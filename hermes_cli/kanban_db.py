@@ -1,42 +1,12 @@
-"""SQLite-backed Kanban board for multi-profile, multi-project collaboration.
+"""SQLite-backed Kanban board shared across profiles (the cross-profile coordination primitive).
 
-The board lives under the **shared Hermes root** ``<root>`` (the parent of any
-active profile; ``HERMES_HOME`` itself in Docker / custom deployments).
-Profiles intentionally collapse onto a shared board — it IS the cross-profile
-coordination primitive: a worker spawned with ``hermes -p <profile>`` joins the
-same board as the dispatcher that claimed its task.
-
-**Boards:** each extra board is ``<root>/kanban/boards/<slug>/`` with its own
-``kanban.db``, ``workspaces/`` and ``logs/``; a worker on one board cannot see
-or enumerate others and its dispatcher ticks never touch their DBs. The first
-board is ``default`` and, for back-compat, its DB stays at ``<root>/kanban.db``
-so pre-boards installs need zero migration (see :func:`kanban_db_path`).
-
-Board resolution order (highest precedence first, all optional):
-
-* ``board=`` argument to :func:`connect` / :func:`init_db` (CLI ``--board``,
-  dashboard ``?board=``).
-* ``HERMES_KANBAN_BOARD`` env var (dispatcher pins workers to their board).
-* ``HERMES_KANBAN_DB`` env var (pins the DB file path directly; legacy
-  override, wins when the file path itself is what the caller forces).
-* ``<root>/kanban/current`` — one-line slug file written by
-  ``hermes kanban boards switch``; absent → ``default``.
-
-Legacy overrides ``HERMES_KANBAN_DB`` / ``HERMES_KANBAN_WORKSPACES_ROOT`` /
-``HERMES_KANBAN_HOME`` (umbrella root; tests and unusual deployments) still
-work. The dispatcher injects the DB, workspaces-root and board env vars into
-worker subprocesses so they converge on the exact DB it claimed from, even
-under unusual symlink or Docker layouts.
-
-Schema: tasks, task_links, task_comments, task_events (+ runs, attachments,
-notify subs). ``workspace_kind`` decouples coordination from git worktrees so
-research / ops workloads run alongside coding. See
-``docs/hermes-kanban-v1-spec.pdf``.
-
-Concurrency: WAL + ``BEGIN IMMEDIATE`` write transactions + compare-and-swap
-updates on ``tasks.status`` / ``tasks.claim_lock``. SQLite serializes writers,
-so at most one claimer wins a task; losers see zero affected rows and move on
-— no retry loops, no distributed locks. CAS is per-board (one DB per board).
+Lives under the shared Hermes root: ``default`` board DB at ``<root>/kanban.db`` (pre-boards
+back-compat), other boards at ``<root>/kanban/boards/<slug>/``; a worker on one board never sees
+another. Board resolution: ``board=`` arg > ``HERMES_KANBAN_BOARD`` > ``HERMES_KANBAN_DB`` (pins the
+file path) > ``<root>/kanban/current`` > ``default``; the dispatcher injects these into workers.
+Concurrency: WAL + ``BEGIN IMMEDIATE`` + compare-and-swap on ``tasks.status``/``claim_lock`` —
+SQLite serializes writers so one claimer wins, losers see zero rows (no retries, no distributed
+locks). Schema: tasks, task_links, task_comments, task_events, task_runs, attachments, notify subs.
 """
 
 from __future__ import annotations
@@ -138,14 +108,9 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
 
 def normalize_reasoning_effort(effort: Optional[str]) -> Optional[str]:
-    """Normalize a per-task reasoning effort into a storable level.
-
-    Accepts any level in ``hermes_constants.VALID_REASONING_EFFORTS`` plus
-    ``"none"`` (thinking disabled), case-insensitively. Empty / None means
-    "inherit the worker profile's own ``agent.reasoning_effort``" and stores
-    NULL. Anything else is rejected rather than silently dropped — a typo'd
-    level must not quietly hand the task back to the profile default.
-    """
+    """``VALID_REASONING_EFFORTS`` or ``"none"`` (thinking off), case-insensitive;
+    empty/None = inherit the profile's own effort (NULL). Anything else raises —
+    a typo'd level must not quietly hand the task back to the profile default."""
     from hermes_constants import VALID_REASONING_EFFORTS
 
     value = str(effort or "").strip().lower()
@@ -163,15 +128,11 @@ KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 
 
 def _assert_not_delegated_child_mutation() -> None:
-    """Reject Kanban state mutations from ``delegate_task`` child contexts.
+    """Reject Kanban mutations from ``delegate_task`` child contexts.
 
-    The structured kanban tools and CLI dispatch layer both have fast-fail
-    guards for better UX, but neither is a trust boundary: a delegated child can
-    still shell out to the CLI or import this module directly. The actual
-    invariant belongs at the DB/filesystem mutation layer so every public
-    mutator that uses ``write_txn`` (tasks, runs, comments, attachments,
-    dispatcher claims, repair events, subscriptions, GC, etc.) and every board
-    metadata mutator fails closed before touching durable state.
+    The tool/CLI fast-fail guards are UX, not a trust boundary (a child can shell
+    out or import this module); the invariant lives here so every ``write_txn``
+    user and board-metadata mutator fails closed before touching durable state.
     """
     try:
         from agent.delegation_context import is_delegated_child_process_context
@@ -184,12 +145,9 @@ def _assert_not_delegated_child_mutation() -> None:
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
-    """Fire a lifecycle plugin hook, best-effort. Callers invoke it AFTER their
-    write txn commits so plugins never run under a SQLite write lock and
-    always see durable state; any failure is swallowed so an observer can
-    never break a transition. ``profile_name`` comes from the active
-    HERMES_HOME so dispatcher- and worker-side hooks agree without plumbing.
-    """
+    """Best-effort lifecycle hook. Call AFTER the write txn commits (plugins never
+    run under the SQLite write lock, always see durable state); failures are
+    swallowed so an observer can never break a transition."""
     try:
         from hermes_cli.lifecycle import invoke_hook
 
@@ -217,11 +175,8 @@ def _hook_profile_name() -> str:
 
 
 def _kanban_observer_consumed(event: str) -> bool:
-    """Whether any observer/plugin consumes *event* — hot-path short-circuit
-    so per-tick / per-write observers skip payload assembly when nothing
-    subscribes. If inspection fails the event counts as unconsumed (the
-    invoke path would fail identically; dropping an observer is always safe).
-    """
+    """Hot-path short-circuit: skip payload assembly when nothing subscribes.
+    Inspection failure counts as unconsumed (dropping an observer is always safe)."""
     try:
         from hermes_cli.lifecycle import has_hook
 
@@ -238,10 +193,7 @@ def _fire_worker_spawned_hook(
     *,
     board: Optional[str] = None,
 ) -> None:
-    """Fire ``on_kanban_worker_spawned`` AFTER ``spawn_fn`` returned and the
-    reported PID is durably persisted. Best-effort: a misbehaving observer can
-    never break the dispatch loop.
-    """
+    """``on_kanban_worker_spawned`` AFTER the PID is durably persisted; best-effort."""
     if not _kanban_observer_consumed("on_kanban_worker_spawned"):
         return
     try:
@@ -265,12 +217,9 @@ def notify_task_updated(
     *,
     board: Optional[str] = None,
 ) -> None:
-    """Fire ``on_kanban_task_updated`` AFTER a task-row mutation outside the
-    claim/complete/block lifecycle has committed — including direct-SQL
-    surfaces that bypass every ``kanban_db`` mutator (dashboard field
-    editors). ``changed_fields`` carries field NAMES only, never values.
-    Observer-only, best-effort; one ``has_hook`` probe when nothing subscribes.
-    """
+    """``on_kanban_task_updated`` AFTER a non-lifecycle task mutation commits
+    (also for direct-SQL surfaces like dashboard field editors).
+    ``changed_fields`` carries field NAMES only, never values."""
     if not _kanban_observer_consumed("on_kanban_task_updated"):
         return
     try:
@@ -305,11 +254,8 @@ def _fire_dispatch_tick_hook(
     board: Optional[str] = None,
     dry_run: bool = False,
 ) -> None:
-    """Fire ``on_kanban_dispatch_tick`` after one tick — strictly AFTER
-    ``_dispatch_tick_lock`` is released, so a slow subscriber cannot extend
-    the single-writer critical section and stall a sibling dispatcher.
-    Observer-only, best-effort: subscriber failures are swallowed.
-    """
+    """``on_kanban_dispatch_tick`` — strictly AFTER ``_dispatch_tick_lock`` is
+    released so a slow subscriber cannot stall a sibling dispatcher."""
     if not _kanban_observer_consumed("on_kanban_dispatch_tick"):
         return
     try:
@@ -356,9 +302,7 @@ RECLAIM_DEFER_GRACE_SECONDS = 120
 
 
 def _resolve_claim_ttl_seconds(ttl_seconds: Optional[int] = None) -> int:
-    """Explicit ``ttl_seconds`` wins; else a positive
-    ``HERMES_KANBAN_CLAIM_TTL_SECONDS`` overrides ``DEFAULT_CLAIM_TTL_SECONDS``
-    (invalid values fall back silently so existing installs keep working)."""
+    """Explicit ``ttl_seconds`` > ``HERMES_KANBAN_CLAIM_TTL_SECONDS`` > default."""
     if ttl_seconds is not None:
         return max(1, int(ttl_seconds))
 
@@ -378,14 +322,12 @@ KANBAN_RATE_LIMIT_EXIT_CODE = 75
 
 
 def _resolve_crash_grace_seconds() -> int:
-    """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate reclaim, for tests)
-    else ``DEFAULT_CRASH_GRACE_SECONDS``."""
+    """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate, for tests) else default."""
     return _env_int("HERMES_KANBAN_CRASH_GRACE_SECONDS", DEFAULT_CRASH_GRACE_SECONDS)
 
 
 def _resolve_rate_limit_cooldown_seconds() -> int:
-    """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = respawn next tick, for
-    tests) else ``DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS``."""
+    """``HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS`` (0 = next tick, for tests) else default."""
     return _env_int("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS)
 
 
@@ -399,11 +341,9 @@ _CTX_MAX_COMMENT_BYTES  = 2 * 1024   # per comment
 
 
 def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
-    """Coarse relative age (``just now`` / ``18h ago`` / ``3d ago``); "" for a
-    missing/invalid timestamp so callers append unconditionally. An LLM reads
-    a bare absolute timestamp as current fact; the relative age is what
-    prompts a worker to re-verify stale sibling work before acting on it.
-    """
+    """``just now`` / ``18h ago`` / ``3d ago``; "" for a missing/invalid ts. An LLM
+    reads a bare absolute timestamp as current fact — the relative age is what
+    prompts a worker to re-verify stale sibling work."""
     if ts is None:
         return ""
     try:
@@ -435,7 +375,7 @@ _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
 
 @contextlib.contextmanager
 def scoped_current_board(slug: str):
-    """Temporarily pin the active board for the current context only."""
+    """Pin the active board for the current context only."""
     token: Token[str | None] = _CURRENT_BOARD_OVERRIDE.set(slug)
     try:
         yield
@@ -476,14 +416,9 @@ def _require_slug(slug: str) -> str:
 
 
 def kanban_home() -> Path:
-    """Shared Hermes root anchoring the board: ``HERMES_KANBAN_HOME`` if set,
-    else ``get_default_hermes_root()`` (``<root>`` for a
-    ``<root>/profiles/<name>`` HERMES_HOME, HERMES_HOME itself otherwise).
-
-    The board is shared across profiles BY DESIGN; resolving through the
-    active profile's HERMES_HOME would silently fork it per profile and break
-    the dispatcher / worker handoff.
-    """
+    """``HERMES_KANBAN_HOME`` else ``get_default_hermes_root()``. Shared across
+    profiles BY DESIGN: resolving through the active profile's HERMES_HOME would
+    fork the board per profile and break the dispatcher/worker handoff."""
     override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     if override:
         return Path(override).expanduser()
@@ -492,35 +427,20 @@ def kanban_home() -> Path:
 
 
 def boards_root() -> Path:
-    """Return ``<root>/kanban/boards`` — the parent of non-default board dirs.
-
-    ``default`` is intentionally NOT under this directory — its DB lives at
-    ``<root>/kanban.db`` for back-compat with pre-boards installs. This
-    function returns the directory where *additional* named boards live,
-    used by :func:`list_boards` to enumerate them.
-    """
+    """``<root>/kanban/boards`` — parent of the *additional* named boards.
+    ``default`` is deliberately not here (its DB stays at ``<root>/kanban.db``)."""
     return kanban_home() / "kanban" / "boards"
 
 
 def current_board_path() -> Path:
-    """Return the path to ``<root>/kanban/current``.
-
-    One-line text file written by ``hermes kanban boards switch <slug>``
-    to persist the user's board selection across CLI invocations. Absent
-    by default (meaning: active board is ``default``).
-    """
+    """``<root>/kanban/current`` — one-line slug written by ``boards switch``; absent = ``default``."""
     return kanban_home() / "kanban" / "current"
 
 
 def get_current_board() -> str:
-    """Active board slug: ``HERMES_KANBAN_BOARD`` env (dispatcher injects it
-    on spawn) -> ``<root>/kanban/current`` (``boards switch``, only while that
-    board still exists) -> ``DEFAULT_BOARD``.
-
-    A malformed/stale slug falls through to the next layer with a warning —
-    the dispatcher must never crash because a user hand-edited a file or
-    removed a board directory.
-    """
+    """Active slug: context override -> ``HERMES_KANBAN_BOARD`` -> ``<root>/kanban/current``
+    (only while that board exists) -> ``DEFAULT_BOARD``. A malformed/stale slug
+    falls through — the dispatcher must never crash on a hand-edited file."""
     def _existing(candidate: str) -> Optional[str]:
         if not candidate:
             return None
@@ -549,13 +469,8 @@ def get_current_board() -> str:
 
 
 def set_current_board(slug: str) -> Path:
-    """Persist ``slug`` as the active board. Returns the file written.
-
-    Writes ``<root>/kanban/current``. The caller should validate the slug
-    exists first (via :func:`board_exists`) — this function does not —
-    so that ``hermes kanban boards switch <typo>`` returns an error
-    instead of silently pointing at nothing.
-    """
+    """Persist ``slug`` as the active board; returns the file written. Does NOT
+    check the board exists — callers do (so ``boards switch <typo>`` errors)."""
     _assert_not_delegated_child_mutation()
     normed = _require_slug(slug)
     path = current_board_path()
@@ -580,12 +495,7 @@ def board_dir(board: Optional[str] = None) -> Path:
 
 
 def board_exists(board: Optional[str] = None) -> bool:
-    """Return True if the board has persisted metadata or a DB on disk.
-
-    ``default`` is considered to always exist — its DB is created
-    on first :func:`connect` and there's no way for it to be missing
-    in a configuration where the kanban feature is usable at all.
-    """
+    """Board has ``board.json`` or ``kanban.db`` on disk; ``default`` always exists."""
     slug = _slug_or_default(board)
     if slug == DEFAULT_BOARD:
         return True
@@ -614,32 +524,20 @@ def _board_path(
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
-    """``kanban.db`` path for ``board``: ``HERMES_KANBAN_DB`` pins it (the
-    dispatcher injects it into worker env so workers are immune to any
-    path-resolution disagreement); else ``default`` -> ``<root>/kanban.db``
-    (back-compat), other boards -> ``<root>/kanban/boards/<slug>/kanban.db``.
-    """
+    """``kanban.db`` path: ``HERMES_KANBAN_DB`` pins it (injected into workers);
+    ``default`` -> ``<root>/kanban.db`` (back-compat), else the board dir."""
     return _board_path("HERMES_KANBAN_DB", board, ("kanban.db",), "kanban.db")
 
 
 def workspaces_root(board: Optional[str] = None) -> Path:
-    """Per-board ``scratch`` workspace root (``HERMES_KANBAN_WORKSPACES_ROOT``
-    wins — the dispatcher injects it into worker env). ``default`` keeps the
-    legacy ``<root>/kanban/workspaces/`` so pre-boards workspaces survive;
-    other boards use ``<root>/kanban/boards/<slug>/workspaces/``.
-    """
+    """Per-board scratch workspace root (``HERMES_KANBAN_WORKSPACES_ROOT`` wins);
+    ``default`` keeps the legacy ``<root>/kanban/workspaces/``."""
     return _board_path("HERMES_KANBAN_WORKSPACES_ROOT", board, ("kanban", "workspaces"), "workspaces")
 
 
 def attachments_root(board: Optional[str] = None) -> Path:
-    """Per-board attachments root (``HERMES_KANBAN_ATTACHMENTS_ROOT`` wins).
-
-    ``default`` -> ``<root>/kanban/attachments/``, other boards ->
-    ``<root>/kanban/boards/<slug>/attachments/``; each task gets its own
-    ``<task_id>/`` subdir. Workers read attachments by the absolute path
-    surfaced in :func:`build_worker_context`, so remote terminal backends
-    (Docker/Modal) need this directory mounted.
-    """
+    """Per-board attachments root (``HERMES_KANBAN_ATTACHMENTS_ROOT`` wins). Workers
+    read attachments by absolute path, so remote terminal backends must mount it."""
     return _board_path("HERMES_KANBAN_ATTACHMENTS_ROOT", board, ("kanban", "attachments"), "attachments")
 
 
@@ -649,44 +547,24 @@ def task_attachments_dir(task_id: str, board: Optional[str] = None) -> Path:
 
 
 def worker_logs_dir(board: Optional[str] = None) -> Path:
-    """Return the directory under which per-task worker logs are written.
-
-    ``default`` keeps the legacy path ``<root>/kanban/logs/``. Other
-    boards use ``<root>/kanban/boards/<slug>/logs/``. Logs follow the
-    board — makes ``hermes kanban log`` unambiguous even when multiple
-    boards have tasks with the same id.
-    """
+    """Per-board worker log dir (logs follow the board so ``hermes kanban log``
+    is unambiguous when two boards share a task id)."""
     return _board_path(None, board, ("kanban", "logs"), "logs")
 
 
 def board_metadata_path(board: Optional[str] = None) -> Path:
-    """Return the path to ``board.json`` for ``board``.
-
-    Stores display metadata (display name, description, icon, color,
-    created_at). The on-disk slug is the canonical identity; this file
-    is purely for presentation in the CLI / dashboard.
-    """
+    """``board.json`` path — display metadata only; the directory slug is the identity."""
     return board_dir(_slug_or_default(board)) / "board.json"
 
 
 def _default_board_display_name(slug: str) -> str:
-    """Turn a slug into a reasonable default display name.
-
-    ``atm10-server`` → ``Atm10 Server``. Users can override via
-    ``board.json`` but the default should look presentable in the
-    dashboard without any follow-up editing.
-    """
+    """``atm10-server`` -> ``Atm10 Server``."""
     return " ".join(part.capitalize() for part in slug.replace("_", "-").split("-") if part) or slug
 
 
 def read_board_metadata(board: Optional[str] = None) -> dict:
-    """Return ``board.json`` contents (or synthesized defaults).
-
-    Never raises — a missing / malformed ``board.json`` falls back to a
-    synthesised entry so the dashboard always has something to render.
-    Includes the canonical ``slug`` and ``db_path`` so the caller
-    doesn't need to reconstruct them.
-    """
+    """``board.json`` merged over defaults, plus ``slug`` and ``db_path``. Never
+    raises — a missing/malformed file yields the synthesized entry."""
     slug = _slug_or_default(board)
     meta: dict[str, Any] = {
         "slug": slug,
@@ -729,15 +607,9 @@ def write_board_metadata(
     default_workdir: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> dict:
-    """Create / update ``board.json`` for ``board``.
-
-    Preserves any existing fields not mentioned in the call. Sets
-    ``created_at`` on first write. Returns the resulting metadata dict.
-
-    ``project_id``: ``None`` leaves it unchanged; empty string clears the
-    project scope; a value sets it (not validated here — the caller resolves
-    it against ``projects_db``).
-    """
+    """Create/update ``board.json``; unmentioned fields are preserved, ``created_at``
+    set on first write. ``project_id``/``default_workdir``: ``None`` = unchanged,
+    "" = clear (``project_id`` is not validated here)."""
     _assert_not_delegated_child_mutation()
     slug = _slug_or_default(board)
     meta = read_board_metadata(slug)
@@ -775,12 +647,7 @@ def create_board(
     default_workdir: Optional[str] = None,
     project_id: Optional[str] = None,
 ) -> dict:
-    """Create a new board directory + DB + metadata. Idempotent.
-
-    Returns the resulting metadata. Raises :class:`ValueError` for a
-    malformed slug; returns the existing metadata (not an error) if the
-    board already exists — matching ``mkdir -p`` semantics.
-    """
+    """Create board dir + DB + metadata (``mkdir -p`` semantics: existing board returns its metadata)."""
     normed = _require_slug(slug)
     meta = write_board_metadata(
         normed,
@@ -797,11 +664,8 @@ def create_board(
 
 
 def list_boards(*, include_archived: bool = True) -> list[dict]:
-    """Metadata dicts for every board on disk, ``default`` first (always
-    present — its DB lives at the legacy path, so no ``boards/default/`` dir
-    is needed) then alphabetical; a ``boards/<slug>/`` counts when it holds a
-    ``kanban.db`` or ``board.json``.
-    """
+    """Metadata for every board: ``default`` first (always present), then
+    ``boards/<slug>/`` dirs holding a ``kanban.db`` or ``board.json``, sorted."""
     entries: list[dict] = []
     seen: set[str] = set()
 
@@ -832,10 +696,8 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
 
 
 def remove_board(slug: str, *, archive: bool = True) -> dict:
-    """Archive (move to ``boards/_archived/<slug>-<timestamp>/``, recoverable)
-    or, with ``archive=False``, delete a board. ``default`` cannot be removed
-    (ValueError). Returns ``{"slug", "action", "new_path"}``.
-    """
+    """Archive (to ``boards/_archived/<slug>-<ts>/``) or delete a board;
+    ``default`` cannot be removed. Returns ``{"slug", "action", "new_path"}``."""
     _assert_not_delegated_child_mutation()
     normed = _require_slug(slug)
     if normed == DEFAULT_BOARD:
@@ -967,14 +829,8 @@ _TASK_EMPTY_IS_NULL_COLUMNS = (
 
 @dataclass
 class Run:
-    """In-memory view of a ``task_runs`` row.
-
-    A run is one attempt to execute a task — created on claim, closed
-    on complete/block/crash/timeout/spawn_failure/reclaim. Multiple runs
-    per task when retries happen. Carries the claim machinery, PID,
-    heartbeat, and the structured handoff summary that downstream workers
-    read via ``build_worker_context``.
-    """
+    """One attempt at a task (``task_runs`` row): opened on claim, closed on
+    complete/block/crash/timeout/reclaim; carries the handoff summary."""
 
     id: int
     task_id: str
@@ -1274,11 +1130,8 @@ CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_
 # ---------------------------------------------------------------------------
 
 def _new_task_id() -> str:
-    """Short URL-safe id: 4 hex bytes (~4.3B; collision ~1.2e-5 at 10k tasks,
-    ~1.2e-3 at 100k — 2 bytes hit the birthday paradox at ~50% by 10k).
-    Idempotency belongs to ``create_task(idempotency_key=...)``, not to id
-    uniqueness.
-    """
+    """``t_`` + 4 hex bytes (collision ~1e-3 at 100k tasks; 2 bytes would hit 50%
+    by 10k). Idempotency belongs to ``idempotency_key``, not id uniqueness."""
     return "t_" + secrets.token_hex(4)
 
 
@@ -1328,18 +1181,13 @@ def _resolve_project_link(
     workspace_kind: str,
     workspace_path: Optional[str],
 ) -> tuple[Optional[str], Any, Optional[str], str]:
-    """Resolve the optional first-class Project link for ``create_task``.
+    """``(project_id, project_obj, project_repo, workspace_kind)`` for ``create_task``.
 
-    Returns ``(project_id, project_obj, project_repo, workspace_kind)``. A
-    project-linked task is anchored to the project's primary repo as a git
-    worktree so its branch can be named deterministically (project slug + task
-    id) instead of the random ``wt/<task-id>`` worker fallback. Projects live in
-    the creator's per-profile projects.db; the repo path is absolute and the
-    branch name pure, so the cross-profile dispatcher needs no projects.db
-    access at dispatch time. ``project_repo`` is the primary repo of a
-    project-linked worktree task whose path still has to be derived once the
-    task id exists. An unresolvable id/slug drops the link (never a dangling
-    reference, never a crash).
+    A project-linked task is anchored to the project's primary repo as a
+    worktree with a deterministic branch (slug + task id). Projects live in the
+    creator's per-profile projects.db, but the stored repo path is absolute so
+    the cross-profile dispatcher needs no projects.db access. ``project_repo``
+    is set when the worktree path must still be derived from the new task id.
     """
     project_id = (str(project_id).strip() or None) if project_id is not None else None
     if not project_id:
@@ -1420,14 +1268,9 @@ def _project_from_source_task(
 
 
 def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
-    """Strip, drop empties, dedupe (order-preserving) a per-task skills list.
-
-    Refuses commas inside a single name so a comma-joined string is never
-    splattered into one argv slot (the ``hermes --skills X,Y`` comma syntax is
-    handled in the dispatcher, not here). Toolset names are rejected all at
-    once — agents that confuse skills with toolsets usually pass several
-    (``["web", "browser", "terminal"]``) and serial-correcting wastes tokens.
-    """
+    """Strip/dedupe a skills list. Commas are refused (a comma-joined string must
+    not land in one argv slot); toolset names are rejected all at once because
+    agents that confuse the two usually pass several."""
     if skills is None:
         return None
     cleaned: list[str] = []
@@ -1493,26 +1336,16 @@ def create_task(
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
 ) -> str:
-    """Create a new task and optionally link it under parent tasks; returns its id.
+    """Create a task (optionally under ``parents``); returns its id.
 
-    Status is ``ready`` with no parents (or all parents ``done``), else ``todo``;
-    ``triage=True`` forces ``triage`` regardless of parents (a specifier promotes
-    it later); ``initial_status="blocked"`` parks it for human-ops review.
-
-    ``idempotency_key``: if a non-archived task with the same key exists its id
-    is returned instead of creating a duplicate (retried webhooks/automation).
-    ``max_runtime_seconds``: cap before the dispatcher SIGTERMs (then SIGKILLs
-    after a grace window) and re-queues; ``None`` = no cap.
-    ``skills``: skill names force-loaded into the worker (``hermes --skills``);
-    see ``_normalize_task_skills``. ``model_override``/``provider_override`` pin
-    the worker model (``-m <model> [--provider <name>]``); provider requires
-    model. ``reasoning_effort`` pins thinking depth (``--reasoning <level>``),
-    independent of the model override.
-    ``project_source_task_id``: internal cross-profile fallback for a
-    worker-created child — when the active profile cannot resolve
-    ``project_id`` in its own projects.db, a canonical project-linked task in
-    this board supplies the repo and branch convention (its literal worktree is
-    never reused). See ``_resolve_project_link``.
+    Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
+    forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
+    ``idempotency_key``: an existing non-archived task with the key is returned
+    instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
+    SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
+    worker model (provider requires model); ``reasoning_effort`` is independent.
+    ``project_source_task_id``: cross-profile fallback when ``project_id`` is not
+    in the active profile's projects.db — see ``_resolve_project_link``.
     """
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -1706,19 +1539,12 @@ def _inherit_notify_subs(
     *,
     created_at: Optional[int] = None,
 ) -> None:
-    """Copy gateway notification subscriptions from parent tasks to a child.
+    """Copy parents' notify subscriptions to a child, cursor caught up to the
+    child's current event so a late ``link_tasks`` never replays history.
 
-    The inherited subscription starts caught up to the child's current event
-    cursor. This makes manual `link_tasks(parent, existing_child)` safe: the
-    parent chat receives future child terminal events without replaying the
-    child's pre-link history.
-
-    Copies EVERY routing/delivery column (chat_type, user_id_alt,
-    delivery_mode, delivery_metadata included) — this helper is the single
-    owner of subscription inheritance for create_task, link_tasks, and triage
-    decomposition. Omitting columns here silently degrades routing: a
-    DM-originated child completion falls back to chat_type='group' and wakes
-    a fresh group-scoped session instead of the originating DM (issue #73030).
+    Single owner of inheritance (create_task, link_tasks, decompose). It must
+    copy EVERY routing/delivery column: dropping ``chat_type`` made DM-originated
+    completions wake a fresh group session instead of the originating DM.
     """
     parent_ids = tuple(dict.fromkeys(p for p in parents if p))
     if not parent_ids:
@@ -1805,11 +1631,7 @@ def list_tasks(
 
 
 def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
-    """Assign or reassign a task.  Returns True on success.
-
-    Refuses to reassign a task that's currently running (claim_lock set).
-    Reassign after the current run completes if needed.
-    """
+    """Assign/reassign; raises RuntimeError while the task is running under a claim."""
     profile = _canonical_assignee(profile)
     with write_txn(conn):
         row = conn.execute(
@@ -1846,20 +1668,9 @@ def set_model_override(
     model: Optional[str],
     provider: Optional[str] = None,
 ) -> bool:
-    """Set (or clear) the per-task model/provider override.
-
-    ``model=None`` (or empty) clears BOTH overrides — the worker falls back
-    to its profile's configured model. ``provider`` without ``model`` is
-    rejected: a bare provider switch has no defined meaning for the worker
-    spawn (``--provider`` alone would re-resolve the profile's model name
-    against a different backend, which is exactly the mismatch class this
-    feature exists to kill).
-
-    Allowed on any non-archived task, including ``running`` ones — the
-    override only takes effect on the NEXT dispatch, so setting it on a
-    running task that's about to be reclaimed/retried is the primary
-    rate-limit-recovery flow. Returns True on success.
-    """
+    """Set (empty ``model`` clears BOTH) the per-task model/provider override.
+    Allowed while ``running``: it applies on the NEXT dispatch, which is the
+    rate-limit-recovery flow (set, then reclaim/retry)."""
     model, provider = _validate_model_override(model, provider)
     return _set_task_override(
         conn, task_id,
@@ -1888,18 +1699,9 @@ def _set_task_override(
 
 
 def set_reasoning_effort(conn: sqlite3.Connection, task_id: str, effort: Optional[str]) -> bool:
-    """Set (or clear) the per-task reasoning effort.
-
-    ``effort=None`` (or empty) clears the override — the worker falls back to
-    its profile's own ``agent.reasoning_effort``. ``"none"`` is a real value,
-    not a clear: it pins thinking OFF for this task.
-
-    Deliberately independent of :func:`set_model_override`: a task may run the
-    profile's own model at a different depth, and clearing a model override
-    must not silently reset the depth the operator chose. Like the model
-    override, it takes effect on the NEXT dispatch, so it is settable on a
-    running task. Returns True on success.
-    """
+    """Set (empty clears; ``"none"`` pins thinking OFF) the per-task reasoning
+    effort. Independent of the model override so clearing one never resets the
+    other; applies on the NEXT dispatch, so settable while running."""
     effort = normalize_reasoning_effort(effort)
     return _set_task_override(
         conn, task_id,
@@ -1937,12 +1739,7 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
-    """Return True if adding parent->child creates a cycle.
-
-    A cycle exists iff ``parent_id`` is already a descendant of
-    ``child_id`` via existing parent->child links.  We walk downward
-    from ``child_id`` and check whether we reach ``parent_id``.
-    """
+    """True iff ``parent_id`` is already a descendant of ``child_id``."""
     seen = set()
     stack = [child_id]
     while stack:
@@ -2059,13 +1856,8 @@ def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
 def list_comments_after(
     conn: sqlite3.Connection, task_id: str, *, after_id: int = 0
 ) -> list[Comment]:
-    """Return comments on ``task_id`` with ``id > after_id`` (ascending).
-
-    Keyed on the monotonic rowid rather than ``created_at`` so a same-second
-    burst can't be skipped. Used by the live worker bridge to fold new
-    operator notes into a running task without a restart (see
-    ``tools.kanban_tools.inject_new_comments_from_env``).
-    """
+    """Comments with ``id > after_id`` — keyed on rowid, not ``created_at``, so a
+    same-second burst is never skipped (live worker comment bridge)."""
     rows = conn.execute(
         "SELECT id, task_id, author, body, created_at FROM task_comments "
         "WHERE task_id = ? AND id > ? ORDER BY id ASC",
@@ -2085,28 +1877,14 @@ def list_comments_after(
 
 
 class AttachmentTooLarge(ValueError):
-    """Raised when an attachment exceeds the configured size cap.
-
-    Subclasses :class:`ValueError` so generic ``except ValueError`` handlers
-    (e.g. the dashboard's 400 fallback) still catch it, while callers that
-    want a distinct user-facing message (the tool/CLI 413-equivalent) can
-    catch it specifically.
-    """
+    """Attachment over the size cap. A ``ValueError`` so generic 400 handlers
+    still catch it while the tool/CLI can give a 413-style message."""
 
 
 def _safe_attachment_name(raw: str) -> str:
-    """Reduce a client-supplied filename to a safe basename.
-
-    Strips any directory components (both separators) so a malicious
-    ``../../etc/passwd`` or ``C:\\x`` collapses to its leaf. Drops control
-    chars and leading dots so we never write a dotfile or a name with
-    embedded NULs/newlines. Rejects empty / dotfile-only names. The result
-    is only ever joined under the per-task attachments dir, never used
-    verbatim as a path from the client.
-
-    Raises :class:`ValueError` on an unusable name; HTTP callers map that
-    to a 400.
-    """
+    """Client filename -> safe basename: strip directories (both separators),
+    control chars and leading dots (no dotfiles, no traversal); ValueError when
+    nothing usable remains. Only ever joined under the per-task attachments dir."""
     name = (raw or "").replace("\\", "/").split("/")[-1].strip()
     name = "".join(ch for ch in name if ch.isprintable() and ch not in "\x00").strip()
     name = name.lstrip(".").strip()
@@ -2116,11 +1894,7 @@ def _safe_attachment_name(raw: str) -> str:
 
 
 def _collision_free_path(dest_dir: Path, safe_name: str) -> Path:
-    """Return a path under ``dest_dir`` that doesn't clobber an existing file.
-
-    ``foo.pdf`` → ``foo.pdf``, then ``foo (1).pdf``, ``foo (2).pdf``, …
-    ``safe_name`` must already be sanitised via :func:`_safe_attachment_name`.
-    """
+    """``foo.pdf`` -> ``foo.pdf``, ``foo (1).pdf``, ... first one that doesn't exist."""
     stem, dot, ext = safe_name.partition(".")
     candidate = safe_name
     n = 1
@@ -2141,23 +1915,10 @@ def store_attachment_bytes(
     board: Optional[str] = None,
     max_bytes: Optional[int] = None,
 ) -> int:
-    """Validate, size-check, persist a blob, and record its metadata row.
-
-    This is the single write path shared by the dashboard endpoint, the
-    agent toolset (``kanban_attach`` / ``kanban_attach_url``), and the CLI
-    (``hermes kanban attach``) so name-sanitisation, the size cap, and the
-    collision-resolution all behave identically everywhere.
-
-    Steps: enforce ``max_bytes``, sanitise ``filename`` to a safe basename,
-    write the bytes under :func:`task_attachments_dir` with a
-    collision-free name, then insert the ``task_attachments`` row via
-    :func:`add_attachment`. Returns the new attachment id.
-
-    Raises :class:`AttachmentTooLarge` when ``data`` exceeds ``max_bytes``,
-    or :class:`ValueError` for a bad filename / unknown task. On any failure
-    after the blob is written (e.g. the task disappeared) the orphaned blob
-    is removed before re-raising.
-    """
+    """Single attachment write path (dashboard, tools, CLI): size cap, safe
+    basename, collision-free blob under :func:`task_attachments_dir`, then the
+    metadata row. Raises :class:`AttachmentTooLarge` / ``ValueError``; a blob
+    whose row insert fails is removed before re-raising. Returns the new id."""
     if max_bytes is None:
         max_bytes = KANBAN_ATTACHMENT_MAX_BYTES
     if len(data) > max_bytes:
@@ -2195,12 +1956,7 @@ def add_attachment(
     size: int = 0,
     uploaded_by: Optional[str] = None,
 ) -> int:
-    """Record a file attachment for a task. Returns the new attachment id.
-
-    The caller is responsible for writing the blob to ``stored_path``
-    first (under :func:`task_attachments_dir`); this only persists the
-    metadata row and appends an ``attached`` event.
-    """
+    """Record the metadata row (+ ``attached`` event) for a blob the caller already wrote."""
     if not filename or not filename.strip():
         raise ValueError("attachment filename is required")
     if not stored_path or not stored_path.strip():
@@ -2233,12 +1989,7 @@ def get_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Att
 
 
 def delete_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Attachment]:
-    """Delete an attachment row and its on-disk blob. Returns the removed row.
-
-    Returns ``None`` when no row matched. The blob is removed best-effort
-    (a missing file is not an error); the metadata row is the source of
-    truth for whether an attachment "exists".
-    """
+    """Delete the row (source of truth) and best-effort its blob; None when no row matched."""
     with write_txn(conn):
         att = get_attachment(conn, attachment_id)
         if att is None:
@@ -2259,11 +2010,8 @@ def list_events(conn: sqlite3.Connection, task_id: str) -> list[Event]:
 def _insert_comment(
     conn: sqlite3.Connection, task_id: str, author: str, body: str, created_at: int,
 ) -> None:
-    """Raw ``task_comments`` INSERT for callers already inside a write txn.
-
-    ``add_comment`` opens its own ``write_txn`` (raises on nesting) and emits
-    a ``commented`` event; transitions that record their own event use this.
-    """
+    """Raw comment INSERT for callers already inside a write txn (``add_comment``
+    opens its own txn and emits ``commented``)."""
     conn.execute(
         "INSERT INTO task_comments (task_id, author, body, created_at) "
         "VALUES (?, ?, ?, ?)",
@@ -2279,13 +2027,7 @@ def _append_event(
     *,
     run_id: Optional[int] = None,
 ) -> None:
-    """Record an event row.  Called from within an already-open txn.
-
-    ``run_id`` is optional: pass the current run id so UIs can group
-    events by attempt. For events that aren't scoped to a single run
-    (task created/edited/archived, dependency promotion) leave it None
-    and the row carries NULL.
-    """
+    """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
     conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -2303,15 +2045,8 @@ def _end_run(
     metadata: Optional[dict] = None,
     status: Optional[str] = None,
 ) -> Optional[int]:
-    """Close the currently-active run for ``task_id`` and clear the pointer.
-
-    ``outcome`` is the semantic result (completed / blocked / crashed /
-    timed_out / spawn_failed / gave_up / reclaimed). ``status`` is the
-    run-row status (usually just ``outcome``, but callers can pass it
-    explicitly). Returns the closed run_id or ``None`` if no active run
-    existed (e.g. a CLI user calling ``hermes kanban complete`` on a
-    task that was never claimed).
-    """
+    """Close the active run (``status`` defaults to ``outcome``) and clear
+    ``current_run_id``; None when no run was active (never-claimed task)."""
     now = int(time.time())
     run_id = _current_run_id(conn, task_id)
     if run_id is None:
@@ -2385,21 +2120,10 @@ def _synthesize_ended_run(
     error: Optional[str] = None,
     metadata: Optional[dict] = None,
 ) -> int:
-    """Insert a zero-duration, already-closed run row.
-
-    Used when a terminal transition happens on a task that was never
-    claimed (CLI user calling ``hermes kanban complete <ready-task>
-    --summary X``, or dashboard "mark done" on a ready task). Without
-    this, the handoff fields (summary / metadata / error) would be
-    silently dropped: ``_end_run`` is a no-op because there's no
-    current run.
-
-    The synthetic run has ``started_at == ended_at == now`` so it
-    shows up in attempt history as "instant" and doesn't skew elapsed
-    stats. Caller is responsible for leaving ``current_run_id`` NULL
-    (or for clearing it elsewhere in the same txn) since this
-    function does NOT touch the tasks row.
-    """
+    """Zero-duration closed run for a terminal transition on a never-claimed
+    task, so the handoff fields aren't silently dropped (``_end_run`` is a
+    no-op then). ``started_at == ended_at`` keeps elapsed stats honest. Does
+    NOT touch the tasks row."""
     now = int(time.time())
     trow = conn.execute(
         "SELECT assignee, current_step_key FROM tasks WHERE id = ?",
@@ -2432,19 +2156,10 @@ def _synthesize_ended_run(
 # ---------------------------------------------------------------------------
 
 def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return True when ``task_id`` is sticky-blocked by an explicit
-    worker/operator ``kanban_block`` call.
-
-    A ``blocked`` status has two sources: a deliberate worker/operator
-    ``kanban_block`` handoff (emits a ``"blocked"`` event; must stay blocked
-    until an operator unblocks it) and a circuit-breaker trip in
-    ``_record_task_failure`` (emits ``"gave_up"``, NOT ``"blocked"``; meant to
-    recover once conditions change). The cheapest discriminator is the most
-    recent ``"blocked"``/``"unblocked"`` event: if it is ``"blocked"`` the task
-    is sticky and ``recompute_ready`` must not auto-promote it. No such event
-    at all (breaker trip, direct DB edit) returns ``False`` — the legacy
-    auto-recover path.
-    """
+    """True when the newest ``blocked``/``unblocked`` event is ``blocked`` — an
+    explicit ``kanban_block`` that must wait for an operator. A breaker trip
+    emits ``gave_up`` (not ``blocked``) and so auto-recovers, as does a task
+    with no such event at all (direct DB edit)."""
     row = conn.execute(
         "SELECT kind FROM task_events "
         "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
@@ -2467,13 +2182,8 @@ def _latest_event(
 
 
 def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
-    """Return the durable phase a blocked/dependency-wait task should resume.
-
-    Events written by review workers carry ``source_status``/``retry_status``;
-    an explicit unblock that must wait for parents carries ``resume_status``.
-    Legacy events omit these fields and therefore retain the historical
-    ``ready`` behavior.
-    """
+    """``review`` when the newest lifecycle event carries a review
+    ``resume_status``/``retry_status``/``source_status``, else ``ready`` (legacy)."""
     row = conn.execute(
         "SELECT payload FROM task_events "
         "WHERE task_id = ? AND kind IN ("
@@ -2491,23 +2201,13 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
-    """Promote ``todo`` tasks to ``ready`` when all parents are ``done`` or ``archived``.
+    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
+    returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
 
-    Returns the number of tasks promoted.  Opens its own IMMEDIATE txn, so it
-    MUST be called OUTSIDE any open write transaction (plain ``write_txn``
-    raises on nesting); call it after the enclosing txn commits.
-
-    ``blocked`` tasks are also considered (a task blocked purely by a parent
-    dependency unblocks itself when the parent completes), *except* when the
-    most recent block event was a worker-initiated ``kanban_block`` (stays
-    blocked until explicit ``kanban_unblock``) or ``consecutive_failures`` has
-    reached the effective limit (otherwise the counter would reset on every
-    recovery cycle and the breaker could never trip).
-
-    The effective limit resolves in the same order as ``_record_task_failure``
-    so the two never disagree: per-task ``max_retries``, then the caller's
-    ``failure_limit`` (``kanban.failure_limit`` via ``dispatch_once``), then
-    ``DEFAULT_FAILURE_LIMIT``.
+    ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
+    ``consecutive_failures`` reached the limit (else the breaker could never
+    trip). Limit order matches ``_record_task_failure``: ``max_retries`` >
+    ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``.
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -2594,11 +2294,8 @@ def _claim_and_open_run(
     *,
     event_extra: Optional[dict] = None,
 ) -> Optional[int]:
-    """CAS ``source_status -> running``, open a ``task_runs`` row and emit ``claimed``.
-
-    Caller holds the write transaction. Returns the new run id, or ``None``
-    when the CAS lost (task already claimed / not in ``source_status``).
-    """
+    """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
+    when the CAS lost. Caller holds the txn."""
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -2704,11 +2401,9 @@ def claim_review_task(
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
 ) -> Optional[Task]:
-    """Atomically ``review -> running``; the claimed ``Task`` or None when
-    already claimed / not in review. Parents are re-checked (one may have
-    been reopened while the task waited) and a NEW run is opened so the
-    review agent's lifecycle is tracked apart from the implementer's run.
-    """
+    """Atomic ``review -> running`` (None when lost). Parents are re-checked
+    (one may have reopened meanwhile) and a NEW run tracks the reviewer
+    separately from the implementer."""
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2744,13 +2439,9 @@ def _retry_status_for_run(
     task_id: str,
     run_id: Optional[int] = None,
 ) -> str:
-    """Return the non-running phase an interrupted run must resume from.
-
-    Review claims record ``source_status=review`` on their claimed event. All
-    other and legacy runs retry from ``ready``. Keeping this decision in one
-    place prevents crash/timeout/reclaim paths from silently converting a
-    reviewer run into an implementation run.
-    """
+    """``review`` when the run's ``claimed`` event says ``source_status=review``,
+    else ``ready`` — one place, so crash/timeout/reclaim can't silently turn a
+    reviewer run into an implementation run."""
     if run_id is None:
         run_id = _current_run_id(conn, task_id)
     if run_id is None:
@@ -2775,13 +2466,9 @@ def goal_run_status(
     task_id: str,
     expected_run_id: Optional[int] = None,
 ) -> Optional[str]:
-    """Resolve lifecycle status from the perspective of one worker run.
-
-    A successor may claim the task immediately after this run hands it off.
-    Returning the task's live ``running`` status in that case lets the old goal
-    loop mutate the successor.  Bind terminal handoffs to the original run and
-    report any other ownership loss as ``superseded``.
-    """
+    """Lifecycle status as seen by ONE run: terminal handoffs bind to that run,
+    any other ownership loss is ``superseded`` — otherwise an old goal loop
+    would read the successor's live ``running`` and mutate it."""
     task = get_task(conn, task_id)
     if task is None:
         return None
@@ -2814,11 +2501,7 @@ def heartbeat_claim(
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
 ) -> bool:
-    """Extend a running claim.  Returns True if we still own it.
-
-    Workers that know they'll exceed 15 minutes should call this every
-    few minutes to keep ownership.
-    """
+    """Extend a running claim; True if we still own it."""
     expires = int(time.time()) + _resolve_claim_ttl_seconds(ttl_seconds)
     lock = claimer or _claimer_id()
     with write_txn(conn):
@@ -2842,23 +2525,13 @@ def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> O
 
 
 def release_stale_claims(conn: sqlite3.Connection, *, signal_fn=None) -> int:
-    """Reset any ``running`` task whose claim has expired.
+    """Reclaim ``running`` tasks whose claim expired; returns the count reclaimed.
 
-    A stale-by-TTL claim whose host-local worker PID is still alive is
-    *extended* (``claim_extended`` event) instead of reclaimed: reclaiming a
-    live worker mid-flight causes a spawn-then-reclaim loop on slow models
-    that spend longer than ``DEFAULT_CLAIM_TTL_SECONDS`` inside one tool-free
-    LLM call (no tool calls means no ``kanban_heartbeat``).
-
-    Backstop: a live PID whose ``last_heartbeat_at`` is older than
-    ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` is reclaimed anyway — the
-    wedged-in-a-logic-loop case. ``_touch_activity`` (run_agent.py) bridges
-    chunk-level liveness into ``last_heartbeat_at``, so any genuinely active
-    worker stays fresh via normal API traffic. ``enforce_max_runtime`` and
-    ``detect_crashed_workers`` remain the upper bounds for wedged/dead workers.
-
-    Returns the number of stale claims actually reclaimed (live-pid
-    extensions don't count). Safe to call often.
+    A host-local worker that is still alive gets its claim *extended* instead
+    (a slow model can sit longer than the TTL inside one tool-free call, so no
+    heartbeat) — unless ``last_heartbeat_at`` is older than
+    ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (wedged; ``_touch_activity``
+    keeps any genuinely active worker fresh). Safe to call often.
     """
     now = int(time.time())
     reclaimed = 0
@@ -2987,11 +2660,8 @@ def reclaim_task(
     reason: Optional[str] = None,
     signal_fn=None,
 ) -> bool:
-    """Operator-driven reclaim regardless of TTL (unlike
-    :func:`release_stale_claims`): release the claim and restore the source
-    phase so a running worker can be aborted on demand. False when the task
-    is missing or not running.
-    """
+    """Operator reclaim regardless of TTL: release the claim, restore the source
+    phase, reset the failure counter. False when not running."""
     row = conn.execute(
         "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
         (task_id,),
@@ -3035,11 +2705,8 @@ def reassign_task(
     reclaim_first: bool = False,
     reason: Optional[str] = None,
 ) -> bool:
-    """Reassign (``profile=None`` unassigns). A running task is refused
-    (False) unless ``reclaim_first`` releases its claim via
-    :func:`reclaim_task` first — the "this profile's model is broken, try
-    another" recovery path.
-    """
+    """Reassign (None unassigns); a running task is refused unless
+    ``reclaim_first`` releases its claim — the "this profile's model is broken" path."""
     if reclaim_first:
         # Safe to call even if nothing to reclaim.
         reclaim_task(conn, task_id, reason=reason or "reassign")
@@ -3057,26 +2724,10 @@ def _verify_created_cards(
     completing_task_id: str,
     claimed_ids: Iterable[str],
 ) -> tuple[list[str], list[str]]:
-    """Partition ``claimed_ids`` into (verified, phantom).
-
-    A card is "verified" iff a row exists in ``tasks`` AND at least one
-    of the following holds:
-
-    * ``created_by`` matches the completing task's ``assignee`` profile
-      (the common case: worker A spawns a card via ``kanban_create``,
-      which stamps ``created_by=A``).
-    * ``created_by`` matches the completing task's id (edge case where
-      a worker passed its own task id as the ``created_by`` value).
-    * The card is linked as a ``task_links.child`` of the completing
-      task — i.e. the worker explicitly called ``kanban_create`` with
-      ``parents=[<current_task>]``. This accepts cards created through
-      the dashboard/CLI by a different principal but then attached to
-      the completing task by the worker.
-
-    ``phantom`` returns ids that either don't exist at all, or exist
-    but don't satisfy any of the three trust conditions. The caller
-    decides what to do with each bucket; this helper never mutates.
-    """
+    """Partition ``claimed_ids`` into (verified, phantom). Verified = the row
+    exists AND ``created_by`` is the completing task's assignee or id, OR the
+    card is linked as its child (created elsewhere, attached by the worker).
+    Never mutates."""
     ordered = list(dict.fromkeys(str(x).strip() for x in (claimed_ids or []) if str(x).strip()))
     if not ordered:
         return [], []
@@ -3125,27 +2776,16 @@ _TASK_ID_PROSE_RE = re.compile(r"\bt_[a-f0-9]{8,}\b")
 
 
 def _scan_prose_for_phantom_ids(conn: sqlite3.Connection, text: str) -> list[str]:
-    """Regex-scan free-form text for ``t_<hex>`` references; return the
-    ones that don't exist in ``tasks``.
-
-    Used as a non-blocking advisory check on completion summaries. An
-    empty return means "no suspicious references found" — either the
-    text had no IDs at all, or every ID it mentioned resolves to a real
-    task. Duplicates are deduped.
-    """
+    """``t_<hex>`` references in ``text`` that don't resolve to a task (deduped; advisory)."""
     if not text:
         return []
     return _missing_task_ids(conn, dict.fromkeys(_TASK_ID_PROSE_RE.findall(text)))
 
 
 class HallucinatedCardsError(ValueError):
-    """Raised by ``complete_task`` when ``created_cards`` contains ids
-    that don't exist or weren't created by the completing worker.
-
-    The phantom list is attached as ``.phantom`` for callers that want
-    structured access. Kept as ``ValueError`` subclass so existing
-    tool-error handlers treat it as a recoverable user error.
-    """
+    """``complete_task`` refused: ``created_cards`` has ids that don't exist or
+    weren't created by this worker (``.phantom``). A ``ValueError`` so tool
+    error handlers treat it as recoverable."""
 
     def __init__(self, phantom: list[str], completing_task_id: str):
         self.phantom = list(phantom)
@@ -3171,37 +2811,15 @@ def complete_task(
     expected_run_id: Optional[int] = None,
     fire_lifecycle_hook: bool = True,
 ) -> bool:
-    """Transition ``running|ready|blocked|review -> done`` and record ``result``.
+    """``running|ready|blocked|review -> done``; records ``result``.
 
-    Accepts a task that is merely ``ready`` too, so a manual CLI
-    completion (``hermes kanban complete <id>``) works without requiring
-    a claim/start/complete sequence. ``review`` is accepted so a human
-    (or reviewer) can approve a task parked in the review lane by
-    :func:`request_review` — even when it has no active run
-    (``current_run_id IS NULL``), the handoff fields are preserved via
-    :func:`_synthesize_ended_run`.
-
-    ``summary`` and ``metadata`` are stored on the closing run (if any)
-    and surfaced to downstream children via :func:`build_worker_context`.
-    When ``summary`` is omitted we fall back to ``result`` so single-run
-    callers do not have to pass both. ``metadata`` is a free-form dict
-    (e.g. ``{"changed_files": [...], "tests_run": [...]}``) — workers
-    are encouraged to use it for structured handoff facts.
-
-    ``created_cards`` is an optional list of task ids the completing
-    worker claims to have created. Each id is verified against
-    ``tasks.created_by``. If any id is phantom (does not exist or was
-    not created by this worker's assignee profile), completion is blocked
-    with a ``HallucinatedCardsError`` and a
-    ``completion_blocked_hallucination`` event is emitted so the rejected
-    attempt is auditable. When all ids verify, they are recorded on the
-    ``completed`` event payload.
-
-    After a successful completion, ``summary`` and ``result`` are scanned
-    for prose references like ``t_deadbeefcafe`` that do not resolve.
-    Any suspected phantom references are recorded as a
-    ``suspected_hallucinated_references`` event. This pass is advisory
-    and never blocks.
+    ``ready`` is accepted for manual CLI completion, ``review`` for human
+    approval; with no active run the handoff fields survive via
+    :func:`_synthesize_ended_run`. ``summary`` (defaults to ``result``) and
+    ``metadata`` land on the closing run for :func:`build_worker_context`.
+    ``created_cards`` are verified first — a phantom id raises
+    :class:`HallucinatedCardsError` after an auditable event; afterwards the
+    prose is scanned for unresolvable ``t_<hex>`` refs (advisory event only).
     """
     now = int(time.time())
     # Fail before validating cards or staging artifacts; re-checked inside the
@@ -3284,12 +2902,9 @@ _REVIEW_APPROVED_NOTE = "Review approved without additional evidence."
 def _gate_created_cards(
     conn: sqlite3.Connection, task_id: str, created_cards: Optional[Iterable[str]], preview_text: Optional[str],
 ) -> list[str]:
-    """Verify ``created_cards`` BEFORE the main write txn; returns the verified ids.
-
-    A phantom id blocks completion: the rejection is recorded in its own tiny
-    txn (auditable) and raised as :class:`HallucinatedCardsError` without
-    touching task state.
-    """
+    """Verify ``created_cards`` BEFORE the main write txn; returns the verified
+    ids. A phantom id is recorded in its own tiny txn (auditable) then raised
+    as :class:`HallucinatedCardsError` without touching task state."""
     if not created_cards:
         return []
     verified_cards, phantom_cards = _verify_created_cards(conn, task_id, created_cards)
@@ -3373,12 +2988,9 @@ def _merge_completion_prose_artifacts(
     summary: Optional[str],
     result: Optional[str],
 ) -> Optional[dict]:
-    """Promote existing scratch files named in legacy completion prose.
-
-    ``artifacts=[...]`` is preferred. Older workers only wrote an absolute
-    deliverable path in ``summary``/``result``; discover it while scratch still
-    exists so cleanup cannot erase the file the user was promised.
-    """
+    """Legacy workers named deliverables only by absolute path in prose; add
+    those that exist under the scratch workspace to ``metadata["artifacts"]``
+    before cleanup can erase them."""
     workspace = _scratch_workspace(conn, task_id)
     if workspace is None:
         return metadata
@@ -3615,18 +3227,9 @@ def block_task(
     kind: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
-
-    ``kind`` (:data:`VALID_BLOCK_KINDS` or ``None`` = legacy un-typed) routes:
-    ``dependency`` -> ``todo`` (parent gating / ``recompute_ready`` promotes
-    it; never parked where a cron would keep "unblocking" it); everything
-    else -> ``blocked`` for a human, EXCEPT that a re-block for the SAME kind
-    after an unblock bumps ``block_recurrences`` and at
-    :data:`BLOCK_RECURRENCE_LIMIT` routes to ``triage`` instead, breaking the
-    cron-unblock ↔ worker-re-block loop. ``transient`` signals "may clear on
-    its own" but still counts toward the loop breaker so a forever-flaky task
-    escalates. Returns True on any transition, False when not blockable.
-    """
+    """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
+    :func:`_route_block`). ``transient`` still counts toward the loop breaker
+    so a forever-flaky task escalates. True on any transition."""
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
     with write_txn(conn):
@@ -3729,24 +3332,13 @@ def request_review(
     force: bool = False,
     with_reason: bool = False,
 ):
-    """Transition implementation work into the first-class review phase.
+    """``running``/``ready`` -> ``review``; never touches block recurrence accounting.
 
-    Unlike :func:`block_task`, this transition never touches block recurrence
-    accounting.  The current implementer and resolved reviewer are recorded on
-    the event so an autonomous reviewer can route requested changes back to the
-    right profile.  Supplying ``reviewer`` reassigns the task before it is
-    exposed to the review dispatcher.  On re-review, omitting it reuses the
-    reviewer provenance persisted by the latest ``changes_requested`` event.
-
-    When the task is ``running`` under a live claim, a caller that supplies no
-    ``expected_run_id`` must pass ``force=True`` (explicit human/CLI override)
-    — otherwise the request is refused instead of silently clearing the live
-    worker's ``claim_lock``/``worker_pid``. Workers prove ownership by passing
-    their own run id as ``expected_run_id`` (unchanged).
-
-    Returns ``bool`` by default. With ``with_reason=True`` returns
-    ``(ok, reason)`` mirroring :func:`request_changes` — ``reason`` is a
-    diagnostic string on failure, ``None`` on success.
+    Implementer and reviewer are recorded on the event so requested changes
+    route back to the right profile; ``reviewer`` reassigns the task, and on
+    re-review defaults to the latest ``changes_requested`` provenance. A live
+    claim is only cleared with proof of ownership (``expected_run_id``) or
+    ``force=True``. Returns ``bool``, or ``(ok, reason)`` with ``with_reason``.
     """
 
     def _ret(ok: bool, reason: Optional[str] = None):
@@ -3860,14 +3452,9 @@ def request_changes(
     reason: str,
     expected_run_id: Optional[int] = None,
 ) -> tuple[bool, Optional[str]]:
-    """Finish an active review run and route the task back for rework.
-
-    The transition is valid only for a run claimed from ``review``.  It closes
-    that reviewer run, restores the implementer recorded by the latest
-    ``review_requested`` event, reapplies parent gating, and emits an auditable
-    ``changes_requested`` event.  The second tuple item is the implementer on
-    success or a diagnostic reason on failure.
-    """
+    """Close an active reviewer run (claimed from ``review``) and hand the task
+    back to the implementer from the latest ``review_requested`` event, parent
+    gating reapplied. Returns ``(ok, implementer | reason)``."""
     reason = str(redact_review_value(reason or "")).strip()
     if not reason:
         return False, "reason is required"
@@ -3948,16 +3535,9 @@ def promote_task(
     force: bool = False,
     dry_run: bool = False,
 ) -> tuple[bool, Optional[str]]:
-    """Manually promote a `todo` or `blocked` task to `ready`.
-
-    Mirrors the automatic promotion done by ``recompute_ready`` but
-    drives it from a deliberate operator action with an audit-trail
-    entry. Refuses to promote if any parent dep is not in a terminal
-    state (`done`/`archived`) unless ``force=True``. Does NOT change
-    assignee or claim state. Returns ``(True, None)`` on success and
-    ``(False, reason)`` if refused. ``dry_run=True`` validates the
-    promotion would succeed without mutating state.
-    """
+    """Operator promotion ``todo``/``blocked`` -> ``ready`` with an audit event.
+    Refused while a parent is unfinished unless ``force``; ``dry_run`` only
+    validates. Returns ``(ok, reason)``."""
     cur_status = _task_status(conn, task_id)
     if cur_status is None:
         return False, f"task {task_id} not found"
@@ -4006,12 +3586,8 @@ def promote_task(
 def _reclaim_dangling_run(
     conn: sqlite3.Connection, task_id: str, *, statuses, now: int, note: str,
 ) -> None:
-    """Close a leaked ``current_run_id`` (run row still open) before a status
-    flip, preserving the runs invariant (``current_run_id IS NULL`` ⇔ run row
-    terminal). No-op in the common path where the prior transition already
-    closed the run. Shared by :func:`unblock_task` and
-    :func:`reopen_review_task` so the recovery can't drift.
-    """
+    """Close a leaked open run before a status flip so the invariant
+    ``current_run_id IS NULL <=> run row terminal`` holds; no-op normally."""
     placeholders = ", ".join("?" for _ in statuses)
     stale = conn.execute(
         f"SELECT current_run_id FROM tasks WHERE id = ? AND status IN ({placeholders})",
@@ -4032,29 +3608,14 @@ def _reclaim_dangling_run(
 
 
 def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str:
-    """Return ``'todo'`` if any parent isn't ``done`` yet, else ``'ready'``.
-
-    The parent-completion re-gate shared by :func:`unblock_task` and
-    :func:`reopen_review_task`: flipping straight to ``ready`` would bypass the
-    parent-completion invariant the dispatcher trusts (it would spawn a child
-    whose upstream work isn't finished). If parents are still in progress the
-    task waits in ``todo`` until ``recompute_ready`` picks it up. RCA: Bug 2 at
-    kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md. Kept in one place
-    so the two transitions can't drift.
-    """
+    """``ready`` if every parent is terminal else ``todo`` — the re-gate shared by
+    unblock/reopen so neither can spawn a child whose upstream is unfinished."""
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
 def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Transition ``blocked``/``scheduled`` to its safe resumable phase.
-
-    Defensively closes any stale ``current_run_id`` pointer before flipping
-    status. In the common path (``block_task`` closed the run already) this
-    is a no-op. If a future or external write left the pointer dangling,
-    the leaked run is closed as ``reclaimed`` inside the same txn so the
-    runs invariant (``current_run_id IS NULL`` ⇔ run row in terminal
-    state) holds for the rest of this function's lifetime.
-    """
+    """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
+    when that is where it left off), closing any leaked run first."""
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
@@ -4103,19 +3664,10 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Transition ``review`` -> ready (or todo) so the implementer re-runs.
-
-    The "changes requested" counterpart of :func:`request_review`: sends the
-    task back out of the review lane so the dispatcher re-runs the implementer
-    on the new comments. Mirrors :func:`unblock_task` (parent re-gating,
-    defensive stale-run close, ``consecutive_failures`` preserved) and emits a
-    ``review_reopened`` event.
-
-    Deliberately does NOT touch ``block_recurrences``/``block_kind``: review is
-    not a block, so there is no loop counter to reset. (A stale counter from a
-    genuine block *before* review is left intact — only :func:`complete_task`
-    clears it.) Returns False when the task is missing or not in ``review``.
-    """
+    """``review`` -> ``ready``/``todo`` so the implementer re-runs on the new
+    comments; restores the implementer from the ``review_requested`` event.
+    Preserves ``consecutive_failures`` and the block loop counter (review is
+    not a block; only :func:`complete_task` clears them)."""
     now = int(time.time())
     with write_txn(conn):
         _reclaim_dangling_run(
@@ -4156,41 +3708,21 @@ def invalidate_descendants_for_parent_reopen(
     *,
     author: str,
 ) -> dict[str, Any]:
-    """Retract every dispatchable/completed descendant of a reopened ancestor.
+    """THE done-reopen invalidation: every ``ready``/``review``/``running``/``done``
+    descendant of a reopened ancestor is demoted to ``todo`` and re-gated.
+    Every surface that reopens a done task (dashboard PATCH/drag) routes here.
 
-    THE single implementation of done-reopen descendant invalidation. When a
-    ``done``/``archived`` ancestor is reopened, every descendant whose state
-    assumed its result — ``ready``, ``review``, ``running`` or ``done`` — is
-    demoted to ``todo`` and re-gated on the graph. The CLI has no done-reopen
-    verb (``reopen-review`` is the review-phase transition), so every surface
-    that reopens a done task (dashboard drag-drop / PATCH via
-    ``_set_status_direct``) must route through here.
+    Composes under the caller's txn (``allow_nested=True``) so the flip and the
+    retractions commit atomically. Each descendant gets a
+    ``descendant_invalidated`` event, the legacy ``status`` event the live feed
+    renders, and a comment naming the ancestor. Running descendants are closed
+    ``reclaimed`` and their workers killed strictly post-commit (audit trail
+    before death) — when composed, the CALLER must drain ``terminations``
+    after its own commit. ``consecutive_failures`` resets (deliberate operator
+    action), the opposite of :func:`reopen_review_task`.
 
-    Transactionality: composes under the caller's open transaction via
-    ``write_txn(conn, allow_nested=True)`` so the ancestor's status flip and
-    the retractions commit atomically; standalone it opens its own. All SQL
-    is inline (no txn-opening helpers).
-
-    Non-silent contract — every invalidated descendant gets a
-    ``descendant_invalidated`` event (``ancestor, prior_status, new_status,
-    resume_status``), the legacy ``status`` event
-    (``reason=ancestor_reopened``) the live feed renders, and a comment
-    naming the ancestor so operators see WHY a card moved.
-
-    Live ``running`` descendants are wasted spend: their run is closed
-    ``reclaimed`` and the worker killed via :func:`_terminate_reclaimed_worker`
-    strictly post-commit, so the audit trail exists BEFORE the worker dies.
-    When composing under a caller's transaction the caller MUST drain the
-    returned ``terminations`` after its own commit.
-
-    ``consecutive_failures`` resets to 0: ancestor reopen is a deliberate
-    operator action, so demoted work gets a fresh breaker budget. This is the
-    OPPOSITE of :func:`reopen_review_task` (preserves the counter) because the
-    autonomous review loop must not launder its own failure streak.
-
-    Returns ``{"invalidated": [...], "terminations": [...]}`` where each
-    invalidated entry is ``{id, prior_status, new_status, resume_status}``
-    and each termination is a ``(worker_pid, claim_lock)`` tuple.
+    Returns ``{"invalidated": [{id, prior_status, new_status, resume_status}],
+    "terminations": [(worker_pid, claim_lock)]}``.
     """
     caller_owns_txn = bool(getattr(conn, "in_transaction", False))
     now = int(time.time())
@@ -4281,21 +3813,9 @@ def specify_triage_task(
     assignee: Optional[str] = None,
     author: Optional[str] = None,
 ) -> bool:
-    """Flesh out a triage task and promote it to ``todo``.
-
-    Atomically updates ``title`` / ``body`` / ``assignee`` (when provided)
-    and transitions ``status: triage -> todo`` in a single write txn. Returns
-    False when the task is missing or not in the ``triage`` column — callers
-    should surface that as "nothing to specify" rather than an error.
-
-    ``todo`` (not ``ready``) is the correct landing column: ``recompute_ready``
-    promotes parent-free / parent-done todos to ``ready`` on the next
-    dispatcher tick, which keeps the normal parent-gating behaviour intact
-    for specified tasks that happen to have open parents.
-
-    ``author`` is recorded on an audit comment only when at least one of
-    ``title`` / ``body`` / ``assignee`` actually changed — avoids noisy
-    comment spam for status-only promotions.
+    """Update title/body/assignee (when given) and move ``triage -> todo`` in one
+    txn; False when not in triage. Lands in ``todo`` (not ``ready``) so parent
+    gating still applies; the audit comment is written only when a field changed.
     """
     if title is not None and not title.strip():
         raise ValueError("title cannot be blank")
@@ -4357,13 +3877,8 @@ def specify_triage_task(
 
 
 def _validate_children_graph(children: list) -> None:
-    """Shape-check ``decompose_triage_task`` children and reject cycles.
-
-    Cheap, DB-free, so bad input aborts before the txn. The sibling parent
-    graph is checked whole (Kahn's sort) rather than edge-by-edge like
-    ``link_tasks``/``_would_cycle``: a cycle silently deadlocks every involved
-    child in ``todo`` because ``recompute_ready`` can never promote them.
-    """
+    """DB-free shape check + Kahn's cycle check on the sibling graph (a cycle
+    would deadlock every involved child in ``todo`` forever)."""
     for idx, child in enumerate(children):
         if not isinstance(child, dict):
             raise ValueError(f"child[{idx}] is not a dict")
@@ -4406,19 +3921,13 @@ def decompose_triage_task(
     author: Optional[str] = None,
     auto_promote: bool = True,
 ) -> Optional[list[str]]:
-    """Fan a triage task out into child tasks and promote the root to ``todo``.
+    """Fan a triage task out into children and move the root to ``todo``; the root
+    waits on every child and wakes (``ready``) when all are done.
 
-    The root task stays alive and becomes the parent of every child —
-    when all children reach ``done``, the root promotes to ``ready`` and
-    its assignee (typically the orchestrator profile) wakes back up to
-    judge completion or spawn more work.
-
-    ``children``: dicts of ``title`` (required), ``body``, ``assignee`` (None
-    -> default fallback) and ``parents`` (indices into this same list).
-    Returns the created child ids in input order, or ``None`` when the root
-    is missing / not in ``triage`` / the graph has a cycle. Title/assignee
-    validation runs inside the same write_txn as the inserts so a malformed
-    entry aborts the whole decomposition (no orphan children).
+    ``children``: dicts of ``title`` (required), ``body``, ``assignee``,
+    ``parents`` (indices into this list), optional workspace overrides.
+    Returns child ids in input order, or None when the root is missing / not
+    in triage. Atomic: a malformed entry aborts the whole fan-out.
     """
     if not children:
         return None
@@ -4559,12 +4068,8 @@ def _delete_task_relations(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Permanently remove an already-archived task and its related rows.
-
-    Safety guard: only archived tasks can be deleted. Active / blocked / done
-    tasks must be explicitly archived first so accidental data loss requires a
-    second deliberate action.
-    """
+    """Hard-delete an ARCHIVED task (+ related rows); anything else must be
+    archived first so data loss takes two deliberate actions."""
     with write_txn(conn):
         if _task_status(conn, task_id) != "archived":
             return False
@@ -4574,15 +4079,7 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
 
 
 def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Hard-delete a task and cascade to all related rows.
-
-    Because the schema does not use ``ON DELETE CASCADE`` foreign keys,
-    we explicitly delete from child tables first, then the task row.
-    This keeps the operation atomic (single ``write_txn``).
-
-    Returns ``True`` if the task existed and was deleted, ``False``
-    if the task was not found.
-    """
+    """Hard-delete a task and its related rows in one txn; False when not found."""
     with write_txn(conn):
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
@@ -4600,12 +4097,8 @@ def schedule_task(
     reason: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Park a task in ``scheduled`` so it is waiting on time, not human input.
-
-    ``scheduled`` tasks are intentionally not dispatchable; an external cron,
-    human action, or automation can later call ``unblock_task`` to re-gate them
-    to ``ready`` (or ``todo`` if parents are still incomplete).
-    """
+    """Park in ``scheduled`` (waiting on time, not a human; not dispatchable)
+    until ``unblock_task`` re-gates it."""
     with write_txn(conn):
         params: list[Any] = [task_id]
         sql = """
@@ -4639,16 +4132,10 @@ def schedule_task(
 # ---------------------------------------------------------------------------
 
 def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
-    """Return the full text a worker should read to understand its task.
-
-    Sections in order: header, body, attachments, prior attempts on this task,
-    done-parent handoffs (``run.summary``/``metadata``, falling back to
-    ``task.result`` for pre-runs data), the assignee's recent completed runs
-    on other tasks, comment thread. Every list is tail-capped (``_CTX_MAX_*``)
-    with the omitted head summarised, and every field is char-capped, so the
-    prompt stays bounded on pathological boards (retry storms, comment
-    storms, a single 1 MB summary).
-    """
+    """Everything a worker should read about its task: header, body,
+    attachments, prior attempts, done-parent handoffs, the assignee's recent
+    work, comments. Lists are tail-capped and fields char-capped
+    (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards."""
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
@@ -4860,9 +4347,7 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
 # ---------------------------------------------------------------------------
 
 def board_stats(conn: sqlite3.Connection) -> dict:
-    """Per-status + per-assignee counts, plus the oldest ``ready`` age in
-    seconds (the clearest staleness signal for a router or HUD).
-    """
+    """Per-status + per-assignee counts and the oldest ``ready`` age (staleness signal)."""
     by_status: dict[str, int] = {}
     for row in conn.execute(
         "SELECT status, COUNT(*) AS n FROM tasks "
@@ -4902,11 +4387,7 @@ def _counts_by_assignee(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
 
 
 def _to_epoch(val) -> Optional[int]:
-    """Normalise a timestamp to unix epoch seconds.
-
-    Accepts ints (pass-through), numeric strings, and ISO-8601 strings.
-    Returns ``None`` for ``None`` / empty values.
-    """
+    """Epoch seconds from int/float/numeric string/ISO-8601; None for empty/invalid."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -4945,10 +4426,7 @@ def task_age(task: Task) -> dict:
 # ---------------------------------------------------------------------------
 
 def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3600) -> int:
-    """Delete task_events rows older than ``older_than_seconds`` for tasks
-    in a terminal state (``done`` or ``archived``). Returns the number of
-    rows deleted. Running / ready / blocked tasks keep their full event
-    history."""
+    """Delete events older than the cutoff on done/archived tasks only; returns the count."""
     cutoff = int(time.time()) - int(older_than_seconds)
     with write_txn(conn):
         cur = conn.execute(
@@ -4960,11 +4438,7 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
 
 
 def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[str] = None) -> int:
-    """Delete worker log files older than ``older_than_seconds``. Returns
-    the number of files removed. Kept separate from ``gc_events`` because
-    log files live on disk, not in SQLite. Scoped to ``board`` (defaults
-    to the active board) — per-board isolation means deleting logs from
-    board A cannot touch board B's logs."""
+    """Delete worker log files older than the cutoff on one board; returns the count."""
     log_dir = worker_logs_dir(board=board)
     if not log_dir.exists():
         return 0
@@ -4983,13 +4457,8 @@ def gc_worker_logs(*, older_than_seconds: int = 30 * 24 * 3600, board: Optional[
 # ---------------------------------------------------------------------------
 
 def worker_log_path(task_id: str, *, board: Optional[str] = None) -> Path:
-    """Return the path to a worker's log file. The file may not exist
-    (task never spawned, or log already GC'd).
-
-    When ``board`` is None, resolves via the active board (env var →
-    current-board file → default). The dispatcher always passes the
-    board explicitly to avoid any resolution ambiguity when multiple
-    boards exist."""
+    """Worker log path (may not exist). The dispatcher always passes ``board``
+    explicitly to avoid resolution ambiguity."""
     return worker_logs_dir(board=board) / f"{task_id}.log"
 
 
@@ -4997,9 +4466,7 @@ def read_worker_log(
     task_id: str, *, tail_bytes: Optional[int] = None,
     board: Optional[str] = None,
 ) -> Optional[str]:
-    """Read the worker log for ``task_id``. Returns None if the file
-    doesn't exist. If ``tail_bytes`` is set, only the last N bytes are
-    returned (useful for the dashboard drawer which shouldn't page megabytes)."""
+    """Worker log text (last ``tail_bytes`` when set); None when the file is missing."""
     path = worker_log_path(task_id, board=board)
     if not path.exists():
         return None
@@ -5026,10 +4493,8 @@ def read_worker_log(
 # ---------------------------------------------------------------------------
 
 def list_profiles_on_disk() -> list[str]:
-    """Profile names on disk: ``<default-root>/profiles/<name>/config.yaml``
-    plus the implicit ``default`` when the root exists. Reads paths directly
-    to avoid importing ``hermes_cli.profiles`` (a large chunk of CLI startup).
-    """
+    """Profiles with a ``config.yaml`` plus the implicit ``default``; reads paths
+    directly to avoid importing ``hermes_cli.profiles`` at startup."""
     try:
         from hermes_constants import get_default_hermes_root
         default_root = get_default_hermes_root()
@@ -5049,10 +4514,8 @@ def list_profiles_on_disk() -> list[str]:
 
 
 def known_assignees(conn: sqlite3.Connection) -> list[dict]:
-    """Every assignee that is a profile on disk OR assigned to a non-archived
-    task, as ``{"name", "on_disk", "counts": {status: n}}`` — so a fresh
-    profile appears in pickers before it has any task.
-    """
+    """``{"name", "on_disk", "counts"}`` for every on-disk profile or task
+    assignee, so a fresh profile appears in pickers before it has a task."""
     on_disk = set(list_profiles_on_disk())
     counts = _counts_by_assignee(conn)
     return [
@@ -5073,10 +4536,8 @@ def list_runs(
     state_type: Optional[str] = None,
     state_name: Optional[str] = None,
 ) -> list[Run]:
-    """All runs for ``task_id`` in start order. ``include_active=False`` returns
-    only closed runs; ``state_type`` (``status``/``outcome``) + ``state_name``
-    filter on that column and must be passed together.
-    """
+    """Runs in start order; ``include_active=False`` = closed only; ``state_type``
+    (``status``/``outcome``) + ``state_name`` filter together."""
     if (state_type is None) ^ (state_name is None):
         raise ValueError("state_type and state_name must both be set or both omitted")
     if state_type is not None and state_type not in ("status", "outcome"):
@@ -5109,11 +4570,8 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
 
 
 def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
-    """Latest non-null ``task_runs.summary`` (newest ``ended_at``, ``id`` for
-    ties), or None. Workers hand off via ``complete_task(summary=...)`` and
-    leave ``tasks.result`` NULL, so show/dashboard views need this or a
-    completed task looks like a no-op.
-    """
+    """Newest non-empty run summary, or None. Workers hand off via ``summary`` and
+    leave ``tasks.result`` NULL, so views need this or a done task looks empty."""
     row = conn.execute(
         "SELECT summary FROM task_runs "
         "WHERE task_id = ? AND summary IS NOT NULL AND summary != '' "
@@ -5124,11 +4582,8 @@ def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
 
 
 def latest_summaries(conn: sqlite3.Connection, task_ids: Iterable[str]) -> dict[str, str]:
-    """``{task_id: latest non-null run summary}`` for many tasks in one query
-    (dashboard board endpoint; avoids N+1 :func:`latest_summary` calls).
-    Window function -> needs SQLite >= 3.25 (default on every supported
-    platform). Tasks without a summary are omitted.
-    """
+    """``{task_id: newest non-empty run summary}`` in one query (window function,
+    SQLite >= 3.25); tasks without a summary are omitted."""
     ids = list(task_ids)
     if not ids:
         return {}
