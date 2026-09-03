@@ -34,7 +34,6 @@ _FLAGS_MESSAGE_CONTENT = (1 << 18) | (1 << 19)
 
 
 class DiscordAPIError(Exception):
-    """Raised when a Discord API call fails."""
     def __init__(self, status: int, body: str):
         self.status = status
         self.body = body
@@ -171,7 +170,6 @@ def _detect_capabilities_nonblocking(token: str) -> Dict[str, Any]:
     # between agent inits within a live process or the per-conversation prompt cache breaks.
     caps_default = dict(_PERMISSIVE_CAPS)
     _capability_cache[token] = caps_default
-
     with _capability_bg_lock:
         if token not in _capability_bg_started:
             _capability_bg_started.add(token)
@@ -258,10 +256,9 @@ def _message_summary(msg: Dict[str, Any]) -> Dict[str, Any]:
 def _limit_param(limit: Any, default: int) -> str:
     """Discord caps list endpoints at 100 per page."""
     try:
-        limit = int(limit)
+        return str(min(int(limit), 100))
     except (TypeError, ValueError):
-        limit = default
-    return str(min(limit, 100))
+        return str(min(default, 100))
 
 
 def _list_guilds(token: str, **_kwargs: Any) -> str:
@@ -435,7 +432,6 @@ def _load_allowed_actions_config() -> Optional[List[str]]:
     except Exception as exc:
         logger.debug("discord: could not load config (%s); allowing all actions.", exc)
         return None
-
     raw = (cfg.get("discord") or {}).get("server_actions")
     if raw is None or raw == "":
         return None
@@ -596,7 +592,6 @@ def _run_discord_action(action: str, valid_actions: Dict[str, Any], tool_label: 
     action_fn = valid_actions.get(action)
     if not action_fn:
         return tool_error(f"Unknown action: {action}", available_actions=list(valid_actions.keys()))
-
     # Config-level allowlist gate (defense in depth): a stale cached schema from a prior
     # config must not let denied actions through.
     allowlist = _load_allowed_actions_config()
@@ -604,12 +599,10 @@ def _run_discord_action(action: str, valid_actions: Dict[str, Any], tool_label: 
         return tool_error(
             f"Action '{action}' is disabled by config (discord.server_actions). "
             f"Allowed: {', '.join(allowlist) if allowlist else '<none>'}")
-
     kwargs = {k: params.get(k, v) for k, v in _HANDLER_DEFAULTS.items()}
     missing = [p for p in _REQUIRED_PARAMS.get(action, []) if not kwargs.get(p)]
     if missing:
         return tool_error(f"Missing required parameters for '{action}': {', '.join(missing)}")
-
     try:
         return action_fn(token=token, **kwargs)
     except DiscordAPIError as e:
@@ -635,7 +628,6 @@ for _name, _actions, _handler in (
         name=_name,
         toolset=_name,
         schema=_build_schema(list(_actions), caps={"detected": False}, tool_name=_name),
-        handler=lambda args, _h=_handler, **kw: _h(
-            action=args.get("action", ""), **{k: args.get(k, v) for k, v in _HANDLER_DEFAULTS.items()}),
+        handler=lambda args, _h=_handler, **kw: _h(**{"action": "", **args}),
         check_fn=check_discord_tool_requirements,
         requires_env=["DISCORD_BOT_TOKEN"])
