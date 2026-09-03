@@ -47,9 +47,7 @@ def _parse_regex_groups(regex, *, thread_group=True):
     """Explicit when ``regex`` fully matches: chat_id = group 1, thread = group 2 (or None)."""
     def parse(ref):
         match = regex.fullmatch(ref)
-        if not match:
-            return None
-        return match.group(1), (match.group(2) if thread_group else None)
+        return (match.group(1), match.group(2) if thread_group else None) if match else None
     return parse
 
 
@@ -66,8 +64,7 @@ def _parse_telegram(ref):
     if parsed:
         return parsed
     from plugins.platforms.telegram.telegram_ids import parse_telegram_username_target
-    username = parse_telegram_username_target(ref)
-    return (username, None) if username else None
+    return _parse_nonempty(parse_telegram_username_target(ref) or "")
 
 
 # (regex, chat_id template, thread comes from group 2) — thread form before bare id.
@@ -205,15 +202,9 @@ def resolve_send_target(
             logger.debug("Plugin target parser failed for %s", platform_name, exc_info=True)
             return None, None, f"Target parser failed for platform '{platform_name}'"
         if parsed is not None:
-            if (
-                not isinstance(parsed, tuple)
-                or len(parsed) != 2
-                or not isinstance(parsed[0], str)
-                or not parsed[0]
-                or (parsed[1] is not None and not isinstance(parsed[1], str))):
-                return (
-                    None, None,
-                    f"Target parser for platform '{platform_name}' returned an invalid result")
+            if (not isinstance(parsed, tuple) or len(parsed) != 2 or not isinstance(parsed[0], str)
+                    or not parsed[0] or (parsed[1] is not None and not isinstance(parsed[1], str))):
+                return None, None, f"Target parser for platform '{platform_name}' returned an invalid result"
             return _validated(*parsed)
 
     parsed_chat_id, parsed_thread_id, explicit = _parse_target_ref(platform_name, target_ref)
@@ -240,23 +231,17 @@ def resolve_send_target(
         error = _validate(target_ref)
         if error:
             return None, None, error
-        logger.debug(
-            "Handing unresolved target '%s' to the %s adapter unchanged "
-            "(the adapter validates it)",
-            target_ref, platform_name)
+        logger.debug("Handing unresolved target '%s' to the %s adapter unchanged "
+                     "(the adapter validates it)", target_ref, platform_name)
         return target_ref, None, None
 
     if entry is not None and entry.source == "plugin" and not is_builtin:
         if pass_unresolved_references and entry.parse_target_ref_fn is None:
             return _pass_through_unresolved()
-        return (
-            None, None,
-            f"Could not resolve '{target_ref}' on {platform_name}. "
-            "The plugin parser did not recognize it and no channel-directory entry matched.")
+        return (None, None, f"Could not resolve '{target_ref}' on {platform_name}. "
+                "The plugin parser did not recognize it and no channel-directory entry matched.")
     if pass_unresolved_references:
         return _pass_through_unresolved()
-    hint = (
-        "Try using a numeric channel ID instead."
-        if resolution_failed
-        else "Use send_message(action='list') to see available targets.")
+    hint = ("Try using a numeric channel ID instead." if resolution_failed
+            else "Use send_message(action='list') to see available targets.")
     return None, None, f"Could not resolve '{target_ref}' on {platform_name}. {hint}"
