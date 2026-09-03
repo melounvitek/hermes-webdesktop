@@ -74,9 +74,7 @@ def _keyless_preference() -> tuple:
         from plugins.web.keyless_mcp import _KEYLESS_RING, _ring_cursor
 
         start = _ring_cursor % len(_KEYLESS_RING)
-        return tuple(
-            _KEYLESS_RING[(start + i) % len(_KEYLESS_RING)] for i in range(len(_KEYLESS_RING))
-        )
+        return tuple(_KEYLESS_RING[start:] + _KEYLESS_RING[:start])
     except Exception as exc:  # noqa: BLE001 — ring optional in stripped envs
         logger.debug("keyless ring order unavailable: %s", exc)
     return _KEYLESS_PREFERENCE
@@ -94,9 +92,10 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
     snapshot = _registry.merged()
 
     def _capable(p: WebSearchProvider) -> bool:
-        if capability == "search":
-            return bool(p.supports_search())
-        return bool(p.supports_extract()) if capability == "extract" else False
+        return bool(
+            p.supports_search() if capability == "search"
+            else p.supports_extract() if capability == "extract" else False
+        )
 
     def _available(p: WebSearchProvider) -> bool:
         return is_available_safe(p, logger, "provider %s.is_available() raised %s")

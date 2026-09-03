@@ -537,7 +537,7 @@ def estimate_usage_cost(
     # Whole-request context tier (e.g. Gemini Pro >200k prompts): above the
     # threshold the *_above rates apply to the entire request; None falls back.
     above = entry.tier_threshold_tokens is not None and usage.prompt_tokens > entry.tier_threshold_tokens
-    buckets = []
+    amount = _ZERO
     for tokens, rate, rate_above, note in (
         (usage.input_tokens, entry.input_cost_per_million, entry.input_cost_per_million_above, ()),
         (usage.output_tokens, entry.output_cost_per_million, entry.output_cost_per_million_above, ()),
@@ -548,14 +548,11 @@ def estimate_usage_cost(
     ):
         if above and rate_above is not None:
             rate = rate_above
-        if tokens and rate is None:
-            return _unknown_cost(entry.source, *note)
-        buckets.append((tokens, rate))
-
-    amount = _ZERO
-    for tokens, rate in buckets:
-        if rate is not None:
-            amount += Decimal(tokens) * rate / _ONE_MILLION
+        if rate is None:
+            if tokens:
+                return _unknown_cost(entry.source, *note)
+            continue
+        amount += Decimal(tokens) * rate / _ONE_MILLION
     if entry.request_cost is not None and usage.request_count:
         amount += Decimal(usage.request_count) * entry.request_cost
 
