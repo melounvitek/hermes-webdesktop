@@ -54,12 +54,9 @@ def _prompt_api_key(label: str, env_var: str, hermes_home: str) -> str:
     """Prompt for API key, showing masked existing value if found."""
     existing = os.environ.get(env_var, "")
     env_path = Path(hermes_home) / ".env"
-    if not existing and env_path.exists():
-        # utf-8-sig: a Notepad BOM on line 1 would otherwise defeat the key match.
-        for line in env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines():
-            if line.startswith(f"{env_var}="):
-                existing = line.split("=", 1)[1].strip()
-                break
+    if not existing and env_path.exists():  # utf-8-sig: a Notepad BOM on line 1 would otherwise defeat the key match
+        lines = env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+        existing = next((line.split("=", 1)[1].strip() for line in lines if line.startswith(f"{env_var}=")), "")
     hint = f" (current: {_masked(existing)}, blank to keep)" if existing else ""
     return getpass.getpass(f"  {label} API key{hint}: ").strip()
 
@@ -93,8 +90,7 @@ _FLAG_DEFAULTS = {"oss_llm": "openai", "oss_embedder": "openai", "oss_vector": "
 
 def parse_flags(argv: list[str] | None = None) -> dict[str, str]:
     args = argv if argv is not None else sys.argv[1:]
-    flags: dict[str, Any] = {k: _FLAG_DEFAULTS.get(k, "") for k in _FLAG_KEYS}
-    flags["dry_run"] = False
+    flags: dict[str, Any] = {**{k: _FLAG_DEFAULTS.get(k, "") for k in _FLAG_KEYS}, "dry_run": False}
     flag_map = {"--" + k.replace("_", "-"): k for k in _FLAG_KEYS}
     i = 0
     while i < len(args):
@@ -127,7 +123,6 @@ def build_oss_config(flags: dict[str, str]) -> tuple[dict, dict[str, str]]:
     dims = KNOWN_DIMS.get(embedder_config["model"])
     if dims:
         embedder_config["embedding_dims"] = dims
-
     vector_id = flags.get("oss_vector", "qdrant")
     vector_config = dict(VECTOR_PROVIDERS[vector_id]["default_config"])
     for key in _VECTOR_FLAG_KEYS.get(vector_id, ()):
@@ -135,7 +130,6 @@ def build_oss_config(flags: dict[str, str]) -> tuple[dict, dict[str, str]]:
             vector_config[key] = int(val) if key == "port" else val
     if "url" in vector_config:
         vector_config.pop("path", None)  # a remote Qdrant URL replaces local storage
-
     oss_config = {"llm": {"provider": llm_id, "config": llm_config}, "embedder": {"provider": embedder_id, "config": embedder_config}, "vector_store": {"provider": vector_id, "config": vector_config}}
     # An embedder sharing the LLM's provider reuses the LLM key when no embedder key was given.
     llm_key = flags.get("oss_llm_key") if llm_def.get("needs_key") else ""
@@ -170,14 +164,8 @@ def _persist_provider_config(hermes_home: str, config: dict, provider_config: di
         _write_env(Path(hermes_home) / ".env", env_writes)
     if server:
         _check_selfhosted_server(server)
-    print(f"\n  Memory provider: {label}")
-    if server:
-        print(f"  Server: {server}")
-    print("  Activation saved to config.yaml")
-    print("  Provider config saved")
-    if env_writes:
-        print(f"  {key_line}")
-    print("\n  Start a new session to activate.\n")
+    print("\n".join(["", f"  Memory provider: {label}", *([f"  Server: {server}"] if server else []), "  Activation saved to config.yaml", "  Provider config saved",
+                     *([f"  {key_line}"] if env_writes else []), "", "  Start a new session to activate.", ""]))
 
 
 def _setup_platform(hermes_home: str, config: dict, flags: dict[str, str]) -> None:
@@ -191,14 +179,12 @@ def _setup_platform(hermes_home: str, config: dict, flags: dict[str, str]) -> No
     choices = ["true", "false"]
     current = str(provider_config.get("rerank", "false") or "").lower()
     provider_config["rerank"] = choices[_curses_select("  Enable reranking for recall", [(c, "") for c in choices], default=choices.index(current) if current in choices else 0)]
-
     if flags.get("dry_run"):
         _print_dry_run(str(provider_config), env_writes)
         return
-    provider_config["mode"] = "platform"
     # Routing checks ``host`` before platform, so clear a stale self-hosted host. "" rather than
     # pop(): save_config merges into the existing mem0.json, so a popped key would survive.
-    provider_config["host"] = ""
+    provider_config.update(mode="platform", host="")
     # _load_config() also seeds ``host`` from MEM0_HOST (.env); the file clear can't help there, so warn.
     if os.environ.get("MEM0_HOST", "").strip():
         print(f"\n  ⚠ MEM0_HOST is set in your environment ({os.environ['MEM0_HOST']}). It overrides platform mode — remove it from ~/.hermes/.env (or unset it) or Hermes will keep routing to the self-hosted server.")
@@ -229,7 +215,6 @@ def _setup_selfhosted(hermes_home: str, config: dict, flags: dict[str, str]) -> 
     env_writes = _api_key_writes(flags, "Server API key", fresh_label="Server API key (blank if AUTH_DISABLED)")
     user_id = flags.get("user_id") or _prompt("User identifier", default=provider_config.get("user_id") or "hermes-user")
     agent_id = _prompt("Agent identifier", default=provider_config.get("agent_id") or "hermes")
-
     if flags.get("dry_run"):
         _print_dry_run(f"host={host}, user_id={user_id}, agent_id={agent_id}", env_writes, lambda: _check_selfhosted_server(host))
         return
@@ -240,19 +225,14 @@ def _setup_selfhosted(hermes_home: str, config: dict, flags: dict[str, str]) -> 
 def _print_oss_summary(oss_config: dict, env_writes: dict, dry_run: bool = False) -> None:
     llm, emb = oss_config["llm"], oss_config["embedder"]
     w = 0 if dry_run else 9  # final summary column-aligns the labels
-    print("\n  [dry-run] OSS config would be:" if dry_run else "\n  ✓ Mem0 configured (OSS mode)")
-    print(f"    {'LLM:':<{w}} {llm['provider']} ({llm['config'].get('model', '')})")
-    print(f"    {'Embedder:':<{w}} {emb['provider']} ({emb['config'].get('model', '')})")
-    print(f"    {'Vector:':<{w}} {oss_config['vector_store']['provider']}")
+    lines = ["", "  [dry-run] OSS config would be:" if dry_run else "  ✓ Mem0 configured (OSS mode)",
+             f"    {'LLM:':<{w}} {llm['provider']} ({llm['config'].get('model', '')})", f"    {'Embedder:':<{w}} {emb['provider']} ({emb['config'].get('model', '')})",
+             f"    {'Vector:':<{w}} {oss_config['vector_store']['provider']}"]
     if dry_run:
-        if env_writes:
-            print(f"    Env vars: {', '.join(env_writes.keys())}")
-        return
-    if env_writes:
-        print("    API keys saved to .env")
-    print("    Config saved to mem0.json")
-    print("    Provider set in config.yaml")
-    print("\n  Start a new session to activate.\n")
+        lines += [f"    Env vars: {', '.join(env_writes.keys())}"] if env_writes else []
+    else:
+        lines += [*(["    API keys saved to .env"] if env_writes else []), "    Config saved to mem0.json", "    Provider set in config.yaml", "", "  Start a new session to activate.", ""]
+    print("\n".join(lines))
 
 
 def _finish_oss(hermes_home: str, config: dict, oss_config: dict, env_writes: dict[str, str], user_id: str, agent_id: str, pgvector_config: dict | None = None) -> None:
@@ -313,13 +293,9 @@ def _ensure_pgvector(host: str = "localhost", port: int = 5432) -> dict | None:
             if _pg_ready(host, port, 15):
                 print("  ✓ PostgreSQL container restarted")
                 return None
-    if input("  Start pgvector via Docker? [Y/n]: ").strip().lower() in ("", "y", "yes"):
-        return _start_pgvector_docker(host, port)
-    print("  Skipping Docker setup. Make sure PostgreSQL with pgvector is running.")
-    return None
-
-
-def _start_pgvector_docker(host: str, port: int) -> dict | None:
+    if input("  Start pgvector via Docker? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
+        print("  Skipping Docker setup. Make sure PostgreSQL with pgvector is running.")
+        return None
     try:
         print(f"  Pulling {_PGVECTOR_IMAGE}...")
         _docker("pull", _PGVECTOR_IMAGE, timeout=120)
@@ -357,7 +333,11 @@ def _ensure_ollama(models: list[str]) -> bool:
         print("  Warning: Ollama not reachable. Models cannot be pulled.")
         return False
     for model in models:
-        if any(model in n or model.split(":")[0] in n for n in _ollama_models(_OLLAMA_URL)):
+        try:
+            names = [m.get("name", "") for m in json.loads(_http_get(_OLLAMA_URL, "/api/tags", 5).read()).get("models", [])]
+        except Exception:
+            names = []
+        if any(model in n or model.split(":")[0] in n for n in names):
             print(f"  ✓ Model '{model}' available")
             continue
         print(f"  Pulling '{model}'... (this may take a few minutes)")
@@ -367,13 +347,6 @@ def _ensure_ollama(models: list[str]) -> bool:
         except Exception as e:
             print(f"  Warning: Could not pull '{model}': {e}\n  Run manually: ollama pull {model}")
     return True
-
-
-def _ollama_models(url: str) -> list[str]:
-    try:
-        return [m.get("name", "") for m in json.loads(_http_get(url, "/api/tags", 5).read()).get("models", [])]
-    except Exception:
-        return []
 
 
 def _ensure_pgvector_extension(pg_config: dict) -> None:
@@ -403,18 +376,13 @@ def _wait_for_port(host: str, port: int, timeout: int = 15) -> None:
 
 
 # Picker descriptions: LLM/embedder show model (+ URL); vector stores by provider id (default: the id itself).
-def _provider_description(v: dict) -> str:
-    model, url = v.get("default_model", ""), v.get("default_url")
-    return f"{model} ({url})" if url else model
-
-
 _VECTOR_DESCRIPTIONS = {"qdrant": lambda cfg: cfg.get("path", "local storage"), "pgvector": lambda cfg: f"{cfg.get('host', 'localhost')}:{cfg.get('port', 5432)}"}
 
 
 def _configure_model_provider(kind: str, registry: dict, hermes_home: str, env_writes: dict[str, str], llm: tuple[str, dict] | None = None) -> tuple[str, dict, str, str | None]:
     """Pick an LLM/embedder provider, collect its key, and (for Ollama) model + URL -> (id, definition, model, url).
     For the embedder (``llm`` given), a provider shared with the LLM reuses the LLM key instead of prompting again."""
-    items = [(v["label"], _provider_description(v)) for v in registry.values()]
+    items = [(v["label"], f"{v.get('default_model', '')} ({v['default_url']})" if v.get("default_url") else v.get("default_model", "")) for v in registry.values()]
     pid = list(registry)[_curses_select(f"{kind} Provider", items, 0)]
     pdef = registry[pid]
     model, url = pdef["default_model"], pdef.get("default_url")
@@ -430,31 +398,23 @@ def _configure_model_provider(kind: str, registry: dict, hermes_home: str, env_w
     return pid, pdef, model, url
 
 
-def _prompt_pgvector_config() -> dict:
-    """Native PostgreSQL — prompt for connection details (user first, matching the historical order)."""
-    pg = {k: _input(f"PostgreSQL {label}", d) for k, label, d in (
-        ("user", "user", os.getenv("USER", "postgres")), ("host", "host", "localhost"), ("port", "port", "5432"), ("dbname", "database", "postgres"))}
-    pg_password = getpass.getpass("  PostgreSQL password (blank if none): ").strip()
-    return {**pg, "port": int(pg["port"]), **({"password": pg_password} if pg_password else {})}
-
-
 def _setup_oss_interactive(hermes_home: str, config: dict) -> None:
     env_writes: dict[str, str] = {}
     llm_id, llm_def, llm_model, llm_url = _configure_model_provider("LLM", LLM_PROVIDERS, hermes_home, env_writes)
     embedder_id, _, embedder_model, embedder_url = _configure_model_provider("Embedder", EMBEDDER_PROVIDERS, hermes_home, env_writes, llm=(llm_id, llm_def))
     vector_items = [(v["label"], _VECTOR_DESCRIPTIONS.get(pid, lambda cfg: pid)(v.get("default_config", {}))) for pid, v in VECTOR_PROVIDERS.items()]
     vector_id = list(VECTOR_PROVIDERS)[_curses_select("Vector Store", vector_items, 0)]
-
     # Auto-setup: ensure Ollama is running and models are pulled; ensure pgvector is reachable (offer Docker if not).
     ollama_models = [m for pid, m in ((llm_id, llm_model), (embedder_id, embedder_model)) if pid == "ollama"]
     if ollama_models:
         _ensure_ollama(ollama_models)
-    pgvector_config = None
-    if vector_id == "pgvector":
-        pgvector_config = _ensure_pgvector() or _prompt_pgvector_config()
+    pgvector_config = _ensure_pgvector() if vector_id == "pgvector" else None
+    if vector_id == "pgvector" and not pgvector_config:  # native PostgreSQL: prompt for connection details (user first, historical order)
+        pg = {k: _input(f"PostgreSQL {label}", d) for k, label, d in (("user", "user", os.getenv("USER", "postgres")), ("host", "host", "localhost"), ("port", "port", "5432"), ("dbname", "database", "postgres"))}
+        pg_password = getpass.getpass("  PostgreSQL password (blank if none): ").strip()
+        pgvector_config = {**pg, "port": int(pg["port"]), **({"password": pg_password} if pg_password else {})}
     user_id = _input("User ID", os.getenv("USER", "hermes-user"))
     agent_id = _input("Agent ID", "hermes")
-
     flags = {
         "oss_llm": llm_id, "oss_llm_model": llm_model, "oss_llm_url": llm_url or "",
         "oss_llm_key": env_writes.get(llm_def["env_var"], "") if llm_def.get("env_var") else "",
@@ -476,12 +436,8 @@ def _install_provider_deps(llm_id: str, embedder_id: str, vector_id: str) -> Non
             outcome = install_specs([dep], timeout=60)
         except Exception:
             outcome = None
-        if outcome is not None and outcome.ok:
-            print(f"  ✓ Installed {dep}")
-        elif outcome is not None and outcome.blocked:
-            print(f"  Warning: cannot install {dep}: {outcome.reason}")
-        else:
-            print(f"  Warning: Could not install {dep}. Install manually: uv pip install {dep}")
+        print(f"  ✓ Installed {dep}" if outcome is not None and outcome.ok else f"  Warning: cannot install {dep}: {outcome.reason}" if outcome is not None and outcome.blocked
+              else f"  Warning: Could not install {dep}. Install manually: uv pip install {dep}")
     if deps:
         import importlib
         importlib.invalidate_caches()

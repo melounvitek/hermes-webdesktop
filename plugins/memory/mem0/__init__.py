@@ -40,13 +40,6 @@ def _is_client_error(exc: Exception) -> bool:
     return type(exc).__name__ in _CLIENT_ERROR_TYPES or any(s in err_str for s in ("404", "not found", "valid uuid"))
 
 
-def _truthy(value: Any, falsy_strings: tuple[str, ...] | None = None) -> bool:
-    """Coerce a flag; strings match ``falsy_strings`` (deny-list) when given, else a truthy allow-list."""
-    if not isinstance(value, str):
-        return bool(value)
-    return value.lower() not in falsy_strings if falsy_strings else value.lower() in ("true", "1", "yes")
-
-
 def _read_mem0_json(config_path: Path) -> dict:
     """Best-effort read of mem0.json; missing/corrupt file -> {}."""
     if config_path.exists():
@@ -117,9 +110,7 @@ class Mem0MemoryProvider(MemoryProvider):
         """Merge-write config to $HERMES_HOME/mem0.json."""
         from utils import atomic_json_write
         config_path = Path(hermes_home) / "mem0.json"
-        existing = _read_mem0_json(config_path)
-        existing.update(values)
-        atomic_json_write(config_path, existing, mode=0o600)
+        atomic_json_write(config_path, {**_read_mem0_json(config_path), **values}, mode=0o600)
 
     def get_config_schema(self):
         api_key_required = _load_config().get("mode", "platform") != "oss"
@@ -137,9 +128,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def _oss_hint(self, template: str, default: str = "vector store") -> str:
         """OSS-only hint; ``{vs}`` is the configured vector-store provider. "" in other modes."""
-        if self._mode != "oss":
-            return ""
-        return template.format(vs=self._config.get("oss", {}).get("vector_store", {}).get("provider", default))
+        return template.format(vs=self._config.get("oss", {}).get("vector_store", {}).get("provider", default)) if self._mode == "oss" else ""
 
     def _create_backend(self):
         # Lazy-install the mem0 SDK before the backend imports it (honors security.allow_lazy_installs);
@@ -151,9 +140,7 @@ class Mem0MemoryProvider(MemoryProvider):
             from . import _backend
             if self._mode == "oss":
                 return _backend.OSSBackend(self._config.get("oss", {}))
-            if self._host:
-                return _backend.SelfHostedBackend(self._api_key, self._host)
-            return _backend.PlatformBackend(self._api_key)
+            return _backend.SelfHostedBackend(self._api_key, self._host) if self._host else _backend.PlatformBackend(self._api_key)
         except Exception as e:
             logger.error("Mem0 backend failed to initialize (%s mode): %s", self._mode, e)
             self._init_error = str(e)
@@ -191,12 +178,12 @@ class Mem0MemoryProvider(MemoryProvider):
         """Background-path wrapper: run ``call`` under the breaker; on error log ``msg`` and return None."""
         try:
             result = call()
-            self._record_success()
-            return result
         except Exception as e:
             self._record_failure()
             log(msg, e)
             return None
+        self._record_success()
+        return result
 
     def initialize(self, session_id: str, **kwargs) -> None:
         self._config = cfg = _load_config()
@@ -206,7 +193,8 @@ class Mem0MemoryProvider(MemoryProvider):
         configured = cfg.get("user_id")
         self._user_id = (None if configured == _DEFAULT_USER_ID else configured) or kwargs.get("user_id") or _DEFAULT_USER_ID
         # Persisted rerank preference: default for mem0_search when the model omits ``rerank``. Platform-only.
-        self._rerank_default = _truthy(cfg.get("rerank", False))
+        _rr = cfg.get("rerank", False)
+        self._rerank_default = _rr.lower() in ("true", "1", "yes") if isinstance(_rr, str) else bool(_rr)
         self._channel = kwargs.get("platform") or "cli"
         self._backend = self._create_backend()
         if self._backend and not self._atexit_registered:
@@ -243,11 +231,6 @@ class Mem0MemoryProvider(MemoryProvider):
         backend = self._backend
         if not query or backend is None or self._is_breaker_open():
             return
-        with self._prefetch_lock:
-            # Same query already answered or still in flight: don't restart it.
-            if self._prefetch_query == query and (self._prefetch_done or (self._prefetch_thread and self._prefetch_thread.is_alive())):
-                return
-            self._prefetch_query, self._prefetch_result, self._prefetch_done = query, "", False
 
         def _run():
             results = self._try(lambda: self._search(query, backend=backend), logger.debug, "Mem0 prefetch failed: %s")
@@ -257,9 +240,12 @@ class Mem0MemoryProvider(MemoryProvider):
                 if self._prefetch_query == query:
                     self._prefetch_result, self._prefetch_done = body, True
 
-        t = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
         with self._prefetch_lock:
-            self._prefetch_thread = t
+            # Same query already answered or still in flight: don't restart it.
+            if self._prefetch_query == query and (self._prefetch_done or (self._prefetch_thread and self._prefetch_thread.is_alive())):
+                return
+            self._prefetch_query, self._prefetch_result, self._prefetch_done = query, "", False
+            self._prefetch_thread = t = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
         t.start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -271,8 +257,7 @@ class Mem0MemoryProvider(MemoryProvider):
             thread = self._prefetch_thread if self._prefetch_query == query else None
         if thread:
             thread.join(timeout=_PREFETCH_WAIT_SECS)
-        # Slow backend: skip injection; mem0_search tool remains the backstop.
-        return self._consume_prefetch_result(query) or ""
+        return self._consume_prefetch_result(query) or ""  # slow backend: skip injection; mem0_search remains the backstop
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
@@ -302,7 +287,8 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def _tool_search(self, args: dict) -> str:
         top_k = max(1, min(int(args.get("top_k", 10)), 50))
-        rerank = _truthy(args.get("rerank", self._rerank_default), falsy_strings=("false", "0", "no"))
+        rerank_raw = args.get("rerank", self._rerank_default)
+        rerank = rerank_raw.lower() not in ("false", "0", "no") if isinstance(rerank_raw, str) else bool(rerank_raw)
         results = self._search(args["query"], top_k, rerank)
         if not results:
             return json.dumps({"result": "No relevant memories found."})
@@ -336,8 +322,6 @@ class Mem0MemoryProvider(MemoryProvider):
             return tool_error(f"Missing required parameter: {missing}")
         try:
             result = body(self, args)
-            self._record_success()
-            return result
         except Exception as e:
             client = _is_client_error(e)
             if client and on_client_error == "not_found":
@@ -345,6 +329,8 @@ class Mem0MemoryProvider(MemoryProvider):
             if not client or on_client_error == "count":
                 self._record_failure()
             return tool_error(self._format_error(label, e))
+        self._record_success()
+        return result
 
     def _shutdown_backend(self):
         with suppress(Exception):
