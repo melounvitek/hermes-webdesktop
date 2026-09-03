@@ -12,9 +12,8 @@ from typing import Callable, Dict, Optional
 
 from tools.file_operations_common import LintResult
 
-# Shell linters by extension, run via _exec() for languages whose check needs an
-# external toolchain. ``.tsx`` is deliberately absent: it has never had a shell
-# linter (it hits the "No linter" skip) and LSP covers it when enabled.
+# Shell linters by extension (external toolchain). ``.tsx`` is deliberately absent:
+# it hits the "No linter" skip and LSP covers it when enabled.
 LINTERS = {
     '.py': 'python -m py_compile {file} 2>&1',
     '.js': 'node --check {file} 2>&1',
@@ -23,16 +22,14 @@ LINTERS = {
     '.rs': 'rustfmt --check {file} 2>&1',
 }
 
-# Extensions whose per-file shell linter is structurally weaker than a real LSP
-# server and floods phantom errors on real projects: single-file ``tsc`` ignores
-# tsconfig, ``go vet`` fails outside a module, ``rustfmt --check`` is style-only.
-# When an LSP server claims the file, ``_check_lint`` skips the shell linter for
-# these; py_compile / node --check are file-local and correct so always run.
+# Per-file shell linters that flood phantom errors on real projects (single-file
+# ``tsc`` ignores tsconfig, ``go vet`` fails outside a module, ``rustfmt --check``
+# is style-only): skipped when an LSP server claims the file. py_compile /
+# node --check are file-local and correct so always run.
 _SHELL_LINTER_LSP_REDUNDANT = frozenset({'.ts', '.go', '.rs'})
 
-# Output substrings meaning the linter binary exists but could not actually run
-# (tooling gap, not a lint failure) → ``skipped`` so the write isn't flagged and
-# the LSP tier (which gates on ok/skipped) still runs. Matched case-insensitively.
+# Output substrings (case-insensitive) meaning the linter binary exists but could
+# not run → ``skipped`` so the write isn't flagged and the LSP tier still runs.
 _LINTER_UNUSABLE_PATTERNS = {
     'npx': (
         'this is not the tsc command you are looking for',  # tsc not installed locally
@@ -71,13 +68,9 @@ def _lint_json_inproc(content: str) -> tuple[bool, str]:
 
 
 def _lint_yaml_inproc(content: str) -> tuple[bool, str]:
-    """In-process YAML syntax check; ``__SKIP__`` when PyYAML is missing.
-
-    Syntax-only (``yaml.parse``), NOT ``safe_load``: loading rejects valid YAML
-    that isn't one plain document — multi-doc ``---`` streams and app tags like
-    CloudFormation ``!Sub`` / Ansible ``!vault``. This verdict is a fail-closed
-    WRITE gate, so a false positive refuses a legitimate write.
-    """
+    """In-process YAML syntax check; ``__SKIP__`` when PyYAML is missing. Syntax-only
+    (``yaml.parse``), NOT ``safe_load``: loading rejects valid multi-doc streams and
+    app tags (``!Sub``, ``!vault``), and this is a fail-closed WRITE gate."""
     try:
         import yaml as _yaml
     except ImportError:
@@ -113,9 +106,8 @@ def _lint_python_inproc(content: str) -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
-# In-process linters, preferred over shell linters (microseconds, no subprocess).
-# Each takes content and returns (ok, error); error ``"__SKIP__"`` means the
-# linter is unavailable (missing dependency) and counts as "no linter".
+# In-process linters, preferred over shell linters (no subprocess). Each returns
+# (ok, error); error ``"__SKIP__"`` = unavailable dependency, counts as "no linter".
 LINTERS_INPROC: Dict[str, Callable[[str], tuple[bool, str]]] = {
     '.py': _lint_python_inproc,
     '.json': _lint_json_inproc,
@@ -124,10 +116,9 @@ LINTERS_INPROC: Dict[str, Callable[[str], tuple[bool, str]]] = {
     '.toml': _lint_toml_inproc,
 }
 
-# Extensions where write_file REFUSES on a parse failure (fail-closed gate) rather
-# than merely reporting. ``.py`` is excluded on purpose: test fixtures use ``*.py``
-# paths as a generic stand-in for arbitrary text, so hard-refusing invalid Python
-# would break exercised patterns. Python keeps the non-blocking lint-delta report.
+# Extensions where write_file REFUSES on a parse failure. ``.py`` is excluded on
+# purpose: test fixtures use ``*.py`` paths as a stand-in for arbitrary text, so
+# Python keeps the non-blocking lint-delta report.
 _FAIL_CLOSED_INPROC_EXTS = frozenset({'.json', '.yaml', '.yml', '.toml'})
 
 
@@ -153,9 +144,8 @@ class LintMixin:
             return LintResult(success=ok, output="" if ok else err)
         if ext not in LINTERS:
             return LintResult(skipped=True, message=f"No linter for {ext} files")
-        # Single-file tsc can't read the project's tsconfig.json, so for project
-        # .ts files it floods phantom TS2307/TS2339 errors the delta filter then
-        # misreports as "pre-existing"; skip and let the LSP tier speak.
+        # Single-file tsc can't read tsconfig.json and floods phantom TS2307/TS2339
+        # errors the delta filter misreports as "pre-existing"; let the LSP tier speak.
         if ext == '.ts' and self._has_ancestor_tsconfig(path):
             return LintResult(skipped=True, message=(
                 "Project tsconfig.json detected — per-file tsc skipped "
@@ -169,8 +159,7 @@ class LintMixin:
         base_cmd = linter_cmd.split()[0]
         if not self._has_command(base_cmd):
             return LintResult(skipped=True, message=f"{base_cmd} not available")
-        # Linters are native Windows binaries on Windows: they need the C:/...
-        # form, not MSYS /c/... (node would resolve it as C:\c\Users\... → phantom ENOENT).
+        # Native Windows binaries need C:/... not MSYS /c/... (→ phantom ENOENT).
         result = self._exec(linter_cmd.replace("{file}", self._escape_native_tool_arg(path)), timeout=30)
         if result.exit_code != 0 and _looks_like_linter_unusable(base_cmd, result.stdout):
             from tools.ansi_strip import strip_ansi
@@ -191,16 +180,13 @@ class LintMixin:
         pre = self._check_lint(path, content=pre_content)
         if pre.success or pre.skipped or not pre.output:
             return post  # pre-write was clean (or unlintable): all post errors are new
-        # Single-error parsers (ast.parse, json.loads) stop at the first error, so
-        # if every post error already existed we can't prove the edit is clean —
-        # report the file as still broken but say nothing new was introduced.
+        # Single-error parsers stop at the first error, so if every post error already
+        # existed we can't prove the edit is clean — say nothing new was introduced.
         pre_lines = {ln.strip() for ln in pre.output.splitlines() if ln.strip()}
         post_lines = [ln for ln in post.output.splitlines() if ln.strip() and ln.strip() not in pre_lines]
         if not post_lines:
-            return LintResult(
-                success=False, output=post.output,
-                message="Pre-existing lint errors — this edit didn't introduce new ones but the file is still broken.",
-            )
+            return LintResult(success=False, output=post.output, message=(
+                "Pre-existing lint errors — this edit didn't introduce new ones but the file is still broken."))
         return LintResult(success=False, output=(
             "New lint errors introduced by this edit "
             "(pre-existing errors filtered out):\n" + "\n".join(post_lines)
@@ -244,11 +230,8 @@ class LintMixin:
 
     def _has_ancestor_tsconfig(self, path: str) -> bool:
         """True iff a tsconfig.json exists in ``path``'s directory or any ancestor.
-
-        Host-side walk, local backend only: on a remote backend the tree isn't
-        here, so this answers False and the shell linter runs as before — never
-        suppress lint based on a probe that couldn't answer.
-        """
+        Host-side walk, local backend only: on a remote backend this answers False so
+        the shell linter still runs — never suppress lint on a probe that couldn't answer."""
         if not self._lsp_local_only():
             return False
         try:
@@ -287,12 +270,9 @@ class LintMixin:
     def _maybe_lsp_diagnostics(self, path: str, *, pre_content: Optional[str] = None,
                                post_content: Optional[str] = None) -> str:
         """Formatted LSP diagnostics introduced by this edit, or "" when LSP is
-        unavailable/disabled/clean. Never raises past the service probe.
-
-        With both pre and post content a line-shift map remaps baseline
-        diagnostics into post-edit coordinates; otherwise every pre-existing
-        diagnostic below an inserted/deleted line would look newly introduced.
-        """
+        unavailable/disabled/clean. With both pre and post content a line-shift map
+        remaps baseline diagnostics into post-edit coordinates; otherwise every
+        pre-existing diagnostic below an inserted line would look new."""
         svc = self._lsp_service()
         if svc is None or not svc.enabled_for(path):
             return ""

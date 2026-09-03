@@ -1,12 +1,11 @@
 """Spill oversized hook-injected context to disk with a preview placeholder.
 
-Hook ``{"context": ...}`` output is concatenated into the user message on EVERY
-subsequent API call, so a large blob inflates every turn and breaks the
-prompt-cache prefix. Above ``hooks.output_spill.max_chars`` (default 10000) the
-full text is written under ``hooks.output_spill.directory`` (default
-``<HERMES_HOME>/hook_outputs/<session>``) and the in-prompt payload becomes a
-``preview_head``/``preview_tail`` excerpt plus the saved path. ``enabled: false``
-disables. Never raises: an I/O failure still returns a bounded preview.
+Hook ``{"context": ...}`` output rides EVERY subsequent API call, so a large blob
+inflates every turn and breaks the prompt-cache prefix. Above
+``hooks.output_spill.max_chars`` (default 10000) the text is written under
+``hooks.output_spill.directory`` (default ``<HERMES_HOME>/hook_outputs/<session>``)
+and the payload becomes a ``preview_head``/``preview_tail`` excerpt plus the path.
+``enabled: false`` disables. Never raises: an I/O failure still returns a preview.
 """
 
 from __future__ import annotations
@@ -114,11 +113,5 @@ def spill_if_oversized(
     return "\n".join(parts)
 
 
-__all__ = [
-    "DEFAULT_MAX_CHARS",
-    "DEFAULT_PREVIEW_HEAD",
-    "DEFAULT_PREVIEW_TAIL",
-    "DEFAULT_ENABLED",
-    "get_spill_config",
-    "spill_if_oversized",
-]
+__all__ = ["DEFAULT_MAX_CHARS", "DEFAULT_PREVIEW_HEAD", "DEFAULT_PREVIEW_TAIL", "DEFAULT_ENABLED",
+           "get_spill_config", "spill_if_oversized"]
