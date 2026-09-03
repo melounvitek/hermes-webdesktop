@@ -544,10 +544,8 @@ def apply_nous_managed_defaults(
 
     selected_toolsets = set(enabled_toolsets or ())
     changed: set[str] = set()
-
     for key in _DEFAULT_SECTIONS:
         _ensure_section(config, key)
-
     for key in _DEFAULT_SECTIONS:
         if features.features[key].explicit_configured or _has_managed_default_direct(key):
             continue
@@ -555,25 +553,19 @@ def apply_nous_managed_defaults(
             # STT is not toolset-gated. Skip when the user has a working local backend (strong
             # signal "local" was a choice, not the DEFAULT_CONFIG seed) or isn't entitled to the
             # managed "openai-audio" category (flipping would silently break transcription).
-            if _local_stt_backend_available() or not (
-                account_info is not None and account_info.tool_gateway_entitled_for("openai-audio")
-            ):
+            if _local_stt_backend_available() or not account_info.tool_gateway_entitled_for("openai-audio"):
                 continue
         elif key not in selected_toolsets:
             continue
         _select_nous(config, key)
         changed.add(key)
-
     # Video gen is not funded by the free tool pool: only wire managed video for entitled (paid) users.
     for key, category in (("image_gen", None), ("video_gen", "fal-video")):
-        if (
-            key in selected_toolsets
-            and not fal_key_is_configured()
-            and (category is None or account_info.tool_gateway_entitled_for(category))
+        if key in selected_toolsets and not fal_key_is_configured() and (
+            category is None or account_info.tool_gateway_entitled_for(category)
         ):
             _select_nous(config, key)
             changed.add(key)
-
     return changed
 
 
@@ -618,12 +610,10 @@ def get_gateway_eligible_tools(
     account_info = _account_info_or_none(force_fresh=force_fresh)
     if not (account_info and account_info.logged_in and account_info.tool_gateway_entitled):
         return [], [], [], []
-
     if config is None:
         config = load_config() or {}
     if not _provider_is_nous(config):
         return [], [], [], []
-
     direct = _get_gateway_direct_credentials()
     unconfigured, has_direct, explicit_configured, already_managed = [], [], [], []
     for key in _ALL_GATEWAY_KEYS:
@@ -659,17 +649,13 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
     Triggered by a live free tool pool or paid access. explicit_configured tools (e.g. an explicit
     ``web.backend: searxng``) are configured on purpose and never offered, like already_managed.
     """
-    unconfigured, has_direct, _explicit_configured, _already_managed = get_gateway_eligible_tools(
-        config, force_fresh=force_fresh
-    )
+    unconfigured, has_direct, _explicit, _managed = get_gateway_eligible_tools(config, force_fresh=force_fresh)
     if not unconfigured and not has_direct:
         return set()
-
     try:
         from hermes_cli.setup import prompt_checklist
     except Exception:
         return set()
-
     # Frame the offer by entitlement: a $0 free-tool-pool user is not on a paid plan.
     account_info = _account_info_or_none(force_fresh=False)
     pool_only = bool(
@@ -684,7 +670,6 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
     # doesn't re-fire on every Nous model swap.
     declined_raw = config.get("tool_gateway_declined_tools")
     declined: set[str] = {str(k) for k in declined_raw} if isinstance(declined_raw, list) else set()
-
     offer_keys: list[str] = list(unconfigured) + list(has_direct)
     labels = [_GATEWAY_TOOL_LABELS[k] for k in unconfigured] + [
         f"{_GATEWAY_TOOL_LABELS[k]} — keep using your {_FEATURES[k].direct_label}" for k in has_direct
@@ -695,20 +680,16 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
         if pool_only
         else "Your Nous subscription includes the Tool Gateway — pick the tools to enable:"
     )
-
     try:
         chosen_idx = prompt_checklist(title, labels, pre_selected)
     except (KeyboardInterrupt, EOFError, OSError, SystemExit):
         return set()
-
     chosen_keys = [offer_keys[i] for i in chosen_idx if 0 <= i < len(offer_keys)]
-
     # Every offered unconfigured tool NOT chosen is a decline; choosing a previously-declined tool
     # clears it. Cancel paths above return before this and record nothing.
     newly_declined = [k for k in unconfigured if k not in chosen_keys and k not in declined]
     if newly_declined or (declined & set(chosen_keys)):
         config["tool_gateway_declined_tools"] = sorted((declined | set(newly_declined)) - set(chosen_keys))
-
     changed = apply_gateway_defaults(config, chosen_keys) if chosen_keys else set()
     if changed or newly_declined:
         from hermes_cli.config import save_config
@@ -742,15 +723,12 @@ def ensure_nous_portal_access(*, capability: str = "the Nous Tool Gateway", cove
     info = _account_info_or_none(force_fresh=True)
     if _entitled(info):
         return True
-
     if info is None or not info.logged_in:
         if not _run_nous_portal_login_only(capability=capability):
             return False
         info = _account_info_or_none(force_fresh=True)
-
     if _entitled(info):
         return True
-
     # Logged in but not entitled for this capability — neutral billing guidance, do not enable.
     message = format_nous_portal_entitlement_message(info, capability=capability, coverage_category=coverage_category)
     for line in (message or "").splitlines():
@@ -769,7 +747,6 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
     except Exception as exc:  # pragma: no cover - defensive
         print(f"  Could not start Nous Portal login: {exc}")
         return False
-
     print()
     print(f"  {capability} requires a Nous Portal login.")
     try:
@@ -780,12 +757,10 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
     if proceed not in {"", "y", "yes"}:
         print("  Skipped Nous Portal login.")
         return False
-
     try:
         # Snapshot active_provider so a tool-config login never silently switches inference to Nous.
         with auth._auth_store_lock():
             prior_active_provider = auth._load_auth_store().get("active_provider")
-
         auth_state = None
         if auth._read_shared_nous_state():
             try:
@@ -794,10 +769,8 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
                 do_import = "y"
             if do_import in {"", "y", "yes"}:
                 auth_state = auth._try_import_shared_nous_state(timeout_seconds=15.0)
-
         if auth_state is None:
             auth_state = auth._nous_device_code_login()
-
         with auth._auth_store_lock():
             auth_store = auth._load_auth_store()
             auth._save_provider_state(auth_store, "nous", auth_state)
@@ -806,7 +779,6 @@ def _run_nous_portal_login_only(*, capability: str) -> bool:
             else:
                 auth_store.pop("active_provider", None)
             auth._save_auth_store(auth_store)
-
         auth._write_shared_nous_state(auth_state)
         auth._sync_nous_pool_from_auth_store()
         print("  Nous Portal login successful.")
