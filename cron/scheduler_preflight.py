@@ -137,9 +137,8 @@ def _primary_profile_routes_for_current_home() -> list:
         if not config_path.exists():
             return []
 
-        import yaml
-        with open(config_path, encoding="utf-8") as f:
-            raw = yaml.safe_load(f) or {}
+        from hermes_cli.config import read_user_config_raw
+        raw = read_user_config_raw(config_path)  # raw primary file, not the merged current-profile config
         routes_raw = raw.get("profile_routes")
         if routes_raw is None and isinstance(raw.get("gateway"), dict):
             routes_raw = raw["gateway"].get("profile_routes")
