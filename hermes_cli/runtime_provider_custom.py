@@ -136,10 +136,8 @@ def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) ->
         if not base_url:
             continue
         result: Dict[str, Any] = {
-            "name": entry.get("name", ep_name),
-            "base_url": base_url.strip(),
-            "api_key": api_key or _clean(entry.get("api_key", "")),
-            "model": entry.get("default_model", ""),
+            "name": entry.get("name", ep_name), "base_url": base_url.strip(),
+            "api_key": api_key or _clean(entry.get("api_key", "")), "model": entry.get("default_model", ""),
         }
         # Command that PRINTS a short-lived credential; wrapped in a per-request token provider.
         key_cmd = _clean(entry.get("key_cmd", ""))
@@ -310,20 +308,20 @@ def canonical_custom_identity(
     if not candidate_norm or candidate_norm in {"custom", "auto", "openrouter"}:
         return None
     # Only when it resolves to a configured entry — never invent a ``custom:<x>`` resolution
-    # can't honor.
+    # can't honor. ``candidate`` may be the entry's DISPLAY NAME, not the durable identity of a
+    # keyed ``providers:`` entry — re-resolve via its endpoint so every path returns the same
+    # config-key slug.
     try:
         entry = rp._get_named_custom_provider(candidate)
-        if entry is not None:
-            # ``candidate`` may be the entry's DISPLAY NAME, not the durable identity of a keyed
-            # ``providers:`` entry — re-resolve via its endpoint so every path returns the same
-            # config-key slug.
-            identity = find_custom_provider_identity(str(entry.get("base_url") or ""))
-            if identity:
-                return identity
-            return candidate_norm if candidate_norm.startswith("custom:") else f"custom:{candidate_norm}"
     except Exception:
-        pass
-    return None
+        return None
+    if entry is None:
+        return None
+    try:
+        identity = find_custom_provider_identity(str(entry.get("base_url") or ""))
+    except Exception:
+        return None
+    return identity or custom_provider_slug(candidate_norm)
 
 
 def is_routable_provider(provider: Optional[str]) -> bool:

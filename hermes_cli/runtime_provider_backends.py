@@ -91,19 +91,18 @@ def _resolve_azure_foundry_runtime(
     if cfg_api_mode == "anthropic_messages":
         base_url = re.sub(r"/v1/?$", "", base_url)
     if cfg_auth_mode == "entra_id":
+        # --api-key on the CLI while config says entra_id: honour the explicit string (escape hatch
+        # for one-off testing).
         if explicit_api_key:
-            # --api-key on the CLI while config says entra_id: honour the explicit string
-            # (escape hatch for one-off testing).
-            api_key, source, auth_mode = explicit_api_key, "explicit", "api_key"
+            api_key, source, auth_mode, entra = explicit_api_key, "explicit", "api_key", {}
         else:
-            api_key, source, auth_mode = _azure_entra_credentials(cfg_entra), "entra_id", "entra_id"
-        clean_entra = {}
-        configured_scope = str(cfg_entra.get("scope") or "").strip()
-        if auth_mode == "entra_id" and configured_scope:
-            clean_entra["scope"] = configured_scope
+            scope = str(cfg_entra.get("scope") or "").strip()
+            api_key, source, auth_mode, entra = _azure_entra_credentials(cfg_entra), "entra_id", "entra_id", (
+                {"scope": scope} if scope else {}
+            )
         return rp._runtime(
             "azure-foundry", cfg_api_mode, base_url, api_key,
-            auth_mode=auth_mode, entra=clean_entra, source=source, requested_provider=requested_provider,
+            auth_mode=auth_mode, entra=entra, source=source, requested_provider=requested_provider,
         )
     return rp._runtime(
         "azure-foundry", cfg_api_mode, base_url, _azure_foundry_api_key(rp, explicit_api_key),
@@ -258,14 +257,14 @@ def _is_external_process_provider(provider: str) -> bool:
     if not name:
         return False
     try:
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        pconfig = PROVIDER_REGISTRY.get(name)
+        pconfig = _rp().PROVIDER_REGISTRY.get(name)
         if pconfig is not None:
             return pconfig.auth_type == "external_process"
     except Exception:
         pass
     try:
         from providers import get_provider_profile
+
         profile = get_provider_profile(name)
     except Exception:
         return False
