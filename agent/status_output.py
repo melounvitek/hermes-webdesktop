@@ -44,7 +44,13 @@ class StatusOutputMixin:
 
     def _should_emit_quiet_tool_messages(self) -> bool:
         """True when quiet-mode tool summaries should print directly (CLI, no callback owns rendering);
-        ``suppress_status_output`` always wins so ``[tool]``/``[done]`` never land in captured stdout."""
+        ``suppress_status_output`` always wins so ``[tool]``/``[done]`` never land in captured stdout.
+
+        ``suppress_status_output`` (the strict machine-readable mode used by ``hermes chat -Q``) always
+        wins: those flows neutralize the rendering callbacks, and without this gate the "no callback owns
+        rendering" fallback would print ``[tool]``/``[done]`` spinner lines into the captured stdout it
+        exists to keep clean (#93220).
+        """
         if getattr(self, "suppress_status_output", False):
             return False
         return self.quiet_mode and not self.tool_progress_callback and getattr(self, "platform", "") == "cli"
@@ -92,7 +98,12 @@ class StatusOutputMixin:
         ))
 
     def _warn_uncompressed_context_overflow(self, preflight_tokens: int, context_length: int) -> None:
-        """Deduped warning when uncompressed context exceeds the model limit; points the user at /compact."""
+        """Deduped warning when uncompressed context exceeds the model limit; points the user at /compact.
+
+        When compression is explicitly disabled (compression.enabled: false), long sessions can grow past
+        the model context window with no compression to shrink them (#89297). Surface an actionable warning
+        so the user knows to run /compact or enable compression.
+        """
         _warn_key = ("uncompressed_ctx_overflow", context_length)
         if getattr(self, "_last_ctx_overflow_warn", None) != _warn_key:
             self._last_ctx_overflow_warn = _warn_key

@@ -87,6 +87,11 @@ def _guard_credential_read(host_target: Path, src: str) -> None:
     """Shared credential-read guard: refuse secret-bearing files (.env, auth.json) with a specific
     error. Guard import is best-effort; a real block always propagates."""
     try:
+        # Shared credential-read guard (agent.file_safety, #57698): refuse secret-bearing files (.env,
+        # auth.json, ...) with an intentional, specific error instead of relying on the magic-byte sniff to
+        # reject them incidentally. Same chokepoint the image-gen/video-gen provider plugins enforce on
+        # model-supplied local paths. Import is best-effort (guard unavailability must not break image
+        # loading); a real block always propagates.
         from agent.file_safety import raise_if_read_blocked
     except Exception:  # noqa: BLE001 — guard unavailable: proceed
         return
@@ -190,7 +195,12 @@ def _get_active_env(task_id: Optional[str]):
 
 def _ensure_container_env(task_id: Optional[str]) -> None:
     """Lazily bring up the sandbox before an in-sandbox read (vision may be a session's first
-    action). Best-effort: failure leaves the env absent and the caller hits the fail-closed error."""
+    action). Best-effort: failure leaves the env absent and the caller hits the fail-closed error.
+
+    Unlike the terminal tool, vision never triggered environment creation, so a session whose first action
+    is ``vision_analyze`` on a container-only path under a non-local backend found no active env and failed
+    — until a terminal command happened to create one (issue #62825).
+    """
     if not task_id:
         return
     try:
@@ -208,8 +218,13 @@ async def _resolve_container_fallback(
     Cold-start retry: under Docker the first exec against a fresh container can fail (empty
     pipe) while a second succeeds. On final failure the container's output is folded into the
     error so "no such file" / "permission denied" / "never came up" are distinguishable.
+
+    We retry once with a short delay before giving up, so callers don't see "could not read inside the
+    sandbox" on a file that is verifiably readable on the immediate retry. See #76566.
     """
     import shlex
+    # Bring the sandbox up on demand: without this, the first vision_analyze of a session (before any
+    # terminal command) has no active env to read from under a non-local backend (issue #62825).
     _ensure_container_env(ctx.task_id)
     env = _get_active_env(ctx.task_id)
     if env is None:

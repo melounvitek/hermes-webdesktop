@@ -289,6 +289,11 @@ class ToolCallGuardrailController:
         self._halt_decision: ToolGuardrailDecision | None = None
         # Identical-call streak: CONSECUTIVE identical (tool, args, result) calls; any different call or
         # result resets it, so re-reads after edits and varied polling are never flagged.
+        # Identical-call loop-breaker state (agent.stall_guards): tracks the CONSECUTIVE streak of identical
+        # (tool, canonical args) calls whose results were also identical. Per-turn, like everything else
+        # here. NOTE: open PR #85352 (patrykkopycinski) tracks no-progress loops ACROSS turns via a
+        # detection window — a different mechanism from this per-turn consecutive streak. Coordinate future
+        # work there.
         self._identical_streak_sig: ToolCallSignature | None = None
         self._identical_streak_result_hash: str = ""
         self._identical_streak_count: int = 0
@@ -353,6 +358,12 @@ class ToolCallGuardrailController:
             # same_tool_failure counts DIFFERENT args on one tool; for failure-tolerant
             # tools a run of distinct red commands is diagnosis, not a loop — warn, never halt.
             if (
+                # Hard-stop widening (#89069 / #100849 bundle): the per-turn no-progress BLOCK above only
+                # covers tools in idempotent_tools, so a model replaying the same successful
+                # `terminal`/`skill_view` call with a byte-identical result ran until the iteration budget.
+                # The consecutive-identical streak is tool-agnostic; when hard stops are enabled, halt at
+                # the same idempotent_no_progress threshold. Pollers stay exempt (an unchanged poll is
+                # progress).
                 self.config.hard_stop_enabled
                 and tool_name not in FAILURE_TOLERANT_TOOL_NAMES
                 and same_count >= self.config.same_tool_failure_halt_after

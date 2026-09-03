@@ -185,7 +185,17 @@ def _session_start_like(agent: Any, now: Any) -> Any:
     lineage-root session id's embedded stamp (compaction rotates ids, each with
     its own mint time), the current session id's stamp, ``agent.session_start``,
     then ``now``.  Stamps are box-local wall-clock: attach that zone first, then
-    convert to ``now``'s zone so the date matches the per-turn clock."""
+    convert to ``now``'s zone so the date matches the per-turn clock.
+
+    0. the LINEAGE-ROOT session id's embedded timestamp — compaction can rotate the session id, and each
+    rotated id embeds its OWN mint time, so after months of compactions rung 1 alone would quietly re-birth
+    the conversation at its latest rotation. Walking to the lineage root (same walk as
+    ``_conversation_root_id``) recovers the ORIGINAL birth stamp — a Bot Mode forever-chat keeps knowing
+    when it was first born, across every compaction (maintainer-directed, #98426); 1. the timestamp embedded
+    in ``session_id`` (``YYYYMMDD_HHMMSS_...``) — immutable for the life of the session, so the line is
+    byte-stable across every rebuild boundary (preserving prefix-cache KV); 2. 3. ``now`` (initial/legacy
+    build without either).
+    """
     from datetime import datetime
     def _to_display_tz(dt: Any) -> Any:
         if dt.tzinfo is None:
@@ -221,7 +231,17 @@ def _agent_home(agent: Any) -> Optional[Path]:
     A bound HERMES_HOME ContextVar override wins (the gateway multiplexes
     profiles over one shared session DB and binds the home per turn); else the
     parent of ``_session_db.db_path`` — ground truth on threads that lost the
-    ContextVar, where ambient resolution would leak the launch profile."""
+    ContextVar, where ambient resolution would leak the launch profile.
+
+    1. Surfaces that multiplex several profiles over ONE shared session DB (the messaging gateway:
+    ``gateway/run.py`` hands every agent the launch-home ``state.db`` and binds the profile home per turn
+    via ``_profile_runtime_scope`` + ``copy_context``) would otherwise have the db-derived launch home STOMP
+    the correctly-bound profile — inverting the leak this helper exists to fix (found by @kshitijk4poor's
+    post-merge probe on #86313). 2. Fallback: the home containing the agent's ``_session_db.db_path``
+    (``<home>/state.db``) — ground truth on threads that lost the ContextVar (ContextVars don't propagate
+    into ``threading.Thread``), where the unbound build previously fell back to the launch home and leaked
+    the default profile's skills/identity into a bot prompt.
+    """
     try:
         from hermes_constants import get_hermes_home_override
         override = get_hermes_home_override()
@@ -348,6 +368,11 @@ def _active_profile_line(agent: Any) -> str:
     # A non-default name is only returned when the resolved home is ALREADY
     # <root>/profiles/<name>, so the profile home is the session home itself.
     profile_home = str(_agent_home_path) if _agent_home_path is not None else str(get_hermes_home())
+    # A non-default name is only ever returned when the resolved home is ALREADY <root>/profiles/<name> —
+    # that is exactly how both _profile_name_for_home() and _resolve_active_profile_name() derive it. So the
+    # profile home is the session home itself; appending /profiles/<name> again doubled it (#72894). The
+    # default profile's data sits at the ROOT (get_default_hermes_root()), which in ambient profile mode is
+    # NOT get_hermes_home().
     default_root = get_default_hermes_root()
     return (
         f"Active Hermes profile: {active_profile}. This session reads "
@@ -419,6 +444,13 @@ def _timestamp_line(agent: Any) -> str:
     _zone_suffix = f" ({', '.join(_bits)})" if _bits else ""
     _start = _session_start_like(agent, now)
     timestamp_line = f"Conversation started: {_start.strftime('%A, %B %d, %Y')}{_zone_suffix}"
+    # Second line (maintainer design, salvaging #96224's anchor): long-lived sessions — Bot Mode
+    # forever-chats, messenger channels people never close — span many days and many compactions. A lone
+    # birth date leads the model to believe it is still living in that old day. The prompt is rebuilt at
+    # every compaction boundary, so stamp the rebuild day too: 'started' stays anchored and byte-stable, 'as
+    # of' refreshes exactly when the cache prefix is already being invalidated (compaction), so the added
+    # line costs no extra cache churn. Same-day sessions skip the second line entirely — nothing to correct,
+    # and the single-line shape stays byte-identical for the day (prefix-cache safe).
     if now.strftime("%Y%m%d") != _start.strftime("%Y%m%d"):
         timestamp_line += (f"\nToday's date (as of the last context rebuild): {now.strftime('%A, %B %d, %Y')} "
                            "— trust this over the start date for what day it is now; query tools for exact time.")
@@ -439,6 +471,9 @@ def _memory_parts(agent: Any) -> List[str]:
             block = agent._memory_store.format_for_system_prompt(kind) if enabled else None
             if block:
                 parts.append(block)
+    # External memory provider system prompt block (additive to built-in). Gated on the same check
+    # ``inject_memory_provider_tools`` uses so we never advertise provider tools that the agent's toolset
+    # configuration has already gated off (#81014).
     if agent._memory_manager:
         try:
             from agent.memory_manager import memory_provider_tools_exposed as _mem_exposed
@@ -621,7 +656,15 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
 def invalidate_system_prompt(agent: Any) -> None:
     """Force a rebuild on the next turn (after compression): reload memory from
     disk and clear the frozen plugin snapshot (previous bytes stashed as the
-    fail-open fallback) so plugins re-render at the same boundary."""
+    fail-open fallback) so plugins re-render at the same boundary.
+
+    Called after context compression events. Also reloads memory from disk so the rebuilt prompt captures
+    any writes from this session, and clears the frozen plugin-section snapshot so plugins re-render at the
+    same boundary (maintainer-directed, #95681 arc): a plugin section is just another prompt block carrying
+    state — freezing it while memory, skills, and guidance refresh would recreate the stale-block disease
+    inside plugin-land. The previous bytes are stashed so a plugin whose render RAISES falls back to its
+    last good section instead of vanishing (fail-open guard, not a freeze).
+    """
     agent._cached_system_prompt = None
     agent._cached_system_prompt_static = None
     if hasattr(agent, "_plugin_system_prompt_sections_snapshot"):

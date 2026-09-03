@@ -93,7 +93,13 @@ def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effe
 def _budget_for_agent(agent) -> BudgetConfig:
     """Tool-result BudgetConfig scaled to the agent's context window. Unknown length goes
     through ``budget_for_context_window(None)`` (not DEFAULT_BUDGET) so the MCP threshold
-    override still applies."""
+    override still applies.
+
+    Large-context models keep the historical 100K/200K char defaults; small models (e.g. a 65K-token local
+    model switched into mid-session) get a budget proportional to their window so a single large tool result
+    can't push the request past the model's limit (#23767). Falls back to the default budget when the
+    context length isn't resolvable.
+    """
     try:
         ctx = getattr(getattr(agent, "context_compressor", None), "context_length", None)
         return budget_for_context_window(int(ctx) if ctx else None)
@@ -114,10 +120,22 @@ def _authorization_gate_lock_timeout() -> float:
     """Authorization-lock bound = ``tools.approval.human_wait_ceiling`` (approval timeout +
     margin, capped so it can't overflow Lock.acquire): never break serialization while a
     prompt is answerable, never let a wedged holder park workers forever. Deliberately NOT
-    min()'d with the fallback so the gate never gives up early."""
+    min()'d with the fallback so the gate never gives up early.
+
+    Delegates to ``tools.approval.human_wait_ceiling`` — the same bound that clamps a human-wait window's
+    deadline contribution — so the two can't drift. Long enough that serialization is never broken while a
+    legitimate approval prompt is still answerable; short enough that a wedged holder (hanging
+    ``pre_tool_call`` plugin, dead approval client) cannot park other workers forever (#79719). Resolved
+    once per gate (per batch), so a mid-process ``approvals.timeout`` change applies from the next batch.
+    """
     try:
         from tools.approval import human_wait_ceiling
 
+        # human_wait_ceiling is platform-safety-capped (agent/deadline.py MAX_SAFE_TIMEOUT_S): a huge
+        # approvals.timeout can no longer overflow Lock.acquire's time_t on macOS (#83220). Deliberately NOT
+        # min()'d with _AUTHORIZATION_GATE_LOCK_TIMEOUT_S — the gate must never give up while a legitimate
+        # approval prompt is still answerable (#79719), so a configured approvals.timeout above 360s must
+        # extend the gate.
         return human_wait_ceiling()
     except Exception:
         return _AUTHORIZATION_GATE_LOCK_TIMEOUT_S
@@ -208,7 +226,12 @@ def _ra():
 
 
 def _is_interpreter_shutdown_submit_error(exc: RuntimeError) -> bool:
-    """Shutdown-race predicate; ``tools.interpreter_shutdown`` knows both CPython message variants."""
+    """Shutdown-race predicate; ``tools.interpreter_shutdown`` knows both CPython message variants.
+
+    Delegates so all sites (cron delivery, conversation-loop retry, tool submission) recognize both CPython
+    shutdown-message variants instead of each matching its own substring (the bug class behind
+    #55924/#58720).
+    """
     from tools.interpreter_shutdown import interpreter_shutting_down
 
     return interpreter_shutting_down(exc)
@@ -431,6 +454,17 @@ class _ConcurrentToolAuthorizationGate:
     the batch behind a wedged plugin/approval client. Exclusion is measured at the SOURCE
     of the human wait (``tools.approval.human_wait_seconds``), NOT as gate residency —
     residency-based exclusion let a wedged plugin keep the deadline from ever firing.
+
+    Serialization keeps concurrent approval prompts from interleaving on the user's screen. The acquire is
+    BOUNDED: a worker wedged inside the gate (a hanging ``pre_tool_call`` plugin, or an approval round-trip
+    to a client that went away) must not park every other worker forever. On expiry the worker runs its
+    prompt unserialized — worst case is interleaved prompts, strictly better than permanent starvation (same
+    tradeoff as the start-order gate, #79705).
+    Gate residency is arbitrary code — using it as the exclusion signal let a wedged plugin grow the
+    exclusion 1:1 with wall clock, keeping the batch deadline's ``remaining`` constant so it never fired and
+    the turn hung forever (#79719). A wedged plugin now contributes nothing to the exclusion and the batch
+    times out normally, while a genuine approval wait (which can legitimately exceed any fixed bound) is
+    still excluded in full.
     """
 
     def __init__(self, *, lock_timeout: float | None = None, session_key: str | None = None) -> None:
@@ -462,6 +496,13 @@ class _ConcurrentToolAuthorizationGate:
 
     def run(self, callback):
         if not self._serialization_lock.acquire(timeout=self._lock_timeout):
+            # Deterministic failure (bad command, non-MCP URL, 401/403): every retry hits the same wall.
+            # Park immediately instead of burning the retry ladder and spamming N identical warnings
+            # (#65673). Auth failures park here too rather than returning. Returning ends the run task, and
+            # with it the only listener on ``_reconnect_event`` — so a 401 on the very first connect left
+            # the server unrevivable for the life of the process, even after the user re-authenticated with
+            # ``hermes mcp login``. Parking keeps the task alive so the 300s self-probe (and an explicit
+            # /mcp refresh) can pick up fresh tokens.
             logger.warning(
                 "authorization gate lock not acquired after %.1fs "
                 "(holder wedged in a pre_tool_call plugin or approval "
@@ -538,6 +579,10 @@ def _run_with_activity_heartbeat(agent, function_name: str, fn):
     """Run ``fn()`` under the activity heartbeat; covers both executor paths."""
     stop = threading.Event()
     thread = threading.Thread(
+        # Keep the gateway turn-inactivity watchdog from abandoning a turn whose tool call runs silently for
+        # longer than the inactivity timeout (#84491): stamp activity periodically while the tool is in
+        # flight, not just at start/completion. Both the sequential and the concurrent paths funnel through
+        # here, so a single heartbeat covers every tool.
         target=_run_tool_activity_heartbeat,
         args=(agent, stop, f"tool running: {function_name}"),
         kwargs={"interval": _TOOL_ACTIVITY_HEARTBEAT_INTERVAL_S},
@@ -1107,6 +1152,8 @@ class _ConcurrentBatch:
         abandoned at the gate (the main thread already wrote this slot; emitting would
         double-report the tool_call_id)."""
         agent = self.agent
+        # Approval/sudo callbacks (thread-local) and the agent turn's ContextVars are propagated by
+        # propagate_context_to_thread() at the submit site below (GHSA-qg5c-hvr5-hjgr, #13617).
         start = time.time()
         blocked = dispatched = False
         try:

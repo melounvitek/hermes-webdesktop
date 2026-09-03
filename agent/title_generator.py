@@ -25,6 +25,7 @@ FailureCallback = Callable[[str, BaseException], None]
 TitleCallback = Callable[[str, str], None]
 # () -> bool, called right before the LLM request; False skips (e.g. the user switched models and
 # the request would reload one the runtime already evicted).
+# Validation callback: () -> bool. See #19027.
 RuntimeValidator = Callable[[], bool]
 
 # Text budget handed to the model (Claude Code / OpenClaw converged on 1000).
@@ -32,6 +33,10 @@ MAX_TITLE_INPUT_CHARS = 1000
 # Cap on the instant derived title; a raw fragment reads worse the longer it runs.
 MAX_DERIVED_TITLE_CHARS = 48
 # Answer-shaped guard: a tiny model sometimes answers instead of titling; longer is rejected, not truncated.
+# Upper bound on accepted title word count. Titling is a 3-7 word task; a small tiny-model sometimes ignores
+# the task and answers the user's message instead — that answer must never become the session title (see the
+# answer-shaped output guard in generate_title; port of can1357/oh-my-pi#7306). 12 leaves headroom for
+# legitimate wordy titles while excluding full-sentence answers.
 _MAX_TITLE_WORDS = 12
 
 _TITLE_PROMPT_TEMPLATE = (
@@ -78,6 +83,11 @@ _MACHINE_PREFIXES = (
     "[CONTEXT COMPACTION", LEGACY_SUMMARY_PREFIX, "[Runtime note:", "[System note:", "[SYSTEM]",
     # tui_gateway.server._MODEL_SWITCH_MARKER_PREFIX (keep in sync); persisted as role="user" because
     # strict providers reject a non-first system message.
+    # Model-switch marker from tui_gateway.server._append_model_switch_marker. It is persisted with
+    # role="user" (strict OpenAI-compatible providers reject a system message that is not first — #48338),
+    # so without this entry it looks like a real opening turn: switching models before the first real
+    # message titled the session "[System: The active model for this chat has…" instead of the user's actual
+    # question.
     "[System: The active model for this chat has changed to ",
 )
 
@@ -227,7 +237,12 @@ def generate_title(
     runtime_validator: Optional[RuntimeValidator] = None,
 ) -> Optional[str]:
     """Title from the opening message alone (waiting for the assistant made this slow and bought
-    nothing). ``runtime_validator`` runs right before the request; False skips silently."""
+    nothing). ``runtime_validator`` runs right before the request; False skips silently.
+
+    If it returns False (e.g. the user's model was switched since the background thread captured its runtime
+    snapshot), the call is skipped silently — no request is sent, so a stale title request can't reload a
+    model the runtime already unloaded (#19027).
+    """
     if not _auto_title_enabled():
         logger.debug("Auto-title skipped: auxiliary.title_generation.enabled=false")
         return None
@@ -254,6 +269,11 @@ def generate_title(
             extra_body={"response_format": _TITLE_RESPONSE_FORMAT},
         )
         title = _clean_title(_extract_title_text(response.choices[0].message.content or ""))
+        # Answer-shaped output guard: titling is a 3-7 word task, so a title with many words is a model that
+        # ignored the task and answered the user's message instead ("I don't have context on X — that's not
+        # something I recognize..."). Truncating would store half an assistant blob as the session title,
+        # which is still an assistant blob — reject instead so the caller retries on the next exchange
+        # (maybe_auto_title fires for the first two exchanges). Port of can1357/oh-my-pi#7306.
         if title is not None and len(title.split()) > _MAX_TITLE_WORDS:
             # Answer-shaped output: reject (not truncate) so the caller retries next exchange.
             logger.debug("Rejecting answer-shaped title output (%d words > %d)", len(title.split()), _MAX_TITLE_WORDS)
@@ -283,7 +303,11 @@ def _persist_session_title(session_db, session_id, title, *, source, dedupe=True
     transaction, so a manual ``/title`` is never overwritten); None when a higher authority held the row.
     ``ValueError`` = unique-title index collision → append ``#N`` via ``get_next_title_in_lineage``;
     ``dedupe=False`` re-raises instead (the derived title is on the critical path, collides constantly
-    on "hi", and the model replaces it a second later anyway)."""
+    on "hi", and the model replaces it a second later anyway).
+
+    ``ValueError`` means the name is taken by an unrelated session (the unique-title index); rather than
+    leave the session untitled (#50537), append a ``#N`` suffix via ``get_next_title_in_lineage``.
+    """
     auto_fn = getattr(session_db, "set_auto_title", None)
 
     def _set(candidate):
@@ -348,6 +372,8 @@ def auto_title_session(
         with suppress(Exception):
             conversation_id = session_db.get_conversation_root(session_id) or session_id
         set_conversation_context(conversation_id)
+        # Same for the accounting context, so the title call's token usage is recorded against this session
+        # (task='title_generation', #23270).
         set_accounting_context(session_db, session_id)
         title, source = generate_title(
             user_message, failure_callback=failure_callback, main_runtime=main_runtime, runtime_validator=runtime_validator,
