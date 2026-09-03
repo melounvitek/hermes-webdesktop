@@ -144,3 +144,68 @@ def _smart_approve(command: str, description: str) -> str:
             e,
         )
         return "escalate"
+
+
+def _prepare_smart_approval_observer(
+    *,
+    command: str,
+    description: str,
+    pattern_key: str,
+    pattern_keys: list[str],
+    session_key: str,
+) -> dict | None:
+    """Redact and emit the pre-decision smart approval observer hook.
+
+    Redaction is observer-payload preparation, not approval policy: if it fails,
+    skip observability rather than leak raw data or block the LLM decision.
+    """
+    from tools import approval as _a
+    try:
+        from agent.redact import redact_sensitive_text
+
+        hook_command = redact_sensitive_text(command, force=True)
+        hook_description = redact_sensitive_text(description, force=True)
+    except Exception as exc:
+        logger.debug("Smart approval hook redaction failed: %s", exc)
+        return None
+
+    payload = {
+        "command": hook_command,
+        "description": hook_description,
+        "pattern_key": pattern_key,
+        "pattern_keys": list(pattern_keys),
+        "session_key": session_key,
+        "surface": "smart",
+    }
+    _a._fire_approval_hook("pre_approval_request", **payload)
+    return payload
+
+
+def _observe_smart_approval_verdict(payload: dict | None, verdict: str) -> None:
+    """Emit a smart verdict after the auxiliary LLM decision, if safe."""
+    from tools import approval as _a
+    if payload is None or verdict not in {"approve", "deny"}:
+        return
+    _a._fire_approval_hook(
+        "post_approval_response",
+        **payload,
+        choice=f"smart_{verdict}",
+        decided_by="aux_llm",
+    )
+
+
+def _smart_verdict(command: str, description: str, pattern_key: str,
+                   pattern_keys: list[str], session_key: str) -> str:
+    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'."""
+    from tools import approval as _a
+
+    observer_payload = _prepare_smart_approval_observer(
+        command=command,
+        description=description,
+        pattern_key=pattern_key,
+        pattern_keys=pattern_keys,
+        session_key=session_key,
+    )
+    verdict = _a._smart_approve(command, description)
+    _observe_smart_approval_verdict(observer_payload, verdict)
+    return verdict

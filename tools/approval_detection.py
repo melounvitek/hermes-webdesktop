@@ -101,6 +101,7 @@ _CMDPOS = (
     r'\s*'
 )
 
+
 # Destructive-path matcher for the rm hardline rules: accept the path fully
 # wrapped in a matching quote pair (`rm -rf "/"`, `rm -rf "$HOME"`) OR bare with
 # a terminator (whitespace, end, or `) ` ; | &` so `$(rm -rf /)` is caught).
@@ -152,26 +153,17 @@ HARDLINE_PATTERNS = [
 _RE_FLAGS = re.IGNORECASE | re.DOTALL
 
 # Positionless hardline rules matched against quote-masked variants (see above).
-_QUOTE_MASKED_HARDLINE_DESCRIPTIONS = frozenset({
-    "redirect to raw block device",
-    "fork bomb",
-})
+_QUOTE_MASKED_HARDLINE_DESCRIPTIONS = frozenset({"redirect to raw block device", "fork bomb"})
 
 HARDLINE_PATTERNS_COMPILED = [
-    (
-        re.compile(pattern, _RE_FLAGS),
-        description,
-        description in _QUOTE_MASKED_HARDLINE_DESCRIPTIONS,
-    )
+    (re.compile(pattern, _RE_FLAGS), description, description in _QUOTE_MASKED_HARDLINE_DESCRIPTIONS)
     for pattern, description in HARDLINE_PATTERNS
 ]
 
 
 # Commands that hand a quoted argument to another shell to EXECUTE: quoted text
 # is code, not prose, so quote-masked hardline rules scan the raw string.
-_SHELL_CARRIER_NAMES = frozenset({
-    "eval", "sh", "bash", "zsh", "ksh", "dash", "source", ".",
-})
+_SHELL_CARRIER_NAMES = frozenset({"eval", "sh", "bash", "zsh", "ksh", "dash", "source", "."})
 
 
 def _contains_shell_carrier(command: str) -> bool:
@@ -542,12 +534,8 @@ _REMOVED_PATTERN_KEY_ALIASES = {
     "script execution via heredoc": "(python[23]?|perl|ruby|node)\\s+<<",
 }
 for _canonical_key, _legacy_key in _REMOVED_PATTERN_KEY_ALIASES.items():
-    _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update(
-        {_canonical_key, _legacy_key}
-    )
-    _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update(
-        {_legacy_key, _canonical_key}
-    )
+    _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update({_canonical_key, _legacy_key})
+    _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update({_legacy_key, _canonical_key})
 
 
 def _approval_key_aliases(pattern_key: str) -> set[str]:
@@ -634,58 +622,48 @@ def _fold_home_prefixes(command: str, paths, replacement: str) -> str:
     return command
 
 
-def _rewrite_resolved_user_home(command: str) -> str:
-    """Rewrite the user's absolute home prefix (expanduser, realpath, and an
-    explicit ``HOME`` — Windows expanduser uses USERPROFILE and ignores HOME) to
-    ``~/``. No-op when the home is unset or degenerate."""
+def _user_home_candidates() -> list[str]:
+    # expanduser, realpath, and an explicit HOME — Windows expanduser uses
+    # USERPROFILE and ignores HOME.
+    home = os.path.expanduser("~")
+    return [home, os.path.realpath(home), os.environ.get("HOME", "")]
+
+
+def _hermes_home_candidates() -> list[str]:
+    from hermes_constants import get_hermes_home
+    home = get_hermes_home().expanduser()
+    return [str(home), str(home.resolve(strict=False))]
+
+
+def _rewrite_home(command: str, candidates, replacement: str) -> str:
+    """Fold a resolved absolute home prefix to its ``~`` spelling; no-op when
+    the home is unset, degenerate, or unresolvable."""
     try:
-        home = os.path.expanduser("~")
-        candidates = [
-            home,
-            os.path.realpath(home),
-            os.environ.get("HOME", ""),
-        ]
+        paths = candidates()
     except Exception:
         return command
-    return _fold_home_prefixes(command, candidates, "~")
+    return _fold_home_prefixes(command, paths, replacement)
+
+
+def _rewrite_resolved_user_home(command: str) -> str:
+    """User home (expanduser / realpath / $HOME) -> ``~/``."""
+    return _rewrite_home(command, _user_home_candidates, "~")
 
 
 def _rewrite_resolved_hermes_home(command: str) -> str:
-    """Rewrite the resolved HERMES_HOME prefix (and its realpath) to ``~/.hermes/``
-    so _HERMES_CONFIG_PATH / _HERMES_ENV_PATH match Docker/gateway deployments
-    that spell the absolute path. No-op when unresolvable."""
-    try:
-        from hermes_constants import get_hermes_home
-        home = get_hermes_home().expanduser()
-        candidates = [
-            str(home),
-            str(home.resolve(strict=False)),
-        ]
-    except Exception:
-        return command
-    return _fold_home_prefixes(command, candidates, "~/.hermes")
+    """Resolved HERMES_HOME (and its realpath) -> ``~/.hermes/`` so the
+    _HERMES_CONFIG_PATH / _HERMES_ENV_PATH rules match Docker/gateway
+    deployments that spell the absolute path."""
+    return _rewrite_home(command, _hermes_home_candidates, "~/.hermes")
 
 
 _PARAM_REPLACEMENT_RE = re.compile(r"\$\{[^}/\s]+/[^}/]*/(?P<replacement>[^}]*)\}")
 _PARAM_DEFAULT_RE = re.compile(r"\$\{[^}:}\s]+:-(?P<default>[^}]*)\}")
 _SIMPLE_SHELL_LITERAL_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]+$")
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
-_COMMAND_WRAPPER_WORDS = {
-    "sudo",
-    "env",
-    "exec",
-    "nohup",
-    "setsid",
-    "time",
-    "command",
-    "builtin",
-}
+_COMMAND_WRAPPER_WORDS = {"sudo", "env", "exec", "nohup", "setsid", "time", "command", "builtin"}
 _SUDO_OPTIONS_WITH_ARG = {
-    "-c", "--close-from",
-    "-g", "--group",
-    "-h", "--host",
-    "-p", "--prompt",
-    "-u", "--user",
+    "-c", "--close-from", "-g", "--group", "-h", "--host", "-p", "--prompt", "-u", "--user",
 }
 
 _INTERPRETER_EXEC_FLAGS = {
@@ -698,17 +676,17 @@ _INTERPRETER_EXEC_FLAGS = {
 }
 _INTERPRETER_WITH_ARG = {
     "python": {"-W", "-X", "--check-hash-based-pycs"},
-    "node": {"-C", "--conditions", "--cpu-prof-dir", "--diagnostic-dir", "--icu-data-dir", "--import", "--loader", "--openssl-config", "--require", "--title"},
+    "node": {"-C", "--conditions", "--cpu-prof-dir", "--diagnostic-dir", "--icu-data-dir",
+             "--import", "--loader", "--openssl-config", "--require", "--title"},
     "perl": {"-0", "-F", "-I", "-M", "-m", "-x"},
     "ruby": {"-C", "-E", "-F", "-I", "-K", "-r"},
     "php": {"-c", "-d", "-z"},
-    "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat", "-outputformat", "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
+    "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat",
+                   "-outputformat", "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
 }
 _READ_TOOL_EXEC_FLAGS = {
-    "sort": {"--compress-program"},
-    "rg": {"--pre", "--hostname-bin"},
-    "ag": {"--pager"},
-    "man": {"--pager", "--html", "-P", "-H"},
+    "sort": {"--compress-program"}, "rg": {"--pre", "--hostname-bin"},
+    "ag": {"--pager"}, "man": {"--pager", "--html", "-P", "-H"},
 }
 # Required-argument options are ownership boundaries: an option-looking next
 # token is data, not another option. These sets mirror the invocation grammar
@@ -743,18 +721,14 @@ _READ_TOOL_LONG_OPTIONS_WITH_ARG = {
     },
 }
 _READ_TOOL_SHORT_OPTIONS_WITH_ARG = {
-    "rg": frozenset("efEmjgdtTABCMr"),
-    "sort": frozenset("koStT"),
-    "man": frozenset("CRLmMSserEPp"),
-    "ag": frozenset("gGmpW"),
+    "rg": frozenset("efEmjgdtTABCMr"), "sort": frozenset("koStT"),
+    "man": frozenset("CRLmMSserEPp"), "ag": frozenset("gGmpW"),
 }
-_SHELL_PUNCTUATION = {";", "&", "&&", "|", "||", "(", ")", "{", "}"}
 _MAX_DETECTION_COMMAND_CHARS = 128_000
 _MAX_SEPARATOR_FREE_COMMAND_CHARS = 4_096
 _MAX_DETECTION_SEGMENTS = 25_000
 _PARSER_LIMIT_DESCRIPTION = "command parser limit exceeded"
 _MALFORMED_EXEC_DESCRIPTION = "command parser limit or malformed executable payload"
-
 
 
 def _command_parser_limit_exceeded(command: str) -> bool:
@@ -836,10 +810,9 @@ def _shell_tokens_with_spans(segment: str, start: int):
 
 
 _GREP_OPTIONS_WITH_ARG = {
-    "--after-context", "--before-context", "--binary-files", "--context",
-    "--directories", "--devices", "--exclude", "--exclude-dir",
-    "--exclude-from", "--include", "--label", "--max-count",
-    "--regexp", "--file",
+    "--after-context", "--before-context", "--binary-files", "--context", "--directories",
+    "--devices", "--exclude", "--exclude-dir", "--exclude-from", "--include", "--label",
+    "--max-count", "--regexp", "--file",
 }
 _GREP_SHORT_OPTIONS_WITH_ARG = {"A", "B", "C", "D", "d", "e", "f", "m"}
 
@@ -944,20 +917,21 @@ def _grep_safe_detection_variant(command: str) -> tuple[str, bool]:
     return "".join(parts), False
 
 
+_INTERPRETER_NAME_RES = (
+    ("python", re.compile(r"py(?:\.exe)?|python[23]?(?:\.\d+)*(?:\.exe)?")),
+    ("node", re.compile(r"node(?:js)?(?:\.exe)?")),
+    ("perl", re.compile(r"perl[0-9]*(?:\.\d+)*(?:\.exe)?")),
+    ("ruby", re.compile(r"ruby[0-9.]*(?:\.exe)?")),
+    ("php", re.compile(r"php(?:\.exe)?")),
+    ("powershell", re.compile(r"powershell(?:\.exe)?|pwsh(?:\.exe)?")),
+)
+
+
 def _interpreter_family(executable: str) -> str | None:
     name = os.path.basename(executable).lower()
-    if re.fullmatch(r"py(?:\.exe)?|python[23]?(?:\.\d+)*(?:\.exe)?", name):
-        return "python"
-    if re.fullmatch(r"node(?:js)?(?:\.exe)?", name):
-        return "node"
-    if re.fullmatch(r"perl[0-9]*(?:\.\d+)*(?:\.exe)?", name):
-        return "perl"
-    if re.fullmatch(r"ruby[0-9.]*(?:\.exe)?", name):
-        return "ruby"
-    if re.fullmatch(r"php(?:\.exe)?", name):
-        return "php"
-    if re.fullmatch(r"powershell(?:\.exe)?|pwsh(?:\.exe)?", name):
-        return "powershell"
+    for family, name_re in _INTERPRETER_NAME_RES:
+        if name_re.fullmatch(name):
+            return family
     return None
 
 
@@ -1270,7 +1244,6 @@ def _read_shell_word(command: str, pos: int) -> tuple[int, int, str]:
             break
         i += 1
     return (start, i, command[start:i])
-
 
 
 def _is_simple_shell_literal(value: str) -> bool:
