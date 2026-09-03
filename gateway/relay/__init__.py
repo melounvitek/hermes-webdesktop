@@ -34,6 +34,9 @@ _AMBIENT_TOKEN_SHAPE = re.compile(
 
 _HTTP_TIMEOUT_S = 15.0
 
+# gateway.idp.* keys (and GATEWAY_RELAY_IDP_<KEY> env mirrors) read by the identity resolver.
+_IDP_KEYS = ("token_url", "client_id", "client_secret", "scope")
+
 
 # ─────────────────────────── config access ───────────────────────────
 
@@ -257,15 +260,15 @@ def relay_relevance_policy(platform: Optional[str] = None) -> Optional[dict]:
     free_response: list[str] = []
     try:
         cfg = _load_cfg()
-        plat_cfg = cfg.get(platform)
-        if not isinstance(plat_cfg, dict):
-            _gw_platforms = (cfg.get("gateway") or {}).get("platforms") or {}
-            if not isinstance(_gw_platforms, dict):
-                _gw_platforms = {}
-            plat_cfg = _gw_platforms.get(platform)
-        if not isinstance(plat_cfg, dict):
-            plat_cfg = (cfg.get("platforms") or {}).get(platform)
-        plat_cfg = plat_cfg if isinstance(plat_cfg, dict) else {}
+        # Platform block lookup order: top-level ``<platform>:``, then
+        # ``gateway.platforms.<platform>``, then ``platforms.<platform>``.
+        def _candidates():
+            yield cfg.get(platform)
+            gw_platforms = (cfg.get("gateway") or {}).get("platforms") or {}
+            yield gw_platforms.get(platform) if isinstance(gw_platforms, dict) else None
+            yield (cfg.get("platforms") or {}).get(platform)
+
+        plat_cfg = next((c for c in _candidates() if isinstance(c, dict)), {})
 
         if "require_mention" in plat_cfg:
             require_mention = plat_cfg.get("require_mention")
@@ -367,17 +370,15 @@ def _resolve_relay_identity_token() -> str:
     Raises on failure; callers decide whether that's fatal (enroll CLI) or a graceful
     boot no-op (self-provision).
     """
-    token_url = os.environ.get("GATEWAY_RELAY_IDP_TOKEN_URL", "").strip()
-    client_id = os.environ.get("GATEWAY_RELAY_IDP_CLIENT_ID", "").strip()
-    client_secret = os.environ.get("GATEWAY_RELAY_IDP_CLIENT_SECRET", "").strip()
-    scope = os.environ.get("GATEWAY_RELAY_IDP_SCOPE", "").strip()
-    if not token_url:
+    env = {k: os.environ.get(f"GATEWAY_RELAY_IDP_{k.upper()}", "").strip() for k in _IDP_KEYS}
+    if not env["token_url"]:
+        # Env token_url absent -> the whole idp block comes from config (env id/secret
+        # still win per key). A malformed gateway.idp degrades to "no token_url".
         idp = _gateway_cfg().get("idp")
-        idp = idp if isinstance(idp, dict) else {}  # malformed gateway.idp degrades to "no token_url"
-        token_url = str(idp.get("token_url", "") or "").strip()
-        client_id = client_id or str(idp.get("client_id", "") or "").strip()
-        client_secret = client_secret or str(idp.get("client_secret", "") or "").strip()
-        scope = scope or str(idp.get("scope", "") or "").strip()
+        idp = idp if isinstance(idp, dict) else {}
+        for k in _IDP_KEYS:
+            env[k] = env[k] or str(idp.get(k, "") or "").strip()
+    token_url, client_id, client_secret, scope = (env[k] for k in _IDP_KEYS)
 
     if not token_url:
         from hermes_cli.auth import resolve_nous_access_token
