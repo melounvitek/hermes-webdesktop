@@ -789,13 +789,9 @@ def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dic
             paused_services.append(current_service_name)
             current_service_name = None
         if paused_services:
-            token["services"] = paused_services
-            token["expected_services"] = list(paused_services)
-            token["restarted_services"] = []
+            token.update(services=paused_services, expected_services=list(paused_services), restarted_services=[])
             token["service_profiles"] = {
-                str(service.name): str(service.profile)
-                for service in service_gateways
-                if str(service.name) in paused_services
+                str(s.name): str(s.profile) for s in service_gateways if str(s.name) in paused_services
             }
             print("  ✓ Paused Windows gateway service(s): " + ", ".join(paused_services))
         return token
@@ -907,34 +903,32 @@ def _pause_windows_gateways_for_update() -> dict | None:
     survivors = _m()._wait_for_windows_update_gateway_exit(mapped_pids, timeout=drain_timeout)
     unmapped_pids = [pid for pid in running_pids if pid not in profile_processes and pid not in service_gateway_pids]
 
-    # Snapshot unmapped gateways' argv *before* force-killing so resume can replay it.
-    # Unmapped = no profile->PID-file mapping (e.g. Scheduled Task ``pythonw.exe -m ...``).
-    unmapped: list[dict] = []
-    for pid in unmapped_pids:
-        argv = None
+    def _argv_or_none(pid: int):
         try:
-            argv = _capture_gateway_argv(int(pid))
+            return _capture_gateway_argv(pid)
         except Exception as exc:
             logger.debug("Could not capture argv for unmapped gateway %s: %s", pid, exc)
-        unmapped.append({"pid": int(pid), "argv": argv})
+            return None
+
+    # Snapshot unmapped gateways' argv *before* force-killing so resume can replay it.
+    # Unmapped = no profile->PID-file mapping (e.g. Scheduled Task ``pythonw.exe -m ...``).
+    unmapped = [{"pid": int(pid), "argv": _argv_or_none(int(pid))} for pid in unmapped_pids]
 
     # Tree-kill survivors, unmapped gateways, and pre-drain launchers; a launcher
     # already gone with its worker raises ProcessLookupError and is skipped.
     force_killed = []
     for pid in sorted(set(survivors).union(unmapped_pids).union(launcher_pids)):
         with suppress(ProcessLookupError, PermissionError, OSError):
-            pid_int = int(pid)
-            terminate_pid(pid_int, force=True, expected_start_time=get_process_start_time(pid_int))
-            force_killed.append(pid_int)
+            terminate_pid(int(pid), force=True, expected_start_time=get_process_start_time(int(pid)))
+            force_killed.append(int(pid))
 
     if profiles:
         print(f"  ✓ Paused gateway profile(s): {', '.join(sorted(profiles))}")
     if force_killed:
         print(f"  → Force-stopped {len(force_killed)} gateway process(es)")
-
     if unmapped_pids:
         print(f"  → Stopped {len(unmapped_pids)} gateway process(es) without profile mapping")
-        if sum(1 for u in unmapped if u.get("argv")) < len(unmapped_pids):
+        if any(not u.get("argv") for u in unmapped):
             # No recoverable cmdline (psutil missing, access denied, gone): manual restart.
             print("    Restart manually after update: hermes gateway run")
 
