@@ -1171,17 +1171,17 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.warning("Matrix: cross-signing key lookup failed: %s", exc)
             if own_xsign is None:
                 _, output_error = _get_matrix_recovery_key_output_target()
-                skipped = "Matrix: cross-signing keys are missing, but automatic bootstrap is skipped because "
-                if output_error == "not_configured":
+                if output_error:
+                    reason = {
+                        "not_configured": "is not configured. Configure MATRIX_RECOVERY_KEY from your Matrix client "
+                                          "or set MATRIX_RECOVERY_KEY_OUTPUT_FILE to write a new recovery key once "
+                                          "with mode 0600.",
+                        "exists": "already exists and will not be overwritten.",
+                    }.get(output_error, "is not usable: %s")
                     logger.warning(
-                        skipped + "MATRIX_RECOVERY_KEY_OUTPUT_FILE is not configured. Configure "
-                        "MATRIX_RECOVERY_KEY from your Matrix client or set MATRIX_RECOVERY_KEY_OUTPUT_FILE "
-                        "to write a new recovery key once with mode 0600.")
-                elif output_error == "exists":
-                    logger.warning(
-                        skipped + "MATRIX_RECOVERY_KEY_OUTPUT_FILE already exists and will not be overwritten.")
-                elif output_error:
-                    logger.warning(skipped + "MATRIX_RECOVERY_KEY_OUTPUT_FILE is not usable: %s", output_error)
+                        "Matrix: cross-signing keys are missing, but automatic bootstrap is skipped because "
+                        "MATRIX_RECOVERY_KEY_OUTPUT_FILE " + reason,
+                        *([output_error] if output_error not in ("not_configured", "exists") else []))
                 else:
                     try:
                         new_recovery_key = await olm.generate_recovery_key()
@@ -1595,12 +1595,20 @@ class MatrixAdapter(BasePlatformAdapter):
         for emoji, (model_id, provider_slug, provider_name) in zip(_MATRIX_MODEL_PICKER_REACTIONS, flat_choices):
             choices[emoji] = (model_id, provider_slug)
             lines.append(f"{emoji} `{model_id}` — {provider_name}")
+        return await self._send_picker(
+            chat_id, lines, choices, session_key, on_model_selected, metadata, self._model_picker_prompts_by_event,
+            "model picker")
+
+    async def _send_picker(
+        self, chat_id: str, lines: list, choices: dict, session_key: str, on_selected, metadata, registry: dict,
+        label: str) -> SendResult:
+        """Send picker *lines*, register a _MatrixPickerPrompt under the event, seed its reactions."""
         return await self._send_reaction_prompt(
             chat_id, "\n".join(lines), metadata,
             lambda message_id, requester, expires_at: _MatrixPickerPrompt(
                 chat_id=chat_id, message_id=message_id, session_key=session_key, choices=choices,
-                on_selected=on_model_selected, requester_user_id=requester, expires_at=expires_at),
-            self._model_picker_prompts_by_event, choices, "model picker")
+                on_selected=on_selected, requester_user_id=requester, expires_at=expires_at),
+            registry, choices, label)
 
     async def send_choice_picker(
         self, chat_id: str, title: str, choices: list, session_key: str, on_choice_selected,
@@ -1620,12 +1628,9 @@ class MatrixAdapter(BasePlatformAdapter):
         if not emoji_choices:
             return SendResult(success=False, error="No choices")
         lines += ["", "React to choose."]
-        return await self._send_reaction_prompt(
-            chat_id, "\n".join(lines), metadata,
-            lambda message_id, requester, expires_at: _MatrixPickerPrompt(
-                chat_id=chat_id, message_id=message_id, session_key=session_key, choices=emoji_choices,
-                on_selected=on_choice_selected, requester_user_id=requester, expires_at=expires_at),
-            self._choice_picker_prompts_by_event, emoji_choices, "choice picker")
+        return await self._send_picker(
+            chat_id, lines, emoji_choices, session_key, on_choice_selected, metadata,
+            self._choice_picker_prompts_by_event, "choice picker")
 
     def format_message(self, content: str) -> str:
         """Markdown passes through; strip image markdown (media is uploaded separately)."""
@@ -2274,42 +2279,40 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _handle_model_picker_reaction(self, room_id: str, reacts_to: str, key: str, sender: str) -> bool:
         """Apply a model-picker reaction. True if the reaction targeted a pending picker."""
-        handled, model_prompt, selection = await self._claim_reaction_prompt(
+        return await self._handle_picker_reaction(
             self._model_picker_prompts_by_event, room_id, reacts_to, key, sender, "model picker",
-            "That reaction is not one of the available model choices.", self._expire_matrix_model_picker_prompt)
-        if selection is None:
-            return handled
-        model_prompt.resolved = True
-        self._model_picker_prompts_by_event.pop(reacts_to, None)
-        model_id, provider_slug = selection
-        try:
-            confirmation = await model_prompt.on_selected(room_id, model_id, provider_slug)
-            await self._redact_bot_model_picker_reactions(room_id, model_prompt)
-            if confirmation:
-                await self.send(room_id, confirmation, reply_to=reacts_to)
-        except Exception as exc:
-            logger.error("Failed to switch model from Matrix reaction: %s", exc)
-            await self.send(room_id, f"Failed to switch model: {exc}", reply_to=reacts_to)
-        return True
+            "That reaction is not one of the available model choices.", self._expire_matrix_model_picker_prompt,
+            ("switch model", "switch model"), redact_bot_reactions=True)
 
     async def _handle_choice_picker_reaction(self, room_id: str, reacts_to: str, key: str, sender: str) -> bool:
         """Apply a choice-picker reaction. True if the reaction targeted a pending picker."""
         async def _expire(_room_id, target_event_id, _prompt):
             self._choice_picker_prompts_by_event.pop(target_event_id, None)
-        handled, choice_prompt, value = await self._claim_reaction_prompt(
+        return await self._handle_picker_reaction(
             self._choice_picker_prompts_by_event, room_id, reacts_to, key, sender, "choice picker",
-            "That reaction is not one of the available choices.", _expire)
-        if value is None:
+            "That reaction is not one of the available choices.", _expire, ("apply choice", "apply selection"))
+
+    async def _handle_picker_reaction(
+        self, registry: dict, room_id: str, reacts_to: str, key: str, sender: str, label: str, invalid_text: str,
+        on_expired, verbs: tuple[str, str], *, redact_bot_reactions: bool = False) -> bool:
+        """Claim the picker, fire ``on_selected(room_id, *selection)`` and post its confirmation (or the error).
+        ``verbs`` = (log verb, user-facing verb)."""
+        handled, prompt, selection = await self._claim_reaction_prompt(
+            registry, room_id, reacts_to, key, sender, label, invalid_text, on_expired)
+        if selection is None:
             return handled
-        choice_prompt.resolved = True
-        self._choice_picker_prompts_by_event.pop(reacts_to, None)
+        prompt.resolved = True
+        registry.pop(reacts_to, None)
+        args = selection if isinstance(selection, tuple) else (selection,)
         try:
-            confirmation = await choice_prompt.on_selected(room_id, value)
+            confirmation = await prompt.on_selected(room_id, *args)
+            if redact_bot_reactions:
+                await self._redact_bot_model_picker_reactions(room_id, prompt)
             if confirmation:
                 await self.send(room_id, confirmation, reply_to=reacts_to)
         except Exception as exc:
-            logger.error("Failed to apply choice from Matrix reaction: %s", exc)
-            await self.send(room_id, f"Failed to apply selection: {exc}", reply_to=reacts_to)
+            logger.error("Failed to %s from Matrix reaction: %s", verbs[0], exc)
+            await self.send(room_id, f"Failed to {verbs[1]}: {exc}", reply_to=reacts_to)
         return True
 
     def _matrix_prompt_expired(self, prompt: Any) -> bool:
