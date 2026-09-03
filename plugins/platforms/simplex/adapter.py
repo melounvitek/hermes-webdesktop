@@ -38,6 +38,8 @@ _CORR_PREFIX = "hermes-"  # marks requests we sent so our own echoes can be igno
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".opus"}
 _VOICE_TAG_EXTS = {".ogg", ".mp3", ".wav", ".m4a", ".opus"}  # MEDIA: tags sent as voice notes
+_TEXT_BEARING_TYPES = ("text", "file", "image", "voice", "link", "video")
+_MEDIA_KIND_PRECEDENCE = (("audio/", MessageType.VOICE), ("image/", MessageType.PHOTO))  # first match wins
 
 
 def _parse_comma_list(value: str) -> List[str]:
@@ -59,6 +61,14 @@ def _is_image_ext(ext: str) -> bool:
 
 def _is_audio_ext(ext: str) -> bool:
     return ext.lower() in _AUDIO_EXTS
+
+
+def _mime_for_ext(ext: str) -> str:
+    if _is_image_ext(ext):
+        return f"image/{ext.lstrip('.')}"
+    if _is_audio_ext(ext):
+        return f"audio/{ext.lstrip('.')}"
+    return "application/octet-stream"
 
 
 def _display_name(obj: dict, profile_key: str, default: str = "") -> str:
@@ -255,8 +265,7 @@ class SimplexAdapter(BasePlatformAdapter):
         for item in chat_items if isinstance(chat_items, list) else [chat_items]:
             await self._safe_handle_chat_item(item, "SimpleX: error processing chat item")
 
-    async def _on_new_chat_item(self, resp: dict) -> None:
-        """Singular variant emitted by some daemon versions."""
+    async def _on_new_chat_item(self, resp: dict) -> None:  # singular variant from some daemon versions
         await self._safe_handle_chat_item(resp, "SimpleX: error processing chat item")
 
     async def _on_rcv_file_complete(self, resp: dict) -> None:
@@ -301,13 +310,10 @@ class SimplexAdapter(BasePlatformAdapter):
         content_type = content.get("type", "") if isinstance(content, dict) else ""
         if content_type != "rcvMsgContent":
             return
-        text = ""
         msg_type_str = msg_content.get("type", "") if isinstance(msg_content, dict) else ""
-        if msg_type_str in ("text", "file", "image", "voice", "link", "video"):
-            text = msg_content.get("text", "")
+        text = msg_content.get("text", "") if msg_type_str in _TEXT_BEARING_TYPES else ""
         if not text and msg_type_str not in ("image", "file", "voice"):
             return
-
         is_group = chat_type == "group"
         if chat_type == "direct":
             contact = chat_info.get("contact", {}) or {}
@@ -333,7 +339,6 @@ class SimplexAdapter(BasePlatformAdapter):
         if not sender_id:
             logger.debug("SimpleX: ignoring message with no sender")
             return
-
         # Attachment: chatItem.chatItem.file (sibling of meta/content/chatDir).
         media_urls: List[str] = []
         media_types: List[str] = []
@@ -353,26 +358,16 @@ class SimplexAdapter(BasePlatformAdapter):
                 await self._send_fire_and_forget(f"/freceive {file_id}")
                 return
             if file_path:
-                if _is_image_ext(ext):
-                    mime = f"image/{ext.lstrip('.')}"
-                elif _is_audio_ext(ext):
-                    mime = f"audio/{ext.lstrip('.')}"
-                else:
-                    mime = "application/octet-stream"
                 media_urls.append(file_path)
-                media_types.append(mime)
-
+                media_types.append(_mime_for_ext(ext))
         source = self.build_source(
             chat_id=chat_id, chat_name=chat_name, chat_type="group" if is_group else "dm",
             user_id=sender_id, user_name=sender_name or sender_id)
+        # Non-image/non-audio files are DOCUMENT so run.py's document-context injection surfaces them.
         msg_type = MessageType.TEXT
         if media_types:
-            if any(mt.startswith("audio/") for mt in media_types):
-                msg_type = MessageType.VOICE
-            elif any(mt.startswith("image/") for mt in media_types):
-                msg_type = MessageType.PHOTO
-            else:  # other files are DOCUMENT so run.py's document-context injection surfaces them
-                msg_type = MessageType.DOCUMENT
+            msg_type = next((t for prefix, t in _MEDIA_KIND_PRECEDENCE if any(mt.startswith(prefix) for mt in media_types)),
+                            MessageType.DOCUMENT)
         ts_str = meta.get("itemTs") or meta.get("createdAt", "")
         try:
             timestamp = datetime.fromisoformat(ts_str.replace("Z", "+00:00")) if ts_str else datetime.now(tz=timezone.utc)
@@ -398,10 +393,9 @@ class SimplexAdapter(BasePlatformAdapter):
         try:
             await asyncio.sleep(self._text_batch_delay)
             event = self._pending_text_batches.pop(key, None)
-            if not event:
-                return
-            logger.info("[SimpleX] Flushing text batch %s (%d chars)", key, len(event.text or ""))
-            await self.handle_message(event)
+            if event:
+                logger.info("[SimpleX] Flushing text batch %s (%d chars)", key, len(event.text or ""))
+                await self.handle_message(event)
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
