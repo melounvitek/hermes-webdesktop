@@ -793,15 +793,14 @@ class LineAdapter(BasePlatformAdapter):
         path is rechecked against allowed roots (tempdir, ``/tmp``→``/private/tmp`` on macOS, HERMES_HOME)."""
         from aiohttp import web
         token = request.match_info["token"]
-        entry = self._media_tokens.get(token)
-        if not entry:
+        file_path, expires_at = self._media_tokens.get(token) or ("", 0.0)
+        if not file_path:
             return web.Response(status=404, text="not found")
-        file_path, expires_at = entry
         if time.time() > expires_at:
             self._media_tokens.pop(token, None)
             return web.Response(status=410, text="gone")
         path = Path(file_path)
-        if not path.exists() or not path.is_file():
+        if not path.is_file():
             return web.Response(status=404, text="not found")
         try:
             from hermes_constants import get_hermes_home
@@ -813,8 +812,8 @@ class LineAdapter(BasePlatformAdapter):
         if not any(resolved.is_relative_to(r) for r in allowed_roots):
             logger.warning("LINE: refusing to serve outside allowed roots: %s", resolved)
             return web.Response(status=403, text="forbidden")
-        content_type, _ = mimetypes.guess_type(str(path))
-        return web.FileResponse(path, headers={"Content-Type": content_type or "application/octet-stream"})
+        content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        return web.FileResponse(path, headers={"Content-Type": content_type})
 
     async def send_image_file(
         self, chat_id: str, image_path: str, caption: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None
@@ -826,9 +825,7 @@ class LineAdapter(BasePlatformAdapter):
         if not url.lower().startswith("https://"):
             return SendResult(success=False, error=f"LINE image URL must be HTTPS: {url}")
         msgs: List[Dict[str, Any]] = [{"type": "image", "originalContentUrl": url, "previewImageUrl": url}]
-        if caption:
-            msgs.append(_text_message(caption))
-        return await self._send_messages(chat_id, msgs)
+        return await self._send_messages(chat_id, msgs + ([_text_message(caption)] if caption else []))
 
     async def send_voice(
         self, chat_id: str, audio_path: str, duration_ms: int = 1000, metadata: Optional[Dict[str, Any]] = None
@@ -836,8 +833,8 @@ class LineAdapter(BasePlatformAdapter):
         path, err = self._check_media_file("audio", audio_path)
         if err:
             return err
-        url = self._serve_file(path)
-        return await self._send_messages(chat_id, [{"type": "audio", "originalContentUrl": url, "duration": int(duration_ms)}])
+        msg = {"type": "audio", "originalContentUrl": self._serve_file(path), "duration": int(duration_ms)}
+        return await self._send_messages(chat_id, [msg])
 
     async def send_video(
         self, chat_id: str, video_path: str, preview_path: Optional[str] = None,
@@ -858,10 +855,8 @@ class LineAdapter(BasePlatformAdapter):
             except Exception:
                 _unlink_quietly(tmp.name)
                 raise
-        video_url = self._serve_file(path)
-        return await self._send_messages(
-            chat_id, [{"type": "video", "originalContentUrl": video_url, "previewImageUrl": preview_url}]
-        )
+        msg = {"type": "video", "originalContentUrl": self._serve_file(path), "previewImageUrl": preview_url}
+        return await self._send_messages(chat_id, [msg])
 
     async def _send_messages(
         self, chat_id: str, messages: List[Dict[str, Any]], *, force_push: bool = False, text: bool = False
@@ -872,31 +867,26 @@ class LineAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="LINE adapter not connected")
         if not messages:
             return SendResult(success=True, message_id=None)
-        first_batch = messages[:LINE_MAX_MESSAGES_PER_CALL]
-        rest = messages[LINE_MAX_MESSAGES_PER_CALL:]
+        n = LINE_MAX_MESSAGES_PER_CALL
+        batches = [messages[i:i + n] for i in range(0, len(messages), n)]
         token, used_reply = self._consume_reply_token(chat_id)
+        start = 0
         if used_reply and not force_push:
             try:
-                await self._client.reply(token, first_batch)
-                first_batch = None
+                await self._client.reply(token, batches[0])
                 if text:
                     return SendResult(success=True, message_id=token)
+                start = 1
             except Exception as exc:
                 logger.info("LINE: reply token rejected (%s); falling back to push", exc)
-        if first_batch is not None:
+        for i in range(start, len(batches)):  # push the rest (reply token is single-use)
             try:
-                await self._client.push(chat_id, first_batch)
+                await self._client.push(chat_id, batches[i])
             except Exception as exc:
-                if text:
+                if i > 0:
+                    logger.warning("LINE: push for follow-up batch failed: %s", exc)
+                elif text:
                     logger.error("LINE: push send failed: %s", exc)
-                return SendResult(success=False, error=str(exc))
-        while rest:  # subsequent batches: always push (reply token is single-use)
-            batch = rest[:LINE_MAX_MESSAGES_PER_CALL]
-            rest = rest[LINE_MAX_MESSAGES_PER_CALL:]
-            try:
-                await self._client.push(chat_id, batch)
-            except Exception as exc:
-                logger.warning("LINE: push for follow-up batch failed: %s", exc)
                 return SendResult(success=False, error=str(exc))
         return SendResult(success=True, message_id=None)
 
@@ -908,9 +898,13 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
+def _env_credentials_present() -> bool:
+    return bool(_get_scoped_secret("LINE_CHANNEL_ACCESS_TOKEN") and _get_scoped_secret("LINE_CHANNEL_SECRET"))
+
+
 def check_requirements() -> bool:
     """Plugin gate: require credentials AND aiohttp at runtime."""
-    if not (_get_scoped_secret("LINE_CHANNEL_ACCESS_TOKEN") and _get_scoped_secret("LINE_CHANNEL_SECRET")):
+    if not _env_credentials_present():
         return False
     try:
         import aiohttp  # noqa: F401
@@ -920,8 +914,7 @@ def check_requirements() -> bool:
 
 
 def validate_config(config) -> bool:
-    token, secret = _credentials(config)
-    return bool(token) and bool(secret)
+    return all(_credentials(config))
 
 
 def is_connected(config) -> bool:
@@ -931,7 +924,7 @@ def is_connected(config) -> bool:
 
 def _env_enablement() -> Optional[Dict[str, Any]]:
     """Seed PlatformConfig.extra from env-only setups so ``hermes status`` sees them."""
-    if not (_get_scoped_secret("LINE_CHANNEL_ACCESS_TOKEN") and _get_scoped_secret("LINE_CHANNEL_SECRET")):
+    if not _env_credentials_present():
         return None
     seeded: Dict[str, Any] = {}
     if os.getenv("LINE_PORT"):
@@ -942,17 +935,15 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     for env, key in (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel")):
         if os.getenv(env):
             seeded[key] = os.environ[env]
-    return seeded or {}
+    return seeded
 
 
 async def _standalone_send(
     pconfig, chat_id: str, message: str, *,
     thread_id: Optional[str] = None, media_files: Optional[List[str]] = None, force_document: bool = False,
 ) -> Dict[str, Any]:
-    """Out-of-process Push delivery for cron jobs detached from the gateway.
-    Always Push (no inbound event → no reply token). ``thread_id`` is ignored (LINE
-    has no threads); ``media_files`` can't be served without the webhook server.
-    """
+    """Out-of-process Push delivery for cron jobs detached from the gateway (no inbound event → no
+    reply token). ``thread_id`` is ignored (no threads); ``media_files`` need the webhook server."""
     extra = getattr(pconfig, "extra", {}) or {}
     token = _get_scoped_secret("LINE_CHANNEL_ACCESS_TOKEN") or extra.get("channel_access_token", "")
     if not token or not chat_id:
@@ -999,8 +990,7 @@ def interactive_setup() -> None:
     _prompt("LINE_CHANNEL_SECRET", "Channel secret", secret=True)
     _prompt("LINE_PUBLIC_URL", "Public HTTPS base URL (optional, e.g. https://my-tunnel.example.com)")
     _prompt("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)")
-    print("Done. Set the webhook URL in the LINE console to "
-          "<your-public-url>/line/webhook and enable 'Use webhook'.")
+    print("Done. Set the webhook URL in the LINE console to <your-public-url>/line/webhook and enable 'Use webhook'.")
 
 
 def register(ctx) -> None:
