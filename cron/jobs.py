@@ -1374,17 +1374,12 @@ def _with_job(
 
 def _complete_job_record(job: Dict[str, Any]) -> None:
     """Retire *job* in place as a terminal completion (record kept for `cronjob list`)."""
-    job["enabled"] = False
-    job["state"] = "completed"
-    job["next_run_at"] = None
+    job.update(enabled=False, state="completed", next_run_at=None)
 
 
 def _activate_job_record(job: Dict[str, Any]) -> None:
     """Clear pause markers in place so *job* is runnable again."""
-    job["enabled"] = True
-    job["state"] = "scheduled"
-    job["paused_at"] = None
-    job["paused_reason"] = None
+    job.update(enabled=True, state="scheduled", paused_at=None, paused_reason=None)
 
 
 def _normalize_workdir(workdir: Optional[str]) -> Optional[str]:
@@ -1968,11 +1963,9 @@ def rearm_oneshot(job_id: str, run_at: Any) -> Optional[Dict[str, Any]]:
             raise ValueError(_REARM_RECURRING_ERROR)
         repeat = job.get("repeat") or {}
         repeat["completed"] = 0
-        job["schedule"] = parsed_schedule
-        job["schedule_display"] = parsed_schedule.get("display", str(run_at))
-        job["repeat"] = repeat
-        job["run_claim"] = None
-        job["fire_claim"] = None
+        job.update(
+            schedule=parsed_schedule, schedule_display=parsed_schedule.get("display", str(run_at)),
+            repeat=repeat, run_claim=None, fire_claim=None)
         _activate_job_record(job)
         job["next_run_at"] = next_run_at
         save_jobs(jobs)
@@ -2068,7 +2061,7 @@ def _record_run_outcome(
     delivery_failed = isinstance(delivery_error, str) and bool(delivery_error.strip())
     job["last_status"] = status or (
         "error" if not success else ("delivery_failed" if delivery_failed else "ok"))
-    job["last_error"] = error if not success else None
+    job["last_error"] = None if success else error
     if success:
         # Healthy run: drop the alert-once dedup markers so a FUTURE break re-alerts, and clear
         # the forward-failure stamp so it only describes CURRENT auto-fire health.
@@ -2531,8 +2524,7 @@ def _self_disable_half_paused(job: Dict[str, Any], scan: _DueScan) -> None:
     rj = scan.find(jid)
     if rj is None:
         return
-    rj["enabled"] = False
-    rj["state"] = "paused"
+    rj.update(enabled=False, state="paused")
     if not rj.get("paused_at"):
         rj["paused_at"] = scan.now.isoformat()
     if not rj.get("paused_reason"):
