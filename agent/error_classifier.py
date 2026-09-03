@@ -428,18 +428,21 @@ class _Ctx:
 
     error: Exception
     status_code: Optional[int]
-    error_type: str
     body: dict
-    error_code: str
-    headers: Any
-    msg: str            # lowercased str(error) + body message(s)
-    provider: str       # as passed by the caller
+    msg: str  # lowercased str(error) + body message(s)
+    provider: str  # as passed by the caller
     model: str
-    provider_slug: str  # stripped + lowercased
-    model_slug: str
     approx_tokens: int
     context_length: int
     num_messages: int
+
+    def __post_init__(self) -> None:
+        self.error_type = type(self.error).__name__
+        self.error_code = _extract_error_code(self.body)
+        self.code = self.error_code.lower()
+        self.headers = _from_cause_chain(self.error, _headers_of, {})
+        self.provider_slug = (self.provider or "").strip().lower()
+        self.model_slug = (self.model or "").strip().lower()
 
     def large_session(self, frac: float, tokens: int, messages: int) -> bool:
         """Absolute thresholds only proxy for smaller context windows."""
@@ -516,12 +519,11 @@ def _moa_special_cases(c: _Ctx) -> Optional[Verdict]:
 
 def _by_error_code(c: _Ctx) -> Optional[Verdict]:
     """Structured error codes from the response body."""
-    code = c.error_code.lower()
     # Request-validation failure as plain-text ``event: error`` SSE data behind
     # HTTP 200: retrying cannot succeed, a configured fallback still may.
-    if code == PROVIDER_STREAM_NON_JSON_ERROR_CODE and "request validation failed:" in c.msg:
+    if c.code == PROVIDER_STREAM_NON_JSON_ERROR_CODE and "request validation failed:" in c.msg:
         return _V_FORMAT_ERROR
-    return _ERROR_CODE_VERDICTS.get(code)
+    return _ERROR_CODE_VERDICTS.get(c.code)
 
 
 def _by_message(c: _Ctx) -> Optional[Verdict]:
@@ -562,13 +564,12 @@ def _by_transport(c: _Ctx) -> Optional[Verdict]:
 
 
 def _by_status(c: _Ctx) -> Optional[Verdict]:
-    """HTTP status code with message-aware refinement."""
-    if c.status_code is None:
+    """HTTP status code with message-aware refinement (unlisted 4xx/5xx → generic)."""
+    status = c.status_code
+    if status is None:
         return None
-    handler = _STATUS_HANDLERS.get(c.status_code)
-    if handler is not None:
-        return handler(c)
-    return _V_FORMAT_ERROR if 400 <= c.status_code < 500 else _V_SERVER_ERROR if 500 <= c.status_code < 600 else None
+    default = _V_FORMAT_ERROR if 400 <= status < 500 else _V_SERVER_ERROR if 500 <= status < 600 else None
+    return _STATUS_HANDLERS[status](c) if status in _STATUS_HANDLERS else default
 
 
 # Stage order: plugin hooks → provider-specific special cases → HTTP status →
@@ -586,17 +587,13 @@ def classify_api_error(
 ) -> ClassifiedError:
     """Classify an API error into a structured recovery recommendation (see ``_STAGES``)."""
     status_code = _extract_status_code(error)
-    error_type = type(error).__name__
     # Copilot/GitHub Models RateLimitError may not set .status_code; force 429.
-    if status_code is None and error_type == "RateLimitError":
+    if status_code is None and type(error).__name__ == "RateLimitError":
         status_code = 429
     body = _extract_error_body(error)
     c = _Ctx(
-        error=error, status_code=status_code, error_type=error_type, body=body,
-        error_code=_extract_error_code(body), headers=_from_cause_chain(error, _headers_of, {}),
-        msg=_build_error_msg(error, body), provider=provider, model=model,
-        provider_slug=(provider or "").strip().lower(), model_slug=(model or "").strip().lower(),
-        approx_tokens=approx_tokens, context_length=context_length, num_messages=num_messages,
+        error, status_code, body, _build_error_msg(error, body), provider, model,
+        approx_tokens, context_length, num_messages,
     )
     verdict = next((v for v in (stage(c) for stage in _STAGES) if v is not None), _V_UNKNOWN)
     return ClassifiedError(**{
@@ -609,7 +606,7 @@ def classify_api_error(
 
 def _status_403(c: _Ctx) -> Verdict:
     # OpenRouter 403 "key limit exceeded" and similar plan/credit exhaustion are billing.
-    xai_spend = c.provider_slug == "xai-oauth" and c.error_code.lower() == _XAI_SPENDING_LIMIT_ERROR_CODE
+    xai_spend = c.provider_slug == "xai-oauth" and c.code == _XAI_SPENDING_LIMIT_ERROR_CODE
     if xai_spend or any(p in c.msg for p in ("key limit exceeded", "spending limit") + _BILLING_PATTERNS):
         return _V_BILLING
     return _V_AUTH_FALLBACK
@@ -639,7 +636,7 @@ def _status_429(c: _Ctx) -> Verdict:
     # phrases) are billing ONLY when the body is not itself a rate-limit phrase
     # ("Rate limit exceeded" contains "limit exceeded") and carries no reset/
     # retry signal (#93419, #39441).
-    quota_wall = c.error_code.lower() == "usage_limit_reached" or any(
+    quota_wall = c.code == "usage_limit_reached" or any(
         p in c.msg for p in ("usage_limit_reached",) + _USAGE_LIMIT_PATTERNS + _BILLING_PATTERNS
     )
     if (
@@ -654,14 +651,10 @@ def _status_429(c: _Ctx) -> Verdict:
 def _status_5xx(c: _Ctx) -> Verdict:
     # Request-validation errors as 5xx (codex.nekos.me) fail fast instead of
     # retry-flooding — unless the parameter was injected server-side.
-    validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.error_code.lower() in _5XX_VALIDATION_CODES
+    validation = any(p in c.msg for p in _REQUEST_VALIDATION_PATTERNS) or c.code in _5XX_VALIDATION_CODES
     if validation and not _is_server_injected_param_rejection(c.msg, c.provider_slug):
         return _V_FORMAT_ERROR
     return _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_SERVER_ERROR
-
-
-def _status_overloaded(c: _Ctx) -> Verdict:
-    return _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED
 
 
 def _classify_402(error_msg: str, result_fn: Callable[..., Any]) -> Any:
@@ -674,7 +667,7 @@ def _classify_402(error_msg: str, result_fn: Callable[..., Any]) -> Any:
 
 def _classify_400(c: _Ctx) -> Verdict:
     """400 Bad Request — image/tool shapes, request-shape rejections, overflow, or generic."""
-    msg, code = c.msg, c.error_code.lower()
+    msg, code = c.msg, c.code
     verdict = _first_match(msg, _IMAGE_TOOL_RULES)
     if verdict is not None:
         return verdict
@@ -722,7 +715,9 @@ def _classify_400(c: _Ctx) -> Verdict:
 _STATUS_HANDLERS: Dict[int, Callable[[_Ctx], Verdict]] = {
     400: _classify_400, 401: lambda c: _V_AUTH_ROTATE, 402: lambda c: _classify_402(c.msg, dict),
     403: _status_403, 404: _status_404, 408: lambda c: _V_TIMEOUT, 413: lambda c: _V_PAYLOAD_TOO_LARGE,
-    429: _status_429, 500: _status_5xx, 502: _status_5xx, 503: _status_overloaded, 529: _status_overloaded,
+    429: _status_429, 500: _status_5xx, 502: _status_5xx,
+    503: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
+    529: lambda c: _first_match(c.msg, _OVERFLOW_AS_5XX_RULES) or _V_OVERLOADED,
 }
 
 
@@ -736,12 +731,9 @@ def _has_usage_limit_transient_signal(error_msg: str, body: dict, response_heade
     """Whether a usage-limit response identifies a reset window (message, body fields, or headers)."""
     if any(pattern in error_msg for pattern in _USAGE_LIMIT_TRANSIENT_SIGNALS):
         return True
-    payloads = [body]
-    if isinstance(body, dict) and isinstance(body.get("error"), dict):
-        payloads.append(body["error"])
-    for payload in payloads:
-        if isinstance(payload, dict) and any(payload.get(f) not in (None, "") for f in _RESET_FIELDS):
-            return True
+    payloads = [p for p in (body, _error_obj(body)) if isinstance(p, dict)]
+    if any(payload.get(f) not in (None, "") for payload in payloads for f in _RESET_FIELDS):
+        return True
     if response_headers and hasattr(response_headers, "get"):
         return any(response_headers.get(h) not in (None, "") for h in _RESET_HEADERS)
     return False
@@ -758,7 +750,6 @@ def _model_id_missing_known_prefix(model: str, provider: str) -> bool:
         return False
     try:
         from hermes_cli.model_normalize import suggest_prefixed_model_id
-
         return bool(suggest_prefixed_model_id((provider or "").strip(), name))
     except Exception:
         return False
@@ -770,13 +761,10 @@ def _is_server_injected_param_rejection(error_msg: str, provider: str) -> bool:
     Conservative: known parameters only, and only when ``provider`` is not a
     sender, so a genuine bad parameter (``max_tokens`` on GPT-5) stays format_error.
     """
-    if not error_msg:
-        return False
     provider_slug = (provider or "").strip().lower()
     for param, senders in _SERVER_INJECTED_PARAM_SENDERS.items():
-        if param not in error_msg or not any(w in error_msg for w in _PARAM_REJECTION_WORDS):
-            continue
-        return not any(sender in provider_slug for sender in senders)
+        if error_msg and param in error_msg and any(w in error_msg for w in _PARAM_REJECTION_WORDS):
+            return not any(sender in provider_slug for sender in senders)
     return False
 
 
@@ -857,14 +845,11 @@ def _body_of(exc: Any) -> Optional[dict]:
     if isinstance(body, dict):
         return body
     response = getattr(exc, "response", None)
-    if response is not None:
-        try:
-            json_body = response.json()
-            if isinstance(json_body, dict):
-                return json_body
-        except Exception:
-            pass
-    return None
+    try:
+        json_body = response.json() if response is not None else None
+    except Exception:
+        return None
+    return json_body if isinstance(json_body, dict) else None
 
 
 def _headers_of(exc: Any) -> Any:
@@ -899,11 +884,8 @@ def _code_from_payload(payload: Any, top_keys: Sequence[str], peek_message: bool
             if nested_code:
                 return nested_code
     code = next((payload.get(k) for k in top_keys if payload.get(k)), "")
-    if isinstance(code, (str, int)):
-        text = str(code).strip()
-        if text and text != "400":
-            return text
-    return ""
+    text = str(code).strip() if isinstance(code, (str, int)) else ""
+    return text if text and text != "400" else ""
 
 
 def _extract_error_code(body: dict) -> str:
@@ -913,10 +895,8 @@ def _extract_error_code(body: dict) -> str:
 
 def _extract_message(error: Exception, body: dict) -> str:
     """Extract the most informative error message (structured body first)."""
-    for msg in _body_message_candidates(body or {}):
-        if isinstance(msg, str) and msg.strip():
-            return msg.strip()[:500]
-    return str(error)[:500]
+    msg = next((m for m in _body_message_candidates(body or {}) if isinstance(m, str) and m.strip()), None)
+    return (msg.strip() if msg else str(error))[:500]
 
 
 def _is_openrouter_upstream_error(body: Any, provider: str) -> bool:
