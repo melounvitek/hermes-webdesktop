@@ -600,13 +600,13 @@ class GatewayAdapterLifecycleMixin:
 
         async def _slow_respawn() -> None:
             await asyncio.sleep(self._RECONNECT_WATCHER_SLOW_RETRY_SECS)
-            if not getattr(self, "_running", False):
-                return
-            if not getattr(self, "_failed_platforms", None):
-                return  # queue drained while we waited
             task = getattr(self, "_reconnect_watcher_task", None)
-            if task is not None and not task.done():
-                return  # a watcher came back on its own; stand down
+            if (
+                not getattr(self, "_running", False)
+                or not getattr(self, "_failed_platforms", None)  # queue drained while waiting
+                or (task is not None and not task.done())  # a watcher came back; stand down
+            ):
+                return
             logger.warning(
                 "Reconnect watcher still down with %d platform(s) queued — "
                 "slow respawn %d/%d", len(self._failed_platforms), attempt + 1,
@@ -654,29 +654,29 @@ class GatewayAdapterLifecycleMixin:
         indefinitely so transient outages self-heal, non-retryable (bad auth) drop out immediately.
         The circuit breaker (``/platform pause``) is manual only — auto-pausing left bots dead.
         """
+        async def _idle(seconds: int, until_queued: bool = False) -> bool:
+            """Sleep in 1s steps; False once the runner stops (or, if asked, once work is queued)."""
+            for _ in range(seconds):
+                if not self._running:
+                    return False
+                if until_queued and self._failed_platforms:
+                    break
+                await asyncio.sleep(1)
+            return True
+
         await asyncio.sleep(10)  # initial delay — let startup finish
         while self._running:
             if not self._failed_platforms:
-                # Nothing to reconnect — sleep and check again
-                for _ in range(30):
-                    if not self._running:
-                        return
-                    if self._failed_platforms:
-                        break
-                    await asyncio.sleep(1)
+                if not await _idle(30, until_queued=True):
+                    return
                 continue
-
             now = time.monotonic()
             for platform in list(self._failed_platforms.keys()):
                 if not self._running:
                     return
                 await self._reconnect_failed_platform(platform, now)
-
-            # Check every 10 seconds for platforms that need reconnection
-            for _ in range(10):
-                if not self._running:
-                    return
-                await asyncio.sleep(1)
+            if not await _idle(10):  # re-check every 10 seconds
+                return
 
     def _flag_reconnect_needs_attention(self, platform, info: dict, now: float) -> None:
         """Past the attention threshold flag NEEDS_ATTENTION in runtime status (once).
@@ -705,10 +705,15 @@ class GatewayAdapterLifecycleMixin:
             retrying_since=retrying_since_iso,
         )
 
-    @staticmethod
-    def _bump_reconnect_backoff(info: dict, attempt: int) -> int:
-        """Record a failed attempt in the queue entry; returns the backoff applied."""
+    def _bump_reconnect_backoff(
+        self, platform, info: dict, attempt: int, error_code, error_message: str
+    ) -> int:
+        """Mark the platform retrying and record the failed attempt; returns the backoff applied."""
         from gateway.run import _reconnect_backoff
+        self._update_platform_runtime_status(
+            platform.value, platform_state="retrying", error_code=error_code,
+            error_message=error_message,
+        )
         backoff = _reconnect_backoff(attempt)
         info["attempts"] = attempt
         info["next_retry"] = time.monotonic() + backoff
@@ -718,12 +723,8 @@ class GatewayAdapterLifecycleMixin:
         """One watcher pass for a queued platform: gate, attempt, and record the outcome."""
         from gateway.run import _dispose_unused_adapter, _platform_has_bot_credential
         info = self._failed_platforms.get(platform)
-        if info is None:
-            # Removed concurrently (/platform resume, reconnect via another path) between the
-            # caller's snapshot and this lookup — not an error, nothing to do this pass.
-            return
-        # Paused platforms need an explicit /platform resume to come back.
-        if info.get("paused"):
+        # None: removed concurrently since the caller's snapshot. Paused needs /platform resume.
+        if info is None or info.get("paused"):
             return
         self._flag_reconnect_needs_attention(platform, info, now)
         if now < info["next_retry"]:
@@ -734,11 +735,7 @@ class GatewayAdapterLifecycleMixin:
         # Empty-token primary configs can never reconnect; drop them so multiplex setups
         # where a secondary profile owns the bot do not spin forever.
         if not _platform_has_bot_credential(platform, platform_config):
-            logger.warning(
-                "Reconnect %s: no bot credential on queued config, "
-                "removing from retry queue", platform.value,
-            )
-            del self._failed_platforms[platform]
+            self._drop_from_reconnect_queue(platform, "no bot credential on queued config")
             return
         logger.info("Reconnecting %s (attempt %d)...", platform.value, attempt)
 
@@ -746,11 +743,7 @@ class GatewayAdapterLifecycleMixin:
         try:
             adapter = self._create_adapter(platform, platform_config)
             if not adapter:
-                logger.warning(
-                    "Reconnect %s: adapter creation returned None, removing from retry queue",
-                    platform.value,
-                )
-                del self._failed_platforms[platform]
+                self._drop_from_reconnect_queue(platform, "adapter creation returned None")
                 return
 
             self._wire_adapter_handlers(adapter)
@@ -768,33 +761,30 @@ class GatewayAdapterLifecycleMixin:
                     "Reconnect %s: non-retryable error (%s), removing from retry queue",
                     platform.value, adapter.fatal_error_message,
                 )
-                # Dropped from the queue without ever being installed on self.adapters, so nothing
-                # else will call disconnect() on it. Dispose here or the resource owners built in
-                # __init__ (ResponseStore etc.) leak ~2 fds each — fd limit in ~12h at the 300s cap.
+                # Never installed on self.adapters, so nothing else will disconnect() it: dispose or
+                # the resource owners built in __init__ leak ~2 fds each (fd limit in ~12h at the cap).
                 await _dispose_unused_adapter(adapter)
                 del self._failed_platforms[platform]
             else:
-                self._update_platform_runtime_status(
-                    platform.value, platform_state="retrying", error_code=adapter.fatal_error_code,
-                    error_message=adapter.fatal_error_message or "failed to reconnect",
+                # Retryable failures retry at the backoff cap forever; never auto-pause them — a
+                # transient outage must not need `/platform resume`. Same fd-leak dispose as above.
+                backoff = self._bump_reconnect_backoff(
+                    platform, info, attempt, adapter.fatal_error_code,
+                    adapter.fatal_error_message or "failed to reconnect",
                 )
-                backoff = self._bump_reconnect_backoff(info, attempt)
                 logger.info("Reconnect %s failed, next retry in %ds", platform.value, backoff)
-                # Same fd-leak concern as the non-retryable branch: the adapter is thrown away.
-                # Retryable failures (network/DNS blips) retry at the backoff cap forever; never
-                # auto-pause them — a transient outage must not need `/platform resume`.
                 await _dispose_unused_adapter(adapter)
         except Exception as e:
             if adapter is not None:
-                # An exception escaping connect (DNS timeout, aiohttp server.start() crash, ...)
-                # leaves the adapter in the same unowned state as the branches above.
+                # An exception escaping connect leaves the adapter in the same unowned state.
                 await _dispose_unused_adapter(adapter)
-            self._update_platform_runtime_status(
-                platform.value, platform_state="retrying", error_code=None, error_message=str(e)
-            )
-            backoff = self._bump_reconnect_backoff(info, attempt)
             # A reconnect exception is transient; keep retrying at the cap rather than auto-pausing.
+            backoff = self._bump_reconnect_backoff(platform, info, attempt, None, str(e))
             logger.warning("Reconnect %s error: %s, next retry in %ds", platform.value, e, backoff)
+
+    def _drop_from_reconnect_queue(self, platform, reason: str) -> None:
+        logger.warning("Reconnect %s: %s, removing from retry queue", platform.value, reason)
+        del self._failed_platforms[platform]
 
     async def _install_reconnected_adapter(self, platform, adapter) -> None:
         """Publish a freshly reconnected primary adapter and replay what it missed while down."""
