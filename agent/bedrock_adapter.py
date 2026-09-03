@@ -1,11 +1,9 @@
-"""AWS Bedrock Converse API adapter for Hermes Agent.
+"""AWS Bedrock Converse API adapter (boto3, optional dependency).
 
-Talks to Bedrock through the native Converse API (boto3) so the AWS credential
-chain (IAM roles, SSO profiles, env vars, instance metadata), cross-region
-inference profiles, guardrails and control-plane model discovery all work
-without API keys. OpenAI-format messages/tools are converted to Converse format
-on the way in and responses normalized back to OpenAI-shaped objects.
-Requires ``boto3`` (optional dependency).
+The AWS credential chain, cross-region inference profiles, guardrails and
+control-plane model discovery all work without API keys. OpenAI-format
+messages/tools are converted to Converse on the way in and responses normalized
+back to OpenAI-shaped objects.
 """
 
 import base64
@@ -32,9 +30,8 @@ except Exception:
 _bedrock_runtime_client_cache: Dict[str, Any] = {}
 _bedrock_control_client_cache: Dict[str, Any] = {}
 
-# Bedrock-hosted OpenAI GPT-5.x models are served from the Bedrock Mantle
-# OpenAI-compatible Responses endpoint, not Converse. Keep the allowlist narrow
-# so Converse-capable GPT-OSS models stay on the native path.
+# Bedrock-hosted GPT-5.x models are served from the Bedrock Mantle OpenAI-compatible
+# endpoint, not Converse. Narrow allowlist so GPT-OSS models stay on the native path.
 BEDROCK_OPENAI_RESPONSES_MODEL_IDS: Tuple[str, ...] = (
     "openai.gpt-5.5",
     "openai.gpt-5.6-sol",
@@ -161,7 +158,7 @@ class BedrockOpenAISigV4Auth(httpx.Auth):
                 "Configure AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, AWS_PROFILE, "
                 "SSO, or an instance/task role."
             )
-        # SigV4 must own Authorization: drop the SDK's placeholder bearer header, keep the rest.
+        # SigV4 must own Authorization: drop the SDK's placeholder bearer header.
         headers = {
             str(k): str(v)
             for k, v in request.headers.items()
@@ -184,11 +181,8 @@ def build_bedrock_openai_http_client(region: str, *, timeout: Optional[float] = 
 def configure_bedrock_openai_client_kwargs(
     client_kwargs: Dict[str, Any], *, timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Install SigV4 auth on OpenAI SDK kwargs for Bedrock Mantle.
-
-    Real API keys (``AWS_BEARER_TOKEN_BEDROCK``) keep the SDK's bearer auth; the
-    ``aws-sdk``/``no-key-required`` placeholders mean IAM credential-chain auth.
-    """
+    """Install SigV4 auth on OpenAI SDK kwargs for Bedrock Mantle. Real API keys keep the
+    SDK's bearer auth; the ``aws-sdk``/``no-key-required`` placeholders mean IAM chain auth."""
     base_url = str(client_kwargs.get("base_url") or "")
     if not is_bedrock_openai_base_url(base_url):
         return client_kwargs
@@ -202,11 +196,9 @@ def configure_bedrock_openai_client_kwargs(
 
 
 # --- Stale-connection detection ---
-# boto3 caches its HTTPS pool inside the client. A pooled connection killed out
-# from under us (NAT timeout, VPN flap, RST) surfaces as botocore
-# ConnectionClosedError / urllib3 ProtocolError, or as a bare AssertionError from
-# urllib3's pool-state checks. Retrying with the same client reproduces the
-# failure, so the fix is to evict the client.
+# A pooled connection killed under boto3 (NAT timeout, VPN flap, RST) surfaces as a
+# botocore/urllib3 transport error or a bare AssertionError from urllib3's pool
+# checks; retrying the same client reproduces it, so the fix is to evict the client.
 
 _STALE_LIB_MODULE_PREFIXES = ("urllib3.", "botocore.", "boto3.")
 
@@ -242,12 +234,9 @@ def is_stale_connection_error(exc: BaseException) -> bool:
 
 
 def is_streaming_access_denied_error(exc: BaseException) -> bool:
-    """True when IAM denied ``bedrock:InvokeModelWithResponseStream``.
-
-    InvokeModel-only policies reject converse_stream() permanently, so callers
-    should fall back to non-streaming converse(). Message-based because the
-    AnthropicBedrock SDK wraps the same AWS response but preserves the action name.
-    """
+    """True when IAM denied ``bedrock:InvokeModelWithResponseStream`` (permanent: callers
+    fall back to non-streaming converse()). Message-based because the AnthropicBedrock SDK
+    wraps the same AWS response but preserves the action name."""
     msg = str(exc).lower()
     if "invokemodelwithresponsestream" not in msg:
         return False
@@ -317,12 +306,9 @@ def resolve_bedrock_region(env: Optional[Dict[str, str]] = None) -> str:
 
 
 def resolve_bedrock_runtime_region(config: Optional[Dict[str, Any]] = None) -> str:
-    """``bedrock.region`` from config.yaml, else :func:`resolve_bedrock_region`.
-
-    Every non-runtime Bedrock endpoint (auxiliary clients, picker discovery) must
-    use this so auxiliary calls never leave the primary runtime's region when
-    config and ambient AWS env/profile disagree. Pass *config* to avoid a disk read.
-    """
+    """``bedrock.region`` from config.yaml, else :func:`resolve_bedrock_region`. Every
+    non-runtime Bedrock endpoint must use this so auxiliary calls never leave the primary
+    runtime's region when config and ambient AWS env disagree. Pass *config* to skip disk."""
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -346,8 +332,7 @@ def bedrock_model_ids_or_none() -> Optional[List[str]]:
 
 # --- Tool-calling / prompt-cache capability detection ---
 
-# Models known to reject toolConfig with a ValidationException. Unknown models
-# are assumed to support tools.
+# Models known to reject toolConfig with a ValidationException; unknown models assumed OK.
 _NON_TOOL_CALLING_PATTERNS = [
     "deepseek.r1",          # DeepSeek R1 — reasoning only
     "deepseek-r1",          # Alternate ID format
@@ -356,10 +341,8 @@ _NON_TOOL_CALLING_PATTERNS = [
     "amazon.titan-embed",   # Embeddings
 ]
 
-# cachePoint allowlist — inverted policy vs tools: an unsupported model rejects
-# cachePoint with a ValidationException, so unknown models get NO cache markers.
-# Claude normally uses the AnthropicBedrock SDK path and only reaches
-# build_converse_kwargs under bearer-token auth.
+# cachePoint allowlist — inverted policy vs tools: unknown models get NO cache markers
+# (they reject cachePoint). Claude only reaches build_converse_kwargs under bearer auth.
 _CACHE_POINT_PATTERNS = [
     "anthropic.claude",  # bearer-token fallback path
     "amazon.nova",
@@ -378,11 +361,10 @@ def _model_supports_prompt_cache(model_id: str) -> bool:
 
 
 # --- Server-verdict cachePoint suppression ---
-# Bedrock's real cachePoint rule is per-family AND per-field (Nova accepts it in
-# system/messages but hard-fails on toolConfig.tools), and any static table
-# drifts as AWS ships new families. So when Bedrock names a placement as
-# unpermitted we record that verdict, drop the marker from that placement for
-# the rest of the process, and retry the rejected request once without it.
+# Bedrock's cachePoint rule is per-family AND per-field (Nova accepts it in
+# system/messages but hard-fails on toolConfig.tools) and any static table drifts, so
+# when Bedrock names a placement as unpermitted we record the verdict, drop the marker
+# there for the rest of the process, and retry once without it.
 
 CACHE_POINT_PLACEMENTS = ("tools", "system", "messages")
 
@@ -395,13 +377,9 @@ _CACHE_POINT = {"cachePoint": {"type": "default"}}
 
 
 def cache_point_rejection_placement(exc: BaseException) -> Optional[str]:
-    """Return the Converse section whose cachePoint Bedrock refused, or None.
-
-    Message-based on purpose: the JSON pointer in the ValidationException is the
-    only thing that says *which* section was rejected, and the same wording
-    arrives raw from botocore and wrapped by SDKs. An unlocalisable rejection
-    maps to "tools" — the only placement a supported family is known to refuse.
-    """
+    """Converse section whose cachePoint Bedrock refused, or None. Message-based: the JSON
+    pointer in the ValidationException is the only thing naming the section, and the same
+    wording arrives raw or SDK-wrapped. Unlocalisable → "tools" (the only known refusal)."""
     msg = str(exc)
     lowered = msg.lower()
     if "cachepoint" not in lowered or ("not permitted" not in lowered and "extraneous" not in lowered):
@@ -441,11 +419,8 @@ def _without_cache_points(blocks: Any) -> Optional[list]:
 
 
 def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]:
-    """Copy of Converse kwargs with ``placement``'s cachePoint removed.
-
-    Returns the input unchanged (same object) when there was nothing to strip,
-    which is what callers use to decide a retry cannot help.
-    """
+    """Copy of Converse kwargs with ``placement``'s cachePoint removed; the SAME object
+    back when nothing was stripped (callers use identity to decide a retry cannot help)."""
     if placement == "system":
         cleaned = _without_cache_points(kwargs.get("system"))
         return kwargs if cleaned is None else {**kwargs, "system": cleaned}
@@ -467,11 +442,8 @@ def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]
 
 
 def recover_from_cache_point_rejection(exc: BaseException, kwargs: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Record Bedrock's cachePoint verdict and return retry kwargs, or None.
-
-    None means the error was not a cachePoint rejection, or the marker was
-    already absent — retrying cannot change the outcome; caller must re-raise.
-    """
+    """Record Bedrock's cachePoint verdict and return retry kwargs, or None when the error
+    was not a cachePoint rejection / the marker was already absent (caller re-raises)."""
     placement = cache_point_rejection_placement(exc)
     if placement is None:
         return None
@@ -493,11 +465,8 @@ _REGIONAL_PREFIXES = ("global.", "us.", "eu.", "apac.", "ap.", "au.", "jp.", "ca
 
 
 def is_anthropic_bedrock_model(model_id: str) -> bool:
-    """True for Claude on Bedrock (``anthropic.claude-*`` with any regional prefix).
-
-    These use the AnthropicBedrock SDK path (prompt caching, thinking budgets);
-    non-Claude models use the Converse path.
-    """
+    """True for Claude on Bedrock (``anthropic.claude-*`` with any regional prefix); these
+    use the AnthropicBedrock SDK path, everything else the Converse path."""
     model_lower = model_id.lower()
     for prefix in _REGIONAL_PREFIXES:
         if model_lower.startswith(prefix):
@@ -536,11 +505,8 @@ def _safe_text(text) -> str:
 
 
 def _image_block_from_data_url(url: str) -> Dict:
-    """``data:<mime>;base64,...`` → Converse image block with RAW bytes.
-
-    boto3 base64-encodes at the wire layer, so passing the base64 string through
-    double-encodes and Bedrock rejects it ("Failed to sanitize image").
-    """
+    """``data:<mime>;base64,...`` → Converse image block with RAW bytes (boto3 base64-encodes
+    at the wire layer; passing the string through double-encodes and Bedrock rejects it)."""
     header, _, data = url.partition(",")
     media_type = (header[5:].split(";")[0] if header.startswith("data:") else "") or "image/jpeg"
     try:
@@ -554,11 +520,8 @@ def _image_block_from_data_url(url: str) -> Dict:
 
 
 def _convert_content_to_converse(content) -> List[Dict]:
-    """OpenAI message content (str or parts list) → Converse content blocks.
-
-    Empty/whitespace text becomes the placeholder; remote image URLs (unsupported
-    by Converse) become a text reference.
-    """
+    """OpenAI message content → Converse blocks. Blank text becomes the placeholder; remote
+    image URLs (unsupported by Converse) become a text reference."""
     if not isinstance(content, list):
         return [{"text": _safe_text(content)}]
     blocks = []
@@ -602,11 +565,8 @@ def _decode_redacted(encoded) -> Optional[bytes]:
 
 
 def _replay_ordered_blocks(ordered_blocks: List) -> List[Dict]:
-    """Rebuild the exact Bedrock block sequence captured at normalization time.
-
-    Redacted reasoning bytes are stored base64-encoded (JSON-safe sidecar);
-    undecodable entries are skipped.
-    """
+    """Rebuild the exact Bedrock block sequence captured at normalization time; redacted
+    reasoning is stored base64 (JSON-safe sidecar) and undecodable entries are skipped."""
     content_blocks: List[Dict] = []
     for block in ordered_blocks:
         if not isinstance(block, dict):
@@ -643,12 +603,9 @@ def _parse_tool_args(args) -> Any:
 
 
 def _assistant_blocks(msg: Dict, content) -> List[Dict]:
-    """Assistant message → Converse blocks.
-
-    An ordered ``bedrock_content_blocks`` sidecar is authoritative and replayed
-    verbatim. Otherwise: redacted thinking from ``reasoning_details`` (so opaque
-    encrypted reasoning round-trips byte-for-byte), then text, then tool calls.
-    """
+    """Assistant message → Converse blocks. An ordered ``bedrock_content_blocks`` sidecar is
+    authoritative; otherwise redacted thinking from ``reasoning_details`` (byte-for-byte
+    round-trip), then text, then tool calls."""
     ordered_blocks = msg.get("bedrock_content_blocks")
     if isinstance(ordered_blocks, list) and ordered_blocks:
         content_blocks = _replay_ordered_blocks(ordered_blocks)
@@ -671,13 +628,9 @@ def _assistant_blocks(msg: Dict, content) -> List[Dict]:
 
 
 def convert_messages_to_converse(messages: List[Dict]) -> Tuple[Optional[List[Dict]], List[Dict]]:
-    """OpenAI messages → ``(system_blocks_or_None, converse_messages)``.
-
-    System messages become the system prompt; tool results become ``toolResult``
-    blocks in a user turn. Converse requires strict user/assistant alternation
-    with a user turn first and last, so same-role neighbours are merged and
-    placeholder user turns are inserted at the ends.
-    """
+    """OpenAI messages → ``(system_blocks_or_None, converse_messages)``. Tool results become
+    ``toolResult`` user blocks. Converse requires strict user/assistant alternation with a
+    user turn first and last: same-role neighbours merge, placeholder user turns pad the ends."""
     system_blocks: List[Dict] = []
     converse_msgs: List[Dict] = []
 
@@ -748,12 +701,8 @@ class _ResponseParts:
             self.reasoning_details.append({"type": "redacted_thinking", "data": encoded})
 
     def build(self, ordered_blocks: List[Dict[str, Any]], usage_data: Dict[str, int], stop_reason: str, model: str) -> SimpleNamespace:
-        """Assemble the OpenAI-shaped response.
-
-        Converse's inputTokens EXCLUDES cache read/write tokens (OpenAI's
-        prompt_tokens includes them), so they are added back here and the
-        Anthropic-named cache fields are surfaced for downstream normalize_usage().
-        """
+        """Assemble the OpenAI-shaped response. Converse's inputTokens EXCLUDES cache
+        read/write tokens (OpenAI's prompt_tokens includes them), so they are added back."""
         msg = SimpleNamespace(
             role="assistant",
             content="\n".join(self.text_parts) if self.text_parts else None,
@@ -782,11 +731,9 @@ class _ResponseParts:
 
 
 def normalize_converse_response(response: Dict) -> SimpleNamespace:
-    """Bedrock Converse response → OpenAI ``ChatCompletion``-shaped SimpleNamespace.
-
-    Exposes ``.choices[0].message.{content,tool_calls,reasoning_content,
-    reasoning_details,bedrock_content_blocks}``, ``.choices[0].finish_reason``, ``.usage``.
-    """
+    """Bedrock Converse response → OpenAI ``ChatCompletion``-shaped SimpleNamespace
+    (``.choices[0].message.{content,tool_calls,reasoning_content,reasoning_details,
+    bedrock_content_blocks}``, ``.choices[0].finish_reason``, ``.usage``)."""
     parts = _ResponseParts()
     ordered_blocks = []
     for block in response.get("output", {}).get("message", {}).get("content", []):
@@ -833,15 +780,11 @@ def stream_converse_with_callbacks(
     on_interrupt_check=None,
     on_event=None,
 ) -> SimpleNamespace:
-    """Process a boto3 ``converse_stream()`` response with real-time callbacks.
-
-    ``on_text_delta`` only fires while no toolUse block has been seen (same
-    semantics as the Anthropic/chat_completions paths). ``on_interrupt_check``
-    runs per event; True stops streaming. ``on_event`` is a wire-level liveness
-    signal fired for EVERY event before any branching; its exceptions are
-    swallowed so it can never abort the stream. Returns the
-    ``normalize_converse_response()`` shape.
-    """
+    """Process a boto3 ``converse_stream()`` response with callbacks → the
+    ``normalize_converse_response()`` shape. ``on_text_delta`` only fires while no toolUse
+    block has been seen (as on the Anthropic/chat_completions paths); ``on_interrupt_check``
+    True stops streaming; ``on_event`` fires for EVERY event before branching and its
+    exceptions are swallowed so a watchdog hook can never abort the stream."""
     parts = _ResponseParts()
     stream_blocks: Dict[int, Dict[str, Any]] = {}
     current_block_index: Optional[int] = None
@@ -941,12 +884,10 @@ def build_converse_kwargs(
 ) -> Dict[str, Any]:
     """Build kwargs for ``bedrock-runtime.converse()`` / ``converse_stream()``.
 
-    ``max_tokens=None`` omits ``inferenceConfig.maxTokens`` so Bedrock uses the
-    model's maximum output (default stays 4096). cachePoint markers go on system,
-    tools and the second-newest message (so the marker survives as only the tail
-    grows — mirrors the Anthropic system_and_3 strategy), each only if the model
-    supports caching and Bedrock has not rejected that placement.
-    """
+    ``max_tokens=None`` omits ``maxTokens`` (model maximum; default stays 4096). cachePoint
+    markers go on system, tools and the second-newest message (survives as the tail grows —
+    mirrors Anthropic system_and_3), each only if the model supports caching and Bedrock has
+    not rejected that placement."""
     system_prompt, converse_messages = convert_messages_to_converse(messages)
     cache_enabled = _model_supports_prompt_cache(model)
 
@@ -968,8 +909,7 @@ def build_converse_kwargs(
         inference_config["stopSequences"] = stop_sequences
     converse_tools = convert_tools_to_converse(tools) if tools else []
     if converse_tools:
-        # Non-tool-calling models (e.g. DeepSeek R1) reject toolConfig with a
-        # ValidationException → retry loop → failure. Strip tools and warn.
+        # Non-tool-calling models reject toolConfig (ValidationException → retry loop): strip and warn.
         if _model_supports_tool_use(model):
             if cache_here("tools"):
                 converse_tools = converse_tools + [dict(_CACHE_POINT)]
@@ -1001,11 +941,8 @@ def call_converse(
     stop_sequences: Optional[List[str]] = None,
     guardrail_config: Optional[Dict] = None,
 ) -> SimpleNamespace:
-    """Non-streaming Converse call → OpenAI-compatible response.
-
-    Retries once without the rejected cachePoint placement; evicts the cached
-    client on stale-connection errors before re-raising.
-    """
+    """Non-streaming Converse call → OpenAI-compatible response. Retries once without a
+    rejected cachePoint placement; evicts the cached client on stale-connection errors."""
     client = _get_bedrock_runtime_client(region)
     kwargs = build_converse_kwargs(
         model, messages, tools, max_tokens, temperature, top_p, stop_sequences, guardrail_config,
@@ -1093,13 +1030,8 @@ def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any
 
 
 def discover_bedrock_models(region: str, provider_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    """Discover Bedrock foundation models + inference profiles (cached 1h per region/filter).
-
-    Each entry has ``id``, ``name``, ``provider`` ("inference-profile" for
-    profiles), ``input_modalities``, ``output_modalities``, ``streaming``.
-    Sorted with ``global.`` cross-region profiles first, then by name.
-    Returns [] when the client cannot be built.
-    """
+    """Discover foundation models + inference profiles (cached 1h per region/filter), sorted
+    ``global.`` profiles first then by name; [] when the client cannot be built."""
     import time
     cache_key = f"{region}:{','.join(sorted(provider_filter or []))}"
     cached = _discovery_cache.get(cache_key)
@@ -1132,15 +1064,12 @@ def _extract_provider_from_arn(arn: str) -> str:
 
 
 # --- Bedrock model context lengths ---
-# Static fallback for when the live probe is unavailable (used by
-# agent/model_metadata.py). Keys match by longest substring, so versioned entries
-# (opus-4-6/4-7/4-8) win over the generic "anthropic.claude-opus-4".
+# Static fallback when the live probe is unavailable (agent/model_metadata.py). Keys match
+# by longest substring, so versioned entries win over the generic "anthropic.claude-opus-4".
 
 BEDROCK_CONTEXT_LENGTHS: Dict[str, int] = {
-    # Anthropic Claude. Fable / Sonnet 5 / Opus 4.8-4.6 / Sonnet 4.6 are 1M GA;
-    # Sonnet 4.5 / Sonnet 4 lost their 1M beta and are 200K; Haiku 4.5 is 200K.
-    # The 1M entries must match agent/model_metadata.py DEFAULT_CONTEXT_LENGTHS
-    # or context compresses early.
+    # Anthropic Claude: 1M GA vs 200K. The 1M entries must match
+    # agent/model_metadata.py DEFAULT_CONTEXT_LENGTHS or context compresses early.
     **dict.fromkeys((
         "anthropic.claude-fable-5", "anthropic.claude-fable", "anthropic.claude-sonnet-5",
         "anthropic.claude-opus-4-8", "anthropic.claude-opus-4-7", "anthropic.claude-opus-4-6",
@@ -1168,23 +1097,17 @@ BEDROCK_CONTEXT_LENGTHS: Dict[str, int] = {
 # Default for unknown Bedrock models
 BEDROCK_DEFAULT_CONTEXT_LENGTH = 128_000
 
-# Probe padding targets (tokens). Tiered because a wildly oversized payload (5M
-# tokens) yields an opaque InternalServerException instead of a clean
-# ValidationException; stepping up discovers 2M+ windows without over-padding.
+# Probe padding tiers (tokens): a wildly oversized payload yields an opaque
+# InternalServerException instead of a clean ValidationException.
 _BEDROCK_PROBE_TIERS = (1_300_000, 2_200_000)
 _WORDS_PER_TOKEN = 0.9  # conservative: ensures the padded prompt clears the tier
 
 
 def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
-    """Discover a model's real context window by provoking a length error.
-
-    No Bedrock metadata API exposes the window; the only authoritative source is
-    the ValidationException for an oversized prompt ("prompt is too long: 1300032
-    tokens > 1000000 maximum"). Length validation happens before inference, so
-    the probe costs nothing. If a tier is accepted, that tier is returned as a
-    safe lower bound. Returns None if the probe could not run (no credentials,
-    network error, no parseable limit) so the caller falls back to the static table.
-    """
+    """Discover a model's real context window by provoking a length error — the only
+    authoritative source ("prompt is too long: 1300032 tokens > 1000000 maximum"); length
+    validation runs before inference so the probe costs nothing. An accepted tier is
+    returned as a safe lower bound; None (no creds / network / unparseable) → static table."""
     try:
         from agent.model_metadata import parse_context_limit_from_error
     except ImportError:  # pragma: no cover — same package
@@ -1220,13 +1143,9 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
 
 
 def get_bedrock_context_length(model_id: str, region: str = "", probe: bool = True) -> int:
-    """Context window: live probe (if ``probe`` and ``region``) → static table → default.
-
-    The static table is a fallback only: AWS ships new versions faster than the
-    table tracks, and a stale substring match silently caps the window (e.g. a 1M
-    Opus pinned to 200K via "opus-4"). ``probe=False`` or an empty region skips
-    the network call for offline/display paths.
-    """
+    """Context window: live probe (if ``probe`` and ``region``) → static table → default. The
+    table is fallback only: a stale substring match silently caps the window (a 1M Opus
+    pinned to 200K via "opus-4"). ``probe=False`` / empty region skips the network call."""
     if probe and region:
         probed = probe_bedrock_context_length(model_id, region)
         if probed:
