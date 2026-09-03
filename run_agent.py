@@ -794,8 +794,7 @@ class AIAgent(
                 target()
                 self._maybe_requeue_preempted_review(review_run, dict(
                     messages_snapshot=messages_snapshot, review_memory=review_memory, review_skills=review_skills,
-                    focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1,
-                ))
+                    focus=focus, task_cfg=task_cfg, _requeue_attempts=_requeue_attempts + 1))
 
             # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
             # right profile.
@@ -882,9 +881,7 @@ class AIAgent(
         if not (user_text and response_text):
             return
         try:
-            sync_kwargs = {"session_id": self.session_id or ""}
-            if messages is not None:
-                sync_kwargs["messages"] = messages
+            sync_kwargs = {"session_id": self.session_id or "", **({"messages": messages} if messages is not None else {})}
             self._memory_manager.sync_all(user_text, response_text, **sync_kwargs)
             # Sibling of the build_turn_context() prefetch gate: don't key recall on zero-signal prompts.
             if not is_trivial_prompt(user_text):
@@ -961,8 +958,8 @@ class AIAgent(
 
     def _close_request_clients(self, reason: str) -> None:
         """Drop the cached per-request wire clients (reused across sequential LLM calls)."""
-        _quietly(lambda: self._close_cached_request_openai_client(reason=reason))
-        _quietly(lambda: self._close_cached_request_anthropic_client(reason=reason))
+        _quietly(self._close_cached_request_openai_client, reason=reason)
+        _quietly(self._close_cached_request_anthropic_client, reason=reason)
 
     def _close_codex_session(self) -> None:
         """Close the Codex app-server session (else the child keeps running); the attribute is cleared BEFORE
@@ -984,13 +981,9 @@ class AIAgent(
         agent owns it — a dedicated handle left open pins its fds and token-writer thread for the process
         lifetime. The owner flag is cleared first so close() stays idempotent."""
         session_db = getattr(self, "_session_db", None)
-        try:
-            if getattr(self, "_end_session_on_close", True):
-                session_id = getattr(self, "session_id", None)
-                if session_db and session_id:
-                    session_db.end_session(session_id, "agent_close")
-        except Exception:
-            pass
+        session_id = getattr(self, "session_id", None)
+        if getattr(self, "_end_session_on_close", True) and session_db and session_id:
+            _quietly(lambda: session_db.end_session(session_id, "agent_close"))
         if getattr(self, "_owns_session_db", False) and session_db is not None:
             self._owns_session_db = False
             # Shared instances no-op on close(); release the refcount so the registry closes on the last caller.
@@ -1006,12 +999,11 @@ class AIAgent(
             last_todo_response, last_todo_revision = found
             # Restore only when history carries a newer revision than the store holds; empty lists are an
             # authoritative clear.
-            current_revision = int(self._todo_store.snapshot().get("revision", 0) or 0)
             try:
                 history_revision = max(0, int(last_todo_revision or 0))
             except (TypeError, ValueError):
                 history_revision = 1
-            if history_revision > current_revision:
+            if history_revision > int(self._todo_store.snapshot().get("revision", 0) or 0):
                 self._todo_store.restore(last_todo_response, revision=history_revision)
                 if not self.quiet_mode:
                     self._vprint(f"{self.log_prefix}📋 Restored {len(last_todo_response)} todo item(s) from history")
@@ -1024,9 +1016,7 @@ class AIAgent(
         for idx in range(len(history) - 1, -1, -1):
             msg = history[idx]
             content = msg.get("content", "")
-            if msg.get("role") != "tool" or not isinstance(content, str):
-                continue
-            if not self._tool_response_matches_todo_call(history, idx):
+            if msg.get("role") != "tool" or not isinstance(content, str) or not self._tool_response_matches_todo_call(history, idx):
                 continue
             if len(content) > MAX_TODO_RESULT_CHARS:
                 logger.warning("Skipping oversized todo tool response during hydration: "
@@ -1046,9 +1036,7 @@ class AIAgent(
     def _tool_response_matches_todo_call(cls, history: List[Dict[str, Any]], tool_index: int) -> bool:
         """True when the nearest prior assistant message issued a ``todo`` call with this ``tool_call_id``; a
         ``user``/``system`` boundary or missing id means unpaired → must not hydrate."""
-        if tool_index < 0 or tool_index >= len(history):
-            return False
-        tool_call_id = history[tool_index].get("tool_call_id")
+        tool_call_id = history[tool_index].get("tool_call_id") if 0 <= tool_index < len(history) else None
         if not tool_call_id:
             return False
         for prior in reversed(history[:tool_index]):
@@ -1133,14 +1121,12 @@ class AIAgent(
                         return True
                     continue
                 btype = block.get("type")
-                if btype in {"thinking", "redacted_thinking"}:
-                    continue
                 if btype == "text":
                     text = block.get("text", "")
                     if isinstance(text, str) and text.strip():
                         return True
-                    continue
-                return True  # tool_use, image, document, etc. — real payload
+                elif btype not in {"thinking", "redacted_thinking"}:
+                    return True  # tool_use, image, document, etc. — real payload
             return False
         return content is not None and content != ""
 
@@ -1155,8 +1141,7 @@ class AIAgent(
         delegate_count = sum(1 for tc in tool_calls if tc.function.name == "delegate_task")
         if delegate_count <= max_children:
             return tool_calls
-        kept_delegates = 0
-        truncated = []
+        kept_delegates, truncated = 0, []
         for tc in tool_calls:
             if tc.function.name == "delegate_task":
                 if kept_delegates >= max_children:
@@ -1284,10 +1269,8 @@ class AIAgent(
             exec_cwd = Path(active_env.cwd) if active_env is not None and active_env.cwd else None
             segments = _plan_tool_batch_segments(tool_calls, execution_cwd=exec_cwd)
             if len(segments) == 1:
-                if segments[0][0] == "parallel":
-                    return self._execute_tool_calls_concurrent(*args)
-                return self._execute_tool_calls_sequential(*args)
-
+                run = self._execute_tool_calls_concurrent if segments[0][0] == "parallel" else self._execute_tool_calls_sequential
+                return run(*args)
             from agent.tool_executor import execute_tool_calls_segmented
             return execute_tool_calls_segmented(self, *args, segments=segments)
         finally:
@@ -1377,15 +1360,9 @@ def _print_tool_listing() -> None:
     basic_toolsets, composite_toolsets, scenario_toolsets = [], [], []
     for name in get_all_toolsets():
         info = get_toolset_info(name)
-        if not info:
-            continue
-        if name in _BASIC_TOOLSETS:
-            basic_toolsets.append((name, info))
-        elif name in _COMPOSITE_TOOLSETS:
-            composite_toolsets.append((name, info))
-        else:
-            scenario_toolsets.append((name, info))
-
+        if info:
+            bucket = basic_toolsets if name in _BASIC_TOOLSETS else composite_toolsets if name in _COMPOSITE_TOOLSETS else scenario_toolsets
+            bucket.append((name, info))
     print("\n📌 Basic Toolsets:")
     for name, info in basic_toolsets:
         print(f"  • {name:15} - {info['description']}")
@@ -1468,25 +1445,17 @@ def main(
         print(f"❌ Failed to initialize agent: {e}")
         return
 
-    user_query = query if query is not None else (
-        "Tell me about the latest developments in Python 3.13 and what new features "
-        "developers should know about. Please search for current information and try it out."
-    )
+    user_query = query if query is not None else ("Tell me about the latest developments in Python 3.13 and what new features "
+                                                  "developers should know about. Please search for current information and try it out.")
     print(f"\n📝 User Query: {user_query}")
     print("\n" + "=" * 50)
 
     result = agent.run_conversation(user_query)
 
-    print("\n" + "=" * 50)
-    print("📋 CONVERSATION SUMMARY")
-    print("=" * 50)
-    print(f"✅ Completed: {result['completed']}")
-    print(f"📞 API Calls: {result['api_calls']}")
-    print(f"💬 Messages: {len(result['messages'])}")
+    print("\n" + "=" * 50 + "\n📋 CONVERSATION SUMMARY\n" + "=" * 50)
+    print(f"✅ Completed: {result['completed']}\n📞 API Calls: {result['api_calls']}\n💬 Messages: {len(result['messages'])}")
     if result['final_response']:
-        print("\n🎯 FINAL RESPONSE:")
-        print("-" * 30)
-        print(result['final_response'])
+        print("\n🎯 FINAL RESPONSE:\n" + "-" * 30 + "\n" + result['final_response'])
     if save_sample:
         _save_sample_trajectory(agent, result, user_query, model)
     print("\n👋 Agent execution completed!")
