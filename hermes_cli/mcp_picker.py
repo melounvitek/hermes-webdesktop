@@ -6,12 +6,12 @@ import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
-from hermes_cli.colors import Colors, color
+from hermes_cli.colors import Colors
 from hermes_cli.cli_output import prompt_yes_no
 from hermes_cli.curses_ui import curses_single_select
 from hermes_cli.mcp_catalog import (
     CatalogEntry, CatalogError, catalog_diagnostics, install_entry, is_enabled, is_installed,
-    list_catalog, installed_servers, remove_server, server_enabled, uninstall_entry,
+    list_catalog, installed_servers, remove_server, server_enabled, uninstall_entry, _say,
 )
 from hermes_cli.config import load_config, save_config
 
@@ -71,15 +71,15 @@ def _enable_disable(name: str, *, enable: bool) -> None:
     servers = cfg.get("mcp_servers") or {}
     server = servers.get(name)
     if not server:
-        print(color(f"  '{name}' is not installed.", Colors.RED))
+        _say(f"  '{name}' is not installed.", Colors.RED)
         return
     server["enabled"] = enable
     cfg["mcp_servers"] = servers
     save_config(cfg)
-    print(color(
+    _say(
         f"  ✓ '{name}' {'enabled' if enable else 'disabled'}. "
-        "Start a new Hermes session for changes to take effect.",
-        Colors.GREEN))
+        "Start a new Hermes session for changes to take effect."
+    )
 
 
 def _configure_tools(name: str) -> None:
@@ -93,12 +93,12 @@ def _configure_tools(name: str) -> None:
 def _remove_custom(name: str) -> None:
     """Remove a non-catalog MCP entry from config.yaml."""
     if not is_installed(name):
-        print(color(f"  '{name}' is not configured.", Colors.RED))
+        _say(f"  '{name}' is not configured.", Colors.RED)
         return
     if not prompt_yes_no(f"Remove '{name}' from mcp_servers?", default=False):
         return
     remove_server(name)
-    print(color(f"  ✓ Removed '{name}'", Colors.GREEN))
+    _say(f"  ✓ Removed '{name}'")
 
 
 def _install(entry: CatalogEntry, verb: str) -> bool:
@@ -106,7 +106,7 @@ def _install(entry: CatalogEntry, verb: str) -> bool:
     try:
         install_entry(entry, enable=True)
     except CatalogError as exc:
-        print(color(f"  ✗ {verb} failed: {exc}", Colors.RED))
+        _say(f"  ✗ {verb} failed: {exc}", Colors.RED)
         return False
     return True
 
@@ -115,12 +115,12 @@ def _uninstall(name: str) -> None:
     if not prompt_yes_no(f"Uninstall '{name}'?", default=False):
         return
     if uninstall_entry(name):
-        print(color(
+        _say(
             f"  ✓ Uninstalled '{name}'. "
-            "Credentials in .env preserved — delete manually if no longer needed.",
-            Colors.GREEN))
+            "Credentials in .env preserved — delete manually if no longer needed."
+        )
     else:
-        print(color(f"  '{name}' was not installed", Colors.DIM))
+        _say(f"  '{name}' was not installed", Colors.DIM)
 
 
 def _run_submenu(title: str, actions: list) -> None:
@@ -148,7 +148,7 @@ def _handle_row(row: _Row) -> None:
         return
     # Catalog row, installed + enabled
     print()
-    print(color(f"  '{row.name}' is already enabled.", Colors.DIM))
+    _say(f"  '{row.name}' is already enabled.", Colors.DIM)
     _run_submenu(f"Action for '{row.name}'", [
         ("Configure tools (probe server + re-pick)", lambda: _configure_tools(row.name)),
         ("Disable (keep config, stop loading on next session)",
@@ -162,27 +162,24 @@ def _print_rows_text(rows: List[_Row]) -> None:
     """Plain-text catalog dump: `hermes mcp catalog` output and the non-curses fallback."""
     print()
     if not rows:
-        print(color("  No MCPs in the catalog or configured.", Colors.DIM))
+        _say("  No MCPs in the catalog or configured.", Colors.DIM)
         print()
         return
 
-    print(color("  MCP Catalog + configured servers:", Colors.CYAN + Colors.BOLD))
+    _say("  MCP Catalog + configured servers:", Colors.CYAN + Colors.BOLD)
     print()
     print(f"  {'Name':<18} {'Status':<24} Description")
     print(f"  {'-' * 18} {'-' * 24} {'-' * 11}")
     for row in rows:
         print(f"  {_format_row(row)}")
     print()
-    print(color("  Install: hermes mcp install <name>    Picker: hermes mcp", Colors.DIM))
+    _say("  Install: hermes mcp install <name>    Picker: hermes mcp", Colors.DIM)
     # Manifest-version warnings: the user's Hermes is too old to install everything listed.
     future = [d for d in catalog_diagnostics() if d[1] == "future_manifest"]
     if future:
         print()
         for name, _, _msg in future:
-            print(color(
-                f"  ⚠ '{name}' requires a newer Hermes — run `hermes update` "
-                "to install this entry.",
-                Colors.YELLOW))
+            _say(f"  ⚠ '{name}' requires a newer Hermes — run `hermes update` to install this entry.", Colors.YELLOW)
         print()
     print()
 
@@ -215,9 +212,9 @@ def install_by_name(identifier: str) -> int:
 
     entry = get_entry(identifier)
     if entry is None:
-        print(color(
-            f"  ✗ '{identifier}' is not in the catalog. "
-            "Run `hermes mcp catalog` to see available entries.",
-            Colors.RED))
+        _say(
+            f"  ✗ '{identifier}' is not in the catalog. Run `hermes mcp catalog` to see available entries.",
+            Colors.RED,
+        )
         return 1
     return 0 if _install(entry, "install") else 1

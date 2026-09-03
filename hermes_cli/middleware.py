@@ -61,8 +61,8 @@ def _safe_copy(payload: Any) -> Any:
 
 
 def _apply_request_chain(
-    kind: str, payload_key: str, trace: List[Dict[str, Any]], **kwargs: Any
-) -> Dict[str, Any]:
+    kind: str, payload_key: str, trace: List[Dict[str, Any]], original: Any, **kwargs: Any
+) -> RequestMiddlewareResult:
     """Feed ``kwargs[payload_key]`` through every ``kind`` middleware; each may return ``{payload_key: {...}}``."""
     from hermes_cli.plugins import invoke_middleware
 
@@ -79,7 +79,7 @@ def _apply_request_chain(
             for key in ("source", "reason", "name")
             if isinstance(value := result.get(key), str) and value}
         trace.append(entry or {"source": "plugin"})
-    return current
+    return RequestMiddlewareResult(payload=current, original_payload=original, changed=bool(trace), trace=trace)
 
 
 def apply_llm_request_middleware(request: Dict[str, Any], **context: Any) -> RequestMiddlewareResult:
@@ -90,12 +90,9 @@ def apply_llm_request_middleware(request: Dict[str, Any], **context: Any) -> Req
         return RequestMiddlewareResult(payload=request, original_payload=request)
 
     original_request = _safe_copy(request)
-    trace: List[Dict[str, Any]] = []
-    current_request = _apply_request_chain(
-        LLM_REQUEST_MIDDLEWARE, "request", trace,
-        request=_safe_copy(original_request), original_request=original_request, **context)
-    return RequestMiddlewareResult(
-        payload=current_request, original_payload=original_request, changed=bool(trace), trace=trace,
+    return _apply_request_chain(
+        LLM_REQUEST_MIDDLEWARE, "request", [], original_request,
+        request=_safe_copy(original_request), original_request=original_request, **context,
     )
 
 
@@ -126,11 +123,10 @@ def apply_tool_request_middleware(
             payload=args if not trace else current_args, original_payload=args,
             changed=bool(trace), trace=trace,
         )
-    current_args = _apply_request_chain(
-        TOOL_REQUEST_MIDDLEWARE, "args", trace,
-        tool_name=tool_name, args=current_args, original_args=original_args, **context)
-    return RequestMiddlewareResult(
-        payload=current_args, original_payload=original_args, changed=bool(trace), trace=trace)
+    return _apply_request_chain(
+        TOOL_REQUEST_MIDDLEWARE, "args", trace, original_args,
+        tool_name=tool_name, args=current_args, original_args=original_args, **context,
+    )
 
 
 def run_llm_execution_middleware(

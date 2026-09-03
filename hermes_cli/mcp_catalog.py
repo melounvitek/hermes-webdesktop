@@ -259,16 +259,10 @@ def _parse_manifest(path: Path) -> CatalogEntry:
     suggest = _parse_suggest(path, data.get("suggest"))
     install = _parse_install(path, data.get("install"))
     return CatalogEntry(
-        name=name,
-        description=description,
-        source=str(data.get("source") or "").strip(),
-        transport=transport,
-        auth=auth,
-        tools=tools,
-        install=install,
-        post_install=str(data.get("post_install") or ""),
-        suggest=suggest,
-        manifest_path=path)
+        name=name, description=description, source=str(data.get("source") or "").strip(),
+        transport=transport, auth=auth, tools=tools, install=install,
+        post_install=str(data.get("post_install") or ""), suggest=suggest, manifest_path=path,
+    )
 
 
 # Populated by list_catalog(); inspected by the picker / catalog UIs so the user gets actionable
@@ -538,7 +532,8 @@ def _apply_tool_selection(
         _write_tools_filter(name, "exclude", entry.tools.default_excluded)
         _say(
             f"  Applied manifest exclude list ({len(entry.tools.default_excluded)} entries); "
-            f"everything else stays enabled. {edit_hint}")
+            f"everything else stays enabled. {edit_hint}"
+        )
         return
 
     _say(f"  Probing '{name}' for available tools...", Colors.CYAN)
@@ -550,24 +545,23 @@ def _apply_tool_selection(
         manifest_default = entry.tools.default_enabled
         refine_hint = f"Run {configure_hint} after the server is reachable to refine."
         if prior_selection is not None:
-            _write_tools_filter(name, "include", prior_selection)
-            msg = (
-                f"  Couldn't probe server. Kept your previous tool selection "
-                f"({len(prior_selection)} tools). {refine_hint}")
+            mode, values = "include", prior_selection
+            msg = f"Kept your previous tool selection ({len(prior_selection)} tools). {refine_hint}"
         elif prior_exclude is not None:
-            _write_tools_filter(name, "exclude", prior_exclude)
-            msg = f"  Couldn't probe server. Kept your existing exclude list ({len(prior_exclude)} entries)."
+            mode, values = "exclude", prior_exclude
+            msg = f"Kept your existing exclude list ({len(prior_exclude)} entries)."
         elif manifest_default:
-            _write_tools_filter(name, "include", manifest_default)
-            msg = (
-                f"  Couldn't probe server. Applied manifest default "
-                f"({len(manifest_default)} tools). {refine_hint}")
+            mode, values = "include", manifest_default
+            msg = f"Applied manifest default ({len(manifest_default)} tools). {refine_hint}"
         else:
-            _write_tools_filter(name, "include", None)
+            mode, values = "include", None
             msg = (
-                "  Couldn't probe server; installed with no tool filter (all tools enabled when "
-                f"reachable). Run {configure_hint} after first connect to prune.")
-        _say(msg, Colors.YELLOW)
+                "installed with no tool filter (all tools enabled when "
+                f"reachable). Run {configure_hint} after first connect to prune."
+            )
+        _write_tools_filter(name, mode, values)
+        sep = ";" if values is None else "."
+        _say(f"  Couldn't probe server{sep} {msg}", Colors.YELLOW)
         return
 
     if not probed:
