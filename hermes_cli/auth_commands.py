@@ -12,22 +12,10 @@ from typing import Any, Callable
 import uuid
 
 from agent.credential_pool import (
-    AUTH_TYPE_API_KEY,
-    AUTH_TYPE_OAUTH,
-    CUSTOM_POOL_PREFIX,
-    SOURCE_MANUAL,
-    SOURCE_MANUAL_DEVICE_CODE,
-    STATUS_EXHAUSTED,
-    STRATEGY_FILL_FIRST,
-    STRATEGY_ROUND_ROBIN,
-    STRATEGY_RANDOM,
-    STRATEGY_LEAST_USED,
-    PooledCredential,
-    _exhausted_until,
-    _normalize_custom_pool_name,
-    get_pool_strategy,
-    label_from_token,
-    list_custom_pool_providers,
+    AUTH_TYPE_API_KEY, AUTH_TYPE_OAUTH, CUSTOM_POOL_PREFIX, SOURCE_MANUAL,
+    SOURCE_MANUAL_DEVICE_CODE, STATUS_EXHAUSTED, STRATEGY_FILL_FIRST, STRATEGY_ROUND_ROBIN,
+    STRATEGY_RANDOM, STRATEGY_LEAST_USED, PooledCredential, _exhausted_until,
+    _normalize_custom_pool_name, get_pool_strategy, label_from_token, list_custom_pool_providers,
     load_pool)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import PROVIDER_REGISTRY
@@ -43,20 +31,17 @@ def _get_custom_provider_entries() -> list[dict]:
     """Return configured provider entries with legacy and canonical pool IDs."""
     try:
         from hermes_cli.config import get_compatible_custom_providers, load_config
-
         config = load_config()
     except Exception:
         return []
     result: list[dict] = []
     for entry in get_compatible_custom_providers(config):
         name = entry.get("name") if isinstance(entry, dict) else None
-        if not isinstance(name, str) or not name.strip():
-            continue
-        result.append({
-            **entry,
-            "name": name.strip(),
-            "pool_key": f"{CUSTOM_POOL_PREFIX}{_normalize_custom_pool_name(name)}",
-            "provider_key": str(entry.get("provider_key", "") or "").strip()})
+        if isinstance(name, str) and name.strip():
+            result.append({
+                **entry, "name": name.strip(),
+                "pool_key": f"{CUSTOM_POOL_PREFIX}{_normalize_custom_pool_name(name)}",
+                "provider_key": str(entry.get("provider_key", "") or "").strip()})
     return result
 
 
@@ -87,9 +72,8 @@ def _resolve_custom_provider_input(raw: str) -> str | None:
 
 
 _PROVIDER_ALIASES = {
-    "or": "openrouter", "open-router": "openrouter",
-    "grok-oauth": "xai-oauth", "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth", "xai-grok-oauth": "xai-oauth",
-}
+    "or": "openrouter", "open-router": "openrouter", "grok-oauth": "xai-oauth",
+    "xai-oauth": "xai-oauth", "x-ai-oauth": "xai-oauth", "xai-grok-oauth": "xai-oauth"}
 
 
 def _normalize_provider(provider: str) -> str:
@@ -107,25 +91,20 @@ def _migrate_legacy_custom_pool_key(provider: str, legacy_key: str) -> None:
         legacy_entries = credential_pool.get(legacy_key)
         if not isinstance(legacy_entries, list) or not legacy_entries:
             return
-
         current_entries = credential_pool.get(provider)
         merged = list(current_entries) if isinstance(current_entries, list) else []
         known_ids = {e.get("id") for e in merged if isinstance(e, dict) and e.get("id")}
         for entry in legacy_entries:
             entry_id = entry.get("id") if isinstance(entry, dict) else None
-            if entry_id and entry_id in known_ids:
-                continue
-            merged.append(entry)
-            if entry_id:
-                known_ids.add(entry_id)
-
+            if not entry_id or entry_id not in known_ids:
+                merged.append(entry)
+                if entry_id:
+                    known_ids.add(entry_id)
         credential_pool[provider] = merged
         del credential_pool[legacy_key]
         auth_mod._save_auth_store(auth_store)
-
     try:
         from hermes_cli.models import clear_provider_models_cache
-
         clear_provider_models_cache(legacy_key)
     except Exception:
         pass
@@ -136,7 +115,6 @@ def _provider_base_url(provider: str) -> str:
         return OPENROUTER_BASE_URL
     if provider.startswith(CUSTOM_POOL_PREFIX):
         from agent.credential_pool import _get_custom_provider_config
-
         return str((_get_custom_provider_config(provider) or {}).get("base_url") or "").strip()
     configured = _configured_provider_entry(provider)
     if configured is not None:
@@ -146,11 +124,8 @@ def _provider_base_url(provider: str) -> str:
 
 
 def _is_known_provider(provider: str, configured_provider: dict | None) -> bool:
-    return (
-        provider in PROVIDER_REGISTRY
-        or provider == "openrouter"
-        or provider.startswith(CUSTOM_POOL_PREFIX)
-        or configured_provider is not None)
+    return (provider in PROVIDER_REGISTRY or provider == "openrouter"
+            or provider.startswith(CUSTOM_POOL_PREFIX) or configured_provider is not None)
 
 
 def _display_source(source: str) -> str:
@@ -172,7 +147,8 @@ def _classify_exhausted_status(entry) -> tuple[str, bool]:
     reason = str(getattr(entry, "last_error_reason", "") or "").strip().lower()
     message = str(getattr(entry, "last_error_message", "") or "").strip().lower()
     for label, retry_window, codes, reason_tokens, message_tokens in _EXHAUSTED_CLASSES:
-        if code in codes or any(t in reason for t in reason_tokens) or any(t in message for t in message_tokens):
+        if (code in codes or any(t in reason for t in reason_tokens)
+                or any(t in message for t in message_tokens)):
             return label, retry_window
     return "exhausted", True
 
@@ -204,7 +180,6 @@ def _format_exhausted_status(entry) -> str:
 
 def _anthropic_oauth_login(args) -> dict:
     from agent import anthropic_adapter as anthropic_mod
-
     creds = anthropic_mod.run_hermes_oauth_login_pure()
     if not creds:
         raise SystemExit("Anthropic OAuth login did not return credentials.")
@@ -273,6 +248,14 @@ _OAUTH_ADD_SPECS: dict[str, _OAuthAddSpec] = {
 }
 
 
+def _ask(prompt: str, reader: Callable[[str], str] | None = None) -> str | None:
+    """Stripped answer from *reader* (default ``input``); None when the user hits EOF / Ctrl-C."""
+    try:
+        return (reader or input)(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
 def _add_nous_oauth_credential(args, provider: str) -> None:
     """``hermes auth add nous --type oauth``: shared-credential import, else device-code login."""
     custom_label = (getattr(args, "label", None) or "").strip() or None
@@ -296,11 +279,8 @@ def _add_nous_oauth_credential(args, provider: str) -> None:
             found = "Found existing shared Nous OAuth credentials"
         print()
         print(found)
-        try:
-            do_import = input("Import these credentials? [Y/n]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            do_import = "y"
-        if do_import in {"", "y", "yes"}:
+        do_import = _ask("Import these credentials? [Y/n]: ")
+        if do_import is None or do_import.lower() in {"", "y", "yes"}:
             print("Rehydrating Nous session from shared credentials...")
             rehydrated = auth_mod._try_import_shared_nous_state(timeout_seconds=timeout)
             if rehydrated is not None:
@@ -331,9 +311,8 @@ def _unsuppress_provider_sources(provider: str) -> None:
 
 
 def _add_api_key_credential(args, provider: str, pool) -> None:
-    token = (getattr(args, "api_key", None) or "").strip()
-    if not token:
-        token = masked_secret_prompt("Paste your API key: ").strip()
+    token = ((getattr(args, "api_key", None) or "").strip()
+             or masked_secret_prompt("Paste your API key: ").strip())
     if not token:
         raise SystemExit("No API key provided.")
     default_label = f"api-key-{len(pool.entries()) + 1}"
@@ -358,9 +337,9 @@ def auth_add_command(args) -> None:
 
     is_custom = provider.startswith(CUSTOM_POOL_PREFIX)
     requested_type = str(getattr(args, "auth_type", "") or "").strip().lower()
-    if requested_type in {AUTH_TYPE_API_KEY, "api-key"}:
+    if requested_type == "api-key":
         requested_type = AUTH_TYPE_API_KEY
-    if not requested_type:
+    elif not requested_type:
         oauth_default = provider in _OAUTH_CAPABLE_PROVIDERS and not is_custom
         requested_type = AUTH_TYPE_OAUTH if oauth_default else AUTH_TYPE_API_KEY
 
@@ -405,9 +384,7 @@ def auth_list_command(args) -> None:
     else:
         credential_pool = auth_mod._load_auth_store().get("credential_pool")
         providers = sorted({
-            *PROVIDER_REGISTRY.keys(),
-            "openrouter",
-            *list_custom_pool_providers(),
+            *PROVIDER_REGISTRY.keys(), "openrouter", *list_custom_pool_providers(),
             *(e["provider_key"] for e in _get_custom_provider_entries() if e["provider_key"]),
             *(credential_pool.keys() if isinstance(credential_pool, dict) else ())})
     for provider in providers:
@@ -449,7 +426,6 @@ def auth_remove_command(args) -> None:
     # custom config) has a RemovalStep in agent.credential_sources; it does the source-specific
     # cleanup while suppression + user-facing output are centralised here.
     from agent.credential_sources import find_removal_step
-
     step = find_removal_step(provider, removed.source)
     if step is None:  # unregistered source, e.g. "manual": nothing external to clean up
         return
@@ -574,15 +550,9 @@ def _interactive_auth() -> None:
     print("What would you like to do?")
     for i, choice in enumerate(choices, 1):
         print(f"  {i}. {choice}")
-    try:
-        raw = input("\nChoice: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return
-    if not raw or raw == str(len(choices)):
-        return
-    handler = {
-        "1": _interactive_add, "2": _interactive_remove, "3": _interactive_reset, "4": _interactive_strategy,
-    }.get(raw)
+    raw = _ask("\nChoice: ")
+    handler = {"1": _interactive_add, "2": _interactive_remove, "3": _interactive_reset,
+               "4": _interactive_strategy}.get(raw)
     if handler is not None:
         handler()
 
@@ -594,9 +564,8 @@ def _pick_provider(prompt: str = "Provider") -> str:
     print(f"\nKnown providers: {', '.join(known)}")
     if custom_display:
         print(f"Custom endpoints: {', '.join(custom_display)}")
-    try:
-        raw = line_input(f"{prompt}: ").strip()
-    except (EOFError, KeyboardInterrupt):
+    raw = _ask(f"{prompt}: ", line_input)
+    if raw is None:
         raise SystemExit()
     return _normalize_provider(raw)
 
@@ -612,20 +581,16 @@ def _interactive_add() -> None:
         print(f"\n{provider} supports both API keys and OAuth login.")
         print("  1. API key (paste a key from the provider dashboard)")
         print("  2. OAuth login (authenticate via browser)")
-        try:
-            type_choice = input("Type [1/2]: ").strip()
-        except (EOFError, KeyboardInterrupt):
+        type_choice = _ask("Type [1/2]: ")
+        if type_choice is None:
             return
         if type_choice == "2":
             auth_type = "oauth"
-
-    try:
-        label = line_input("Label / account name (optional): ").strip() or None
-    except (EOFError, KeyboardInterrupt):
+    label = _ask("Label / account name (optional): ", line_input)
+    if label is None:
         return
-
     auth_add_command(SimpleNamespace(
-        provider=provider, auth_type=auth_type, label=label, api_key=None,
+        provider=provider, auth_type=auth_type, label=label or None, api_key=None,
         portal_url=None, inference_url=None, client_id=None, scope=None,
         no_browser=False, timeout=None, insecure=False, ca_bundle=None))
 
@@ -638,10 +603,7 @@ def _interactive_remove() -> None:
         return
     for i, e in enumerate(pool.entries(), 1):
         print(f"  #{i}  {e.label:25s} {e.auth_type:10s} {e.source}{_format_exhausted_status(e)} [id:{e.id}]")
-    try:
-        raw = line_input("Remove #, id, or label (blank to cancel): ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return
+    raw = _ask("Remove #, id, or label (blank to cancel): ", line_input)
     if raw:
         auth_remove_command(SimpleNamespace(provider=provider, target=raw))
 
@@ -665,12 +627,8 @@ def _interactive_strategy() -> None:
     print(f"\nCurrent strategy for {provider}: {current}")
     print()
     for i, s in enumerate(strategies, 1):
-        marker = " ←" if s == current else ""
-        print(f"  {i}. {s:15s} — {_STRATEGY_DESCRIPTIONS[s]}{marker}")
-    try:
-        raw = input("\nStrategy [1-4]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return
+        print(f"  {i}. {s:15s} — {_STRATEGY_DESCRIPTIONS[s]}{' ←' if s == current else ''}")
+    raw = _ask("\nStrategy [1-4]: ")
     if not raw:
         return
     try:
@@ -678,7 +636,6 @@ def _interactive_strategy() -> None:
     except (ValueError, IndexError):
         print("Invalid choice.")
         return
-
     from hermes_cli.config import load_config, save_config
     cfg = load_config()
     pool_strategies = cfg.get("credential_pool_strategies")
@@ -691,12 +648,8 @@ def _interactive_strategy() -> None:
 
 
 _AUTH_ACTIONS = {
-    "add": auth_add_command,
-    "list": auth_list_command,
-    "remove": auth_remove_command,
-    "reset": auth_reset_command,
-    "status": auth_status_command,
-    "logout": auth_logout_command,
+    "add": auth_add_command, "list": auth_list_command, "remove": auth_remove_command,
+    "reset": auth_reset_command, "status": auth_status_command, "logout": auth_logout_command,
     "spotify": auth_spotify_command}
 
 
