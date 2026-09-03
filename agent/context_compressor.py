@@ -1048,7 +1048,6 @@ def _extract_tool_call_name_and_args(tool_call: Any) -> tuple[str, str]:
     if isinstance(tool_call, dict):
         fn = tool_call.get("function") or {}
         return str(fn.get("name") or "unknown"), str(fn.get("arguments") or "")
-
     fn = getattr(tool_call, "function", None)
     if fn is None:
         return "unknown", ""
@@ -1634,17 +1633,13 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
         args = {}
     if not isinstance(args, dict):
         args = {}
-
     content = tool_content or ""
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
-
     summarizer = _TOOL_RESULT_SUMMARIZERS.get(tool_name)
     if summarizer is not None:
         return summarizer(tool_name, args, content, content_len, line_count)
-    first_arg = ""
-    for k, v in list(args.items())[:2]:
-        first_arg += f" {k}={str(v)[:40]}"
+    first_arg = "".join(f" {k}={str(v)[:40]}" for k, v in list(args.items())[:2])
     return f"[{tool_name}]{first_arg} ({content_len:,} chars result)"
 
 
@@ -1655,13 +1650,8 @@ def resolve_model_threshold(model: str, model_thresholds: dict[str, float] | Non
     plugin context engines can reuse it."""
     if not model_thresholds or not model:
         return default
-    best_key = ""
-    for key in model_thresholds:
-        if key in model and len(key) > len(best_key):
-            best_key = key
-    if best_key:
-        return float(model_thresholds[best_key])
-    return default
+    best_key = max((key for key in model_thresholds if key in model), key=len, default="")
+    return float(model_thresholds[best_key]) if best_key else default
 
 
 def _memory_provider_section(memory_context: str) -> str:
@@ -3588,32 +3578,23 @@ This compaction should PRIORITISE preserving all information related to the focu
                 _SUMMARY_FAILURE_COOLDOWN_SECONDS, "no auxiliary LLM provider configured",
             )
             self._last_summary_error = "no auxiliary LLM provider configured"
-            logger.warning("Context compression: no provider available for "
-                            "summary. Middle turns will be dropped without summary "
-                            "for %d seconds.",
-                            _SUMMARY_FAILURE_COOLDOWN_SECONDS)
+            logger.warning(
+                "Context compression: no provider available for summary. Middle turns will be dropped without "
+                "summary for %d seconds.",
+                _SUMMARY_FAILURE_COOLDOWN_SECONDS,
+            )
             return None
         kind = _classify_summary_failure(e)
-        _is_model_not_found = kind.model_not_found
-        _is_timeout = kind.timeout
-        _is_json_decode = kind.json_decode
-        _is_streaming_closed = kind.streaming_closed
-        _is_empty_content = kind.empty_content
-        _is_truncated_summary = kind.truncated
         # Auth/permission/quota failures are not retryable: flag so compress() preserves the
         # session. A distinct summary_model still gets the one-shot main-model fallback.
         if _is_summary_access_or_quota_error(e):
             # Field name kept for caller compatibility; now covers the whole access/quota class.
             self._last_summary_auth_failure = True
-        if _is_json_decode and not _is_model_not_found and not _is_timeout:
+        if kind.json_decode and not kind.model_not_found and not kind.timeout:
             logger.error(
                 "Context compression failed: auxiliary LLM returned a non-JSON response. provider=%s "
                 "summary_model=%s main_model=%s base_url=%s err=%s",
-                self.provider or "auto",
-                self.summary_model or "(main)",
-                self.model,
-                self.base_url or "default",
-                e,
+                self.provider or "auto", self.summary_model or "(main)", self.model, self.base_url or "default", e,
             )
         # A distinct summary model gets ONE main-model retry: a specific reason for known transient classes,
         # else a best-effort "failed" retry — losing N turns is worse than one extra summary attempt.
@@ -3623,17 +3604,14 @@ This compaction should PRIORITISE preserving all information related to the focu
             and not getattr(self, "_summary_model_fallen_back", False)
         ):
             self._fallback_to_main_for_compression(e, kind.fallback_reason())
-            return self._generate_summary(
-                turns_to_summarize,
-                focus_topic=focus_topic,
-                memory_context=memory_context,
-            )  # retry immediately
+            # Retry immediately on the main model.
+            return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, memory_context=memory_context)
 
         # Transient errors: short cooldown for JSON-decode/streaming-closed. Timeouts escalate
         # 60s→300s→900s (structural repeat offenders) and take precedence over the short rung.
-        if _is_timeout:
+        if kind.timeout:
             _transient_cooldown = _next_timeout_cooldown(self)
-        elif _is_json_decode or _is_streaming_closed or _is_empty_content or _is_truncated_summary:
+        elif kind.json_decode or kind.streaming_closed or kind.empty_content or kind.truncated:
             _transient_cooldown = 30
         else:
             _transient_cooldown = 60
@@ -3642,11 +3620,11 @@ This compaction should PRIORITISE preserving all information related to the focu
         self._last_summary_error = err_text
         # Terminal network/empty-content failure after any fallback: flag so compress() ABORTS
         # and preserves the session; independent of abort_on_summary_failure.
-        if _is_streaming_closed:
+        if kind.streaming_closed:
             self._last_summary_network_failure = True
-        elif _is_truncated_summary:
+        elif kind.truncated:
             self._last_summary_truncated_failure = True
-        elif _is_empty_content:
+        elif kind.empty_content:
             self._last_summary_empty_content_failure = True
         logger.warning(
             "Failed to generate context summary: %s. Further summary attempts paused for %d seconds.", e,
