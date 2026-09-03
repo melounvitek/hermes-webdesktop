@@ -20,10 +20,6 @@ from hermes_constants import hermes_home_key
 P = TypeVar("P")
 
 
-def strip_key(name: str) -> str:
-    return name.strip()
-
-
 def lower_key(name: str) -> str:
     return name.strip().lower()
 
@@ -31,7 +27,7 @@ def lower_key(name: str) -> str:
 class ProviderRegistry(Generic[P]):
     """Global + per-scope provider map with plugin snapshot/restore support.
 
-    ``normalize`` is ``strip_key`` or ``lower_key`` (case-insensitive registries mirror
+    ``normalize`` is ``str.strip`` or ``lower_key`` (case-insensitive registries mirror
     how their dispatcher normalizes the configured name). ``builtin_names`` are reserved
     for in-tree implementations; a collision calls ``on_builtin_collision(key)`` and, if
     that returns, skips registration. ``logger`` is the owning module's so record names
@@ -40,7 +36,7 @@ class ProviderRegistry(Generic[P]):
 
     def __init__(
         self, *, label: str, provider_cls: type, logger: logging.Logger,
-        normalize: Callable[[str], str] = strip_key, builtin_names: FrozenSet[str] = frozenset(),
+        normalize: Callable[[str], str] = str.strip, builtin_names: FrozenSet[str] = frozenset(),
         on_builtin_collision: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.label = label
@@ -188,7 +184,6 @@ def configured_provider_name(section: str, logger: logging.Logger) -> Optional[s
     configured: Optional[str] = None
     try:
         from hermes_cli.config import load_config_readonly
-
         cfg = load_config_readonly()
         block = cfg.get(section) if isinstance(cfg, dict) else None
         raw = block.get("provider") if isinstance(block, dict) else None
@@ -199,7 +194,6 @@ def configured_provider_name(section: str, logger: logging.Logger) -> Optional[s
     if configured:
         try:
             from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER
-
             if configured.lower() == NOUS_MANAGED_PROVIDER:
                 configured = "fal"
         except Exception:  # pragma: no cover — helpers are in-repo

@@ -19,7 +19,6 @@ from typing import Dict, Tuple
 def cache_dir(kind: str) -> Path:
     """Return ``$HERMES_HOME/cache/<kind>/``, creating parents as needed."""
     from hermes_constants import get_hermes_home
-
     path = get_hermes_home() / "cache" / kind
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -57,7 +56,6 @@ def save_url(
     callers can fall back to the bare URL; a partial file is never left behind.
     """
     import requests
-
     response = requests.get(url, timeout=timeout, stream=True)
     response.raise_for_status()
 

@@ -27,7 +27,6 @@ def _traces_enabled_and_dir() -> Optional[Path]:
     call (once per cache-MISS turn); ``moa.trace_dir`` overrides the default."""
     try:
         from hermes_cli.config import load_config
-
         moa_cfg = (load_config() or {}).get("moa") or {}
     except Exception:  # pragma: no cover - never break a turn over tracing
         return None

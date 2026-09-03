@@ -112,11 +112,8 @@ class _TrustPolicy:
 
 # The ``allow_*_override`` config keys; each is a same-named ``_TrustPolicy`` field.
 _OVERRIDE_FLAGS = (
-    "allow_provider_override",
-    "allow_model_override",
-    "allow_agent_id_override",
-    "allow_profile_override",
-    "allow_task_override",
+    "allow_provider_override", "allow_model_override", "allow_agent_id_override",
+    "allow_profile_override", "allow_task_override",
 )
 
 
@@ -217,7 +214,6 @@ def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
     builtin: set = set()
     try:
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
-
         owned = {
             e.get("key") for e in get_plugin_auxiliary_tasks()
             if e.get("plugin") == plugin_id and isinstance(e.get("key"), str) and e.get("key")
@@ -226,7 +222,6 @@ def _resolve_task_ownership(plugin_id: str) -> tuple[frozenset, frozenset]:
         pass
     try:
         from hermes_cli.main import _AUX_TASKS
-
         builtin = {k for k, _name, _desc in _AUX_TASKS}
     except Exception:  # pragma: no cover — main import failure
         pass
@@ -664,13 +659,6 @@ def make_plugin_llm_for_test(
 
 
 __all__ = [
-    "PluginLlm",
-    "PluginLlmTextInput",
-    "PluginLlmImageInput",
-    "PluginLlmInput",
-    "PluginLlmUsage",
-    "PluginLlmCompleteResult",
-    "PluginLlmStructuredResult",
-    "PluginLlmTrustError",
-    "make_plugin_llm_for_test",
+    "PluginLlm", "PluginLlmTextInput", "PluginLlmImageInput", "PluginLlmInput", "PluginLlmUsage",
+    "PluginLlmCompleteResult", "PluginLlmStructuredResult", "PluginLlmTrustError", "make_plugin_llm_for_test",
 ]
