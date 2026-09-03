@@ -212,10 +212,23 @@ def _toolset_label(ts_key: str) -> str:
 # --- Tool Categories: toolset key -> provider options shown when newly enabled. Toolsets not in this map
 # either need no config or use the TOOLSET_ENV_REQUIREMENTS fallback.
 def _key(key: str, prompt: str, url: str = "", **extra) -> dict:
-    """One ``env_vars`` entry for a TOOL_CATEGORIES provider row (key order matters for the GUI JSON)."""
+    """One ``env_vars`` entry for a provider row (key order matters for the GUI JSON)."""
     return {"key": key, "prompt": prompt, **extra, **({"url": url} if url else {})}
 
 
+def _row(name: str, badge: str = "", tag: str = "", env_vars: list = (), **markers) -> dict:
+    """One TOOL_CATEGORIES provider row; ``markers`` are the ``*_provider`` / ``post_setup`` / Nous keys."""
+    row = {"name": name}
+    if badge:
+        row["badge"] = badge
+    if tag:
+        row["tag"] = tag
+    row["env_vars"] = list(env_vars)
+    row.update(markers)
+    return row
+
+
+_NOUS = {"requires_nous_auth": True}
 _OPENAI_VOICE_KEY = _key("VOICE_TOOLS_OPENAI_KEY", "OpenAI API key", "https://platform.openai.com/api-keys")
 _ELEVENLABS_KEY = _key("ELEVENLABS_API_KEY", "ElevenLabs API key", "https://elevenlabs.io/app/settings/api-keys")
 _DEEPINFRA_KEY = _key("DEEPINFRA_API_KEY", "DeepInfra API key", "https://deepinfra.com/dash/api_keys")
@@ -226,52 +239,42 @@ TOOL_CATEGORIES = {
     "tts": {
         "name": "Text-to-Speech", "icon": "🔊",
         "providers": [
-            {"name": "Microsoft Edge TTS", "badge": "★ recommended · free", "tag": "Good quality, no API key needed",
-             "env_vars": [], "tts_provider": "edge"},
-            {"name": "Nous Subscription", "badge": "subscription", "tag": "Managed OpenAI TTS billed to your subscription",
-             "env_vars": [], "tts_provider": "openai", "requires_nous_auth": True, "managed_nous_feature": "tts",
-             "override_env_vars": ["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]},
-            {"name": "OpenAI TTS", "badge": "paid", "tag": "High quality voices", "env_vars": [_OPENAI_VOICE_KEY],
-             "tts_provider": "openai"},
-            {"name": "xAI TTS", "tag": "Grok voices — uses xAI Grok OAuth or XAI_API_KEY", "env_vars": [],
-             "tts_provider": "xai", "post_setup": "xai_grok"},
-            {"name": "ElevenLabs", "badge": "paid", "tag": "Most natural voices", "env_vars": [_ELEVENLABS_KEY],
-             "tts_provider": "elevenlabs"},
+            _row("Microsoft Edge TTS", "★ recommended · free", "Good quality, no API key needed", tts_provider="edge"),
+            _row("Nous Subscription", "subscription", "Managed OpenAI TTS billed to your subscription", tts_provider="openai",
+                 **_NOUS, managed_nous_feature="tts", override_env_vars=["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]),
+            _row("OpenAI TTS", "paid", "High quality voices", [_OPENAI_VOICE_KEY], tts_provider="openai"),
+            _row("xAI TTS", tag="Grok voices — uses xAI Grok OAuth or XAI_API_KEY", tts_provider="xai", post_setup="xai_grok"),
+            _row("ElevenLabs", "paid", "Most natural voices", [_ELEVENLABS_KEY], tts_provider="elevenlabs"),
             # Mistral Voxtral TTS — `mistralai` SDK lazy-installs on first use.
-            {"name": "Mistral (Voxtral TTS)", "badge": "paid", "tag": "Multilingual, native Opus",
-             "env_vars": [_key("MISTRAL_API_KEY", "Mistral API key", "https://console.mistral.ai/")], "tts_provider": "mistral"},
-            {"name": "Google Gemini TTS", "badge": "preview", "tag": "30 prebuilt voices, controllable via prompts",
-             "env_vars": [_key("GEMINI_API_KEY", "Gemini API key", "https://aistudio.google.com/app/apikey")],
-             "tts_provider": "gemini"},
-            {"name": "KittenTTS", "badge": "local · free", "tag": "Lightweight local ONNX TTS (~25MB), no API key",
-             "env_vars": [], "tts_provider": "kittentts", "post_setup": "kittentts"},
-            {"name": "Piper", "badge": "local · free", "tag": "Local neural TTS, 44 languages (voices ~20-90MB)",
-             "env_vars": [], "tts_provider": "piper", "post_setup": "piper"},
-            {"name": "DeepInfra TTS", "badge": "paid", "tag": "Chatterbox, Qwen3-TTS, … — live catalog from api.deepinfra.com",
-             "env_vars": [_DEEPINFRA_KEY], "tts_provider": "deepinfra"},
+            _row("Mistral (Voxtral TTS)", "paid", "Multilingual, native Opus",
+                 [_key("MISTRAL_API_KEY", "Mistral API key", "https://console.mistral.ai/")], tts_provider="mistral"),
+            _row("Google Gemini TTS", "preview", "30 prebuilt voices, controllable via prompts",
+                 [_key("GEMINI_API_KEY", "Gemini API key", "https://aistudio.google.com/app/apikey")], tts_provider="gemini"),
+            _row("KittenTTS", "local · free", "Lightweight local ONNX TTS (~25MB), no API key", tts_provider="kittentts",
+                 post_setup="kittentts"),
+            _row("Piper", "local · free", "Local neural TTS, 44 languages (voices ~20-90MB)", tts_provider="piper",
+                 post_setup="piper"),
+            _row("DeepInfra TTS", "paid", "Chatterbox, Qwen3-TTS, … — live catalog from api.deepinfra.com", [_DEEPINFRA_KEY],
+                 tts_provider="deepinfra"),
         ],
     },
     "stt": {
         "name": "Speech-to-Text", "icon": "🎙️",
         "providers": [
-            {"name": "Local Whisper", "badge": "★ recommended · free", "tag": "faster-whisper on-device, no API key",
-             "env_vars": [], "stt_provider": "local", "post_setup": "faster_whisper"},
-            {"name": "Nous Subscription", "badge": "subscription",
-             "tag": "Managed OpenAI transcription billed to your subscription", "env_vars": [], "stt_provider": "openai",
-             "requires_nous_auth": True, "managed_nous_feature": "stt",
-             "override_env_vars": ["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]},
-            {"name": "OpenAI", "badge": "paid", "tag": "whisper-1, gpt-4o-transcribe, gpt-transcribe",
-             "env_vars": [_OPENAI_VOICE_KEY], "stt_provider": "openai"},
-            {"name": "Groq", "badge": "free tier", "tag": "Whisper large-v3 family — very fast",
-             "env_vars": [_key("GROQ_API_KEY", "Groq API key", "https://console.groq.com/keys")], "stt_provider": "groq"},
-            {"name": "xAI", "tag": "grok-stt — uses xAI Grok OAuth or XAI_API_KEY", "env_vars": [],
-             "stt_provider": "xai", "post_setup": "xai_grok"},
-            {"name": "ElevenLabs Scribe", "badge": "paid", "tag": "scribe_v2 — diarization + audio-event tagging",
-             "env_vars": [_ELEVENLABS_KEY], "stt_provider": "elevenlabs"},
+            _row("Local Whisper", "★ recommended · free", "faster-whisper on-device, no API key", stt_provider="local",
+                 post_setup="faster_whisper"),
+            _row("Nous Subscription", "subscription", "Managed OpenAI transcription billed to your subscription",
+                 stt_provider="openai", **_NOUS, managed_nous_feature="stt",
+                 override_env_vars=["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]),
+            _row("OpenAI", "paid", "whisper-1, gpt-4o-transcribe, gpt-transcribe", [_OPENAI_VOICE_KEY], stt_provider="openai"),
+            _row("Groq", "free tier", "Whisper large-v3 family — very fast",
+                 [_key("GROQ_API_KEY", "Groq API key", "https://console.groq.com/keys")], stt_provider="groq"),
+            _row("xAI", tag="grok-stt — uses xAI Grok OAuth or XAI_API_KEY", stt_provider="xai", post_setup="xai_grok"),
+            _row("ElevenLabs Scribe", "paid", "scribe_v2 — diarization + audio-event tagging", [_ELEVENLABS_KEY],
+                 stt_provider="elevenlabs"),
             # Mistral Voxtral STT intentionally omitted — mistralai PyPI package quarantined (malicious 2.4.6
             # release, 2026-05-12). Restore alongside the dashboard stt.provider option.
-            {"name": "DeepInfra", "badge": "paid", "tag": "Live STT catalog from api.deepinfra.com",
-             "env_vars": [_DEEPINFRA_KEY], "stt_provider": "deepinfra"},
+            _row("DeepInfra", "paid", "Live STT catalog from api.deepinfra.com", [_DEEPINFRA_KEY], stt_provider="deepinfra"),
         ],
     },
     "web": {
@@ -282,7 +285,7 @@ TOOL_CATEGORIES = {
         # non-provider firecrawl setup-flow rows live here: managed via Nous subscription, and self-hosted.
         "providers": [
             {"name": "Nous Subscription", "badge": "subscription", "tag": "Managed Firecrawl billed to your subscription",
-             "web_backend": "firecrawl", "env_vars": [], "requires_nous_auth": True, "managed_nous_feature": "web",
+             "web_backend": "firecrawl", "env_vars": [], **_NOUS, "managed_nous_feature": "web",
              "override_env_vars": ["FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"]},
             {"name": "Firecrawl Self-Hosted", "badge": "free · self-hosted", "tag": "Run your own Firecrawl instance (Docker)",
              "web_backend": "firecrawl",
@@ -294,23 +297,18 @@ TOOL_CATEGORIES = {
         # Provider rows (FAL, OpenAI, OpenAI Codex, xAI) come from plugins.image_gen.<vendor> via
         # _plugin_image_gen_providers(). Only the managed "Nous Subscription" row lives here — fal backend, distinct UX.
         "providers": [
-            {"name": "Nous Subscription", "badge": "subscription",
-             "tag": "Managed FAL image generation billed to your subscription", "env_vars": [],
-             "requires_nous_auth": True, "managed_nous_feature": "image_gen", "override_env_vars": ["FAL_KEY"],
-             "imagegen_backend": "fal"},
+            _row("Nous Subscription", "subscription", "Managed FAL image generation billed to your subscription", **_NOUS,
+                 managed_nous_feature="image_gen", override_env_vars=["FAL_KEY"], imagegen_backend="fal"),
         ],
     },
     "video_gen": {
         "name": "Video Generation", "icon": "🎬",
         # Mirrors image_gen: managed FAL video billed via the Nous Portal. Plugin-backed rows (FAL BYOK, xAI, …)
-        # are injected at runtime by ``_plugin_video_gen_providers()`` in ``_visible_providers``.
+        # are injected at runtime by ``_plugin_video_gen_providers()`` in ``_visible_providers``. Picking this row
+        # sets video_gen.provider = "fal" + use_gateway so the FAL plugin routes through the managed queue gateway.
         "providers": [
-            {"name": "Nous Subscription", "badge": "subscription",
-             "tag": "Managed FAL video generation billed to your subscription", "env_vars": [],
-             "requires_nous_auth": True, "managed_nous_feature": "video_gen", "override_env_vars": ["FAL_KEY"],
-             # Underlying plugin backend: picking this row sets video_gen.provider = "fal" and
-             # video_gen.use_gateway = True so the FAL plugin routes through the managed queue gateway.
-             "video_gen_plugin_name": "fal"},
+            _row("Nous Subscription", "subscription", "Managed FAL video generation billed to your subscription", **_NOUS,
+                 managed_nous_feature="video_gen", override_env_vars=["FAL_KEY"], video_gen_plugin_name="fal"),
         ],
     },
     "x_search": {
@@ -323,10 +321,10 @@ TOOL_CATEGORIES = {
         ),
         "icon": "🐦",
         "providers": [
-            {"name": "xAI Grok OAuth (SuperGrok / Premium+)", "badge": "subscription",
-             "tag": "Browser login at accounts.x.ai — no API key required", "env_vars": [], "post_setup": "xai_grok"},
-            {"name": "xAI API key", "badge": "paid", "tag": "Direct xAI API billing via XAI_API_KEY",
-             "env_vars": [_key("XAI_API_KEY", "xAI API key", "https://console.x.ai/")]},
+            _row("xAI Grok OAuth (SuperGrok / Premium+)", "subscription", "Browser login at accounts.x.ai — no API key required",
+                 post_setup="xai_grok"),
+            _row("xAI API key", "paid", "Direct xAI API billing via XAI_API_KEY",
+                 [_key("XAI_API_KEY", "xAI API key", "https://console.x.ai/")]),
         ],
     },
     "browser": {
@@ -338,61 +336,55 @@ TOOL_CATEGORIES = {
         # ``lightpanda serve``, built-in tools use ``agent-browser --engine lightpanda``; no Chromium).
         # Camofox short-circuits the cloud dispatch via _is_camofox_mode().
         "providers": [
-            {"name": "Local Browser", "badge": "★ recommended · free", "tag": "Headless Chromium, no API key needed",
-             "env_vars": [], "browser_provider": "local", "browser_engine": "auto", "post_setup": "agent_browser"},
-            {"name": "Lightpanda", "badge": "free · local · no Chromium",
-             "tag": "Zig headless browser spawned by Hermes, text-only (no screenshots)", "env_vars": [],
-             "browser_provider": "local", "browser_engine": "lightpanda", "post_setup": "lightpanda"},
-            {"name": "Nous Subscription (Browser Use cloud)", "badge": "subscription",
-             "tag": "Managed Browser Use billed to your subscription", "env_vars": [], "browser_provider": "browser-use",
-             "requires_nous_auth": True, "managed_nous_feature": "browser", "override_env_vars": ["BROWSER_USE_API_KEY"],
-             # Cloud hook installs only the agent-browser CLI: Browser Use hosts its own Chromium, so the
-             # local-Chromium install and readiness gate must not apply (with "agent_browser" this row read
-             # "needs setup" forever on machines without a local Chromium build).
-             "post_setup": "browserbase"},
-            {"name": "Camofox", "badge": "free · local", "tag": "Anti-detection browser (Firefox/Camoufox)",
-             "env_vars": [_key("CAMOFOX_URL", "Camofox server URL", "https://github.com/jo-inc/camofox-browser", default="http://localhost:9377")],
-             "browser_provider": "camofox", "post_setup": "camofox"},
-            {"name": "Browser Use", "badge": "free · local · cloud", "tag": "New SOTA web harness (CLI 3.0)", "env_vars": [],
-             "browser_backend": "browser-use", "post_setup": "browser_use_cli"},
+            _row("Local Browser", "★ recommended · free", "Headless Chromium, no API key needed", browser_provider="local",
+                 browser_engine="auto", post_setup="agent_browser"),
+            _row("Lightpanda", "free · local · no Chromium", "Zig headless browser spawned by Hermes, text-only (no screenshots)",
+                 browser_provider="local", browser_engine="lightpanda", post_setup="lightpanda"),
+            # Cloud hook installs only the agent-browser CLI: Browser Use hosts its own Chromium, so the
+            # local-Chromium install and readiness gate must not apply (with "agent_browser" this row read
+            # "needs setup" forever on machines without a local Chromium build).
+            _row("Nous Subscription (Browser Use cloud)", "subscription", "Managed Browser Use billed to your subscription",
+                 browser_provider="browser-use", **_NOUS, managed_nous_feature="browser",
+                 override_env_vars=["BROWSER_USE_API_KEY"], post_setup="browserbase"),
+            _row("Camofox", "free · local", "Anti-detection browser (Firefox/Camoufox)",
+                 [_key("CAMOFOX_URL", "Camofox server URL", "https://github.com/jo-inc/camofox-browser", default="http://localhost:9377")],
+                 browser_provider="camofox", post_setup="camofox"),
+            _row("Browser Use", "free · local · cloud", "New SOTA web harness (CLI 3.0)", browser_backend="browser-use",
+                 post_setup="browser_use_cli"),
         ],
     },
     "homeassistant": {
         "name": "Smart Home", "icon": "🏠",
         "providers": [
-            {"name": "Home Assistant", "tag": "REST API integration",
-             "env_vars": [_key("HASS_TOKEN", "Home Assistant Long-Lived Access Token"),
-                          _key("HASS_URL", "Home Assistant URL", default="http://homeassistant.local:8123")]},
+            _row("Home Assistant", tag="REST API integration",
+                 env_vars=[_key("HASS_TOKEN", "Home Assistant Long-Lived Access Token"),
+                           _key("HASS_URL", "Home Assistant URL", default="http://homeassistant.local:8123")]),
         ],
     },
     "spotify": {
         "name": "Spotify", "icon": "🎵",
-        "providers": [
-            {"name": "Spotify Web API", "tag": "PKCE OAuth — opens the setup wizard", "env_vars": [], "post_setup": "spotify"},
-        ],
+        "providers": [_row("Spotify Web API", tag="PKCE OAuth — opens the setup wizard", post_setup="spotify")],
     },
     "computer_use": {
         "name": "Computer Use (macOS/Windows/Linux)", "icon": "🖱️",
         # Runtime backends ship for macOS, Windows, Linux (X11; Wayland via XWayland). Gaps surface via `computer-use doctor`.
         "platform_gate": ["darwin", "win32", "linux"],
+        # cua-driver reads HOME/TMPDIR from the process env; HERMES_CUA_DRIVER_CMD selects a specific
+        # binary (e.g. a local build). There is no version-pin env var.
         "providers": [
-            {"name": "cua-driver (background)", "badge": "★ recommended · free · local",
-             "tag": "Background computer-use via cua-driver — does NOT steal your cursor or focus. Works with any model.",
-             # cua-driver reads HOME/TMPDIR from the process env; HERMES_CUA_DRIVER_CMD selects a specific
-             # binary (e.g. a local build). There is no version-pin env var.
-             "env_vars": [], "computer_use_backend": "cua", "post_setup": "cua_driver"},
+            _row("cua-driver (background)", "★ recommended · free · local",
+                 "Background computer-use via cua-driver — does NOT steal your cursor or focus. Works with any model.",
+                 computer_use_backend="cua", post_setup="cua_driver"),
         ],
     },
     "langfuse": {
         "name": "Langfuse Observability", "icon": "📊",
         "providers": [
-            {"name": "Langfuse Cloud", "tag": "Hosted Langfuse (cloud.langfuse.com)",
-             "env_vars": [_key(*_LANGFUSE_PUBLIC, "https://cloud.langfuse.com"), _key(*_LANGFUSE_SECRET, "https://cloud.langfuse.com")],
-             "post_setup": "langfuse"},
-            {"name": "Langfuse Self-Hosted", "tag": "Self-hosted Langfuse instance",
-             "env_vars": [_key(*_LANGFUSE_PUBLIC), _key(*_LANGFUSE_SECRET),
-                          _key("HERMES_LANGFUSE_BASE_URL", "Langfuse server URL (e.g. http://localhost:3000)", default="http://localhost:3000")],
-             "post_setup": "langfuse"},
+            _row("Langfuse Cloud", tag="Hosted Langfuse (cloud.langfuse.com)", post_setup="langfuse",
+                 env_vars=[_key(*_LANGFUSE_PUBLIC, "https://cloud.langfuse.com"), _key(*_LANGFUSE_SECRET, "https://cloud.langfuse.com")]),
+            _row("Langfuse Self-Hosted", tag="Self-hosted Langfuse instance", post_setup="langfuse",
+                 env_vars=[_key(*_LANGFUSE_PUBLIC), _key(*_LANGFUSE_SECRET),
+                           _key("HERMES_LANGFUSE_BASE_URL", "Langfuse server URL (e.g. http://localhost:3000)", default="http://localhost:3000")]),
         ],
     },
 }
