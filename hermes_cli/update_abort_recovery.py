@@ -1,7 +1,7 @@
 """Fresh-process recovery after the update's in-process restart phase aborts (the fleet restart
-runs in the interpreter that started before ``git pull``). Deliberately a separate owner from
-``update_cmd``: its own vocabulary (``verified`` / ``relaunch_attempted`` / ``failed``, serve units,
-survivors) and its own fail-closed contract."""
+runs in the interpreter that started before ``git pull``). Separate owner from ``update_cmd``: its
+own vocabulary (``verified`` / ``relaunch_attempted`` / ``failed``, serve units, survivors) and
+its own fail-closed contract."""
 
 from __future__ import annotations
 
@@ -36,12 +36,10 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
                 continue
             detail = getattr(runtime, "detail", None)
             planned[pid] = {
-                "pid": pid,
-                "kind": str(getattr(runtime, "kind", "")),
+                "pid": pid, "kind": str(getattr(runtime, "kind", "")),
                 "profile": str(getattr(runtime, "profile", "")),
                 "supervisor": str(getattr(runtime, "supervisor", "")),
-                "_create_time": _numeric(detail.get("create_time") if isinstance(detail, dict) else None),
-            }
+                "_create_time": _numeric(detail.get("create_time") if isinstance(detail, dict) else None)}
     except Exception as exc:
         logger.debug("Could not read planned serve runtimes: %s", exc)
         return []
@@ -56,30 +54,27 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
     except Exception as exc:
         logger.debug("Serve/dashboard survivor probe failed: %s", exc)
         live = None
-    survivors = []
-    for pid, row in planned.items():
-        if live is not None:
-            if pid not in live:
-                continue
-            planned_created, live_created = row["_create_time"], live[pid]
-            if (
-                planned_created is not None
-                and live_created is not None
-                and abs(float(live_created) - float(planned_created)) >= 2.0):
-                # Same number, different process: the pre-update runtime is gone
-                # and something new registered under its PID. Not a survivor.
-                continue
-        survivors.append(_without_incarnation(row))
+    def _still_live(pid, row) -> bool:
+        if live is None:
+            return True
+        if pid not in live:
+            return False
+        planned_created, live_created = row["_create_time"], live[pid]
+        # Same number, different process: the pre-update runtime is gone and something new
+        # registered under its PID. Not a survivor.
+        return not (
+            planned_created is not None and live_created is not None
+            and abs(float(live_created) - float(planned_created)) >= 2.0)
+
+    # The operator-facing row drops the incarnation (a matching key only).
+    survivors = [
+        {k: v for k, v in row.items() if k != "_create_time"}
+        for pid, row in planned.items() if _still_live(pid, row)]
     return sorted(survivors, key=lambda row: row["pid"])
 
 
 def _numeric(value):
     return value if isinstance(value, (int, float)) else None
-
-
-def _without_incarnation(row: dict) -> dict:
-    """The operator-facing survivor row (incarnation is a matching key only)."""
-    return {key: value for key, value in row.items() if key != "_create_time"}
 
 
 def _qualified_serve_skips(skip_units) -> list[dict]:
@@ -95,35 +90,11 @@ def _qualified_serve_skips(skip_units) -> list[dict]:
     return rows
 
 
-def _recover_gateway_restart_after_abort(
-    plan,
-    *,
-    gateway_mode: bool,
-    skip_profiles: set[str] | None = None,
-    skip_units: set[str] | None = None) -> dict[str, list]:
-    """Retry supervised gateway restarts from a clean Python process (the in-process restart ran
-    in the pre-``git pull`` interpreter). Only inventory-classified supervisor-owned profiles."""
-    from hermes_cli.update_cmd import _gateway_recovery_partition
-    candidates, skipped = _gateway_recovery_partition(plan, skip_profiles=skip_profiles)
-    profiles = sorted(candidates)
-    recover_serve = _serve_unit_recovery_available()
-    _empty_serve: dict[str, list] = {"verified": [], "failed": []}
-
-    def _result(requested, verified, relaunch_attempted, failed, serve_units=None) -> dict[str, list]:
-        return {
-            "requested": requested,
-            "verified": verified,
-            "relaunch_attempted": relaunch_attempted,
-            "failed": failed,
-            "skipped": skipped,
-            "serve_units": dict(_empty_serve) if serve_units is None else serve_units}
-
-    if not profiles and not recover_serve:
-        return _result([], [], [], [])
-
-    def _all_failed() -> dict[str, list]:
-        return _result(profiles, [], [], profiles)
-
+def _run_fresh_recovery_process(
+    profiles, candidates, *, gateway_mode: bool, recover_serve: bool, skip_units
+) -> "subprocess.CompletedProcess | None":
+    """Spawn ``hermes_cli.update_restart_recovery --stdin`` detached from this process; None when it
+    could not run (no systemd-run in gateway mode, OSError, timeout) — the caller fails closed."""
     command = [sys.executable, "-m", "hermes_cli.update_restart_recovery", "--stdin"]
     env = os.environ.copy()
     env["HERMES_UPDATE_RESTART_RECOVERY"] = "1"
@@ -137,66 +108,83 @@ def _recover_gateway_restart_after_abort(
         systemd_run = shutil.which("systemd-run")
         if not systemd_run:
             logger.warning("Cannot isolate fresh gateway recovery from the gateway cgroup")
-            return _all_failed()
+            return None
         command = [systemd_run, "--user", "--scope", "--quiet", "--collect", "--", *command]
 
     kwargs = {
-        "input": json.dumps(
-            {
-                "profiles": profiles,
-                "supervisors": candidates,
-                "serve_units": {
-                    "recover": recover_serve, "skip": _qualified_serve_skips(skip_units)}}),
-        "capture_output": True,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-        "check": False,
-        "env": env,
+        "input": json.dumps({
+            "profiles": profiles, "supervisors": candidates,
+            "serve_units": {"recover": recover_serve, "skip": _qualified_serve_skips(skip_units)}}),
+        "capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace",
+        "check": False, "env": env,
         # Gateway profiles run sequentially at up to 90s each, plus the serve pass's own
         # restart + settle budget — don't kill a recovery that was working.
         "timeout": max(180, 30 + 90 * len(profiles) + (150 if recover_serve else 0))}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
-            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0))
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0))
     else:
         kwargs["start_new_session"] = True
-
     try:
-        result = subprocess.run(command, **kwargs)
+        return subprocess.run(command, **kwargs)
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("Fresh gateway restart recovery failed: %s", exc)
-        return _all_failed()
+        return None
 
+
+def _parse_serve_units(raw_serve, *, recover_serve: bool) -> dict[str, list]:
+    """Validate the child's ``serve_units`` block; an unreadable block is not "nothing to do" when
+    serve recovery was requested (those units may still serve the pre-update generation)."""
+    if (
+        isinstance(raw_serve, dict)
+        and isinstance(raw_serve.get("verified"), list) and isinstance(raw_serve.get("failed"), list)
+        and all(isinstance(unit, str) for unit in (*raw_serve["verified"], *raw_serve["failed"]))):
+        return {"verified": sorted(raw_serve["verified"]), "failed": sorted(raw_serve["failed"])}
+    if recover_serve:
+        logger.warning("Fresh recovery returned an invalid serve-unit result")
+        return {"verified": [], "failed": ["<unreadable>"]}
+    return {"verified": [], "failed": []}
+
+
+def _recover_gateway_restart_after_abort(
+    plan, *, gateway_mode: bool, skip_profiles: set[str] | None = None,
+    skip_units: set[str] | None = None) -> dict[str, list]:
+    """Retry supervised gateway restarts from a clean Python process (the in-process restart ran
+    in the pre-``git pull`` interpreter). Only inventory-classified supervisor-owned profiles."""
+    from hermes_cli.update_cmd import _gateway_recovery_partition
+    candidates, skipped = _gateway_recovery_partition(plan, skip_profiles=skip_profiles)
+    profiles = sorted(candidates)
+    recover_serve = _serve_unit_recovery_available()
+
+    def _result(requested, verified, relaunch_attempted, failed, serve_units=None) -> dict[str, list]:
+        return {
+            "requested": requested, "verified": verified, "relaunch_attempted": relaunch_attempted,
+            "failed": failed, "skipped": skipped,
+            "serve_units": {"verified": [], "failed": []} if serve_units is None else serve_units}
+
+    if not profiles and not recover_serve:
+        return _result([], [], [], [])
+
+    def _all_failed() -> dict[str, list]:
+        return _result(profiles, [], [], profiles)
+
+    result = _run_fresh_recovery_process(
+        profiles, candidates, gateway_mode=gateway_mode, recover_serve=recover_serve, skip_units=skip_units)
+    if result is None:
+        return _all_failed()
     if result.returncode != 0:
         logger.warning("Fresh gateway restart recovery exited %s", result.returncode)
         return _all_failed()
-
     try:
         recovery_result = json.loads(result.stdout or "")
         verified = recovery_result.get("verified")
         relaunch_attempted = recovery_result.get("relaunch_attempted")
         failed = recovery_result.get("failed")
-        raw_serve = recovery_result.get("serve_units") or dict(_empty_serve)
+        raw_serve = recovery_result.get("serve_units") or {"verified": [], "failed": []}
     except (AttributeError, TypeError, ValueError):
         logger.warning("Fresh gateway restart recovery returned invalid JSON")
         return _all_failed()
-
-    serve_units = dict(_empty_serve)
-    if (
-        isinstance(raw_serve, dict)
-        and isinstance(raw_serve.get("verified"), list)
-        and isinstance(raw_serve.get("failed"), list)
-        and all(
-            isinstance(unit, str) for unit in (*raw_serve["verified"], *raw_serve["failed"]))):
-        serve_units = {
-            "verified": sorted(raw_serve["verified"]), "failed": sorted(raw_serve["failed"])}
-    elif recover_serve:
-        # An unreadable serve block is not "nothing to do": those units host tui_gateway and
-        # may still be serving the pre-update generation.
-        logger.warning("Fresh recovery returned an invalid serve-unit result")
-        serve_units = {"verified": [], "failed": ["<unreadable>"]}
+    serve_units = _parse_serve_units(raw_serve, recover_serve=recover_serve)
 
     buckets = (verified, relaunch_attempted, failed)
     reported: list[str] = []
@@ -205,8 +193,7 @@ def _recover_gateway_restart_after_abort(
     if (
         not all(isinstance(bucket, list) for bucket in buckets)
         or any(not isinstance(profile, str) for profile in reported)
-        or set(reported) != set(profiles)
-        or len(reported) != len(set(reported))):
+        or set(reported) != set(profiles) or len(reported) != len(set(reported))):
         logger.warning("Fresh gateway restart recovery returned incomplete profiles")
         return _all_failed()
 
@@ -225,21 +212,18 @@ def _recover_gateway_restart_after_abort(
 def _warn_stale_serve_runtimes(rows) -> None:
     """Name the serve/dashboard processes still on pre-update code: ``hermes serve`` hosts
     ``tui_gateway.server``, and an un-restarted unit keeps the pre-pull ``sys.modules`` graph so
-    every chat turn fails with an ``ImportError`` no gateway row explains. Print PIDs + the fixing
-    command."""
+    every chat turn fails with an ``ImportError`` no gateway row explains."""
     if not rows:
         return
     print(
         "  ⚠ These serve/dashboard processes still run pre-update code"
         " (they started before the checkout changed):")
     for row in rows:
-        supervisor = row.get("supervisor") or "unknown"
         print(
             f"      pid {row.get('pid')} — {row.get('kind')}"
-            f" (profile {row.get('profile') or 'default'}, {supervisor})")
+            f" (profile {row.get('profile') or 'default'}, {row.get('supervisor') or 'unknown'})")
     print(
-        "    Restart them before using Hermes again, e.g."
-        " `systemctl --user restart hermes-serve.service`"
+        "    Restart them before using Hermes again, e.g. `systemctl --user restart hermes-serve.service`"
         " or by relaunching `hermes serve` / the Desktop app.")
 
 
@@ -250,13 +234,10 @@ def _abort_recovery_is_complete(
     family is accounted for. Empty ``planned_gateway_profiles`` is deliberately NOT completeness:
     with no gateway leg to prove, ``_restart_phase_failure_is_incomplete`` + the stale rows decide.
     """
-    if not planned_gateway_profiles:
-        return False
-    if not set(planned_gateway_profiles) <= set(covered_gateway_profiles):
-        return False
     result = recovery_result or {}
-    if result.get("failed") or result.get("relaunch_attempted"):
-        return False
-    if (result.get("serve_units") or {}).get("failed"):
-        return False
-    return not stale_runtime_rows
+    return bool(
+        planned_gateway_profiles
+        and set(planned_gateway_profiles) <= set(covered_gateway_profiles)
+        and not (result.get("failed") or result.get("relaunch_attempted"))
+        and not (result.get("serve_units") or {}).get("failed")
+        and not stale_runtime_rows)
