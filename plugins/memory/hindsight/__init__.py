@@ -111,7 +111,7 @@ def _fetch_hindsight_api_version(api_url: str, api_key: str | None = None,
     except Exception as exc:
         logger.debug("Hindsight /version probe failed for %s: %s", url, exc)
         return None
-    version = data.get("version") or data.get("api_version") if isinstance(data, dict) else None
+    version = (data.get("version") or data.get("api_version")) if isinstance(data, dict) else None
     return str(version) if version else None
 
 
@@ -458,13 +458,9 @@ class HindsightMemoryProvider(MemoryProvider):
         self._idle_timeout = self._int_setting(
             "idle_timeout", "HINDSIGHT_IDLE_TIMEOUT", _DEFAULT_IDLE_TIMEOUT, env_default=self._idle_timeout,
         )
-        kwargs = dict(
-            profile=cfg.get("profile", "hermes"),
-            llm_provider=llm_provider,
-            llm_api_key=_embedded_llm_api_key(cfg),
-            llm_model=cfg.get("llm_model", ""),
-            idle_timeout=self._idle_timeout,
-        )
+        kwargs = dict(profile=cfg.get("profile", "hermes"), llm_provider=llm_provider,
+                      llm_api_key=_embedded_llm_api_key(cfg), llm_model=cfg.get("llm_model", ""),
+                      idle_timeout=self._idle_timeout)
         if self._llm_base_url:
             kwargs["llm_base_url"] = self._llm_base_url
         return HindsightEmbedded(**kwargs)
@@ -482,9 +478,7 @@ class HindsightMemoryProvider(MemoryProvider):
     def _get_client(self):
         """Return the cached Hindsight client (created once, reused)."""
         if self._client is None:
-            self._client = (
-                self._new_embedded_client() if self._mode == "local_embedded" else self._new_cloud_client()
-            )
+            self._client = self._new_embedded_client() if self._mode == "local_embedded" else self._new_cloud_client()
         return self._client
 
     def _run_sync(self, coro):
@@ -512,8 +506,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _ensure_writer(self) -> None:
         """Lazy-start the single retain-writer thread (tools-only providers never pay for it)."""
-        thread = self._writer_thread
-        if thread is not None and thread.is_alive():
+        if (thread := self._writer_thread) is not None and thread.is_alive():
             return
         # A previous writer may have exited after shutdown(); allow the fresh one to drain.
         self._shutting_down.clear()
@@ -679,10 +672,8 @@ class HindsightMemoryProvider(MemoryProvider):
             _export_port_health_grace_timeout(cfg)
             available, reason = _check_local_runtime()
             if not available:
-                logger.warning(
-                    "Hindsight local mode disabled because its runtime could not be imported: %s.%s",
-                    reason, _local_runtime_hint(reason),
-                )
+                logger.warning("Hindsight local mode disabled because its runtime could not be imported: %s.%s",
+                               reason, _local_runtime_hint(reason))
                 self._mode = "disabled"
                 return
         self._apply_connection_settings(cfg)
@@ -840,12 +831,11 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _recall_disabled(self) -> bool:
         """Guards shared by the async and synchronous recall paths."""
-        for skip, why in ((self._memory_mode == "tools", "tools-only mode"), (not self._auto_recall, "auto_recall disabled"),
-                          (self._shutting_down.is_set(), "shutting down")):
-            if skip:
-                logger.debug("Prefetch: skipped (%s)", why)
-                return True
-        return False
+        why = ("tools-only mode" if self._memory_mode == "tools" else "auto_recall disabled" if not self._auto_recall
+               else "shutting down" if self._shutting_down.is_set() else None)
+        if why:
+            logger.debug("Prefetch: skipped (%s)", why)
+        return why is not None
 
     def _recall(self, query: str) -> list:
         kwargs: dict = {"bank_id": self._bank_id, "query": query, "budget": self._budget, "max_tokens": self._recall_max_tokens}
@@ -895,10 +885,11 @@ class HindsightMemoryProvider(MemoryProvider):
         return f"{header}\n\n{result}"
 
     def _join_prefetch(self, timeout: float, *, log: bool = False) -> None:
-        if self._prefetch_thread and self._prefetch_thread.is_alive():
-            if log:
-                logger.debug("Prefetch: waiting for background thread to complete")
-            self._prefetch_thread.join(timeout=timeout)
+        if not (self._prefetch_thread and self._prefetch_thread.is_alive()):
+            return
+        if log:
+            logger.debug("Prefetch: waiting for background thread to complete")
+        self._prefetch_thread.join(timeout=timeout)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Opt-in: recall synchronously against the *current* message so the
@@ -976,8 +967,8 @@ class HindsightMemoryProvider(MemoryProvider):
                       retain_async: bool | None = None):
         """Dispatch one item via aretain_batch (bank_id/document_id/retain_async are
         call-level args, never item keys)."""
-        kwargs: Dict[str, Any] = {"bank_id": bank_id, "items": [item]}
-        kwargs.update({k: v for k, v in (("document_id", document_id), ("retain_async", retain_async)) if v is not None})
+        kwargs: Dict[str, Any] = {"bank_id": bank_id, "items": [item], "document_id": document_id, "retain_async": retain_async}
+        kwargs = {k: v for k, v in kwargs.items() if v is not None}
         return self._run_hindsight_operation(lambda client: client.aretain_batch(**kwargs))
 
     def _make_turn_retain_job(self, turns: list[str], *, document_id: str, update_mode: str | None,
@@ -1007,10 +998,10 @@ class HindsightMemoryProvider(MemoryProvider):
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Enqueue a retain for the current turn (non-blocking; writer thread). Dropped
         once shutdown() fired so post-exit retains never reach aiohttp during teardown."""
-        for skip, why in ((not self._auto_retain, "auto_retain disabled"), (self._shutting_down.is_set(), "shutting down")):
-            if skip:
-                logger.debug("sync_turn: skipped (%s)", why)
-                return
+        why = "auto_retain disabled" if not self._auto_retain else "shutting down" if self._shutting_down.is_set() else None
+        if why:
+            logger.debug("sync_turn: skipped (%s)", why)
+            return
         if session_id:
             self._session_id = str(session_id).strip()
 
@@ -1177,8 +1168,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._shutting_down.set()
         # The writer finishes in-flight work then exits on the sentinel; the
         # bounded join keeps shutdown predictable even if the daemon is wedged.
-        writer = self._writer_thread
-        if writer is not None and writer.is_alive():
+        if (writer := self._writer_thread) is not None and writer.is_alive():
             self._retain_queue.put(_WRITER_SENTINEL)
             writer.join(timeout=10.0)
             if writer.is_alive():
