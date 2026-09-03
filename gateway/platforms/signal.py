@@ -383,19 +383,16 @@ class SignalAdapter(BasePlatformAdapter):
         account_norm = self._account_normalized
         if self.require_mention:
             mentioned_in_text = account_norm and (f"@{account_norm}" in (text or ""))
-            mentioned_in_metadata = any(
-                m.get("number") == account_norm or m.get("uuid") == account_norm
-                for m in (data_message.get("mentions") or []))
+            mentioned_in_metadata = any(account_norm in (m.get("number"), m.get("uuid"))
+                                        for m in (data_message.get("mentions") or []))
             if not mentioned_in_text and not mentioned_in_metadata:
                 logger.debug("Signal: ignoring group message (require_mention=true, bot not mentioned)")
                 return False, text
         if text and account_norm:
             text = text.replace(f"@{account_norm}", "")
-            bot_uuid = self._recipient_uuid_by_number.get(account_norm)
-            if bot_uuid:
+            if bot_uuid := self._recipient_uuid_by_number.get(account_norm):
                 text = text.replace(f"@{bot_uuid}", "")
-            # Collapse only the doubled space the removal introduced; newlines are preserved.
-            text = text.replace("  ", " ").strip()
+            text = text.replace("  ", " ").strip()  # collapse only the doubled space; newlines preserved
         return True, text
 
     async def _collect_attachments(self, attachments_data: list) -> Tuple[List[str], List[str]]:
@@ -707,8 +704,7 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def _rpc_send(self, params: Dict[str, Any], fail_error: str) -> Tuple[Any, Optional[SendResult]]:
         """Run a ``send`` RPC, validate and track it; ``(result, None)`` or ``(None, failed SendResult)``."""
-        result = await self._rpc("send", params)
-        if result is None:
+        if (result := await self._rpc("send", params)) is None:
             return None, SendResult(success=False, error=fail_error)
         success, err_msg = self._validate_send_result(result)
         if not success:
@@ -767,8 +763,7 @@ class SignalAdapter(BasePlatformAdapter):
             return
         params = await self._with_target({"account": self.account}, chat_id)
         fails = self._typing_failures.get(chat_id, 0)
-        result = await self._rpc("sendTyping", params, rpc_id="typing", log_failures=(fails == 0))
-        if result is not None:
+        if await self._rpc("sendTyping", params, rpc_id="typing", log_failures=(fails == 0)) is not None:
             self._typing_failures.pop(chat_id, None)
             self._typing_skip_until.pop(chat_id, None)
             return
@@ -865,8 +860,8 @@ class SignalAdapter(BasePlatformAdapter):
     async def _notify_batch_pacing(self, chat_id: str, next_batch_idx: int, total_batches: int, wait_s: float) -> None:
         """Tell the user about an inter-batch pacing wait over the notice threshold (best-effort)."""
         try:
-            await self.send(chat_id, f"(More images coming — pausing ~{_format_wait(wait_s)} "
-                                     f"for Signal rate limit, batch {next_batch_idx}/{total_batches}.)")
+            await self.send(chat_id, f"(More images coming — pausing ~{_format_wait(wait_s)} for Signal rate limit, "
+                                     f"batch {next_batch_idx}/{total_batches}.)")
         except Exception as e:
             logger.warning("Signal: failed to send pacing notice: %s", e)
 
@@ -967,18 +962,14 @@ class SignalAdapter(BasePlatformAdapter):
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """React with 👀 when processing begins."""
-        if not self._reactions_enabled(event):
-            return
-        target = self._extract_reaction_target(event)
-        if target:
+        if self._reactions_enabled(event) and (target := self._extract_reaction_target(event)):
             await self.send_reaction(event.source.chat_id, "👀", *target)
 
     async def on_processing_complete(self, event: MessageEvent, outcome: "ProcessingOutcome") -> None:
         """Swap 👀 for ✅/❌; on CANCELLED the 👀 stays to keep reflecting "in progress" (matches Telegram)."""
         if outcome == ProcessingOutcome.CANCELLED or not self._reactions_enabled(event):
             return
-        target = self._extract_reaction_target(event)
-        if not target:
+        if not (target := self._extract_reaction_target(event)):
             return
         await self.remove_reaction(event.source.chat_id, *target)
         if emoji := _OUTCOME_REACTION.get(outcome):
