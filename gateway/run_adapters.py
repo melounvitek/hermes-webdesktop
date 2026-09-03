@@ -41,17 +41,14 @@ class GatewayAdapterLifecycleMixin:
         """Wait up to ``timeout`` for ``task``; on deadline (or our own cancellation) detach it. Not
         ``asyncio.wait_for``: that WAITS for the cancelled child, so a connect()/close() swallowing
         ``CancelledError`` blocks recovery forever. True if it finished in time."""
+        done: set = set()
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
-        except asyncio.CancelledError:
-            task.cancel()
-            task.add_done_callback(consume_detached_task_result)
-            raise
-        if task in done:
-            return True
-        task.cancel()
-        task.add_done_callback(consume_detached_task_result)
-        return False
+        finally:
+            if task not in done:  # timed out, or our own cancellation
+                task.cancel()
+                task.add_done_callback(consume_detached_task_result)
+        return task in done
 
     async def _await_adapter_cleanup_with_timeout(self, awaitable: Awaitable[Any], timeout: float) -> bool:
         """Await adapter cleanup with a detach-on-deadline bound; True when it completed."""

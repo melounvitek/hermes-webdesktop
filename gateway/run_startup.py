@@ -23,7 +23,7 @@ from gateway.session import SessionSource, build_session_key
 from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT, GATEWAY_FATAL_CONFIG_EXIT_CODE, is_global_startup_conflict
 )
-from gateway.run_shutdown import _log_suppressed
+from gateway.run_shutdown import _log_suppressed, _send_error
 from gateway.shutdown_watchdog import (
     DEFAULT_HEARTBEAT_INTERVAL_S, DEFAULT_LOOP_WATCHDOG_INTERVAL_S,
     DEFAULT_LOOP_WATCHDOG_MAX_STRIKES, DEFAULT_LOOP_WATCHDOG_TIMEOUT_S, loop_heartbeat_forever,
@@ -725,14 +725,12 @@ class GatewayStartupMixin:
 
         # Log any active supply-chain security advisories. Deliberately does NOT block startup or
         # surface inline to users — only the operator can act (uninstall, rotate credentials).
-        try:
+        with _log_suppressed(logging.DEBUG, "security advisory check failed at gateway startup", exc_info=True):
             from hermes_cli.security_advisories import detect_compromised, gateway_log_message
             _adv_msg = gateway_log_message(detect_compromised())
             if _adv_msg:
                 logger.warning("%s", _adv_msg)
                 logger.warning("Run `hermes doctor` on the gateway host for full remediation steps.")
-        except Exception:
-            logger.debug("security advisory check failed at gateway startup", exc_info=True)
 
     def _start_log_systemd_timing_alignment(self) -> None:
         """Warn when systemd's TimeoutStopSec does not cover the drain window (a unit file from before
@@ -784,9 +782,9 @@ class GatewayStartupMixin:
             entries = platform_registry.plugin_entries()
             allowed_vars += [e.allowed_users_env for e in entries if e.allowed_users_env]
             allow_all_vars += [e.allow_all_env for e in entries if e.allow_all_env]
-        _any_allowlist = any(os.getenv(v) for v in allowed_vars)
-        _allow_all = any(os.getenv(v, "").lower() in {"true", "1", "yes"} for v in allow_all_vars)
-        if not _any_allowlist and not _allow_all:
+        if not any(os.getenv(v) for v in allowed_vars) and not any(
+            os.getenv(v, "").lower() in {"true", "1", "yes"} for v in allow_all_vars
+        ):
             logger.warning(
                 "No env user allowlists configured. Messaging platforms default to "
                 "pairing/allowlist policies and will deny unknown senders unless you "
@@ -985,12 +983,10 @@ class GatewayStartupMixin:
         # stop() won't reach them.
         _connected_ok = [
             _t for _t in _task_map
-            if _t not in _pending_tasks and not _t.cancelled()
-            and _t.exception() is None and _t.result()[3] == "ok"
+            if _t not in _pending_tasks and not _t.cancelled() and _t.exception() is None and _t.result()[3] == "ok"
         ]
         for _t in [*_pending_tasks, *_connected_ok]:
-            _p, _c, _a = _task_map[_t]
-            await self._startup_teardown_adapter(_a, _p)
+            await self._startup_teardown_adapter(_task_map[_t][2], _task_map[_t][0])
         await self._abort_startup_if_shutdown_requested()
         return None
 
@@ -1519,5 +1515,4 @@ class GatewayStartupMixin:
         except Exception as exc:
             raise RuntimeError(f"adapter.send failed: {exc}") from exc
         if not getattr(result, "success", True):
-            err = getattr(result, "error", "send returned success=False")
-            raise RuntimeError(f"adapter.send failed: {err}")
+            raise RuntimeError(f"adapter.send failed: {_send_error(result)}")

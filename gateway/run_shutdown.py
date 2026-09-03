@@ -138,11 +138,15 @@ class GatewayShutdownMixin:
             + self._active_deferred_agent_worker_count()
         )
 
+    @staticmethod
+    def _running_cron_job_count() -> int:
+        from cron.scheduler import get_running_job_ids
+        return len(get_running_job_ids())
+
     def _active_cron_job_count(self) -> int:
         """Cron jobs currently executing — they run outside ``_running_agents``; 0 if cron can't import."""
         try:
-            from cron.scheduler import get_running_job_ids
-            return len(get_running_job_ids())
+            return self._running_cron_job_count()
         except Exception:
             return 0
 
@@ -341,11 +345,7 @@ class GatewayShutdownMixin:
                 logger.debug("scale-to-zero: %s unreadable — staying awake", label, exc_info=True)
                 return busy_sentinel
 
-        def _cron_count() -> int:
-            from cron.scheduler import get_running_job_ids
-            return len(get_running_job_ids())
-
-        cron_count = _read_or_awake("cron work count", _cron_count, 1)
+        cron_count = _read_or_awake("cron work count", self._running_cron_job_count, 1)
         api_count = _read_or_awake("api work count", lambda: self._api_server_hook("active_agent_work_count"), 1)
         # An attached dashboard/desktop/TUI client (heartbeat file mtime from the dashboard process) is
         # inbound activity too — folded into the inbound clock, not a conjunct, so disconnect gets the
@@ -623,12 +623,12 @@ class GatewayShutdownMixin:
                 logger.debug("Interrupted running agent for session %s during shutdown", session_key)
         # API-server / desk turns are adapter-owned and never enter _running_agents, so the loop above
         # cannot see them even though _drain_active_agents() waited for them.
-        interrupted_api = self._interrupt_api_server_runs(reason)
-        if interrupted_api:
-            logger.debug("Interrupted %d api_server run(s) during shutdown", interrupted_api)
-        interrupted_deferred = self._interrupt_deferred_agent_workers(reason)
-        if interrupted_deferred:
-            logger.debug("Interrupted %d deferred agent worker(s) during shutdown", interrupted_deferred)
+        for count, what in (
+            (self._interrupt_api_server_runs(reason), "api_server run(s)"),
+            (self._interrupt_deferred_agent_workers(reason), "deferred agent worker(s)"),
+        ):
+            if count:
+                logger.debug("Interrupted %d %s during shutdown", count, what)
 
     def _shutdown_interrupt_reason(self) -> str:
         from gateway.run import _INTERRUPT_REASON_GATEWAY_RESTART, _INTERRUPT_REASON_GATEWAY_SHUTDOWN
@@ -844,9 +844,9 @@ class GatewayShutdownMixin:
                 )
                 continue
             # Home channels omit ``metadata=`` when empty (adapter doubles may not accept the kwarg).
-            send_kwargs = {"metadata": metadata} if metadata else {}
             if await self._send_shutdown_notice(
-                adapter, str(home.chat_id), msg, "home channel", platform.value, **send_kwargs
+                adapter, str(home.chat_id), msg, "home channel", platform.value,
+                **({"metadata": metadata} if metadata else {}),
             ):
                 notified.add(dedup_key)
 
@@ -1533,12 +1533,11 @@ class GatewayShutdownMixin:
         # session (never a wholesale dict swap that could lose a concurrent writer's entry).
         self._running_agents.clear()
         self._running_agents_ts.clear()
-        if hasattr(self, "_active_session_leases"):
-            self._active_session_leases.clear()
         self._pending_messages.clear()
         self._pending_approvals.clear()
-        if hasattr(self, "_busy_ack_ts"):
-            self._busy_ack_ts.clear()
+        for _attr in ("_active_session_leases", "_busy_ack_ts"):  # absent on bare shutdown-path doubles
+            if hasattr(self, _attr):
+                getattr(self, _attr).clear()
         self._shutdown_event.set()
         # Global catch-all subprocess kill (safe to repeat): covers the graceful path and
         # anything respawned since the drain-timeout path's post-interrupt kill.
