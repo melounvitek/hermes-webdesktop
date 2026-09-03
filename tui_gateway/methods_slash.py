@@ -247,11 +247,10 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
     def estimate(messages, prompt, tool_defs) -> int:
         return estimate_request_tokens_rough(messages, system_prompt=prompt, tools=tool_defs) if messages else 0
     before_tokens = estimate(before_messages, sys_prompt, tools)
+    snapshot = {"approx_tokens": before_tokens, "before_messages": before_messages, "history_version": history_version}
     try:
         if snapshot_kwargs:
-            _compress_session_history(
-                session, arg.strip() or None, approx_tokens=before_tokens, before_messages=before_messages,
-                history_version=history_version)
+            _compress_session_history(session, arg.strip() or None, **snapshot)
         else:
             _compress_session_history(session, arg)
     except CompressionLockHeld as e:
@@ -354,12 +353,12 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     name, arg, agent = parts[0], (parts[1].strip() if len(parts) > 1 else ""), session.get("agent")
     if name == "compact":  # /compact aliases /compress; the compute-host control forwards the raw alias
         name = "compress"
-    if _session_uses_compute_host(session) and name in _MUTATES_WHILE_RUNNING:
-        return _compute_host_slash(sid, session, name, command)[1]
-    if name in _MUTATES_WHILE_RUNNING and session.get("running"):
-        return f"session busy — /interrupt the current turn before running /{name}"
-    mirror = _SLASH_MIRRORS.get(name)
-    if mirror is None:
+    if name in _MUTATES_WHILE_RUNNING:
+        if _session_uses_compute_host(session):
+            return _compute_host_slash(sid, session, name, command)[1]
+        if session.get("running"):
+            return f"session busy — /interrupt the current turn before running /{name}"
+    if (mirror := _SLASH_MIRRORS.get(name)) is None:
         return ""
     try:
         return mirror(sid, session, agent, arg) or ""
