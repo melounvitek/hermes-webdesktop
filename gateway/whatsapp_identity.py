@@ -28,18 +28,15 @@ _BARE_PHONE_RE = re.compile(r"^\+?[\d\s().\-]+$")
 
 def normalize_whatsapp_identifier(value: str) -> str:
     """Strip JID/LID/device/plus syntax down to the bare numeric identifier:
-    ``"6012:47@s.whatsapp.net"``, ``"6012@lid"`` and ``"+6012"`` all become ``"6012"``.
-    """
+    ``"6012:47@s.whatsapp.net"``, ``"6012@lid"`` and ``"+6012"`` all become ``"6012"``."""
     return str(value or "").strip().replace("+", "", 1).split(":", 1)[0].split("@", 1)[0]
 
 
 def to_whatsapp_jid(value: str) -> str:
-    """Normalize an *outbound* target to a bridge-safe JID (inverse of normalize).
-
-    Baileys' ``jidDecode`` crashes on a bare phone number, so bare phones become
-    ``<digits>@s.whatsapp.net``; ``user:device@domain`` collapses to ``user@domain``; anything
-    else is returned unchanged so the bridge can surface a real error. ``""`` for empty input.
-    """
+    """Normalize an *outbound* target to a bridge-safe JID (inverse of normalize).  Baileys'
+    ``jidDecode`` crashes on a bare phone, so bare phones become ``<digits>@s.whatsapp.net``;
+    ``user:device@domain`` collapses to ``user@domain``; anything else is returned unchanged
+    so the bridge can surface a real error.  ``""`` for empty input."""
     if not value:
         return ""
     normalized = str(value).strip()
@@ -56,10 +53,8 @@ def to_whatsapp_jid(value: str) -> str:
 
 
 def expand_whatsapp_aliases(identifier: str) -> Set[str]:
-    """Return all identifiers transitively reachable via the bridge's ``lid-mapping-*.json`` files.
-    Always includes the normalized input itself (callers can ``in``-check without a fallback);
-    empty set if ``identifier`` normalizes to empty.
-    """
+    """All identifiers transitively reachable via the bridge's ``lid-mapping-*.json`` files;
+    always includes the normalized input itself (empty set if it normalizes to empty)."""
     normalized = normalize_whatsapp_identifier(identifier)
     if not normalized:
         return set()
@@ -78,9 +73,8 @@ def expand_whatsapp_aliases(identifier: str) -> Set[str]:
             if not mapping_path.exists():
                 continue
             try:
-                mapped = normalize_whatsapp_identifier(
-                    json.loads(mapping_path.read_text(encoding="utf-8"))
-                )
+                raw = json.loads(mapping_path.read_text(encoding="utf-8"))
+                mapped = normalize_whatsapp_identifier(raw)
             except (OSError, json.JSONDecodeError) as exc:
                 logger.debug("whatsapp_identity: failed to read %s: %s", mapping_path, exc)
                 continue
@@ -90,9 +84,8 @@ def expand_whatsapp_aliases(identifier: str) -> Set[str]:
 
 
 def canonical_whatsapp_identifier(identifier: str) -> str:
-    """Return a stable sender identity across phone-JID/LID variants (DM ``chat_id`` and group
+    """Stable sender identity across phone-JID/LID variants (DM ``chat_id`` and group
     ``participant_id`` alike): the shortest alias from :func:`expand_whatsapp_aliases`, which
-    degrades to the normalized input when no mapping files exist. ``""`` for empty input.
-    """
+    degrades to the normalized input when no mapping files exist.  ``""`` for empty input."""
     aliases = expand_whatsapp_aliases(identifier)
     return min(aliases, key=lambda c: (len(c), c)) if aliases else ""
