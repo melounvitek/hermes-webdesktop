@@ -19,14 +19,12 @@ from hermes_cli.model_setup_flows_common import (  # noqa: F401
     _ensure_dict_section, _ensure_flow_api_key, _existing_api_key_for_model_flow, _finish_model,
     _load_config_model_section, _models_dev_merged, _oauth_gate, _persist_model, _pick_model_or_prompt,
     _print_numbered, _prompt_auth_credentials_choice, _prune_replaced_custom_model_config_credentials,
-    _run_login, _say, _show_curated,
-)
+    _run_login, _say, _show_curated)
 from hermes_cli.model_setup_flows_custom import _model_flow_custom, _model_flow_named_custom  # noqa: F401
 from hermes_cli.model_setup_flows_azure import _model_flow_azure_foundry  # noqa: F401
 from hermes_cli.model_setup_flows_bedrock import (  # noqa: F401
     BEDROCK_GEO_PREFIXES, bedrock_region_geo_prefix, bedrock_model_routable_from_region,
-    _model_flow_bedrock_api_key, _model_flow_bedrock,
-)
+    _model_flow_bedrock_api_key, _model_flow_bedrock)
 
 
 def _env_base_url(base_url_env: str) -> str:
@@ -236,8 +234,7 @@ def _nous_verified_credentials(creds_or_none=None):
     """Resolve Nous runtime credentials; on failure print the diagnosis (re-login when the
     session expired) and return None."""
     from hermes_cli.auth import (
-        AuthError, PROVIDER_REGISTRY, _login_nous, format_auth_error, resolve_nous_runtime_credentials,
-    )
+        AuthError, PROVIDER_REGISTRY, _login_nous, format_auth_error, resolve_nous_runtime_credentials)
 
     try:
         return resolve_nous_runtime_credentials()
@@ -373,8 +370,7 @@ def _model_flow_openai_codex(config, current_model=""):
     from hermes_cli.codex_models import get_codex_model_ids
     if not _oauth_gate(
         bool(get_codex_auth_status().get("logged_in")), "OpenAI Codex", _login_openai_codex, argparse.Namespace(),
-        PROVIDER_REGISTRY["openai-codex"], recheck=lambda: get_codex_auth_status().get("logged_in"),
-    ):
+        PROVIDER_REGISTRY["openai-codex"], recheck=lambda: get_codex_auth_status().get("logged_in")):
         return
 
     # Prefer the credential pool (where `hermes auth` stores device_code tokens),

@@ -232,8 +232,7 @@ def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_n
         # endpoint may occupy must be skipped or its own legacy pool gets pruned.
         active_pool_keys = {
             str(key).strip().lower()
-            for key in custom_provider_pool_key_candidates(base_url, provider_name=provider_name or None)
-        }
+            for key in custom_provider_pool_key_candidates(base_url, provider_name=provider_name or None)}
         if not active_pool_keys:
             return
         pools = read_credential_pool(None)

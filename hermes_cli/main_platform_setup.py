@@ -337,8 +337,7 @@ _SYNC_GATED = {
     "pull": _sync_pull,
     "push": lambda ssc, identity: ssc.push_skills(identity=identity, message="hermes sync push"),
     "now": lambda ssc, identity: {"pull": ssc.pull_skills(identity=identity),
-                                  "push": ssc.push_skills(identity=identity, message="hermes sync now")},
-}
+                                  "push": ssc.push_skills(identity=identity, message="hermes sync now")}}
 
 
 def cmd_sync(args):
