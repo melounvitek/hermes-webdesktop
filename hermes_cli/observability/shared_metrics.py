@@ -103,6 +103,13 @@ _MIGRATE_V1_SQL = (
             """,
     "DROP TABLE counter_aggregates_v1",
 )
+_PENDING_PERIOD_COUNT_SQL = """
+                SELECT COUNT(*) AS period_count FROM (
+                    SELECT period_start, hermes_version, os_family, architecture, install_method
+                    FROM counter_aggregates WHERE value > packaged_value
+                    GROUP BY period_start, hermes_version, os_family, architecture, install_method
+                )
+                """
 _INCREMENT_COUNTER_SQL = """
             INSERT INTO counter_aggregates(
                 period_start, metric_name, hermes_version, os_family, architecture,
@@ -251,8 +258,10 @@ class SharedMetricsStore:
         )
 
     def create_and_export_package(self) -> list[Path]:
-        """Commit one pending delta package, then atomically export the outbox."""
-        for _ in range(self._pending_period_count()):
+        """Commit every pending delta package (one per period), then export the outbox."""
+        with self._connection() as connection:
+            row = connection.execute(_PENDING_PERIOD_COUNT_SQL).fetchone()
+        for _ in range(int(row["period_count"]) if row is not None else 0):
             if self._create_package() is None:
                 break
         return self._export_and_prune()
@@ -370,19 +379,6 @@ class SharedMetricsStore:
         except (TypeError, ValueError):
             return None
         return None if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
-
-    def _pending_period_count(self) -> int:
-        with self._connection() as connection:
-            row = connection.execute(
-                """
-                SELECT COUNT(*) AS period_count FROM (
-                    SELECT period_start, hermes_version, os_family, architecture, install_method
-                    FROM counter_aggregates WHERE value > packaged_value
-                    GROUP BY period_start, hermes_version, os_family, architecture, install_method
-                )
-                """
-            ).fetchone()
-        return int(row["period_count"]) if row is not None else 0
 
     def _create_pending_packages_if_due(self) -> None:
         now = _utc_now()
