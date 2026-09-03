@@ -27,11 +27,8 @@ _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS = 3
 
 
 def parse_retry_after_seconds(value_or_headers: Any) -> Optional[float]:
-    """Parse a ``Retry-After`` value (numeric / HTTP-date) or a headers mapping into seconds.
-
-    Both casings are tried for plain dicts (real header containers are already
-    case-insensitive). Clamped at 0.0; None when absent / unparseable.
-    """
+    """Parse a ``Retry-After`` value (numeric / HTTP-date) or a headers mapping (both casings tried) into
+    seconds, clamped at 0.0; None when absent / unparseable."""
     raw = value_or_headers
     if raw is not None and not isinstance(raw, (str, int, float)):
         getter = getattr(raw, "get", None)
@@ -104,12 +101,8 @@ def adaptive_rate_limit_backoff(
     attempt: int, *, base_url: str | None, model: str | None, error: Any, default_wait: float,
     short_attempts: int = _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS,
 ) -> tuple[float, str | None]:
-    """Provider-aware rate-limit backoff → ``(wait_seconds, reason_label)``.
-
-    Most providers get ``default_wait`` unchanged. Z.AI Coding GLM-5.2 overloads keep
-    ``short_attempts`` short retries, then 30→60→90→120s (capped) with light jitter so long
-    waits stay readable. ``attempt`` is 1-based like the loop's log.
-    """
+    """``(wait_seconds, reason_label)``: ``default_wait`` for most providers; Z.AI Coding GLM-5.2 overloads keep
+    ``short_attempts`` short retries, then 30→60→90→120s with light jitter. ``attempt`` is 1-based."""
     if not is_zai_coding_overload_error(base_url=base_url, model=model, error=error):
         return default_wait, None
     if attempt <= short_attempts:

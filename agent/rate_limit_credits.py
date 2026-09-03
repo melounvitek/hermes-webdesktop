@@ -51,11 +51,9 @@ class RateLimitCreditsMixin:
     def _capture_credits(self, http_response: Any) -> None:
         """Parse x-nous-credits-* headers, cache CreditsState, fire threshold notices.
 
-        The PARSE is swallowed (miss → keep last-known); the notice EVALUATION is a separate block that WARNS
-        on failure so a depletion-notice bug cannot vanish silently.
+        The PARSE is swallowed (miss → keep last-known); notice EVALUATION WARNS on failure so a
+        depletion-notice bug cannot vanish silently. HERMES_DEV_CREDITS_FIXTURE injects a chosen state instead.
         """
-        # Dev test fixture (HERMES_DEV_CREDITS_FIXTURE): inject a chosen notice state
-        # each turn for repeatable testing, bypassing real headers.
         try:
             from agent.credits_tracker import dev_fixture_credits_state
             fixture = dev_fixture_credits_state()
@@ -110,11 +108,9 @@ class RateLimitCreditsMixin:
             self._credits_session_start_micros = state.remaining_micros
 
     def _emit_credits_notices(self) -> None:
-        """Run the threshold policy on the current credits state and emit notices.
+        """Run the threshold policy and emit notices (shared by the warm path and the cold-start seed).
 
-        Shared by the warm path and the cold-start seed so an already-depleted session warns immediately. Runs
-        only when a notice consumer is bound. WARNS on failure. Emits clears FIRST so depleted lands last
-        (latest-wins slot).
+        Runs only when a notice consumer is bound; WARNS on failure; clears FIRST so depleted lands last.
         """
         if getattr(self, "notice_callback", None) is None and getattr(self, "notice_clear_callback", None) is None:
             return

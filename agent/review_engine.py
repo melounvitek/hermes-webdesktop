@@ -48,10 +48,8 @@ def _message_text(message: Dict[str, Any]) -> str:
 
 
 def snapshot_recent_messages(messages: List[Dict[str, Any]], limit: int = DEFAULT_CONTEXT_MESSAGES) -> List[Dict[str, str]]:
-    """Last ``limit`` user/assistant messages as {role, text} dicts, oldest first.
-
-    System messages, tool results and empty-text messages (pure tool-call stubs) are excluded.
-    """
+    """Last ``limit`` user/assistant messages with text as {role, text}, oldest first (system, tool and
+    pure tool-call stubs excluded)."""
     out: List[Dict[str, str]] = []
     for message in reversed(list(messages or [])):
         if not isinstance(message, dict):
@@ -70,13 +68,9 @@ def snapshot_recent_messages(messages: List[Dict[str, Any]], limit: int = DEFAUL
 
 
 def collect_parent_loaded_skills(parent_agent, messages: List[Dict[str, Any]], limit: int = 8) -> List[str]:
-    """Names of skills the parent agent was operating under.
-
-    Launch-preloaded skills come from the stable marker in the parent's
-    ``ephemeral_system_prompt``; mid-session loads from ``skill_view`` tool calls in the
-    history. Preloaded first, then history loads, deduped, capped at ``limit`` (a reviewer
-    told to load 30 skills would burn its budget before working).
-    """
+    """Skills the parent was operating under: launch-preloaded (marker in ``ephemeral_system_prompt``)
+    first, then ``skill_view`` loads from history, deduped, capped at ``limit`` (a reviewer told to load 30
+    skills would burn its budget before working)."""
     names: List[str] = []
     prompt = str(getattr(parent_agent, "ephemeral_system_prompt", "") or "")
     candidates = [m.group(1) for m in re.finditer(r'with the "([^"]+)" skill\s+preloaded', prompt)]
@@ -137,11 +131,8 @@ def build_review_task(snapshot: List[Dict[str, str]], user_prompt: str = "", loa
 
 
 def _load_review_credentials_cfg() -> Optional[Dict[str, Any]]:
-    """Read ``auxiliary.review`` into a delegation-credentials-shaped dict.
-
-    None when nothing is configured (provider=auto/empty and no model/base_url): the
-    reviewer then inherits the parent agent's credentials.
-    """
+    """``auxiliary.review`` as a delegation-credentials dict, or None when unconfigured (provider auto/empty
+    and no model/base_url) so the reviewer inherits the parent's credentials."""
     try:
         from hermes_cli.config import load_config_readonly
 
@@ -160,13 +151,9 @@ def _load_review_credentials_cfg() -> Optional[Dict[str, Any]]:
 
 
 def start_review(parent_agent, messages: List[Dict[str, Any]], user_prompt: str = "") -> Dict[str, Any]:
-    """Dispatch the reviewer subagent in the background.
-
-    Returns the parsed ``delegate_task`` dispatch dict (``status: "dispatched"`` with a
-    ``delegation_id``, or the synchronous result dict on channels that cannot route async
-    completions). Raises ValueError when there is nothing to review or the dispatch is
-    rejected/errored.
-    """
+    """Dispatch the reviewer subagent; returns the parsed ``delegate_task`` dict (``status: "dispatched"`` +
+    ``delegation_id``, or the synchronous result on channels without async completions). Raises ValueError
+    when there is nothing to review or the dispatch is rejected/errored."""
     if parent_agent is None:
         raise ValueError("No active agent — send a message first.")
 

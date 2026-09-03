@@ -27,11 +27,8 @@ class ReasoningParamsMixin:
     """Reasoning-parameter gating and echo policy (see module docstring)."""
 
     def _supports_reasoning_extra_body(self) -> bool:
-        """Return True when reasoning extra_body is safe to send for this route/model.
-
-        OpenRouter forwards unknown extra_body upstream and some routes 400 on ``reasoning``; gate to known
-        reasoning-capable families and direct Nous Portal.
-        """
+        """True when reasoning extra_body is safe to send: OpenRouter forwards unknown extra_body upstream and
+        some routes 400 on ``reasoning``, so gate to known reasoning-capable families and direct Nous Portal."""
         url = self._base_url_lower
         if base_url_host_matches(url, "nousresearch.com") or base_url_host_matches(url, "ai-gateway.vercel.sh"):
             return True
@@ -65,10 +62,8 @@ class ReasoningParamsMixin:
         return any(model.startswith(prefix) for prefix in _OPENROUTER_REASONING_PREFIXES)
 
     def _cached_probe(self, cache_attr: str, probe, unknown, definitive):
-        """Run ``probe(model, base_url, api_key)`` once per (model, base_url) with the module TTL policy.
-
-        ``unknown`` is what a raising probe yields; ``definitive(value)`` decides permanent vs 60s TTL.
-        """
+        """``probe(model, base_url, api_key)`` once per (model, base_url); ``unknown`` is what a raising probe
+        yields, ``definitive(value)`` decides permanent vs 60s TTL."""
         cache = getattr(self, cache_attr, None)
         if cache is None:
             cache = {}
@@ -132,12 +127,9 @@ class ReasoningParamsMixin:
     _build_assistant_message = _forward("agent.chat_completion_helpers", "build_assistant_message")
 
     def _needs_thinking_reasoning_pad(self) -> bool:
-        """Return True when the active provider enforces ``reasoning_content`` echo-back on tool-call replays.
-
-        DeepSeek thinking, Kimi/Moonshot thinking and Xiaomi MiMo thinking all 400 without it. Cached per
-        (provider, model, base_url) and invalidated by ``switch_model()`` / ``_try_activate_fallback()`` —
-        the loop calls this ~16× per turn and each miss re-runs several ``urlparse`` host matches.
-        """
+        """True when the provider enforces ``reasoning_content`` echo-back on tool-call replays (DeepSeek, Kimi,
+        MiMo thinking all 400 without it). Cached per (provider, model, base_url), invalidated by
+        ``switch_model()`` / ``_try_activate_fallback()`` — called ~16× per turn."""
         key = (self.provider, self.model, getattr(self, "_base_url_lower", self.base_url))
         cached = getattr(self, "_thinking_pad_cache", None)
         if cached is not None and cached[0] == key:
@@ -148,11 +140,8 @@ class ReasoningParamsMixin:
         return result
 
     def _reasoning_echo_opt_in(self) -> bool:
-        """User opted in to ``reasoning_content`` echo-back for the *current* provider (``model.reasoning_echo``).
-
-        Covers custom providers/gateways the host-based echo rules miss. Per-active-provider: fallback
-        activation swaps the flag and ``restore_primary_runtime()`` restores it, so a strict fallback still strips.
-        """
+        """``model.reasoning_echo`` opt-in for the *current* provider (covers gateways the host rules miss);
+        fallback activation swaps the flag and ``restore_primary_runtime()`` restores it."""
         return bool(getattr(self, "_reasoning_echo_flag", False))
 
     @staticmethod
@@ -185,12 +174,9 @@ class ReasoningParamsMixin:
 
     @staticmethod
     def _sanitize_tool_calls_for_strict_api(api_msg: dict, model: "str | None" = None) -> dict:
-        """Strip Codex Responses fields (call_id, response_item_id, extra_content) from tool_calls.
-
-        Strict Chat Completions APIs (Mistral, Fireworks) 400/422 on unknown fields. ``extra_content`` (Gemini
-        thought_signature) is kept only when the outgoing model is Gemini-family (it 400s without it). Builds
-        new dicts so the internal history retains the Codex fields for a later fallback.
-        """
+        """Strip Codex Responses fields from tool_calls for strict Chat Completions APIs (Mistral, Fireworks
+        400/422 on unknown fields). ``extra_content`` (Gemini thought_signature) is kept only for Gemini-family
+        models. Builds new dicts so the internal history keeps the Codex fields for a later fallback."""
         tool_calls = api_msg.get("tool_calls")
         if not isinstance(tool_calls, list):
             return api_msg
