@@ -5278,20 +5278,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _init_display_options(self, verbose, compact):
         """Display-related config: compact/tool-progress/focus view, bells, streaming, previews, stream buffers."""
-        # Initialize Rich console
         self.console = Console()
         self.config = CLI_CONFIG
-        self.compact = compact if compact is not None else CLI_CONFIG["display"].get("compact", False)
-        # tool_progress: "off", "new", "all", "verbose" (from config.yaml display section)
-        # YAML 1.1 parses bare `off` as boolean False — normalise to string.
-        _raw_tp = CLI_CONFIG["display"].get("tool_progress", "all")
+        display = CLI_CONFIG["display"]
+        self.compact = compact if compact is not None else display.get("compact", False)
+        # tool_progress: "off" | "new" | "all" | "verbose". YAML 1.1 parses bare
+        # `off` as False — normalise to the string.
+        _raw_tp = display.get("tool_progress", "all")
         self.tool_progress_mode = "off" if _raw_tp is False else str(_raw_tp)
-        # focus_view: display-only reduced-output mode (/focus). When on, the
-        # tool-progress mode is snapped to "off" so the EXISTING suppression
-        # path hides per-tool lines, and the pre-focus mode is stashed so
-        # /focus off restores it. Purely cosmetic — never changes what is sent
-        # to the model. See hermes_cli/focus_view.py.
-        self._focus_view_enabled = bool(CLI_CONFIG["display"].get("focus_view", False))
+        # focus_view (/focus): display-only. Snaps tool_progress to "off" so the
+        # EXISTING suppression path hides per-tool lines and stashes the pre-focus
+        # mode for /focus off. Never changes what is sent to the model
+        # (hermes_cli/focus_view.py).
+        self._focus_view_enabled = bool(display.get("focus_view", False))
         self._focus_saved_tool_progress = None
         self._focus_hidden_lines = 0
         self._focus_last_counted_tool = None
@@ -5305,81 +5304,69 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 self.tool_progress_mode
             )
             self.tool_progress_mode = FOCUS_TOOL_PROGRESS_MODE
-        # resume_display: "full" (show history) | "minimal" (one-liner only)
-        self.resume_display = CLI_CONFIG["display"].get("resume_display", "full")
-        # bell_on_complete: play terminal bell (\a) when agent finishes a response
-        self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
-        # bell_on_prompt: play terminal bell (\a) whenever a blocking prompt
-        # modal opens (clarify, approval, sudo password, secret capture)
-        self.bell_on_prompt = CLI_CONFIG["display"].get("bell_on_prompt", False)
-        # show_reasoning: display model thinking/reasoning before the response
-        self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", True)
-        # reasoning_full: when reasoning display is on, print the post-response
-        # recap box uncollapsed instead of clamping to the first 10 lines.
-        self.reasoning_full = CLI_CONFIG["display"].get("reasoning_full", False)
+        self.resume_display = display.get("resume_display", "full")  # "full" | "minimal"
+        self.bell_on_complete = display.get("bell_on_complete", False)
+        # bell_on_prompt: terminal bell whenever a blocking prompt modal opens
+        # (clarify, approval, sudo password, secret capture).
+        self.bell_on_prompt = display.get("bell_on_prompt", False)
+        self.show_reasoning = display.get("show_reasoning", True)
+        # reasoning_full: post-response recap box uncollapsed instead of the first 10 lines.
+        self.reasoning_full = display.get("reasoning_full", False)
         _configure_output_history(
-            enabled=CLI_CONFIG["display"].get("persistent_output", True),
-            max_lines=CLI_CONFIG["display"].get("persistent_output_max_lines", 200),
+            enabled=display.get("persistent_output", True),
+            max_lines=display.get("persistent_output_max_lines", 200),
         )
-        # busy_input_mode: "interrupt" (Enter redirects current run),
-        # "queue" (Enter queues for next turn), or "steer" (Enter injects
-        # mid-run via /steer, arriving after the next tool call).
-        _bim = str(CLI_CONFIG["display"].get("busy_input_mode", "interrupt")).strip().lower()
+        # busy_input_mode: "interrupt" (Enter redirects the current run), "queue"
+        # (Enter queues for the next turn) or "steer" (inject mid-run via /steer).
+        _bim = str(display.get("busy_input_mode", "interrupt")).strip().lower()
         self.busy_input_mode = _bim if _bim in ("queue", "steer") else "interrupt"
 
         # self.verbose ONLY controls global DEBUG logging (root logger level).
-        # display.tool_progress="verbose" controls tool-call rendering (full args,
-        # results, think blocks) and is independent — see _apply_logging_levels.
-        # Coupling the two (PR #6a1aa420e) caused all module DEBUG logs to spew
-        # to console whenever a user set tool_progress: verbose in config.
+        # display.tool_progress="verbose" controls tool-call rendering and is
+        # independent (see _apply_logging_levels): coupling the two made every
+        # module's DEBUG logs spew to the console whenever a user set
+        # tool_progress: verbose.
         self.verbose = bool(verbose) if verbose is not None else False
 
-        # streaming: stream tokens to the terminal as they arrive (display.streaming in config.yaml)
-        self.streaming_enabled = CLI_CONFIG["display"].get("streaming", False)
-        # show_timestamps: prefix user and assistant labels with timestamps
-        self.show_timestamps = CLI_CONFIG["display"].get("timestamps", False)
-        self.timestamp_format = CLI_CONFIG["display"].get("timestamp_format", "%H:%M")
+        self.streaming_enabled = display.get("streaming", False)
+        self.show_timestamps = display.get("timestamps", False)
+        self.timestamp_format = display.get("timestamp_format", "%H:%M")
         self.final_response_markdown = str(
-            CLI_CONFIG["display"].get("final_response_markdown", "strip")
+            display.get("final_response_markdown", "strip")
         ).strip().lower() or "strip"
         if self.final_response_markdown not in {"render", "strip", "raw"}:
             self.final_response_markdown = "strip"
 
-        # Inline diff previews for write actions (display.inline_diffs in config.yaml)
-        self._inline_diffs_enabled = CLI_CONFIG["display"].get("inline_diffs", True)
+        self._inline_diffs_enabled = display.get("inline_diffs", True)  # diff previews for write actions
 
-        # Per-turn accounting (display.turn_summary / display.spinner_token_flow).
-        # Both are CLI-only, display-only chrome. The collector rides the
-        # tool-progress feed this class already receives, so no agent-loop
-        # bookkeeping is involved.
-        self._turn_summary_enabled = bool(CLI_CONFIG["display"].get("turn_summary", True))
+        # Per-turn accounting (display.turn_summary / display.spinner_token_flow):
+        # CLI-only chrome; the collector rides the tool-progress feed this class
+        # already receives, so no agent-loop bookkeeping is involved.
+        self._turn_summary_enabled = bool(display.get("turn_summary", True))
         self._spinner_token_flow_enabled = bool(
-            CLI_CONFIG["display"].get("spinner_token_flow", True)
+            display.get("spinner_token_flow", True)
         )
         self._turn_summary_collector = None
         self._turn_summary_start = 0.0
         self._turn_token_baseline = 0
-        # True only while an interactive (run()-loop) turn is in flight. Single
-        # query, -Q, and gateway paths never set it, which is what keeps the
-        # summary line out of non-interactive surfaces.
+        # True only while an interactive (run()-loop) turn is in flight; -Q and
+        # gateway paths never set it, which keeps the summary line off them.
         self._interactive_turn = False
 
-        # Submitted multiline user-message preview (display.user_message_preview in config.yaml)
-        _ump = CLI_CONFIG["display"].get("user_message_preview", {})
+        # Submitted multiline user-message preview (display.user_message_preview)
+        _ump = display.get("user_message_preview", {})
         if not isinstance(_ump, dict):
             _ump = {}
         self.user_message_preview_first_lines = max(1, _int_or(_ump.get("first_lines", 2), 2))
         self.user_message_preview_last_lines = max(0, _int_or(_ump.get("last_lines", 2), 2))
 
         # Streaming display state
-        self._stream_buf = ""        # Partial line buffer for line-buffered rendering
-        self._stream_started = False  # True once first delta arrives
+        self._stream_buf = ""        # partial line buffer for line-buffered rendering
+        self._stream_started = False  # True once the first delta arrives
         self._stream_box_opened = False  # True once the response box header is printed
-        self._reasoning_preview_buf = ""  # Coalesce tiny reasoning chunks for [thinking] output
-        # Table-row buffer.  When a streamed line looks like it could be
-        # part of a markdown table, hold it here until the block ends so
-        # we can re-pad with wcwidth-aware widths.  Empty by default;
-        # populated only while `_in_stream_table` is True.
+        self._reasoning_preview_buf = ""  # coalesce tiny reasoning chunks for [thinking] output
+        # Lines that may belong to a markdown table are held here until the block
+        # ends so they can be re-padded with wcwidth-aware widths.
         self._stream_table_buf: list[str] = []
         self._in_stream_table = False
         self._pending_edit_snapshots = {}
@@ -5390,22 +5377,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _init_model_routing(self, model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, checkpoints, pass_session_id, ignore_rules):
         """Resolve model/provider/base_url, turn limits, toolsets, checkpoints, prompt/personality, reasoning + routing config."""
-        # Configuration - priority: CLI args > env vars > config file
-        # Model comes from: CLI arg or config.yaml (single source of truth).
-        # LLM_MODEL/OPENAI_MODEL env vars are NOT checked — config.yaml is
-        # authoritative.  This avoids conflicts in multi-agent setups where
-        # env vars would stomp each other.
+        _model_config = self._init_model_and_provider(model, provider, api_key, base_url)
+        self._init_turn_limits(max_turns, run_budget)
+        self._init_toolsets(toolsets)
+        self._init_checkpoints_and_rules(checkpoints, pass_session_id, ignore_rules)
+        self._init_prompt_and_reasoning(reasoning)
+
+    def _init_model_and_provider(self, model, provider, api_key, base_url):
+        """Priority: CLI args > env vars > config file. Returns the raw ``model`` config section."""
+        # Model comes from the CLI arg or config.yaml (single source of truth) —
+        # LLM_MODEL/OPENAI_MODEL env vars are NOT checked, so multi-agent setups
+        # don't stomp each other through the environment.
         _model_config = CLI_CONFIG.get("model", {})
         _raw_default = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
         # A dict-valued default (``model.default: {provider: ..., model: ...}``)
-        # carries its own provider; flatten it here so the nested provider is
-        # available when ``requested_provider`` is constructed below instead of
-        # being discarded and replaced by the outer merged ``model.provider``
-        # (typically ``"auto"``, which is authoritative at runtime resolution).
+        # carries its own provider; flatten it so that nested provider feeds
+        # ``requested_provider`` instead of being replaced by the outer merged
+        # ``model.provider`` (typically "auto").
         _config_model, _nested_provider = _split_model_config_default(_raw_default)
         _DEFAULT_CONFIG_MODEL = ""
-        # Track whether the user passed -m / --model so resume knows not to
-        # clobber an explicit override with the session's stored model.
+        # Whether -m/--model was passed: resume must not clobber an explicit
+        # override with the session's stored model.
         self._explicit_model_override = bool(model)
         self.model = model or _config_model or _DEFAULT_CONFIG_MODEL
         _startup_provider_override = ""
@@ -5432,25 +5424,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 _startup_provider_override = _startup_route.provider
                 _startup_base_url_override = _startup_route.base_url
                 _startup_api_key_override = _startup_route.api_key
-        # A ``moa:<preset>`` model string selects the MoA virtual provider in
-        # one shot (parity with interactive ``/moa`` and the model picker). Do
-        # this before provider resolution so ``-Q -m moa:<preset>`` routes
-        # through MoA instead of hitting the real provider with an unknown
-        # model (#56828). A ``moa:`` prefix wins over an explicit ``--provider``.
+        # ``moa:<preset>`` selects the MoA virtual provider in one shot (parity
+        # with /moa and the picker). Done before provider resolution so
+        # ``-Q -m moa:<preset>`` never hits the real provider with an unknown
+        # model (#56828); the prefix wins over an explicit --provider.
         _moa_provider_override, self.model = _normalize_moa_model(self.model)
-        # Read max_tokens from config (env var override: HERMES_MAX_TOKENS)
+        # max_tokens: HERMES_MAX_TOKENS env overrides config.
         _env_mt = os.environ.get("HERMES_MAX_TOKENS")
         if _env_mt:
-            try:
-                self.max_tokens = int(_env_mt)
-            except (ValueError, TypeError):
-                self.max_tokens = None
+            self.max_tokens = _int_or(_env_mt, None)
         elif isinstance(_model_config, dict):
             _mt = _model_config.get("max_tokens")
             self.max_tokens = _mt if isinstance(_mt, int) else None
         else:
             self.max_tokens = None
-        # Auto-detect model from local server if still on default
+        # Auto-detect the model from a local server if still on the default.
         if self.model == _DEFAULT_CONFIG_MODEL:
             _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
             if base_url_hostname(_base_url) in ("localhost", "127.0.0.1"):
@@ -5458,12 +5446,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 _detected = _auto_detect_local_model(_base_url)
                 if _detected:
                     self.model = _detected
-        # Track whether model was explicitly chosen by the user or fell back
-        # to the global default.  Provider-specific normalisation may override
-        # the default silently but should warn when overriding an explicit choice.
-        # A config model that matches the global fallback is NOT considered an
-        # explicit choice — the user just never changed it.  But a config model
-        # like "gpt-5.3-codex" IS explicit and must be preserved.
+        # Provider-specific normalisation may silently override the global
+        # default but must warn when overriding an explicit choice. A config
+        # model equal to the global fallback is NOT explicit; "gpt-5.3-codex" is.
         self._model_is_default = not model and (
             not _config_model or _config_model == _DEFAULT_CONFIG_MODEL
         )
@@ -5483,10 +5468,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             or os.getenv("HERMES_INFERENCE_PROVIDER")
             or "auto"
         )
-        # `--provider <custom>` without `-m` must use that entry's
-        # default_model. Otherwise the global model.default is sent to the
-        # custom endpoint and the compressor inherits the wrong context
-        # length (#86978). Explicit `-m` still wins.
+        # `--provider <custom>` without `-m` must use that entry's default_model,
+        # otherwise the global model.default is sent to the custom endpoint and
+        # the compressor inherits the wrong context length (#86978).
         if not model and provider:
             try:
                 from hermes_cli.runtime_provider import _get_named_custom_provider
@@ -5515,57 +5499,52 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             or CLI_CONFIG["model"].get("base_url", "")
             or os.getenv("OPENROUTER_BASE_URL", "")
         ) or None
-        # Match key to resolved base_url: OpenRouter URL → prefer OPENROUTER_API_KEY,
-        # custom endpoint → prefer OPENAI_API_KEY (issue #560).
-        # Note: _ensure_runtime_credentials() re-resolves this before first use.
+        # Match the key to the resolved base_url (issue #560); re-resolved by
+        # _ensure_runtime_credentials() before first use.
         if self.base_url and base_url_host_matches(self.base_url, "openrouter.ai"):
             self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY")
         else:
             self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("OPENROUTER_API_KEY")
-        # Max turns priority: CLI arg > config file > env var > default
-        # All paths go through resolve_turn_limit() so that agent.max_turns
-        # accepts "none"/"unlimited" (→ sys.maxsize) in addition to ints.
-        # See hermes_cli.config.resolve_turn_limit for the full spelling table.
+        return _model_config
+
+    def _init_turn_limits(self, max_turns, run_budget):
+        """max_turns: CLI arg > config > env var > default; run budget: CLI flag > config."""
+        # Everything goes through resolve_turn_limit() so "none"/"unlimited"
+        # (-> sys.maxsize) are accepted alongside ints.
         from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
-        if max_turns is not None:  # CLI arg was explicitly set
+        if max_turns is not None:
             self.max_turns = _resolve_turn_limit(max_turns)
         elif CLI_CONFIG["agent"].get("max_turns") is not None:
             self.max_turns = _resolve_turn_limit(CLI_CONFIG["agent"]["max_turns"])
-        elif CLI_CONFIG.get("max_turns") is not None:  # Backwards compat: root-level max_turns
-            # KEEP (evaluated for the v12 support-floor cleanup, July 2026):
-            # no versioned config migration ever rewrote root-level max_turns
-            # to agent.max_turns on disk — only load-time normalization
-            # (_normalize_max_turns_config) folds it, and configs read through
-            # other paths may bypass it. This fallback is therefore the only
-            # safety net for configs that still carry the root key.
+        elif CLI_CONFIG.get("max_turns") is not None:
+            # KEEP: root-level max_turns is only folded at load time
+            # (_normalize_max_turns_config), never migrated on disk, and configs
+            # read through other paths may bypass it — this is the only safety net.
             self.max_turns = _resolve_turn_limit(CLI_CONFIG["max_turns"])
         else:
-            # Env var bridge (set by gateway/run.py from config.yaml, or by the
-            # user directly). Empty/unset → default (unlimited).
+            # Env bridge (gateway/run.py or the user); empty/unset -> unlimited.
             self.max_turns = _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
-
-        # Wall-clock run budget: CLI flag wins over config; both optional.
-        # None keeps the feature fully off (AIAgent stays dormant).
+        # None keeps the wall-clock budget fully off (AIAgent stays dormant).
         if run_budget is not None:
             self.run_budget_seconds = run_budget
         else:
             self.run_budget_seconds = CLI_CONFIG["agent"].get("run_budget_seconds")
 
-        # Parse and validate toolsets
+    def _init_toolsets(self, toolsets):
         self.enabled_toolsets = toolsets
         from agent.skill_utils import parse_config_string_list
 
         self.disabled_toolsets = parse_config_string_list(CLI_CONFIG["agent"].get("disabled_toolsets"))
 
         if toolsets and "all" not in toolsets and "*" not in toolsets:
-            # Validate each toolset — MCP server names are resolved via
-            # live registry aliases (registered during discover_mcp_tools),
-            # but discovery hasn't run yet at this point, so exclude them.
+            # MCP server names resolve via live registry aliases registered during
+            # discover_mcp_tools, which hasn't run yet — exclude them from validation.
             mcp_names = set((CLI_CONFIG.get("mcp_servers") or {}).keys())
             invalid = [t for t in toolsets if not validate_toolset(t) and t not in mcp_names]
             if invalid:
                 self._console_print(f"[bold red]Warning: Unknown toolsets: {', '.join(invalid)}[/]")
 
+    def _init_checkpoints_and_rules(self, checkpoints, pass_session_id, ignore_rules):
         # Filesystem checkpoints: CLI flag > config
         cp_cfg = CLI_CONFIG.get("checkpoints", {})
         if isinstance(cp_cfg, bool):
@@ -5575,15 +5554,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.checkpoint_max_total_size_mb = cp_cfg.get("max_total_size_mb", 500)
         self.checkpoint_max_file_size_mb = cp_cfg.get("max_file_size_mb", 10)
         self.pass_session_id = pass_session_id
-        # --ignore-rules: honor either the constructor flag or the env var set
-        # by `hermes chat --ignore-rules` in hermes_cli/main.py. When true we
-        # pass skip_context_files=True and skip_memory=True to AIAgent so
+        # --ignore-rules (flag or the env var set by `hermes chat --ignore-rules`):
+        # AIAgent gets skip_context_files=True and skip_memory=True so
         # AGENTS.md/SOUL.md/.cursorrules and persistent memory are not loaded.
         self.ignore_rules = ignore_rules or os.environ.get("HERMES_IGNORE_RULES") == "1"
 
-        # Ephemeral system prompt: env var takes precedence, then
-        # display.personality / agent.system_prompt from config.
-        # hermes_cli.personality is the single owner of overlay resolution.
+    def _init_prompt_and_reasoning(self, reasoning):
+        """Ephemeral system prompt/prefill, reasoning + service tier, OpenRouter routing knobs, fallback chain."""
+        # Env var wins, then display.personality / agent.system_prompt via
+        # hermes_cli.personality (single owner of overlay resolution).
         from hermes_cli.personality import (
             available_personalities,
             resolve_ephemeral_system_prompt,
@@ -5600,16 +5579,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             _resolve_prefill_messages_file(CLI_CONFIG)
         )
 
-        # Reasoning config (OpenRouter reasoning effort level)
-        # Per-model override > global reasoning_effort — resolved through the
-        # shared chokepoint in hermes_constants (Closes #21256).
+        # Per-model override > global reasoning_effort (shared chokepoint, #21256).
         from hermes_constants import resolve_reasoning_config
         self.reasoning_config = resolve_reasoning_config(CLI_CONFIG, self.model)
-        # An explicit --reasoning wins over config for this run only (never
-        # persisted). Kanban's dispatcher uses it to pin a task's thinking
-        # depth without touching the worker profile's config.yaml. An
-        # unparseable level is ignored with a warning rather than silently
-        # swapping in the default — same contract as the config path.
+        # An explicit --reasoning wins for this run only (never persisted; Kanban
+        # pins a task's thinking depth this way). An unparseable level is ignored
+        # with a warning, same contract as the config path.
         if reasoning is not None and str(reasoning).strip():
             _cli_reasoning = _parse_reasoning_config(reasoning)
             if _cli_reasoning is None:
@@ -5632,9 +5607,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._provider_require_params = pr.get("require_parameters", False)
         self._provider_data_collection = pr.get("data_collection")
 
-        # OpenRouter Pareto Code router knob — coding-score floor (0.0-1.0).
-        # Only applied when model.model == "openrouter/pareto-code".
-        # Empty string / None / out-of-range = unset (let OR pick strongest coder).
+        # OpenRouter Pareto Code router: coding-score floor (0.0-1.0), only applied
+        # when model.model == "openrouter/pareto-code". Empty/None/out-of-range = unset.
         _or_cfg = CLI_CONFIG.get("openrouter", {}) or {}
         _raw_score = _or_cfg.get("min_coding_score")
         self._openrouter_min_coding_score: Optional[float] = None
@@ -5646,52 +5620,61 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             except (TypeError, ValueError):
                 pass
 
-        # Fallback provider chain — tried in order when primary fails after retries.
-        # Merge new ``fallback_providers`` entries with any legacy
-        # ``fallback_model`` entries so old configs still participate.
+        # Fallback provider chain (new ``fallback_providers`` merged with legacy
+        # ``fallback_model`` entries so old configs still participate).
         self._fallback_model = get_fallback_chain(CLI_CONFIG)
 
     def _init_runtime_state(self, resume):
         """Session store + all per-run mutable state (queues, overlays, pet/voice/status-bar fields)."""
-        # Signature of the currently-initialised agent's runtime.  Used to
-        # rebuild the agent when provider / model / base_url changes across
-        # turns (e.g. after /model or credential rotation).
+        # Runtime signature of the initialised agent; a change across turns
+        # (/model, credential rotation) rebuilds the agent.
         self._active_agent_route_signature = None
-
-        # Agent will be initialized on first use
-        self.agent: Optional[Any] = None
+        self.agent: Optional[Any] = None  # initialized on first use
         self._tool_callbacks_installed = False
         self._tirith_security_checked = False
         self._app = None  # prompt_toolkit Application (set in run())
 
-        # Conversation state
         self.conversation_history: List[Dict[str, Any]] = []
         self.session_start = datetime.now()
         self._resumed = False
-        # Per-prompt elapsed timer — started at the beginning of each chat turn,
-        # frozen when the agent thread completes, displayed in the status bar.
-        self._prompt_start_time: Optional[float] = None  # time.time() when turn started
-        self._prompt_duration: float = 0.0  # frozen duration of last completed turn
-        self._last_turn_finished_at: Optional[float] = None  # time.time() when the last agent loop finished
-        # Initialize SQLite session store early so /title works before first message
+        # Per-prompt elapsed timer: started each turn, frozen when the agent thread
+        # completes, shown in the status bar.
+        self._prompt_start_time: Optional[float] = None
+        self._prompt_duration: float = 0.0
+        self._last_turn_finished_at: Optional[float] = None
+        self._init_session_store()
+        # Deferred title: held until the session row exists in the DB.
+        self._pending_title: Optional[str] = None
+        if resume:
+            self.session_id = resume
+            self._resumed = True
+        else:
+            timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
+            short_uuid = uuid.uuid4().hex[:6]
+            self.session_id = f"{timestamp_str}_{short_uuid}"
+        getattr(self, "_write_terminal_breadcrumb", lambda: None)()
+
+        self._history_file = _hermes_home / ".hermes_history"  # persistent input recall
+        self._last_invalidate: float = 0.0  # throttle UI repaints
+        self._app = None
+        self._init_ui_state()
+
+    def _init_session_store(self):
+        """Open the SQLite session store early (so /title works before the first message) + opportunistic maintenance."""
         self._session_db = None
         self._session_db_unavailable = False
         try:
             from hermes_state import SessionDB
             self._session_db = SessionDB()
         except Exception as e:
-            # #41386: a failed session store means the transcript is NOT
-            # persisted to state.db — the live chat looks healthy but resume
-            # later shows a truncated/empty session. A buried log line is not
-            # enough; surface it prominently so the user knows persistence is
-            # off for this run and can fix the store before relying on resume.
+            # #41386: with no store the transcript is NOT persisted — the live chat
+            # looks healthy but resume later shows a truncated/empty session, so
+            # surface it prominently rather than only logging.
             self._session_db_unavailable = True
             logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
             try:
-                # Console is imported at module scope; do NOT re-import it here.
-                # A function-local `import` would make `Console` a local name for
-                # the whole __init__ body and break the earlier `self.console =
-                # Console()` with UnboundLocalError.
+                # Console is the module-scope import; a function-local import would
+                # shadow it for the whole method body.
                 Console(stderr=True).print(
                     "[bold yellow]⚠ Session store unavailable[/bold yellow] — "
                     "this conversation will [bold]NOT be saved[/bold] to disk and "
@@ -5705,61 +5688,33 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     "WARNING: Session store unavailable — this conversation will NOT be "
                     f"saved to disk and cannot be resumed later. Reason: {e}"
                 )
-
-        # Opportunistic state.db maintenance — runs at most once per
-        # min_interval_hours, tracked via state_meta in state.db itself so
-        # it's shared across all Hermes processes for this HERMES_HOME.
-        # Never blocks startup on failure.
+        # state.db maintenance: at most once per min_interval_hours, tracked in
+        # state_meta so it is shared across every Hermes process for this
+        # HERMES_HOME; never blocks startup on failure.
         _run_state_db_auto_maintenance(self._session_db)
-
-        # Opportunistic shadow-repo cleanup — deletes orphan/stale
-        # checkpoint repos under ~/.hermes/checkpoints/.  Opt-in via
-        # checkpoints.auto_prune, idempotent via .last_prune marker.
+        # Orphan/stale checkpoint shadow repos (opt-in via checkpoints.auto_prune).
         _run_checkpoint_auto_maintenance()
 
-        # Deferred title: stored in memory until the session is created in the DB
-        self._pending_title: Optional[str] = None
+    def _init_ui_state(self):
+        """Per-run mutable UI state shared by interactive run() and single-query chat().
 
-        # Session ID: reuse existing one when resuming, otherwise generate fresh
-        if resume:
-            self.session_id = resume
-            self._resumed = True
-        else:
-            timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
-            short_uuid = uuid.uuid4().hex[:6]
-            self.session_id = f"{timestamp_str}_{short_uuid}"
-        getattr(self, "_write_terminal_breadcrumb", lambda: None)()
-
-        # History file for persistent input recall across sessions
-        self._history_file = _hermes_home / ".hermes_history"
-        self._last_invalidate: float = 0.0  # throttle UI repaints
-        self._app = None
-
-        # State shared by interactive run() and single-query chat mode.
-        # These must exist before any direct chat() call because single-query
-        # mode does not go through run().
+        Everything here must exist before any direct chat() call because
+        single-query mode does not go through run().
+        """
         self._agent_running = False
         self._pending_input = queue.Queue()
         self._interrupt_queue = queue.Queue()
-        # Tracks whether the turn that just finished was interrupted via
-        # Ctrl+C. Consumed by _maybe_continue_goal_after_turn so /goal loops
-        # don't auto-queue another continuation on top of a user-cancelled
-        # turn (which would make Ctrl+C feel like it did nothing).
+        # Whether the turn that just finished was Ctrl+C'd; _maybe_continue_goal_after_turn
+        # reads it so /goal never auto-queues on top of a user-cancelled turn.
         self._last_turn_interrupted = False
-        # When stdout/PTY raises EIO (broken pipe after a stream-stall
-        # interrupt), freeze further UI paints so we don't spin the main
-        # thread at hundreds of escape-sequence writes/sec (#81521).
+        # Set when stdout/PTY raises EIO (broken pipe after a stream-stall interrupt)
+        # to freeze UI paints instead of spinning on escape-sequence writes (#81521).
         self._terminal_io_broken = False
         self._should_exit = False
-        # /exit --delete: when True, the current session's SQLite history and
-        # on-disk transcripts are deleted during shutdown. Set by
-        # process_command() when the user runs /exit --delete or /quit --delete.
-        # Ported from google-gemini/gemini-cli#19332.
+        # /exit --delete: delete this session's SQLite history + transcripts at shutdown.
         self._delete_session_on_exit = False
-        # /update: when set, run() executes relaunch() after prompt_toolkit
-        # has fully exited and cleaned up terminal modes.  Set by
-        # _handle_update_command() so the relaunch happens on the main thread,
-        # not the background process_loop thread.
+        # /update: run() execs relaunch() after prompt_toolkit has fully exited and
+        # restored terminal modes — on the main thread, not the process_loop thread.
         self._pending_relaunch: list[str] | None = None
         self._last_ctrl_c_time = 0
         self._clarify_state = None
@@ -5776,36 +5731,30 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._slash_confirm_state = None
         self._slash_confirm_deadline = 0
         self._model_picker_state = None
-        # Rotating task-oriented composer placeholder (C-09), chosen once per
-        # session so it stays stable while the empty input box is on screen.
+        # Composer placeholder chosen once per session so it stays stable on screen.
         try:
             from hermes_cli.tips import get_random_composer_placeholder
             self._composer_placeholder = get_random_composer_placeholder()
         except Exception:
             self._composer_placeholder = ""
         self._command_palette_state = None
-        # Armed when a bare `/resume` prints the recent-sessions list so the
-        # very next bare numeric input (e.g. `3`) resolves to that session.
-        # Holds the exact list used for index resolution; one-shot (cleared on
-        # the next submitted input, whether it's the selection or anything
-        # else). See #34584.
+        # Armed by a bare `/resume` list so the next bare number selects that
+        # session; one-shot, cleared on the next submitted input (#34584).
         self._pending_resume_sessions = None
-        # One-shot agent seed set by a slash handler (e.g. /blueprint <name>)
-        # that wants its output run as the next agent turn. Consumed and cleared
-        # by the interactive loop immediately after process_command() returns.
+        # One-shot agent seed set by a slash handler (e.g. /blueprint <name>);
+        # consumed by the interactive loop right after process_command() returns.
         self._pending_agent_seed = None
         self._secret_state = None
         self._secret_deadline = 0
         self._spinner_text: str = ""  # thinking spinner text for TUI
-        self._tool_start_time: float = 0.0  # monotonic timestamp when current tool started (for live elapsed)
+        self._tool_start_time: float = 0.0  # monotonic start of the current tool (live elapsed)
         self._pending_tool_info: dict = {}  # function_name -> list of (preview, args) for stacked scrollback
-        self._last_scrollback_tool: str = ""  # last tool name printed to scrollback (for "new" dedup)
+        self._last_scrollback_tool: str = ""  # last tool name printed to scrollback ("new" dedup)
         self._command_running = False
         self._command_blocks_input = False
         self._command_status = ""
-        # Petdex mascot (opt-in via display.pet). Kitty/Ghostty use Unicode
-        # placeholders plus out-of-band image transmission; other terminals
-        # use the truecolor half-block fallback.
+        # Petdex mascot (opt-in via display.pet). Kitty/Ghostty: Unicode placeholders
+        # + out-of-band image transmission; other terminals: truecolor half-blocks.
         self._pet_renderer = None  # agent.pet.render.PetRenderer | None
         self._pet_slug: str = ""
         self._pet_enabled: bool = False
@@ -5827,9 +5776,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._pet_turn_error: bool = False
         self._attached_images: list[Path] = []
         self._image_counter = 0
-        # Ctrl+S prompt stash — park a half-written draft, send something
-        # else, bring the draft back.  Session-scoped and in-memory only:
-        # drafts routinely contain secrets, so nothing is written to disk.
+        # Ctrl+S prompt stash. In-memory only: drafts routinely contain secrets.
         from hermes_cli.prompt_stash import PromptStash as _PromptStash
         self._prompt_stash = _PromptStash()
         self.preloaded_skills: list[str] = []
@@ -5858,39 +5805,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._voice_last_tts_text = ""  # most recently spoken TTS text (echo guard, #75780)
         self._voice_barge_phase = None  # "generation" or "playback" phase of the last barge trip
 
-        # Status bar visibility (toggled via /statusbar)
         self._status_bar_visible = _status_bar_visible_from_display_config(
             CLI_CONFIG.get("display") if isinstance(CLI_CONFIG, dict) else None
         )
-        # Battery read-out in the status bar (toggled via /battery, off by
-        # default). Persisted to display.battery so it survives restarts.
-        self._battery_visible = bool(CLI_CONFIG["display"].get("battery", False))
-        # When True, the input separator rules and the dynamic status bar are
-        # hidden until the next user input. Set by _recover_after_resize() so a
-        # SIGWINCH cannot stamp a freshly-drawn status bar on top of one that
-        # the terminal just reflowed into scrollback — the cause of duplicated
-        # bars / "blank line flooding" reports (#19280, #22976).
+        self._battery_visible = bool(CLI_CONFIG["display"].get("battery", False))  # /battery, persisted
+        # While True the input rules + status bar stay hidden until the next input:
+        # set by _recover_after_resize() so a SIGWINCH cannot stamp a fresh status
+        # bar over one the terminal just reflowed into scrollback (#19280, #22976).
         self._status_bar_suppressed_after_resize = False
         self._resize_recovery_lock = threading.Lock()
         self._resize_recovery_timer = None
         self._resize_recovery_pending = False
-        # Debounced timer that clears the post-resize suppression once the
-        # terminal reflow settles, so the status bar returns during idle
-        # without waiting for the next submitted input.
+        # Debounced timer clearing that suppression once the reflow settles.
         self._status_bar_unsuppress_timer = None
-        # Last terminal width seen by the resize handler. Used to distinguish a
-        # width change (column reflow → possible ghost chrome, needs a viewport
-        # clear) from a rows-only change (no reflow). None until the first
-        # resize fires.
+        # Last width seen by the resize handler: width change (reflow -> possible
+        # ghost chrome, needs a viewport clear) vs rows-only change. None until
+        # the first resize.
         self._last_resize_width = None
 
-        # Background task tracking: {task_id: threading.Thread}
-        self._background_tasks: Dict[str, threading.Thread] = {}
+        self._background_tasks: Dict[str, threading.Thread] = {}  # task_id -> thread
         self._background_task_counter = 0
 
-        # Cache-hit ratio baseline — reset on model switch and on
-        # context compression so the bar reflects the *current* cache
-        # regime, not a lifetime average that survives invalidation.
+        # Cache-hit ratio baseline — reset on model switch and on context compression
+        # so the bar reflects the current cache regime, not a lifetime average.
         self._cache_hit_baseline_prompt = 0
         self._cache_hit_baseline_read = 0
         self._cache_hit_baseline_model: Optional[str] = None
