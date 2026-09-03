@@ -63,7 +63,14 @@ def _windows_listener_pids(port: int) -> list:
 
 
 def _pid_looks_like_node_bridge(pid: int) -> bool:
-    """Fail-closed: the live process must be a ``node`` executable (a scan-time PID can be a stranger by kill time)."""
+    """Fail-closed: the live process must be a ``node`` executable (a scan-time PID can be a stranger by kill time).
+
+    ``_kill_port_process`` discovers PIDs from a netstat/lsof scan of a TCP port — a bare number naming a
+    *stranger* process (#89614 class: an unverified scan-time PID force-killed later can be anything,
+    including a critical system process). Before any kill, require the live process to actually look like
+    our Baileys bridge: a ``node`` executable. Any ambiguity (process gone, unreadable cmdline) refuses the
+    kill.
+    """
     try:
         import psutil
         proc = psutil.Process(pid)
@@ -916,7 +923,11 @@ _YAML_LIST_KEYS = (("free_response_chats", "WHATSAPP_FREE_RESPONSE_CHATS"), ("al
 
 
 def _apply_yaml_config(yaml_cfg: dict, whatsapp_cfg: dict) -> dict | None:
-    """config.yaml whatsapp: keys → WHATSAPP_* env vars (apply_yaml_config_fn contract; returns None)."""
+    """config.yaml whatsapp: keys → WHATSAPP_* env vars (apply_yaml_config_fn contract; returns None).
+
+    Mirrors the legacy whatsapp_cfg block from gateway/config.py::load_gateway_config(). Env vars take
+    precedence over YAML. Returns None — everything flows through env. See #24849.
+    """
     import json as _json
     for key, env in _YAML_LOWERCASE_KEYS:
         if key in whatsapp_cfg and not os.getenv(env):

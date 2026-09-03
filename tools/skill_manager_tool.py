@@ -75,7 +75,11 @@ _SKILLS_DIR_AT_IMPORT = SKILLS_DIR
 
 def _skills_dir() -> Path:
     """Active profile's skills dir at call time (multi-profile runtimes rebind per session).
-    An explicitly patched module-level ``SKILLS_DIR`` (tests) wins over the live HERMES_HOME."""
+    An explicitly patched module-level ``SKILLS_DIR`` (tests) wins over the live HERMES_HOME.
+
+    Long-lived multi-profile runtimes (Dashboard/TUI/Desktop backend, cron, kanban workers) import this
+    module once under the launch HERMES_HOME and later bind a different profile per session (#40677).
+    """
     configured = Path(SKILLS_DIR)
     return configured if configured != _SKILLS_DIR_AT_IMPORT else get_hermes_home() / "skills"
 
@@ -709,6 +713,11 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
     # record as STATE_ARCHIVED (`hermes curator status`/`restore`); only a hard delete forgets.
     with suppress(Exception):
         from tools.skill_usage import bump_patch, forget, record_created
+        # During the curator consolidation pass, a verified consolidation must be RECOVERABLE: archival into
+        # ~/.hermes/skills/.archive/ is documented as the maximum destructive action the curator may take,
+        # and `hermes curator restore` promises the skill can be brought back. Route through the recoverable
+        # archive primitive instead of permanent rmtree so a misjudged consolidation can be undone (#29912).
+        # Foreground, user-directed deletes keep their existing hard-delete semantics.
         from tools.skill_provenance import is_background_review
         if action == "create":
             record_created(name, agent_created=is_background_review(),
@@ -744,6 +753,8 @@ def skill_manage(
     # Ledger pre-capture: telemetry, not a gate — failures must NEVER block the mutation. delete
     # destroys the whole package (consolidation may have re-homed support files first), so
     # complete it from the newest curator backup or a restore is hollow.
+    # Audit ledger (tracker #79686 P3): capture the pre-mutation state of the skill directory so every
+    # mutation — any actor — lands in the append-only JSONL ledger with before/after blobs.
     _ledger_before = None
     with suppress(Exception):
         from tools import skill_ledger as _ledger
