@@ -25,13 +25,9 @@ def _jsonrpc_code(exc: BaseException):
 
 
 def _jsonrpc_matches(exc: BaseException, code, codes: tuple, markers: tuple) -> bool:
-    """Structural *code* in *codes*, else any lowercased *marker* in ``str(exc)``. Never
-    ``isinstance`` on SDK exception types: they arrive wrapped in ExceptionGroups and drift
-    across generations."""
-    if code in codes:
-        return True
-    msg = str(exc).lower()
-    return any(marker in msg for marker in markers)
+    """Structural *code* in *codes*, else any *marker* in ``str(exc).lower()``. Never ``isinstance``
+    on SDK exception types: they arrive wrapped in ExceptionGroups and drift across generations."""
+    return code in codes or any(marker in str(exc).lower() for marker in markers)
 
 
 def _handshake_rejected_as_modern(exc: BaseException) -> bool:
@@ -44,33 +40,29 @@ def _handshake_rejected_as_modern(exc: BaseException) -> bool:
 
 
 def _is_method_not_found_error(exc: BaseException) -> bool:
-    """True if *exc* is a JSON-RPC ``method not found`` (-32601). ``ping`` is optional in MCP;
-    servers lacking it answer -32601. The substring fallback includes "Unknown method: <name>",
-    which some servers use; without it the ping→list_tools keepalive fallback never latches
-    and reconnect-loops."""
+    """True if *exc* is a JSON-RPC ``method not found`` (-32601; ``ping`` is optional in MCP). The
+    substring fallback includes "Unknown method: <name>" — without it the ping→list_tools keepalive
+    fallback never latches and reconnect-loops."""
     return _jsonrpc_matches(
         exc, _jsonrpc_code(exc), (_core._JSONRPC_METHOD_NOT_FOUND,),
-        (str(_core._JSONRPC_METHOD_NOT_FOUND), "method not found", "unknown method", "not found: ping"),
-    )
+        (str(_core._JSONRPC_METHOD_NOT_FOUND), "method not found", "unknown method", "not found: ping"))
 
 
 class InvalidMcpUrlError(ValueError):
-    """A remote MCP server's ``url`` is not parseable http(s)://. Validated once at startup so
-    we fail fast instead of burning the reconnect-backoff loop on every attempt."""
+    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup so we
+    fail fast instead of burning the reconnect-backoff loop."""
 
 
 class NonMcpEndpointError(ConnectionError):
-    """An HTTP MCP URL served a non-MCP 2xx response (e.g. ``text/html``); real Streamable-HTTP
-    endpoints answer ``application/json`` or ``text/event-stream``. Non-retryable: every attempt
-    gets the same page, so the backoff loop is skipped and the server is failed immediately.
-    Subclasses ConnectionError so broad catches still see a connection problem."""
+    """An HTTP MCP URL served a non-MCP 2xx (e.g. ``text/html``). Non-retryable: every attempt gets
+    the same page, so backoff is skipped and the server fails immediately. Subclasses ConnectionError
+    so broad catches still see a connection problem."""
 
 
 def _unwrap_exception_group(exc: BaseException) -> BaseException:
-    """Extract the root-cause leaf from anyio ``(Base)ExceptionGroup`` wrappers (group ``str()``
-    is opaque, so log sites must unwrap). Two rules: a ``KeyboardInterrupt``/``SystemExit`` leaf
-    anywhere is re-raised (never flattened into a loggable error); a non-cancellation leaf is
-    preferred over the ``CancelledError`` noise anyio sprays on siblings."""
+    """Root-cause leaf of anyio ``(Base)ExceptionGroup`` wrappers (group ``str()`` is opaque). A
+    ``KeyboardInterrupt``/``SystemExit`` leaf anywhere is re-raised, never flattened into a loggable
+    error; a non-cancellation leaf is preferred over the ``CancelledError`` noise anyio sprays on siblings."""
     while isinstance(exc, BaseExceptionGroup) and exc.exceptions:
         fatal, _rest = exc.split((KeyboardInterrupt, SystemExit))
         if fatal is not None:
@@ -90,9 +82,8 @@ def _contains_only_cancellation(exc: BaseException) -> bool:
 
 
 def _classify_mcp_failure(exc: BaseException) -> str:
-    """``'permanent'`` (deterministic — ``run()`` parks immediately instead of burning the retry
-    ladder: auth 401/403, NonMcpEndpointError, InvalidMcpUrlError, missing stdio command
-    FileNotFoundError / ENOENT) or ``'transient'`` (keeps backoff retry)."""
+    """``'permanent'`` (``run()`` parks instead of burning the retry ladder: auth 401/403,
+    NonMcpEndpointError, InvalidMcpUrlError, missing stdio command) or ``'transient'`` (backoff retry)."""
     root = _unwrap_exception_group(exc)
     permanent = (
         _core._is_auth_error(root)
@@ -104,9 +95,8 @@ def _classify_mcp_failure(exc: BaseException) -> str:
 
 
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
-    """The stripped URL if it is a valid http(s) remote MCP URL. Raises InvalidMcpUrlError naming
-    the server for non-strings, missing/other schemes (stdio servers use ``command``, not ``url``),
-    and empty hosts."""
+    """The stripped URL if it is a valid http(s) URL; else InvalidMcpUrlError naming the server
+    (non-string, other scheme — stdio servers use ``command`` — or empty host)."""
     def _bad(detail: str) -> InvalidMcpUrlError:
         return InvalidMcpUrlError(f"Invalid MCP URL for '{server_name}': {detail}")
 
@@ -129,10 +119,9 @@ def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
 
 
 def _resolve_client_cert(server_name: str, config: dict):
-    """``client_cert`` / ``client_key`` in httpx's ``cert=`` shape: None when neither is set; a
-    single path for a combined PEM; ``(cert, key)`` or ``(cert, key, password)`` for the
-    pair/list forms. ``~`` is expanded and missing files raise a server-scoped
-    FileNotFoundError instead of an opaque TLS handshake error."""
+    """``client_cert`` / ``client_key`` in httpx's ``cert=`` shape: None, a combined-PEM path,
+    ``(cert, key)`` or ``(cert, key, password)``. ``~`` is expanded; missing files raise a
+    server-scoped FileNotFoundError instead of an opaque TLS handshake error."""
     raw_cert = config.get("client_cert")
     raw_key = config.get("client_key")
     if raw_cert is None and raw_key is None:
@@ -166,10 +155,9 @@ def _resolve_client_cert(server_name: str, config: dict):
 
 
 def _resolve_identity_header(server_name: str, config: dict):
-    """Optional per-server ``identity_header`` ``{name, value_from: "static"|"profile", value}``
-    (``value`` required for static) → ``(name, value)`` or None. Invalid configs warn and are
-    ignored — an identity header must never break the connection. ``profile`` resolves once at
-    connect time; no per-call mutation."""
+    """``identity_header`` ``{name, value_from: "static"|"profile", value}`` → ``(name, value)`` or
+    None. Invalid configs warn and are ignored — an identity header must never break the connection.
+    ``profile`` resolves once at connect time."""
     raw = config.get("identity_header")
     if raw is None:
         return None
@@ -196,9 +184,8 @@ def _resolve_identity_header(server_name: str, config: dict):
 
 
 def _apply_identity_header(server_name: str, config: dict, headers: dict) -> dict:
-    """Merge the resolved identity header into ``headers`` in place. An explicit per-server
-    ``headers`` entry with the same name (any casing) wins — the identity header never silently
-    overrides user config."""
+    """Merge the identity header into ``headers`` in place; an explicit entry of the same name (any
+    casing) wins — never silently override user config."""
     resolved = _resolve_identity_header(server_name, config)
     if resolved is None:
         return headers
@@ -213,11 +200,9 @@ def _apply_identity_header(server_name: str, config: dict, headers: dict) -> dic
 
 def _make_redirect_header_stripper(original_url, *, strict: bool = False,
                                    configured_header_names: "set[str] | frozenset[str]" = frozenset()):
-    """httpx response hook guarding cross-origin redirects: always strips ``Authorization`` when
-    a redirect leaves the original origin; with *strict* (Agent Plugins v1
-    ``strict_redirect_headers``) every configured header (lowercase names in
-    *configured_header_names*) is stripped too — the v1 spec forbids forwarding
-    package-configured headers cross-origin."""
+    """httpx response hook: strips ``Authorization`` when a redirect leaves the original origin;
+    with *strict* (Agent Plugins v1 ``strict_redirect_headers``) every configured header (lowercase
+    names in *configured_header_names*) is stripped too — v1 forbids forwarding them cross-origin."""
     origin = (original_url.scheme, original_url.host, original_url.port)
 
     async def _strip_on_cross_origin_redirect(response):
@@ -276,7 +261,7 @@ def _format_connect_error(exc: BaseException) -> str:
     return _sanitize_error("; ".join(deduped[:3]))
 
 
-# Lazily-built caches so this module imports even without the SDK OAuth module.
+# Lazily-built caches so this module imports without the SDK OAuth module.
 _AUTH_ERROR_TYPES: tuple = ()
 _HTTP_STATUS_ERROR_TYPES: Optional[tuple] = None
 
@@ -291,21 +276,20 @@ def _optional_types(module: str, *names: str) -> list:
 
 
 def _http_status_error_types() -> tuple:
-    """``HTTPStatusError`` classes from both httpx flavours: a 401 may come from the SDK's own
-    stack (``httpx2`` on mcp >= 2.0) or from Hermes' pinned ``httpx``; the classes are unrelated."""
+    """``HTTPStatusError`` from both httpx flavours: a 401 may come from the SDK's own stack
+    (``httpx2`` on mcp >= 2.0) or Hermes' pinned ``httpx``; the classes are unrelated."""
     global _HTTP_STATUS_ERROR_TYPES
     if _HTTP_STATUS_ERROR_TYPES is None:
         sdk_mod = _core.sdk_httpx()
-        found: list = [sdk_mod.HTTPStatusError] if sdk_mod is not None else []
-        found += [cls for cls in _optional_types("httpx", "HTTPStatusError") if cls not in found]
-        _HTTP_STATUS_ERROR_TYPES = tuple(found)
+        _HTTP_STATUS_ERROR_TYPES = tuple(dict.fromkeys(
+            ([sdk_mod.HTTPStatusError] if sdk_mod is not None else []) + _optional_types("httpx", "HTTPStatusError")))
     return _HTTP_STATUS_ERROR_TYPES
 
 
 def _get_auth_error_types() -> tuple:
-    """Cached exception types indicating MCP OAuth failure: SDK ``OAuthFlowError``/``OAuthTokenError``
-    (+ legacy ``UnauthorizedError``), our ``OAuthNonInteractiveError``, and ``HTTPStatusError`` from
-    both httpx flavours — the latter needs the 401 status check in :func:`_is_auth_error`."""
+    """Cached MCP OAuth failure types: SDK ``OAuthFlowError``/``OAuthTokenError`` (+ legacy
+    ``UnauthorizedError``), our ``OAuthNonInteractiveError``, and both ``HTTPStatusError`` flavours
+    (which still need the 401 check in :func:`_is_auth_error`)."""
     global _AUTH_ERROR_TYPES
     if not _AUTH_ERROR_TYPES:
         _AUTH_ERROR_TYPES = tuple(
@@ -317,45 +301,37 @@ def _get_auth_error_types() -> tuple:
 
 
 def _is_auth_error(exc: BaseException) -> bool:
-    """True if ``exc`` indicates an MCP OAuth failure. ``HTTPStatusError`` counts only with
-    status 401; other HTTP errors fall through to the generic error path."""
-    types = _get_auth_error_types()
-    if not types or not isinstance(exc, types):
+    """True if ``exc`` indicates an MCP OAuth failure; ``HTTPStatusError`` counts only with status 401."""
+    if not isinstance(exc, _get_auth_error_types()):
         return False
-    status_error_types = _http_status_error_types()
-    if status_error_types and isinstance(exc, status_error_types):
+    if isinstance(exc, _http_status_error_types()):
         return getattr(exc.response, "status_code", None) == 401
     return True
 
 
-# Lower-cased substrings meaning the server-side transport session expired / was GC'd.
-# The OAuth token is still valid — only the transport needs rebuilding.
+# Lower-cased substrings meaning the transport session expired / was GC'd (OAuth token still valid).
 _SESSION_EXPIRED_MARKERS: tuple = (
     "invalid or expired session", "expired session", "session expired", "session not found",
     "unknown session", "session terminated", "closedresourceerror", "closed resource",
     "transport is closed", "connection closed", "broken pipe", "end of file")
 
-# Node budget for ``_is_session_expired_error``. The visited set breaks cycles; the budget
-# bounds pathological acyclic graphs. Kept well above ``sys.getrecursionlimit()`` so deep
-# task-group nesting is still fully scanned.
+# Node budget for ``_is_session_expired_error`` (the visited set breaks cycles; this bounds acyclic
+# blow-ups). Well above ``sys.getrecursionlimit()`` so deep task-group nesting is fully scanned.
 _EXC_TRAVERSAL_MAX_NODES = 10_000
 
 
 def _is_session_expired_error(exc: BaseException) -> bool:
-    """True if ``exc`` looks like an MCP transport session expiry. Streamable-HTTP servers GC
-    session state (idle TTL, restart, pod rotation) while the OAuth token stays valid, so unlike
-    :func:`_is_auth_error` the fix is a transport reconnect (``_reconnect_event``), not an OAuth refresh.
-
-    Iterative walk over ``exceptions`` / ``__cause__`` / ``__context__`` with an identity-visited
-    set AND a node budget (graphs can be deep or cyclic). Every reachable node is inspected so an
-    InterruptedError anywhere overrides transport markers; the chain walk matters because SDK
-    wrappers often raise a generic RuntimeError *from* a message-less ClosedResourceError."""
-    # AnyIO stream exceptions are often message-less (``str(ClosedResourceError()) == ""``),
-    # so type checks are needed in addition to marker matching.
+    """True if ``exc`` looks like a transport session expiry (Streamable-HTTP servers GC session
+    state on idle TTL / restart / pod rotation while the OAuth token stays valid) — the fix is a
+    transport reconnect, not an OAuth refresh. Iterative walk over ``exceptions`` / ``__cause__`` /
+    ``__context__`` with a visited set AND a node budget; every reachable node is inspected so an
+    InterruptedError anywhere overrides transport markers, and the chain walk matters because SDK
+    wrappers raise a generic RuntimeError *from* a message-less ClosedResourceError."""
+    # AnyIO stream exceptions are often message-less, so type checks complement marker matching.
     transport_error_types = tuple(_optional_types("anyio", "BrokenResourceError", "ClosedResourceError", "EndOfStream"))
     stack: "list[BaseException | None]" = [exc]
     seen: set[int] = set()
-    transport_error_found = False
+    found = False
     budget = _EXC_TRAVERSAL_MAX_NODES
     while stack and budget > 0:
         current = stack.pop()
@@ -365,11 +341,10 @@ def _is_session_expired_error(exc: BaseException) -> bool:
         budget -= 1
         if isinstance(current, InterruptedError):
             return False
-        # Messages vary across SDK versions and servers: match a narrow allow-list of stable
-        # substrings, not exception type, to avoid false positives.
+        # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids
+        # false positives.
         msg = str(current).lower()
-        if isinstance(current, transport_error_types) or any(marker in msg for marker in _SESSION_EXPIRED_MARKERS):
-            transport_error_found = True
+        found = found or isinstance(current, transport_error_types) or any(m in msg for m in _SESSION_EXPIRED_MARKERS)
         stack.extend(getattr(current, "exceptions", ()))
         stack.extend((getattr(current, "__cause__", None), getattr(current, "__context__", None)))
-    return transport_error_found
+    return found

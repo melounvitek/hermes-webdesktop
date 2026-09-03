@@ -13,8 +13,8 @@ logger = logging.getLogger("tools.mcp_tool")
 
 
 def _tool_use_id(block):
-    """Tool-use id (the discriminator for a tool *result* block), read under both SDK spellings —
-    on mcp 2.x a bare ``hasattr(b, "toolUseId")`` is False and would silently drop tool results."""
+    """Tool-use id (marks a tool *result* block) under both SDK spellings — on mcp 2.x a bare
+    ``hasattr(b, "toolUseId")`` is False and would silently drop tool results."""
     return mcp_field(block, "tool_use_id", "toolUseId", _MISSING)
 
 
@@ -49,8 +49,8 @@ def _tool_call_dict(tu, index: int) -> dict:
 
 
 def _convert_sampling_message(msg) -> List[dict]:
-    """One MCP SamplingMessage -> OpenAI-format messages (tool results first,
-    then either an assistant tool_calls message or plain content)."""
+    """One MCP SamplingMessage -> OpenAI messages: tool results first, then either an assistant
+    tool_calls message or plain content."""
     blocks = msg.content_as_list if hasattr(msg, "content_as_list") else (
         msg.content if isinstance(msg.content, list) else [msg.content])
     tool_results = [b for b in blocks if _tool_use_id(b) is not _MISSING]
@@ -75,8 +75,7 @@ def _convert_sampling_message(msg) -> List[dict]:
 
 
 def _parse_tool_call_arguments(server_name: str, args) -> dict:
-    """LLM tool_calls arguments -> dict; malformed JSON / non-dict values are
-    wrapped as ``{"_raw": ...}`` rather than dropped."""
+    """LLM tool_calls arguments -> dict; malformed JSON / non-dicts become ``{"_raw": ...}``, not dropped."""
     if isinstance(args, str):
         try:
             return json.loads(args)
@@ -92,13 +91,10 @@ def _response_total_tokens(response, default):
 
 
 class SamplingHandler:
-    """Handles sampling/createMessage requests for one MCP server; passed to ``ClientSession`` as
-    ``sampling_callback``. All state (rate-limit timestamps, metrics, tool-loop counter) is per
-    instance. Runs on the MCP background loop; the sync LLM call is offloaded via ``asyncio.to_thread``.
-
-    Deprecated upstream (MCP 2026-07-28, SEP-2577, 12-month window): stays fully functional because
-    handshake-era servers still issue it, but do NOT grow new capability here — modern servers use
-    MRTR, handled by the SDK session layer."""
+    """``sampling_callback`` for one MCP server (per-instance rate-limit, metrics, tool-loop state).
+    Runs on the MCP loop; the sync LLM call is offloaded via ``asyncio.to_thread``. Deprecated
+    upstream (MCP 2026-07-28, SEP-2577): stays functional for handshake-era servers, but do NOT grow
+    new capability here — modern servers use MRTR, handled by the SDK session layer."""
 
     _STOP_REASON_MAP = {"stop": "endTurn", "length": "maxTokens", "tool_calls": "toolUse"}
     _LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
@@ -129,10 +125,8 @@ class SamplingHandler:
         """Config override > server hint > None (use default)."""
         if self.model_override:
             return self.model_override
-        for hint in (getattr(preferences, "hints", None) or []):
-            if getattr(hint, "name", None):
-                return hint.name
-        return None
+        hints = getattr(preferences, "hints", None) or []
+        return next((hint.name for hint in hints if getattr(hint, "name", None)), None)
 
     def _convert_messages(self, params) -> List[dict]:
         """MCP SamplingMessages -> OpenAI format (per-block duck-typed dispatch)."""
@@ -155,8 +149,7 @@ class SamplingHandler:
                    self.server_name, response.model, _response_total_tokens(response, "?"), *args)
 
     def _build_tool_use_result(self, choice, response):
-        """CreateMessageResultWithTools from an LLM tool_calls response, subject to tool-loop
-        governance (``max_tool_rounds``; 0 disables)."""
+        """CreateMessageResultWithTools from a tool_calls response, under ``max_tool_rounds`` (0 disables)."""
         self.metrics["tool_use_count"] += 1
         if self.max_tool_rounds == 0:
             self._tool_loop_count = 0
@@ -197,14 +190,14 @@ class SamplingHandler:
         model = self._resolve_model(mcp_field(params, "model_preferences", "modelPreferences"))
         resolved_model = model or self.model_override or ""
         if self.allowed_models and resolved_model and resolved_model not in self.allowed_models:
-            logger.warning("MCP server '%s' requested model '%s' not in allowed_models", self.server_name, resolved_model)
+            logger.warning("MCP server '%s' requested model '%s' not in allowed_models",
+                           self.server_name, resolved_model)
             return None, self._fail(f"Model '{resolved_model}' not allowed for server "
                                     f"'{self.server_name}'. Allowed: {', '.join(self.allowed_models)}")
         return resolved_model, None
 
     def _build_llm_call(self, params, resolved_model: str) -> Callable[[], object]:
-        """Translate the sampling params into a zero-arg sync ``call_llm`` thunk (run off-loop so
-        the MCP loop is not blocked). Server-provided tools are forwarded."""
+        """Sampling params -> zero-arg sync ``call_llm`` thunk (run off-loop); server tools are forwarded."""
         from agent.auxiliary_client import call_llm
 
         messages = self._convert_messages(params)
@@ -224,8 +217,7 @@ class SamplingHandler:
                                 max_tokens=max_tokens, tools=tools, timeout=self.timeout)
 
     async def __call__(self, context, params):
-        """SDK sampling callback (``SamplingFnT``). Returns CreateMessageResult,
-        CreateMessageResultWithTools, or ErrorData."""
+        """SDK ``SamplingFnT``: CreateMessageResult, CreateMessageResultWithTools, or ErrorData."""
         resolved_model, err = self._admit(params)
         if err is not None:
             return err
@@ -250,8 +242,7 @@ class SamplingHandler:
 
 
 def _format_elicitation_schema_summary(schema: dict, server_name: str) -> str:
-    """Render a flat-object requested_schema as a human-readable field list (names, types,
-    descriptions) so the user knows what they're approving."""
+    """Flat-object requested_schema -> readable field list so the user knows what they're approving."""
     props = schema.get("properties") if isinstance(schema, dict) else None
     if not isinstance(props, dict) or not props:
         return f"Approval requested by MCP server '{server_name}'."
@@ -266,24 +257,21 @@ def _format_elicitation_schema_summary(schema: dict, server_name: str) -> str:
 
 
 class ElicitationHandler:
-    """Handles ``elicitation/create`` requests for one MCP server; passed to ``ClientSession`` as
-    ``elicitation_callback``. Form-mode requests route through Hermes' approval system (CLI, TUI,
-    Telegram, ...); URL-mode is declined as unsupported. Fail-closed: any timeout, exception or
-    unexpected state returns decline/cancel, never a silent accept."""
+    """``elicitation_callback`` for one MCP server. Form-mode routes through Hermes' approval system
+    (CLI, TUI, Telegram, ...); URL-mode is declined. Fail-closed: any timeout, exception or unexpected
+    state returns decline/cancel, never a silent accept."""
 
-    # asyncio-side safety net over the approval's own input() timeout so the MCP loop never
-    # blocks indefinitely if the inner timeout is bypassed.
+    # asyncio-side safety net over the approval's own input() timeout so the MCP loop never blocks
+    # indefinitely if the inner timeout is bypassed.
     _OUTER_TIMEOUT_GRACE_SECONDS = 5
     # consent answer -> (ElicitResult action, metric); anything else declines.
     _ANSWER_RESULTS = {"accept": ("accept", "accepted"), "cancel": ("cancel", "errors")}
 
     def __init__(self, server_name: str, config: dict, owner: Optional["MCPServerTask"] = None):
         self.server_name = server_name
-        # Default 5 min mirrors the gateway approval default so async surfaces (Telegram, Slack)
-        # have time to respond.
+        # 5 min mirrors the gateway approval default so async surfaces (Telegram, Slack) can respond.
         self.timeout = _safe_numeric(config.get("timeout", 300), 300, float)
-        # Back-reference for the agent's contextvars snapshot; optional so the handler stays
-        # unit-testable in isolation.
+        # Back-reference for the agent's contextvars snapshot; optional for isolated unit tests.
         self.owner = owner
         self.metrics = {"requests": 0, "accepted": 0, "declined": 0, "errors": 0}
 
@@ -294,14 +282,12 @@ class ElicitationHandler:
     def _result(self, action: str, metric: str):
         """Count *metric* and return ``ElicitResult(action)`` (accept carries empty content)."""
         self.metrics[metric] += 1
-        if action == "accept":
-            return _core.ElicitResult(action="accept", content={})
-        return _core.ElicitResult(action=action)
+        return _core.ElicitResult(action=action, **({"content": {}} if action == "accept" else {}))
 
     def _consent_thunk(self, message: str, description: str) -> Callable[[], str]:
-        """Sync consent call, replaying the agent's contextvars snapshot when the owner captured
-        one: the recv-loop task does NOT inherit them, and gateway-platform detection needs them.
-        ``Context.run`` executes a context once, so it is copied per elicitation."""
+        """Sync consent call replaying the agent's contextvars snapshot when the owner captured one
+        (the recv-loop task does NOT inherit them; gateway-platform detection needs them).
+        ``Context.run`` runs a context once, so it is copied per elicitation."""
         from tools.approval import request_elicitation_consent
 
         kwargs = {"timeout_seconds": int(self.timeout), "surface": f"mcp-elicitation/{self.server_name}"}
@@ -313,16 +299,15 @@ class ElicitationHandler:
     async def __call__(self, context, params):
         """SDK elicitation callback (``ElicitationFnT``). Returns ElicitResult or ErrorData."""
         self.metrics["requests"] += 1
-        # URL-mode (OAuth, payment) would need a browser + waiting for
-        # notifications/elicitation/complete — not implemented; decline cleanly.
+        # URL-mode (OAuth, payment) needs a browser + notifications/elicitation/complete — not implemented.
         if getattr(params, "mode", "form") == "url":
-            logger.info("MCP server '%s' requested URL-mode elicitation; declining (URL-mode elicitation not implemented)",
-                        self.server_name)
+            logger.info("MCP server '%s' requested URL-mode elicitation; declining "
+                        "(URL-mode elicitation not implemented)", self.server_name)
             return self._result("decline", "declined")
 
         message = getattr(params, "message", "") or f"MCP server '{self.server_name}' is requesting your approval"
-        # ``requestedSchema`` on mcp 1.x, ``requested_schema`` on 2.0 (pydantic aliases don't apply
-        # to attribute access) — read both or the user approves without seeing the fields.
+        # ``requestedSchema`` on mcp 1.x, ``requested_schema`` on 2.0 (aliases don't apply to attribute
+        # access) — read both or the user approves without seeing the fields.
         schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None) or {}
         description = _format_elicitation_schema_summary(schema, self.server_name)
         logger.info("MCP server '%s' elicitation request: %s", self.server_name, _sanitize_error(message)[:200])
@@ -332,8 +317,7 @@ class ElicitationHandler:
         except Exception as exc:  # pragma: no cover -- defensive
             logger.error("MCP server '%s' elicitation: approval system unavailable: %s", self.server_name, exc)
             return self._result("decline", "errors")
-        # Offload the sync consent flow to a thread — inline it would freeze the MCP loop and
-        # every other RPC on this session.
+        # Off-thread: inline, the sync consent flow would freeze the MCP loop and every RPC on it.
         try:
             answer = await asyncio.wait_for(
                 asyncio.to_thread(invoke_consent), timeout=self.timeout + self._OUTER_TIMEOUT_GRACE_SECONDS)
