@@ -155,11 +155,7 @@ class ShellHookSpec(_ToolMatcherMixin):
 
 # --- Public API ---
 
-def register_from_config(
-    cfg: Optional[Dict[str, Any]],
-    *,
-    accept_hooks: bool = False,
-) -> List[ShellHookSpec]:
+def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = False) -> List[ShellHookSpec]:
     """Register every configured shell hook on the plugin manager; idempotent.
 
     Returns the specs that were newly wired up. Skipped entries (unknown events, malformed, not
@@ -636,10 +632,7 @@ def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
     """Approve an unseen ``(event, command)`` pair; True iff granted and recorded."""
     if accept_hooks:
         _record_approval(event, command)
-        logger.info(
-            "shell hook auto-approved via --accept-hooks / env / config: "
-            "%s -> %s", event, command,
-        )
+        logger.info("shell hook auto-approved via --accept-hooks / env / config: " "%s -> %s", event, command)
         return True
 
     if not sys.stdin.isatty():

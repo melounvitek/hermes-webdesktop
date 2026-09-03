@@ -92,10 +92,7 @@ def resolve_and_repair_transcript_batch(
     return inserted_rows
 
 
-def sync_flushed_message_markers(
-    batch_msgs: List[Dict[str, Any]],
-    batch_rows: List[Dict[str, Any]],
-) -> None:
+def sync_flushed_message_markers(batch_msgs: List[Dict[str, Any]], batch_rows: List[Dict[str, Any]]) -> None:
     """Stamp _DB_PERSISTED_MARKER and sync canonical row ID / content onto live dicts after commit."""
     for written, row in zip(batch_msgs, batch_rows):
         written[_DB_PERSISTED_MARKER] = True

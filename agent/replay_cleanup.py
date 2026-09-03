@@ -51,9 +51,7 @@ def _orphan_recovery(name: str, unknown_text: str, none_text: str) -> tuple:
     return "none", none_text
 
 
-def strip_interrupted_tool_tails(
-    agent_history: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Strip interrupted assistant→tool sequences from replay history.
 
     The interrupted block is not necessarily the final tail (a queued real user
@@ -77,10 +75,7 @@ def strip_interrupted_tool_tails(
             while j < n and agent_history[j].get("role") == "tool":
                 tool_results.append(agent_history[j])
                 j += 1
-            if tool_results and any(
-                is_interrupted_tool_result(m.get("content", ""))
-                for m in tool_results
-            ):
+            if tool_results and any(is_interrupted_tool_result(m.get("content", "")) for m in tool_results):
                 calls = msg.get("tool_calls") or []
                 if _any_side_effecting(calls):
                     call_names = {_call_id(call): _call_name(call) for call in calls}
@@ -117,9 +112,7 @@ def strip_interrupted_tool_tails(
     return cleaned
 
 
-def strip_dangling_tool_call_tail(
-    agent_history: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+def strip_dangling_tool_call_tail(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Strip a trailing ``assistant(tool_calls)`` block left with NO answers.
 
     A tool call that kills the gateway process itself (``docker restart``,
@@ -134,11 +127,7 @@ def strip_dangling_tool_call_tail(
         return agent_history
 
     last = agent_history[-1]
-    if not (
-        isinstance(last, dict)
-        and last.get("role") == "assistant"
-        and last.get("tool_calls")
-    ):
+    if not (isinstance(last, dict) and last.get("role") == "assistant" and last.get("tool_calls")):
         return agent_history
 
     tool_calls = last.get("tool_calls") or []
@@ -155,9 +144,7 @@ def strip_dangling_tool_call_tail(
             recovered.append(make_tool_result_message(
                 name, content, _call_id(call), effect_disposition=disposition,
             ))
-        logger.warning(
-            "Recovered dangling side-effecting tool call(s) as UNKNOWN instead of erasing them"
-        )
+        logger.warning("Recovered dangling side-effecting tool call(s) as UNKNOWN instead of erasing them")
         return recovered
 
     logger.debug(
@@ -167,9 +154,7 @@ def strip_dangling_tool_call_tail(
     return agent_history[:-1]
 
 
-def sanitize_replay_history(
-    agent_history: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+def sanitize_replay_history(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Both replay-tail strippers in canonical order (interrupted blocks, then
     dangling tail). Returns the same list object when nothing is stripped."""
     if not agent_history:

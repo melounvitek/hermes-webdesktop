@@ -250,8 +250,7 @@ def _do_upload(
     try:
         from huggingface_hub import HfApi
     except ImportError:
-        return ("Hugging Face upload needs the `huggingface_hub` package "
-                "(`pip install huggingface_hub`).")
+        return ("Hugging Face upload needs the `huggingface_hub` package " "(`pip install huggingface_hub`).")
 
     api = HfApi(token=token)
     try:

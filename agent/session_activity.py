@@ -41,9 +41,7 @@ def bound_activity_description(description: Optional[str]) -> str:
     return text[: ACTIVITY_DESCRIPTION_MAX - 1] + "…"
 
 
-def normalize_activity_provenance(
-    provenance: Optional[ActivityProvenance | str],
-) -> ActivityProvenance:
+def normalize_activity_provenance(provenance: Optional[ActivityProvenance | str]) -> ActivityProvenance:
     """Return a known provenance, or ``UNKNOWN`` when unset/unrecognized."""
     if isinstance(provenance, ActivityProvenance):
         return provenance
