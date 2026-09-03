@@ -20,6 +20,9 @@ logger = logging.getLogger("tools.web_tools")
 
 _NO_RESULT_ERROR = "Extract backend returned no result for this URL"
 _EXTRACT_BACKENDS_HINT = "firecrawl, tavily, keenable, exa, or parallel."
+_INVALID_ITEM_ERROR = (
+    "Invalid URL item at index {}: expected a URL string or an object with a string 'url' or 'href' field"
+)
 
 
 def _web_extract_url(value: Any) -> Optional[str]:
@@ -30,9 +33,7 @@ def _web_extract_url(value: Any) -> Optional[str]:
     """
     if isinstance(value, dict):
         value = value.get("url") or value.get("href")
-    if not isinstance(value, str):
-        return None
-    return value.strip() or None
+    return (value.strip() or None) if isinstance(value, str) else None
 
 
 def _disabled_plugin_error(capability: str, disabled_key: str) -> str:
@@ -86,25 +87,19 @@ def _merge_in_order(
 
 
 def _validate_extract_urls(urls: List[Any]):
-    """Normalize model-supplied items and block URLs carrying secrets.
-
-    Returns ``(normalized_urls, normalized_indices, invalid_urls, blocked_json)``;
-    ``blocked_json`` is a whole-call refusal (exfiltration prevention) or None.
-    Percent-encoded secrets are caught by checking the unquoted forms too.
-    """
+    """Normalize model-supplied items and block URLs carrying secrets (percent-encoded forms are unquoted
+    and checked too). Returns ``(normalized_urls, normalized_indices, invalid_urls, blocked_json)``;
+    ``blocked_json`` is a whole-call refusal (exfiltration prevention) or None."""
     from agent.redact import _PREFIX_RE
     from urllib.parse import unquote
+
     normalized_urls: List[str] = []
     normalized_indices: List[int] = []
     invalid_urls: Dict[int, Dict[str, Any]] = {}
     for index, item in enumerate(urls):
         _url = _web_extract_url(item)
         if _url is None:
-            invalid_urls[index] = _result_entry(
-                "",
-                f"Invalid URL item at index {index}: expected a URL string "
-                "or an object with a string 'url' or 'href' field",
-            )
+            invalid_urls[index] = _result_entry("", _INVALID_ITEM_ERROR.format(index))
             continue
         normalized_url = normalize_url_for_request(_url)
         if any(_PREFIX_RE.search(c) for c in (_url, unquote(_url), normalized_url, unquote(normalized_url))):

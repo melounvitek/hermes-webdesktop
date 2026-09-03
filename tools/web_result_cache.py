@@ -39,8 +39,7 @@ def _web_config() -> dict:
 
 def cache_enabled() -> bool:
     """Both caches honor ``web.cache_enabled`` (default: on)."""
-    val = _web_config().get("cache_enabled")
-    return True if val is None else bool(val)
+    return True if (val := _web_config().get("cache_enabled")) is None else bool(val)
 
 
 def ttl_seconds() -> float:
@@ -78,9 +77,7 @@ def _deep_copy(response: dict) -> dict:
     return json.loads(json.dumps(response))
 
 
-# ---------------------------------------------------------------------------
-# Search memo (in-memory, single-flight)
-# ---------------------------------------------------------------------------
+# ─── Search memo (in-memory, single-flight) ───────────────────────────────────
 
 class SearchMemo:
     """TTL memo + single-flight coalescer for search responses. Thread-safe: the parallel tool-dispatch pool
@@ -88,7 +85,7 @@ class SearchMemo:
     wait for (and share) the winner's response."""
 
     def __init__(self) -> None:
-        self._store: Dict[tuple, Tuple[float, dict]] = {}
+        self._store: Dict[tuple, Tuple[float, dict]] = {}  # key -> (expires_at, response)
         self._store_lock = threading.Lock()
         self._key_locks: Dict[tuple, threading.Lock] = {}
 
@@ -156,9 +153,7 @@ def slice_search_response(response: dict, limit: int) -> dict:
     return response
 
 
-# ---------------------------------------------------------------------------
-# Extract cache (disk-backed, reuses cache/web)
-# ---------------------------------------------------------------------------
+# ─── Extract cache (disk-backed, reuses cache/web) ────────────────────────────
 
 _index_lock = threading.Lock()
 
@@ -208,8 +203,7 @@ def _url_digest(url: str, format: Optional[str], provider: str = "") -> str:
 def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional[Path]:
     """Dedicated cache file per (url, format, provider) — deliberately NOT the truncate-store file
     (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
-    d = _cache_dir()
-    if d is None:
+    if (d := _cache_dir()) is None:
         return None
     try:
         slug = _host_slug(url)
@@ -222,12 +216,8 @@ def _host_matches_pattern(host: str, pattern: str) -> bool:
     """Case-insensitive: exact, ``*.wildcard``, or bare-domain suffix
     (``mysite.dev`` also matches ``preview.mysite.dev``)."""
     host = host.lower().strip(".")
-    pattern = (pattern or "").lower().strip().strip(".")
-    if not pattern:
-        return False
-    if pattern.startswith("*."):
-        pattern = pattern[2:]
-    return host == pattern or host.endswith("." + pattern)
+    pattern = (pattern or "").lower().strip().strip(".").removeprefix("*.")
+    return bool(pattern) and (host == pattern or host.endswith("." + pattern))
 
 
 def _is_cache_exempt_host(url: str) -> bool:

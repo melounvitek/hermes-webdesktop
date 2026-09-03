@@ -80,8 +80,7 @@ def _load_policy_config(config_path: Path) -> Dict[str, Any]:
         logger.debug("PyYAML not installed — website blocklist disabled")
         return dict(_DEFAULT_WEBSITE_BLOCKLIST)
     try:
-        with open(config_path, encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise WebsitePolicyError(f"Invalid config YAML at {config_path}: {exc}") from exc
     except OSError as exc:
@@ -119,12 +118,11 @@ def load_website_blocklist(config_path: Optional[Path] = None) -> Dict[str, Any]
 
     config_path = config_path or default_path
     policy = _load_policy_config(config_path)
-    raw_domains = _require_type(policy, "domains", list, [])
-    raw_shared_files = _require_type(policy, "shared_files", list, [])
+    domains = map(_normalize_rule, _require_type(policy, "domains", list, []))
+    pairs: List[Tuple[str, str]] = [(p, "config") for p in domains if p]
+    shared_files = _require_type(policy, "shared_files", list, [])
     enabled = _require_type(policy, "enabled", bool, True)
-
-    pairs: List[Tuple[str, str]] = [(p, "config") for p in map(_normalize_rule, raw_domains) if p]
-    for shared_file in raw_shared_files:
+    for shared_file in shared_files:
         if not isinstance(shared_file, str) or not shared_file.strip():
             continue
         path = Path(shared_file).expanduser()
@@ -169,11 +167,9 @@ def check_website_access(url: str, config_path: Optional[Path] = None) -> Option
         with _cache_lock:
             if _cached_policy is not None and not _cached_policy.get("enabled"):
                 return None
-
     host = _extract_host_from_urlish(url)
     if not host:
         return None
-
     try:
         policy = load_website_blocklist(config_path)
     except WebsitePolicyError as exc:
@@ -184,7 +180,6 @@ def check_website_access(url: str, config_path: Optional[Path] = None) -> Option
     except Exception as exc:
         logger.warning("Unexpected error loading website policy (failing open): %s", exc)
         return None
-
     if not policy.get("enabled"):
         return None
     for rule in policy.get("rules", []):

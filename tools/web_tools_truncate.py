@@ -12,11 +12,11 @@ from typing import Any, List, Optional
 
 logger = logging.getLogger("tools.web_tools")
 
-# Per-page char budget sent to the model (override: web.extract_char_limit); larger pages are
-# head+tail truncated and the full text stored on disk.
+# Per-page char budget sent to the model (override: web.extract_char_limit); larger pages are head+tail
+# truncated, full text stored on disk.
 DEFAULT_EXTRACT_CHAR_LIMIT = 15000
-# Ceiling on the full-text file written to cache/web so a multi-MB page can't write unbounded bytes
-# on every extract; the model only ever sees char_limit.
+# Ceiling on the full-text file written to cache/web so a multi-MB page can't write unbounded bytes on
+# every extract; the model only ever sees char_limit.
 MAX_STORED_TEXT_CHARS = 2_000_000
 
 _CHAR_LIMIT_FLOOR, _CHAR_LIMIT_CEILING = 2000, 500_000
@@ -28,16 +28,18 @@ def _clamp_char_limit(value: Any) -> int:
     return max(_CHAR_LIMIT_FLOOR, min(int(value), _CHAR_LIMIT_CEILING))
 
 
+def _clamp_or_default(value: Any) -> int:
+    """``_clamp_char_limit(value)``; ``None`` or non-numeric input falls back to the default."""
+    try:
+        return DEFAULT_EXTRACT_CHAR_LIMIT if value is None else _clamp_char_limit(value)
+    except (TypeError, ValueError):
+        return DEFAULT_EXTRACT_CHAR_LIMIT
+
+
 def _get_extract_char_limit() -> int:
     """``web.extract_char_limit`` clamped to a sane range, else the default."""
     from tools.web_tools import _load_web_config  # lazy: tests patch tools.web_tools._load_web_config
-    try:
-        configured = _load_web_config().get("extract_char_limit")
-        if configured is not None:
-            return _clamp_char_limit(configured)
-    except (TypeError, ValueError):
-        pass
-    return DEFAULT_EXTRACT_CHAR_LIMIT
+    return _clamp_or_default(_load_web_config().get("extract_char_limit"))
 
 
 def convert_base64_images_to_links(text: str) -> str:
@@ -45,8 +47,7 @@ def convert_base64_images_to_links(text: str) -> str:
     (alt kept), parenthesised blobs, and bare ``data:image/...;base64,`` payloads. Real http(s) markdown
     image links are left untouched so the agent can ``web_extract`` / ``vision_analyze`` them."""
     def _md_repl(m: "re.Match[str]") -> str:
-        alt = (m.group("alt") or "").strip()
-        return f"[IMAGE: {alt}]" if alt else "[IMAGE]"
+        return f"[IMAGE: {alt}]" if (alt := (m.group("alt") or "").strip()) else "[IMAGE]"
 
     out = re.sub(r"!\[(?P<alt>[^\]]*)\]\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", _md_repl, text)
     out = re.sub(r"\(\s*data:image/[^;]+;base64,[A-Za-z0-9+/=\s]+\)", "[IMAGE]", out)
@@ -126,11 +127,7 @@ def _truncate_with_footer(content: str, url: str, char_limit: int) -> tuple[str,
 
 def _effective_char_limit(char_limit: Optional[int]) -> int:
     """Caller's ``char_limit`` (else config) clamped; non-numeric input falls back to the default."""
-    value = char_limit if char_limit is not None else _get_extract_char_limit()
-    try:
-        return _clamp_char_limit(value)
-    except (TypeError, ValueError):
-        return DEFAULT_EXTRACT_CHAR_LIMIT
+    return _clamp_or_default(char_limit) if char_limit is not None else _get_extract_char_limit()
 
 
 def _truncate_results(results: List[dict], char_limit: int, debug_call_data: dict) -> None:

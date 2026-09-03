@@ -127,12 +127,10 @@ def _get_backend() -> str:
     Autodetect runs ONLY when no web selection has ever been stored."""
     configured = _configured_backend()
     if configured:
-        # "nous" (managed subscription) is serviced by the firecrawl provider, whose client
-        # resolver routes it through the managed Tool Gateway.
+        # "nous" (managed subscription) is serviced by firecrawl, routed through the managed Tool Gateway.
         return "firecrawl" if configured == NOUS_MANAGED_PROVIDER else configured
     if selection_exists("web"):
-        # Selection exists (use_gateway / per-capability keys) but no shared name: keep the
-        # firecrawl default rather than credential-laddering.
+        # Selection exists (use_gateway / per-capability keys) but no shared name: firecrawl, no ladder.
         return "firecrawl"
 
     # Never-configured install. Explicit user credentials beat the managed-gateway probe (a Nous OAuth
@@ -226,10 +224,9 @@ def _is_backend_available(backend: str) -> bool:
     """True when *backend* is usable — the single availability chokepoint. Non-legacy names delegate to the
     registered provider's ``is_available()`` (unregistered names fall through); built-ins use cheap probes."""
     backend = (backend or "").lower().strip()
-    if backend not in _LEGACY_WEB_BACKENDS:
-        provider = _registered_web_provider(backend)
-        if provider is not None:
-            return _probe(provider, "is_available") or False
+    provider = None if backend in _LEGACY_WEB_BACKENDS else _registered_web_provider(backend)
+    if provider is not None:
+        return _probe(provider, "is_available") or False
     probe = _BUILTIN_AVAILABILITY.get(backend)
     return probe() if probe else False
 
@@ -262,17 +259,14 @@ def _ensure_web_plugins_loaded() -> None:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
 
-def _finish_debug(call_name: str, debug_call_data: dict) -> None:
+def _finish_debug(call_name: str, debug_call_data: dict, error_msg: Optional[str] = None) -> Optional[str]:
+    """Log the call into the debug session; with *error_msg*, record it and return its ``tool_error`` envelope."""
+    if error_msg is not None:
+        logger.debug("%s", error_msg)
+        debug_call_data["error"] = error_msg
     _debug.log_call(call_name, debug_call_data)
     _debug.save()
-
-
-def _debug_error(call_name: str, debug_call_data: dict, error_msg: str) -> str:
-    """Record *error_msg* in the debug session and return the ``tool_error`` envelope for it."""
-    logger.debug("%s", error_msg)
-    debug_call_data["error"] = error_msg
-    _finish_debug(call_name, debug_call_data)
-    return tool_error(error_msg)
+    return None if error_msg is None else tool_error(error_msg)
 
 
 def web_search_tool(query: str, limit: int = 5) -> str:
@@ -324,7 +318,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
         _finish_debug("web_search_tool", debug_call_data)
         return result_json
     except Exception as e:
-        return _debug_error("web_search_tool", debug_call_data, f"Error searching web: {str(e)}")
+        return _finish_debug("web_search_tool", debug_call_data, f"Error searching web: {str(e)}")
 
 
 def _memoized_search(provider, query: str, limit: int) -> dict:
@@ -333,6 +327,7 @@ def _memoized_search(provider, query: str, limit: int) -> dict:
     the caller's count is sliced out. Only successful, non-rescued responses are cached — caching a rescue
     would make the one-shot ring fallback sticky for a whole TTL."""
     from tools.web_result_cache import bucket_limit, search_memo, slice_search_response
+
     def _paid_search() -> tuple[dict, bool]:
         fetch_limit = bucket_limit(limit)
         try:
@@ -407,9 +402,10 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         debug_call_data["processing_applied"].append("truncate_and_store")
         _truncate_results(results, _effective_char_limit(char_limit), debug_call_data)
         trimmed = _trim_results(results)
-        result_json = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False) if trimmed else tool_error(
-            "Content was inaccessible or not found"
-        )
+        if not trimmed:
+            result_json = tool_error("Content was inaccessible or not found")
+        else:
+            result_json = json.dumps({"results": trimmed}, indent=2, ensure_ascii=False)
         # Belt-and-suspenders sweep of the serialized JSON: a provider may tuck a base64 blob in metadata.
         cleaned_result = convert_base64_images_to_links(result_json)
         debug_call_data["final_response_size"] = len(cleaned_result)
@@ -417,7 +413,7 @@ async def web_extract_tool(urls: List[Any], format: str = None, char_limit: Opti
         _finish_debug("web_extract_tool", debug_call_data)
         return cleaned_result
     except Exception as e:
-        return _debug_error("web_extract_tool", debug_call_data, f"Error extracting content: {str(e)}")
+        return _finish_debug("web_extract_tool", debug_call_data, f"Error extracting content: {str(e)}")
 
 
 def _provider_is_ready(provider) -> bool:
@@ -429,13 +425,10 @@ def _provider_is_ready(provider) -> bool:
     """
     if provider is None:
         return False
-    for method in ("is_available", "is_keyless_available"):
-        ready = _probe(provider, method, " during readiness check")
-        if ready is None:  # broken provider == not ready; don't try the next probe
-            return False
-        if ready:
-            return True
-    return False
+    ready = _probe(provider, "is_available", " during readiness check")
+    if ready is None:  # broken provider == not ready; don't try the keyless probe
+        return False
+    return bool(ready or _probe(provider, "is_keyless_available", " during readiness check"))
 
 
 def check_web_api_key() -> bool:
