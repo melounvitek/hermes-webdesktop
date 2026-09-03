@@ -183,12 +183,14 @@ def _mark_exited_quietly(exit_code: int, reason: str) -> None:
         pass
 
 
-def _home(home: Optional[Path]) -> Path:
-    """``home`` or the process-level HERMES_HOME (env, ignoring profile overrides)."""
-    if home is not None:
-        return home
+def _process_hermes_home() -> Path:
+    """HERMES_HOME for process-level identity files (ignore profile overrides)."""
     val = os.environ.get("HERMES_HOME", "").strip()
     return Path(val) if val else get_hermes_home()
+
+
+def _home(home: Optional[Path]) -> Path:
+    return home if home is not None else _process_hermes_home()
 
 
 def get_loop_heartbeat_path(home: Optional[Path] = None) -> Path:
