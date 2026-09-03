@@ -1930,38 +1930,33 @@ def get_plugin_error_classification(
         error=error, approx_tokens=approx_tokens, context_length=context_length,
         num_messages=num_messages,
     )
-    winner: Optional[Dict[str, Any]] = None
-    skipped_valid = 0
-    for result in hook_results:
-        if not isinstance(result, dict):
-            continue
-        reason = result.get("reason")
+
+    def _reason(result: Any) -> Any:
+        reason = result.get("reason") if isinstance(result, dict) else None
         if isinstance(reason, str):
-            try:
-                reason = FailoverReason(reason.strip().lower())
-            except ValueError:
-                continue
-        if not isinstance(reason, FailoverReason):
-            continue
-        if winner is not None:
-            skipped_valid += 1
-            continue
-        out: Dict[str, Any] = {"reason": reason}
-        for key in ("retryable", "should_compress", "should_rotate_credential", "should_fallback"):
-            if key in result:
-                out[key] = bool(result[key])
-        message = result.get("message")
-        if isinstance(message, str) and message.strip():
-            out["message"] = message.strip()[:500]
-        error_context = result.get("error_context")
-        if isinstance(error_context, dict):
-            out["error_context"] = error_context
-        winner = out
-    if winner is not None and skipped_valid:
+            with suppress(ValueError):
+                return FailoverReason(reason.strip().lower())
+            return None
+        return reason if isinstance(reason, FailoverReason) else None
+
+    valid = [(result, reason) for result in hook_results if (reason := _reason(result)) is not None]
+    if not valid:
+        return None
+    result, reason = valid[0]
+    winner: Dict[str, Any] = {"reason": reason}
+    for key in ("retryable", "should_compress", "should_rotate_credential", "should_fallback"):
+        if key in result:
+            winner[key] = bool(result[key])
+    message = result.get("message")
+    if isinstance(message, str) and message.strip():
+        winner["message"] = message.strip()[:500]
+    if isinstance(result.get("error_context"), dict):
+        winner["error_context"] = result["error_context"]
+    if len(valid) > 1:
         logger.warning(
             "transform_api_error_classification: skipped %d valid "
             "classification(s) after the first result in registration order "
-            "won (run-all-then-pick-first)", skipped_valid,
+            "won (run-all-then-pick-first)", len(valid) - 1,
         )
     return winner
 
