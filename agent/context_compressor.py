@@ -465,6 +465,7 @@ def salvage_grown_transcript(
         return out
     return None
 
+
 # Exact wire text of every shipped prefix, newest-first; stale directives must
 # still be strippable on resume. NEVER edit/reorder entries (byte-pinned); prepend.
 _HISTORICAL_SUMMARY_PREFIXES = (
@@ -602,6 +603,7 @@ class _HandoffScan:
     previous_summary_before: Optional[str]
     has_user_turn_before: Optional[bool]
 
+
 def _short_error_text(e: Exception, limit: int = 220) -> str:
     """Error text (or class name) capped for durable cooldown rows and telemetry."""
     text = str(e).strip() or e.__class__.__name__
@@ -724,6 +726,7 @@ def _next_timeout_cooldown(compressor: Any) -> int:
         min(compressor._consecutive_timeout_failures, len(_TIMEOUT_COOLDOWN_LADDER)) - 1
     ]
 
+
 _MIN_SUMMARY_TOKENS = 2000
 _SUMMARY_RATIO = 0.20
 # Summaries above ~10K tokens are themselves a context-pressure source.
@@ -766,6 +769,7 @@ def _is_clarify_non_response_sentinel(response: Any) -> bool:
             for item in response
         )
     return False
+
 
 # Ghost-skill defense: the ONE canonical prune marker; emit sites and presence
 # checks must use the same string so they cannot drift.
@@ -1081,6 +1085,7 @@ def _collect_protected_skill_names(messages: List[Dict[str, Any]], prune_boundar
         if idx >= recent_start or idx >= tail_start or any(key in text for text in tail_user_texts):
             protected.add(key)
     return protected
+
 
 _CHARS_PER_TOKEN = 4
 # Flat per-image token estimate (realistic ceiling; matches Claude Code's constant).
@@ -2881,7 +2886,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._set_anti_thrash_recovery_deadline(0.0)
         return False
 
-
     def _prune_boundary(
         self, result: List[Dict[str, Any]], protect_tail_count: int, protect_tail_tokens: int | None,
     ) -> int:
@@ -3132,7 +3136,6 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             stamp_db_persisted_markers(pruned_msgs)
         self._proactive_prune_rearm_tokens = next_rearm_tokens
         return pruned_msgs, pruned_count
-
 
     def _compute_summary_budget(self, turns_to_summarize: List[Dict[str, Any]]) -> int:
         """Scale the summary token budget with content size and context window."""
@@ -4350,7 +4353,6 @@ This compaction should PRIORITISE preserving all information related to the focu
             idx = check
         return idx
 
-
     @classmethod
     def _real_user_indices_desc(cls, messages: List[Dict[str, Any]], head_end: int) -> list[int]:
         """Indices (newest first) of actionable, non-synthetic user turns at or after *head_end*.
@@ -4579,7 +4581,6 @@ This compaction should PRIORITISE preserving all information related to the focu
         # can't split a tool group (backward would give the floor's message back).
         return min(n, self._align_boundary_forward(messages, max(cut_idx, head_end + 1)))
 
-
     def has_content_to_compress(self, messages: List[Dict[str, Any]]) -> bool:
         """Return True if there is a non-empty middle region to compact.
 
@@ -4588,7 +4589,6 @@ This compaction should PRIORITISE preserving all information related to the focu
         compress_start = self._align_boundary_forward(messages, self._protect_head_size(messages))
         compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
         return compress_start < compress_end
-
 
     def _scan_window_handoffs(
         self, messages: List[Dict[str, Any]], compress_start: int, compress_end: int,
@@ -5112,6 +5112,7 @@ This compaction should PRIORITISE preserving all information related to the focu
                 self._merge_summary_into_tail_row(msg, summary, summary_role, force_user_leading)
             compressed.append(msg)
         return self._finalize_compressed(compressed, messages, n_messages)
+
 
 def is_compaction_summary_message(message: Any) -> bool:
     """Return True when *message* is a context-compaction handoff summary.
