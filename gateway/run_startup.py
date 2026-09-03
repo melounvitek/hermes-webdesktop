@@ -876,42 +876,19 @@ class GatewayStartupMixin:
         except Exception as _e:
             logger.debug("check_systemd_timing_alignment failed: %s", _e)
 
-    # Env vars that count as "an allowlist is configured" / "open access opted in" for builtin
-    # platforms; plugin-registered platforms are appended at check time.
-    _BUILTIN_ALLOWED_USERS_VARS = (
-        "TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
-        "WHATSAPP_ALLOWED_USERS", "WHATSAPP_CLOUD_ALLOWED_USERS",
-        "SLACK_ALLOWED_USERS",
-        "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
-        "TELEGRAM_GROUP_ALLOWED_USERS",
-        "TELEGRAM_GROUP_ALLOWED_CHATS",
-        "EMAIL_ALLOWED_USERS",
-        "SMS_ALLOWED_USERS", "MATTERMOST_ALLOWED_USERS",
-        "MATRIX_ALLOWED_USERS", "DINGTALK_ALLOWED_USERS",
-        "FEISHU_ALLOWED_USERS",
-        "WECOM_ALLOWED_USERS",
-        "WECOM_CALLBACK_ALLOWED_USERS",
-        "WEIXIN_ALLOWED_USERS",
-        "BLUEBUBBLES_ALLOWED_USERS",
-        "QQ_ALLOWED_USERS",
-        "YUANBAO_ALLOWED_USERS",
-        "GATEWAY_ALLOWED_USERS",
+    # Builtin platforms whose ``<P>_ALLOWED_USERS`` / ``<P>_ALLOW_ALL_USERS`` env vars count as
+    # "an allowlist is configured" / "open access opted in"; plugin platforms are appended at
+    # check time.
+    _ALLOWLIST_ENV_PLATFORMS = (
+        "TELEGRAM", "DISCORD", "WHATSAPP", "WHATSAPP_CLOUD", "SLACK", "SIGNAL", "EMAIL", "SMS",
+        "MATTERMOST", "MATRIX", "DINGTALK", "FEISHU", "WECOM", "WECOM_CALLBACK", "WEIXIN",
+        "BLUEBUBBLES", "QQ", "YUANBAO",
     )
-    _BUILTIN_ALLOW_ALL_VARS = (
-        "TELEGRAM_ALLOW_ALL_USERS", "DISCORD_ALLOW_ALL_USERS",
-        "WHATSAPP_ALLOW_ALL_USERS", "WHATSAPP_CLOUD_ALLOW_ALL_USERS",
-        "SLACK_ALLOW_ALL_USERS",
-        "SIGNAL_ALLOW_ALL_USERS", "EMAIL_ALLOW_ALL_USERS",
-        "SMS_ALLOW_ALL_USERS", "MATTERMOST_ALLOW_ALL_USERS",
-        "MATRIX_ALLOW_ALL_USERS", "DINGTALK_ALLOW_ALL_USERS",
-        "FEISHU_ALLOW_ALL_USERS",
-        "WECOM_ALLOW_ALL_USERS",
-        "WECOM_CALLBACK_ALLOW_ALL_USERS",
-        "WEIXIN_ALLOW_ALL_USERS",
-        "BLUEBUBBLES_ALLOW_ALL_USERS",
-        "QQ_ALLOW_ALL_USERS",
-        "YUANBAO_ALLOW_ALL_USERS",
+    _BUILTIN_ALLOWED_USERS_VARS = tuple(f"{p}_ALLOWED_USERS" for p in _ALLOWLIST_ENV_PLATFORMS) + (
+        "SIGNAL_GROUP_ALLOWED_USERS", "TELEGRAM_GROUP_ALLOWED_USERS",
+        "TELEGRAM_GROUP_ALLOWED_CHATS", "GATEWAY_ALLOWED_USERS",
     )
+    _BUILTIN_ALLOW_ALL_VARS = tuple(f"{p}_ALLOW_ALL_USERS" for p in _ALLOWLIST_ENV_PLATFORMS)
 
     def _start_check_access_policy(self) -> bool:
         """Warn about missing allowlists; return True when startup must be refused."""
@@ -952,11 +929,9 @@ class GatewayStartupMixin:
         reason = _own_policy_open_startup_violation(self.config)
         if reason:
             platform_value = reason.split(":", 1)[0]
-            allow_all_env = None
-            for platform, open_env in _OWN_POLICY_OPEN_ENV.items():
-                if platform.value == platform_value:
-                    allow_all_env = open_env[2]
-                    break
+            allow_all_env = next(
+                (env[2] for p, env in _OWN_POLICY_OPEN_ENV.items() if p.value == platform_value), None
+            )
             logger.error(
                 "Refusing to start: %s has dm_policy/group_policy set to 'open' "
                 "but neither GATEWAY_ALLOW_ALL_USERS nor %s is enabled.", platform_value,
@@ -1061,7 +1036,7 @@ class GatewayStartupMixin:
             logger.debug("Stuck-loop detection failed: %s", e)
 
     async def _start_prefilter_platforms(self) -> Tuple[bool, int, list, list]:
-        """Create + wire an adapter per enabled platform (serial pre-filter, no connects).
+        """Create + wire an adapter per enabled platform (no connects).
 
         Returns (aborted, enabled_platform_count, multiplex_skipped_platforms, pending_connects).
         """
@@ -1069,9 +1044,8 @@ class GatewayStartupMixin:
         enabled_platform_count = 0
         _multiplex_on = bool(getattr(self.config, "multiplex_profiles", False))
         _multiplex_skipped_platforms: list[Platform] = []
-        # Initialize and connect each configured platform. connect() calls run concurrently so one
-        # slow/failing platform (e.g. Telegram behind a dead proxy) cannot delay the others by a
-        # full timeout window; the cheap serial pre-filter and per-platform timeouts are unchanged.
+        # connect() calls run concurrently (see _start_connect_pending) so one slow/failing platform
+        # cannot delay the others by a full timeout window; this serial pre-filter stays cheap.
         _pending_connects = []  # (platform, platform_config, adapter)
         for platform, platform_config in self.config.platforms.items():
             if await self._abort_startup_if_shutdown_requested():
@@ -1177,6 +1151,16 @@ class GatewayStartupMixin:
         await self._abort_startup_if_shutdown_requested()
         return None
 
+    def _startup_queue_transient_failure(
+        self, platform, adapter, platform_config, message: str, startup_retryable_errors: list
+    ) -> None:
+        """Mark a platform ``retrying`` with ``message`` and queue it in ``_failed_platforms``."""
+        self._update_platform_runtime_status(
+            platform.value, platform_state="retrying", error_code=None, error_message=message,
+        )
+        startup_retryable_errors.append(f"{platform.value}: {message}")
+        self._failed_platforms[platform] = self._startup_retry_entry(platform, adapter, platform_config)
+
     async def _start_aggregate_connect_results(
         self, _raw: list, startup_retryable_errors: list, startup_nonretryable_errors: list
     ) -> int:
@@ -1197,14 +1181,12 @@ class GatewayStartupMixin:
             if outcome == "exception":
                 logger.error("\u2717 %s error: %s", platform.value, exc)
                 # Same defensive cleanup path for exceptions -- an adapter that raised mid-connect
-                # may still have a live aiohttp.ClientSession or child subprocess.
+                # may still have a live aiohttp.ClientSession or child subprocess. Unexpected
+                # exceptions are typically transient -- queue for retry.
                 await self._safe_adapter_disconnect(adapter, platform)
-                self._update_platform_runtime_status(
-                    platform.value, platform_state="retrying", error_code=None, error_message=str(exc),
+                self._startup_queue_transient_failure(
+                    platform, adapter, platform_config, str(exc), startup_retryable_errors
                 )
-                startup_retryable_errors.append(f"{platform.value}: {exc}")
-                # Unexpected exceptions are typically transient -- queue for retry
-                self._failed_platforms[platform] = self._startup_retry_entry(platform, adapter, platform_config)
                 continue
             if outcome == "ok":
                 self.adapters[platform] = adapter
@@ -1223,12 +1205,10 @@ class GatewayStartupMixin:
             # (aiohttp.ClientSession, poll tasks, bridge subprocesses) before giving up.
             await self._safe_adapter_disconnect(adapter, platform)
             if not adapter.has_fatal_error:
-                self._update_platform_runtime_status(
-                    platform.value, platform_state="retrying", error_code=None, error_message="failed to connect",
-                )
-                startup_retryable_errors.append(f"{platform.value}: failed to connect")
                 # No fatal error info means likely a transient issue -- queue for retry
-                self._failed_platforms[platform] = self._startup_retry_entry(platform, adapter, platform_config)
+                self._startup_queue_transient_failure(
+                    platform, adapter, platform_config, "failed to connect", startup_retryable_errors
+                )
                 continue
             # A live foreign holder of this bot token is a single-writer ownership conflict, not a
             # blip — ``_acquire_platform_lock`` emits it retryable only so a MID-RUN reconnect can
@@ -1262,9 +1242,8 @@ class GatewayStartupMixin:
     ) -> Tuple[bool, int]:
         """Bring up multiplexed secondary-profile adapters. Returns (aborted, connected_count)."""
         from gateway.run import MultiplexConfigError
-        # Multi-profile multiplexing: bring up adapters for every OTHER profile this gateway serves.
-        # Each profile's adapters connect under that profile's home + credential scope and stamp
-        # their inbound events with the profile so the agent turn resolves correctly.
+        # Adapters for every OTHER profile this gateway serves connect under that profile's home +
+        # credential scope and stamp inbound events with the profile so the agent turn resolves.
         try:
             _secondary_connected = await self._start_secondary_profile_adapters()
             connected_count += _secondary_connected
@@ -1311,11 +1290,10 @@ class GatewayStartupMixin:
             self._startup_fail_fatal_config(reason)
             return True
         if startup_nonretryable_errors:
-            # Mixed failure mode: some platforms fatally misconfigured (e.g. WhatsApp never
-            # paired), others merely transient (e.g. Telegram TimedOut). Exiting 78 here would
-            # let exit-78 supervisors take the gateway PERMANENTLY down over a network blip and
-            # deny the retryable ones their retry. Log the fatal side loudly, then fall through to
-            # the degraded/retry path: the watcher recovers the retryable; the rest stay parked.
+            # Mixed failure mode (some fatal, some transient). Exiting 78 here would let exit-78
+            # supervisors take the gateway PERMANENTLY down over a network blip and deny the
+            # retryable ones their retry. Log the fatal side loudly, then fall through to the
+            # degraded/retry path: the watcher recovers the retryable; the rest stay parked.
             logger.error(
                 "%d platform(s) fatally misconfigured and parked: %s. "
                 "Staying alive so retryable platforms can recover.",
@@ -1326,10 +1304,9 @@ class GatewayStartupMixin:
             logger.info("Gateway will continue running for cron job execution.")
             return False
         if startup_retryable_errors:
-            # All enabled platforms hit retryable failures (network blip, bridge not paired,
-            # npm install timeout...). Keep the gateway alive so cron jobs still run and the
-            # reconnect watcher can recover the platforms once the cause is fixed; exiting
-            # here would turn one misconfigured platform into an infinite systemd restart loop.
+            # All enabled platforms hit retryable failures. Keep the gateway alive so cron jobs
+            # still run and the reconnect watcher can recover them once the cause is fixed;
+            # exiting would turn one misconfigured platform into an infinite systemd restart loop.
             logger.warning(
                 "Gateway started with no connected platforms — "
                 "%d platform(s) queued for retry: %s",
@@ -1338,10 +1315,8 @@ class GatewayStartupMixin:
             with suppress(Exception):
                 from gateway.status import write_runtime_status
                 write_runtime_status(gateway_state="degraded", exit_reason=None)
-            # Fall through to the normal "running" state — reconnect watcher takes it from here.
-        # All enabled platforms had no adapter (missing library or credentials). Fleet nodes
-        # share one config.yaml but hold credentials for only a subset of platforms, so
-        # degrade gracefully and let cron jobs run.
+        # (Or: no adapter for any enabled platform — missing library or credentials.) Fleet nodes
+        # share one config.yaml but hold credentials for only a subset, so degrade gracefully.
         logger.warning(
             "No adapter could be created for any of the %d configured platform(s). "
             "Check that required dependencies are installed and credentials are set. "
