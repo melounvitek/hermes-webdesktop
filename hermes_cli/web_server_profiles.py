@@ -122,8 +122,7 @@ def _fallback_profile_entry(profiles_mod, name: str, home: Path, *, is_default: 
         "gateway_running": _safe(gateway_running, False),
         "description": meta("description", ""), "description_auto": meta("description_auto", False),
         "distribution_name": None, "distribution_version": None, "distribution_source": None,
-        "has_alias": False,
-    }
+        "has_alias": False}
 
 
 def _fallback_profile_dicts(profiles_mod) -> List[Dict[str, Any]]:
@@ -281,9 +280,7 @@ _TERMINAL_BACKENDS: List[Dict[str, str]] = [
          "Run commands in a Singularity/Apptainer container (HPC-friendly, rootless)."),
         ("modal", "Modal", "Run commands in a Modal cloud sandbox."),
         ("daytona", "Daytona", "Run commands in a Daytona cloud sandbox."),
-        ("ssh", "SSH", "Run commands on a remote host over SSH."),
-    )
-]
+        ("ssh", "SSH", "Run commands on a remote host over SSH."))]
 
 
 def _plugin_terminal_backend_rows() -> List[Dict[str, str]]:
@@ -349,8 +346,7 @@ def _aux_usage_rows(db, cutoff: float) -> List[Dict[str, Any]]:
 
 
 def _merge_aux_into_by_model(
-    by_model: List[Dict[str, Any]], aux_rows: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
+    by_model: List[Dict[str, Any]], aux_rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Fold aux usage rows into the sessions-derived per-model list.
 
     Aux usage lives only in session_model_usage (never in the sessions counters), so
@@ -430,7 +426,6 @@ def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
         return {
             entry["identifier"]: {"name": entry.get("name"), "trust_level": entry.get("trust_level"),
                                   "scan_verdict": entry.get("scan_verdict")}
-            for entry in lock.list_installed() if entry.get("identifier")
-        }
+            for entry in lock.list_installed() if entry.get("identifier")}
     except Exception:
         return {}

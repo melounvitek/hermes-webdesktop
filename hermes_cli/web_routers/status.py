@@ -75,8 +75,7 @@ def _count_status_active_sessions() -> int:
         return sum(
             1 for s in sessions
             if s.get("ended_at") is None
-            and (now - s.get("last_active", s.get("started_at", 0))) < 300
-        )
+            and (now - s.get("last_active", s.get("started_at", 0))) < 300)
     finally:
         db.close()
 
@@ -85,13 +84,11 @@ async def _status_active_sessions() -> int:
     try:
         return await asyncio.wait_for(
             run_in_threadpool(_count_status_active_sessions),
-            timeout=_STATUS_ACTIVE_SESSIONS_TIMEOUT,
-        )
+            timeout=_STATUS_ACTIVE_SESSIONS_TIMEOUT)
     except asyncio.TimeoutError:
         _log.debug(
             "/api/status active session count exceeded %.2fs; returning 0",
-            _STATUS_ACTIVE_SESSIONS_TIMEOUT,
-        )
+            _STATUS_ACTIVE_SESSIONS_TIMEOUT)
     except Exception as exc:
         _log.debug("/api/status active session count unavailable: %s", exc)
     return 0
@@ -107,8 +104,7 @@ async def get_ssh_ownership(request: Request):
         "ok": True,
         "sshOwnerNonce": _SSH_OWNER_NONCE,
         "protocolVersion": 1,
-        "runtimeIntact": _ssh_runtime_intact(),
-    }
+        "runtimeIntact": _ssh_runtime_intact()}
 
 
 @router.get("/api/health")
@@ -117,8 +113,7 @@ async def get_health():
     return {
         "ok": True,
         "version": __version__,
-        "auth_required": bool(getattr(app.state, "auth_required", False)),
-    }
+        "auth_required": bool(getattr(app.state, "auth_required", False))}
 
 
 # Profile segment mirrors hermes_cli.profiles._PROFILE_ID_RE. Platform segment mirrors the
@@ -202,8 +197,7 @@ def _bounded_health_probe():
             _log.warning(
                 "/api/status gateway health probe exceeded %.2fs; "
                 "using local status",
-                _GATEWAY_HEALTH_ROUTE_TIMEOUT,
-            )
+                _GATEWAY_HEALTH_ROUTE_TIMEOUT)
             return False, None
         except Exception:
             return False, None
@@ -226,8 +220,7 @@ def _project_gateway_platforms(gateway_platforms: dict, configured: "set[str] | 
     platforms = {
         key: _public_platform_entry(value)
         for key, value in gateway_platforms.items()
-        if _status_platform_key_allowed(key, configured)
-    }
+        if _status_platform_key_allowed(key, configured)}
     if gateway_running:
         return platforms
     if gateway_state == "startup_failed":
@@ -297,8 +290,7 @@ async def _resolve_gateway_status(profile_dir: Optional[Path], health_url) -> Di
     return {
         "runtime": runtime, "gateway_running": gateway_running, "gateway_pid": liveness.pid,
         "gateway_state": gateway_state, "gateway_platforms": gateway_platforms,
-        "gateway_exit_reason": gateway_exit_reason, "gateway_updated_at": gateway_updated_at,
-    }
+        "gateway_exit_reason": gateway_exit_reason, "gateway_updated_at": gateway_updated_at}
 
 
 def _auth_gate_status() -> Dict[str, Any]:
@@ -318,9 +310,7 @@ def _auth_gate_status() -> Dict[str, Any]:
     auth_flows: list[str] = []
     try:
         from hermes_cli.dashboard_auth import (
-            list_providers as _list_providers,
-            list_session_providers as _list_session_providers,
-        )
+            list_providers as _list_providers, list_session_providers as _list_session_providers)
         auth_providers = [p.name for p in _list_providers()]
         if auth_required:
             auth_flows.append("cookie")
@@ -357,10 +347,8 @@ async def _component_health(gateway: Dict[str, Any]) -> Dict[str, Any]:
     components: Dict[str, Any] = {
         "gateway": {
             "status": "ok" if gateway_running and gateway_state in {"running", "draining"} else "degraded",
-            "state": gateway_state or ("running" if gateway_running else "stopped"),
-        },
-        "dashboard": DASHBOARD_HEALTH.snapshot(),
-    }
+            "state": gateway_state or ("running" if gateway_running else "stopped")},
+        "dashboard": DASHBOARD_HEALTH.snapshot()}
     try:
         from gateway.readiness import _probe_state_db
 
@@ -371,14 +359,12 @@ async def _component_health(gateway: Dict[str, Any]) -> Dict[str, Any]:
     platform_states = [
         str(value.get("state") or value.get("status") or "").lower()
         for value in gateway_platforms.values()
-        if isinstance(value, dict)
-    ]
+        if isinstance(value, dict)]
     connected = sum(1 for state in platform_states if state in _HEALTHY_PLATFORM_STATES)
     components["platforms"] = {
         "status": "ok" if connected == len(platform_states) else "degraded",
         "configured": len(gateway_platforms),
-        "connected": connected,
-    }
+        "connected": connected}
     return components
 
 
@@ -485,8 +471,7 @@ async def get_status(profile: Optional[str] = None):
             "restart_drain_timeout": restart_drain_timeout,
             "active_sessions": active_sessions,
             **auth,
-            "nous_session_valid": _nous_session_validity(),
-        }
+            "nous_session_valid": _nous_session_validity()}
 
         # Stable per-install identity. First call may touch disk, so keep it off the loop;
         # afterwards it is a process-global cache hit. Omitted (not null) when unpersistable
@@ -519,8 +504,7 @@ async def get_status(profile: Optional[str] = None):
                 "env_path": str(get_env_path()),
                 "gateway_pid": gateway["gateway_pid"],
                 "gateway_health_url": _GATEWAY_HEALTH_URL,
-                "gateways": topology["gateways"],
-            })
+                "gateways": topology["gateways"]})
 
         return status
     finally:
@@ -540,15 +524,13 @@ async def get_system_stats():
             system=_platform.system(),
             release=_platform.release(),
             version=_platform.version(),
-            platform_label=_platform.platform(),
-        ),
+            platform_label=_platform.platform()),
         "arch": _platform.machine(),
         "hostname": _platform.node(),
         "python_version": _platform.python_version(),
         "python_impl": _platform.python_implementation(),
         "hermes_version": __version__,
-        "cpu_count": os.cpu_count(),
-    }
+        "cpu_count": os.cpu_count()}
 
     def _optional(fill):
         try:
@@ -579,7 +561,8 @@ async def get_system_stats():
         import psutil  # type: ignore
 
         vm = psutil.virtual_memory()
-        info["memory"] = {"total": vm.total, "available": vm.available, "used": vm.used, "percent": vm.percent}
+        info["memory"] = {"total": vm.total, "available": vm.available, "used": vm.used,
+                          "percent": vm.percent}
         for fill in (_disk, _cpu, _uptime, _process):
             _optional(fill)
         info["psutil"] = True
@@ -617,8 +600,7 @@ async def get_curator_status():
         "last_run_at": state.get("last_run_at"),
         "min_idle_hours": _safe_call(curator, "get_min_idle_hours", None),
         "stale_after_days": _safe_call(curator, "get_stale_after_days", None),
-        "archive_after_days": _safe_call(curator, "get_archive_after_days", None),
-    }
+        "archive_after_days": _safe_call(curator, "get_archive_after_days", None)}
 
 
 @router.put("/api/curator/paused")
@@ -751,8 +733,7 @@ def _get_portal_status_sync():
         "inference_url": auth.get("inference_base_url"),
         "provider": str((model_cfg or {}).get("provider") or ""),
         "subscription_url": "https://portal.nousresearch.com/manage-subscription",
-        "features": features,
-    }
+        "features": features}
 
 
 # ---------------------------------------------------------------------------
@@ -790,10 +771,7 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
     req = body or DebugShareRequest()
     try:
         result = await asyncio.to_thread(
-            build_debug_share,
-            log_lines=max(1, min(int(req.lines), 5000)),
-            redact=bool(req.redact),
-        )
+            build_debug_share, log_lines=max(1, min(int(req.lines), 5000)), redact=bool(req.redact))
     except RuntimeError as exc:
         # Required summary-report upload failed (offline / paste service down).
         raise HTTPException(status_code=502, detail=f"Upload failed: {exc}")
@@ -806,8 +784,7 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
         "urls": result.urls,
         "failures": result.failures,
         "redacted": result.redacted,
-        "auto_delete_seconds": result.auto_delete_seconds,
-    }
+        "auto_delete_seconds": result.auto_delete_seconds}
 
 
 # ---------------------------------------------------------------------------
@@ -821,8 +798,7 @@ async def get_logs(
     lines: int = 100,
     level: Optional[str] = None,
     component: Optional[str] = None,
-    search: Optional[str] = None,
-):
+    search: Optional[str] = None):
     from hermes_cli.logs import _read_tail, LOG_FILES
 
     log_name = LOG_FILES.get(file)
@@ -847,8 +823,7 @@ async def get_logs(
             raise HTTPException(
                 status_code=400,
                 detail=f"Unknown component: {component}. "
-                       f"Available: {', '.join(sorted(COMPONENT_PREFIXES))}",
-            )
+                       f"Available: {', '.join(sorted(COMPONENT_PREFIXES))}")
     else:
         comp_prefixes = None
 
@@ -857,8 +832,7 @@ async def get_logs(
         log_path, min(lines, 500) if not search else 2000,
         has_filters=has_filters,
         min_level=min_level,
-        component_prefixes=comp_prefixes,
-    )
+        component_prefixes=comp_prefixes)
     # _read_tail doesn't support free-text search, so post-filter (case-insensitive
     # substring) here and trim to the requested line count afterward.
     if search:

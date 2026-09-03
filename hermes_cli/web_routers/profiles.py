@@ -90,8 +90,7 @@ def _profile_to_dict(info) -> Dict[str, Any]:
         "distribution_name": attr("distribution_name", None),
         "distribution_version": attr("distribution_version", None),
         "distribution_source": attr("distribution_source", None),
-        "has_alias": attr("alias_path", None) is not None,
-    }
+        "has_alias": attr("alias_path", None) is not None}
 
 
 def _profile_setup_command(name: str) -> str:
@@ -128,7 +127,8 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
     keep_set = {s.strip() for s in keep if s and s.strip()}
     with _hermes_home_scope(profile_dir):
         skills_root = profile_dir / "skills"
-        installed = [md.parent.name for md in skills_root.rglob("SKILL.md")] if skills_root.is_dir() else []
+        installed = ([md.parent.name for md in skills_root.rglob("SKILL.md")]
+                     if skills_root.is_dir() else [])
         cfg = load_config()
         disabled = get_disabled_skills(cfg)
         newly = 0
@@ -202,8 +202,7 @@ def _tag_rows(rows: List[Dict[str, Any]], name: str, now: float) -> List[Dict[st
         s["profile"] = name
         s["is_default_profile"] = name == "default"
         s["is_active"] = (
-            s.get("ended_at") is None
-            and (now - s.get("last_active", s.get("started_at", 0))) < 300
+            s.get("ended_at") is None and (now - s.get("last_active", s.get("started_at", 0))) < 300
         )
         s["archived"] = bool(s.get("archived"))
         s["pinned"] = bool(s.get("pinned"))
@@ -413,8 +412,7 @@ def get_profiles_sessions(
     source: str = None,
     sources: str = None,
     exclude_sources: str = None,
-    full: bool = False,
-):
+    full: bool = False):
     """Unified, read-only session list aggregated across ALL profiles.
 
     Process-light: opens each profile's ``state.db`` directly from disk — it does NOT spawn
@@ -441,8 +439,7 @@ def get_profiles_sessions(
         exclude_sources=_csv_list(exclude_sources) or None,
         min_message_count=max(0, min_messages),
         include_archived=archived == "include",
-        archived_only=archived == "only",
-    )
+        archived_only=archived == "only")
     # Over-fetch per profile so the merged+sorted window is correct for the requested page.
     # Capped so a huge profile can't blow up the response.
     per_profile = min(max(limit + offset, limit), 500)
@@ -456,8 +453,7 @@ def get_profiles_sessions(
             rows = db.list_sessions_rich(
                 limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.
-                compact_rows=not full, include_pinned=True, **filters,
-            )
+                compact_rows=not full, include_pinned=True, **filters)
             totals[name] = db.session_count(exclude_children=True, **filters)
             merged.extend(_tag_rows(rows, name, now))
         _read_profile_db(name, home, errors, _read)
@@ -479,8 +475,7 @@ def get_profiles_sessions_sidebar(
     recents_exclude: str = None,
     cron_limit: int = 50,
     messaging_limit: int = 100,
-    messaging_exclude: str = None,
-):
+    messaging_exclude: str = None):
     """Batched sidebar session slices — one profile-DB open per refresh.
 
     The desktop sidebar needs three source-scoped windows per refresh: recents (local
@@ -518,8 +513,7 @@ def get_profiles_sessions_sidebar(
         return db.list_sessions_rich(
             source=source, exclude_sources=exclude or None, limit=cap, offset=0,
             min_message_count=1, include_archived=False, archived_only=False,
-            order_by_last_active=True, compact_rows=True, include_pinned=True,
-        )
+            order_by_last_active=True, compact_rows=True, include_pinned=True)
 
     def _build_slices(db, cache_key):
         slices = {
@@ -528,8 +522,7 @@ def get_profiles_sessions_sidebar(
             # and a total that shrank when you scrolled would be worse than no total at all.
             "usage": db.usage_totals(),
             "cron": _slice(db, source="cron", cap=cron_cap),
-            "messaging": _slice(db, exclude=messaging_exclude_list, cap=messaging_cap),
-        }
+            "messaging": _slice(db, exclude=messaging_exclude_list, cap=messaging_cap)}
         _sidebar_profile_cache_put(cache_key, slices)
         return slices
 
@@ -571,8 +564,7 @@ def get_profiles_sessions_sidebar(
                     "profiles_truncated": recents_truncated, "profiles_usage": profile_totals},
         "cron": {"sessions": _window(cron_rows, cron_cap)},
         "messaging": {"sessions": _window(messaging_rows, messaging_cap), "total": len(messaging_rows)},
-        "errors": errors,
-    }
+        "errors": errors}
 
 
 def _merge_by_id(into: Dict[str, Dict[str, Any]], entries: List[Dict[str, Any]], child_key: str) -> None:
@@ -601,8 +593,7 @@ def _merge_profile_tree(
     merged: Dict[str, Dict[str, Any]],
     projects: List[Dict[str, Any]],
     profile: str,
-    preview_limit: int,
-) -> None:
+    preview_limit: int) -> None:
     """Fold one profile's projects into the shared tree, keyed by folder.
 
     The same checkout in two profiles is one group, as is ``__no_project__`` (every profile
@@ -677,8 +668,7 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
         "projects": sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True),
         # Ownership is per profile, so no project is "the active one" here; the desktop only
         # reads active_id to bias its overview sort.
-        "active_id": None, "scoped_session_ids": scoped_session_ids, "errors": errors,
-    }
+        "active_id": None, "scoped_session_ids": scoped_session_ids, "errors": errors}
 
 
 # `gh pr create` prints the PR url and nothing else, so a tool result whose whole output IS
@@ -803,8 +793,7 @@ async def create_profile_endpoint(body: ProfileCreate):
         {"identifier": ident, "pid": _best_effort(
             "Spawning hub-skill install %s for new profile %s failed", ident, body.name,
             fn=lambda: _spawn_install(ident))}
-        for ident in ((i or "").strip() for i in body.hub_skills) if ident
-    ]
+        for ident in ((i or "").strip() for i in body.hub_skills) if ident]
 
     return {"ok": True, "name": body.name, "path": str(path), "model_set": model_set,
             "mcp_written": mcp_written, "skills_disabled": skills_disabled,
@@ -855,8 +844,7 @@ async def get_profile_setup_command(name: str):
 _LINUX_TERMINALS = (
     ("x-terminal-emulator", "-e"), ("gnome-terminal", "--"), ("konsole", "-e"),
     ("xfce4-terminal", None), ("mate-terminal", None), ("lxterminal", None),
-    ("tilix", "-e"), ("alacritty", "-e"), ("kitty", ""), ("xterm", "-e"),
-)
+    ("tilix", "-e"), ("alacritty", "-e"), ("kitty", ""), ("xterm", "-e"))
 
 
 def _linux_terminal_commands(command: str) -> list:
@@ -864,8 +852,7 @@ def _linux_terminal_commands(command: str) -> list:
     quoted = f"sh -lc '{command}'"
     return [
         (exe, [exe, "-e", quoted] if flag is None else [exe, *([flag] if flag else []), *sh])
-        for exe, flag in _LINUX_TERMINALS
-    ]
+        for exe, flag in _LINUX_TERMINALS]
 
 
 @router.post("/api/profiles/{name}/open-terminal")
@@ -1028,8 +1015,7 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
         "description": outcome.description,
         # Only a successful generation is an auto-authored description. A failed sweep
         # leaves any existing description untouched, so don't claim it's auto-generated.
-        "description_auto": bool(outcome.ok),
-    }
+        "description_auto": bool(outcome.ok)}
 
 
 # ── Export / Import ──────────────────────────────────────────────────────────
