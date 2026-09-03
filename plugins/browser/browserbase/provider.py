@@ -18,6 +18,13 @@ from plugins.browser._common import CloudBrowserProvider
 
 logger = logging.getLogger(__name__)
 
+# 402 fallbacks, in retry order: (session_config key, warning logged when dropped).
+_PAID_FEATURE_FALLBACKS = (
+    ("keepAlive", "keepAlive may require paid plan (402), retrying without it. "
+                  "Sessions may timeout during long operations."),
+    ("proxies", "Proxies unavailable (402), retrying without proxies. Bot detection may be less effective."),
+)
+
 
 class BrowserbaseBrowserProvider(CloudBrowserProvider):
     """Browserbase (https://browserbase.com) cloud browser backend."""
@@ -83,30 +90,22 @@ class BrowserbaseBrowserProvider(CloudBrowserProvider):
         response = self._post_create(url, headers, session_config)
 
         # 402 — paid features unavailable: drop keepAlive, then proxies, and retry.
-        proxies_fallback = keepalive_fallback = False
-        if response.status_code == 402 and enable_keep_alive:
-            keepalive_fallback = True
-            logger.warning(
-                "keepAlive may require paid plan (402), retrying without it. "
-                "Sessions may timeout during long operations.")
-            session_config.pop("keepAlive", None)
-            response = self._post_create(url, headers, session_config)
-        if response.status_code == 402 and enable_proxies:
-            proxies_fallback = True
-            logger.warning(
-                "Proxies unavailable (402), retrying without proxies. Bot detection may be less effective."
-            )
-            session_config.pop("proxies", None)
-            response = self._post_create(url, headers, session_config)
+        dropped = set()
+        for key, warning in _PAID_FEATURE_FALLBACKS:
+            if response.status_code == 402 and key in session_config:
+                dropped.add(key)
+                logger.warning(warning)
+                session_config.pop(key)
+                response = self._post_create(url, headers, session_config)
         self._check_created(response)
 
         session_data = response.json()
         session_name = self._session_name(task_id)
         features_enabled = {
             "basic_stealth": True,
-            "proxies": enable_proxies and not proxies_fallback,
+            "proxies": enable_proxies and "proxies" not in dropped,
             "advanced_stealth": enable_advanced_stealth,
-            "keep_alive": enable_keep_alive and not keepalive_fallback,
+            "keep_alive": enable_keep_alive and "keepAlive" not in dropped,
             "custom_timeout": bool(custom_timeout_ms) and "timeout" in session_config,
         }
         feature_str = ", ".join(k for k, v in features_enabled.items() if v)
