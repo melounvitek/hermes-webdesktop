@@ -1,12 +1,10 @@
 """Kanban dashboard plugin — backend API routes, mounted at /api/plugins/kanban/.
 
-Every handler is a thin wrapper around ``hermes_cli.kanban_db`` (the same code
-paths the CLI and gateway ``/kanban`` command use, so the surfaces cannot drift).
-Live updates: the ``/events`` WebSocket tails the append-only ``task_events``
-table on a short poll (WAL reads run alongside the dispatcher's write txns).
-HTTP routes sit behind the dashboard's session-token middleware; the WebSocket
-carries its credential in the query string (browsers can't set ``Authorization``
-on an upgrade) and is gated by the dashboard's canonical WS auth check.
+Every handler is a thin wrapper around ``hermes_cli.kanban_db`` (the same code paths the CLI
+and gateway ``/kanban`` command use, so the surfaces cannot drift). The ``/events`` WebSocket
+tails the append-only ``task_events`` table on a short poll (WAL reads run alongside the
+dispatcher's write txns); it carries its credential in the query string (browsers can't set
+``Authorization`` on an upgrade) and is gated by the dashboard's canonical WS auth check.
 """
 
 from __future__ import annotations
@@ -106,18 +104,23 @@ def _with_board_pinned(board: Optional[str], fn: Callable[[], Any]) -> Any:
         return fn()
 
 
+def _require(getter: Callable, conn: sqlite3.Connection, ident, label: str):
+    obj = getter(conn, ident)
+    if obj is None:
+        raise HTTPException(status_code=404, detail=f"{label} {ident} not found")
+    return obj
+
+
 def _require_task(conn: sqlite3.Connection, task_id: str) -> kanban_db.Task:
-    task = kanban_db.get_task(conn, task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"task {task_id} not found")
-    return task
+    return _require(kanban_db.get_task, conn, task_id, "task")
 
 
 def _require_run(conn, run_id: int) -> kanban_db.Run:
-    r = kanban_db.get_run(conn, run_id)
-    if r is None:
-        raise HTTPException(status_code=404, detail=f"run {run_id} not found")
-    return r
+    return _require(kanban_db.get_run, conn, run_id, "run")
+
+
+def _conflict(detail: str) -> HTTPException:
+    return HTTPException(status_code=409, detail=detail)
 
 
 @contextmanager
@@ -595,8 +598,8 @@ def _patch_status(conn, task_id: str, payload: UpdateTaskBody, review_assignee_d
     blockers = _parents_blocking_ready(conn, task_id) if s == "ready" else []
     if blockers:
         names = ", ".join(f"{p['title']!r} ({p['id']}, status={p['status']})" for p in blockers)
-        raise HTTPException(status_code=409, detail=f"Cannot move to 'ready': blocked by parent(s) not done — {names}")
-    raise HTTPException(status_code=409, detail=f"status transition to {s!r} not valid from current state")
+        raise _conflict(f"Cannot move to 'ready': blocked by parent(s) not done — {names}")
+    raise _conflict(f"status transition to {s!r} not valid from current state")
 
 
 def _patch_title_body(conn, task_id: str, payload: UpdateTaskBody, board: Optional[str]) -> None:
@@ -632,7 +635,7 @@ def update_task(task_id: str, payload: UpdateTaskBody, board: Optional[str] = Qu
             try:
                 ok = kanban_db.assign_task(conn, task_id, payload.assignee or None)
             except RuntimeError as e:
-                raise HTTPException(status_code=409, detail=str(e))
+                raise _conflict(str(e))
             if not ok:
                 raise HTTPException(status_code=404, detail="task not found")
         if payload.status is not None:
@@ -939,11 +942,9 @@ def terminate_run_endpoint(run_id: int, payload: TerminateRunBody, board: Option
     with _board_conn(board) as (board, conn):
         r = _require_run(conn, run_id)
         if r.ended_at is not None:
-            raise HTTPException(status_code=409, detail=f"run {run_id} already ended")
+            raise _conflict(f"run {run_id} already ended")
         if not kanban_db.reclaim_task(conn, r.task_id, reason=payload.reason):
-            raise HTTPException(
-                status_code=409,
-                detail=f"cannot terminate run {run_id}: task {r.task_id} is no longer in a reclaimable state")
+            raise _conflict(f"cannot terminate run {run_id}: task {r.task_id} is no longer in a reclaimable state")
         return {"ok": True, "run_id": run_id, "task_id": r.task_id}
 
 
@@ -959,9 +960,7 @@ def reclaim_task_endpoint(task_id: str, payload: ReclaimBody, board: Optional[st
     (``hermes kanban reclaim <task_id> --reason ...``)."""
     with _board_conn(board) as (board, conn):
         if not kanban_db.reclaim_task(conn, task_id, reason=payload.reason):
-            raise HTTPException(
-                status_code=409,
-                detail=f"cannot reclaim {task_id}: not in a claimable state (not running, or unknown id)")
+            raise _conflict(f"cannot reclaim {task_id}: not in a claimable state (not running, or unknown id)")
         return {"ok": True, "task_id": task_id}
 
 
@@ -1000,11 +999,9 @@ def reassign_task_endpoint(task_id: str, payload: ReassignBody, board: Optional[
         ok = kanban_db.reassign_task(
             conn, task_id, payload.profile or None, reclaim_first=bool(payload.reclaim_first), reason=payload.reason)
         if not ok:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"cannot reassign {task_id}: unknown id, or still "
-                    "running (pass reclaim_first=true to release the claim first)"))
+            raise _conflict(
+                f"cannot reassign {task_id}: unknown id, or still "
+                "running (pass reclaim_first=true to release the claim first)")
         return {"ok": True, "task_id": task_id, "assignee": payload.profile or None}
 
 
@@ -1122,13 +1119,9 @@ def _configured_home_channels() -> list[dict]:
     except Exception:
         return []
     result = [
-        {
-            "platform": platform.value,
-            "chat_id": pcfg.home_channel.chat_id,
-            "thread_id": pcfg.home_channel.thread_id or "",
-            "name": pcfg.home_channel.name or "Home"}
-        for platform, pcfg in gw_cfg.platforms.items()
-        if pcfg and pcfg.home_channel]
+        {"platform": platform.value, "chat_id": pcfg.home_channel.chat_id,
+         "thread_id": pcfg.home_channel.thread_id or "", "name": pcfg.home_channel.name or "Home"}
+        for platform, pcfg in gw_cfg.platforms.items() if pcfg and pcfg.home_channel]
     result.sort(key=lambda r: r["platform"])
     return result
 
@@ -1360,12 +1353,10 @@ def list_kanban_projects():
         from hermes_cli import projects_db as pdb
         with pdb.connect_closing() as pconn:
             projects = pdb.list_projects(pconn, include_archived=False)
-    return {
-        "projects": [
-            {
-                "id": p.id, "slug": p.slug, "name": p.name,
-                "primary_path": p.primary_path or "", "icon": p.icon or "", "color": p.color or ""}
-            for p in projects]}
+    return {"projects": [
+        {"id": p.id, "slug": p.slug, "name": p.name,
+         "primary_path": p.primary_path or "", "icon": p.icon or "", "color": p.color or ""}
+        for p in projects]}
 
 
 @router.get("/boards")
@@ -1517,14 +1508,11 @@ def list_profile_roster():
     with _errors_to_500("failed to list profiles"):
         from hermes_cli import profiles as profiles_mod
         profiles = profiles_mod.list_profiles()
-    return {
-        "profiles": [
-            {
-                "name": p.name, "is_default": bool(p.is_default),
-                "model": p.model or "", "provider": p.provider or "",
-                "description": p.description or "", "description_auto": bool(p.description_auto),
-                "skill_count": int(p.skill_count or 0)}
-            for p in profiles]}
+    return {"profiles": [
+        {"name": p.name, "is_default": bool(p.is_default), "model": p.model or "", "provider": p.provider or "",
+         "description": p.description or "", "description_auto": bool(p.description_auto),
+         "skill_count": int(p.skill_count or 0)}
+        for p in profiles]}
 
 
 @router.patch("/profiles/{profile_name}")
