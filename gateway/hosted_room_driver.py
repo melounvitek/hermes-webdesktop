@@ -306,8 +306,7 @@ def _migrate_task_status_constraint(conn: sqlite3.Connection) -> None:
 def _connect(db_path: Path | str) -> sqlite3.Connection:
     """Open the store; existing tables are validated (after the status-constraint migration when needed).
 
-    The driver schema never shipped, so an incompatible draft fails closed in
-    ``_validate_schema`` instead of attempting a partial in-place migration.
+    The driver schema never shipped, so an incompatible draft fails closed in ``_validate_schema``.
     """
     existing: list[bool] = []
 
@@ -492,10 +491,9 @@ def _transition(
     guard: Callable[[sqlite3.Row], None] | None = None) -> dict[str, Any]:
     """Run one fenced task transition: load -> idempotent replay -> lease/fence guard -> UPDATE.
 
-    ``sql`` binds ``(*set_params, room_id, task_id, *fence_params)`` and must hit exactly one row
-    or ``stale`` is raised. ``lease_first`` puts the active-lease check before the row load
-    (recovery paths) instead of after the replay (settlement paths: an identical replay still
-    succeeds after the lease moved on).
+    ``sql`` binds ``(*set_params, room_id, task_id, *fence_params)`` and must hit exactly one row or
+    ``stale`` is raised. ``lease_first`` checks the lease before the row load (recovery paths) instead
+    of after the replay (settlement paths: an identical replay still succeeds after the lease moved on).
     """
     params = (*set_params, identity.room_id, identity.task_id, *fence_params)
     with _transaction(db_path) as conn:
@@ -537,8 +535,7 @@ def _run_fence_transition(
     lease_generation: Callable[[Any], int] = int, **transition: Any) -> dict[str, Any]:
     """Transition fenced on this attempt's running generation under its exact lease (row guard + SQL fence).
 
-    ``lease_generation`` casts the stored run_lease_generation: ``int`` raises on NULL,
-    ``int(v or 0)`` reads it as generation 0.
+    ``lease_generation`` casts the stored run_lease_generation: ``int`` raises on NULL, ``int(v or 0)`` reads 0.
     """
     lease = attempt.lease
 

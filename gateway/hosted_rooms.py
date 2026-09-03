@@ -1047,8 +1047,7 @@ def append_event(
     authority_gateway_id: Any = None, authority_epoch: Any = None, now: float | None = None) -> dict[str, Any]:
     """Append one immutable event and allocate its per-room sequence atomically.
 
-    Repeating the same ``event_id`` and immutable content returns the original
-    event. Reusing the id for different content fails closed.
+    Repeating an ``event_id`` with identical content returns the original; different content fails closed.
     """
     room_id = _room_id(room_id)
     event_id = _event_id(event_id)
@@ -1113,9 +1112,8 @@ def _probe(path: Path, table: str, query: str, params: tuple[Any, ...], unavaila
 def probe_hosted_room(db_path: Path | str, *, room_id: Any) -> bool:
     """Check room ownership without creating or migrating the shared store.
 
-    This runs on the synchronous prompt-admission path for older Desktop
-    clients, so it fails quickly under contention instead of blocking the
-    WebSocket reader for SQLite's normal ten-second timeout.
+    Runs on the synchronous prompt-admission path for older Desktop clients, so it fails fast
+    under contention instead of blocking the WebSocket reader for SQLite's ten-second timeout.
     """
     checked_room_id = _room_id(room_id)
     return _probe(
@@ -1189,9 +1187,8 @@ def claim_authority(
     new_gateway_id: Any, event_id: Any, now: float | None = None) -> dict[str, Any]:
     """Fence a verified authority transfer with a compare-and-swap epoch.
 
-    This storage primitive does not decide *when* takeover is safe. A
-    replicated driver must call it only after its lease/quorum policy has
-    established that the previous owner can no longer commit.
+    Does not decide *when* takeover is safe: a replicated driver calls it only after its
+    lease/quorum policy established that the previous owner can no longer commit.
     """
     room_id = _room_id(room_id)
     expected_gateway_id = _actor_id(expected_gateway_id, "expected_gateway_id")

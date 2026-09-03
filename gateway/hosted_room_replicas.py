@@ -78,8 +78,7 @@ def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
 def _replica_transaction(db_path: Path | str) -> Iterator[sqlite3.Connection]:
     """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction.
 
-    The schema DDL is re-run inside the transaction too; that double init is the
-    established statement order and is intentionally preserved.
+    The DDL is deliberately re-run inside the transaction: that double init is the established statement order.
     """
     conn = _connect(db_path)
     try:
@@ -171,11 +170,7 @@ def _store_replica(
 def ingest_page(
     db_path: Path | str, *, room_id: Any, room_name: Any, members: Any, page: Any, now: float | None = None
 ) -> dict[str, Any]:
-    """Persist one replay page idempotently; refuses seq gaps and epoch regressions.
-
-    ``page`` is the verbatim ``groups.log`` (``read_events()``) result whose
-    ``authority`` stamp proves lineage.
-    """
+    """Persist one verbatim ``read_events()`` page idempotently; refuses seq gaps and epoch regressions."""
     room_id = _room_id(room_id)
     room_name = _validate_room_name(room_name)
     _, members_json = _validate_members(members)
@@ -236,10 +231,9 @@ def promote_replica(
 ) -> dict[str, Any]:
     """Continue a replicated room on THIS gateway at ``epoch + 1``.
 
-    Copies the replica log into the authoritative store and appends a
-    lineage-proving ``authority.claimed`` event; wherever the claim replicates,
-    the old epoch is stale and every fenced primitive rejects it. The caller
-    decides takeover is safe; this only makes it atomic and provable.
+    Copies the replica log into the authoritative store and appends a lineage-proving
+    ``authority.claimed`` event, so wherever the claim replicates the old epoch is stale and every
+    fenced primitive rejects it. The caller decides takeover is safe; this makes it atomic and provable.
     """
     room_id = _room_id(room_id)
     if not isinstance(reason, str) or not reason or len(reason) > 200:
@@ -301,10 +295,9 @@ def demote_room(
 ) -> dict[str, Any]:
     """Fence THIS gateway's stale room authority against a proven newer epoch.
 
-    Called when a returning gateway observes (replicated ``authority.claimed``
-    or a transport rejection) that another gateway owns the room at a higher
-    epoch. Appends ``authority.lost`` and adopts the observed lineage so no
-    local send can commit at the stale epoch. Idempotent per lineage.
+    When a returning gateway observes (replicated ``authority.claimed`` or a transport rejection) that
+    another gateway owns the room at a higher epoch, append ``authority.lost`` and adopt the observed
+    lineage so no local send can commit at the stale epoch. Idempotent per lineage.
     """
     room_id = _room_id(room_id)
     observed_gateway_id = _validate_identifier(

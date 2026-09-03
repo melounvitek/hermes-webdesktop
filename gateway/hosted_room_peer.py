@@ -103,10 +103,9 @@ def _gateway_room_grant_secret_for_home(home_value: str) -> bytes:
 def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
     """Load or atomically mint the gateway-only RoomLink signing secret.
 
-    API keys are bearer credentials known to clients and may be profile scoped;
-    they must never become grant-signing authority. This secret lives in the
-    installation root, is not exposed by configuration or capability RPCs, and
-    is shared only by the gateway processes that serve this installation.
+    API keys are client-known, possibly profile-scoped bearer credentials and must never become
+    grant-signing authority; this secret lives in the installation root, is never exposed by
+    config or capability RPCs, and is shared only by this installation's gateway processes.
     """
     if root is None:
         from hermes_constants import get_hermes_home
@@ -120,8 +119,7 @@ def gateway_room_grant_secret(root: Path | str | None = None) -> bytes:
 def derive_room_grant_secret(api_key: str) -> bytes:
     """Domain-separate room grants from the configured API key.
 
-    The API-server startup guard enforces the production key-strength policy;
-    this helper keeps a lower structural floor for isolated contract tests.
+    Production key strength is enforced by the API-server startup guard; this floor is for contract tests.
     """
     if not isinstance(api_key, str) or len(api_key) < 8:
         raise HostedRoomGrantError("room grants require a strong gateway API key")
@@ -352,11 +350,7 @@ def _configured_room_link_url() -> str | None:
 
 
 def validate_room_link_url(value: Any) -> tuple[str, TransportSecurity]:
-    """Validate a RoomLink endpoint and classify its transport protection.
-
-    Plaintext HTTP is allowed only toward the local loopback interface; every
-    non-loopback endpoint must use HTTPS.
-    """
+    """Validate a RoomLink endpoint and classify its transport: plaintext HTTP only toward loopback."""
     raw = str(value or "").strip().rstrip("/")
     try:
         parsed = urllib.parse.urlsplit(raw)
@@ -545,11 +539,7 @@ def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float 
 
 
 def room_grant_needs_dispatch_refresh(token: str, *, now: float | None = None, leeway_seconds: float = 5 * 60) -> bool:
-    """Read only grant timing to schedule target-validated refresh.
-
-    This deliberately does not establish trust; the target validates the
-    signature and immutable scope before issuing a replacement.
-    """
+    """Read only grant timing to schedule refresh; trust is established by the target, not here."""
     try:
         payload = json.loads(_b64decode(_split_token(token)[0]).decode("ascii"))
         expires_at = float(payload["expires_at"])
