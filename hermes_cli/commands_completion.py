@@ -233,9 +233,7 @@ def _dir_completions(
             break
         suffix = "/" if is_dir else ""
         yield Completion(
-            text_for(full_path) + suffix,
-            start_position=-len(word),
-            display=entry + suffix,
+            text_for(full_path) + suffix, start_position=-len(word), display=entry + suffix,
             display_meta="dir" if is_dir else _file_size_label(full_path))
         count += 1
 
@@ -294,14 +292,9 @@ class SlashCommandCompleter(Completer):
 
     # Module-level helpers exposed as staticmethods for existing callers/tests.
     _extract_path_word = staticmethod(_extract_path_word)
-    _dir_completions = staticmethod(_dir_completions)
     _path_completions = staticmethod(_path_completions)
-    _score_path = staticmethod(_score_path)
-    _skin_completions = staticmethod(_skin_completions)
     _personality_completions = staticmethod(_personality_completions)
     _tools_completions = staticmethod(_tools_completions)
-    _handoff_completions = staticmethod(_handoff_completions)
-    _DYNAMIC_COMPLETIONS = _DYNAMIC_COMPLETIONS
 
     def __init__(
         self,
@@ -403,8 +396,7 @@ class SlashCommandCompleter(Completer):
                     expanded = "./"
                 # `@folder:` = dirs only, `@file:` = files only (else `@folder:` lists dotfiles).
                 yield from _dir_completions(
-                    expanded, word, limit,
-                    lambda fp: f"{prefix}{os.path.relpath(fp)}",
+                    expanded, word, limit, lambda fp: f"{prefix}{os.path.relpath(fp)}",
                     want_dir=(prefix == "@folder:"))
                 return
 
@@ -494,10 +486,8 @@ class SlashCommandCompleter(Completer):
 
         def _cmd_completion(cmd_name: str, meta: str):
             return Completion(
-                self._completion_text(cmd_name, word),
-                start_position=-len(word),
-                display=f"/{cmd_name}",
-                display_meta=meta)
+                self._completion_text(cmd_name, word), start_position=-len(word),
+                display=f"/{cmd_name}", display_meta=meta)
 
         for cmd, desc in COMMANDS.items():
             if self._command_allowed(cmd) and cmd[1:].startswith(word):

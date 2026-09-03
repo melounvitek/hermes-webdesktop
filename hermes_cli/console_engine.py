@@ -352,12 +352,8 @@ def _register_command_family(
             return _dispatch(surface, root, fixed, args, namespace_update)
 
         engine.register(
-            full_path,
-            usage,
-            summaries.get(full_path) or f"Run `hermes {usage}`.",
-            handler,
-            mutating=mutating,
-            confirmation=f"Run `hermes {usage}`?")
+            full_path, usage, summaries.get(full_path) or f"Run `hermes {usage}`.", handler,
+            mutating=mutating, confirmation=f"Run `hermes {usage}`?")
 
 
 _BLOCKED_TOP = frozenset(
