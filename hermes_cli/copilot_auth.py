@@ -1,11 +1,9 @@
-"""GitHub Copilot authentication utilities.
-
-Credential search order (matching Copilot CLI behaviour): 1. COPILOT_GITHUB_TOKEN env var 2.
-GH_TOKEN env var 3. GITHUB_TOKEN env var 4. gh auth token CLI fallback
-"""
+"""GitHub Copilot authentication utilities (credential order matches the Copilot CLI:
+COPILOT_GITHUB_TOKEN, GH_TOKEN, GITHUB_TOKEN, then ``gh auth token``)."""
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -24,17 +22,11 @@ from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
-# OAuth device code flow — VS Code's GitHub App client ID: it mints ghu_* tokens that can be
-# exchanged for Copilot API JWTs (required for internal-only models and enterprise endpoints).
-# The opencode App ID (Ov23li8tweQw6odWQebz) mints gho_* tokens that 404 on exchange.
+# VS Code's GitHub App client ID: mints ghu_* tokens exchangeable for Copilot API JWTs (needed for
+# internal-only models / enterprise endpoints). The opencode App ID mints gho_* tokens that 404.
 COPILOT_OAUTH_CLIENT_ID = "Iv1.b507a08c87ecfe98"
-# ghp_ classic PATs are rejected by the Copilot API (gho_ / github_pat_ / ghu_ work).
-_CLASSIC_PAT_PREFIX = "ghp_"
-
-# Env var search order (matches Copilot CLI)
+_CLASSIC_PAT_PREFIX = "ghp_"  # rejected by the Copilot API (gho_ / github_pat_ / ghu_ work)
 COPILOT_ENV_VARS = ("COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
-
-# Polling constants
 _DEVICE_CODE_POLL_INTERVAL = 5  # seconds
 _DEVICE_CODE_POLL_SAFETY_MARGIN = 3  # seconds
 
@@ -44,7 +36,6 @@ def validate_copilot_token(token: str) -> tuple[bool, str]:
     token = token.strip()
     if not token:
         return False, "Empty token"
-
     if token.startswith(_CLASSIC_PAT_PREFIX):
         return False, (
             "Classic Personal Access Tokens (ghp_*) are not supported by the "
@@ -53,7 +44,6 @@ def validate_copilot_token(token: str) -> tuple[bool, str]:
             "  → A fine-grained PAT (github_pat_*) with Copilot Requests permission\n"
             "  → `gh auth login` with the default device code flow (produces gho_* tokens)"
         )
-
     return True, "OK"
 
 
@@ -72,24 +62,20 @@ def resolve_copilot_token() -> tuple[str, str]:
         if valid:
             return val, env_var
         logger.warning("Token from %s is not supported: %s", env_var, msg)
-
-    # Fall back to gh auth token ONLY when no Copilot env var was explicitly set: an exported
-    # GITHUB_TOKEN (even an unsupported classic PAT) means the user intends *that* token, not
-    # one silently substituted from the gh credential store. Skipping the subprocess also
-    # avoids a slow `gh auth token` call (up to 5s on Windows) on every cold start.
+    # `gh auth token` fallback ONLY when no Copilot env var was set: an exported GITHUB_TOKEN
+    # (even a classic PAT) means the user intends *that* token; skipping also avoids a slow
+    # subprocess (up to 5s on Windows) on every cold start.
     if any_env_var_set:
         logger.debug("Copilot env var(s) set but none held a supported token; skipping `gh auth "
                      "token` fallback to honor explicit env-var intent (and avoid the subprocess "
                      "cost on cold start, #60800).")
         return "", ""
-
     token = _try_gh_cli_token()
     if token:
         valid, msg = validate_copilot_token(token)
         if not valid:
             raise ValueError(f"Token from `gh auth token` is a classic PAT (ghp_*). {msg}")
         return token, "gh auth token"
-
     return "", ""
 
 
@@ -103,11 +89,10 @@ def _gh_cli_candidates() -> list[str]:
     return candidates
 
 
-# ``gh auth token`` result cache. With no credential store for this HOME (fresh profile, CI)
-# the probe blocks for its full 5s timeout on keyring / D-Bus prompts, and provider inventory
-# builds probe Copilot auth several times per request — an uncached miss made one settings
-# page a 4×5s stall past the Desktop renderer's 15s IPC budget. Misses are cached too; a short
-# TTL keeps a fresh ``gh auth login`` discoverable.
+# ``gh auth token`` cache (misses too). With no credential store the probe blocks its full 5s on
+# keyring / D-Bus, and provider inventory probes Copilot several times per request — an uncached
+# miss made one settings page a 4×5s stall past Desktop's 15s IPC budget. Short TTL keeps a
+# fresh ``gh auth login`` discoverable.
 _GH_CLI_TOKEN_CACHE_TTL_SECONDS = 300.0
 _gh_cli_token_cache: tuple[float, Optional[str]] | None = None
 
@@ -121,12 +106,10 @@ def _invalidate_gh_cli_token_cache() -> None:
 def _try_gh_cli_token() -> Optional[str]:
     """Token from ``gh auth token`` when available; the result (incl. a miss) is cached per TTL."""
     global _gh_cli_token_cache
-
     now = time.monotonic()
     cache = _gh_cli_token_cache
     if cache is not None and now - cache[0] < _GH_CLI_TOKEN_CACHE_TTL_SECONDS:
         return cache[1]
-
     token = _probe_gh_cli_token()
     _gh_cli_token_cache = (now, token)
     return token
@@ -135,18 +118,14 @@ def _try_gh_cli_token() -> Optional[str]:
 def _probe_gh_cli_token() -> Optional[str]:
     """Uncached ``gh auth token`` subprocess probe (see ``_try_gh_cli_token``)."""
     hostname = os.getenv("COPILOT_GH_HOST", "").strip()
-
-    # Clean env so gh doesn't short-circuit on GITHUB_TOKEN / GH_TOKEN, and never let it open
-    # an interactive prompt from a backend process.
+    # gh must not short-circuit on GITHUB_TOKEN / GH_TOKEN, nor prompt from a backend process.
     clean_env = {k: v for k, v in os.environ.items() if k not in {"GITHUB_TOKEN", "GH_TOKEN"}}
     clean_env.setdefault("GH_PROMPT_DISABLED", "1")
     clean_env.setdefault("GH_NO_UPDATE_NOTIFIER", "1")
-
     _popen_kwargs = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {}
+    host_args = ["--hostname", hostname] if hostname else []
     for gh_path in _gh_cli_candidates():
-        cmd = [gh_path, "auth", "token"]
-        if hostname:
-            cmd += ["--hostname", hostname]
+        cmd = [gh_path, "auth", "token", *host_args]
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
                                     errors='replace', timeout=5, env=clean_env,
@@ -159,21 +138,15 @@ def _probe_gh_cli_token() -> Optional[str]:
     return None
 
 
-# ─── OAuth Device Code Flow ────────────────────────────────────────────────
-
 _DEVICE_CODE_TERMINAL_ERRORS = {"expired_token": "  ✗ Device code expired. Please try again.",
                                 "access_denied": "  ✗ Authorization was denied."}
 
 
 def _post_form(url: str, fields: dict, timeout: float) -> dict:
     req = urllib.request.Request(
-        url,
-        data=urllib.parse.urlencode(fields).encode(),
-        headers={
-            "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "HermesAgent/1.0",
-        },
+        url, data=urllib.parse.urlencode(fields).encode(),
+        headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0",
+                 "Content-Type": "application/x-www-form-urlencoded"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode())
@@ -184,11 +157,8 @@ def copilot_device_code_login(
 ) -> Optional[str]:
     """Run the GitHub OAuth device code flow for Copilot."""
     domain = host.rstrip("/")
-    device_code_url = f"https://{domain}/login/device/code"
-    access_token_url = f"https://{domain}/login/oauth/access_token"
-
     try:
-        device_data = _post_form(device_code_url,
+        device_data = _post_form(f"https://{domain}/login/device/code",
                                  {"client_id": COPILOT_OAUTH_CLIENT_ID, "scope": "read:user"}, 15)
     except Exception as exc:
         logger.error("Failed to initiate device authorization: %s", exc)
@@ -199,38 +169,25 @@ def copilot_device_code_login(
     user_code = device_data.get("user_code", "")
     device_code = device_data.get("device_code", "")
     interval = max(device_data.get("interval", _DEVICE_CODE_POLL_INTERVAL), 1)
-
     if not device_code or not user_code:
         print("  ✗ GitHub did not return a device code.")
         return None
-
     print(f"\n  Open this URL in your browser: {verification_uri}\n"
           f"  Enter this code: {user_code}\n")
     print("  Waiting for authorization...", end="", flush=True)
-
+    poll_fields = {"client_id": COPILOT_OAUTH_CLIENT_ID, "device_code": device_code,
+                   "grant_type": "urn:ietf:params:oauth:grant-type:device_code"}
     deadline = time.monotonic() + timeout_seconds
-
     while time.monotonic() < deadline:
         time.sleep(interval + _DEVICE_CODE_POLL_SAFETY_MARGIN)
-
         try:
-            result = _post_form(
-                access_token_url,
-                {
-                    "client_id": COPILOT_OAUTH_CLIENT_ID,
-                    "device_code": device_code,
-                    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                },
-                10,
-            )
+            result = _post_form(f"https://{domain}/login/oauth/access_token", poll_fields, 10)
         except Exception:
             print(".", end="", flush=True)
             continue
-
         if result.get("access_token"):
             print(" ✓")
             return result["access_token"]
-
         error = result.get("error", "")
         if error == "slow_down":
             # RFC 8628: add 5 seconds to polling interval (or honor a server-supplied one)
@@ -244,41 +201,32 @@ def copilot_device_code_login(
             print("\n" + _DEVICE_CODE_TERMINAL_ERRORS.get(error,
                                                        f"  ✗ Authorization failed: {error}"))
             return None
-
     print("\n  ✗ Timed out waiting for authorization.")
     return None
 
 
-# ─── Copilot Token Exchange ────────────────────────────────────────────────
-
-# In-process cache of exchanged Copilot API tokens:
-# raw_token_fingerprint -> (api_token, expires_at_epoch, base_url).
+# In-process cache: raw_token_fingerprint -> (api_token, expires_at_epoch, base_url).
 _jwt_cache: dict[str, tuple[str, float, Optional[str]]] = {}
 _JWT_REFRESH_MARGIN_SECONDS = 120  # refresh 2 min before expiry
-
-# Token exchange endpoint and headers (matching VS Code / Copilot CLI)
+# Exchange endpoint and headers (matching VS Code / Copilot CLI)
 _TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
 _EDITOR_VERSION = "vscode/1.104.1"
 _EXCHANGE_USER_AGENT = "GitHubCopilotChat/0.26.7"
 
-# Transient-failure hardening. Gateway startup races network readiness (launchd relaunch,
-# DHCP/VPN settling); a single-shot exchange failing there silently degrades to the RAW GitHub
-# token, which Copilot routes to the "copilot-language-server" integrator whose allowlist omits
-# enterprise-only models → HTTP 400 every turn until restart. Retry, and persist the last good
-# JWT so a restart during a blip reuses the still-valid ~30-min token.
+# Transient-failure hardening: gateway startup races network readiness, and a single-shot
+# exchange failing there silently degrades to the RAW GitHub token, whose integrator allowlist
+# omits enterprise-only models → HTTP 400 every turn until restart. Retry, and persist the last
+# good JWT so a restart during a blip reuses the still-valid ~30-min token.
 _EXCHANGE_MAX_ATTEMPTS = 3
 _EXCHANGE_BACKOFF_BASE_SECONDS = 1.5  # sleeps ~1.5s, ~3.0s between attempts
 _JWT_DISK_FILENAME = ".copilot_jwt.json"
 _JWT_DISK_MAX_BYTES = 1_048_576  # 1 MiB cap on the persisted JWT store read
-
 # Negative cache: fingerprint -> epoch until which attempts raise immediately (success clears
-# it). Without it a permanently-rejected token (403: not entitled, expired grant, org policy)
-# burned ~4.5s of retry backoff on EVERY provider-discovery pass (/model picker, delegation
-# spawns, dashboard).
+# it). Without it a permanently-rejected token burned ~4.5s of retry backoff on EVERY
+# provider-discovery pass (/model picker, delegation spawns, dashboard).
 _exchange_failure_cache: dict[str, float] = {}
-# Single-flight guard per fingerprint: concurrent callers (dashboard polls /api/credentials/
-# pool every few seconds) wait on the ONE in-flight exchange and then hit the cache, instead
-# of each spawning its own hung resolver thread during a DNS outage.
+# Single-flight per fingerprint: concurrent callers (dashboard polls every few seconds) wait on
+# the ONE in-flight exchange instead of each spawning a hung resolver thread during a DNS outage.
 _exchange_locks: dict[str, threading.Lock] = {}
 _exchange_locks_guard = threading.Lock()
 
@@ -293,8 +241,7 @@ def _exchange_lock_for(fp: str) -> threading.Lock:
 
 _EXCHANGE_FAILURE_TTL_TRANSIENT_SECONDS = 60.0     # network blips: retry soon
 _EXCHANGE_FAILURE_TTL_PERMANENT_SECONDS = 1800.0   # 401/403/404: won't heal
-# HTTP statuses meaning the token itself is rejected — retrying with backoff is pointless
-# (the retry loop exists for startup network races) and sleeping on them just blocks the caller.
+# The token itself is rejected — retrying with backoff just blocks the caller.
 _EXCHANGE_PERMANENT_HTTP_STATUSES = frozenset({401, 403, 404})
 
 
@@ -304,12 +251,8 @@ def _token_fingerprint(raw_token: str) -> str:
 
 
 def _read_jwt_store(path: Path) -> Optional[dict]:
-    """Bounded read of the on-disk JWT store → dict, or None if missing/unusable.
-
-    Single chokepoint for every read (load, eviction, save-merge). A well-formed store is a
-    few KB; a file over the 1 MiB cap or with non-dict content is unusable so a corrupt or
-    oversized file can't balloon memory or get rewritten back out.
-    """
+    """Bounded read of the on-disk JWT store → dict, or None if missing/unusable (a store over
+    the 1 MiB cap or non-dict can't balloon memory or get rewritten back out)."""
     if not path.exists():
         return None
     try:
@@ -328,10 +271,8 @@ def _write_jwt_store(path: Path, store: dict) -> None:
     """Atomically write the JWT store (tmp + os.replace), best-effort 0o600."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(store), encoding="utf-8")
-    try:
+    with contextlib.suppress(Exception):
         os.chmod(tmp, 0o600)
-    except Exception:
-        pass
     os.replace(tmp, path)
 
 
@@ -357,17 +298,13 @@ def _with_jwt_store(verb: str, op):
 
 
 def evict_cached_exchanged_token(raw_token: str) -> None:
-    """Drop any cached exchanged JWT for ``raw_token`` (in-process + on-disk).
-
-    Used by the runtime stale-credential recovery path when a live request starts failing with
-    a Copilot ``model_not_available_for_integrator`` / ``model_not_supported`` 400.
-    """
+    """Drop any cached exchanged JWT for ``raw_token`` (in-process + on-disk) — the runtime
+    stale-credential recovery path for ``model_not_available_for_integrator`` 400s."""
     if not raw_token:
         return
     fp = _token_fingerprint(raw_token)
     _jwt_cache.pop(fp, None)
-    # Eviction is an explicit "force a fresh exchange" signal, so the negative-cache entry
-    # must go too — the next exchange_copilot_token() must be allowed to hit the network.
+    # Eviction = "force a fresh exchange": the negative-cache entry must go too.
     _exchange_failure_cache.pop(fp, None)
 
     def _evict(path, store):
@@ -405,18 +342,14 @@ def _save_jwt_to_disk(fp: str, api_token: str, expires_at: float, base_url: Opti
     _with_jwt_store("persist", _save)
 
 
-# Hard wall-clock cap for the exchange call: urllib's ``timeout`` only bounds socket ops AFTER
-# DNS succeeds; getaddrinfo blocks in C and ignores it, so a networkless Windows host can hang
-# for many minutes (observed: a 17-minute event-loop stall that took the backend down).
+# urllib's ``timeout`` only bounds socket ops AFTER DNS; getaddrinfo ignores it, so a networkless
+# Windows host can hang for minutes (observed: a 17-minute event-loop stall).
 _DNS_GRACE_SECONDS = 5.0
 
 
 def _urlopen_bounded(req, timeout: float):
-    """urlopen() with a hard wall-clock cap of timeout + _DNS_GRACE_SECONDS.
-
-    Runs the call on a daemon thread and abandons it if the cap fires, so a DNS/getaddrinfo
-    hang cannot block the caller. Raises the worker's exception, or TimeoutError on the cap.
-    """
+    """urlopen() on a daemon thread, abandoned after timeout + _DNS_GRACE_SECONDS so a
+    DNS/getaddrinfo hang cannot block the caller. Raises the worker's exception or TimeoutError."""
     box: dict = {}
     abandoned = threading.Event()
 
@@ -426,12 +359,9 @@ def _urlopen_bounded(req, timeout: float):
         except BaseException as exc:  # re-raised on the caller's thread
             box["exc"] = exc
             return
-        if abandoned.is_set():
-            # Caller already timed out; nobody will read this response — release its socket.
-            try:
+        if abandoned.is_set():  # caller already timed out — release the socket
+            with contextlib.suppress(Exception):
                 resp.close()
-            except Exception:
-                pass
             return
         box["resp"] = resp
 
@@ -440,10 +370,8 @@ def _urlopen_bounded(req, timeout: float):
     t.join(timeout + _DNS_GRACE_SECONDS)
     if t.is_alive():
         abandoned.set()
-        raise TimeoutError(
-            "copilot token exchange exceeded hard cap of "
-            f"{timeout + _DNS_GRACE_SECONDS:.0f}s (DNS/getaddrinfo hang?)"
-        )
+        raise TimeoutError("copilot token exchange exceeded hard cap of "
+                           f"{timeout + _DNS_GRACE_SECONDS:.0f}s (DNS/getaddrinfo hang?)")
     if "exc" in box:
         raise box["exc"]
     if "resp" not in box:
@@ -454,9 +382,8 @@ def _urlopen_bounded(req, timeout: float):
 def _fetch_exchange_with_retry(req, timeout: float, fp: str) -> dict:
     """GET the exchange with backoff for startup network races; raises ValueError on failure.
 
-    Permanent HTTP rejections (401/403/404) skip the retry loop entirely — sleeping on an auth
-    rejection blocks the caller for ~4.5s with an identical outcome. Failures populate the
-    negative cache (long TTL for permanent, short for transient); success clears it.
+    Permanent rejections (401/403/404) skip the retry loop. Failures populate the negative
+    cache (long TTL for permanent, short for transient); success clears it.
     """
     last_exc: Optional[Exception] = None
     permanent_failure = False
@@ -478,12 +405,11 @@ def _fetch_exchange_with_retry(req, timeout: float, fp: str) -> dict:
                 logger.debug("Copilot token exchange attempt %d/%d failed (%s); retrying in %.1fs",
                              attempt, _EXCHANGE_MAX_ATTEMPTS, exc, sleep_s)
                 time.sleep(sleep_s)
-    ttl = (_EXCHANGE_FAILURE_TTL_PERMANENT_SECONDS if permanent_failure
-           else _EXCHANGE_FAILURE_TTL_TRANSIENT_SECONDS)
-    _exchange_failure_cache[fp] = time.time() + ttl
-    raise ValueError(
-        f"Copilot token exchange failed after {_EXCHANGE_MAX_ATTEMPTS} attempts: {last_exc}"
-    ) from last_exc
+    _exchange_failure_cache[fp] = time.time() + (
+        _EXCHANGE_FAILURE_TTL_PERMANENT_SECONDS if permanent_failure
+        else _EXCHANGE_FAILURE_TTL_TRANSIENT_SECONDS)
+    raise ValueError(f"Copilot token exchange failed after {_EXCHANGE_MAX_ATTEMPTS} attempts: "
+                     f"{last_exc}") from last_exc
 
 
 def _cache_entry_fresh(cached) -> bool:
@@ -501,12 +427,9 @@ def exchange_copilot_token(
     so it is None. Cached in-process until close to expiry. Raises ``ValueError`` on failure.
     """
     fp = _token_fingerprint(raw_token)
-
-    # Fast path outside the lock: a valid in-process JWT needs no exchange.
-    cached = _jwt_cache.get(fp)
+    cached = _jwt_cache.get(fp)  # fast path outside the lock
     if _cache_entry_fresh(cached):
         return cached
-
     with _exchange_lock_for(fp):
         return _exchange_copilot_token_locked(raw_token, fp, timeout=timeout)
 
@@ -514,52 +437,35 @@ def exchange_copilot_token(
 def _exchange_copilot_token_locked(
     raw_token: str, fp: str, *, timeout: float,
 ) -> tuple[str, float, Optional[str]]:
-    # Re-check the in-process cache under the lock (a concurrent caller may have just completed
-    # the exchange we were queued behind), then the on-disk cache: a fresh process (gateway
-    # restart) has an empty in-process cache but may hold a still-valid persisted JWT, and
-    # reusing it avoids a network round-trip precisely when the network is most likely flaky.
+    # Re-check in-process under the lock (a queued-behind caller may have just exchanged), then
+    # on-disk: a fresh process may hold a still-valid persisted JWT, avoiding a network
+    # round-trip precisely when the network is most likely flaky.
     for lookup in (_jwt_cache.get, _load_jwt_from_disk):
         cached = lookup(fp)
         if _cache_entry_fresh(cached):
             _jwt_cache[fp] = cached
             return cached
-
-    # Negative cache: fail fast so provider discovery / picker opens don't block on a token
-    # we already know is rejected or unreachable.
+    # Negative cache: fail fast so provider discovery / picker opens don't block.
     _fail_until = _exchange_failure_cache.get(fp, 0.0)
     if time.time() < _fail_until:
-        raise ValueError(
-            "Copilot token exchange recently failed; skipping re-attempt "
-            f"for another {int(_fail_until - time.time())}s"
-        )
-
+        raise ValueError("Copilot token exchange recently failed; skipping re-attempt "
+                         f"for another {int(_fail_until - time.time())}s")
     req = urllib.request.Request(
-        _TOKEN_EXCHANGE_URL,
-        method="GET",
-        headers={
-            "Authorization": f"token {raw_token}",
-            "User-Agent": _EXCHANGE_USER_AGENT,
-            "Accept": "application/json",
-            "Editor-Version": _EDITOR_VERSION,
-        },
+        _TOKEN_EXCHANGE_URL, method="GET",
+        headers={"Authorization": f"token {raw_token}", "User-Agent": _EXCHANGE_USER_AGENT,
+                 "Accept": "application/json", "Editor-Version": _EDITOR_VERSION},
     )
-
     data = _fetch_exchange_with_retry(req, timeout, fp)
-
     api_token = data.get("token", "")
     if not api_token:
         raise ValueError("Copilot token exchange returned empty token")
     expires_at = float(data.get("expires_at") or 0) or time.time() + 1800
-
-    # Account-specific API base URL: GitHub advertises the authoritative endpoint under
-    # ``endpoints.api`` (differs for Copilot Enterprise / proxied accounts); when omitted,
-    # derive the host from the ``proxy-ep`` field embedded in the exchanged token. Individual
-    # accounts have neither, so ``base_url`` stays None and callers use the registry default.
+    # ``endpoints.api`` is authoritative (Copilot Enterprise / proxied accounts); else derive from
+    # the token's ``proxy-ep``. Individual accounts have neither → None (registry default).
     endpoints = data.get("endpoints")
     base_url: Optional[str] = (
         str(endpoints.get("api") or "").strip().rstrip("/") if isinstance(endpoints, dict) else ""
     ) or _derive_base_url_from_proxy_ep(api_token)
-
     _jwt_cache[fp] = (api_token, expires_at, base_url)
     _save_jwt_to_disk(fp, api_token, expires_at, base_url)
     logger.debug("Copilot token exchanged, expires_at=%s, base_url=%s", expires_at, base_url)
@@ -567,10 +473,7 @@ def _exchange_copilot_token_locked(
 
 
 def _derive_base_url_from_proxy_ep(token: str) -> Optional[str]:
-    """Copilot API base URL from the token's ``proxy-ep`` (``proxy.`` host → ``api.``), or None.
-
-    The token looks like ``tid=…;exp=…;proxy-ep=proxy.enterprise.githubcopilot.com;…``.
-    """
+    """Copilot API base URL from the token's ``proxy-ep=proxy.<host>`` field (→ ``api.``)."""
     m = re.search(r'(?:^|;)\s*proxy-ep=([^;\s]+)', token)
     if not m:
         return None
@@ -580,11 +483,8 @@ def _derive_base_url_from_proxy_ep(token: str) -> Optional[str]:
 
 
 def get_copilot_api_token(raw_token: str) -> tuple[str, Optional[str]]:
-    """``(api_token, base_url)`` from the exchange, or ``(raw_token, None)`` when it fails.
-
-    The fallback preserves behaviour for accounts that don't need exchange (network error,
-    unsupported account type) while enabling internal-only models for those that do.
-    """
+    """``(api_token, base_url)`` from the exchange, or ``(raw_token, None)`` when it fails
+    (accounts that don't need exchange keep working)."""
     if not raw_token:
         return raw_token, None
     try:
@@ -594,8 +494,6 @@ def get_copilot_api_token(raw_token: str) -> tuple[str, Optional[str]]:
         logger.debug("Copilot token exchange failed, using raw token: %s", exc)
         return raw_token, None
 
-
-# ─── Copilot API Headers ───────────────────────────────────────────────────
 
 def copilot_request_headers(
     *, is_agent_turn: bool = True, is_vision: bool = False,
@@ -607,5 +505,4 @@ def copilot_request_headers(
                                "x-initiator": "agent" if is_agent_turn else "user"}
     if is_vision:
         headers["Copilot-Vision-Request"] = "true"
-
     return headers
