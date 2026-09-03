@@ -1,5 +1,4 @@
-"""Projects RPC surface: first-class, per-profile, multi-folder workspaces, plus repo
-discovery and the sidebar project tree.
+"""Projects RPC surface: per-profile multi-folder workspaces, repo discovery, sidebar tree.
 
 Bodies are rebound onto server.py's globals at install time (see
 method_ctx.bind_module), so they reference server.py globals bare.
@@ -27,8 +26,7 @@ def _projects_payload(conn) -> dict:
     from hermes_cli import projects_db as pdb
     return {
         "projects": [p.to_dict() for p in pdb.list_projects(conn, include_archived=True)],
-        "active_id": pdb.get_active_id(conn),
-    }
+        "active_id": pdb.get_active_id(conn)}
 
 
 def _projects_method(name: str):
@@ -65,6 +63,37 @@ def _require_project(pdb, conn, params: dict):
     return proj
 
 
+def _pick(params: dict, *keys: str) -> dict:
+    return {k: params.get(k) for k in keys}
+
+
+# Per-project mutators: (rpc suffix, pdb function, takes params['path'], extra kwargs).
+# Each resolves ``params['id']`` (5062 when missing), mutates, and answers with the
+# refreshed project.
+_PROJECT_MUTATORS = (
+    ("update", "update_project", False,
+     lambda p: _pick(p, "name", "description", "icon", "color", "board_slug")),
+    ("add_folder", "add_folder", True,
+     lambda p: {"label": p.get("label"), "is_primary": bool(p.get("is_primary"))}),
+    ("remove_folder", "remove_folder", True, lambda p: {}),
+    ("set_primary", "set_primary", True, lambda p: {}),
+)
+
+
+def _register_project_mutator(suffix: str, fn_name: str, takes_path: bool, kwargs_of) -> None:
+    @_projects_method(f"projects.{suffix}")
+    def _(rid, params, pdb, conn) -> dict:
+        proj = _require_project(pdb, conn, params)
+        args = (str(params.get("path") or ""),) if takes_path else ()
+        getattr(pdb, fn_name)(conn, proj.id, *args, **kwargs_of(params))
+        return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
+
+
+for _spec in _PROJECT_MUTATORS:
+    _register_project_mutator(*_spec)
+del _spec
+
+
 @_projects_method("projects.list")
 def _(rid, params, pdb, conn) -> dict:
     return _ok(rid, _projects_payload(conn))
@@ -78,49 +107,12 @@ def _(rid, params, pdb, conn) -> dict:
 @_projects_method("projects.create")
 def _(rid, params, pdb, conn) -> dict:
     pid = pdb.create_project(
-        conn, name=str(params.get("name") or ""), slug=params.get("slug"),
-        folders=params.get("folders") or [], primary_path=params.get("primary_path"),
-        description=params.get("description"), icon=params.get("icon"), color=params.get("color"),
-        board_slug=params.get("board_slug"),
-    )
+        conn, name=str(params.get("name") or ""), folders=params.get("folders") or [],
+        **_pick(params, "slug", "primary_path", "description", "icon", "color", "board_slug"))
     if params.get("use"):
         pdb.set_active(conn, pid)
     proj = pdb.get_project(conn, pid)
     return _ok(rid, {"project": proj.to_dict() if proj else None})
-
-
-@_projects_method("projects.update")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.update_project(
-        conn, proj.id, name=params.get("name"), description=params.get("description"),
-        icon=params.get("icon"), color=params.get("color"), board_slug=params.get("board_slug"),
-    )
-    return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
-
-
-@_projects_method("projects.add_folder")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.add_folder(
-        conn, proj.id, str(params.get("path") or ""), label=params.get("label"),
-        is_primary=bool(params.get("is_primary")),
-    )
-    return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
-
-
-@_projects_method("projects.remove_folder")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.remove_folder(conn, proj.id, str(params.get("path") or ""))
-    return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
-
-
-@_projects_method("projects.set_primary")
-def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.set_primary(conn, proj.id, str(params.get("path") or ""))
-    return _ok(rid, {"project": pdb.get_project(conn, proj.id).to_dict()})
 
 
 @_projects_method("projects.archive")
@@ -132,8 +124,7 @@ def _(rid, params, pdb, conn) -> dict:
 
 @_projects_method("projects.delete")
 def _(rid, params, pdb, conn) -> dict:
-    proj = _require_project(pdb, conn, params)
-    pdb.delete_project(conn, proj.id)
+    pdb.delete_project(conn, _require_project(pdb, conn, params).id)
     return _ok(rid, _projects_payload(conn))
 
 
@@ -151,26 +142,19 @@ def _(rid, params, pdb, conn) -> dict:
 
 
 def _non_workspace_dirs() -> set[str]:
-    """Directories that are never a workspace, whichever tier proposes them.
-
-    The filesystem root, the user's home, and the directory homes live in —
-    ``/home`` on Linux, ``/Users`` on macOS, ``C:\\Users`` on Windows. Both
-    POSIX spellings are excluded on every host because both are reachable as a
-    cwd anywhere: macOS ships an empty ``/home`` autofs stub, and a container or
-    remote shell hands back Linux paths. Promoting one of these mints a
-    catch-all project that swallows unplaced sessions, and ``/home`` in
-    particular renders as a second row reading "home" next to the Home bucket.
-    """
+    """Never-a-workspace dirs: ``/``, the user's home, and the dir homes live in. Both
+    POSIX spellings are excluded on every host (macOS ships an empty ``/home`` autofs
+    stub; containers/remote shells hand back Linux paths) — promoting one mints a
+    catch-all project and ``/home`` renders as a second "home" row beside Home."""
     home = os.path.realpath(os.path.expanduser("~"))
     candidates = (os.sep, home, os.path.dirname(home), "/home", "/Users")
     return {os.path.normcase(os.path.realpath(path)) for path in candidates if path}
 
 
 def _is_repo_junk(root: str) -> bool:
-    """A git root we never auto-surface as a project: a non-workspace dir (see
-    :func:`_non_workspace_dirs`) or anything under HERMES_HOME (~/.hermes by
-    default) — config/sessions/skills, not a workspace. User-created projects
-    pointing there are still honored."""
+    """A git root never auto-surfaced as a project: a non-workspace dir or anything
+    under HERMES_HOME (config/sessions/skills). User-created projects pointing
+    there are still honored."""
     if not root:
         return True
     from hermes_constants import get_hermes_home
@@ -179,19 +163,13 @@ def _is_repo_junk(root: str) -> bool:
     return (
         os.path.normcase(real) in _non_workspace_dirs()
         or real == hermes_home
-        or real.startswith(hermes_home + os.sep)
-    )
+        or real.startswith(hermes_home + os.sep))
 
 
 def _is_session_cwd_junk(cwd: str) -> bool:
-    """A non-git cwd that should stay in flat Recents rather than auto-group.
-
-    Unlike discovered git roots, an explicitly selected descendant of
-    HERMES_HOME may be an intentional prose/data workspace. The pre-Projects
-    desktop surfaced every such cwd, so exclude only the broad defaults that
-    would create catch-all projects: HERMES_HOME itself and the dirs in
-    :func:`_non_workspace_dirs`.
-    """
+    """A non-git cwd that stays in flat Recents rather than auto-grouping. Unlike git
+    roots, a selected DESCENDANT of HERMES_HOME may be an intentional prose/data
+    workspace, so only HERMES_HOME itself and ``_non_workspace_dirs`` are excluded."""
     if not cwd:
         return True
     from hermes_constants import get_hermes_home
@@ -207,23 +185,21 @@ def _repo_discovery_policy(raw: dict | None = None) -> dict:
     source = raw if isinstance(raw, dict) else (_load_cfg().get("desktop") or {})
     if not isinstance(source, dict):
         source = {}
-    enabled = source.get("enabled", source.get("repo_scan_enabled", defaults["repo_scan_enabled"]))
-    roots = source.get("roots", source.get("repo_scan_roots", defaults["repo_scan_roots"]))
-    excludes = source.get(
-        "exclude_paths", source.get("repo_scan_exclude_paths", defaults["repo_scan_exclude_paths"]),
-    )
+
+    def _get(short: str, long: str):
+        return source.get(short, source.get(long, defaults[long]))
+
+    def _paths(short: str, long: str) -> list[str]:
+        values = _get(short, long)
+        if not isinstance(values, list):
+            return list(defaults[long])
+        return [v.strip() for v in values if isinstance(v, str) and v.strip()]
+
+    enabled = _get("enabled", "repo_scan_enabled")
     return {
         "enabled": enabled if isinstance(enabled, bool) else defaults["repo_scan_enabled"],
-        "roots": [value.strip() for value in roots if isinstance(value, str) and value.strip()]
-        if isinstance(roots, list)
-        else list(defaults["repo_scan_roots"]),
-        "exclude_paths": [
-            value.strip()
-            for value in excludes
-            if isinstance(value, str) and value.strip()
-        ]
-        if isinstance(excludes, list)
-        else list(defaults["repo_scan_exclude_paths"]),
+        "roots": _paths("roots", "repo_scan_roots"),
+        "exclude_paths": _paths("exclude_paths", "repo_scan_exclude_paths"),
     }
 
 
@@ -239,37 +215,22 @@ def _repo_discovery_policy_key(policy: dict) -> str:
         return sorted(normalized)
     canonical = {
         "enabled": bool(policy["enabled"]), "roots": _paths(policy["roots"]),
-        "exclude_paths": _paths(policy["exclude_paths"]),
-    }
+        "exclude_paths": _paths(policy["exclude_paths"])}
     return json.dumps(canonical, sort_keys=True, separators=(",", ":"))
 
 
 def _repo_discovery_policy_is_default(policy: dict) -> bool:
     from hermes_cli.config import DEFAULT_CONFIG
     return _repo_discovery_policy_key(policy) == _repo_discovery_policy_key(
-        _repo_discovery_policy(DEFAULT_CONFIG["desktop"])
-    )
+        _repo_discovery_policy(DEFAULT_CONFIG["desktop"]))
 
 
 def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
-    """Backend-side disk scan of the discovery policy roots.
-
-    The desktop's native repo scan only runs on the local filesystem. On a
-    remote gateway connection the host must scan its own disk so repos with
-    zero Hermes sessions still appear in the sidebar (#81723). Mirrors the
-    desktop's behavior: walk each root (bounded depth), find `.git`
-    directories, record (root, label) pairs into the discovery cache.
-
-    Best-effort: any failure logs and leaves the cache untouched — the
-    session-derived repos from `_discover_repos_payload` still surface.
-
-    Returns True when the scan is authoritative (every root was walked to
-    completion without error and the per-scan cap was not hit). Only then may
-    the caller treat the result as a full replacement and pass ``replace=True``
-    to the cache write — a partial or errored scan must merge, never wipe, so
-    a failed remote refresh can't blank the previously cached repos into the
-    silent, unpopulated sidebar of #81723.
-    """
+    """Backend-side disk scan of the policy roots into the discovery cache (the desktop's
+    native scan only sees the local filesystem). Best-effort: failures log and leave
+    the cache untouched. Returns True only when the scan is authoritative (every root
+    walked to completion, cap not hit) — only then is the cache write ``replace=True``;
+    a partial/errored scan must MERGE, never wipe, or a failed refresh blanks the sidebar."""
     from hermes_cli import projects_db as pdb
     roots = policy.get("roots") or []
     excludes = policy.get("exclude_paths") or []
@@ -281,9 +242,8 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
         return any(path == ex or path.startswith(ex.rstrip("/\\") + os.sep) for ex in excludes if ex)
     for root in roots:
         if not os.path.isdir(root):
-            # `os.walk` on a missing root yields nothing instead of raising; an
-            # unmounted volume would look like an empty scan and let the
-            # authoritative replace wipe every cached repo under it.
+            # `os.walk` on a missing root yields nothing instead of raising; an unmounted
+            # volume would look like an empty scan and let the replace wipe its cache.
             authoritative = False
             logger.debug("discover_repos scan root missing, skipping: %s", root)
             continue
@@ -291,37 +251,27 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
             for dirpath, dirnames, _filenames in os.walk(root):
                 if _is_excluded(dirpath):
                     dirnames[:] = []
-                    continue
-                # A `.git` directory marks this directory as a repo root. Check
-                # BEFORE pruning hidden dirs — `.git` is itself hidden, so a
-                # prune-first order would drop it and never detect any repo.
-                if ".git" in dirnames:
-                    repo_root = dirpath
-                    if repo_root not in seen:
-                        seen.add(repo_root)
-                        pairs.append((repo_root, os.path.basename(repo_root)))
-                    # Don't descend into the repo's own .git to hunt nested repos.
-                    dirnames[:] = []
+                elif ".git" in dirnames:  # check BEFORE pruning hidden dirs — `.git` is hidden
+                    if dirpath not in seen:
+                        seen.add(dirpath)
+                        pairs.append((dirpath, os.path.basename(dirpath)))
+                    dirnames[:] = []  # don't hunt nested repos inside a repo
                 else:
-                    # Not a repo: skip hidden dirs (e.g. .hermes) and node_modules.
-                    dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in ("node_modules",)]
+                    dirnames[:] = [
+                        d for d in dirnames if not d.startswith(".") and d != "node_modules"]
                 if len(pairs) >= 500:
                     break
         except Exception:
-            # A root that can't be walked yields no authoritative set — fall back
-            # to merging, never replacing, so the prior cache survives.
             authoritative = False
             logger.debug("discover_repos scan failed for root %s", root, exc_info=True)
         if len(pairs) >= 500:
-            # Cap hit means the walk didn't cover the full roots; the collected
-            # set must not be treated as the complete authoritative universe.
+            # Cap hit: the walk didn't cover the full roots -> not authoritative.
             authoritative = False
             break
     if pairs:
         try:
             pdb.record_discovered_repos(
-                conn, pairs, replace=authoritative, policy_key=_repo_discovery_policy_key(policy)
-            )
+                conn, pairs, replace=authoritative, policy_key=_repo_discovery_policy_key(policy))
         except Exception:
             logger.debug("discover_repos cache write failed", exc_info=True)
             authoritative = False
@@ -329,28 +279,16 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
 
 
 def _discover_repos_payload(
-    db, *, conn=None, backfill: bool = True, include_cached: bool = True
-) -> list[dict]:
-    """Merge filesystem-scanned repos (cached) with session-derived repo roots.
-
-    Repo-first: the disk scan (persisted by `projects.record_repos`) surfaces
-    repos even with zero hermes sessions. Session-derived roots cover repos
-    outside the scan roots. Both are junk-filtered (hermes home subtree + bare
-    home) and carry their session totals for the overview.
-
-    ``conn`` reuses an already-open projects.db connection (the tree path holds
-    one); ``backfill`` persists resolved roots back onto session rows — kept off
-    the per-turn tree path (grouping uses the live git resolver regardless) and
-    done only on the explicit discover/record refresh.
-    """
-    _is_junk = _is_repo_junk
+    db, *, conn=None, backfill: bool = True, include_cached: bool = True) -> list[dict]:
+    """Merge filesystem-scanned repos (cached; may have zero sessions) with
+    session-derived roots, junk-filtered, with session totals. ``conn`` reuses an open
+    projects.db connection; ``backfill`` persists resolved roots onto session rows —
+    kept OFF the per-turn tree path and done only on explicit refresh."""
     repos: dict[str, dict] = {}
 
     def _agg(root: str) -> dict:
         return repos.setdefault(root, {"root": root, "label": "", "sessions": 0, "last_active": 0.0})
 
-    # Session-derived roots (common repo root, folding worktrees; cached) +
-    # backfill the column so persisted git_repo_root matches the tree grouping.
     cwd_rows = list(db.distinct_session_cwds())
     # Warm the per-cwd git probes in parallel so a cold first paint doesn't
     # serialize one subprocess per distinct cwd before this loop reads the cache.
@@ -362,7 +300,7 @@ def _discover_repos_payload(
         if not root:
             continue
         cwd_to_root[cwd] = root
-        if _is_junk(root):
+        if _is_repo_junk(root):
             continue
         agg = _agg(root)
         agg["sessions"] += int(row.get("sessions") or 0)
@@ -373,26 +311,17 @@ def _discover_repos_payload(
         except Exception:
             logger.debug("failed to backfill repo roots", exc_info=True)
     if include_cached:
-        # Filesystem-scanned roots from the cache (may have zero sessions). Reuse
-        # the caller's projects.db connection when given, else a short-lived one.
+        # `last_seen` is scan time, not user activity — never fold it into
+        # `last_active` (made every scanned repo "just now").
         try:
             from hermes_cli import projects_db as pdb
-
-            def _read(c) -> None:
+            with (contextlib.nullcontext(conn) if conn is not None else pdb.connect_closing()) as c:
                 for entry in pdb.list_discovered_repos(c):
                     root = str(entry.get("root") or "")
-                    if not root or _is_junk(root):
-                        continue
-                    agg = _agg(root)
-                    if entry.get("label"):
-                        agg["label"] = entry["label"]
-                    # `last_seen` is scan time, not user activity; folding it
-                    # into `last_active` made every scanned repo "just now".
-            if conn is not None:
-                _read(conn)
-            else:
-                with pdb.connect_closing() as own:
-                    _read(own)
+                    if root and not _is_repo_junk(root):
+                        agg = _agg(root)
+                        if entry.get("label"):
+                            agg["label"] = entry["label"]
         except Exception:
             logger.debug("failed to read discovered repo cache", exc_info=True)
     out = sorted(repos.values(), key=lambda r: r["last_active"], reverse=True)
@@ -407,71 +336,39 @@ _PROJECT_TREE_EXCLUDED_SOURCES = ["cron", "kanban"]
 
 
 def _project_tree_row(r: dict) -> dict:
-    """Project a SessionDB row to the minimal shape the sidebar renders.
-
-    Keeps the fields the grouping needs (cwd / git_branch / git_repo_root) plus
-    everything ``SidebarSessionRow`` reads, and drops the heavy columns
-    (system_prompt, model_config, ...) so the tree payload stays lean.
-    """
-    return {
-        "id": r.get("id"),
-        "_lineage_root_id": r.get("_lineage_root_id"),
-        "_lineage_ids": r.get("_lineage_ids"),
-        # The sidebar nests branch/fork sessions under their parent
-        # (flattenSessionsWithBranches keys on this); without it, lane rows can't
-        # draw the └─ connector the flat Recents list shows.
-        "parent_session_id": r.get("parent_session_id"),
-        "title": r.get("title"),
-        "preview": r.get("preview"),
-        "started_at": r.get("started_at") or 0,
-        "ended_at": r.get("ended_at"),
-        "last_active": r.get("last_active") or r.get("started_at") or 0,
-        "source": r.get("source"),
-        "archived": bool(r.get("archived")),
-        "message_count": r.get("message_count") or 0,
-        "tool_call_count": r.get("tool_call_count") or 0,
-        "input_tokens": r.get("input_tokens") or 0,
-        "output_tokens": r.get("output_tokens") or 0,
-        # Cost is one of the fields SidebarSessionRow renders, so a lane row has
-        # to carry it too — without it, switching Show → cost filled in every
-        # figure in Recents and left the same sessions blank under a project.
-        "actual_cost_usd": r.get("actual_cost_usd"),
-        "estimated_cost_usd": r.get("estimated_cost_usd"),
-        "model": r.get("model"),
-        "is_active": False,
-        "cwd": r.get("cwd"),
-        "git_branch": r.get("git_branch"),
-        "git_repo_root": r.get("git_repo_root"),
-    }
+    """Project a SessionDB row to the minimal shape the sidebar renders: the
+    grouping fields (cwd/git_branch/git_repo_root) + everything ``SidebarSessionRow``
+    reads (parent_session_id for the └─ connector, cost for Show → cost), minus the
+    heavy columns."""
+    row = {k: r.get(k) for k in (
+        "id", "_lineage_root_id", "_lineage_ids", "parent_session_id", "title", "preview")}
+    row.update(
+        started_at=r.get("started_at") or 0, ended_at=r.get("ended_at"),
+        last_active=r.get("last_active") or r.get("started_at") or 0,
+        source=r.get("source"), archived=bool(r.get("archived")))
+    row.update({k: r.get(k) or 0 for k in (
+        "message_count", "tool_call_count", "input_tokens", "output_tokens")})
+    row.update({k: r.get(k) for k in ("actual_cost_usd", "estimated_cost_usd", "model")})
+    row["is_active"] = False
+    row.update({k: r.get(k) for k in ("cwd", "git_branch", "git_repo_root")})
+    return row
 
 
 def _project_tree_inputs(
     db, session_limit: int, *, include_discovered: bool
 ) -> tuple[list[dict], list[dict], list[dict], str | None]:
     """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
-
-    ``include_discovered`` is the zero-session-repo overview tier; the entered
-    view (drill-in) skips it entirely — it only needs the project it's showing,
-    which already has sessions — avoiding the distinct-cwd scan + git probes on
-    that per-turn path. One projects.db connection serves both reads.
-    """
+    ``include_discovered`` is the zero-session-repo overview tier; drill-in skips it,
+    avoiding the distinct-cwd scan + git probes on that per-turn path."""
+    # compact_rows: `_project_tree_row` drops the system-prompt blob; selecting it
+    # only to discard it costs tens of MB of B-tree reads per build on a big DB.
     rows = db.list_sessions_rich(
-        limit=session_limit,
-        offset=0,
-        order_by_last_active=True,
-        min_message_count=1,
-        include_children=False,
-        exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
-        include_archived=False,
-        # `_project_tree_row` keeps ~18 fields and drops the rest, so selecting
-        # the system-prompt blob only to discard it costs tens of MB of B-tree
-        # reads per build on a long-lived database.
-        compact_rows=True,
-    )
+        limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
+        include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
+        include_archived=False, compact_rows=True)
     sessions = [_project_tree_row(r) for r in rows]
     # Parallel-warm the git cache so build_tree's resolver reads it instead of
-    # cold-probing each cwd in sequence (matters on the drill-in path, which
-    # skips the discovery warm-up below).
+    # cold-probing each cwd in sequence (matters on the drill-in path).
     git_probe.warm_roots(s["cwd"] for s in sessions if s.get("cwd"))
     from hermes_cli import projects_db as pdb
     policy = _repo_discovery_policy()
@@ -479,33 +376,26 @@ def _project_tree_inputs(
     with pdb.connect_closing() as conn:
         if include_discovered:
             pdb.reconcile_discovered_repos_policy(
-                conn, policy_key, preserve_unversioned=_repo_discovery_policy_is_default(policy),
-            )
+                conn, policy_key, preserve_unversioned=_repo_discovery_policy_is_default(policy))
         projects = [p.to_dict() for p in pdb.list_projects(conn)]
         active_id = pdb.get_active_id(conn)
         # backfill stays off the hot tree path — grouping uses the live resolver.
-        discovered = (
-            _discover_repos_payload(db, conn=conn, backfill=False, include_cached=policy["enabled"])
-            if include_discovered
-            else []
-        )
+        discovered = []
+        if include_discovered:
+            discovered = _discover_repos_payload(
+                db, conn=conn, backfill=False, include_cached=policy["enabled"])
     return sessions, projects, discovered, active_id
 
 
-# Per-build memo for `_dir_exists_cached`. Cleared at the top of every
-# `_build_project_tree`, so a dir created or deleted between sidebar refreshes
-# is seen on the next one.
+# Per-build memo for `_dir_exists_cached`; cleared at the top of every
+# `_build_project_tree` so a dir created/deleted between refreshes is seen.
 _DIR_EXISTS_CACHE: dict[str, bool] = {}
 
 
 def _dir_exists_cached(path: str) -> bool:
-    """``os.path.isdir`` for the project tree, memoized per build.
-
-    ``build_tree`` asks per SESSION, not per distinct path, so a power user with
-    hundreds of sessions across a handful of dirs would otherwise fire hundreds
-    of redundant stats on every sidebar open. The memo is per build, so a dir
-    created or deleted between refreshes is picked up on the next one.
-    """
+    """``os.path.isdir`` memoized per build — ``build_tree`` asks per SESSION, not
+    per distinct path, so hundreds of sessions in a few dirs would otherwise fire
+    hundreds of redundant stats per sidebar open."""
     hit = _DIR_EXISTS_CACHE.get(path)
     if hit is None:
         hit = os.path.isdir(path)
@@ -520,20 +410,16 @@ def _build_project_tree(
     from tui_gateway import project_tree
     _DIR_EXISTS_CACHE.clear()
     sessions, projects, discovered, active_id = _project_tree_inputs(
-        db, session_limit, include_discovered=include_discovered
-    )
-    # build_tree resolves every declared project folder and every discovered
-    # repo root too, and those paths are not session cwds — without this they
-    # are the one part of the build still probing git one directory at a time.
+        db, session_limit, include_discovered=include_discovered)
+    # build_tree also resolves every declared project folder and discovered repo
+    # root — not session cwds, so warm them too or they probe git one at a time.
     git_probe.warm_roots(
         [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
-        + [str(r.get("root") or "") for r in discovered]
-    )
+        + [str(r.get("root") or "") for r in discovered])
     tree = project_tree.build_tree(
         projects, sessions, discovered, _resolve_cwd_git, preview_limit=preview_limit,
         hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
-        exists=_dir_exists_cached,
-    )
+        exists=_dir_exists_cached)
     return tree, active_id
 
 
