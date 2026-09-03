@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 import asyncio
+import dataclasses
 import faulthandler
 import os
 import signal
@@ -19,6 +20,7 @@ from datetime import datetime
 from gateway.config import Platform
 from gateway.delivery import looks_like_telegram_private_chat_id
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType
+from gateway.session import SessionSource, build_session_key
 from gateway.restart import (
     DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
     GATEWAY_FATAL_CONFIG_EXIT_CODE,
@@ -680,6 +682,27 @@ class GatewayStartupMixin:
             or self._shutdown_event.is_set()
         )
 
+    async def _startup_teardown_adapter(self, adapter, platform) -> None:
+        """Cancel an adapter's background tasks (best-effort) then disconnect it."""
+        try:
+            await adapter.cancel_background_tasks()
+        except Exception as e:
+            logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
+        await self._safe_adapter_disconnect(adapter, platform)
+
+    def _startup_retry_entry(self, platform, adapter, platform_config, *, queued: bool = True) -> dict:
+        """Build a ``_failed_platforms`` entry for a platform that failed at startup."""
+        entry = {
+            "config": platform_config,
+            "attempts": 1,
+            "next_retry": time.monotonic() + 30,
+        }
+        if queued:
+            entry["queued_at"] = time.monotonic()
+        entry["credential_claim"] = self._adapter_credential_claim(platform, adapter)
+        entry["listener_claim"] = self._adapter_listener_claim(platform, adapter)
+        return entry
+
     async def _abort_startup_if_shutdown_requested(
         self,
         adapter: Optional[BasePlatformAdapter] = None,
@@ -689,11 +712,7 @@ class GatewayStartupMixin:
         if not self._startup_should_abort():
             return False
         if adapter is not None and platform is not None:
-            try:
-                await adapter.cancel_background_tasks()
-            except Exception as e:
-                logger.debug("✗ %s background-task cancel error: %s", platform.value, e)
-            await self._safe_adapter_disconnect(adapter, platform)
+            await self._startup_teardown_adapter(adapter, platform)
         stop_task = self._stop_task
         current_task = asyncio.current_task()
         if stop_task is not None and stop_task is not current_task:
@@ -751,32 +770,23 @@ class GatewayStartupMixin:
                 logger.debug("Failed to start gateway loop liveness watchdog", exc_info=True)
 
     def _stop_loop_liveness_guards(self) -> None:
-        """Disarm lifetime liveness guards before shutdown can load the loop."""
-        watchdog = getattr(self, "_loop_liveness_watchdog", None)
-        self._loop_liveness_watchdog = None
-        if watchdog is not None:
-            try:
-                watchdog.stop()
-            except Exception:
-                logger.debug("Failed to stop gateway loop liveness watchdog", exc_info=True)
+        """Disarm lifetime liveness guards before shutdown can load the loop.
 
-        floor_timer = getattr(self, "_loop_floor_timer_handle", None)
-        self._loop_floor_timer_handle = None
-        if floor_timer is not None:
-            try:
-                floor_timer.cancel()
-            except Exception:
-                logger.debug("Failed to cancel gateway loop floor timer", exc_info=True)
-
-        # Also disarm the heartbeat writer task: once shutdown starts loading the loop, a heartbeat
-        # that keeps refreshing the file makes a draining gateway look healthy to external probes.
-        heartbeat = getattr(self, "_loop_heartbeat_task", None)
-        self._loop_heartbeat_task = None
-        if heartbeat is not None:
-            try:
-                heartbeat.cancel()
-            except Exception:
-                logger.debug("Failed to cancel gateway loop heartbeat task", exc_info=True)
+        Also disarms the heartbeat writer: once shutdown starts loading the loop, a heartbeat that
+        keeps refreshing the file makes a draining gateway look healthy to external probes.
+        """
+        for attr, method, what in (
+            ("_loop_liveness_watchdog", "stop", "stop gateway loop liveness watchdog"),
+            ("_loop_floor_timer_handle", "cancel", "cancel gateway loop floor timer"),
+            ("_loop_heartbeat_task", "cancel", "cancel gateway loop heartbeat task"),
+        ):
+            guard = getattr(self, attr, None)
+            setattr(self, attr, None)
+            if guard is not None:
+                try:
+                    getattr(guard, method)()
+                except Exception:
+                    logger.debug("Failed to %s", what, exc_info=True)
 
     async def _consume_clean_shutdown_marker(self, marker_path) -> int:
         """Discard orphan turn markers before consuming a clean-exit receipt.
@@ -873,44 +883,34 @@ class GatewayStartupMixin:
         except Exception:
             logger.debug("Failed to start gateway loop heartbeat", exc_info=True)
 
+    def _open_faulthandler_log(self):
+        """Open (append) ``<log_dir>/gateway_faulthandler.log``, creating the directory."""
+        from gateway.run import get_hermes_home
+        log_dir = getattr(self.config, "log_dir", None) or os.path.join(
+            str(get_hermes_home()), "logs",
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        return open(os.path.join(log_dir, "gateway_faulthandler.log"), "a", encoding="utf-8")
+
     def _start_install_faulthandler(self) -> None:
         """Enable faulthandler (stderr or a log file) plus the SIGUSR2 stack-dump hook."""
-        from gateway.run import get_hermes_home
-        # Enable faulthandler for stack dumps on freezes/crashes. Falls back to a log file when
-        # sys.stderr is None (Windows VBS / pythonw / detached service) — otherwise the gateway
-        # would die here and take every adapter offline.
+        # Falls back to a log file when sys.stderr is None (Windows VBS / pythonw / detached
+        # service) — otherwise the gateway would die here and take every adapter offline.
         try:
             faulthandler.enable()
         except (RuntimeError, ValueError, OSError):
             try:
-                _fh_log_dir = getattr(self.config, "log_dir", None) or os.path.join(
-                    str(get_hermes_home()),
-                    "logs",
-                )
-                os.makedirs(_fh_log_dir, exist_ok=True)
-                _fh_enable_path = os.path.join(_fh_log_dir, "gateway_faulthandler.log")
-                _fh_enable_file = open(_fh_enable_path, "a", encoding="utf-8")
-                faulthandler.enable(file=_fh_enable_file, all_threads=True)
+                faulthandler.enable(file=self._open_faulthandler_log(), all_threads=True)
             except Exception:
                 logger.debug("faulthandler.enable() unavailable", exc_info=True)
-        # Also dump stacks to a rotating file for off-line analysis under a service manager that
-        # doesn't capture stderr. faulthandler.register()/SIGUSR2 are POSIX-only: skip the signal-
-        # triggered file dump on Windows (faulthandler.enable() above still covers fatal errors).
+        # Also dump stacks to a file on SIGUSR2 for off-line analysis under a service manager that
+        # doesn't capture stderr. faulthandler.register()/SIGUSR2 are POSIX-only: skip on Windows
+        # (faulthandler.enable() above still covers fatal errors).
         _sigusr2 = getattr(signal, "SIGUSR2", None)
         if _sigusr2 is not None and hasattr(faulthandler, "register"):
             try:
-                _log_dir = getattr(self.config, "log_dir", None) or os.path.join(
-                    str(get_hermes_home()),
-                    "logs",
-                )
-                _faulthandler_path = os.path.join(_log_dir, "gateway_faulthandler.log")
-                os.makedirs(_log_dir, exist_ok=True)
-                _fh = open(_faulthandler_path, "a", encoding="utf-8")
                 faulthandler.register(
-                    _sigusr2,
-                    file=_fh,
-                    all_threads=True,
-                    chain=True,
+                    _sigusr2, file=self._open_faulthandler_log(), all_threads=True, chain=True,
                 )
             except Exception:
                 logger.debug("Could not set up faulthandler file logging", exc_info=True)
@@ -934,10 +934,80 @@ class GatewayStartupMixin:
             except Exception:
                 logger.debug("Startup watchdog disarm failed", exc_info=True)
         logger.info("Session storage: %s", self.config.sessions_dir)
+        self._start_log_systemd_timing_alignment()
+        # Log the resolved max_iterations budget so operators can verify the config.yaml → env
+        # bridge at a glance (instead of silently running at a stale .env value for weeks).
+        with suppress(Exception):
+            logger.info(
+                "Agent budget: max_iterations=%d (agent.max_turns from config.yaml, "
+                "or HERMES_MAX_ITERATIONS from .env, or default 500)",
+                int(os.getenv("HERMES_MAX_ITERATIONS", "500")),
+            )
+        # Redaction is ON by default; warn prominently when an operator has explicitly opted out so
+        # the downgrade isn't forgotten. The redactor snapshots its state at import time, so this
+        # log line is the source of truth for the process lifetime.
+        with suppress(Exception):
+            _redact_raw = os.getenv("HERMES_REDACT_SECRETS", "true")
+            if _redact_raw.lower() in {"1", "true", "yes", "on"}:
+                logger.info(
+                    "Secret redaction: ENABLED (tool output, logs, and chat "
+                    "responses are scrubbed before delivery)"
+                )
+            else:
+                logger.warning(
+                    "Secret redaction: DISABLED (HERMES_REDACT_SECRETS=%s). "
+                    "API keys and tokens may appear verbatim in chat output, "
+                    "session JSONs, and logs. Set security.redact_secrets: true "
+                    "in config.yaml to re-enable.",
+                    _redact_raw,
+                )
+        with suppress(Exception):
+            from hermes_cli.profiles import get_active_profile_name
+            _profile = get_active_profile_name()
+            if _profile and _profile != "default":
+                logger.info("Active profile: %s", _profile)
+        with suppress(Exception):
+            from gateway.status import write_runtime_status
+            write_runtime_status(
+                gateway_state="starting",
+                exit_reason=None,
+                clear_profile_platforms=True,
+            )
+        try:
+            from hermes_cli.config import load_config
+            from agent.monitoring.gateway_health_export import start_gateway_health_export
+            self._gateway_health_export_runtime = start_gateway_health_export(load_config())
+            if getattr(self._gateway_health_export_runtime, "enabled", False):
+                logger.info("Gateway health OTLP export: enabled")
+        except Exception:
+            logger.debug("gateway health OTLP export startup failed", exc_info=True)
 
-        # Sanity-check that systemd's TimeoutStopSec covers our drain window: a unit file from
-        # before a hermes-agent upgrade (no ``hermes setup`` re-run) may encode the old default,
-        # so SIGKILL hits mid-drain and looks like a phantom kill in the journal. Never raises.
+        # Log any active supply-chain security advisories. Deliberately does NOT block startup or
+        # surface inline to users — only the operator can act (uninstall, rotate credentials).
+        try:
+            from hermes_cli.security_advisories import (
+                detect_compromised,
+                gateway_log_message,
+            )
+            _adv_msg = gateway_log_message(detect_compromised())
+            if _adv_msg:
+                logger.warning("%s", _adv_msg)
+                logger.warning(
+                    "Run `hermes doctor` on the gateway host for full "
+                    "remediation steps."
+                )
+        except Exception:
+            logger.debug(
+                "security advisory check failed at gateway startup",
+                exc_info=True,
+            )
+
+    def _start_log_systemd_timing_alignment(self) -> None:
+        """Warn when systemd's TimeoutStopSec does not cover the drain window. Never raises.
+
+        A unit file from before an upgrade (no ``hermes setup`` re-run) may encode the old default,
+        so SIGKILL hits mid-drain and looks like a phantom kill in the journal.
+        """
         try:
             from gateway.shutdown_forensics import check_systemd_timing_alignment
             _alignment = check_systemd_timing_alignment(
@@ -961,83 +1031,43 @@ class GatewayStartupMixin:
                 )
         except Exception as _e:
             logger.debug("check_systemd_timing_alignment failed: %s", _e)
-        # Log the resolved max_iterations budget so operators can verify the config.yaml → env
-        # bridge at a glance (instead of silently running at a stale .env value for weeks).
-        try:
-            _effective_max_iter = int(os.getenv("HERMES_MAX_ITERATIONS", "500"))
-            logger.info(
-                "Agent budget: max_iterations=%d (agent.max_turns from config.yaml, "
-                "or HERMES_MAX_ITERATIONS from .env, or default 500)",
-                _effective_max_iter,
-            )
-        except Exception:
-            pass
-        # Redaction is ON by default; warn prominently when an operator has explicitly opted out so
-        # the downgrade isn't forgotten. The redactor snapshots its state at import time, so this
-        # log line is the source of truth for the process lifetime.
-        try:
-            _redact_raw = os.getenv("HERMES_REDACT_SECRETS", "true")
-            _redact_on = _redact_raw.lower() in {"1", "true", "yes", "on"}
-            if _redact_on:
-                logger.info(
-                    "Secret redaction: ENABLED (tool output, logs, and chat "
-                    "responses are scrubbed before delivery)"
-                )
-            else:
-                logger.warning(
-                    "Secret redaction: DISABLED (HERMES_REDACT_SECRETS=%s). "
-                    "API keys and tokens may appear verbatim in chat output, "
-                    "session JSONs, and logs. Set security.redact_secrets: true "
-                    "in config.yaml to re-enable.",
-                    _redact_raw,
-                )
-        except Exception:
-            pass
-        try:
-            from hermes_cli.profiles import get_active_profile_name
-            _profile = get_active_profile_name()
-            if _profile and _profile != "default":
-                logger.info("Active profile: %s", _profile)
-        except Exception:
-            pass
-        try:
-            from gateway.status import write_runtime_status
-            write_runtime_status(
-                gateway_state="starting",
-                exit_reason=None,
-                clear_profile_platforms=True,
-            )
-        except Exception:
-            pass
-        try:
-            from hermes_cli.config import load_config
-            from agent.monitoring.gateway_health_export import start_gateway_health_export
-            self._gateway_health_export_runtime = start_gateway_health_export(load_config())
-            if getattr(self._gateway_health_export_runtime, "enabled", False):
-                logger.info("Gateway health OTLP export: enabled")
-        except Exception:
-            logger.debug("gateway health OTLP export startup failed", exc_info=True)
 
-        # Log any active supply-chain security advisories. Deliberately does NOT block startup or
-        # surface inline to users — only the operator can act (uninstall, rotate credentials).
-        try:
-            from hermes_cli.security_advisories import (
-                detect_compromised,
-                gateway_log_message,
-            )
-            _adv_hits = detect_compromised()
-            _adv_msg = gateway_log_message(_adv_hits)
-            if _adv_msg:
-                logger.warning("%s", _adv_msg)
-                logger.warning(
-                    "Run `hermes doctor` on the gateway host for full "
-                    "remediation steps."
-                )
-        except Exception:
-            logger.debug(
-                "security advisory check failed at gateway startup",
-                exc_info=True,
-            )
+    # Env vars that count as "an allowlist is configured" / "open access opted in" for builtin
+    # platforms; plugin-registered platforms are appended at check time.
+    _BUILTIN_ALLOWED_USERS_VARS = (
+        "TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
+        "WHATSAPP_ALLOWED_USERS", "WHATSAPP_CLOUD_ALLOWED_USERS",
+        "SLACK_ALLOWED_USERS",
+        "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
+        "TELEGRAM_GROUP_ALLOWED_USERS",
+        "TELEGRAM_GROUP_ALLOWED_CHATS",
+        "EMAIL_ALLOWED_USERS",
+        "SMS_ALLOWED_USERS", "MATTERMOST_ALLOWED_USERS",
+        "MATRIX_ALLOWED_USERS", "DINGTALK_ALLOWED_USERS",
+        "FEISHU_ALLOWED_USERS",
+        "WECOM_ALLOWED_USERS",
+        "WECOM_CALLBACK_ALLOWED_USERS",
+        "WEIXIN_ALLOWED_USERS",
+        "BLUEBUBBLES_ALLOWED_USERS",
+        "QQ_ALLOWED_USERS",
+        "YUANBAO_ALLOWED_USERS",
+        "GATEWAY_ALLOWED_USERS",
+    )
+    _BUILTIN_ALLOW_ALL_VARS = (
+        "TELEGRAM_ALLOW_ALL_USERS", "DISCORD_ALLOW_ALL_USERS",
+        "WHATSAPP_ALLOW_ALL_USERS", "WHATSAPP_CLOUD_ALLOW_ALL_USERS",
+        "SLACK_ALLOW_ALL_USERS",
+        "SIGNAL_ALLOW_ALL_USERS", "EMAIL_ALLOW_ALL_USERS",
+        "SMS_ALLOW_ALL_USERS", "MATTERMOST_ALLOW_ALL_USERS",
+        "MATRIX_ALLOW_ALL_USERS", "DINGTALK_ALLOW_ALL_USERS",
+        "FEISHU_ALLOW_ALL_USERS",
+        "WECOM_ALLOW_ALL_USERS",
+        "WECOM_CALLBACK_ALLOW_ALL_USERS",
+        "WEIXIN_ALLOW_ALL_USERS",
+        "BLUEBUBBLES_ALLOW_ALL_USERS",
+        "QQ_ALLOW_ALL_USERS",
+        "YUANBAO_ALLOW_ALL_USERS",
+    )
 
     def _start_check_access_policy(self) -> bool:
         """Warn about missing allowlists; return True when startup must be refused."""
@@ -1046,43 +1076,8 @@ class GatewayStartupMixin:
             _own_policy_open_startup_violation,
             _write_runtime_status_quiet,
         )
-        # Warn if no user allowlists are configured and open access is not opted in
-        _builtin_allowed_vars = (
-            "TELEGRAM_ALLOWED_USERS", "DISCORD_ALLOWED_USERS",
-            "WHATSAPP_ALLOWED_USERS", "WHATSAPP_CLOUD_ALLOWED_USERS",
-            "SLACK_ALLOWED_USERS",
-            "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
-            "TELEGRAM_GROUP_ALLOWED_USERS",
-            "TELEGRAM_GROUP_ALLOWED_CHATS",
-            "EMAIL_ALLOWED_USERS",
-            "SMS_ALLOWED_USERS", "MATTERMOST_ALLOWED_USERS",
-            "MATRIX_ALLOWED_USERS", "DINGTALK_ALLOWED_USERS",
-            "FEISHU_ALLOWED_USERS",
-            "WECOM_ALLOWED_USERS",
-            "WECOM_CALLBACK_ALLOWED_USERS",
-            "WEIXIN_ALLOWED_USERS",
-            "BLUEBUBBLES_ALLOWED_USERS",
-            "QQ_ALLOWED_USERS",
-            "YUANBAO_ALLOWED_USERS",
-            "GATEWAY_ALLOWED_USERS",
-        )
-        _builtin_allow_all_vars = (
-            "TELEGRAM_ALLOW_ALL_USERS", "DISCORD_ALLOW_ALL_USERS",
-            "WHATSAPP_ALLOW_ALL_USERS", "WHATSAPP_CLOUD_ALLOW_ALL_USERS",
-            "SLACK_ALLOW_ALL_USERS",
-            "SIGNAL_ALLOW_ALL_USERS", "EMAIL_ALLOW_ALL_USERS",
-            "SMS_ALLOW_ALL_USERS", "MATTERMOST_ALLOW_ALL_USERS",
-            "MATRIX_ALLOW_ALL_USERS", "DINGTALK_ALLOW_ALL_USERS",
-            "FEISHU_ALLOW_ALL_USERS",
-            "WECOM_ALLOW_ALL_USERS",
-            "WECOM_CALLBACK_ALLOW_ALL_USERS",
-            "WEIXIN_ALLOW_ALL_USERS",
-            "BLUEBUBBLES_ALLOW_ALL_USERS",
-            "QQ_ALLOW_ALL_USERS",
-            "YUANBAO_ALLOW_ALL_USERS",
-        )
-        # Also pick up plugin-registered platforms — each entry can declare its own
-        # allowed_users_env / allow_all_env, so the warning stays accurate as plugins (IRC) arrive.
+        # Plugin-registered platforms declare their own allowed_users_env / allow_all_env, so the
+        # warning stays accurate as plugins (IRC) arrive.
         _plugin_allowed_vars: tuple = ()
         _plugin_allow_all_vars: tuple = ()
         try:
@@ -1098,11 +1093,11 @@ class GatewayStartupMixin:
         except Exception:
             pass
         _any_allowlist = any(
-            os.getenv(v) for v in _builtin_allowed_vars + _plugin_allowed_vars
+            os.getenv(v) for v in self._BUILTIN_ALLOWED_USERS_VARS + _plugin_allowed_vars
         )
         _allow_all = os.getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"} or any(
             os.getenv(v, "").lower() in {"true", "1", "yes"}
-            for v in _builtin_allow_all_vars + _plugin_allow_all_vars
+            for v in self._BUILTIN_ALLOW_ALL_VARS + _plugin_allow_all_vars
         )
         if not _any_allowlist and not _allow_all:
             logger.warning(
@@ -1353,13 +1348,7 @@ class GatewayStartupMixin:
                 await asyncio.gather(*_pending_tasks, return_exceptions=True)
                 for _t in _pending_tasks:
                     _p, _c, _a = _task_map[_t]
-                    try:
-                        await _a.cancel_background_tasks()
-                    except Exception as e:
-                        logger.debug(
-                            "✗ %s background-task cancel error: %s", _p.value, e
-                        )
-                    await self._safe_adapter_disconnect(_a, _p)
+                    await self._startup_teardown_adapter(_a, _p)
                 # Tear down adapters whose connect already succeeded — they
                 # were never registered, so stop() won't reach them.
                 for _t, (_p, _c, _a) in _task_map.items():
@@ -1367,14 +1356,7 @@ class GatewayStartupMixin:
                         continue
                     _res = _t.exception() is None and _t.result() or None
                     if _res and _res[3] == "ok":
-                        try:
-                            await _a.cancel_background_tasks()
-                        except Exception as e:
-                            logger.debug(
-                                "✗ %s background-task cancel error: %s",
-                                _p.value, e,
-                            )
-                        await self._safe_adapter_disconnect(_a, _p)
+                        await self._startup_teardown_adapter(_a, _p)
                 await self._abort_startup_if_shutdown_requested()
                 return None
             _raw = [
@@ -1390,15 +1372,15 @@ class GatewayStartupMixin:
         startup_retryable_errors: list,
         startup_nonretryable_errors: list,
     ) -> int:
-        """Apply connect outcomes to shared state; returns the connected adapter count."""
+        """Apply connect outcomes to shared state; returns the connected adapter count.
+
+        Aggregated single-threaded so shared state (self.adapters, self._failed_platforms, the
+        error lists) is mutated exactly as the original serial loop did.
+        """
         connected_count = 0
-        # Aggregate results single-threaded so shared state (self.adapters, self._failed_platforms,
-        # the error lists, connected_count) is mutated exactly as the original serial loop did --
-        # only the connect() wall-clock overlap changed.
         for _item in _raw:
             if isinstance(_item, Exception):
-                # Unexpected escape from _connect_one_startup (shouldn't happen);
-                # log and skip rather than aborting the whole startup.
+                # Unexpected escape from _connect_one_startup (shouldn't happen); log and skip.
                 logger.error("Unexpected startup connect error: %s", _item)
                 continue
             platform, adapter, platform_config, outcome, exc = _item
@@ -1414,74 +1396,51 @@ class GatewayStartupMixin:
                 )
                 startup_retryable_errors.append(f"{platform.value}: {exc}")
                 # Unexpected exceptions are typically transient -- queue for retry
-                self._failed_platforms[platform] = {
-                    "config": platform_config,
-                    "attempts": 1,
-                    "next_retry": time.monotonic() + 30,
-                    "queued_at": time.monotonic(),
-                    "credential_claim": self._adapter_credential_claim(platform, adapter),
-                    "listener_claim": self._adapter_listener_claim(platform, adapter),
-                }
+                self._failed_platforms[platform] = self._startup_retry_entry(platform, adapter, platform_config)
                 continue
             if outcome == "ok":
                 self.adapters[platform] = adapter
                 self._sync_voice_mode_state_to_adapter(adapter)
-                # Wire voice input callback at connect time so voice
-                # transcription is forwarded without requiring /voice join.
+                # Wire voice input at connect time so transcription works without /voice join.
                 self._bind_voice_input_callback(adapter)
                 connected_count += 1
                 self._update_platform_runtime_status(
                     platform.value, platform_state="connected", error_code=None, error_message=None,
                 )
                 logger.info("\u2713 %s connected", platform.value)
-            else:  # outcome == "failed"
-                logger.warning("\u2717 %s failed to connect", platform.value)
-                # Defensive cleanup: a failed connect() may have allocated resources
-                # (aiohttp.ClientSession, poll tasks, bridge subprocesses) before giving up.
-                await self._safe_adapter_disconnect(adapter, platform)
-                if adapter.has_fatal_error:
-                    # A live foreign holder of this bot token is a single-writer ownership conflict,
-                    # not a blip — ``_acquire_platform_lock`` emits it retryable only so a MID-RUN
-                    # reconnect can recover. At startup route it non-retryable: with nothing connected
-                    # the gateway exits 78 instead of sitting alive and deaf in the retry queue.
-                    _retryable = adapter.fatal_error_retryable and not (
-                        is_global_startup_conflict(adapter.fatal_error_code)
-                    )
-                    self._update_platform_runtime_status(
-                        platform.value,
-                        platform_state="retrying" if _retryable else "fatal",
-                        error_code=adapter.fatal_error_code,
-                        error_message=adapter.fatal_error_message,
-                    )
-                    target = (
-                        startup_retryable_errors
-                        if _retryable
-                        else startup_nonretryable_errors
-                    )
-                    target.append(f"{platform.value}: {adapter.fatal_error_message}")
-                    # Queue for reconnection if the error is retryable
-                    if _retryable:
-                        self._failed_platforms[platform] = {
-                            "config": platform_config,
-                            "attempts": 1,
-                            "next_retry": time.monotonic() + 30,
-                            "credential_claim": self._adapter_credential_claim(platform, adapter),
-                            "listener_claim": self._adapter_listener_claim(platform, adapter),
-                        }
-                else:
-                    self._update_platform_runtime_status(
-                        platform.value, platform_state="retrying", error_code=None, error_message="failed to connect",
-                    )
-                    startup_retryable_errors.append(f"{platform.value}: failed to connect")
-                    # No fatal error info means likely a transient issue -- queue for retry
-                    self._failed_platforms[platform] = {
-                        "config": platform_config,
-                        "attempts": 1,
-                        "next_retry": time.monotonic() + 30,
-                        "queued_at": time.monotonic(),
-                        "credential_claim": self._adapter_credential_claim(platform, adapter),
-                        "listener_claim": self._adapter_listener_claim(platform, adapter),
-                    }
+                continue
+            # outcome == "failed"
+            logger.warning("\u2717 %s failed to connect", platform.value)
+            # Defensive cleanup: a failed connect() may have allocated resources
+            # (aiohttp.ClientSession, poll tasks, bridge subprocesses) before giving up.
+            await self._safe_adapter_disconnect(adapter, platform)
+            if not adapter.has_fatal_error:
+                self._update_platform_runtime_status(
+                    platform.value, platform_state="retrying", error_code=None, error_message="failed to connect",
+                )
+                startup_retryable_errors.append(f"{platform.value}: failed to connect")
+                # No fatal error info means likely a transient issue -- queue for retry
+                self._failed_platforms[platform] = self._startup_retry_entry(platform, adapter, platform_config)
+                continue
+            # A live foreign holder of this bot token is a single-writer ownership conflict, not a
+            # blip — ``_acquire_platform_lock`` emits it retryable only so a MID-RUN reconnect can
+            # recover. At startup route it non-retryable: with nothing connected the gateway exits
+            # 78 instead of sitting alive and deaf in the retry queue.
+            _retryable = adapter.fatal_error_retryable and not (
+                is_global_startup_conflict(adapter.fatal_error_code)
+            )
+            self._update_platform_runtime_status(
+                platform.value,
+                platform_state="retrying" if _retryable else "fatal",
+                error_code=adapter.fatal_error_code,
+                error_message=adapter.fatal_error_message,
+            )
+            target = startup_retryable_errors if _retryable else startup_nonretryable_errors
+            target.append(f"{platform.value}: {adapter.fatal_error_message}")
+            if _retryable:
+                self._failed_platforms[platform] = self._startup_retry_entry(
+                    platform, adapter, platform_config, queued=False
+                )
         return connected_count
 
     async def _start_secondary_profiles(
@@ -1702,60 +1661,58 @@ class GatewayStartupMixin:
         except Exception as e:
             logger.error("Recovered watcher setup error: %s", e)
 
+    # Long-lived supervised watchers spawned at the end of start(), in order. (method, name)
+    # - session_expiry_watcher: finalize expired sessions.
+    # - model_catalog_refresh_watcher: keep /model picker remote catalogs warm on disk so a
+    #   delisted/new model reaches the picker within one TTL (model_catalog.ttl_minutes).
+    # - session_stall_watcher: pending inbound + stale agent activity → warn user to /new
+    #   (does not kill the turn; agent.session_stall_timeout).
+    # - kanban_notifier_watcher: deliver events for subscriptions owned by the profiles whose
+    #   adapters this gateway hosts, even when another gateway owns the dispatcher.
+    # - kanban_dispatcher_watcher: spawn workers for ready tasks; gated by
+    #   kanban.dispatch_in_gateway (default True), no-op when false.
+    _PRE_RECONNECT_WATCHERS = (
+        ("_session_expiry_watcher", "session_expiry_watcher"),
+        ("_model_catalog_refresh_watcher", "model_catalog_refresh_watcher"),
+        ("_session_stall_watcher", "session_stall_watcher"),
+        ("_kanban_notifier_watcher", "kanban_notifier_watcher"),
+        ("_kanban_dispatcher_watcher", "kanban_dispatcher_watcher"),
+    )
+    # - handoff_watcher: re-bind CLI sessions marked handoff_state='pending' to the destination
+    #   platform's home channel and forge a synthetic user turn.
+    # - async_delegation_watcher: inject delegate_task(background=true) completions into their
+    #   originating session as a new turn (covers the idle, no-turn case).
+    # - loop_wakeup_watcher: inject due /loop wakeup prompts into idle originating chats.
+    _POST_RECONNECT_WATCHERS = (
+        ("_handoff_watcher", "handoff_watcher"),
+        ("_async_delegation_watcher", "async_delegation_watcher"),
+        ("_loop_wakeup_watcher", "loop_wakeup_watcher"),
+    )
+
     def _start_spawn_background_watchers(self) -> None:
         """Spawn the long-lived supervised background watchers."""
-        # Start background session expiry watcher to finalize expired sessions
-        self._spawn_supervised(self._session_expiry_watcher, "session_expiry_watcher")
+        for method, name in self._PRE_RECONNECT_WATCHERS:
+            self._spawn_supervised(getattr(self, method), name)
 
-        # Keep the /model picker's remote catalogs (curated manifest, OpenRouter live list, Nous
-        # Portal recommendations) warm on disk so a delisted or newly-published model reaches the
-        # picker within one TTL window (model_catalog.ttl_minutes, default 20) without a cold open.
-        self._spawn_supervised(self._model_catalog_refresh_watcher, "model_catalog_refresh_watcher")
-
-        # Stall watchdog: pending inbound + stale agent activity → warn user
-        # to /new (does not kill the turn; see agent.session_stall_timeout).
-        self._spawn_supervised(self._session_stall_watcher, "session_stall_watcher")
-
-        # Start the kanban notifier — each gateway delivers events for subscriptions owned by the
-        # profiles whose adapters it hosts, even when another gateway owns the single dispatcher.
-        self._spawn_supervised(self._kanban_notifier_watcher, "kanban_notifier_watcher")
-
-        # Start background kanban dispatcher — spawns workers for ready tasks. Gated by
-        # `kanban.dispatch_in_gateway` (default True). When false, users run `hermes kanban daemon`
-        # externally or simply don't use kanban; this loop becomes a no-op.
-        self._spawn_supervised(self._kanban_dispatcher_watcher, "kanban_dispatcher_watcher")
-
-        # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
                 "Starting reconnection watcher for %d failed platform(s): %s",
                 len(self._failed_platforms),
                 ", ".join(p.value for p in self._failed_platforms),
             )
-        # Track the reconnect watcher task so _ensure_reconnect_watcher_running can detect death
-        # and respawn it. Spawned via _spawn_supervised so an exception escaping the watcher's OUTER
-        # loop is caught, logged, and restarted with backoff instead of silently killing it (else a
-        # platform already queued in _failed_platforms stays stranded: the ensure hook only runs on
-        # a NEW fatal-error arrival). ``on_spawn`` keeps ``_reconnect_watcher_task`` on the CURRENT
-        # live task across backoff respawns so a superseded handle never looks like a dead watcher.
+        # Spawned via _spawn_supervised so an exception escaping the watcher's OUTER loop is caught,
+        # logged, and restarted with backoff instead of silently killing it (else a platform already
+        # queued in _failed_platforms stays stranded: the ensure hook only runs on a NEW fatal-error
+        # arrival). ``on_spawn`` keeps ``_reconnect_watcher_task`` on the CURRENT live task across
+        # backoff respawns so a superseded handle never looks like a dead watcher.
         self._spawn_reconnect_watcher()
 
-        # Start background handoff watcher — picks up CLI sessions marked handoff_state='pending' in
-        # state.db and re-binds them to the destination platform's home channel, then forges a
-        # synthetic user turn so the agent kicks off the new chat.
-        self._spawn_supervised(self._handoff_watcher, "handoff_watcher")
+        for method, name in self._POST_RECONNECT_WATCHERS:
+            self._spawn_supervised(getattr(self, method), name)
 
-        # Async-delegation watcher: drains delegate_task(background=true) completions and injects
-        # each result into its originating session as a new turn (covers the idle, no-turn case).
-        self._spawn_supervised(self._async_delegation_watcher, "async_delegation_watcher")
-
-        # /loop wakeup watcher: scans persisted loops (SessionDB loop:* rows) and injects due
-        # wakeup prompts into their originating chats while the session is idle.
-        self._spawn_supervised(self._loop_wakeup_watcher, "loop_wakeup_watcher")
-
-        # Start the scale-to-zero idle watcher ONLY when opted in (HERMES_SCALE_TO_ZERO stamp),
-        # messaging is relay-only/absent, and a wakeUrl is registered. When armed it drives the relay
-        # dormant on sustained idle, then suspends via flaps — Fly autostop is inbound-only, job-blind.
+        # Scale-to-zero idle watcher ONLY when opted in (HERMES_SCALE_TO_ZERO stamp), messaging is
+        # relay-only/absent, and a wakeUrl is registered. When armed it drives the relay dormant on
+        # sustained idle, then suspends via flaps — Fly autostop is inbound-only, job-blind.
         try:
             if self._scale_to_zero_should_arm():
                 logger.info(
@@ -1851,57 +1808,61 @@ class GatewayStartupMixin:
 
         return True
 
-    async def _process_handoff(
-        self, row: Dict[str, Any], profile_name: Optional[str] = None,
-    ) -> None:
-        """Execute one handoff row. Raises on failure (caller marks failed).
+    @dataclasses.dataclass
+    class _HandoffDestination:
+        """Resolved destination for one handoff row."""
+        platform: Platform
+        platform_name: str
+        transport: Any
+        home: Any
+        home_chat_id: str
+        effective_thread_id: Optional[str]
+        source: SessionSource
+        handoff_config: Any
 
-        ``profile_name`` (``None`` = root) is the profile whose store queued this handoff. Under
-        multiplex it is load-bearing: ``self.adapters``/``self.config`` are the primary's (secondaries
-        live in ``_profile_adapters``), and the session key must be namespaced ``agent:<profile>:...``
-        or it binds a key nobody reads. Passing the name beats re-deriving it from the contextvar.
+    def _handoff_resolve_scope(self, profile_name: Optional[str]):
+        """Return (config, adapters) for the profile that queued the handoff.
+
+        Single-profile gateways (or a default-profile handoff) use self.config/self.adapters. For
+        a secondary profile the watcher already entered _profile_runtime_scope, so a fresh load
+        resolves THAT profile's config; fail closed — self.config would deliver to the WRONG chat.
         """
-        from gateway.run import load_gateway_config, resolve_delivery_transport
-        from gateway.config import Platform
-        from gateway.session import SessionSource, build_session_key
-        from gateway.platforms.base import MessageEvent
+        from gateway.run import load_gateway_config
+        if not profile_name or profile_name == "default":
+            return self.config, self.adapters
+        secondary = (self._profile_adapters or {}).get(profile_name)
+        if not secondary:
+            raise RuntimeError(
+                f"profile '{profile_name}' has no live adapters in this gateway"
+            )
+        try:
+            return load_gateway_config(), secondary
+        except Exception as exc:
+            logger.error(
+                "Handoff: could not load config for profile %s; "
+                "failing the handoff instead of delivering via the "
+                "primary's config",
+                profile_name, exc_info=True,
+            )
+            raise RuntimeError(
+                f"could not load config for profile '{profile_name}': {exc}"
+            ) from exc
 
+    async def _handoff_resolve_destination(
+        self, row: Dict[str, Any], profile_name: Optional[str]
+    ) -> "GatewayStartupMixin._HandoffDestination":
+        """Resolve platform, transport, home channel, thread and destination source for a row."""
+        from gateway.run import resolve_delivery_transport
         cli_session_id = row["id"]
         platform_name = (row.get("handoff_platform") or "").strip().lower()
         if not platform_name:
             raise RuntimeError("handoff_platform is empty")
-
-        # Resolve platform enum
         try:
             platform = Platform(platform_name)
         except (ValueError, KeyError):
             raise RuntimeError(f"unknown platform '{platform_name}'")
 
-        # Resolve the config + adapter map for the profile that queued this handoff; single-profile
-        # gateways (or a default-profile handoff) fall back to self.config/self.adapters.
-        handoff_config = self.config
-        handoff_adapters = self.adapters
-        if profile_name and profile_name != "default":
-            secondary = (self._profile_adapters or {}).get(profile_name)
-            if not secondary:
-                raise RuntimeError(
-                    f"profile '{profile_name}' has no live adapters in this gateway"
-                )
-            handoff_adapters = secondary
-            # The watcher already entered _profile_runtime_scope, so a fresh load resolves THIS
-            # profile's config. Fail closed — self.config would deliver to the WRONG chat.
-            try:
-                handoff_config = load_gateway_config()
-            except Exception as exc:
-                logger.error(
-                    "Handoff: could not load config for profile %s; "
-                    "failing the handoff instead of delivering via the "
-                    "primary's config",
-                    profile_name, exc_info=True,
-                )
-                raise RuntimeError(
-                    f"could not load config for profile '{profile_name}': {exc}"
-                ) from exc
+        handoff_config, handoff_adapters = self._handoff_resolve_scope(profile_name)
 
         # Adapter must be live. A relay-fronted gateway registers ONE adapter under Platform.RELAY
         # fronting N logical platforms, so a literal adapters.get(discord) misses a deliverable
@@ -1911,9 +1872,6 @@ class GatewayStartupMixin:
             raise RuntimeError(
                 f"platform '{platform_name}' is not active in this gateway"
             )
-        adapter = transport.adapter
-
-        # Home channel must be configured
         home = handoff_config.get_home_channel(platform)
         if not home or not home.chat_id:
             raise RuntimeError(
@@ -1921,14 +1879,12 @@ class GatewayStartupMixin:
                 f"run /sethome on the desired chat first"
             )
 
+        # Fresh thread on the destination so the handoff has its own scrollback. Adapter returns
+        # None if threading is unsupported (Matrix/WhatsApp/Signal/SMS) or creation failed.
         cli_title = row.get("title") or cli_session_id[:8]
-
-        # Create a fresh thread on the destination so the handoff has its own scrollback. Adapter
-        # returns None if threading is unsupported (Matrix/WhatsApp/Signal/SMS) or creation failed.
-        thread_name = f"Hermes — {cli_title}"
         try:
-            new_thread_id = await adapter.create_handoff_thread(
-                str(home.chat_id), thread_name,
+            new_thread_id = await transport.adapter.create_handoff_thread(
+                str(home.chat_id), f"Hermes — {cli_title}",
             )
         except Exception as exc:
             logger.debug(
@@ -1936,7 +1892,6 @@ class GatewayStartupMixin:
                 platform_name, exc, exc_info=True,
             )
             new_thread_id = None
-
         effective_thread_id = new_thread_id or (
             str(home.thread_id) if home.thread_id else None
         )
@@ -1949,7 +1904,6 @@ class GatewayStartupMixin:
             platform == Platform.TELEGRAM
             and looks_like_telegram_private_chat_id(home_chat_id)
         )
-
         if new_thread_id and not is_telegram_private_chat:
             dest_chat_type = "thread"
             dest_user_id = "system:handoff"
@@ -1958,7 +1912,6 @@ class GatewayStartupMixin:
             # (== chat_id) so topic-mode checks and binding persistence match later inbound turns.
             dest_chat_type = "dm"
             dest_user_id = home_chat_id if is_telegram_private_chat else "system:handoff"
-
         # Discord (unlike Slack/Telegram) builds in-thread messages with ``chat_id == thread id``,
         # so key on the thread's OWN id; keying on the parent would make the next reply spawn anew.
         if platform == Platform.DISCORD and dest_chat_type == "thread" and effective_thread_id:
@@ -1975,37 +1928,63 @@ class GatewayStartupMixin:
             thread_id=effective_thread_id,
             profile=profile_name,
         )
+        return self._HandoffDestination(
+            platform=platform,
+            platform_name=platform_name,
+            transport=transport,
+            home=home,
+            home_chat_id=home_chat_id,
+            effective_thread_id=effective_thread_id,
+            source=dest_source,
+            handoff_config=handoff_config,
+        )
 
-        # Build the session_key with the adapters' own rules so switch_session hits the right entry.
-        # Thread keys omit user_id (thread_sessions_per_user default) so the next message shares it.
-        platform_cfg = handoff_config.platforms.get(platform)
+    def _handoff_session_key(self, dest, profile_name: Optional[str]) -> str:
+        """Build the destination session_key with the adapters' own rules.
+
+        Thread keys omit user_id (thread_sessions_per_user default) so the next message shares it.
+        The key is namespaced to the queuing profile: a multiplexed gateway would otherwise build
+        ``agent:main:...`` while the profile's adapter routes inbound on ``agent:<profile>:...``.
+        The store resolver is only the root fallback (None when multiplexing is off; old key
+        unchanged). The isinstance check is load-bearing: a Mock store returns a truthy MagicMock.
+        """
+        platform_cfg = dest.handoff_config.platforms.get(dest.platform)
         extra = platform_cfg.extra if platform_cfg else {}
-        # Namespace the key to the queuing profile: a multiplexed gateway would otherwise build
-        # ``agent:main:...`` while the profile's adapter routes inbound on ``agent:<profile>:...``.
-        # The resolver is only the root fallback (None when multiplexing is off; old key unchanged).
-        # The isinstance check is load-bearing: a Mock store returns a truthy MagicMock.
         handoff_profile = profile_name if (profile_name and profile_name != "default") else None
         if handoff_profile is None:
             try:
                 store = getattr(self.async_session_store, "_store", self.async_session_store)
                 resolver = getattr(store, "_resolve_profile_for_key", None)
                 if callable(resolver):
-                    resolved = resolver(dest_source)
+                    resolved = resolver(dest.source)
                     if isinstance(resolved, str) and resolved.strip():
                         handoff_profile = resolved
             except Exception:
                 logger.debug("Handoff: could not resolve profile namespace", exc_info=True)
-        session_key = build_session_key(
-            dest_source,
+        return build_session_key(
+            dest.source,
             group_sessions_per_user=extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
             profile=handoff_profile,
         )
 
+    async def _process_handoff(
+        self, row: Dict[str, Any], profile_name: Optional[str] = None,
+    ) -> None:
+        """Execute one handoff row. Raises on failure (caller marks failed).
+
+        ``profile_name`` (``None`` = root) is the profile whose store queued this handoff. Under
+        multiplex it is load-bearing: ``self.adapters``/``self.config`` are the primary's (secondaries
+        live in ``_profile_adapters``), and the session key must be namespaced ``agent:<profile>:...``
+        or it binds a key nobody reads. Passing the name beats re-deriving it from the contextvar.
+        """
+        cli_session_id = row["id"]
+        dest = await self._handoff_resolve_destination(row, profile_name)
+        session_key = self._handoff_session_key(dest, profile_name)
+
         # Ensure a session_store entry exists for this key (get_or_create_session creates one for a
         # never-used home channel); switch_session then re-points it.
-        await self.async_session_store.get_or_create_session(dest_source)
-
+        await self.async_session_store.get_or_create_session(dest.source)
         # Re-bind the destination key to the CLI session_id: switch_session ends the prior session
         # in SQLite and reopens the CLI session under the new key; its transcript is now active.
         switched = await self.async_session_store.switch_session(session_key, cli_session_id)
@@ -2013,59 +1992,47 @@ class GatewayStartupMixin:
             raise RuntimeError(
                 f"could not switch session key {session_key} → {cli_session_id}"
             )
-
-        # Evict any cached AIAgent for this session_key so the next dispatch
-        # rebuilds it against the CLI session_id (mirrors /resume / /branch).
+        # Evict any cached AIAgent for this key so the next dispatch rebuilds it against the CLI
+        # session_id (mirrors /resume / /branch), and clear stale running-agent state so the
+        # synthetic turn isn't queued behind it.
         self._evict_cached_agent(session_key)
-
-        # Cancel any in-flight running-agent state for the destination key
-        # so the synthetic turn isn't queued behind a stale running flag.
         self._release_running_agent_state(session_key)
 
-        synthetic_text = (
-            f"[Session was just handed off from CLI (\"{cli_title}\") to this "
-            f"channel. The full prior conversation history is loaded above. "
-            f"Briefly confirm you're working here and summarize what we were "
-            f"working on, so the user can continue from this device.]"
-        )
-
+        cli_title = row.get("title") or cli_session_id[:8]
         synthetic_event = MessageEvent(
-            text=synthetic_text,
-            source=dest_source,
+            text=(
+                f"[Session was just handed off from CLI (\"{cli_title}\") to this "
+                f"channel. The full prior conversation history is loaded above. "
+                f"Briefly confirm you're working here and summarize what we were "
+                f"working on, so the user can continue from this device.]"
+            ),
+            source=dest.source,
             internal=True,
         )
-
         logger.info(
             "Handoff: dispatching synthetic turn for CLI session %s → %s "
             "(home=%s, thread=%s, session_key=%s)",
-            cli_session_id, platform_name, home.chat_id, effective_thread_id,
+            cli_session_id, dest.platform_name, dest.home.chat_id, dest.effective_thread_id,
             session_key,
         )
-
         # Dispatch through the runner directly: adapter.handle_message would spawn a background task
         # and lose error visibility; inline _handle_message keeps success/failure observable.
         response_text = await self._handle_message(synthetic_event)
         if not response_text:
-            # Streaming may have already delivered the response inline.
-            # Either way, agent ran without raising — count as success.
+            # Streaming may have already delivered the response inline; the agent ran without
+            # raising either way — count as success.
             return
 
         # Send the reply to the new thread if we created one, else the configured home channel
         # (which may carry a thread_id). Use the resolved transport (not adapter.send) so a
         # relay-fronted logical platform is stamped on the outbound frame (send_for_platform).
-        send_metadata: Dict[str, Any] = {}
-        if effective_thread_id:
-            send_metadata["thread_id"] = effective_thread_id
+        send_metadata = {"thread_id": dest.effective_thread_id} if dest.effective_thread_id else None
         try:
-            result = await transport.send(
-                platform,
-                str(home.chat_id),
-                response_text,
-                send_metadata or None,
+            result = await dest.transport.send(
+                dest.platform, str(dest.home.chat_id), response_text, send_metadata,
             )
         except Exception as exc:
             raise RuntimeError(f"adapter.send failed: {exc}") from exc
-
         if not getattr(result, "success", True):
             err = getattr(result, "error", "send returned success=False")
             raise RuntimeError(f"adapter.send failed: {err}")
