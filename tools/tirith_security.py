@@ -212,8 +212,7 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
             [cosign, "verify-blob", "--certificate", cert_path, "--signature", sig_path,
              "--certificate-identity-regexp", _COSIGN_IDENTITY_REGEXP,
              "--certificate-oidc-issuer", _COSIGN_ISSUER, checksums_path],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=15, stdin=subprocess.DEVNULL)
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("cosign execution failed: %s", exc)
         return None
@@ -494,8 +493,8 @@ def check_command_security(command: str) -> dict:
     try:
         result = subprocess.run(
             [tirith_path, "check", "--json", "--non-interactive", "--shell", "posix", "--", command],
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=timeout, stdin=subprocess.DEVNULL)
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
+            stdin=subprocess.DEVNULL)
     except OSError as exc:
         # FileNotFoundError / PermissionError / exec format error: dedupe by (class, errno)
         # so each failure mode surfaces once, not per command.

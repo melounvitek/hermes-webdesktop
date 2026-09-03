@@ -269,10 +269,9 @@ def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict
 def read_sync_state() -> Dict[str, Any]:
     """``{"head": "sha256:...|null", "skills": {...}}``; a default on missing/corrupt. A legacy
     ``.sync_manifest`` is migrated to ``.sync_state`` on read so no head record is lost."""
-    path = _skills_dir() / ".sync_state"
+    path, legacy = _skills_dir() / ".sync_state", _skills_dir() / ".sync_manifest"
     if path.exists():
         return _load_state_file(path) or dict(_EMPTY_STATE)
-    legacy = _skills_dir() / ".sync_manifest"
     data = _load_state_file(legacy, "legacy sync state migrate") if legacy.exists() else None
     if data is not None:
         write_sync_state(data)
@@ -289,11 +288,6 @@ def write_sync_state(data: Dict[str, Any]) -> None:
                       lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
     except Exception as e:
         logger.debug("skills_sync_client: sync state write failed: %s", e)
-
-
-def _record_head(state: Dict[str, Any], head: str, root: str) -> None:
-    state.update(head=head, root=root)
-    write_sync_state(state)
 
 
 # Profile snapshot -- the root tree mirrors each skill's relative path (categories = intermediate trees).
@@ -370,7 +364,7 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
                                           objects, message, base_head)
         client.cas_ref(ref, None, commit_hash)
         result["recovered_stale_head"] = True
-    _record_head(state, commit_hash, root_hash)
+    write_sync_state({**state, "head": commit_hash, "root": root_hash})
     return result
 
 
@@ -414,7 +408,7 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
     except SyncConflict as c2:
         return {"ok": False, "conflict": True, "actual_head": c2.actual,
                 "message": f"merge CAS lost again (head now {c2.actual}); retry sync."}
-    _record_head(read_sync_state(), merge_commit, merged_root)
+    write_sync_state({**read_sync_state(), "head": merge_commit, "root": merged_root})
     return {"ok": True, "head": merge_commit, "merged": True}
 
 
@@ -449,8 +443,7 @@ def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[
     updated = [path for path in remote_trees if not opted_in or path in opted_in]
     for path in updated:
         materialize_tree(client, remote_trees[path], _skills_dir() / path)
-    state["head"] = head
-    write_sync_state(state)
+    write_sync_state({**state, "head": head})
     return {"ok": True, "head": head, "updated": sorted(updated), "opt_in_adopted": sorted(adopted)}
 
 
