@@ -66,13 +66,9 @@ class DashboardOAuthFlow:
             self.status = "authorization_required"
             self._authorization_ready.set()
 
-    @staticmethod
-    async def _await_event(event: threading.Event, timeout: float, message: str) -> None:
-        if not await asyncio.to_thread(event.wait, timeout):
-            raise TimeoutError(message)
-
     async def wait_for_authorization_url(self, timeout: float = 30.0) -> str:
-        await self._await_event(self._authorization_ready, timeout, "Timed out waiting for MCP authorization URL")
+        if not await asyncio.to_thread(self._authorization_ready.wait, timeout):
+            raise TimeoutError("Timed out waiting for MCP authorization URL")
         if not self.authorization_url:
             raise RuntimeError(self.error or "MCP OAuth flow ended before authorization")
         return self.authorization_url
@@ -93,7 +89,8 @@ class DashboardOAuthFlow:
             self._callback_ready.set()
 
     async def wait_for_callback(self, timeout: float = 300.0) -> tuple[str, str | None]:
-        await self._await_event(self._callback_ready, timeout, "Timed out waiting for MCP OAuth callback")
+        if not await asyncio.to_thread(self._callback_ready.wait, timeout):
+            raise TimeoutError("Timed out waiting for MCP OAuth callback")
         if self._callback_error:
             raise RuntimeError(f"OAuth authorization failed: {self._callback_error}")
         if self._callback is None:
@@ -134,9 +131,7 @@ class DashboardOAuthFlow:
         return self._worker_done.is_set()
 
 
-_current_dashboard_flow: contextvars.ContextVar[DashboardOAuthFlow | None] = (
-    contextvars.ContextVar("mcp_dashboard_oauth_flow", default=None)
-)
+_current_dashboard_flow: contextvars.ContextVar[DashboardOAuthFlow | None] = contextvars.ContextVar("mcp_dashboard_oauth_flow", default=None)
 
 
 def dashboard_oauth_flow(flow: DashboardOAuthFlow):
