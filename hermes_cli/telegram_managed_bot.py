@@ -150,10 +150,14 @@ def _try_poll(api_url: str | None, pairing: TelegramPairing) -> TelegramBotSetup
 
 def poll_for_setup_result(
     api_url: str | None, pairing: TelegramPairing, timeout: float = DEFAULT_POLL_TIMEOUT,
-    interval: float = POLL_INTERVAL) -> Optional[TelegramBotSetupResult]:
-    """Poll the pairing API until setup metadata is available or timeout."""
-    deadline = time.monotonic() + timeout
+    interval: float = POLL_INTERVAL, on_tick=None) -> Optional[TelegramBotSetupResult]:
+    """Poll the pairing API until setup metadata is available or timeout. ``on_tick(elapsed_s)``
+    runs before each attempt (progress display)."""
+    start = time.monotonic()
+    deadline = start + timeout
     while time.monotonic() < deadline:
+        if on_tick:
+            on_tick(time.monotonic() - start)
         if result := _try_poll(api_url, pairing):
             return result
         time.sleep(interval)
@@ -172,8 +176,8 @@ def auto_setup_telegram_bot_result(
     sys.stdout.flush()
     pairing = create_pairing(resolved_api_url)
     if not pairing:
-        print("  ✗ Could not reach the Hermes Telegram onboarding service.")
-        print("    Try the manual setup instead, or check your network.")
+        print("  ✗ Could not reach the Hermes Telegram onboarding service.\n"
+              "    Try the manual setup instead, or check your network.")
         return None
 
     print("  ✓ Pairing created")
@@ -181,28 +185,26 @@ def auto_setup_telegram_bot_result(
     sys.stdout.flush()
     print("\n  Scan this QR code with your phone, or open the link below:\n")
     print_qr_code(pairing.qr_payload, include_link=False)
-    print(f"\n  Link: {pairing.deep_link}\n")
-    print("  When Telegram opens, tap 'Create Bot' to confirm.")
-    print("  (You can edit the bot display name before confirming)\n")
+    print(f"\n  Link: {pairing.deep_link}\n"
+          "  When Telegram opens, tap 'Create Bot' to confirm.\n"
+          "  (You can edit the bot display name before confirming)\n")
 
     spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    start = time.monotonic()
-    deadline = start + poll_timeout
-    idx = 0
-    while time.monotonic() < deadline:
-        char = spinner_chars[idx % len(spinner_chars)]
-        remaining = max(0, int(poll_timeout - int(time.monotonic() - start)))
+    ticks = iter(range(1 << 30))
+
+    def spin(elapsed: float) -> None:
+        char = spinner_chars[next(ticks) % len(spinner_chars)]
+        remaining = max(0, int(poll_timeout - int(elapsed)))
         sys.stdout.write(f"\r  {char} Waiting for bot creation... ({remaining}s remaining) ")
         sys.stdout.flush()
-        idx += 1
-        if result := _try_poll(resolved_api_url, pairing):
-            sys.stdout.write("\r  ✓ Bot created successfully!                              \n")
-            sys.stdout.flush()
-            return result
-        time.sleep(POLL_INTERVAL)
 
+    result = poll_for_setup_result(resolved_api_url, pairing, poll_timeout, POLL_INTERVAL, on_tick=spin)
+    if result:
+        sys.stdout.write("\r  ✓ Bot created successfully!                              \n")
+        sys.stdout.flush()
+        return result
     sys.stdout.write("\r  ✗ Timed out waiting for bot creation.                    \n")
     sys.stdout.flush()
-    print("    The bot may still be created — check Telegram.")
-    print("    You can paste the token manually below, or re-run setup.")
+    print("    The bot may still be created — check Telegram.\n"
+          "    You can paste the token manually below, or re-run setup.")
     return None

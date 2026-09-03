@@ -80,9 +80,8 @@ def _read_nearest_vercel_project(start: Path | None = None) -> dict[str, str]:
             return {}
         if not isinstance(data, dict):
             return {}
-        return {
-            key: value for key, value in {"projectId": data.get("projectId"), "orgId": data.get("orgId")}.items()
-            if isinstance(value, str) and value.strip()}
+        return {key: data[key] for key in ("projectId", "orgId")
+                if isinstance(data.get(key), str) and data[key].strip()}
     return {}
 
 
@@ -93,6 +92,14 @@ def _prompt_secret_env(label: str, env_var: str, *, confirm_msg: str = "") -> No
         _setup.save_env_value(env_var, value)
         if confirm_msg:
             _setup.print_success(confirm_msg)
+
+
+def _existing_secret_keeps(env_var: str, label: str, question: str) -> bool:
+    """True when ``env_var`` is already set and the user declines to update it."""
+    if not _setup.get_env_value(env_var):
+        return False
+    _setup.print_info(f"  {label}: already configured")
+    return not _setup.prompt_yes_no(question, False)
 
 
 def _pip_install_vercel(package):
@@ -198,10 +205,8 @@ def _setup_backend_modal(config: dict) -> None:
     _setup.print_info("Requires a Modal account: https://modal.com")
     _ensure_sdk("modal", "uv pip install modal")
     _setup._info(None, "Modal authentication:", "  Get your token at: https://modal.com/settings")
-    if _setup.get_env_value("MODAL_TOKEN_ID"):
-        _setup.print_info("  Modal token: already configured")
-        if not _setup.prompt_yes_no("  Update Modal credentials?", False):
-            return
+    if _existing_secret_keeps("MODAL_TOKEN_ID", "Modal token", "  Update Modal credentials?"):
+        return
     _prompt_secret_env("    Modal Token ID", "MODAL_TOKEN_ID")
     _prompt_secret_env("    Modal Token Secret", "MODAL_TOKEN_SECRET")
 
@@ -213,12 +218,9 @@ def _setup_backend_daytona(config: dict) -> None:
           "Sign up at: https://daytona.io")
     _ensure_sdk("daytona", "uv pip install daytona", show_stderr=True)
     print()
-    if _setup.get_env_value("DAYTONA_API_KEY"):
-        _setup.print_info("  Daytona API key: already configured")
-        if _setup.prompt_yes_no("  Update API key?", False):
-            _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Updated")
-    else:
-        _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Configured")
+    had_key = bool(_setup.get_env_value("DAYTONA_API_KEY"))
+    if not _existing_secret_keeps("DAYTONA_API_KEY", "Daytona API key", "  Update API key?"):
+        _prompt_secret_env("    Daytona API key", "DAYTONA_API_KEY", confirm_msg="    Updated" if had_key else "    Configured")
     config["terminal"].setdefault("daytona_image", _SANDBOX_IMAGE)
 
 
@@ -251,13 +253,8 @@ def _setup_backend_ssh(config: dict) -> None:
     if host and _setup.prompt_yes_no("  Test SSH connection?", True):
         _setup.print_info("  Testing connection...")
         import subprocess
-
-        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5"]
-        if ssh_key:
-            ssh_cmd.extend(["-i", ssh_key])
-        if port and port != "22":
-            ssh_cmd.extend(["-p", port])
-        ssh_cmd += [f"{user}@{host}" if user else host, "echo ok"]
+        ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", *(["-i", ssh_key] if ssh_key else []),
+                   *(["-p", port] if port and port != "22" else []), f"{user}@{host}" if user else host, "echo ok"]
         result = subprocess.run(ssh_cmd, timeout=10, **_RUN_KW)
         if result.returncode == 0:
             _setup.print_success("  SSH connection successful!")
@@ -269,7 +266,6 @@ def _setup_backend_ssh(config: dict) -> None:
 def _setup_backend_plugin(config: dict, backend: str) -> None:
     try:
         from agent.terminal_env_registry import get_provider
-
         provider = get_provider(backend)
         _setup.print_success(f"Terminal backend: {provider.display_name}")
         for line in provider.setup_instructions():
@@ -314,10 +310,8 @@ def setup_terminal_backend(config: dict):
     plugin_backend_names = []
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()  # idempotent — plugin state may not be loaded yet
         from agent.terminal_env_registry import list_providers
-
         for provider in list_providers():
             pname = provider.name.strip().lower()
             backends.append((pname, f"{provider.display_name} - {provider.description}"))
@@ -325,10 +319,9 @@ def setup_terminal_backend(config: dict):
     except Exception:
         pass
 
-    keep_current_idx = len(backends)
     terminal_choices = [label for _, label in backends] + [f"Keep current ({current_backend})"]
-    terminal_idx = _setup.prompt_choice("Select terminal backend:", terminal_choices, keep_current_idx)
-    if terminal_idx == keep_current_idx:
+    terminal_idx = _setup.prompt_choice("Select terminal backend:", terminal_choices, len(backends))
+    if terminal_idx == len(backends):
         _setup.print_info(f"Keeping current backend: {current_backend}")
         return
     selected_backend = backends[terminal_idx][0] if 0 <= terminal_idx < len(backends) else None

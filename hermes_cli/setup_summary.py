@@ -77,7 +77,6 @@ def _first_available_plugin_provider(registry: str, skip: str = None):
     try:
         import importlib
         from hermes_cli.plugins import _ensure_plugins_discovered
-
         _ensure_plugins_discovered()
         for provider in importlib.import_module(f"agent.{registry}").list_providers():
             if provider.name == skip:
@@ -99,7 +98,6 @@ def _vision_row(config, feats):
     # Use the same runtime resolver as the actual vision tools.
     try:
         from agent.auxiliary_client import get_available_vision_backends
-
         ok = bool(get_available_vision_backends())
     except Exception:
         ok = False
@@ -150,18 +148,18 @@ def _video_gen_row(config, feats):
 
 def _tts_row(config, feats):
     # Configured provider, gated on its key (or local install)
-    tts_provider = _setup.cfg_get(config, "tts", "provider", default="edge")
     if feats.tts.managed_by_nous:
         return ("Text-to-Speech (OpenAI via Nous subscription)", True, None)
-    return _voice_provider_status("Text-to-Speech", tts_provider, _TTS_SUMMARY_ROWS, _TTS_SUMMARY_DEFAULT)
+    provider = _setup.cfg_get(config, "tts", "provider", default="edge")
+    return _voice_provider_status("Text-to-Speech", provider, _TTS_SUMMARY_ROWS, _TTS_SUMMARY_DEFAULT)
 
 
 def _stt_row(config, feats):
-    stt_provider = _setup.cfg_get(config, "stt", "provider", default="local") or "local"
-    _stt_feature = feats.features.get("stt")
-    if _stt_feature is not None and _stt_feature.managed_by_nous:
+    stt_feature = feats.features.get("stt")
+    if stt_feature is not None and stt_feature.managed_by_nous:
         return ("Speech-to-Text (OpenAI via Nous subscription)", True, None)
-    return _voice_provider_status("Speech-to-Text", stt_provider, _STT_SUMMARY_ROWS, _STT_SUMMARY_DEFAULT)
+    provider = _setup.cfg_get(config, "stt", "provider", default="local") or "local"
+    return _voice_provider_status("Speech-to-Text", provider, _STT_SUMMARY_ROWS, _STT_SUMMARY_DEFAULT)
 
 
 def _modal_row(config, feats):
@@ -184,8 +182,8 @@ def _spotify_row(config, feats):
     # OAuth via hermes auth spotify — check auth.json, not env vars
     try:
         from hermes_cli.auth import get_provider_auth_state
-        _spotify_state = get_provider_auth_state("spotify") or {}
-        if _spotify_state.get("access_token") or _spotify_state.get("refresh_token"):
+        state = get_provider_auth_state("spotify") or {}
+        if state.get("access_token") or state.get("refresh_token"):
             return ("Spotify (PKCE OAuth)", True, None)
     except Exception:
         pass
@@ -228,7 +226,6 @@ def _print_setup_summary(config: dict, hermes_home):
     # prompt mid-wizard used to exit "successfully" with NO working model; say so loudly.
     try:
         from hermes_cli.auth import resolve_provider
-
         resolve_provider()
     except Exception:
         print()
@@ -244,7 +241,7 @@ def _print_setup_summary(config: dict, hermes_home):
     subscription_features = _setup.get_nous_subscription_features(config)
     for build in _TOOL_ROW_BUILDERS:
         row = build(config, subscription_features)
-        tool_status.extend(row if isinstance(row, list) else [row] if row is not None else [])
+        tool_status.extend(row if isinstance(row, list) else [] if row is None else [row])
 
     available_count = sum(1 for _, avail, _ in tool_status if avail)
     _setup._info(f"{available_count}/{len(tool_status)} tool categories available:", None)
@@ -267,9 +264,9 @@ def _print_setup_summary(config: dict, hermes_home):
     print()
     print(_setup.color(f"📁 All your files are in {_dhh()}/:", _setup.Colors.CYAN, _setup.Colors.BOLD))
     print()
-    print(f"   {_setup.color('Settings:', _setup.Colors.YELLOW)}  {_setup.get_config_path()}")
-    print(f"   {_setup.color('API Keys:', _setup.Colors.YELLOW)}  {_setup.get_env_path()}")
-    print(f"   {_setup.color('Data:', _setup.Colors.YELLOW)}      {hermes_home}/cron/, sessions/, logs/")
+    for label, value in (("Settings:", f"  {_setup.get_config_path()}"), ("API Keys:", f"  {_setup.get_env_path()}"),
+                         ("Data:", f"      {hermes_home}/cron/, sessions/, logs/")):
+        print(f"   {_setup.color(label, _setup.Colors.YELLOW)}{value}")
     print()
 
     _print_section_header("📝 To edit your configuration:")
@@ -279,8 +276,8 @@ def _print_setup_summary(config: dict, hermes_home):
     print("                          Set a specific value")
     print()
     print("   Or edit the files directly:")
-    print(f"   {_setup.color(f'nano {_setup.get_config_path()}', _setup.Colors.DIM)}")
-    print(f"   {_setup.color(f'nano {_setup.get_env_path()}', _setup.Colors.DIM)}")
+    for path in (_setup.get_config_path(), _setup.get_env_path()):
+        print(f"   {_setup.color(f'nano {path}', _setup.Colors.DIM)}")
     print()
 
     _print_section_header("🚀 Ready to go!")

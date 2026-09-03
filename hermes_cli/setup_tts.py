@@ -67,8 +67,7 @@ def _install_kittentts_deps() -> bool:
     wheel_url = "https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl"
     _setup._info(None, "Installing kittentts Python package (~25-80MB model downloaded on first use)...", None)
     return _pip_install_tts_package(
-        "kittentts", ["-U", wheel_url, "soundfile", "--quiet"], f"uv pip install -U '{wheel_url}' soundfile",
-    )
+        "kittentts", ["-U", wheel_url, "soundfile", "--quiet"], f"uv pip install -U '{wheel_url}' soundfile")
 
 
 def _xai_oauth_logged_in_for_setup() -> bool:
@@ -76,7 +75,6 @@ def _xai_oauth_logged_in_for_setup() -> bool:
     API-key prompt for users who logged in via ``hermes model`` -> xAI Grok OAuth."""
     try:
         from hermes_cli.auth import get_xai_oauth_auth_status
-
         return bool(get_xai_oauth_auth_status().get("logged_in"))
     except Exception:
         return False
@@ -185,6 +183,24 @@ def _tts_local_install_step(selected: str) -> str:
     return selected
 
 
+def _xai_oauth_path():
+    if _setup._run_xai_oauth_login_from_setup():
+        _setup.print_success("Logged in — xAI TTS will use these OAuth credentials")
+        return None
+    return "xAI Grok OAuth login did not complete. Falling back to Edge TTS."
+
+
+def _xai_api_key_path():
+    api_key = _setup.prompt("xAI API key for TTS", password=True)
+    if api_key:
+        _setup.save_env_value("XAI_API_KEY", api_key)
+        _setup.print_success("xAI TTS API key saved")
+        return None
+    from hermes_constants import display_hermes_home as _dhh
+    return ("No xAI API key provided for TTS. Configure XAI_API_KEY via hermes setup model "
+            f"or {_dhh()}/.env to use xAI TTS. Falling back to Edge TTS.")
+
+
 def _tts_xai_step(config: dict) -> str:
     """xAI TTS auth. Order: existing OAuth tokens (free for SuperGrok) > existing
     XAI_API_KEY > offer both paths — xAI TTS works with OAuth bearer tokens too."""
@@ -199,23 +215,9 @@ def _tts_xai_step(config: dict) -> str:
             choices=["Sign in with xAI Grok OAuth (SuperGrok / Premium+) — browser login",
                      "Paste an xAI API key (console.x.ai)", "Skip → fallback to Edge TTS"],
             default=0)
-        fallback = None  # warning printed when xAI auth did not happen; result is then "edge"
-        if choice_idx == 0:
-            if _setup._run_xai_oauth_login_from_setup():
-                _setup.print_success("Logged in — xAI TTS will use these OAuth credentials")
-            else:
-                fallback = "xAI Grok OAuth login did not complete. Falling back to Edge TTS."
-        elif choice_idx == 1:
-            api_key = _setup.prompt("xAI API key for TTS", password=True)
-            if api_key:
-                _setup.save_env_value("XAI_API_KEY", api_key)
-                _setup.print_success("xAI TTS API key saved")
-            else:
-                from hermes_constants import display_hermes_home as _dhh
-                fallback = ("No xAI API key provided for TTS. Configure XAI_API_KEY via hermes setup model "
-                            f"or {_dhh()}/.env to use xAI TTS. Falling back to Edge TTS.")
-        else:
-            fallback = "xAI TTS skipped. Falling back to Edge TTS."
+        # Each path returns the fallback warning (result is then "edge") or None on success.
+        fallback = (_xai_oauth_path, _xai_api_key_path, lambda: "xAI TTS skipped. Falling back to Edge TTS.")[
+            choice_idx if choice_idx in (0, 1) else 2]()
         if fallback:
             _setup.print_warning(fallback)
             return "edge"
@@ -248,17 +250,15 @@ def _setup_tts_provider(config: dict):
         return
 
     selected = options[idx][0]
-    selected_via_nous = selected == "nous-openai"
-    if selected_via_nous:
+    if selected == "nous-openai":
         selected = "openai"
         _setup.print_info("OpenAI TTS will use the managed Nous gateway and bill to your subscription.")
         if _setup.get_env_value("VOICE_TOOLS_OPENAI_KEY") or _setup.get_env_value("OPENAI_API_KEY"):
             _setup.print_warning("Direct OpenAI credentials are still configured and may take precedence "
-                          "until removed from ~/.hermes/.env.")
-
-    if selected in _TTS_LOCAL_PROVIDERS:
+                                 "until removed from ~/.hermes/.env.")
+    elif selected in _TTS_LOCAL_PROVIDERS:
         selected = _tts_local_install_step(selected)
-    elif selected in _TTS_API_KEY_PROVIDERS and not selected_via_nous:
+    elif selected in _TTS_API_KEY_PROVIDERS:
         selected = _tts_api_key_step(selected)
     elif selected == "xai":
         selected = _tts_xai_step(config)
