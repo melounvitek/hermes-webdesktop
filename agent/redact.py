@@ -373,11 +373,10 @@ def _redact_query_string(query: str) -> str:
     """Replace values of sensitive ``k=v&k=v`` params with ``***``; others pass through."""
     if not query:
         return query
-    parts = []
-    for pair in query.split("&"):
-        key, sep, _value = pair.partition("=")
-        parts.append(f"{key}=***" if sep and key.lower() in _SENSITIVE_QUERY_PARAMS else pair)
-    return "&".join(parts)
+    return "&".join(
+        f"{key}=***" if sep and key.lower() in _SENSITIVE_QUERY_PARAMS else pair
+        for pair in query.split("&") for key, sep, _ in (pair.partition("="),)
+    )
 
 
 def _canonical_url_param_name(name: str) -> str:
@@ -394,19 +393,12 @@ def _canonical_url_param_name(name: str) -> str:
 def _redact_strict_url_credentials(text: str) -> str:
     """Strict egress-boundary redaction of URL credentials (absolute, relative and
     network references); preserves keys, separators, public params, hosts, paths."""
-    def _redact_param(match: re.Match) -> str:
-        if _canonical_url_param_name(match.group(2)) not in _SENSITIVE_QUERY_PARAMS:
-            return match.group(0)
-        return f"{match.group(1)}{match.group(2)}=***"
-
-    def _redact_userinfo(match: re.Match) -> str:
-        userinfo = match.group(2)
-        if ":" in userinfo:
-            return f"{match.group(1)}{userinfo.partition(':')[0]}:***@"
-        return f"{match.group(1)}***@"
-
-    text = _STRICT_URL_PARAM_RE.sub(_redact_param, text)
-    return _STRICT_URL_USERINFO_RE.sub(_redact_userinfo, text)
+    text = _STRICT_URL_PARAM_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}=***"
+        if _canonical_url_param_name(m.group(2)) in _SENSITIVE_QUERY_PARAMS else m.group(0), text)
+    return _STRICT_URL_USERINFO_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2).partition(':')[0]}:***@" if ":" in m.group(2) else f"{m.group(1)}***@",
+        text)
 
 
 def redact_cdp_url(value: object) -> str:
@@ -518,8 +510,7 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     """
     if text is None:
         return None
-    if not isinstance(text, str):
-        text = str(text)
+    text = text if isinstance(text, str) else str(text)
     if not text or not (force or _REDACT_ENABLED):
         return text
     code_file = code_file or file_read
@@ -637,13 +628,9 @@ def _extract_literal_prefix(pattern: str) -> str:
 
 def _skip_char_class(pattern: str, i: int) -> int:
     """Given ``pattern[i] == "["``, return the index just past the closing ``]``."""
-    i += 1
-    if i < len(pattern) and pattern[i] == "]":
-        i += 1
+    i += 2 if pattern[i + 1:i + 2] == "]" else 1  # a leading "]" is literal
     while i < len(pattern) and pattern[i] != "]":
-        if pattern[i] == "\\":
-            i += 1
-        i += 1
+        i += 2 if pattern[i] == "\\" else 1
     return i
 
 

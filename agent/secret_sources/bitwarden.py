@@ -222,10 +222,10 @@ def _safe_extract_member(zf: zipfile.ZipFile, member: str, dest_dir: Path) -> Pa
     dest_root = os.path.realpath(dest_dir)
     target = os.path.realpath(os.path.join(dest_root, member))
     try:  # commonpath raises for e.g. different Windows drives — treat as escape
-        contained = os.path.commonpath([dest_root, target]) == dest_root
+        contained = os.path.commonpath([dest_root, target]) == dest_root and target != dest_root
     except ValueError:
         contained = False
-    if not contained or target == dest_root:
+    if not contained:
         raise RuntimeError(f"Refusing to extract unsafe archive member {member!r}: "
                            f"it escapes the extraction directory")
     zf.extract(member, dest_root)
@@ -385,18 +385,13 @@ def _summarize_bws_stderr(raw: str) -> str:
     """Reduce a bws (color-eyre) error dump to its numbered cause lines joined with
     ``; `` (dropping ``Location:``/``Backtrace`` on); raw text if unrecognized."""
     text = raw.replace("\x1b", "").strip()
-    if not text:
-        return text
     causes: List[str] = []
     for line in text.splitlines():
         stripped = line.strip()
         if stripped.startswith(("Location:", "Backtrace omitted", "Run with ")):
             break
-        if stripped in ("", "Error:"):
-            continue
-        stripped = re.sub(r"^\d+:\s*", "", stripped)
-        if stripped:
-            causes.append(stripped)
+        if stripped not in ("", "Error:") and (cause := re.sub(r"^\d+:\s*", "", stripped)):
+            causes.append(cause)
     return "; ".join(causes) if causes else text
 
 

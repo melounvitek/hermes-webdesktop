@@ -118,14 +118,12 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     """
     if _is_global_env(name):
         return _environ_or(name, default)
-
     scope = _SECRET_SCOPE.get()
     if scope is not None:
         val = scope.get(name)
         if val is not None:
             return val
         return default if _MULTIPLEX_ACTIVE else _environ_or(name, default)
-
     if _MULTIPLEX_ACTIVE:
         raise UnscopedSecretError(
             f"get_secret({name!r}) called with no profile secret scope active "
@@ -190,11 +188,10 @@ def build_profile_secret_scope(hermes_home: Path) -> Dict[str, str]:
     """Build a profile's secret mapping from ``<home>/.env`` plus its external
     secret sources. Global vars are NOT copied in — ``get_secret`` reads those
     from ``os.environ`` — so the scope holds only profile secrets."""
-    home = Path(hermes_home)
-    secrets = load_env_file(home / ".env")
+    secrets = load_env_file(Path(hermes_home) / ".env")
     try:
         from hermes_cli.env_loader import get_secret_source_values
-        external_secrets = get_secret_source_values(home)
+        external_secrets = get_secret_source_values(Path(hermes_home))
     except Exception:
         external_secrets = {}
     secrets.update((k, v) for k, v in external_secrets.items() if not _is_global_env(k))

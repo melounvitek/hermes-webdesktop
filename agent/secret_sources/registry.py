@@ -146,8 +146,7 @@ def snapshot_registration(name: str, *, scope: Optional[str] = None) -> Optional
     """Return the registration owned by exactly one registry layer."""
     _ensure_builtin_sources()
     with _REGISTRY_LOCK:
-        target = _SOURCES if scope is None else _SCOPED_SOURCES.get(scope, {})
-        return target.get(name)
+        return (_SOURCES if scope is None else _SCOPED_SOURCES.get(scope, {})).get(name)
 
 
 def restore_registration(name: str, current: SecretSource, previous: Optional[SecretSource], *,
@@ -260,22 +259,18 @@ def _ordered_enabled_sources(secrets_cfg: dict, *, scope: Optional[str] = None) 
     sources = {source.name: source for source in list_sources(scope=scope)}
 
     explicit = secrets_cfg.get("sources")
-    order: Dict[str, None] = {}  # insertion-ordered set
-    if isinstance(explicit, list):
-        names = [e for e in explicit if isinstance(e, str)]
-        order.update((n, None) for n in names if n in sources)
-        unknown = [n for n in names if n not in sources]
-        if unknown:
-            logger.warning("secrets.sources names unknown source(s): %s (known: %s)",
-                           ", ".join(unknown), ", ".join(sources) or "none")
-    order.update((n, None) for n in sources)
+    names = [e for e in explicit if isinstance(e, str)] if isinstance(explicit, list) else []
+    unknown = [n for n in names if n not in sources]
+    if unknown:
+        logger.warning("secrets.sources names unknown source(s): %s (known: %s)",
+                       ", ".join(unknown), ", ".join(sources) or "none")
+    order = dict.fromkeys([n for n in names if n in sources] + list(sources))  # insertion-ordered set
 
     enabled: List[SecretSource] = []
     for name in order:
-        source = sources[name]
         try:
-            if source.is_enabled(_section(secrets_cfg, name)):
-                enabled.append(source)
+            if sources[name].is_enabled(_section(secrets_cfg, name)):
+                enabled.append(sources[name])
         except Exception:  # noqa: BLE001
             logger.warning("Secret source '%s' is_enabled() raised; skipping", name, exc_info=True)
     return enabled
@@ -301,15 +296,11 @@ _ALIAS_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY", "_PASSWORD")
 
 def _profile_alias_target(var: str, profile: str) -> Optional[str]:
     """Map ``FOO_<PROFILE>`` to ``FOO`` for the active profile when safe."""
-    if not profile:
-        return None
     suffix = "_" + profile.replace("-", "_").upper()
-    if not var.endswith(suffix):
+    if not profile or not var.endswith(suffix):
         return None
     alias = var[: -len(suffix)]
-    if not alias or not is_valid_env_name(alias) or not alias.endswith(_ALIAS_SUFFIXES):
-        return None
-    return alias
+    return alias if alias and is_valid_env_name(alias) and alias.endswith(_ALIAS_SUFFIXES) else None
 
 
 class _Applier:
@@ -386,7 +377,6 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     """
     env = environ if environ is not None else os.environ
     report = ApplyReport()
-
     secrets_cfg = secrets_cfg if isinstance(secrets_cfg, dict) else {}
     enabled = _ordered_enabled_sources(secrets_cfg, scope=hermes_home_key(home_path))
     if not enabled:

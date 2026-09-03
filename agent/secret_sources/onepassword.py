@@ -114,11 +114,10 @@ def _refs_fingerprint(references: Dict[str, str]) -> str:
 def find_op(binary_path: str = "") -> Optional[Path]:
     """Resolve a usable ``op`` binary, or None. A pinned ``binary_path`` is used
     verbatim — pinned-but-missing returns None rather than falling back to PATH."""
-    if binary_path:
-        pinned = Path(binary_path)
-        return pinned if pinned.exists() and os.access(pinned, os.X_OK) else None
-    found = shutil.which("op")
-    return Path(found) if found else None
+    found = binary_path or shutil.which("op")
+    if not found or (binary_path and not os.access(binary_path, os.X_OK)):
+        return None
+    return Path(found)
 
 
 def _scrub(text: str) -> str:
