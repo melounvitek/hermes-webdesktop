@@ -209,7 +209,6 @@ class GatewayGoalsMixin:
                 return
             except Exception as exc:
                 logger.debug("goal continuation: post-delivery callback registration failed: %s", exc)
-
         await _deliver()
 
     async def _post_turn_manager(self, session_entry: Any, label: str, module: str, load):
@@ -258,7 +257,6 @@ class GatewayGoalsMixin:
         # Deferred until the visible final response is delivered, else "✓ Goal achieved" precedes it.
         if msg and source is not None:
             await self._defer_goal_status_notice_after_delivery(source, msg)
-
         prompt = decision.get("continuation_prompt") or ""
         if not decision.get("should_continue") or not prompt or source is None:
             return
