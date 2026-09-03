@@ -97,11 +97,8 @@ def set_current_observability_context(
     *, turn_id: str = "", tool_call_id: str = "", session_id: str = "",
 ) -> _Tokens:
     """Bind active tool correlation IDs to approval hooks."""
-    return (
-        _approval_turn_id.set(turn_id or ""),
-        _approval_tool_call_id.set(tool_call_id or ""),
-        _approval_session_id.set(session_id or ""),
-    )
+    return (_approval_turn_id.set(turn_id or ""), _approval_tool_call_id.set(tool_call_id or ""),
+            _approval_session_id.set(session_id or ""))
 
 
 def reset_current_observability_context(tokens: _Tokens) -> None:
@@ -219,12 +216,8 @@ def _normalize_approval_mode(mode) -> str:
         if normalized in _VALID_MODES:
             return normalized
         if normalized:
-            logger.warning(
-                "Unknown approvals.mode %r — defaulting to 'manual'. "
-                "Valid values: %s",
-                mode,
-                ", ".join(_VALID_MODES),
-            )
+            logger.warning("Unknown approvals.mode %r — defaulting to 'manual'. "
+                           "Valid values: %s", mode, ", ".join(_VALID_MODES))
     return "manual"
 
 
@@ -276,12 +269,8 @@ def _get_approval_timeout() -> int:
         # Fail CLOSED: the raw value would re-open the overflow this prevents.
         safe_cap = 365 * 24 * 3600
     if raw > safe_cap:
-        logger.warning(
-            "approvals.timeout=%s exceeds the platform-safe maximum; "
-            "clamping to %ss",
-            raw,
-            safe_cap,
-        )
+        logger.warning("approvals.timeout=%s exceeds the platform-safe maximum; "
+                       "clamping to %ss", raw, safe_cap)
         return safe_cap
     return raw
 
@@ -333,9 +322,9 @@ def _get_approval_transport_config() -> tuple[str, str | None]:
     """Return explicitly selected transport and fail-closed fallback mode."""
     try:
         from hermes_cli.config import load_config_readonly
-        approval_config = ((load_config_readonly() or {}).get("security") or {}).get("approval") or {}
-        selected = str(approval_config.get("transport") or "builtin").strip().lower()
-        fallback = str(approval_config.get("transport_fallback") or "").strip().lower()
+        cfg = ((load_config_readonly() or {}).get("security") or {}).get("approval") or {}
+        selected = str(cfg.get("transport") or "builtin").strip().lower()
+        fallback = str(cfg.get("transport_fallback") or "").strip().lower()
     except Exception:
         # An unreadable/malformed selection must not silently materialize a
         # prompt on a built-in surface the operator may not be watching.

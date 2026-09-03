@@ -80,10 +80,8 @@ def _finish(payload: dict, resolved: bool, choice: str | None, reason, **extra) 
     """Fire the post hook and build the decision dict. Unresolved (timeout) and
     a None choice both mean the user never answered."""
     from tools.approval import _fire_approval_hook
-    _fire_approval_hook(
-        "post_approval_response", **payload,
-        choice="timeout" if not resolved else (choice or "timeout"), **extra,
-    )
+    _fire_approval_hook("post_approval_response", **payload,
+                        choice="timeout" if not resolved else (choice or "timeout"), **extra)
     return {"resolved": resolved, "choice": choice, "reason": reason, **extra}
 
 
@@ -100,11 +98,9 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
     """
     from tools.approval import _fire_approval_hook
     _fire_approval_hook("pre_approval_request", **payload, coalesced=True)
-    state = _poll_event(
-        leader.event, session_key,
-        interrupt_log="Coalesced approval wait interrupted by user signal — "
-                      "returning deny for session %s",
-    )
+    state = _poll_event(leader.event, session_key,
+                        interrupt_log="Coalesced approval wait interrupted by user signal — "
+                                      "returning deny for session %s")
     if state == "interrupted":
         # Deny only OUR follower; the leader thread handles its own signal.
         choice, resolved = "deny", True
@@ -143,17 +139,13 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         "description": approval_data.get("description", ""),
         "pattern_key": primary_key,
         "pattern_keys": list(approval_data.get("pattern_keys", [primary_key])),
-        "session_key": session_key,
-        "surface": surface,
+        "session_key": session_key, "surface": surface,
     }
     keys = list(approval_data.get("pattern_keys") or [])
     with _approval._lock:
-        leader = next(
-            (e for e in _approval._gateway_queues.get(session_key, [])
-             if e.data.get("command") == approval_data.get("command")
-             and list(e.data.get("pattern_keys") or []) == keys),
-            None,
-        )
+        leader = next((e for e in _approval._gateway_queues.get(session_key, [])
+                       if e.data.get("command") == approval_data.get("command")
+                       and list(e.data.get("pattern_keys") or []) == keys), None)
     if leader is not None:
         adopted = _await_coalesced_leader(session_key, leader, payload)
         if adopted is not None:
@@ -182,11 +174,9 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         _approval._fire_approval_hook("post_approval_response", **payload, choice="notify_failed")
         return {"resolved": False, "choice": None, "notify_failed": True}
 
-    state = _poll_event(
-        entry.event, session_key,
-        interrupt_log="Approval wait interrupted by user signal — "
-                      "returning deny for session %s",
-    )
+    state = _poll_event(entry.event, session_key,
+                        interrupt_log="Approval wait interrupted by user signal — "
+                                      "returning deny for session %s")
     if state == "interrupted":
         entry.result = "deny"
         entry.event.set()

@@ -17,12 +17,9 @@ from tools.interrupt import is_interrupted
 logger = logging.getLogger("tools.approval")
 
 
-def prompt_dangerous_approval(command: str, description: str,
-                              timeout_seconds: int | None = None,
-                              allow_permanent: bool = True,
-                              approval_callback=None,
-                              *, allow_session: bool = True,
-                              smart_denied: bool = False) -> str:
+def prompt_dangerous_approval(command: str, description: str, timeout_seconds: int | None = None,
+                              allow_permanent: bool = True, approval_callback=None,
+                              *, allow_session: bool = True, smart_denied: bool = False) -> str:
     """Prompt the user to approve a dangerous command (CLI only).
 
     Args:
@@ -85,12 +82,9 @@ def _read_choice(prompt: str, timeout_seconds: int) -> str | None:
     return None if thread.is_alive() else result["choice"]
 
 
-def _prompt_dangerous_approval_inner(command: str, description: str,
-                                     timeout_seconds: int,
-                                     allow_permanent: bool = True,
-                                     approval_callback=None,
-                                     *, allow_session: bool = True,
-                                     smart_denied: bool = False) -> str:
+def _prompt_dangerous_approval_inner(command: str, description: str, timeout_seconds: int,
+                                     allow_permanent: bool = True, approval_callback=None,
+                                     *, allow_session: bool = True, smart_denied: bool = False) -> str:
     # Redact before any user-visible rendering; the original `command` is
     # still what executes after approval. Same redactor as memory/log
     # sanitization so tokens mask consistently across surfaces.
@@ -124,8 +118,7 @@ def _prompt_dangerous_approval_inner(command: str, description: str,
             logger.warning(
                 "Dangerous-command approval requested on a thread with no "
                 "approval callback while prompt_toolkit is active; denying "
-                "to avoid stdin deadlock. command=%r description=%r",
-                command, description,
+                "to avoid stdin deadlock. command=%r description=%r", command, description,
             )
             return "deny"
     except Exception:
@@ -140,23 +133,18 @@ def _prompt_dangerous_approval_inner(command: str, description: str,
             else ("approval.prompt_long", "approval.choose_long") if allow_permanent
             else ("approval.prompt_short", "approval.choose_short")
         )
-        print()
-        print(f"  {t('approval.dangerous_header', description=display_description)}")
-        print(f"      {display_command}")
-        print()
-        print(t(menu_key))
-        print()
+        print(f"\n  {t('approval.dangerous_header', description=display_description)}"
+              f"\n      {display_command}\n\n{t(menu_key)}\n")
         sys.stdout.flush()
         choice = _read_choice(t(prompt_key), timeout_seconds)
         if choice is None:
             print("\n" + t("approval.timeout"))
             return "timeout"  # distinct from deny: the user never answered
         if once_only:
-            choice_map = {
+            decision = {
                 **dict.fromkeys(t("approval.smart_deny_once_inputs").split(","), "once"),
                 **dict.fromkeys(t("approval.smart_deny_deny_inputs").split(","), "deny"),
-            }
-            decision = choice_map.get(choice, "deny")
+            }.get(choice, "deny")
         else:
             decision = _CLI_CHOICE_ALIASES.get(choice, "deny")
             if decision == "always" and not allow_permanent:
@@ -187,17 +175,9 @@ def _attempt(name: str, choice, failure, fallback) -> dict:
     return {"selected": True, "choice": choice, "failure": failure, "fallback": fallback, "name": name}
 
 
-def _present_with_selected_transport(
-    *,
-    command: str,
-    description: str,
-    pattern_key: str,
-    pattern_keys: list[str],
-    session_key: str,
-    surface: str,
-    allow_session: bool,
-    allow_permanent: bool,
-) -> dict:
+def _present_with_selected_transport(*, command: str, description: str, pattern_key: str,
+                                     pattern_keys: list[str], session_key: str, surface: str,
+                                     allow_session: bool, allow_permanent: bool) -> dict:
     """Present through an explicitly selected plugin transport, if any.
 
     A selected transport replaces every built-in prompt surface; detection,
@@ -228,12 +208,8 @@ def _present_with_selected_transport(
         request = ApprovalRequest.create(
             command=redact_sensitive_text(command, force=True),
             description=redact_sensitive_text(description, force=True),
-            pattern_key=pattern_key,
-            pattern_keys=tuple(pattern_keys),
-            session_key=session_key,
-            surface=surface,
-            allow_session=allow_session,
-            allow_permanent=allow_permanent,
+            pattern_key=pattern_key, pattern_keys=tuple(pattern_keys), session_key=session_key,
+            surface=surface, allow_session=allow_session, allow_permanent=allow_permanent,
             timeout_seconds=timeout_seconds,
         )
     except Exception:
@@ -243,14 +219,9 @@ def _present_with_selected_transport(
         logger.warning("Could not build redacted plugin approval request")
         return _attempt(name, "deny", "error", None)
     hook_kwargs = dict(
-        command=request.command,
-        description=request.description,
-        pattern_key=pattern_key,
-        pattern_keys=list(pattern_keys),
-        session_key=session_key,
-        surface=f"transport:{name}",
-        request_id=request.request_id,
-        request_digest=request.digest,
+        command=request.command, description=request.description, pattern_key=pattern_key,
+        pattern_keys=list(pattern_keys), session_key=session_key, surface=f"transport:{name}",
+        request_id=request.request_id, request_digest=request.digest,
     )
     _a._fire_approval_hook("pre_approval_request", **hook_kwargs)
     try:
@@ -287,21 +258,16 @@ def _transport_choice(attempt: dict, *, pattern_key: str, description: str):
     if not failure:
         return attempt.get("choice"), None
     if attempt.get("fallback") == "builtin":
-        logger.warning(
-            "Approval transport %r failed (%s); using explicit builtin fallback",
-            attempt.get("name"),
-            failure,
-        )
+        logger.warning("Approval transport %r failed (%s); using explicit builtin fallback",
+                       attempt.get("name"), failure)
         return None, None
     from tools import approval as _a
     breaker_addendum = _a._denial_breaker_addendum(_a.get_current_session_key())
     return None, _a._denied(
         f"BLOCKED: Selected approval transport failed ({failure}); the user "
         "has NOT consented to this action. Do NOT retry this command or "
-        "attempt the same outcome through another route."
-        f"{breaker_addendum}",
-        pattern_key=pattern_key, description=description,
-        outcome=f"transport_{failure}",
+        f"attempt the same outcome through another route.{breaker_addendum}",
+        pattern_key=pattern_key, description=description, outcome=f"transport_{failure}",
     )
 
 
@@ -312,13 +278,9 @@ def _consent(choice, unresolved: str) -> str:
     return unresolved if choice == "timeout" else "decline"
 
 
-def request_elicitation_consent(
-    message: str,
-    description: str,
-    *,
-    timeout_seconds: int | None = None,
-    surface: str = "mcp-elicitation",
-) -> str:
+def request_elicitation_consent(message: str, description: str, *,
+                                timeout_seconds: int | None = None,
+                                surface: str = "mcp-elicitation") -> str:
     """Route an MCP elicitation request to the surface owning the active session.
 
     Gateway sessions go through ``_await_gateway_decision``; CLI/TUI through
@@ -337,22 +299,13 @@ def request_elicitation_consent(
     if _a._is_gateway_approval_context():
         notify_cb = _a._gateway_notify_cb(session_key)
         if notify_cb is None:
-            logger.warning(
-                "Elicitation requested in gateway session %s but no "
-                "notify_cb is registered — failing closed",
-                session_key,
-            )
+            logger.warning("Elicitation requested in gateway session %s but no "
+                           "notify_cb is registered — failing closed", session_key)
             return "decline"
-        approval_data = {
-            "command": message,
-            "description": description,
-            "pattern_key": "mcp_elicitation",
-            "pattern_keys": ["mcp_elicitation"],
-        }
+        approval_data = {"command": message, "description": description,
+                         "pattern_key": "mcp_elicitation", "pattern_keys": ["mcp_elicitation"]}
         try:
-            decision = _a._await_gateway_decision(
-                session_key, notify_cb, approval_data, surface=surface,
-            )
+            decision = _a._await_gateway_decision(session_key, notify_cb, approval_data, surface=surface)
         except Exception as exc:
             logger.error("Elicitation gateway dispatch failed: %s", exc, exc_info=True)
             return "decline"

@@ -109,14 +109,9 @@ def _smart_approve(command: str, description: str) -> str:
             "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
         )
         response = call_llm(
-            task="approval",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0,
-            max_tokens=16,
-            timeout=smart_timeout,
+            task="approval", temperature=0, max_tokens=16, timeout=smart_timeout,
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_prompt}],
         )
         logger.debug("Smart approvals: LLM call completed in %.1fs", time.monotonic() - _smart_t0)
         answer = (response.choices[0].message.content or "").strip().upper()
@@ -124,12 +119,8 @@ def _smart_approve(command: str, description: str) -> str:
     except Exception as e:
         # WARNING, not DEBUG: a failed/blocked guardian call is a real event
         # the operator needs to see (the hang was invisible at DEBUG).
-        logger.warning(
-            "Smart approvals: LLM call failed after %.1fs (%s: %s), escalating",
-            time.monotonic() - _smart_t0,
-            type(e).__name__,
-            e,
-        )
+        logger.warning("Smart approvals: LLM call failed after %.1fs (%s: %s), escalating",
+                       time.monotonic() - _smart_t0, type(e).__name__, e)
         return "escalate"
 
 
@@ -146,10 +137,8 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
         payload = {
             "command": redact_sensitive_text(command, force=True),
             "description": redact_sensitive_text(description, force=True),
-            "pattern_key": pattern_key,
-            "pattern_keys": list(pattern_keys),
-            "session_key": session_key,
-            "surface": "smart",
+            "pattern_key": pattern_key, "pattern_keys": list(pattern_keys),
+            "session_key": session_key, "surface": "smart",
         }
     except Exception as exc:
         logger.debug("Smart approval hook redaction failed: %s", exc)
@@ -158,7 +147,6 @@ def _smart_verdict(command: str, description: str, pattern_key: str,
         _a._fire_approval_hook("pre_approval_request", **payload)
     verdict = _a._smart_approve(command, description)
     if payload is not None and verdict in {"approve", "deny"}:
-        _a._fire_approval_hook(
-            "post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm",
-        )
+        _a._fire_approval_hook("post_approval_response", **payload,
+                               choice=f"smart_{verdict}", decided_by="aux_llm")
     return verdict
