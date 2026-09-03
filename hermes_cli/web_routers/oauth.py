@@ -107,6 +107,14 @@ def _start_poller(target, sid: str) -> None:
     threading.Thread(target=target, args=(sid,), daemon=True, name=f"oauth-poll-{sid[:6]}").start()
 
 
+def _device_code_started(sid: str, user_code, verification_url, expires_in: int, poll_interval: int) -> Dict[str, Any]:
+    """The /start response shape shared by every device-code flow."""
+    return {
+        "session_id": sid, "flow": "device_code", "user_code": user_code,
+        "verification_url": verification_url, "expires_in": expires_in, "poll_interval": poll_interval,
+    }
+
+
 def _codex_full_login_worker(session_id: str) -> None:
     """Run the complete OpenAI Codex device-code flow.
 
@@ -232,63 +240,46 @@ def _codex_full_login_worker(session_id: str) -> None:
                 s["error_message"] = str(e)
 
 
-# Hand-written status card shapes per provider id: (hauth getter name, shaper).
+_OMIT: Any = object()
+
+
+def _status_card(
+    raw: dict, source, source_label, token_preview, expires_at, has_refresh_token, last_refresh=_OMIT
+) -> Dict[str, Any]:
+    card = {
+        "logged_in": bool(raw.get("logged_in")), "source": source, "source_label": source_label,
+        "token_preview": token_preview, "expires_at": expires_at, "has_refresh_token": has_refresh_token,
+    }
+    if last_refresh is not _OMIT:
+        card["last_refresh"] = last_refresh
+    return card
+
+
+# Hand-written status cards per provider id: (hauth getter name, raw -> card).
 # Providers absent here fall through to the slug-driven ``get_auth_status``.
-def _nous_status(raw):
-    # Refresh-free snapshot so listing providers never performs an OAuth refresh.
-    return {
-        "logged_in": bool(raw.get("logged_in")), "source": "nous_portal",
-        "source_label": raw.get("portal_base_url") or "Nous Portal",
-        "token_preview": _truncate_token(raw.get("access_token")),
-        "expires_at": raw.get("access_expires_at"),
-        "has_refresh_token": bool(raw.get("has_refresh_token")),
-    }
-
-
-def _codex_status(raw):
-    return {
-        "logged_in": bool(raw.get("logged_in")), "source": raw.get("source") or "openai_codex",
-        "source_label": raw.get("auth_mode") or "OpenAI Codex",
-        "token_preview": _truncate_token(raw.get("api_key")), "expires_at": None,
-        "has_refresh_token": False, "last_refresh": raw.get("last_refresh"),
-    }
-
-
-def _qwen_status(raw):
-    return {
-        "logged_in": bool(raw.get("logged_in")), "source": "qwen_cli",
-        "source_label": raw.get("auth_store_path") or "Qwen CLI",
-        "token_preview": _truncate_token(raw.get("access_token")),
-        "expires_at": raw.get("expires_at"),
-        "has_refresh_token": bool(raw.get("has_refresh_token")),
-    }
-
-
-def _minimax_status(raw):
-    return {
-        "logged_in": bool(raw.get("logged_in")), "source": "minimax_oauth",
-        "source_label": f"MiniMax ({raw.get('region', 'global')})", "token_preview": None,
-        "expires_at": raw.get("expires_at"), "has_refresh_token": True,
-    }
-
-
-def _xai_status(raw):
-    # source_label is a human-readable origin (auth-store path / credential
-    # source), not the internal auth_mode string ("oauth_pkce").
-    return {
-        "logged_in": bool(raw.get("logged_in")), "source": raw.get("source") or "xai_oauth",
-        "source_label": raw.get("auth_store") or raw.get("source") or "xAI Grok OAuth",
-        "token_preview": _truncate_token(raw.get("api_key")), "expires_at": None,
-        "has_refresh_token": True, "last_refresh": raw.get("last_refresh"),
-    }
-
-
+# nous: refresh-free local snapshot so listing providers never performs an OAuth
+# refresh. xai: source_label is a human-readable origin (auth-store path /
+# credential source), not the internal auth_mode string ("oauth_pkce").
 _PROVIDER_STATUS: Dict[str, tuple[str, Callable[[dict], dict]]] = {
-    "nous": ("get_nous_auth_status_local", _nous_status),
-    "openai-codex": ("get_codex_auth_status", _codex_status),
-    "qwen-oauth": ("get_qwen_auth_status", _qwen_status),
-    "minimax-oauth": ("get_minimax_oauth_auth_status", _minimax_status),
-    "xai-oauth": ("get_xai_oauth_auth_status", _xai_status),
+    "nous": ("get_nous_auth_status_local", lambda r: _status_card(
+        r, "nous_portal", r.get("portal_base_url") or "Nous Portal",
+        _truncate_token(r.get("access_token")), r.get("access_expires_at"), bool(r.get("has_refresh_token")),
+    )),
+    "openai-codex": ("get_codex_auth_status", lambda r: _status_card(
+        r, r.get("source") or "openai_codex", r.get("auth_mode") or "OpenAI Codex",
+        _truncate_token(r.get("api_key")), None, False, r.get("last_refresh"),
+    )),
+    "qwen-oauth": ("get_qwen_auth_status", lambda r: _status_card(
+        r, "qwen_cli", r.get("auth_store_path") or "Qwen CLI",
+        _truncate_token(r.get("access_token")), r.get("expires_at"), bool(r.get("has_refresh_token")),
+    )),
+    "minimax-oauth": ("get_minimax_oauth_auth_status", lambda r: _status_card(
+        r, "minimax_oauth", f"MiniMax ({r.get('region', 'global')})", None, r.get("expires_at"), True,
+    )),
+    "xai-oauth": ("get_xai_oauth_auth_status", lambda r: _status_card(
+        r, r.get("source") or "xai_oauth", r.get("auth_store") or r.get("source") or "xAI Grok OAuth",
+        _truncate_token(r.get("api_key")), None, True, r.get("last_refresh"),
+    )),
 }
 
 
@@ -310,21 +301,15 @@ def _resolve_provider_status(provider_id: str, status_fn) -> Dict[str, Any]:
         # a new OAuth/account provider plugin never renders permanently logged-out.
         raw = hauth.get_auth_status(provider_id)
         if isinstance(raw, dict) and "logged_in" in raw:
-            return {
-                "logged_in": bool(raw.get("logged_in")),
-                "source": raw.get("source") or raw.get("provider") or provider_id,
-                "source_label": (
-                    raw.get("source_label")
-                    or raw.get("auth_store")
-                    or raw.get("auth_store_path")
-                    or raw.get("base_url")
-                    or raw.get("name")
-                    or ""
-                ),
-                "token_preview": _truncate_token(raw.get("access_token") or raw.get("api_key")),
-                "expires_at": raw.get("expires_at") or raw.get("access_expires_at"),
-                "has_refresh_token": bool(raw.get("has_refresh_token")),
-            }
+            return _status_card(
+                raw,
+                raw.get("source") or raw.get("provider") or provider_id,
+                raw.get("source_label") or raw.get("auth_store") or raw.get("auth_store_path")
+                or raw.get("base_url") or raw.get("name") or "",
+                _truncate_token(raw.get("access_token") or raw.get("api_key")),
+                raw.get("expires_at") or raw.get("access_expires_at"),
+                bool(raw.get("has_refresh_token")),
+            )
     except Exception as e:
         return {"logged_in": False, "error": str(e)}
     return {"logged_in": False}
@@ -359,11 +344,10 @@ async def _start_nous_device_code(profile: Optional[str]) -> Dict[str, Any]:
         client_id=client_id, scope=effective_scope,
     )
     _start_poller(_nous_poller, sid)
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data["verification_uri_complete"]),
-        "expires_in": int(device_data["expires_in"]), "poll_interval": int(device_data["interval"]),
-    }
+    return _device_code_started(
+        sid, str(device_data["user_code"]), str(device_data["verification_uri_complete"]),
+        int(device_data["expires_in"]), int(device_data["interval"]),
+    )
 
 
 async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
@@ -385,11 +369,9 @@ async def _start_codex_device_code(profile: Optional[str]) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=s.get("error_message") or "device-auth failed")
     if not s.get("user_code"):
         raise HTTPException(status_code=504, detail="device-auth timed out before returning a user code")
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": s["user_code"],
-        "verification_url": s["verification_url"], "expires_in": int(s.get("expires_in") or 900),
-        "poll_interval": int(s.get("interval") or 5),
-    }
+    return _device_code_started(
+        sid, s["user_code"], s["verification_url"], int(s.get("expires_in") or 900), int(s.get("interval") or 5)
+    )
 
 
 async def _start_minimax_device_code(profile: Optional[str]) -> Dict[str, Any]:
@@ -433,11 +415,10 @@ async def _start_minimax_device_code(profile: Optional[str]) -> Dict[str, Any]:
         expires_in_seconds = expired_in_raw
     sess["expires_at"] = expires_at_ts
     _start_poller(_minimax_poller, sid)
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data["verification_uri"]), "expires_in": expires_in_seconds,
-        "poll_interval": max(2, (sess["interval_ms"] or 2000) // 1000),
-    }
+    return _device_code_started(
+        sid, str(device_data["user_code"]), str(device_data["verification_uri"]), expires_in_seconds,
+        max(2, (sess["interval_ms"] or 2000) // 1000),
+    )
 
 
 async def _start_xai_device_code(profile: Optional[str]) -> Dict[str, Any]:
@@ -455,11 +436,11 @@ async def _start_xai_device_code(profile: Optional[str]) -> Dict[str, Any]:
         expires_at=time.time() + int(device_data["expires_in"]),
     )
     _start_poller(_xai_device_poller, sid)
-    return {
-        "session_id": sid, "flow": "device_code", "user_code": str(device_data["user_code"]),
-        "verification_url": str(device_data.get("verification_uri_complete") or device_data["verification_uri"]),
-        "expires_in": int(device_data["expires_in"]), "poll_interval": int(device_data["interval"]),
-    }
+    return _device_code_started(
+        sid, str(device_data["user_code"]),
+        str(device_data.get("verification_uri_complete") or device_data["verification_uri"]),
+        int(device_data["expires_in"]), int(device_data["interval"]),
+    )
 
 
 _DEVICE_CODE_STARTERS = {

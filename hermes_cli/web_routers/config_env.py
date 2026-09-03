@@ -105,7 +105,6 @@ async def get_schema(profile: Optional[str] = None):
 async def get_egress_status():
     """Dashboard/Desktop-readable egress proxy status and remediation text."""
     from hermes_cli.proxy_cli import format_status_text
-
     return {"text": format_status_text()}
 
 
@@ -147,6 +146,15 @@ def _provider_card(d, description: str, url, *, is_password: bool, advanced: boo
         "provider": d.slug, "provider_label": d.label, "description": description, "url": url,
         "is_password": is_password, "advanced": advanced, "category": "provider",
     }
+
+
+_AUTH_TYPE_ENV_VARS = {
+    "aws_sdk": (
+        ("AWS_REGION", lambda d, var: f"{d.label} ({var})"),
+        ("AWS_PROFILE", lambda d, var: f"{d.label} ({var})"),
+    ),
+    "vertex": (("VERTEX_CREDENTIALS_PATH", lambda d, var: f"{d.label} — service account JSON path (or use ADC)"),),
+}
 
 
 def _catalog_provider_env_metadata() -> dict:
@@ -196,19 +204,11 @@ def _catalog_provider_env_metadata() -> dict:
         # the Keys tab: AWS-SDK providers (Bedrock) authenticate via the AWS
         # credential chain, Vertex via OAuth2 (service-account JSON path or
         # ADC — a path, not a secret). Tag their env vars to the card.
-        if d.auth_type == "aws_sdk":
-            for aws_var in ("AWS_REGION", "AWS_PROFILE"):
-                existing = meta.get(aws_var, {})
-                meta[aws_var] = _provider_card(
-                    d, existing.get("description") or f"{d.label} ({aws_var})", existing.get("url"),
-                    is_password=False, advanced=existing.get("advanced", True),
-                )
-        if d.auth_type == "vertex":
-            existing = meta.get("VERTEX_CREDENTIALS_PATH", {})
-            meta["VERTEX_CREDENTIALS_PATH"] = _provider_card(
-                d,
-                existing.get("description") or f"{d.label} — service account JSON path (or use ADC)",
-                existing.get("url"), is_password=False, advanced=existing.get("advanced", True),
+        for var, describe in _AUTH_TYPE_ENV_VARS.get(d.auth_type, ()):
+            existing = meta.get(var, {})
+            meta[var] = _provider_card(
+                d, existing.get("description") or describe(d, var), existing.get("url"),
+                is_password=False, advanced=existing.get("advanced", True),
             )
     return meta
 
@@ -352,6 +352,19 @@ def _config_api_key_is_env_ref(endpoint_id: str) -> bool:
     return bool(isinstance(raw_key, str) and re.search(r"\$\{[^}]+\}", raw_key))
 
 
+def _endpoint_row(
+    endpoint_id: str, name: str, base_url: str, model: str, models: List[str], context_length,
+    discover_models: bool, key_entry: Dict[str, Any], is_current: bool, source: str,
+) -> Dict[str, Any]:
+    has_api_key, api_key_preview = _api_key_display(key_entry)
+    return {
+        "id": endpoint_id, "name": name, "base_url": base_url, "model": model, "models": models,
+        "context_length": context_length, "discover_models": discover_models,
+        "has_api_key": has_api_key, "api_key_preview": api_key_preview,
+        "is_current": is_current, "source": source,
+    }
+
+
 def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
     model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
     current_provider = str(model_cfg.get("provider", "") or "")
@@ -369,26 +382,18 @@ def _custom_endpoint_response(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             endpoint_id = str(provider_id)
             models = _models_from_custom_endpoint_entry(raw_entry)
-            endpoint_model = str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else ""))
-            has_api_key, api_key_preview = _api_key_display(raw_entry)
-            endpoints.append({
-                "id": endpoint_id, "name": str(raw_entry.get("name") or endpoint_id),
-                "base_url": base_url, "model": endpoint_model, "models": models,
-                "context_length": raw_entry.get("context_length"),
-                "discover_models": bool(raw_entry.get("discover_models", True)),
-                "has_api_key": has_api_key, "api_key_preview": api_key_preview,
-                "is_current": endpoint_id == current_provider, "source": "providers",
-            })
+            endpoints.append(_endpoint_row(
+                endpoint_id, str(raw_entry.get("name") or endpoint_id), base_url,
+                str(raw_entry.get("model") or raw_entry.get("default_model") or (models[0] if models else "")),
+                models, raw_entry.get("context_length"), bool(raw_entry.get("discover_models", True)),
+                raw_entry, endpoint_id == current_provider, "providers",
+            ))
 
     if current_provider.lower() == "custom" and current_base_url and not any(e["id"] == "custom" for e in endpoints):
-        has_api_key, api_key_preview = _api_key_display(model_cfg)
-        endpoints.insert(0, {
-            "id": "custom", "name": "Custom", "base_url": current_base_url, "model": current_model,
-            "models": [current_model] if current_model else [],
-            "context_length": model_cfg.get("context_length"), "discover_models": True,
-            "has_api_key": has_api_key, "api_key_preview": api_key_preview, "is_current": True,
-            "source": "direct-config",
-        })
+        endpoints.insert(0, _endpoint_row(
+            "custom", "Custom", current_base_url, current_model, [current_model] if current_model else [],
+            model_cfg.get("context_length"), True, model_cfg, True, "direct-config",
+        ))
 
     return {
         "endpoints": endpoints,
