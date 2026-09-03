@@ -56,9 +56,8 @@ def _commit_message_template(variables: Dict[str, Any]) -> Tuple[str, str]:
     avoid = _truncate(str(variables.get("avoid") or "").strip(), 1000)
     if avoid:
         parts.append(
-            "You already proposed the message below and the user wants a "
-            "different one. Write a NEW message with different wording (and, if "
-            "reasonable, a different emphasis or scope framing) — do not repeat "
+            "You already proposed the message below and the user wants a different one. Write a NEW message with "
+            "different wording (and, if reasonable, a different emphasis or scope framing) — do not repeat "
             f"it:\n{avoid}"
         )
     return _COMMIT_INSTRUCTIONS, "\n\n".join(parts)

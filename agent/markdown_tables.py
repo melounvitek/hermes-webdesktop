@@ -16,12 +16,7 @@ from typing import List
 
 from wcwidth import wcswidth
 
-__all__ = [
-    "is_table_divider",
-    "looks_like_table_row",
-    "realign_markdown_tables",
-    "split_table_row",
-]
+__all__ = ["is_table_divider", "looks_like_table_row", "realign_markdown_tables", "split_table_row"]
 
 
 _DIVIDER_CELL_RE = re.compile(r"^\s*:?-{3,}:?\s*$")
@@ -88,8 +83,7 @@ def _render_block(rows: List[List[str]], available_width: int | None = None) -> 
 def _hard_break(word: str, w: int) -> List[str]:
     """Split a single over-wide word into display-width-``w`` chunks."""
     out: List[str] = []
-    buf = ""
-    bw = 0
+    buf, bw = "", 0
     for ch in word:
         cw = _disp_width(ch) or 1
         if bw + cw > w and buf:
@@ -116,8 +110,7 @@ def _wrap_to_width(text: str, width: int) -> List[str]:
         return [""]
 
     lines: List[str] = []
-    current = ""
-    current_w = 0
+    current, current_w = "", 0
 
     def _start(word: str, ww: int) -> None:
         nonlocal current, current_w
@@ -189,8 +182,7 @@ def realign_markdown_tables(text: str, available_width: int | None = None) -> st
 
     lines = text.split("\n")
     out: List[str] = []
-    i = 0
-    n = len(lines)
+    i, n = 0, len(lines)
     while i < n:
         line = lines[i]
         # A table starts with a header row whose next line is a divider.

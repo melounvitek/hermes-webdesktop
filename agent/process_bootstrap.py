@@ -42,6 +42,13 @@ def _interleave_addrinfos(addrinfos: list[tuple]) -> list[tuple]:
     return interleaved
 
 
+def _quiet_unregister(selector, sock) -> None:
+    try:
+        selector.unregister(sock)
+    except Exception:
+        pass
+
+
 def _happy_eyeballs_create_connection(
     address: tuple[str, int],
     timeout: Optional[float],
@@ -65,10 +72,7 @@ def _happy_eyeballs_create_connection(
     deadline = None if timeout is None else time.monotonic() + max(timeout, 0.0)
     next_launch = time.monotonic()
     pending = list(addrinfos)
-    in_progress = {
-        0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR,
-        getattr(errno, "WSAEWOULDBLOCK", 10035),
-    }
+    in_progress = {0, errno.EINPROGRESS, errno.EWOULDBLOCK, errno.EALREADY, errno.EINTR, getattr(errno, "WSAEWOULDBLOCK", 10035)}
 
     def start_attempt(addrinfo):
         family, socktype, proto, _canonname, sockaddr = addrinfo
@@ -133,10 +137,7 @@ def _happy_eyeballs_create_connection(
         if winner is None:
             raise last_error if last_error is not None else OSError(f"Could not connect to {host}:{port}")
 
-        try:
-            selector.unregister(winner)
-        except Exception:
-            pass
+        _quiet_unregister(selector, winner)
         active.discard(winner)
         winner.settimeout(timeout)
         for option in socket_options or ():
@@ -145,10 +146,7 @@ def _happy_eyeballs_create_connection(
         return winner
     finally:
         for candidate in active:
-            try:
-                selector.unregister(candidate)
-            except Exception:
-                pass
+            _quiet_unregister(selector, candidate)
             candidate.close()
         selector.close()
 
@@ -357,13 +355,6 @@ OpenAI = _OpenAIProxy()
 
 
 __all__ = [
-    "OpenAI",
-    "_OpenAIProxy",
-    "_load_openai_cls",
-    "_SafeWriter",
-    "_install_safe_stdio",
-    "_get_proxy_from_env",
-    "_get_proxy_for_base_url",
-    "build_keepalive_http_client",
-    "enable_happy_eyeballs_on_client",
+    "OpenAI", "_OpenAIProxy", "_load_openai_cls", "_SafeWriter", "_install_safe_stdio", "_get_proxy_from_env",
+    "_get_proxy_for_base_url", "build_keepalive_http_client", "enable_happy_eyeballs_on_client",
 ]

@@ -25,9 +25,8 @@ PROFILE_BUILD_FLAG = "profile_build_offered"
 # applied so the message matches reality; "interrupt" is the default branch.
 _BUSY_INPUT_HINTS_GATEWAY = {
     "queue": (
-        "💡 First-time tip — I queued your message instead of interrupting. "
-        "Send `/busy interrupt` to make new messages stop the current task "
-        "immediately, or `/busy status` to check. This notice won't appear again."
+        "💡 First-time tip — I queued your message instead of interrupting. Send `/busy interrupt` to make new messages "
+        "stop the current task immediately, or `/busy status` to check. This notice won't appear again."
     ),
     "steer": (
         "💡 First-time tip — I steered your message into the current run; it will arrive after the next tool "
@@ -132,21 +131,20 @@ def profile_build_directive() -> str:
     connected accounts.
     """
     return (
-        "\n\n[System note: This is the user's very first message ever. "
-        "After a one-sentence introduction (mention /help shows commands), "
-        "OFFER — do not assume — to build a short profile of them so you can "
-        "be more useful, and explain they can decline or do it later. If and ONLY IF they accept:\n"
-        "  1. Ask for whatever they're comfortable sharing (name, what they "
-        "do, how they like you to work). Volunteered facts come first.\n"
-        "  2. Before ANY external lookup, say what you intend to look up and "
-        "get explicit consent for that step. Never read their connected "
-        "accounts (email, calendar, etc.) silently — ask each time.\n"
-        "  3. With consent, you may use web_search to confirm public details "
-        "(e.g. employer, public profiles) from the data points they gave.\n"
-        "  4. Save each confirmed, durable fact with the memory tool using "
-        "target=\"user\" — keep entries compact and high-signal.\n"
-        "If they decline at any point, stop immediately and continue normally. "
-        "Keep the whole exchange light and conversational, not an interrogation.]"
+        "\n\n"
+        "[System note: This is the user's very first message ever. After a one-sentence introduction (mention /help "
+        "shows commands), OFFER — do not assume — to build a short profile of them so you can be more useful, and "
+        "explain they can decline or do it later. If and ONLY IF they accept:\n"
+        "  1. Ask for whatever they're comfortable sharing (name, what they do, how they like you to work). "
+        "Volunteered facts come first.\n"
+        "  2. Before ANY external lookup, say what you intend to look up and get explicit consent for that step. Never "
+        "read their connected accounts (email, calendar, etc.) silently — ask each time.\n"
+        "  3. With consent, you may use web_search to confirm public details (e.g. employer, public profiles) from the "
+        "data points they gave.\n"
+        "  4. Save each confirmed, durable fact with the memory tool using target=\"user\" — keep entries compact and "
+        "high-signal.\n"
+        "If they decline at any point, stop immediately and continue normally. Keep the whole exchange light and "
+        "conversational, not an interrogation.]"
     )
 
 
@@ -174,12 +172,10 @@ def mark_seen(config_path: Path, flag: str) -> bool:
             cfg["onboarding"] = {}
         seen = cfg["onboarding"].get("seen")
         if not isinstance(seen, dict):
-            seen = {}
-            cfg["onboarding"]["seen"] = seen
-        if seen.get(flag) is True:
-            return True
-        seen[flag] = True
-        atomic_config_write(config_path, cfg)
+            seen = cfg["onboarding"]["seen"] = {}
+        if seen.get(flag) is not True:
+            seen[flag] = True
+            atomic_config_write(config_path, cfg)
         return True
     except Exception as e:
         logger.debug("onboarding: failed to mark flag %s: %s", flag, e)
@@ -187,18 +183,8 @@ def mark_seen(config_path: Path, flag: str) -> bool:
 
 
 __all__ = [
-    "BUSY_INPUT_FLAG",
-    "TOOL_PROGRESS_FLAG",
-    "OPENCLAW_RESIDUE_FLAG",
-    "PROFILE_BUILD_FLAG",
-    "busy_input_hint_gateway",
-    "busy_input_hint_cli",
-    "tool_progress_hint_gateway",
-    "tool_progress_hint_cli",
-    "openclaw_residue_hint_cli",
-    "detect_openclaw_residue",
-    "profile_build_mode",
-    "profile_build_directive",
-    "is_seen",
-    "mark_seen",
+    "BUSY_INPUT_FLAG", "TOOL_PROGRESS_FLAG", "OPENCLAW_RESIDUE_FLAG", "PROFILE_BUILD_FLAG",
+    "busy_input_hint_gateway", "busy_input_hint_cli", "tool_progress_hint_gateway", "tool_progress_hint_cli",
+    "openclaw_residue_hint_cli", "detect_openclaw_residue", "profile_build_mode", "profile_build_directive",
+    "is_seen", "mark_seen",
 ]

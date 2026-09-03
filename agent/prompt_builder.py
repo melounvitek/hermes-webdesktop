@@ -81,7 +81,6 @@ def _strip_yaml_frontmatter(content: str) -> str:
     return content
 
 
-# Constants
 DEFAULT_AGENT_IDENTITY = (
     # A behavior spec (sizing rule, named prohibitions, earned-depth escape hatch), not a trait list — trait
     # lists change nothing. Maintainer rule: models UNDER-explore by default; never re-add an exploration-thrift line.
@@ -113,6 +112,7 @@ HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
     "(or read it yourself if you have a way to fetch web content)."
 )
 
+
 def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = True) -> str:
     """ONE memory-guidance block whose opening frame adapts to the enabled store(s); "" when both are off.
 
@@ -143,6 +143,7 @@ def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = T
 # Legacy aliases still imported by call sites and tests.
 MEMORY_GUIDANCE = build_memory_guidance(True, True)
 USER_PROFILE_GUIDANCE = build_memory_guidance(False, True)
+
 SESSION_SEARCH_GUIDANCE = (
     "When the user references something from a past conversation or you suspect relevant cross-session "
     "context exists, use session_search to recall it before asking them to repeat themselves."
@@ -878,12 +879,8 @@ def build_environment_hints() -> str:
     backend = (_tenv_read("TERMINAL_ENV") or "local").strip().lower()
     is_remote_backend = backend in _REMOTE_TERMINAL_BACKENDS or _plugin_backend_is_remote(backend)
     hints = [_remote_backend_hint(backend)] if is_remote_backend else _local_host_hints()
-    if is_wsl():
-        hints.append(WSL_ENVIRONMENT_HINT)
-    extra = _embedder_environment_hint()
-    if extra:
-        hints.append(extra)
-    return "\n\n".join(hints)
+    hints += [WSL_ENVIRONMENT_HINT] if is_wsl() else []
+    return "\n\n".join(h for h in (*hints, _embedder_environment_hint()) if h)
 
 
 CONTEXT_FILE_MAX_CHARS = 20_000
@@ -935,8 +932,7 @@ def drain_truncation_warnings() -> list:
     return drained
 
 
-# Skills index (two-layer cache: in-process LRU, then disk snapshot)
-
+# Skills index (two-layer cache: in-process LRU, then disk snapshot).
 # One entry per profile × platform (key carries skills_dir); a multiplexing gateway needs more than a handful.
 _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
@@ -1011,19 +1007,6 @@ def _load_skills_snapshot(skills_dir: Path) -> Optional[dict]:
     ):
         return snapshot
     return None
-
-
-def _write_skills_snapshot(skills_dir: Path, skill_entries: list[dict], category_descriptions: dict[str, str]) -> None:
-    """Persist skill metadata to disk for fast cold-start reuse (best-effort)."""
-    try:
-        atomic_json_write(_skills_prompt_snapshot_path(), {
-            "version": _SKILLS_SNAPSHOT_VERSION,
-            "manifest": _build_skills_manifest(skills_dir),
-            "skills": skill_entries,
-            "category_descriptions": category_descriptions,
-        })
-    except Exception as e:
-        logger.debug("Could not write skills prompt snapshot: %s", e)
 
 
 def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict, description: str) -> dict:
@@ -1287,7 +1270,6 @@ def _build_skills_system_prompt_inner(
 
     skills_by_category: dict[str, list[tuple[str, str]]] = {}
     category_descriptions: dict[str, str] = {}
-
     # Disk snapshot (fast path) vs. full scan: both yield (entry, is_compatible) pairs so labeling runs identically.
     snapshot = _load_skills_snapshot(skills_dir)
     if snapshot is not None:
@@ -1317,21 +1299,21 @@ def _build_skills_system_prompt_inner(
                     proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
                     desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s",
                 )
-    if project_names:
-        # Drop shadowed entries BEFORE org labeling so collision flags don't fire on intentional overrides.
-        visible_entries = [e for e in visible_entries if _entry_name(e) not in project_names]
-
-    _label_visible_entries(visible_entries, skills_by_category)
-
-    if snapshot is None:
+    # Drop shadowed entries BEFORE org labeling so collision flags don't fire on intentional overrides.
+    _label_visible_entries([e for e in visible_entries if _entry_name(e) not in project_names], skills_by_category)
+    if snapshot is None:  # persist for fast cold-start reuse (best-effort)
         category_descriptions.update(_read_category_descriptions(skills_dir, "Could not read skill description %s: %s"))
-        _write_skills_snapshot(skills_dir, [entry for entry, _ in candidates], category_descriptions)
+        try:
+            atomic_json_write(_skills_prompt_snapshot_path(), {
+                "version": _SKILLS_SNAPSHOT_VERSION, "manifest": _build_skills_manifest(skills_dir),
+                "skills": [entry for entry, _ in candidates], "category_descriptions": category_descriptions,
+            })
+        except Exception as e:
+            logger.debug("Could not write skills prompt snapshot: %s", e)
 
     # External skill directories: scanned directly (read-only, small); names already indexed are skipped.
     seen_skill_names: set[str] = {name for cat in skills_by_category.values() for name, _ in cat}
-    for ext_dir in external_dirs:
-        if not ext_dir.exists():
-            continue
+    for ext_dir in (d for d in external_dirs if d.exists()):
         _collect_extra_skills(
             ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names, skills_by_category,
             desc_prefix="", log_fmt="Error reading external skill %s: %s",
@@ -1349,6 +1331,7 @@ def _build_skills_system_prompt_inner(
 
 
 # Context files (SOUL.md, AGENTS.md, .cursorrules)
+
 
 def _truncate_content(
     content: str,
@@ -1397,10 +1380,7 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
         content = soul_path.read_text(encoding="utf-8").strip()
         if not content:
             return None
-        return _truncate_content(
-            _scan_context_content(content, "SOUL.md"), "SOUL.md",
-            context_length=context_length, read_path=str(soul_path),
-        )
+        return _truncate_content(_scan_context_content(content, "SOUL.md"), "SOUL.md", context_length=context_length, read_path=str(soul_path))
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
@@ -1427,10 +1407,8 @@ def _context_section(
     """Threat-scan *content*, render it as ``## <label>``, cap it to the budget (*warn_name* labels warnings)."""
     if strip_frontmatter:
         content = _strip_yaml_frontmatter(content)
-    return _truncate_content(
-        f"## {label}\n\n{_scan_context_content(content, label)}", warn_name,
-        context_length=context_length, read_path=str(path),
-    )
+    body = f"## {label}\n\n{_scan_context_content(content, label)}"
+    return _truncate_content(body, warn_name, context_length=context_length, read_path=str(path))
 
 
 def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
@@ -1479,19 +1457,15 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
     if len(sections) <= 1:
         return sections[0] if sections else ""
     # Per-file budgets applied above; also cap the merged chain so a deep monorepo can't multiply the budget.
-    return _truncate_content(
-        "\n\n".join(sections), "AGENTS.md (directory chain)",
-        context_length=context_length, read_path=str(cwd_resolved / "AGENTS.md"),
-    )
+    return _truncate_content("\n\n".join(sections), "AGENTS.md (directory chain)", context_length=context_length, read_path=str(cwd_resolved / "AGENTS.md"))
 
 
 def _load_claude_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ("CLAUDE.md", "claude.md"):
-        candidate = cwd_path / name
-        content = _read_context_file(candidate) if candidate.exists() else ""
+        content = _read_context_file(cwd_path / name) if (cwd_path / name).exists() else ""
         if content:
-            return _context_section(content, name, "CLAUDE.md", candidate, context_length)
+            return _context_section(content, name, "CLAUDE.md", cwd_path / name, context_length)
     return ""
 
 
@@ -1525,7 +1499,6 @@ def build_context_files_prompt(
     from HERMES_HOME is independent and always included unless *skip_soul* (already the identity slot).
     """
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
-    sections = []
     # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt authority (the desktop
     # default would load this repo's contributor AGENTS.md). An explicit cwd is honored verbatim.
     from agent.runtime_cwd import _is_install_tree
@@ -1536,13 +1509,14 @@ def build_context_files_prompt(
             "install tree (%s) — set terminal.cwd to your project directory",
             cwd_path,
         )
+        sections = []
     else:
-        sections.append(
+        sections = [
             _load_hermes_md(cwd_path, context_length)
             or _load_agents_md(cwd_path, context_length)
             or _load_claude_md(cwd_path, context_length)
             or _load_cursorrules(cwd_path, context_length)
-        )
+        ]
     if not skip_soul:
         sections.append(load_soul_md(context_length, home_override=home_override))
     sections = [s for s in sections if s]
