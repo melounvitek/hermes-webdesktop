@@ -1,19 +1,12 @@
 """Relay media client — gateway↔connector media plane (Phase 2). EXPERIMENTAL.
 
-The relay wire carries media BY REFERENCE: inbound ``media_urls`` name
-connector re-hosts (``{connector}/relay/media/{id}``) and an outbound
-``send_media`` op names a ``source_url`` the connector resolves back to bytes.
-
-  - ``download(url)`` → GET a re-hosted attachment to a local temp file (the
-    agent's vision/file tools consume LOCAL paths, like every native adapter).
-  - ``upload(path)``  → POST local bytes to ``/relay/media``; returns the
-    ``/relay/media/{id}`` reference for a subsequent ``send_media`` op, so a
-    locally-generated artifact crosses without the gateway needing a public URL.
-
-Both present the same per-gateway signed bearer the WS upgrade uses
-(``make_upgrade_token``). Uploads are per-gateway-owned on the connector;
-downloads accept this gateway's uploads and connector ingest re-hosts.
-Transport is stdlib ``urllib`` in a thread executor (no HTTP client deps).
+The relay wire carries media BY REFERENCE: inbound ``media_urls`` name connector
+re-hosts (``{connector}/relay/media/{id}``) and an outbound ``send_media`` op names
+a ``source_url`` the connector resolves back to bytes. ``download(url)`` GETs a
+re-hosted attachment to a local temp file (vision/file tools consume LOCAL paths,
+like every native adapter); ``upload(path)`` POSTs local bytes to ``/relay/media``
+and returns the reference for a subsequent ``send_media`` op. Both present the
+per-gateway signed bearer the WS upgrade uses; stdlib ``urllib`` in a thread executor.
 """
 
 from __future__ import annotations
@@ -45,7 +38,7 @@ _MEDIA_USER_AGENT = "HermesAgent-Relay/1.0 (+https://github.com/NousResearch/her
 
 
 def media_base_url(relay_dial_url: str) -> str:
-    """Map the ``ws(s)://…/relay`` dial URL to the ``http(s)://…`` base (same derivation as ``_provision_url``)."""
+    """Map the ``ws(s)://…/relay`` dial URL to the ``http(s)://…`` connector base."""
     raw = (relay_dial_url or "").strip().rstrip("/")
     if raw.startswith("ws://"):
         raw = "http://" + raw[len("ws://") :]
@@ -59,12 +52,7 @@ def media_base_url(relay_dial_url: str) -> str:
 class RelayMediaClient:
     """Authenticated client for the connector's ``/relay/media`` routes."""
 
-    def __init__(
-        self,
-        base_url: str,
-        gateway_id: Optional[str],
-        secret: Optional[str],
-    ) -> None:
+    def __init__(self, base_url: str, gateway_id: Optional[str], secret: Optional[str]) -> None:
         self._base_url = base_url.rstrip("/")
         self._gateway_id = gateway_id or ""
         self._secret = secret or ""
@@ -77,16 +65,8 @@ class RelayMediaClient:
     def _bearer(self) -> str:
         return make_upgrade_token(self._gateway_id, self._secret)
 
-    def is_relay_media_url(self, url: str) -> bool:
-        """Is ``url`` a connector re-host reference (needs our bearer to GET)?"""
-        return "/relay/media/" in (url or "")
-
     async def upload(
-        self,
-        file_path: str,
-        *,
-        mime: Optional[str] = None,
-        filename: Optional[str] = None,
+        self, file_path: str, *, mime: Optional[str] = None, filename: Optional[str] = None
     ) -> Optional[str]:
         """POST local file bytes to ``/relay/media``; return the reference URL or None on any failure."""
         if not self.enabled:
@@ -99,16 +79,11 @@ class RelayMediaClient:
             return None
         if not data or len(data) > MEDIA_MAX_BYTES:
             logger.warning(
-                "relay media upload: %s size %d outside (0, %d]",
-                file_path,
-                len(data),
-                MEDIA_MAX_BYTES,
+                "relay media upload: %s size %d outside (0, %d]", file_path, len(data), MEDIA_MAX_BYTES
             )
             return None
         content_type = (
-            mime
-            or mimetypes.guess_type(filename or path.name)[0]
-            or "application/octet-stream"
+            mime or mimetypes.guess_type(filename or path.name)[0] or "application/octet-stream"
         )
         headers = {
             "User-Agent": _MEDIA_USER_AGENT,
@@ -122,11 +97,8 @@ class RelayMediaClient:
             req = urllib.request.Request(url, data=data, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
-                    body = json.loads(resp.read().decode("utf-8"))
-                    media_id = body.get("id")
-                    if not media_id:
-                        return None
-                    return f"{self._base_url}/relay/media/{media_id}"
+                    media_id = json.loads(resp.read().decode("utf-8")).get("id")
+                    return f"{self._base_url}/relay/media/{media_id}" if media_id else None
             except (urllib.error.URLError, ValueError, OSError) as exc:
                 logger.warning("relay media upload failed: %s", exc)
                 return None
@@ -141,7 +113,7 @@ class RelayMediaClient:
         """
         if not url:
             return None
-        needs_auth = self.is_relay_media_url(url)
+        needs_auth = "/relay/media/" in url
         if needs_auth and not self.enabled:
             return None
         headers = {"User-Agent": _MEDIA_USER_AGENT}
@@ -152,8 +124,7 @@ class RelayMediaClient:
             req = urllib.request.Request(url, headers=headers)
             try:
                 with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT_S) as resp:
-                    length = int(resp.headers.get("Content-Length") or 0)
-                    if length > MEDIA_MAX_BYTES:
+                    if int(resp.headers.get("Content-Length") or 0) > MEDIA_MAX_BYTES:
                         logger.warning("relay media download too large: %s", url)
                         return None
                     data = resp.read(MEDIA_MAX_BYTES + 1)
