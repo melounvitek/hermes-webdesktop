@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from hermes_cli.colors import Colors, color
@@ -39,6 +40,17 @@ def _fail_and_issue(text: str, detail: str, fix: str, issues: list[str]) -> None
     issues.append(fix)
 
 
+@contextmanager
+def warn_on_error(text: str, detail: str = "({e})", report=check_warn):
+    """Best-effort block: an exception prints ``report(text.format(e=e), detail.format(e=e))`` (nothing when
+    *text* is ``""``) instead of propagating. ``{e}`` in either string is the exception."""
+    try:
+        yield
+    except Exception as e:
+        if text:
+            report(text.format(e=e), detail.format(e=e))
+
+
 @dataclass
 class Finding:
     """What one doctor check contributed: auto-fixable issues, manual-only issues, fixes applied."""
@@ -57,20 +69,17 @@ def doctor_check(on_error: str | None = None, detail: str = ""):
     """Turn ``fn(should_fix, f: Finding)`` into a ``(should_fix) -> Finding`` doctor check.
 
     *on_error* None: exceptions propagate (as they always did for that check). Otherwise the check is
-    best-effort: a crash prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing for
-    ``""``) and the partial Finding is still returned, so issues recorded before the crash survive.
-    """
+    best-effort via :func:`warn_on_error` (``""`` = silent) and the partial Finding is still returned,
+    so issues recorded before the crash survive."""
     def deco(fn):
         @functools.wraps(fn)
         def check(should_fix: bool) -> Finding:
             f = Finding()
-            try:
+            if on_error is None:
                 fn(should_fix, f)
-            except Exception as e:
-                if on_error is None:
-                    raise
-                if on_error:
-                    check_warn(on_error.format(e=e), detail.format(e=e))
+            else:
+                with warn_on_error(on_error, detail):
+                    fn(should_fix, f)
             return f
         return check
     return deco

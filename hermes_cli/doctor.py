@@ -30,6 +30,7 @@ load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".en
 from hermes_cli.colors import Colors, color
 from hermes_cli.doctor_report import (  # noqa: F401  (re-exported for doctor_live and tests)
     Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
+    warn_on_error,
 )
 from hermes_cli.doctor_connectivity import (  # noqa: F401  (re-exported; tests import from hermes_cli.doctor)
     _build_apikey_providers_list, _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes,
@@ -55,7 +56,7 @@ _PROVIDER_ENV_HINTS = (
 @doctor_check()
 def _check_auth_providers(should_fix: bool, f: Finding) -> None:
     """Refresh-free OAuth status snapshot (doctor must never trigger a token refresh)."""
-    try:
+    with warn_on_error("Auth provider status", "(could not check: {e})"):
         from hermes_cli.auth import get_nous_auth_status_local, get_codex_auth_status, get_minimax_oauth_auth_status
         _login_row("Nous Portal auth", get_nous_auth_status_local())
         # Native OAuth is Hermes' own device-code flow; the Codex CLI only imports existing ~/.codex/auth.json
@@ -64,13 +65,9 @@ def _check_auth_providers(should_fix: bool, f: Finding) -> None:
             check_info("codex CLI not installed (optional — only required to import tokens from an existing Codex CLI login)")
         minimax_status = get_minimax_oauth_auth_status()
         _login_row("MiniMax OAuth", minimax_status, f"(logged in, region={minimax_status.get('region', 'global')})")
-    except Exception as e:
-        check_warn("Auth provider status", f"(could not check: {e})")
-    try:  # xAI OAuth separately, so an import failure cannot disrupt the rows already printed above
+    with warn_on_error(""):  # xAI OAuth separately, so an import failure cannot disrupt the rows already printed
         from hermes_cli.auth import get_xai_oauth_auth_status
         _login_row("xAI OAuth", get_xai_oauth_auth_status() or {}, show_error=True)
-    except Exception:
-        pass
 
 
 def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_error: bool = False) -> bool:
@@ -168,9 +165,7 @@ def run_doctor(args):
             _section(title)
         total.merge(check(should_fix))
     # Opt-in live probes run AFTER all static checks (`--live`: real network calls; bounded + read-only).
-    try:
+    with warn_on_error(""):
         from hermes_cli.doctor_live import maybe_run_live_checks
         maybe_run_live_checks(args, total.manual_issues)
-    except Exception:
-        pass
     _print_summary(should_fix, total)

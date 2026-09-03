@@ -12,6 +12,7 @@ from hermes_cli.colors import Colors, color
 from hermes_cli.config import is_nix_install_method, recommended_update_command_for_method
 from hermes_cli.doctor_report import (
     Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
+    warn_on_error,
 )
 from hermes_constants import is_termux as _is_termux
 
@@ -21,9 +22,7 @@ def _python_install_cmd() -> str:
 
 
 def _system_package_install_cmd(pkg: str) -> str:
-    if _is_termux():
-        return f"pkg install {pkg}"
-    return f"brew install {pkg}" if sys.platform == "darwin" else f"sudo apt install {pkg}"
+    return f"{'pkg' if _is_termux() else 'brew' if sys.platform == 'darwin' else 'sudo apt'} install {pkg}"
 
 
 def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
@@ -31,10 +30,8 @@ def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
     from hermes_cli.doctor import PROJECT_ROOT, detect_install_method
     method = install_method or detect_install_method(PROJECT_ROOT)
     cmd = recommended_update_command_for_method(method)
-    if is_nix_install_method(method):
-        action = cmd  # prose guidance, not a shell command
-    else:
-        action = {"docker": f"run `{cmd}`, then recreate all Hermes containers", "apt": f"run `{cmd}`"}.get(method, "run `hermes update`")
+    action = cmd if is_nix_install_method(method) else {  # nix: prose guidance, not a shell command
+        "docker": f"run `{cmd}`, then recreate all Hermes containers", "apt": f"run `{cmd}`"}.get(method, "run `hermes update`")
     return f"({action}; fixed versions: 3.51.3+ / 3.50.7 / 3.44.6 — see https://sqlite.org/wal.html#walresetbug)"
 
 
@@ -107,10 +104,11 @@ def _report_database_journal_modes(hermes_home: Path | None = None, version_info
             continue
         mode, error = _read_journal_mode(path)
         size = _format_db_size(path)
-        if error is not None and vulnerable:
-            check_warn(f"{name}: journal mode could not be read", f"({error}; cannot rule out WAL exposure)")
-        elif error is not None:
-            check_info(f"{name}: journal mode could not be read ({error})")
+        if error is not None:
+            if vulnerable:
+                check_warn(f"{name}: journal mode could not be read", f"({error}; cannot rule out WAL exposure)")
+            else:
+                check_info(f"{name}: journal mode could not be read ({error})")
         elif mode == "wal" and vulnerable:
             exposed.append(name)
             check_warn(f"{name} is in WAL mode ({size})", "(exposed to the WAL-reset bug until SQLite is upgraded)")
@@ -166,8 +164,8 @@ def _check_s6_supervision(issues: list[str]) -> None:
     _section("s6 Supervision")
     mgr = S6ServiceManager()
     for static in ("main-hermes", "dashboard"):  # s6-rc symlinks under /run/service/, same s6-svstat probe
-        (check_ok if mgr.is_running(static) else check_info)(
-            f"{static}: up" if mgr.is_running(static) else f"{static}: down (expected if not enabled via env)")
+        up = mgr.is_running(static)
+        (check_ok if up else check_info)(f"{static}: up" if up else f"{static}: down (expected if not enabled via env)")
     profiles = mgr.list_profile_gateways()
     if not profiles:
         return check_info("No per-profile gateways registered yet — create one with `hermes profile create <name>`")
@@ -186,19 +184,16 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
         from agent.ssl_guard import verify_ca_bundle_with_fallback
         from agent.errors import SSLConfigurationError
     except Exception as e:
-        check_warn("SSL certificate check skipped", str(e))
-        return
+        return check_warn("SSL certificate check skipped", str(e))
     if issues is None:
         issues = []
     try:
         verify_ca_bundle_with_fallback()
-        check_ok("SSL CA certificate bundle is valid")
-        return
+        return check_ok("SSL CA certificate bundle is valid")
     except SSLConfigurationError as e:
         first_error = str(e)
     except Exception as e:
-        check_warn("SSL certificate check skipped", str(e))
-        return
+        return check_warn("SSL certificate check skipped", str(e))
     check_fail("SSL CA certificate bundle is broken", first_error)
     pip_cmd = f"{sys.executable} -m pip install --force-reinstall certifi"
     if not should_fix:
@@ -212,9 +207,7 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
     except Exception as exc:
         failure = ("certifi repair could not run pip", str(exc))
     if failure:
-        check_fail(*failure)
-        issues.append(f"Reinstall certifi manually: {pip_cmd}")
-        return
+        return _fail_and_issue(*failure, f"Reinstall certifi manually: {pip_cmd}", issues)
     # Drop cached certifi modules so where() resolves the fresh install without a restart.
     import importlib
     for mod_name in [m for m in sys.modules if m == "certifi" or m.startswith("certifi.")]:
@@ -224,9 +217,9 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
         verify_ca_bundle_with_fallback()
         check_ok("SSL CA certificate bundle repaired (certifi reinstalled)")
     except SSLConfigurationError as e:
-        check_fail("SSL CA certificate bundle still broken after reinstall", str(e))
-        issues.append("certifi reinstall did not restore the CA bundle — check for a custom CA env var "
-                      "(SSL_CERT_FILE/REQUESTS_CA_BUNDLE) pointing at a missing file, or recreate the venv.")
+        _fail_and_issue("SSL CA certificate bundle still broken after reinstall", str(e),
+                        "certifi reinstall did not restore the CA bundle — check for a custom CA env var "
+                        "(SSL_CERT_FILE/REQUESTS_CA_BUNDLE) pointing at a missing file, or recreate the venv.", issues)
 
 
 def _check_gateway_service_linger(issues: list[str]) -> None:
@@ -235,17 +228,27 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         from hermes_cli.gateway import get_systemd_linger_status, get_systemd_unit_path, is_linux
         from hermes_cli.service_manager import detect_service_manager
     except Exception as e:
-        check_warn("Gateway service linger", f"(could not import gateway helpers: {e})")
-        return
+        return check_warn("Gateway service linger", f"(could not import gateway helpers: {e})")
     if not is_linux() or detect_service_manager() == "s6" or not get_systemd_unit_path().exists():
         return
     _section("Gateway Service")
     linger_enabled, linger_detail = get_systemd_linger_status()
     if linger_enabled is None:
         return check_warn("Could not verify systemd linger", f"({linger_detail})")
-    if not check_bool(linger_enabled, ("Systemd linger enabled", "(gateway service survives logout)"), ("Systemd linger disabled", "(gateway may stop after logout)")):
+    if not check_bool(linger_enabled, ("Systemd linger enabled", "(gateway service survives logout)"),
+                      ("Systemd linger disabled", "(gateway may stop after logout)")):
         check_info("Run: sudo loginctl enable-linger $USER")
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
+
+
+_TCC_CDHASH_DETAIL = (
+    "the desktop bundle's designated requirement is cdhash-pinned (pre-#73681 build) — rebuilds invalidate "
+    "all permission grants. Run `hermes update` to get the stable identifier-pinned signing identity, "
+    "then re-grant permissions once.")
+_TCC_STABLE_DETAIL = {
+    True: "(certificate-anchored DR; grants survive rebuilds)",
+    False: "(identifier-pinned DR; grants survive rebuilds — for the strongest anchor, see `hermes desktop --setup-tcc-identity`)",
+}
 
 
 def check_macos_tcc_grants() -> None:
@@ -262,17 +265,11 @@ def check_macos_tcc_grants() -> None:
         return
     dr = _macos_desktop_dr(app)
     if not dr:
-        check_warn("macOS TCC grant check", "(could not read code-signing requirement of the desktop bundle)")
-        return
+        return check_warn("macOS TCC grant check", "(could not read code-signing requirement of the desktop bundle)")
     if "cdhash" in dr.lower():
-        return check_warn("macOS TCC grants will reset after every update",
-                          "the desktop bundle's designated requirement is cdhash-pinned (pre-#73681 build) — rebuilds invalidate "
-                          "all permission grants. Run `hermes update` to get the stable identifier-pinned signing identity, "
-                          "then re-grant permissions once.")
-    check_ok("macOS TCC signing identity is stable",
-             # --setup-tcc-identity or notarized build: strongest anchor
-             "(certificate-anchored DR; grants survive rebuilds)" if "certificate" in dr.lower() else
-             "(identifier-pinned DR; grants survive rebuilds — for the strongest anchor, see `hermes desktop --setup-tcc-identity`)")
+        return check_warn("macOS TCC grants will reset after every update", _TCC_CDHASH_DETAIL)
+    # --setup-tcc-identity or notarized build (certificate-anchored) is the strongest anchor.
+    check_ok("macOS TCC signing identity is stable", _TCC_STABLE_DETAIL["certificate" in dr.lower()])
     check_info("If macOS still re-prompts for permissions (toggle shows ON): the stored grant is stale — run "
                "`tccutil reset ScreenCapture com.nousresearch.hermes` (repeat per affected service), toggle it ON in "
                "System Settings, then fully quit & relaunch Hermes once.")
@@ -302,7 +299,7 @@ def _macos_desktop_dr(app: Path) -> str | None:
 def check_macos_tcc_anchor(should_fix: bool = False) -> None:
     """Report (and with --fix install) the dylib-complete TCC anchor; silent on non-macOS / non-uv interpreters.
     Never raises. Install is gated by the module's pre-install boot probe, so ``--fix`` cannot brick the CLI."""
-    try:
+    with warn_on_error("macOS TCC anchor check failed"):
         from hermes_cli import macos_tcc_anchor as tcc
         status, detail = tcc.tcc_anchor_state()
         if status == "skip":
@@ -313,8 +310,6 @@ def check_macos_tcc_anchor(should_fix: bool = False) -> None:
         if anchored is not None:
             return check_ok("macOS TCC anchor installed", f"({anchored})")
         check_warn("macOS TCC anchor missing" if status == "missing" else "macOS TCC anchor stale", f"({detail})")
-    except Exception as e:
-        check_warn("macOS TCC anchor check failed", f"({e})")
 
 
 def check_macos_full_disk_access() -> None:
@@ -325,18 +320,17 @@ def check_macos_full_disk_access() -> None:
     """
     if sys.platform != "darwin":
         return
-    tcc_dir = Path.home() / "Library" / "Application Support" / "com.apple.TCC"
     try:
-        os.listdir(tcc_dir)
-    except OSError as e:
-        if not isinstance(e, PermissionError):
-            return
+        os.listdir(Path.home() / "Library" / "Application Support" / "com.apple.TCC")
+    except PermissionError:
         check_info("One switch silences all macOS folder prompts: grant your terminal app Full Disk Access and Hermes "
                    "will never trip per-folder dialogs (Desktop/Downloads/Documents/...) again. Open: System Settings → "
                    "Privacy & Security → Full Disk Access — or run:\n"
                    "      open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n"
                    "    then enable your terminal (and Hermes.app if you use Desktop), and restart them once. "
                    "With Hermes' stable signing identities the grant survives every update.")
+    except OSError:
+        pass  # missing dir / other error: indeterminate, stay silent
     else:
         check_ok("macOS Full Disk Access granted", "(no per-folder permission prompts will occur)")
 
@@ -350,12 +344,12 @@ def _check_security_advisories(should_fix: bool, f: Finding) -> None:
     if not fresh_hits:
         return check_ok("No active security advisories")
     for hit in fresh_hits:
-        check_fail(f"{hit.advisory.title}", f"({hit.package}=={hit.installed_version})")
-        for line in full_remediation_text(hit):  # indented under the header as one section
+        # Fail row + remediation text indented under it as one section; also into the summary action list.
+        _fail_and_issue(f"{hit.advisory.title}", f"({hit.package}=={hit.installed_version})",
+                        f"Resolve security advisory {hit.advisory.id}: uninstall {hit.package}=={hit.installed_version} "
+                        f"and rotate credentials, then run `hermes doctor --ack {hit.advisory.id}`.", f.manual_issues)
+        for line in full_remediation_text(hit):
             print(f"    {color(line, Colors.YELLOW)}" if line else "")
-        # Also into the action list so the summary block surfaces it.
-        f.manual_issues.append(f"Resolve security advisory {hit.advisory.id}: uninstall {hit.package}=={hit.installed_version} "
-                               f"and rotate credentials, then run `hermes doctor --ack {hit.advisory.id}`.")
     acked_ids = get_acked_ids()  # acked-but-still-installed stays visible
     for h in all_hits:
         if h.advisory.id in acked_ids:
@@ -366,30 +360,22 @@ def _check_security_advisories(should_fix: bool, f: Finding) -> None:
 def _check_python_environment(should_fix: bool, f: Finding) -> None:
     """Interpreter, linked SQLite, venv, macOS TCC anchors/FDA/grants, version-file drift."""
     v, label = sys.version_info, f"Python {'.'.join(map(str, sys.version_info[:3]))}"
-    if v >= (3, 10):
-        check_ok(label)
-        if v < (3, 11):
-            check_warn("Python 3.11+ recommended for RL Training tools (tinker requires >= 3.11)")
-    elif v >= (3, 8):
-        check_warn(label, "(3.10+ recommended)")
-    else:
+    if v < (3, 8):
         _fail_and_issue(label, "(3.10+ required)", "Upgrade Python to 3.10+", f.issues)
+    elif check_bool(v >= (3, 10), label, (label, "(3.10+ recommended)")) and v < (3, 11):
+        check_warn("Python 3.11+ recommended for RL Training tools (tinker requires >= 3.11)")
     # Linked SQLite: version + source id matter independently of the Python minor (uv's
     # python-build-standalone can keep a vulnerable SQLite across upgrades).
-    try:
+    with warn_on_error("SQLite version probe failed: {e}", ""):
         import sqlite3
         from hermes_state import is_sqlite_wal_reset_vulnerable, sqlite_source_id
         src = sqlite_source_id()
-        if is_sqlite_wal_reset_vulnerable():
-            # Warn-only: Hermes already refuses WAL on fresh DBs and runtime repair is best-effort.
-            check_warn(f"SQLite {sqlite3.sqlite_version} (WAL-reset bug)", _sqlite_upgrade_hint())
-        else:
-            check_ok(f"SQLite {sqlite3.sqlite_version}")
+        # Warn-only: Hermes already refuses WAL on fresh DBs and runtime repair is best-effort.
+        check_bool(not is_sqlite_wal_reset_vulnerable(), f"SQLite {sqlite3.sqlite_version}",
+                   (f"SQLite {sqlite3.sqlite_version} (WAL-reset bug)", _sqlite_upgrade_hint()))
         if src:
             check_info(f"SQLite source id: {(src[:48] + '…') if len(src) > 48 else src}")
         _report_database_journal_modes()
-    except Exception as e:
-        check_warn(f"SQLite version probe failed: {e}")
     check_bool(sys.prefix != sys.base_prefix, "Virtual environment active", ("Not in virtual environment", "(recommended)"))
     check_macos_tcc_anchor(should_fix=should_fix)
     check_macos_full_disk_access()
@@ -443,10 +429,8 @@ def _check_command_installation(should_fix: bool, f: Finding) -> None:
     check_ok(f"Venv entry point exists ({venv_bin.relative_to(PROJECT_ROOT)})")
     # Expected command link directory (mirrors install.sh logic).
     prefix = os.environ.get("PREFIX", "")
-    if prefix and (os.environ.get("TERMUX_VERSION") or "com.termux/files/usr" in prefix):
-        link_dir, display = Path(prefix) / "bin", "$PREFIX/bin"
-    else:
-        link_dir, display = Path.home() / ".local" / "bin", "~/.local/bin"
+    termux = prefix and (os.environ.get("TERMUX_VERSION") or "com.termux/files/usr" in prefix)
+    link_dir, display = (Path(prefix) / "bin", "$PREFIX/bin") if termux else (Path.home() / ".local" / "bin", "~/.local/bin")
     link = link_dir / "hermes"
     if link.is_symlink():
         target, expected = link.resolve(), venv_bin.resolve()
