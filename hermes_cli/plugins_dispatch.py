@@ -62,8 +62,7 @@ def format_system_prompt_section(section_id: str, content: str) -> str:
     """Render an auditable, length-framed block recoverable from the full prompt."""
     return (
         f"{_SYSTEM_PROMPT_SECTION_HEADING_PREFIX}{section_id}\n"
-        f"<!-- hermes-plugin-section-chars:{len(content)} -->\n\n{content}"
-    )
+        f"<!-- hermes-plugin-section-chars:{len(content)} -->\n\n{content}")
 
 
 def format_system_prompt_sections(sections: list) -> str:
@@ -190,8 +189,7 @@ class PluginDispatchMixin:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc,
-                )
+                    "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc)
         return results
 
     def _run_hook_callback_bounded(
@@ -209,8 +207,7 @@ class PluginDispatchMixin:
             if (suppressed_until is not None and suppressed_until > time.monotonic()) or running:
                 logger.warning(
                     "Hook '%s' callback %s skipped after previous "
-                    "timeout or while still running", hook_name, callback_name,
-                )
+                    "timeout or while still running", hook_name, callback_name)
                 return _HOOK_SKIPPED
             if suppressed_until is not None:
                 self._hook_timeout_suppressed_until.pop(callback_key, None)
@@ -237,11 +234,9 @@ class PluginDispatchMixin:
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
                 self._hook_timeout_suppressed_until[callback_key] = (
-                    time.monotonic() + self._hook_timeout_suppression_seconds
-                )
+                    time.monotonic() + self._hook_timeout_suppression_seconds)
             logger.warning(
-                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name, timeout,
-            )
+                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name, timeout)
             return _HOOK_SKIPPED
         if "exc" in failure:
             raise failure["exc"]
@@ -322,8 +317,7 @@ class PluginDispatchMixin:
                 except Exception as exc:
                     logger.warning(
                         "Event '%s' subscriber %s raised: %s", item.event,
-                        getattr(callback, "__name__", repr(callback)), exc,
-                    )
+                        getattr(callback, "__name__", repr(callback)), exc)
         finally:
             self._emit_depth.value = previous_depth
 
@@ -332,8 +326,7 @@ class PluginDispatchMixin:
         with self._event_idle:
             generation = self._event_generation
             return self._event_idle.wait_for(
-                lambda: self._event_pending_by_generation.get(generation, 0) == 0, timeout=timeout,
-            )
+                lambda: self._event_pending_by_generation.get(generation, 0) == 0, timeout=timeout)
 
     def _dispatch_event(self, event: str, payload: Dict[str, Any]) -> int:
         """Queue *event* without blocking; return the subscriber count scheduled. Pending work is
@@ -342,8 +335,7 @@ class PluginDispatchMixin:
         if depth >= _EVENT_EMIT_DEPTH_CAP:
             logger.warning(
                 "Event bus recursion cap (%d) exceeded while dispatching '%s' "
-                "— dropping this emit to prevent an infinite loop", _EVENT_EMIT_DEPTH_CAP, event,
-            )
+                "— dropping this emit to prevent an infinite loop", _EVENT_EMIT_DEPTH_CAP, event)
             return 0
         budget_msg = "Event bus pending budget (%d) exhausted while dispatching '%s' — dropping this emit"
         with self._event_lock:
@@ -357,8 +349,7 @@ class PluginDispatchMixin:
                 return 0
             item = _QueuedPluginEvent(
                 event=event, payload=dict(payload), subscriptions=subscriptions, depth=depth + 1,
-                generation=generation,
-            )
+                generation=generation)
             try:
                 self._event_queue.put_nowait(item)
             except queue.Full:
@@ -387,8 +378,7 @@ class PluginDispatchMixin:
             if len(rendered) >= MAX_SYSTEM_PROMPT_SECTIONS:
                 logger.warning(
                     "Plugin system prompt section %s exceeded the section-count "
-                    "budget (%d) and was skipped", section.id, MAX_SYSTEM_PROMPT_SECTIONS,
-                )
+                    "budget (%d) and was skipped", section.id, MAX_SYSTEM_PROMPT_SECTIONS)
                 continue
             text = self._render_prompt_section_text(section, frozen_info)
             if text is None:
@@ -400,19 +390,15 @@ class PluginDispatchMixin:
                 logger.warning(
                     "Plugin system prompt section %s (%s) exceeded the aggregate "
                     "session budget (%d chars) and was skipped", section.id, section.plugin,
-                    MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS,
-                )
+                    MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS)
                 continue
             rendered.append(
                 RenderedPluginSystemPromptSection(
-                    id=section.id, content=text, position=section.position, plugin=section.plugin,
-                )
-            )
+                    id=section.id, content=text, position=section.position, plugin=section.plugin))
             total_chars += rendered_chars
             logger.info(
                 "Session plugin prompt section: id=%s plugin=%s position=%s chars=%d", section.id,
-                section.plugin, section.position, len(text),
-            )
+                section.plugin, section.position, len(text))
         return rendered
 
     @staticmethod
@@ -422,8 +408,7 @@ class PluginDispatchMixin:
         """Evaluate one section; return its stripped text or None (with a warning) when skipped."""
         def _skip(detail: str, *args: Any) -> None:
             logger.warning(
-                "Plugin system prompt section %s (%s) " + detail, section.id, section.plugin, *args,
-            )
+                "Plugin system prompt section %s (%s) " + detail, section.id, section.plugin, *args)
 
         try:
             value = section.content(frozen_info) if callable(section.content) else section.content
@@ -458,6 +443,5 @@ class PluginDispatchMixin:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Middleware '%s' callback %s raised: %s", kind, getattr(cb, "__name__", repr(cb)), exc,
-                )
+                    "Middleware '%s' callback %s raised: %s", kind, getattr(cb, "__name__", repr(cb)), exc)
         return results

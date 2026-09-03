@@ -44,8 +44,7 @@ _CAPABILITY_ROWS = (
      "task lanes"),
     ("gateway.platform_actions", ("allow_platform_actions",),
      "Act on connected chat platforms as the gateway bot "
-     "(add reactions, rename threads) via ctx.platform_actions"),
-)
+     "(add reactions, rename threads) via ctx.platform_actions"))
 CAPABILITY_REGISTRY: Dict[str, CapabilitySpec] = {
     cid: CapabilitySpec(cid, path, desc) for cid, path, desc in _CAPABILITY_ROWS
 }
@@ -67,8 +66,7 @@ def parse_declared_capabilities(raw: Any, plugin_name: str = "?") -> List[str]:
     if not isinstance(raw, (list, tuple)):
         logger.warning(
             "Plugin %s: manifest 'capabilities' must be a list, got %s — ignoring",
-            plugin_name, type(raw).__name__,
-        )
+            plugin_name, type(raw).__name__)
         return []
     out: List[str] = []
     for item in raw:
@@ -79,8 +77,7 @@ def parse_declared_capabilities(raw: Any, plugin_name: str = "?") -> List[str]:
         if cap not in VALID_CAPABILITY_IDS:
             logger.warning(
                 "Plugin %s: unknown capability %r (known: %s) — ignoring",
-                plugin_name, cap, ", ".join(sorted(VALID_CAPABILITY_IDS)),
-            )
+                plugin_name, cap, ", ".join(sorted(VALID_CAPABILITY_IDS)))
         elif cap not in out:
             out.append(cap)
     return out
@@ -148,8 +145,7 @@ def plugin_capability_granted(plugin_id: str, capability: str, config: Optional[
         allowed, evidence = False, "not granted"
     logger.info(  # audit trail for capability gate decisions
         "capability_check plugin=%s capability=%s decision=%s checked_by=plugin_capability_granted evidence=%s",
-        plugin_id, capability, "allow" if allowed else "deny", evidence,
-    )
+        plugin_id, capability, "allow" if allowed else "deny", evidence)
     return allowed
 
 
@@ -191,8 +187,7 @@ def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[st
     save_config(config)
     logger.info(
         "capability_consent plugin=%s granted=%s declared_hash=%s", plugin_id,
-        ",".join(entry[GRANTED_KEY]) or "(none)", entry[CONSENT_KEY]["hash"][:12],
-    )
+        ",".join(entry[GRANTED_KEY]) or "(none)", entry[CONSENT_KEY]["hash"][:12])
 
 
 def consent_hash(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> Optional[str]:

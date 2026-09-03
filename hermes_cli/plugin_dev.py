@@ -46,8 +46,7 @@ def _doctor_runtime(plugin_path: Path):
         copied = plugins_root / plugin_path.name
         shutil.copytree(
             plugin_path, copied,
-            ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"),
-        )
+            ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"))
         stack.enter_context(patch.dict(os.environ, {
             "HERMES_HOME": str(home),
             "HERMES_BUNDLED_PLUGINS": str(bundled),
@@ -72,8 +71,7 @@ def _doctor_runtime(plugin_path: Path):
             raise _DoctorLoadError(f"Hermes discovery found no valid plugin manifest under {copied}")
         if len(manifests) != 1:
             raise _DoctorLoadError(
-                f"Expected one plugin manifest, discovered {len(manifests)} under {copied}"
-            )
+                f"Expected one plugin manifest, discovered {len(manifests)} under {copied}")
         manifest = manifests[0]
         manager._load_plugin(manifest)
         loaded = manager._plugins.get(manifest.key or manifest.name)
@@ -85,8 +83,7 @@ def _doctor_runtime(plugin_path: Path):
             raise _DoctorLoadError("Plugin registration did not enable the runtime record")
         yield SimpleNamespace(
             manifest=manifest, manager=manager, registered_tools=tuple(sorted(loaded.tools_registered)),
-            registered_hooks=tuple(loaded.hooks_registered),
-        )
+            registered_hooks=tuple(loaded.hooks_registered))
     finally:
         entries_after = {entry.name: entry for entry in registry._snapshot_entries()}
         changed_names = {
@@ -144,15 +141,13 @@ class DoctorReport:
         if self.manifest is not None:
             lines.append(
                 f"  manifest: {self.manifest.name} "
-                f"{self.manifest.version or '(no version)'} ({self.manifest.kind})"
-            )
+                f"{self.manifest.version or '(no version)'} ({self.manifest.kind})")
         for finding in self.findings:
             lines.append(f"  {'ERROR' if finding.level == 'error' else 'WARN'}: {finding.message}")
         if self.ok:
             lines.append("  OK: runtime discovery, manifest parsing, import, and registration passed")
         lines.append(
-            f"  registrations: {len(self.registered_tools)} tool(s), {len(self.registered_hooks)} hook(s)",
-        )
+            f"  registrations: {len(self.registered_tools)} tool(s), {len(self.registered_hooks)} hook(s)")
         return "\n".join(lines)
 
 
@@ -212,8 +207,7 @@ def resolve_plugin_path(target: str | os.PathLike[str] | None = None) -> Path:
         raise FileNotFoundError(
             f"{direct.resolve()} holds no plugin manifest "
             f"({', '.join(_MANIFEST_NAMES)}), and {raw!r} is not an installed "
-            "plugin id. Point Doctor at a plugin directory."
-        )
+            "plugin id. Point Doctor at a plugin directory.")
     raise FileNotFoundError(f"Plugin {raw!r} was not found as a path or installed plugin id")
 
 
@@ -234,8 +228,7 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
     if mv > SUPPORTED_MANIFEST_VERSION:
         report.warning(
             f"manifest_version {mv} is newer than this Hermes supports "
-            f"({SUPPORTED_MANIFEST_VERSION}); unknown fields are ignored"
-        )
+            f"({SUPPORTED_MANIFEST_VERSION}); unknown fields are ignored")
 
     api_version = getattr(manifest, "api_version", None)
     if api_version is not None and api_version < 1:
@@ -250,8 +243,7 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
         if vr:
             report.warning(
                 f"requires plugin {dep_id!r} ({vr}) — version ranges are "
-                "advisory; a missing dependency logs a warning at load"
-            )
+                "advisory; a missing dependency logs a warning at load")
 
     pydeps = getattr(manifest, "python_dependencies", []) or []
     missing: list[str] = []
@@ -271,14 +263,12 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
     for req in unpinned:
         report.warning(
             f"python_dependencies entry {req!r} has no upper bound — "
-            "pin an upper bound (e.g. 'pkg>=1.0,<2') per the dependency policy"
-        )
+            "pin an upper bound (e.g. 'pkg>=1.0,<2') per the dependency policy")
     if missing:
         report.warning(
             "declared python_dependencies not installed: " + ", ".join(missing)
             + " — Hermes never auto-installs plugin dependencies; install manually: pip install "
-            + " ".join(f"'{m}'" for m in missing)
-        )
+            + " ".join(f"'{m}'" for m in missing))
 
     schema = getattr(manifest, "config_schema", {}) or {}
     if schema:
@@ -330,8 +320,7 @@ def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
                         callback_name = getattr(callback, "__name__", repr(callback))
                         report.error(
                             f"hook callback {callback_name!r} for {hook_name!r} "
-                            "must accept **kwargs for forward compatibility"
-                        )
+                            "must accept **kwargs for forward compatibility")
 
             for kind, declared, registered in (
                 ("hook", declared_hooks, host.registered_hooks),

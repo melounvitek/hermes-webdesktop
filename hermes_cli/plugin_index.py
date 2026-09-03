@@ -27,8 +27,7 @@ _MAX_INDEX_BYTES = 5 * 1024 * 1024  # refuse absurdly large index payloads
 
 SECURITY_FOOTER = (
     "Indexed \u2260 audited: inclusion in the index is a metadata review only, "
-    "not a code audit. Review a plugin before enabling it."
-)
+    "not a code audit. Review a plugin before enabling it.")
 
 
 @dataclass
@@ -118,8 +117,7 @@ def _parse_entries(raw: Any) -> List[PluginIndexEntry]:
             homepage=str(item["homepage"]) if item.get("homepage") else None,
             capabilities=[str(c) for c in item.get("capabilities") or []],
             api_version=int(api_version) if isinstance(api_version, (int, str)) and str(api_version).isdigit() else None,
-            added_at=str(item["added_at"]) if item.get("added_at") else None,
-        ))
+            added_at=str(item["added_at"]) if item.get("added_at") else None))
     return entries
 
 
@@ -202,8 +200,7 @@ def _score_entry(entry: PluginIndexEntry, term: str) -> float:
     signals = (
         (term in name, 80.0), (term in tags, 70.0), (any(term in t for t in tags), 55.0),
         (term in entry.description.lower(), 50.0), (term in entry.author.lower(), 40.0),
-        (ratio >= 0.6, ratio * 60.0),
-    )
+        (ratio >= 0.6, ratio * 60.0))
     return max((points for hit, points in signals if hit), default=0.0)
 
 
