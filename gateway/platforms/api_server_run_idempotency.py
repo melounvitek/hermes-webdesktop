@@ -189,7 +189,8 @@ class RunIdempotencyStore:
                 self._conn.commit()
             row = self._conn.execute(
                 "SELECT status_json, owner_pid, owner_started, updated_at "
-                "FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)).fetchone()
+                "FROM run_idempotency WHERE scope=? AND run_id=?",
+                (scope, run_id)).fetchone()
         if row is None:
             return None
         return {k: v for k, v in _record(None, *row).items() if k != "run_id"}
@@ -207,8 +208,7 @@ class RunIdempotencyStore:
     def owns_run(self, scope: str, run_id: str) -> bool:
         with self._lock:
             row = self._conn.execute(
-                "SELECT 1 FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)
-            ).fetchone()
+                "SELECT 1 FROM run_idempotency WHERE scope=? AND run_id=?", (scope, run_id)).fetchone()
         return row is not None
 
     def update_status(self, run_id: str, status: Dict[str, Any]) -> None:

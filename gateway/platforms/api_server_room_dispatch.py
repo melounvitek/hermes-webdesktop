@@ -41,8 +41,8 @@ async def _ensure_hosted_member_session(self, dispatch: Any) -> str:
                 "Another group already uses this room title on the target gateway. "
                 "Rename or migrate that group before retrying.")
         conn.execute(
-            "INSERT INTO sessions(id, source, title, hidden, started_at) "
-            "VALUES(?, 'bot_room', ?, 1, ?)", (session_id, clean_title, time.time()))
+            "INSERT INTO sessions(id, source, title, hidden, started_at) VALUES(?, 'bot_room', ?, 1, ?)",
+            (session_id, clean_title, time.time()))
         return session_id
 
     return await asyncio.to_thread(db._execute_write, atomic)
