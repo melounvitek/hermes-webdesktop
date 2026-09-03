@@ -170,8 +170,6 @@ def _data_file(name: str) -> Path:
 def _read_json(name: str) -> Any:
     """Parsed data file, or ``None`` when missing/unreadable."""
     path = _data_file(name)
-    if not path.exists():
-        return None
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -555,8 +553,7 @@ def scan_sessions(limit: Optional[int] = None, progress_callback: Optional[Any] 
     except Exception as exc:
         return {"sessions": [], "aggregate": {}, "error": f"Could not import SessionDB: {exc}", "scan_meta": _scan_meta("failed", 0)}
 
-    checkpoint = load_checkpoint()
-    previous_sessions = checkpoint.get("sessions") if isinstance(checkpoint.get("sessions"), dict) else {}
+    previous_sessions = load_checkpoint()["sessions"]  # load_checkpoint guarantees a dict
     reused = rescanned = 0
     db_limit = -1 if (limit is None or limit <= 0) else int(limit)
     db = SessionDB()
