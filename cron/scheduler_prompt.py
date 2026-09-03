@@ -77,27 +77,30 @@ def _inject_context_from(job: dict, prompt: str) -> tuple[str, bool]:
         if not source_job_id or not all(c in "0123456789abcdef" for c in source_job_id):
             logger.warning(
                 "context_from: skipping invalid job_id %r for job_id=%r name=%r%s",
-                source_job_id, job.get("id"), job.get("name"), _sched._cron_job_origin_log_suffix(job),
+                source_job_id, job.get("id"), job.get("name"),
+                _sched._cron_job_origin_log_suffix(job),
             )
             continue
         try:
             output_files = sorted(
-                (output_dir / source_job_id).glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True,
+                (output_dir / source_job_id).glob("*.md"), key=lambda f: f.stat().st_mtime,
+                reverse=True,
             )
             if not output_files:
                 continue  # silent skip — no output yet
             latest_output = output_files[0].read_text(encoding="utf-8").strip()
             if len(latest_output) > _MAX_CONTEXT_CHARS:
-                latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
+                latest_output = (
+                    latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]")
             if not latest_output:
                 continue  # silent skip — empty output
             if is_self:
                 prompt = _prepend_context_block(
-                    prompt, "Your previous run's output", _SELF_CONTEXT_INTRO, latest_output,
-                )
+                    prompt, "Your previous run's output", _SELF_CONTEXT_INTRO, latest_output)
             else:
                 prompt = _prepend_context_block(
-                    prompt, f"Output from job '{source_job_id}'", _UPSTREAM_CONTEXT_INTRO, latest_output,
+                    prompt, f"Output from job '{source_job_id}'", _UPSTREAM_CONTEXT_INTRO,
+                    latest_output,
                 )
             injected = True
         except (OSError, PermissionError) as e:
@@ -107,7 +110,7 @@ def _inject_context_from(job: dict, prompt: str) -> tuple[str, bool]:
 
 
 def _load_cron_skill_parts(job: dict, skill_names: list[str]) -> list[str]:
-    """Load each named skill/bundle into prompt parts; unknown ones are skipped with a user notice."""
+    """Load each named skill/bundle into prompt parts; unknown ones are skipped with a notice."""
     from tools.skills_tool import skill_view
     from tools.skill_usage import bump_use
     from agent.skill_bundles import build_bundle_invocation_message, resolve_bundle_command_key
@@ -126,7 +129,8 @@ def _load_cron_skill_parts(job: dict, skill_names: list[str]) -> list[str]:
         # Bundles shadow same-slug skills, mirroring the CLI/gateway slash-command path.
         bundle_key = resolve_bundle_command_key(skill_name.lstrip("/"))
         if bundle_key:
-            bundle_payload = build_bundle_invocation_message(bundle_key, user_instruction="", task_id=task_id)
+            bundle_payload = build_bundle_invocation_message(
+                bundle_key, user_instruction="", task_id=task_id)
             if bundle_payload:
                 if parts:
                     parts.append("")
@@ -141,7 +145,9 @@ def _load_cron_skill_parts(job: dict, skill_names: list[str]) -> list[str]:
             _skip("skill '%s' returned invalid JSON, skipping", skill_name)
             continue
         if not loaded.get("success"):
-            _skip("skill not found, skipping — %s", loaded.get("error") or f"Failed to load skill '{skill_name}'")
+            _skip(
+                "skill not found, skipping — %s",
+                loaded.get("error") or f"Failed to load skill '{skill_name}'")
             continue
 
         try:
@@ -154,8 +160,7 @@ def _load_cron_skill_parts(job: dict, skill_names: list[str]) -> list[str]:
         parts.extend([
             f'[IMPORTANT: The user has invoked the "{skill_name}" skill, indicating they want you to follow its instructions. The full skill content is loaded below.]',
             "",
-            str(loaded.get("content") or "").strip(),
-        ])
+            str(loaded.get("content") or "").strip()])
 
     if skipped:
         parts.insert(0, (
@@ -181,16 +186,11 @@ _CRON_HINT = (
 
 
 def _build_job_prompt(
-    job: dict,
-    prerun_script: Optional[tuple] = None,
-    extra_prompt: Optional[str] = None,
-) -> str:
+    job: dict, prerun_script: Optional[tuple] = None, extra_prompt: Optional[str] = None) -> str:
     """Build the effective prompt for a cron job, optionally loading skills first.
-
     ``prerun_script``: cached ``(success, stdout)`` from a script the caller already ran (wake-gate
     check) — skips re-execution. ``extra_prompt``: per-run ``## Run Context`` for this fire only,
-    never persisted to the job.
-    """
+    never persisted to the job."""
     user_prompt = str(job.get("prompt") or "")
     if extra_prompt:
         user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
@@ -202,12 +202,12 @@ def _build_job_prompt(
     script_path = job.get("script")
     if script_path:
         success, script_output = (
-            prerun_script if prerun_script is not None else _sched._run_job_script(script_path)
-        )
+            prerun_script if prerun_script is not None else _sched._run_job_script(script_path))
         if success and not script_output:
             return None  # no output → nothing to report, skip the AI call
         heading, intro = (
-            ("Script Output", "The following data was collected by a pre-run script. Use it as context for your analysis.")
+            ("Script Output", "The following data was collected by a pre-run script. "
+                              "Use it as context for your analysis.")
             if success
             else ("Script Error", "The data-collection script failed. Report this to the user.")
         )
@@ -229,7 +229,8 @@ def _build_job_prompt(
     skill_names = _job_skill_names(job)
     if not skill_names:
         return _scan_assembled_cron_prompt(
-            prompt, job, has_skills=False, has_injected_data=has_injected_data, user_prompt=user_prompt,
+            prompt, job, has_skills=False, has_injected_data=has_injected_data,
+            user_prompt=user_prompt,
         )
 
     parts = _load_cron_skill_parts(job, skill_names)
@@ -242,7 +243,11 @@ def _build_job_prompt(
         # Declare that boundary for the Anthropic cache planner.
         stable_prefix = append_user_instruction(parts, prompt)
     assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
-    if stable_prefix and len(assembled) > len(stable_prefix) and assembled.startswith(stable_prefix):
+    if (
+        stable_prefix
+        and len(assembled) > len(stable_prefix)
+        and assembled.startswith(stable_prefix)
+    ):
         # Guarded: the scanner may mutate the bytes; mismatch → whole-message caching.
         from agent.prompt_cache_boundary import register_stable_prefix
 
@@ -251,21 +256,15 @@ def _build_job_prompt(
 
 
 def _scan_assembled_cron_prompt(
-    assembled: str,
-    job: dict,
-    *,
-    has_skills: bool = False,
-    has_injected_data: bool = False,
+    assembled: str, job: dict, *, has_skills: bool = False, has_injected_data: bool = False,
     user_prompt: Optional[str] = None,
 ) -> str:
     """Scan the assembled cron prompt for injection; raise ``CronPromptInjectionBlocked`` on a hit.
-
     Needed because skill content is loaded from disk at runtime (never scanned at create/update)
-    and cron auto-approves tool calls. Tier is chosen by what the prompt CONTAINS: user prompt +
-    hint only → STRICT ``_scan_cron_prompt``; skills or injected data → LOOSER
-    ``_scan_cron_skill_assembled`` (command-shape patterns dropped, invisible unicode sanitized not
-    blocked, so a false positive cannot permanently kill a job). With injected data but no skills,
-    ``user_prompt`` is additionally scanned STRICT (defense-in-depth for legacy jobs).
+    and cron auto-approves tool calls. Tier by what the prompt CONTAINS: user prompt + hint only →
+    STRICT ``_scan_cron_prompt``; skills or injected data → LOOSER ``_scan_cron_skill_assembled``
+    (command-shape patterns dropped, invisible unicode sanitized not blocked, so a false positive
+    cannot permanently kill a job); injected data without skills also scans ``user_prompt`` STRICT.
     """
     from tools.cronjob_tools import _scan_cron_prompt, _scan_cron_skill_assembled
 
@@ -279,8 +278,7 @@ def _scan_assembled_cron_prompt(
     if scan_error:
         logger.warning(
             "Cron job '%s': assembled prompt blocked by injection scanner — %s",
-            job.get("name") or job.get("id") or "<unknown>", scan_error,
-        )
+            job.get("name") or job.get("id") or "<unknown>", scan_error)
         raise _sched.CronPromptInjectionBlocked(scan_error)
     return assembled
 
@@ -294,8 +292,8 @@ def _guard_job_credential_exfil(job: dict) -> None:
         from tools.cronjob_tools import _validate_cron_base_url
         err = _validate_cron_base_url(job.get("provider"), job.get("base_url"))
     except Exception as exc:
-        # Fail CLOSED on validator/import errors — but only for jobs WITH a base_url override; a job
-        # without one cannot exfiltrate via this path, so it still runs.
+        # Fail CLOSED on validator/import errors — but only for jobs WITH a base_url override;
+        # a job without one cannot exfiltrate via this path, so it still runs.
         err = (
             f"could not validate provider/base_url pair "
             f"({exc.__class__.__name__}: {exc}); refusing to run a job with "
@@ -306,14 +304,12 @@ def _guard_job_credential_exfil(job: dict) -> None:
         logger.error(
             "Job '%s': refusing to run — unsafe provider/base_url pair could "
             "exfiltrate a stored credential: %s",
-            job_id, err,
-        )
+            job_id, err)
         raise RuntimeError(f"Cron job '{job_id}' blocked for safety: {err}")
 
 
 def _block_and_pause_job(
-    job_id: str, job_name: str, reason: str
-) -> tuple[bool, str, str, Optional[str]]:
+    job_id: str, job_name: str, reason: str) -> tuple[bool, str, str, Optional[str]]:
     """Fail a run closed and pause the job: an unrunnable job left enabled re-fires every tick
     forever; ``paused_at``/``paused_reason`` give an auditable record."""
     from cron.jobs import pause_job

@@ -37,9 +37,10 @@ def _positive_int(raw) -> Optional[int]:
     return timeout if timeout > 0 else None
 
 
-def _timeout_from_env_or_config(env_var: str, config_key: str, parse: Callable[[Any], Any], label: str):
+def _timeout_from_env_or_config(
+    env_var: str, config_key: str, parse: Callable[[Any], Any], label: str):
     """Shared env → ``cron.<config_key>`` resolution. ``parse`` returns the value or None to keep
-    looking; a parse error on the env var WARNs, on config DEBUGs. Returns None when neither yields."""
+    looking; a parse error on the env var WARNs, on config DEBUGs. None when neither yields."""
     env_value = os.getenv(env_var, "").strip()
     if env_value:
         try:
@@ -69,9 +70,12 @@ def _get_script_timeout() -> int:
             if timeout is not None:
                 return timeout
         except Exception:
-            logger.warning("Invalid patched _SCRIPT_TIMEOUT=%r; using env/config/default", _sched._SCRIPT_TIMEOUT)
+            logger.warning(
+                "Invalid patched _SCRIPT_TIMEOUT=%r; using env/config/default",
+                _sched._SCRIPT_TIMEOUT)
     resolved = _timeout_from_env_or_config(
-        "HERMES_CRON_SCRIPT_TIMEOUT", "script_timeout_seconds", _positive_int, "cron script timeout",
+        "HERMES_CRON_SCRIPT_TIMEOUT", "script_timeout_seconds", _positive_int,
+        "cron script timeout",
     )
     return _sched._DEFAULT_SCRIPT_TIMEOUT if resolved is None else resolved
 
@@ -84,8 +88,7 @@ def _get_media_send_timeout() -> int:
     ``cron.media_send_timeout_seconds``, then 300s (long TTS audio can exceed a 30s window)."""
     resolved = _timeout_from_env_or_config(
         "HERMES_CRON_MEDIA_SEND_TIMEOUT", "media_send_timeout_seconds", _positive_int,
-        "cron media-send timeout",
-    )
+        "cron media-send timeout")
     return _DEFAULT_MEDIA_SEND_TIMEOUT if resolved is None else resolved
 
 
@@ -95,8 +98,7 @@ def _get_session_db_timeout() -> float:
     0 is meaningful (unlimited, debugging opt-in), so values pass through untouched."""
     resolved = _timeout_from_env_or_config(
         "HERMES_CRON_SESSION_DB_TIMEOUT", "session_db_timeout_seconds", float,
-        "cron.session_db_timeout_seconds",
-    )
+        "cron.session_db_timeout_seconds")
     return 10.0 if resolved is None else resolved
 
 
@@ -113,8 +115,8 @@ def _read_windows_pyvenv_cfg(venv_dir: Path) -> dict[str, str]:
 
 def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str]]:
     """Hidden, output-capable Python invocation for Windows cron scripts. ``pythonw.exe`` loses
-    captured output; uv venv launchers can re-exec the base console python and flash a window even
-    with CREATE_NO_WINDOW, so run the base python directly with venv paths overlaid in env."""
+    captured output; uv venv launchers can re-exec the base console python and flash a window
+    even with CREATE_NO_WINDOW, so run the base python directly with venv paths overlaid in env."""
     if sys.platform != "win32":
         return python_exe, {}
 
@@ -135,7 +137,8 @@ def _windows_cron_python_invocation(python_exe: str) -> tuple[str, dict[str, str
         if base_python.exists() and site_packages.exists():
             interpreter = base_python
             env_overlay["VIRTUAL_ENV"] = str(venv_dir)
-            pythonpath_entries = [str(_sched.Path(__file__).resolve().parents[1]), str(site_packages)]
+            pythonpath_entries = [
+                str(_sched.Path(__file__).resolve().parents[1]), str(site_packages)]
             existing_pythonpath = os.environ.get("PYTHONPATH", "")
             if existing_pythonpath:
                 pythonpath_entries.append(existing_pythonpath)
@@ -148,16 +151,15 @@ def _terminate_cron_script_process(proc: subprocess.Popen) -> None:
     """Best-effort hard stop of a cron script and every child it spawned."""
     if proc.poll() is not None:
         return
-    if sys.platform == "win32":
+    if sys.platform != "win32":
+        _terminate_process_group(proc)
+    else:
         try:
             subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True, timeout=10, creationflags=_sched.windows_hide_flags(), check=False,
-            )
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=10,
+                creationflags=_sched.windows_hide_flags(), check=False)
         except (OSError, subprocess.TimeoutExpired):
             proc.kill()
-    else:
-        _terminate_process_group(proc)
     try:
         proc.wait(timeout=1.0)
     except subprocess.TimeoutExpired:
@@ -170,7 +172,7 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
     the pipe write ends open and the caller's communicate() would block on EOF forever)."""
     try:
         process_group = os.getpgid(proc.pid)
-        os.killpg(process_group, signal.SIGTERM)  # windows-footgun: ok — POSIX-only branch (win32 handled by caller)
+        os.killpg(process_group, signal.SIGTERM)  # windows-footgun: ok — POSIX-only branch
     except (ProcessLookupError, PermissionError, OSError):
         return
     with contextlib.suppress(subprocess.TimeoutExpired):
@@ -191,9 +193,9 @@ def _terminate_cron_script_tree(proc: subprocess.Popen) -> None:
     pid = getattr(proc, "pid", None)
     if not isinstance(pid, int) or pid <= 0:
         logger.warning(
-            "Cron script tree-kill received invalid pid %r; falling back to process-group termination",
-            pid,
-        )
+            "Cron script tree-kill received invalid pid %r; "
+            "falling back to process-group termination",
+            pid)
         _sched._terminate_cron_script_process(proc)
         return
     try:
@@ -202,23 +204,22 @@ def _terminate_cron_script_tree(proc: subprocess.Popen) -> None:
         from agent.deadline import kill_process_tree
     except Exception:
         logger.warning(
-            "agent.deadline.kill_process_tree unavailable; falling back to process-group termination",
-            exc_info=True,
-        )
+            "agent.deadline.kill_process_tree unavailable; "
+            "falling back to process-group termination",
+            exc_info=True)
         _sched._terminate_cron_script_process(proc)
         return
     try:
         if kill_process_tree(pid):
             return
         logger.warning(
-            "Cron script tree-kill reported no signal for pid %s; falling back to process-group termination",
-            pid,
-        )
+            "Cron script tree-kill reported no signal for pid %s; "
+            "falling back to process-group termination",
+            pid)
     except Exception:
         logger.warning(
             "Cron script tree-kill failed for pid %s; falling back to process-group termination",
-            pid, exc_info=True,
-        )
+            pid, exc_info=True)
     _sched._terminate_cron_script_process(proc)
 
 
@@ -238,20 +239,19 @@ def _drain_script_pipes(proc: subprocess.Popen) -> None:
         proc.wait(timeout=5.0)
 
 
-def _windows_cron_bootstrap_argv(python_exe: str, env_overlay: dict[str, str], script_path: str) -> list[str]:
-    """Bootstrap a cron script under the base interpreter with ``.pth`` support.
-    Overlay mode runs base ``python.exe`` (avoids the launcher flashing a console window) with the
-    venv on ``PYTHONPATH`` — but ``.pth`` files are only processed by ``site.addsitedir()``, so
-    editable installs would be invisible. Bootstrap via addsitedir + ``runpy.run_path`` (keeps
-    ``__file__`` and ``sys.path[0]`` semantics); plain invocation if the venv is unresolvable."""
+def _windows_cron_bootstrap_argv(
+    python_exe: str, env_overlay: dict[str, str], script_path: str) -> list[str]:
+    """Bootstrap a cron script under the base interpreter with ``.pth`` support. Overlay mode puts
+    the venv on ``PYTHONPATH``, but ``.pth`` files are only processed by ``site.addsitedir()``, so
+    editable installs would be invisible; bootstrap via addsitedir + ``runpy.run_path`` (keeps
+    ``__file__``/``sys.path[0]`` semantics). Plain invocation if the venv is unresolvable."""
     site_packages = _sched.Path(env_overlay.get("VIRTUAL_ENV", "")) / "Lib" / "site-packages"
     if not site_packages.is_dir():
         # Warn: silent fallback would make "editable installs invisible" undiagnosable.
         logger.warning(
             "Windows cron script: venv site-packages %s not found; running "
             "without .pth processing (editable installs may be unimportable)",
-            site_packages,
-        )
+            site_packages)
         return [python_exe, script_path]
     bootstrap = (
         "import os, runpy, site, sys;"
@@ -265,9 +265,9 @@ def _windows_cron_bootstrap_argv(python_exe: str, env_overlay: dict[str, str], s
 
 
 def _resolve_script_path(script_path: str) -> tuple[Optional[Path], Optional[str]]:
-    """Validate a job script path; ``(path, None)`` or ``(None, error)``. Scripts MUST resolve inside
-    HERMES_HOME/scripts/ (relative, absolute and ``~`` paths are all validated — path traversal /
-    absolute-path injection). Same contract as cron.lifecycle_guard._expand_candidate_path."""
+    """Validate a job script path; ``(path, None)`` or ``(None, error)``. Scripts MUST resolve
+    inside HERMES_HOME/scripts/ (relative, absolute and ``~`` paths are all validated — path
+    traversal / absolute-path injection); contract of lifecycle_guard._expand_candidate_path."""
     scripts_dir = _sched._get_hermes_home() / "scripts"
     _ensure_cron_dir(scripts_dir)
     scripts_dir_resolved = scripts_dir.resolve()
@@ -299,9 +299,9 @@ def _resolve_script_path(script_path: str) -> tuple[Optional[Path], Optional[str
 
 
 def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optional[str]]:
-    """``(argv, env_overlay, error)`` for a validated script. Interpreter by extension — the shebang
-    is deliberately NOT honoured (small, auditable surface): ``.sh``/``.bash`` → bash, else
-    ``sys.executable`` (Windows uv-venv overlay gets the .pth bootstrap)."""
+    """``(argv, env_overlay, error)`` for a validated script. Interpreter by extension — the
+    shebang is deliberately NOT honoured (small, auditable surface): ``.sh``/``.bash`` → bash,
+    else ``sys.executable`` (Windows uv-venv overlay gets the .pth bootstrap)."""
     if path.suffix.lower() in {".sh", ".bash"}:
         # which() finds Git Bash on Windows; None there → clear error instead of a "[WinError 2]".
         _bash = shutil.which("bash") or ("/bin/bash" if os.path.isfile("/bin/bash") else None)
@@ -319,8 +319,7 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
 
 
 def _run_job_script(
-    script_path: str,
-    workdir: Optional[str] = None,
+    script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None,
 ) -> tuple[bool, str]:
     """Execute a cron job's script and return ``(success, output)``; on failure *output* is the
@@ -341,17 +340,16 @@ def _run_job_script(
         popen_kwargs: dict[str, Any] = {"start_new_session": True}
         if sys.platform == "win32":
             popen_kwargs = {
-                "creationflags": _sched.windows_hide_flags() | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                "creationflags": _sched.windows_hide_flags()
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
                 "encoding": "utf-8",
-                "errors": "replace",
-            }
+                "errors": "replace"}
         env = build_subprocess_env()
         env.update(env_overlay)
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=workdir or str(path.parent), env=env, **popen_kwargs,
-        )
+            cwd=workdir or str(path.parent), env=env, **popen_kwargs)
         deadline = time.monotonic() + script_timeout
         while True:
             # Tree-kill on cancel AND timeout: killpg misses setsid grandchildren (watchdogs,
@@ -399,7 +397,8 @@ def _start_heartbeat_thread(loop_fn, name: str, fail_log) -> Optional[threading.
     """Start ``loop_fn`` on a daemon thread inside a copy of the current context (multiplexed
     profile ContextVars). On failure calls ``fail_log()`` inside the except (traceback intact) and
     returns None."""
-    thread = threading.Thread(target=contextvars.copy_context().run, args=(loop_fn,), name=name, daemon=True)
+    thread = threading.Thread(
+        target=contextvars.copy_context().run, args=(loop_fn,), name=name, daemon=True)
     try:
         thread.start()
     except Exception:
@@ -409,18 +408,13 @@ def _start_heartbeat_thread(loop_fn, name: str, fail_log) -> Optional[threading.
 
 
 def _run_job_script_with_claim_heartbeat(
-    job: dict,
-    script_path: str,
-    workdir: Optional[str] = None,
+    job: dict, script_path: str, workdir: Optional[str] = None,
     cancel_event: Optional[_CancelEventLike] = None,
 ) -> tuple[bool, str]:
-    """Run a cron script while heartbeating its owned one-shot claim.
-
-    A long script can outlive the stale-claim TTL; without a heartbeat another scheduler would
-    re-dispatch the one-shot. Recurring/unclaimed runs have no durable claim → no thread. The owner
-    is captured from the dispatched job, never re-read, so a stale runner cannot extend a
-    replacement owner's claim.
-    """
+    """Run a cron script while heartbeating its owned one-shot claim. A long script can outlive
+    the stale-claim TTL; without a heartbeat another scheduler would re-dispatch the one-shot.
+    Recurring/unclaimed runs have no durable claim → no thread. The owner is captured from the
+    dispatched job, never re-read, so a stale runner cannot extend a replacement owner's claim."""
     schedule = job.get("schedule")
     claim = job.get("run_claim")
     owner = str(claim.get("by") or "") if isinstance(claim, dict) else ""
@@ -439,7 +433,8 @@ def _run_job_script_with_claim_heartbeat(
 
     heartbeat_thread = _start_heartbeat_thread(
         _heartbeat_loop, "cron-script-claim-heartbeat",
-        lambda: logger.debug("Job '%s': could not start script run_claim heartbeat", job_id, exc_info=True),
+        lambda: logger.debug(
+            "Job '%s': could not start script run_claim heartbeat", job_id, exc_info=True),
     )
     if heartbeat_thread is None:
         return _sched._run_job_script(script_path, workdir=workdir, cancel_event=cancel_event)
