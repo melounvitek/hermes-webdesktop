@@ -68,9 +68,6 @@ WAKEUP_PROMPT_WITH_UNTIL_TEMPLATE = (
 )
 
 
-# --- interval parsing -------------------------------------------------------
-
-
 def parse_interval_token(token: str) -> Optional[int]:
     """Total seconds for ``30s``/``5m``/``2h``/``1h30m``, else None.
 
@@ -140,9 +137,6 @@ def format_interval(seconds: float) -> str:
     return "".join(parts)
 
 
-# --- config -----------------------------------------------------------------
-
-
 def _loops_config() -> Dict[str, Any]:
     try:
         from hermes_cli.config import load_config
@@ -176,9 +170,6 @@ def self_paced_floor_seconds() -> int:
 def self_paced_ceiling_seconds() -> int:
     floor = self_paced_floor_seconds()
     return _config_int("self_paced_ceiling_seconds", max(floor, DEFAULT_SELF_PACED_CEILING_SECONDS), floor)
-
-
-# --- state ------------------------------------------------------------------
 
 
 @dataclass
@@ -242,8 +233,6 @@ class LoopState:
         return "due now" if remaining <= 0 else f"next in {format_interval(remaining)}"
 
 
-# --- persistence (SessionDB state_meta) -------------------------------------
-
 _META_PREFIX = "loop:"
 
 
@@ -271,21 +260,23 @@ def _db_op(label: str, fn, default=None):
         return default
 
 
-def load_loop(session_id: str) -> Optional[LoopState]:
-    """Load the loop for a session, or None if none exists."""
-    if not session_id:
-        return None
-    db = _get_session_db()
-    if db is None:
-        return None
-    raw = _db_op("get_meta", lambda: db.get_meta(_meta_key(session_id)))
-    if not raw:
-        return None
+def _parse_state(raw: str, session_id: str = "") -> Optional[LoopState]:
+    """``LoopState`` from stored JSON; None (warning when *session_id* given) on corrupt data."""
     try:
         return LoopState.from_json(raw)
     except Exception as exc:
-        logger.warning("LoopManager: could not parse stored loop for %s: %s", session_id, exc)
+        if session_id:
+            logger.warning("LoopManager: could not parse stored loop for %s: %s", session_id, exc)
         return None
+
+
+def load_loop(session_id: str) -> Optional[LoopState]:
+    """Load the loop for a session, or None if none exists."""
+    db = _get_session_db() if session_id else None
+    if db is None:
+        return None
+    raw = _db_op("get_meta", lambda: db.get_meta(_meta_key(session_id)))
+    return _parse_state(raw, session_id) if raw else None
 
 
 def save_loop(session_id: str, state: LoopState) -> None:
@@ -320,13 +311,8 @@ def list_active_loops() -> List[Tuple[str, LoopState]]:
     out: List[Tuple[str, LoopState]] = []
     for key, raw in _db_op("list_meta_prefix", lambda: db.list_meta_prefix(_META_PREFIX), []):
         session_id = key[len(_META_PREFIX):]
-        if not session_id or not raw:
-            continue
-        try:
-            state = LoopState.from_json(raw)
-        except Exception:
-            continue
-        if state.status == "active":
+        state = _parse_state(raw) if session_id and raw else None
+        if state is not None and state.status == "active":
             out.append((session_id, state))
     return out
 
@@ -355,9 +341,6 @@ def migrate_loop_to_session(old_session_id: str, new_session_id: str, *, reason:
         return False
 
 
-# --- response evaluation ----------------------------------------------------
-
-
 def _ticks_label(n: int) -> str:
     return f"{n} tick{'s' if n != 1 else ''}"
 
@@ -380,9 +363,6 @@ def _digest_response(response: str) -> str:
     text = re.sub(r"\b\d+(\.\d+)?\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b", "", text)
     text = re.sub(r"\s+", " ", text)
     return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
-
-
-# --- LoopManager ------------------------------------------------------------
 
 
 class LoopManager:
@@ -499,9 +479,10 @@ class LoopManager:
     def is_due(self, now: Optional[float] = None) -> bool:
         """Cheap check: active, not mid-wakeup, and the clock has passed."""
         s = self._state
-        if s is None or s.status != "active" or s.awaiting_response:
-            return False
-        return (now if now is not None else time.time()) >= s.next_due_at
+        return (
+            s is not None and s.status == "active" and not s.awaiting_response
+            and (now if now is not None else time.time()) >= s.next_due_at
+        )
 
     def fire_tick(self) -> Optional[str]:
         """Claim a due tick; returns the message to inject, or None.
@@ -626,9 +607,6 @@ def goal_blocks_loop_tick(session_id: str) -> bool:
         return False
 
 
-# --- shared slash-command dispatch (CLI + gateway + TUI) --------------------
-
-
 LOOP_HELP = (
     "Usage: /loop [interval] <prompt> [--times N] [--until <condition>]\n"
     "  /loop 5m check the deploy status      — first run now, then every 5m\n"
@@ -697,6 +675,8 @@ def dispatch_loop_command(
         return {"output": f"/loop: {exc}", "created": False}
 
     lines = [f"↻ Loop set ({state.cadence_label()}): {state.prompt}"]
+    if replacing:
+        lines.append("(replaced the previous loop for this session)")
     if parsed["interval_seconds"] is not None and parsed["interval_seconds"] < state.interval_seconds:
         lines.append(
             f"(interval raised to the {format_interval(state.interval_seconds)} minimum — "
@@ -715,8 +695,6 @@ def dispatch_loop_command(
         lines.append(f"Backstop budget: {state.max_ticks} ticks (loops.max_ticks; 0 = unlimited).")
     first = "fires now, then on the cadence above" if state.status == "active" else state.remaining_label()
     lines.append(f"First wakeup {first}. Controls: /loop status · pause · resume · stop.")
-    if replacing:
-        lines.insert(1, "(replaced the previous loop for this session)")
     return {"output": "\n".join(lines), "created": True}
 
 
