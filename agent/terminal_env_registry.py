@@ -30,7 +30,8 @@ BUILTIN_BACKEND_NAMES = frozenset({
 
 
 def _reject_builtin_collision(name: str) -> None:
-    raise ValueError(f"Terminal backend name '{name}' is reserved for the built-in {name} backend and cannot be registered by a plugin")
+    raise ValueError(f"Terminal backend name '{name}' is reserved for the built-in {name} backend "
+                     "and cannot be registered by a plugin")
 
 
 _registry: ProviderRegistry[TerminalEnvironmentProvider] = ProviderRegistry(
