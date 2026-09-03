@@ -45,9 +45,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     sub = getattr(args, "photon_command", None)
-    if sub is None:
-        return _cmd_status(args)  # no subcommand — show status by default
-    handler = _COMMANDS.get(sub)
+    handler = _cmd_status if sub is None else _COMMANDS.get(sub)  # no subcommand — status by default
     if handler is None:
         print(f"unknown subcommand: {sub}", file=sys.stderr)
         return 2
@@ -83,20 +81,16 @@ def _setup_token(args: argparse.Namespace) -> Optional[str]:
         print("[1/5] Checking existing Photon token...")
         if photon_auth.check_photon_token_valid(token):
             print("  ✓ token is valid")
-        else:
-            print("  ✗ token is stale (dashboard rejected it) — re-authenticating")
-            photon_auth.clear_photon_token()
-            token = None
+            print("[1/5] Reusing existing Photon token")
+            return token
+        print("  ✗ token is stale (dashboard rejected it) — re-authenticating")
+        photon_auth.clear_photon_token()
+    print("[1/5] No valid Photon token found — running device login...")
+    if _run_device_login(args) != 0:
+        return None
+    token = photon_auth.load_photon_token()
     if not token:
-        print("[1/5] No valid Photon token found — running device login...")
-        if _run_device_login(args) != 0:
-            return None
-        token = photon_auth.load_photon_token()
-        if not token:
-            print("login completed but token was not stored", file=sys.stderr)
-            return None
-    else:
-        print("[1/5] Reusing existing Photon token")
+        print("login completed but token was not stored", file=sys.stderr)
     return token
 
 
@@ -106,16 +100,13 @@ def _setup_project(token: str, name: str) -> Optional[str]:
     try:
         if dashboard_id:
             print("[2/5] Reusing configured Photon project")
+        elif (existing := photon_auth.find_project_by_name(token, name)) and existing.get("id"):
+            dashboard_id = existing["id"]
+            print(f"[2/5] Found existing project '{name}'")
         else:
-            existing = photon_auth.find_project_by_name(token, name)
-            if existing and existing.get("id"):
-                dashboard_id = existing["id"]
-                print(f"[2/5] Found existing project '{name}'")
-            else:
-                print(f"[2/5] Creating Photon project '{name}'...")
-                created = photon_auth.create_project(token, name=name)
-                dashboard_id = created.get("id")
-                print("  ✓ project created")
+            print(f"[2/5] Creating Photon project '{name}'...")
+            dashboard_id = photon_auth.create_project(token, name=name).get("id")
+            print("  ✓ project created")
     except Exception as e:
         print(f"project setup failed: {e}", file=sys.stderr)
         return None
@@ -156,14 +147,10 @@ def _setup_credentials(token: str, dashboard_id: str, name: str) -> Optional[str
 
 
 def _cmd_setup(args: argparse.Namespace) -> int:
-    token = _setup_token(args)
-    if not token:
-        return 1
     name = args.project_name or photon_auth.DEFAULT_PROJECT_NAME
-    dashboard_id = _setup_project(token, name)
-    if not dashboard_id:
-        return 1
-    secret = _setup_credentials(token, dashboard_id, name)
+    token = _setup_token(args)
+    dashboard_id = token and _setup_project(token, name)
+    secret = dashboard_id and _setup_credentials(token, dashboard_id, name)
     if not secret:
         return 1
     # 4. Register the operator's phone number as a Spectrum user (idempotent).
@@ -199,11 +186,11 @@ def _cmd_setup(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"      (could not fetch the assigned line: {e})", file=sys.stderr)
     if agent_number:
-        print()
-        print(color("┌─ Your agent's iMessage number ───────────────────────────────", Colors.GREEN))
-        print(color("│  📱 ", Colors.GREEN) + color(str(agent_number), Colors.GREEN, Colors.BOLD))
-        print(color("│  Text this number from your phone to talk to your agent.", Colors.GREEN))
-        print(color("└──────────────────────────────────────────────────────────────", Colors.GREEN))
+        print("\n" + "\n".join((
+            color("┌─ Your agent's iMessage number ───────────────────────────────", Colors.GREEN),
+            color("│  📱 ", Colors.GREEN) + color(str(agent_number), Colors.GREEN, Colors.BOLD),
+            color("│  Text this number from your phone to talk to your agent.", Colors.GREEN),
+            color("└──────────────────────────────────────────────────────────────", Colors.GREEN))))
     else:
         print("      No iMessage line assigned yet — check the Photon dashboard.")
     if registered_phone:
@@ -319,15 +306,14 @@ def _install_sidecar() -> int:
     if proc.returncode != 0:
         print(f"  npm ci failed — falling back to:  {npm} install")
         proc = _run("install")
+    error = (proc.stderr or "").strip()[:_NPM_ERROR_LOG_MAX_CHARS]  # bounded to what check_requirements surfaces
     if proc.returncode != 0:
         print("npm install failed", file=sys.stderr)
-        error = (proc.stderr or "").strip()[:_NPM_ERROR_LOG_MAX_CHARS]  # bounded to what check_requirements surfaces
-        if error:
-            with contextlib.suppress(OSError):
-                _npm_error_log().write_text(error, encoding="utf-8")
-    else:
-        with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError):
+        if proc.returncode == 0:
             _npm_error_log().unlink()
+        elif error:
+            _npm_error_log().write_text(error, encoding="utf-8")
     return proc.returncode
 
 
