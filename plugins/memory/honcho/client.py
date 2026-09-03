@@ -7,6 +7,7 @@ flat/global fields, which win over defaults.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -203,6 +204,7 @@ class _HostLookup:
         return bool(_first_set(*self.vals(*keys), default=default))
 
     def parsed(self, key: str, caster: Callable[[Any], Any], default):
+        """First host-then-root value ``caster`` accepts, else default."""
         return _first_parsed(self.vals(key), caster, default)
 
     def present(self, key: str, default=None):
@@ -239,10 +241,9 @@ def _is_local_base_url(base_url: str | None) -> bool:
         ip = ipaddress.ip_address(host)
     except ValueError:
         return False
-    if ip.is_loopback or ip.is_private or ip.is_link_local:
-        return True
-    # Tailscale/other VPN setups often sit in carrier-grade NAT space.
-    return ip.version == 4 and ipaddress.ip_address("100.64.0.0") <= ip <= ipaddress.ip_address("100.127.255.255")
+    # Tailscale/other VPN setups often sit in carrier-grade NAT space (100.64.0.0/10).
+    cgnat = ip.version == 4 and ipaddress.ip_address("100.64.0.0") <= ip <= ipaddress.ip_address("100.127.255.255")
+    return ip.is_loopback or ip.is_private or ip.is_link_local or cgnat
 
 
 def _env_base_url() -> str | None:
@@ -281,10 +282,7 @@ def _connection_fields(look: _HostLookup, host: str, path: Path) -> dict[str, An
 def _behavior_fields(look: _HostLookup, explicitly_configured: bool) -> dict[str, Any]:
     """Resolve memory-behavior tuning fields (host block -> root -> defaults)."""
     raw_wf = look.pick("writeFrequency") or "async"
-    try:
-        write_frequency: str | int = int(raw_wf)
-    except (TypeError, ValueError):
-        write_frequency = str(raw_wf)
+    write_frequency: str | int = _first_parsed([raw_wf], int, str(raw_wf))
     depth = look.parsed("dialecticDepth", lambda v: max(1, min(int(v), 3)), 1)
     # Migration guard: configs that predate observationMode keep the old
     # "unified" default; fresh installs get "directional" (all observations on).
@@ -532,12 +530,9 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
 
 def _build_client(config: HonchoClientConfig) -> "Honcho":
     """Construct the SDK client (runs inside the slot factory so racing callers share one)."""
-    # Lazy dependency failures fall through to the canonical import error below.
-    try:
+    with contextlib.suppress(Exception):  # lazy-dep failures fall through to the canonical import error below
         from tools.lazy_deps import ensure as _lazy_ensure
         _lazy_ensure("memory.honcho", prompt=False)
-    except Exception:
-        pass
     try:
         from honcho import Honcho
     except ImportError:
@@ -547,18 +542,15 @@ def _build_client(config: HonchoClientConfig) -> "Honcho":
     # config.yaml honcho.base_url / timeout fill whatever honcho.json left unset.
     base_url, timeout = config.base_url, config.timeout
     if not base_url or timeout is None:
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.config import load_config
             honcho_cfg = load_config().get("honcho", {})
             if isinstance(honcho_cfg, dict):
                 base_url = base_url or _sanitize_url(honcho_cfg.get("base_url", "").strip() or None)
                 if timeout is None:
                     timeout = _resolve_optional_float(honcho_cfg.get("timeout"), honcho_cfg.get("request_timeout"))
-        except Exception:
-            pass
-    # Default so an unconfigured install cannot hang on a stalled request.
     if timeout is None:
-        timeout = _DEFAULT_HTTP_TIMEOUT
+        timeout = _DEFAULT_HTTP_TIMEOUT  # an unconfigured install must not hang on a stalled request
 
     if base_url:
         logger.info("Initializing Honcho client (base_url: %s, workspace: %s)", base_url, config.workspace_id)
@@ -571,11 +563,9 @@ def _build_client(config: HonchoClientConfig) -> "Honcho":
     # Local instances need no key but the SDK wants a non-empty string: honor a
     # key set EXPLICITLY in honcho.json (host block or root) and treat an
     # env-sourced key as likely-cloud, substituting the placeholder.
-    api_key = config.api_key
     raw = config.raw or {}
-    if _is_local_base_url(base_url) and not (_host_block(raw, config.host).get("apiKey") or raw.get("apiKey")):
-        api_key = "local"
-
+    explicit_key = _host_block(raw, config.host).get("apiKey") or raw.get("apiKey")
+    api_key = "local" if _is_local_base_url(base_url) and not explicit_key else config.api_key
     kwargs: dict = {"workspace_id": config.workspace_id, "api_key": api_key, "environment": config.environment, "timeout": timeout}
     if base_url:
         # The SDK's route builders already carry the version prefix ("/v3/..."), so
