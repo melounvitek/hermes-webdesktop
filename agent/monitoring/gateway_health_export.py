@@ -171,11 +171,10 @@ def _count(failure_msg: str, module: str, read: Callable[[Any], Any]) -> int:
 
 
 def _read_background_work_count() -> int:
-    """Live background/subagent work that ``active_agents`` deliberately does NOT include
-    (``active_agents`` = foreground turns + in-flight cron + API runs; backgrounded
-    ``delegate_task`` subagents, ``terminal(background=true)`` processes and kanban workers are
-    tracked only by the scale-to-zero guard).  TASK-granular: a fan-out batch of N contributes N
-    (real concurrent load), unlike the pool's one-slot-per-batch accounting.  Content-free."""
+    """Live background/subagent work that ``active_agents`` (foreground turns + in-flight cron + API
+    runs) deliberately does NOT include: backgrounded ``delegate_task`` subagents,
+    ``terminal(background=true)`` processes, kanban workers.  TASK-granular: a fan-out batch of N
+    contributes N (real concurrent load), unlike the pool's one-slot-per-batch accounting."""
     return (
         _count("background-work async-delegation count failed", "tools.async_delegation", lambda m: m.active_task_count())
         + _count("background-work process-registry count failed", "tools.process_registry",
@@ -184,9 +183,8 @@ def _read_background_work_count() -> int:
 
 
 def _read_background_delegations_count() -> int:
-    """Live async delegation UNITS (dispatch/pool slots): a batch counts ONE regardless of fan-out
-    width, matching the pool's capacity accounting — slot pressure (alert vs
-    ``max_concurrent_children``) alongside ``background_work``'s real load.  Delegations only."""
+    """Live async delegation UNITS (pool slots): a batch counts ONE regardless of fan-out width, so
+    operators see slot pressure (vs ``max_concurrent_children``) alongside ``background_work``."""
     return _count("background-delegations count failed", "tools.async_delegation", lambda m: m.active_count())
 
 

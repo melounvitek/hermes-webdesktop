@@ -1,14 +1,10 @@
-"""Outbound webhook notifications: ``hooks.outbound`` in config.yaml -> notify-only callbacks
-on the plugin hook manager, so every ``invoke_hook()`` site can push lifecycle events to
-external HTTP endpoints (outbound mirror of ``gateway/platforms/webhook.py``).
-
-* Fire-and-forget: callbacks serialize, enqueue on a bounded queue and return ``None``; one
-  daemon worker POSTs, so a target can never block a tool call or influence agent flow.
-* HMAC-SHA256 signed (``X-Hermes-Signature-256: sha256=<hex>`` over the raw body) when a
-  secret is configured.  ``HERMES_SAFE_MODE=1`` skips registration; registration is idempotent.
-* Entry keys: url, events, secret_env|secret, matcher (pre/post_tool_call only), timeout
-  (clamped to [1, 60]), name.  Body: ``{hook_event_name, profile, tool_name, tool_input,
-  session_id, cwd, extra, delivery_id, timestamp}``.
+"""Outbound webhooks: ``hooks.outbound`` entries (url, events, secret_env|secret, matcher for
+pre/post_tool_call, timeout clamped to [1, 60], name) -> notify-only callbacks on the plugin hook
+manager, so every ``invoke_hook()`` site can POST lifecycle events (mirror of
+``gateway/platforms/webhook.py``).  Fire-and-forget through a bounded queue + one daemon worker,
+so a target can never block a tool call or influence agent flow.  HMAC-SHA256 signed
+(``X-Hermes-Signature-256: sha256=<hex>`` over the raw body) when a secret is configured;
+``HERMES_SAFE_MODE=1`` skips registration; registration is idempotent.
 """
 
 from __future__ import annotations
@@ -76,11 +72,8 @@ class WebhookTarget(_ToolMatcherMixin):
 # --- Public API -----------------------------------------------------------------
 
 def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
-    """Register every configured outbound webhook on the plugin manager.
-
-    Malformed ``hooks.outbound`` means zero targets — never raises. Returns the
-    targets that ended up wired (deduplicated across repeat calls).
-    """
+    """Register every configured outbound webhook on the plugin manager.  Malformed ``hooks.outbound``
+    means zero targets — never raises.  Returns the targets that ended up wired (deduplicated)."""
     if not isinstance(cfg, dict):
         return []
     from utils import env_var_enabled

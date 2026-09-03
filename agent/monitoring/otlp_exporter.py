@@ -1,12 +1,10 @@
 """Export monitoring events to an OpenTelemetry Collector over OTLP/HTTP.
 
-Maps gateway monitoring events to OTel spans for the operator-configured
-``monitoring.export.otlp`` endpoint (no default destination ships) and hosts the OTLP
-plumbing shared with ``gateway_health_export`` (SDK loading, header resolution, resource
-attributes, endpoint mapping).  The OTel SDK is an optional extra (``hermes-agent[otlp]``)
-imported lazily; ``headers_env`` values are read from the environment at export time and
-never logged or stored.  The continuous subscriber runs on the emitter's dispatcher thread,
-fail-isolated, and ``event_filter`` keeps other planes from riding along on this exporter.
+Maps gateway monitoring events to OTel spans for the operator-configured ``monitoring.export.otlp``
+endpoint (no default destination ships) and hosts the OTLP plumbing shared with
+``gateway_health_export``.  The OTel SDK is an optional extra (``hermes-agent[otlp]``) imported
+lazily; ``headers_env`` values are read at export time and never logged or stored.  The streaming
+subscriber runs fail-isolated on the emitter thread; ``event_filter`` keeps other planes off it.
 """
 
 from __future__ import annotations

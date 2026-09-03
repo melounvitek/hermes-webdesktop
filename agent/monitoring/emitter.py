@@ -1,11 +1,9 @@
-"""Monitoring emitter: fire-and-forget queue + background dispatcher.
-
-The single seam between producers (gateway status hooks, diagnostic log handler)
-and consumers (OTLP streamers). Hot-path invariant: ``emit()`` MUST return in
-O(microseconds), MUST NOT block on disk/network, and MUST NEVER raise into the
-caller — a monitoring failure is logged locally and dropped. On a full queue the
-*oldest* event is dropped. A daemon thread fans batches out to fail-isolated
-subscribers. Nothing is persisted: monitoring is an egress path, not a store.
+"""Monitoring emitter: fire-and-forget queue + background dispatcher — the single seam between
+producers (gateway status hooks, diagnostic log handler) and consumers (OTLP streamers).
+Hot-path invariant: ``emit()`` MUST return in O(microseconds), MUST NOT block on disk/network, and
+MUST NEVER raise into the caller — a monitoring failure is logged locally and dropped.  On a full
+queue the *oldest* event is dropped.  A daemon thread fans batches out to fail-isolated
+subscribers.  Nothing is persisted: monitoring is an egress path, not a store.
 """
 
 from __future__ import annotations
