@@ -23,10 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult
-
-from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
-from gateway.platforms._shared import profile_scoped as _profile_scoped_config_load
-
+from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret, profile_scoped as _profile_scoped_config_load
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +37,16 @@ _CHANNEL_TYPE_MAP = {"D": "dm", "G": "group", "P": "group", "O": "channel"}
 
 _MATTERMOST_DISABLE_MENTIONS_PROPS = {"disable_mentions": True}
 
-# Reconnect parameters (exponential backoff).
-_RECONNECT_BASE_DELAY = 2.0
-_RECONNECT_MAX_DELAY = 60.0
-_RECONNECT_JITTER = 0.2
+_RECONNECT_BASE_DELAY, _RECONNECT_MAX_DELAY, _RECONNECT_JITTER = 2.0, 60.0, 0.2  # exponential backoff
 
 _POST_WITH_FILE_ERROR = "Failed to post with file"
 _MEDIA_MSG_TYPES = (("image/", MessageType.PHOTO), ("audio/", MessageType.VOICE))  # first match wins
+_INBOUND_CACHE_EXT = {"image/": ".png", "audio/": ".ogg"}  # mime prefix → default extension for cached media
 
 
 def _with_mentions_disabled(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Return a post payload that prevents Mattermost from firing mentions."""
-    props = payload.get("props")
-    disable = _MATTERMOST_DISABLE_MENTIONS_PROPS
+    props, disable = payload.get("props"), _MATTERMOST_DISABLE_MENTIONS_PROPS
     payload["props"] = {**props, **disable} if isinstance(props, dict) else dict(disable)
     return payload
 
@@ -77,6 +71,13 @@ def _url_filename(url: str, fallback: str) -> str:
     return url.rsplit("/", 1)[-1].split("?")[0] or fallback
 
 
+def _url_and_token(config) -> Tuple[str, str]:
+    """(server URL, token): ``config`` first, MATTERMOST_URL / MATTERMOST_TOKEN env fallback."""
+    extra = getattr(config, "extra", {}) or {}
+    return (extra.get("url") or _get_scoped_secret("MATTERMOST_URL", ""),
+            getattr(config, "token", None) or _get_scoped_secret("MATTERMOST_TOKEN", ""))
+
+
 def check_mattermost_requirements() -> bool:
     """Return True if the Mattermost adapter runtime dependency is available."""
     try:
@@ -89,11 +90,11 @@ def check_mattermost_requirements() -> bool:
 
 def validate_mattermost_config(config: PlatformConfig) -> bool:
     """Return True when Mattermost has enough config to connect."""
-    extra = getattr(config, "extra", {}) or {}
-    if not (getattr(config, "token", None) or _get_scoped_secret("MATTERMOST_TOKEN", "")).strip():
+    url, token = _url_and_token(config)
+    if not token.strip():
         logger.debug("Mattermost: MATTERMOST_TOKEN not set")
         return False
-    if not (extra.get("url", "") or _get_scoped_secret("MATTERMOST_URL", "")).strip():
+    if not url.strip():
         logger.warning("Mattermost: MATTERMOST_URL not set")
         return False
     return True
@@ -106,10 +107,9 @@ class MattermostAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform.MATTERMOST)
-        self._base_url: str = (config.extra.get("url", "") or _get_scoped_secret("MATTERMOST_URL", "")).rstrip("/")
-        self._token: str = config.token or _get_scoped_secret("MATTERMOST_TOKEN", "")
-        self._bot_user_id: str = ""
-        self._bot_username: str = ""
+        self._base_url, self._token = _url_and_token(config)
+        self._base_url = self._base_url.rstrip("/")
+        self._bot_user_id = self._bot_username = ""
         self._session: Any = None  # aiohttp.ClientSession
         self._ws: Any = None  # aiohttp.ClientWebSocketResponse
         self._ws_task: Optional[asyncio.Task] = None
@@ -118,14 +118,14 @@ class MattermostAdapter(BasePlatformAdapter):
         # Reply mode: "thread" to nest replies, "off" for flat messages.
         self._reply_mode: str = (
             config.extra.get("reply_mode", "") or _get_scoped_secret("MATTERMOST_REPLY_MODE", "off")).lower()
-        self._last_post_status: Optional[int] = None
+        self._last_post_status: Optional[int] = None  # POST-only, read by the broken-thread-root fallback
         self._last_post_error: str = ""
         self._dedup = MessageDeduplicator()
 
     # --- HTTP helpers ---
 
     def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
+        return {**self._auth_header(), "Content-Type": "application/json"}
 
     def _auth_header(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
@@ -139,8 +139,7 @@ class MattermostAdapter(BasePlatformAdapter):
         url = f"{self._base_url}/api/v4/{path.lstrip('/')}"
         is_post = method == "POST"
         if is_post:
-            self._last_post_status = None
-            self._last_post_error = ""
+            self._last_post_status, self._last_post_error = None, ""
         kwargs: Dict[str, Any] = {"headers": self._headers()}
         if payload is not None:
             kwargs["json"] = payload
@@ -171,14 +170,11 @@ class MattermostAdapter(BasePlatformAdapter):
 
     def _last_post_failure_is_broken_thread_root(self) -> bool:
         """Return True only for clear invalid/missing Mattermost thread roots."""
-        if self._last_post_status not in {400, 404}:
-            return False
         body = (self._last_post_error or "").lower()
-        if not body:
+        if self._last_post_status not in {400, 404} or not body:
             return False
-        rootish = any(marker in body for marker in ("root_id", "rootid", "root id", "thread", "post"))
-        broken = any(marker in body for marker in ("invalid", "not found", "does not exist", "missing"))
-        return rootish and broken
+        return (any(marker in body for marker in ("root_id", "rootid", "root id", "thread", "post"))
+                and any(marker in body for marker in ("invalid", "not found", "does not exist", "missing")))
 
     async def _post_preserving_thread(
         self, chat_id: str, payload: Dict[str, Any], metadata: _Metadata) -> Dict[str, Any]:
@@ -220,20 +216,16 @@ class MattermostAdapter(BasePlatformAdapter):
     ) -> Optional[str]:
         """Upload a file and return its file ID, or None on failure."""
         import aiohttp
-
-        url = f"{self._base_url}/api/v4/files"
         form = aiohttp.FormData()
         form.add_field("channel_id", channel_id)
         form.add_field("files", file_data, filename=filename, content_type=content_type)
-        async with self._session.post(
-            url, headers=self._auth_header(), data=form, timeout=aiohttp.ClientTimeout(total=60)
-        ) as resp:
+        async with self._session.post(f"{self._base_url}/api/v4/files", headers=self._auth_header(), data=form,
+                                      timeout=aiohttp.ClientTimeout(total=60)) as resp:
             if resp.status >= 400:
                 body = await resp.text()
                 logger.error("MM file upload → %s: %s", resp.status, body[:200])
                 return None
-            data = await resp.json()
-            infos = data.get("file_infos", [])
+            infos = (await resp.json()).get("file_infos", [])
             return infos[0]["id"] if infos else None
 
     # --- Required overrides ---
@@ -241,25 +233,19 @@ class MattermostAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Mattermost and start the WebSocket listener."""
         import aiohttp
-
         if not self._base_url or not self._token:
             logger.error("Mattermost: URL or token not configured")
             return False
-
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), trust_env=gateway_trust_env())
         self._closing = False
-
         me = await self._api_get("users/me")
         if not me or "id" not in me:
             logger.error("Mattermost: failed to authenticate — check MATTERMOST_TOKEN and MATTERMOST_URL")
             await self._session.close()
             return False
-
-        self._bot_user_id = me["id"]
-        self._bot_username = me.get("username", "")
+        self._bot_user_id, self._bot_username = me["id"], me.get("username", "")
         logger.info(
             "Mattermost: authenticated as @%s (%s) on %s", self._bot_username, self._bot_user_id, self._base_url)
-
         self._ws_task = asyncio.create_task(self._ws_loop())
         self._mark_connected()
         self._wire_plugin_handlers(None)  # plugin-registered native handlers
@@ -289,17 +275,15 @@ class MattermostAdapter(BasePlatformAdapter):
 
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
-        """Send a message (or multiple chunks) to a channel."""
+        """Send a message (or multiple chunks) to a channel; reply_to / metadata["thread_id"] is the root post."""
         if not content:
             return SendResult(success=True)
-        last_id = None
+        result = SendResult(success=True)
         for chunk in self.truncate_message(self.format_message(content), MAX_POST_LENGTH):
-            # Thread support: reply_to or metadata["thread_id"] is the root post ID.
-            data = await self._post_message(chat_id, chunk, reply_to, metadata)
-            if not data or "id" not in data:
-                return SendResult(success=False, error="Failed to create post")
-            last_id = data["id"]
-        return SendResult(success=True, message_id=last_id)
+            result = _post_result(await self._post_message(chat_id, chunk, reply_to, metadata), "Failed to create post")
+            if not result.success:
+                break
+        return result
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         data = await self._api_get(f"channels/{chat_id}")
@@ -360,11 +344,8 @@ class MattermostAdapter(BasePlatformAdapter):
         if not is_safe_url(url):
             logger.warning("Mattermost: blocked unsafe URL (SSRF protection)")
             return await fallback()
-
         import aiohttp
-
-        file_data = None
-        ct = "application/octet-stream"
+        file_data, ct = None, "application/octet-stream"
         for attempt in range(3):
             try:
                 async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -384,7 +365,6 @@ class MattermostAdapter(BasePlatformAdapter):
                     continue
                 logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
                 return await fallback()
-
         file_id = await self._upload_file(chat_id, file_data, _url_filename(url, f"{kind}.png"), ct)
         if not file_id:
             return await fallback()
@@ -398,7 +378,6 @@ class MattermostAdapter(BasePlatformAdapter):
         if not p.exists():
             logger.warning("Mattermost: local file not found, skipping: %s", file_path)
             return SendResult(success=True, message_id=None)
-
         fname = file_name or p.name
         file_id = await self._upload_file(chat_id, p.read_bytes(), fname,
                                           mimetypes.guess_type(fname)[0] or "application/octet-stream")
@@ -409,7 +388,6 @@ class MattermostAdapter(BasePlatformAdapter):
     async def _load_batch_image(self, image_url: str, index: int) -> Optional[Tuple[bytes, str, str]]:
         """Read a file:// or remote image for a batch post → (data, filename, content_type), or None to skip."""
         import aiohttp
-
         if image_url.startswith("file://"):
             local_path = _unquote(image_url[7:])
             p = Path(local_path)
@@ -417,7 +395,6 @@ class MattermostAdapter(BasePlatformAdapter):
                 logger.warning("Mattermost: skipping missing image %s", local_path)
                 return None
             return p.read_bytes(), p.name, mimetypes.guess_type(p.name)[0] or "image/png"
-
         from tools.url_safety import is_safe_url
         if not is_safe_url(image_url):
             logger.warning("Mattermost: blocked unsafe image URL in batch")
@@ -441,14 +418,11 @@ class MattermostAdapter(BasePlatformAdapter):
         falling back to the base per-image loop on failure."""
         if not images:
             return
-        CHUNK = 5  # Mattermost post file_ids cap
-        chunks = [images[i:i + CHUNK] for i in range(0, len(images), CHUNK)]
-
+        chunks = [images[i:i + 5] for i in range(0, len(images), 5)]  # Mattermost post file_ids cap
         for chunk_idx, chunk in enumerate(chunks):
             if human_delay > 0 and chunk_idx > 0:
                 await asyncio.sleep(human_delay)
-            file_ids: List[str] = []
-            caption_parts: List[str] = []
+            file_ids, caption_parts = [], []
             try:
                 for image_url, alt_text in chunk:
                     if alt_text:
@@ -476,6 +450,8 @@ class MattermostAdapter(BasePlatformAdapter):
 
     async def _ws_loop(self) -> None:
         """Connect to the WebSocket and listen for events, reconnecting on failure."""
+        import aiohttp
+        import random
         delay = _RECONNECT_BASE_DELAY
         while not self._closing:
             try:
@@ -488,22 +464,18 @@ class MattermostAdapter(BasePlatformAdapter):
                     return
                 # Permanent auth failure: escalate via the fatal-error hook (a bare return leaves is_connected()
                 # healthy with a dead listener). Type-based: substring "401" matching misclassified transient errors.
-                import aiohttp
                 if isinstance(exc, aiohttp.WSServerHandshakeError) and exc.status in {401, 403}:
                     logger.error("Mattermost WS auth failed (HTTP %d) — stopping reconnect", exc.status)
                     self._set_fatal_error(
                         "mattermost_auth_error",
                         f"Mattermost WebSocket authentication rejected (HTTP {exc.status}). The bot token is "
                         "invalid, revoked, or lacks permission — check MATTERMOST_TOKEN and the bot account in "
-                        "the System Console.",
-                        retryable=False)
+                        "the System Console.", retryable=False)
                     await self._notify_fatal_error()
                     return
                 logger.warning("Mattermost WS error: %s — reconnecting in %.0fs", exc, delay)
-
             if self._closing:
                 return
-            import random
             await asyncio.sleep(delay + delay * _RECONNECT_JITTER * random.random())
             delay = min(delay * 2, _RECONNECT_MAX_DELAY)
 
@@ -541,14 +513,12 @@ class MattermostAdapter(BasePlatformAdapter):
         if allowed_channels and channel_id not in allowed_channels:
             logger.debug("Mattermost: ignoring message in non-allowed channel: %s", channel_id)
             return None
-
-        require_mention_raw = self._extra_or_env("require_mention", "MATTERMOST_REQUIRE_MENTION", "true")
-        require_mention = str(require_mention_raw).lower() not in {"false", "0", "no"}
+        require_mention = str(self._extra_or_env("require_mention", "MATTERMOST_REQUIRE_MENTION", "true")
+                              ).lower() not in {"false", "0", "no"}
         free_channels = _channel_id_set(
             self._extra_or_env("free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS"))
         mention_patterns = [f"@{self._bot_username}", f"@{self._bot_user_id}"]
         has_mention = any(pattern.lower() in message_text.lower() for pattern in mention_patterns)
-
         if require_mention and channel_id not in free_channels and not has_mention:
             logger.debug("Mattermost: skipping non-DM message without @mention (channel=%s)", channel_id)
             return None
@@ -561,26 +531,23 @@ class MattermostAdapter(BasePlatformAdapter):
         """Download attachments now (URLs need auth headers downstream tools lack) → (paths, mime types)."""
         import aiohttp
         from gateway.platforms.base import cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes
-        media_urls: List[str] = []
-        media_types: List[str] = []
+        media_urls, media_types = [], []
+        cache_fns = {"image/": cache_image_from_bytes, "audio/": cache_audio_from_bytes}
         for fid in file_ids:
             try:
                 file_info = await self._api_get(f"files/{fid}/info")
                 fname = file_info.get("name", f"file_{fid}")
-                ext = Path(fname).suffix or ""
                 mime = file_info.get("mime_type", "application/octet-stream")
                 async with self._session.get(
                     f"{self._base_url}/api/v4/files/{fid}", headers=self._auth_header(),
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
+                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status >= 400:
                         logger.warning("Mattermost: failed to download file %s: HTTP %s", fid, resp.status)
                         continue
                     file_data = await resp.read()
-                    if mime.startswith("image/"):
-                        media_urls.append(cache_image_from_bytes(file_data, ext or ".png"))
-                    elif mime.startswith("audio/"):
-                        media_urls.append(cache_audio_from_bytes(file_data, ext or ".ogg"))
+                    prefix = next((p for p in cache_fns if mime.startswith(p)), None)
+                    if prefix:
+                        media_urls.append(cache_fns[prefix](file_data, Path(fname).suffix or _INBOUND_CACHE_EXT[prefix]))
                     else:
                         media_urls.append(cache_document_from_bytes(file_data, fname))
                     media_types.append(mime)
@@ -643,9 +610,8 @@ async def _standalone_send(
     except ImportError:
         return {"error": "aiohttp not installed. Run: pip install aiohttp"}
 
-    extra = getattr(pconfig, "extra", {}) or {}
-    base_url = (extra.get("url") or _get_scoped_secret("MATTERMOST_URL", "")).rstrip("/")
-    token = (getattr(pconfig, "token", None) or _get_scoped_secret("MATTERMOST_TOKEN", "")).strip()
+    base_url, token = _url_and_token(pconfig)
+    base_url, token = base_url.rstrip("/"), token.strip()
     if not base_url or not token:
         return {"error": "Mattermost standalone send: MATTERMOST_URL and MATTERMOST_TOKEN must both be set"}
 
@@ -700,15 +666,17 @@ def interactive_setup() -> None:
     from hermes_cli.config import get_env_value, remove_env_value, save_env_value
     from hermes_cli.cli_output import prompt, prompt_yes_no, print_header, print_info, print_success
 
+    def info(*lines: str) -> None:
+        for line in lines:
+            print_info(line)
+
     print_header("Mattermost")
     if get_env_value("MATTERMOST_TOKEN"):
         print_info("Mattermost: already configured")
         if not prompt_yes_no("Reconfigure Mattermost?", False):
             return
-
-    for line in ("Works with any self-hosted Mattermost instance.",
-                 "   1. In Mattermost: Integrations → Bot Accounts → Add Bot Account", "   2. Copy the bot token"):
-        print_info(line)
+    info("Works with any self-hosted Mattermost instance.",
+         "   1. In Mattermost: Integrations → Bot Accounts → Add Bot Account", "   2. Copy the bot token")
     print()
     mm_url = prompt("Mattermost server URL (e.g. https://mm.example.com)")
     if mm_url:
@@ -718,11 +686,9 @@ def interactive_setup() -> None:
         return
     save_env_value("MATTERMOST_TOKEN", token)
     print_success("Mattermost token saved")
-
     print()
-    for line in ("🔒 Security: Restrict who can use your bot", "   To find your user ID: click your avatar → Profile",
-                 "   or use the API: GET /api/v4/users/me"):
-        print_info(line)
+    info("🔒 Security: Restrict who can use your bot", "   To find your user ID: click your avatar → Profile",
+         "   or use the API: GET /api/v4/users/me")
     print()
     allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
     if allowed_users:
@@ -730,12 +696,10 @@ def interactive_setup() -> None:
         print_success("Mattermost allowlist configured")
     else:
         print_info("⚠️  No allowlist set - anyone who can message the bot can use it!")
-
     print()
-    for line in ("📬 Home Channel: where Hermes delivers cron job results and notifications.",
-                 "   To get a channel ID: click channel name → View Info → copy the ID",
-                 "   You can also set this later by typing /set-home in a Mattermost channel."):
-        print_info(line)
+    info("📬 Home Channel: where Hermes delivers cron job results and notifications.",
+         "   To get a channel ID: click channel name → View Info → copy the ID",
+         "   You can also set this later by typing /set-home in a Mattermost channel.")
     home_channel = prompt("Home channel ID (leave empty to set later with /set-home)").strip()
     if home_channel:
         save_env_value("MATTERMOST_HOME_CHANNEL", home_channel)
@@ -746,6 +710,12 @@ def interactive_setup() -> None:
 
 # --- YAML → env config bridge (apply_yaml_config_fn) ---
 
+_YAML_BRIDGE = (  # (yaml key, env var, yaml value → env string); allowed_channels is a whitelist
+    ("require_mention", "MATTERMOST_REQUIRE_MENTION", lambda v: str(v).lower()),
+    ("free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS", _csv),
+    ("allowed_channels", "MATTERMOST_ALLOWED_CHANNELS", _csv))
+
+
 def _apply_yaml_config(yaml_cfg: dict, mattermost_cfg: dict) -> dict | None:
     """Translate ``config.yaml`` ``mattermost:`` keys into env vars + ``PlatformConfig.extra``.
 
@@ -755,22 +725,13 @@ def _apply_yaml_config(yaml_cfg: dict, mattermost_cfg: dict) -> dict | None:
     """
     skip_env_bridge = _profile_scoped_config_load()
     seeded: dict = {}
-
-    def bridge(key: str, env: str, value: Any, to_env) -> None:
+    for key, env, to_env in _YAML_BRIDGE:
+        value = mattermost_cfg.get(key)
+        if value is None and not (key == "require_mention" and key in mattermost_cfg):
+            continue
         seeded[key] = value
         if not skip_env_bridge and not os.getenv(env):
             os.environ[env] = to_env(value)
-
-    if "require_mention" in mattermost_cfg:
-        bridge("require_mention", "MATTERMOST_REQUIRE_MENTION", mattermost_cfg["require_mention"],
-               lambda v: str(v).lower())
-    for key, env in (
-        ("free_response_channels", "MATTERMOST_FREE_RESPONSE_CHANNELS"),
-        ("allowed_channels", "MATTERMOST_ALLOWED_CHANNELS"),  # whitelist: bot ONLY responds in these
-    ):
-        value = mattermost_cfg.get(key)
-        if value is not None:
-            bridge(key, env, value, _csv)
     return seeded or None
 
 
