@@ -35,8 +35,7 @@ _LIKE_TOKEN_RE = re.compile(r'"[^"]+"|\S+')
 _SEARCH_SELECT_TAIL = "m.timestamp, m.tool_name, s.source, s.model, s.started_at AS session_started"
 _LIKE_SNIPPET_SQL = "substr(m.content, max(1, instr(m.content, ?) - 40), 120) AS snippet"
 _LIKE_ANY_COLUMN_SQL = (
-    "(m.content LIKE ? ESCAPE '\\' OR m.tool_name LIKE ? ESCAPE '\\' "
-    "OR m.tool_calls LIKE ? ESCAPE '\\')"
+    "(m.content LIKE ? ESCAPE '\\' OR m.tool_name LIKE ? ESCAPE '\\' OR m.tool_calls LIKE ? ESCAPE '\\')"
 )
 _LIKE_COALESCED_COLUMN_SQL = (
     "(COALESCE(m.content, '') LIKE ? ESCAPE '\\' OR "
@@ -227,15 +226,13 @@ class SessionSearchMixin:
     # per indexed doc, so the anti-join is exact.
     _BOUNDARY_SWEEP_SQL = (
         "INSERT INTO {table}(rowid, content, tool_name, tool_calls) "
-        "SELECT m.id, m.content, m.tool_name, m.tool_calls "
-        "FROM messages m "
+        "SELECT m.id, m.content, m.tool_name, m.tool_calls FROM messages m "
         "WHERE m.id > ? AND m.id <= ? {extra}"
         "AND NOT EXISTS (SELECT 1 FROM {table}_docsize d WHERE d.id = m.id)"
     )
     _CHUNK_INSERT_SQL = (
         "INSERT INTO {table}(rowid, content, tool_name, tool_calls) "
-        "SELECT id, content, tool_name, tool_calls FROM messages "
-        "WHERE id > ? AND id <= ?{extra}"
+        "SELECT id, content, tool_name, tool_calls FROM messages WHERE id > ? AND id <= ?{extra}"
     )
 
     def _fts_rebuild_finish(self) -> None:
@@ -496,19 +493,17 @@ class SessionSearchMixin:
             return False
         with self._lock:
             conn = self._conn
-            if self._db_has_legacy_inline_fts(conn):
-                return True
-            if _meta_row(conn, "fts_rebuild_high_water") is not None:
-                return True  # interrupted optimize: demoted but unfinished
-            # CJK work is only offerable when THIS process can tokenize.
-            if self._fts_cjk_loaded and (
-                _meta_row(conn, "fts_cjk_rebuild_high_water") is not None
-                or _meta_row(conn, FTS_CJK_STALE_KEY) is not None
-            ):
-                return True
-            if self._has_fts_trash(conn):
-                return True
-            return self._fts_external_index_empty_with_messages(conn)
+            return (
+                self._db_has_legacy_inline_fts(conn)
+                or _meta_row(conn, "fts_rebuild_high_water") is not None  # interrupted optimize
+                # CJK work is only offerable when THIS process can tokenize.
+                or (self._fts_cjk_loaded and (
+                    _meta_row(conn, "fts_cjk_rebuild_high_water") is not None
+                    or _meta_row(conn, FTS_CJK_STALE_KEY) is not None
+                ))
+                or self._has_fts_trash(conn)
+                or self._fts_external_index_empty_with_messages(conn)
+            )
 
     def _demote_legacy_fts_to_trash(self) -> int:
         """Demote the legacy inline FTS vtables and stage their shadow tables for chunked
@@ -608,8 +603,7 @@ class SessionSearchMixin:
         self.set_meta("fts_storage_version", str(FTS_STORAGE_VERSION), cursor=conn)
         _delete_meta(conn, "fts_optimize_available")
         conn.execute(
-            "UPDATE schema_version SET version = ? WHERE version < ?",
-            (SCHEMA_VERSION, SCHEMA_VERSION),
+            "UPDATE schema_version SET version = ? WHERE version < ?", (SCHEMA_VERSION, SCHEMA_VERSION),
         )
         return None
 
@@ -768,8 +762,7 @@ class SessionSearchMixin:
         fetch_limit = int(limit) * 2 + 5
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, timestamp, content FROM messages "
-                "WHERE session_id = ? AND role = 'user'"
+                "SELECT id, timestamp, content FROM messages WHERE session_id = ? AND role = 'user'"
                 f"{active_clause}{display_clause} "
                 "ORDER BY id DESC LIMIT ?",
                 (session_id, fetch_limit),

@@ -113,8 +113,7 @@ _SESSION_MODEL_USAGE_V20_SEED_SQL = """INSERT OR IGNORE INTO session_model_usage
                                  + COALESCE(cache_write_tokens, 0)
                                  + COALESCE(reasoning_tokens, 0) > 0"""
 _TITLE_UNIQUE_INDEX_SQL = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique "
-    "ON sessions(title) WHERE title IS NOT NULL"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL"
 )
 _STALE_KEY_UPSERT_SQL = (
     "INSERT INTO state_meta (key, value) VALUES (?, '1') "
@@ -203,8 +202,7 @@ class SessionSchemaMixin:
             return 0  # "name IN ()" is a SQLite syntax error
         placeholders = ",".join("?" for _ in names)
         row = cursor.execute(
-            f"SELECT COUNT(*) FROM sqlite_master "
-            f"WHERE type = 'trigger' AND name IN ({placeholders})",
+            f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})",
             tuple(names),
         ).fetchone()
         return int(row[0])
@@ -234,8 +232,7 @@ class SessionSchemaMixin:
             update_names += ("messages_fts_cjk_update",)
         placeholders = ", ".join("?" for _ in update_names)
         rows = cursor.execute(
-            "SELECT name, sql FROM sqlite_master "
-            f"WHERE type = 'trigger' AND name IN ({placeholders})",
+            f"SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})",
             update_names,
         ).fetchall()
         to_drop = [name for name, sql in rows if self._fts_update_trigger_needs_narrowing(sql)]
@@ -266,16 +263,14 @@ class SessionSchemaMixin:
                     "UPDATE OF migration; marked stale and unavailable"
                 )
         logger.info(
-            "Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF " "(no rebuild required)",
-            len(to_drop),
+            "Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF (no rebuild required)", len(to_drop),
         )
         return len(to_drop)
 
     def _cjk_update_trigger_is_narrowed(self, cursor: sqlite3.Cursor) -> bool:
         """True when messages_fts_cjk_update exists with AFTER UPDATE OF."""
         row = cursor.execute(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
-            ("messages_fts_cjk_update",),
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", ("messages_fts_cjk_update",),
         ).fetchone()
         return bool(row) and not self._fts_update_trigger_needs_narrowing(row[0])
 
@@ -427,8 +422,7 @@ class SessionSchemaMixin:
             if not admitted:
                 logger.warning(
                     "Deferred stale state.db FTS rebuild: another process "
-                    "holds the rebuild authority; canonical writes and LIKE "
-                    "search remain available."
+                    "holds the rebuild authority; canonical writes and LIKE search remain available."
                 )
                 return False
             return self._recover_stale_fts_locked(cursor, legacy=legacy)
@@ -472,8 +466,7 @@ class SessionSchemaMixin:
                 return recovered
         except Exception:  # noqa: BLE001 - background retry must never raise
             logger.warning(
-                "In-process retry of the deferred stale state.db FTS rebuild "
-                "failed; will retry later.",
+                "In-process retry of the deferred stale state.db FTS rebuild failed; will retry later.",
                 exc_info=True,
             )
             return False
@@ -693,8 +686,7 @@ class SessionSchemaMixin:
         if pk_cols is None or pk_cols == ["scope", "session_key"]:
             return
         logger.info(
-            "gateway_routing has legacy primary key %r; rebuilding with "
-            "composite (scope, session_key) key",
+            "gateway_routing has legacy primary key %r; rebuilding with composite (scope, session_key) key",
             pk_cols,
         )
         self._rebuild_table(
@@ -706,8 +698,7 @@ class SessionSchemaMixin:
     updated_at REAL NOT NULL,
     PRIMARY KEY (scope, session_key)
 )""",
-            "INSERT OR REPLACE INTO gateway_routing "
-            "(scope, session_key, entry_json, updated_at) "
+            "INSERT OR REPLACE INTO gateway_routing (scope, session_key, entry_json, updated_at) "
             "SELECT COALESCE(scope, ''), session_key, entry_json, updated_at "
             "FROM gateway_routing_legacy_pk ORDER BY updated_at ASC",
         )
@@ -786,8 +777,7 @@ class SessionSchemaMixin:
         try:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
-                "ON messages(session_id, platform_message_id) "
-                "WHERE platform_message_id IS NOT NULL"
+                "ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL"
             )
         except sqlite3.OperationalError as exc:
             logger.debug("idx_messages_platform_msg_id create skipped: %s", exc)
@@ -804,8 +794,7 @@ class SessionSchemaMixin:
 
         fts5_available = self._sqlite_supports_fts5(cursor)
         self._fts_stale = cursor.execute(
-            "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1",
-            (FTS_STALE_KEY,),
+            "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1", (FTS_STALE_KEY,)
         ).fetchone() is not None
         if self._fts_stale:
             # A prior process detached FTS after corruption; keep every FTS writer
@@ -859,9 +848,7 @@ class SessionSchemaMixin:
                     "WHERE parent_session_id IS NULL "
                     "AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL "
                     "AND json_extract(COALESCE(model_config, '{}'), '$._branched_from') IS NULL "
-                    "AND title IS NULL "
-                    "AND message_count <= 25 "
-                    "AND EXISTS (SELECT 1 FROM messages m "
+                    "AND title IS NULL AND message_count <= 25 AND EXISTS (SELECT 1 FROM messages m "
                     "            WHERE m.session_id = sessions.id AND m.role = 'tool') "
                     "AND NOT EXISTS (SELECT 1 FROM sessions ch "
                     "                WHERE ch.parent_session_id = sessions.id)"
@@ -926,8 +913,7 @@ class SessionSchemaMixin:
         existing rows are main-loop accounting → task=''."""
         try:
             legacy_pk = cursor.execute(
-                "SELECT COUNT(*) FROM pragma_table_info('session_model_usage') "
-                "WHERE name = 'task' AND pk > 0"
+                "SELECT COUNT(*) FROM pragma_table_info('session_model_usage') WHERE name = 'task' AND pk > 0"
             ).fetchone()[0]
             if legacy_pk:
                 return
@@ -970,8 +956,7 @@ class SessionSchemaMixin:
                          )"""
                 )
                 logger.warning(
-                    "Cleared %d duplicate session title(s) while restoring the unique index",
-                    cursor.rowcount,
+                    "Cleared %d duplicate session title(s) while restoring the unique index", cursor.rowcount,
                 )
                 cursor.execute(_TITLE_UNIQUE_INDEX_SQL)
             except sqlite3.Error:

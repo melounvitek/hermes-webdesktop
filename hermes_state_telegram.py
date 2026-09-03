@@ -206,8 +206,7 @@ class SessionTelegramTopicsMixin:
                 )
                 if clear_bindings:
                     conn.execute(
-                        "DELETE FROM telegram_dm_topic_bindings "
-                        "WHERE profile_name = ? AND chat_id = ?",
+                        "DELETE FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ?",
                         (profile_name, str(chat_id)),
                     )
             except sqlite3.OperationalError:
@@ -248,8 +247,7 @@ class SessionTelegramTopicsMixin:
         """All bindings for one chat, newest first ([] when the table is absent)."""
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         rows = self._topic_read_all(
-            "SELECT * FROM telegram_dm_topic_bindings "
-            "WHERE profile_name = ? AND chat_id = ? "
+            "SELECT * FROM telegram_dm_topic_bindings WHERE profile_name = ? AND chat_id = ? "
             "ORDER BY updated_at DESC",
             (profile_name, str(chat_id)),
         )
@@ -306,8 +304,7 @@ class SessionTelegramTopicsMixin:
                 ).fetchone()
                 if remaining is None:
                     conn.execute(
-                        "UPDATE telegram_dm_topic_mode "
-                        "SET enabled = 0, updated_at = ? "
+                        "UPDATE telegram_dm_topic_mode SET enabled = 0, updated_at = ? "
                         "WHERE profile_name = ? AND chat_id = ?",
                         (time.time(), profile_name, chat_id),
                     )
@@ -392,7 +389,6 @@ class SessionTelegramTopicsMixin:
                 ).fetchall()
             except sqlite3.OperationalError:
                 rows = conn.execute(
-                    _UNLINKED_SELECT_HEAD + _UNLINKED_SELECT_TAIL,
-                    (str(user_id), int(limit)),
+                    _UNLINKED_SELECT_HEAD + _UNLINKED_SELECT_TAIL, (str(user_id), int(limit)),
                 ).fetchall()
         return [self._rich_row(row) for row in rows]

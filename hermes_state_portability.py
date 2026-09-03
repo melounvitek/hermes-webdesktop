@@ -115,8 +115,7 @@ class SessionPortabilityMixin:
         if not include_archived:
             where += " AND archived = 0"
         rows = self._locked_rows(
-            "SELECT cwd AS cwd, COUNT(*) AS sessions, "
-            "MAX(COALESCE(ended_at, started_at, 0)) AS last_active "
+            "SELECT cwd AS cwd, COUNT(*) AS sessions, MAX(COALESCE(ended_at, started_at, 0)) AS last_active "
             f"FROM sessions WHERE {where} GROUP BY cwd"
         )
         return [
@@ -267,8 +266,7 @@ class SessionPortabilityMixin:
         adopted = result.get("ok", False) and (imported + skipped) == len(segments)
         if not adopted:
             logger.warning(
-                "adoption of %s did not complete: imported=%s skipped=%s "
-                "of %s segment(s); errors=%s",
+                "adoption of %s did not complete: imported=%s skipped=%s of %s segment(s); errors=%s",
                 session_id, imported, skipped, len(segments), result.get("errors"),
             )
 
@@ -291,8 +289,7 @@ class SessionPortabilityMixin:
             local_now = len(self.get_messages(seg_id))
             if donor_now > local_now:
                 logger.warning(
-                    "adoption divergence at retire time: donor "
-                    "segment %s grew to %d messages (local %d) — "
+                    "adoption divergence at retire time: donor segment %s grew to %d messages (local %d) — "
                     "leaving donor unretired",
                     seg_id, donor_now, local_now,
                 )
