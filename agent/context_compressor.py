@@ -75,17 +75,14 @@ def take_pinned_summary_route() -> Optional[Dict[str, Any]]:
 
     Single use by design: the main-model retry must not re-issue the pin."""
     route = _SUMMARY_ROUTE_PIN.get()
-    if route is None:
-        return None
-    _SUMMARY_ROUTE_PIN.set(None)
+    if route is not None:
+        _SUMMARY_ROUTE_PIN.set(None)
     return route
 
 
 def _pinned_summary_call_kwargs() -> Dict[str, Any]:
     """Consume the pinned route as explicit ``call_llm`` keyword arguments."""
-    route = take_pinned_summary_route()
-    if not route:
-        return {}
+    route = take_pinned_summary_route() or {}
     return {field: route[field] for field in _PINNED_ROUTE_FIELDS if route.get(field) not in (None, "")}
 
 
@@ -344,16 +341,15 @@ def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
 
     for i in range(len(out) - 1, -1, -1):
         msg = out[i]
-        if not isinstance(msg, dict):
+        if not isinstance(msg, dict) or not (msg.get("_todo_snapshot_synthetic") and msg.get("role") == "user"):
             continue
-        if msg.get("_todo_snapshot_synthetic") and msg.get("role") == "user":
-            content = msg.get("content")
-            notice_idx = content.find(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) if isinstance(content, str) else -1
-            if isinstance(content, str) and notice_idx >= 0:
-                msg["content"] = content[notice_idx:]
-            else:
-                del out[i]
-            return
+        content = msg.get("content")
+        notice_idx = content.find(_PRUNED_SKILL_RELOAD_NOTICE_HEADER) if isinstance(content, str) else -1
+        if notice_idx >= 0:
+            msg["content"] = content[notice_idx:]
+        else:
+            del out[i]
+        return
 
 
 def salvage_grown_transcript(
@@ -490,9 +486,7 @@ class _HandoffScan:
 def _short_error_text(e: Exception, limit: int = 220) -> str:
     """Error text (or class name) capped for durable cooldown rows and telemetry."""
     text = str(e).strip() or e.__class__.__name__
-    if len(text) > limit:
-        text = text[: limit - 3].rstrip() + "..."
-    return text
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
 @dataclass
@@ -508,17 +502,12 @@ class _SummaryFailureKind:
 
     def fallback_reason(self) -> str:
         """Reason string for the one-shot main-model retry log line, most specific first."""
-        for flagged, reason in (
-            (self.json_decode, "returned invalid JSON"),
-            (self.truncated, "returned a truncated summary (output token cap)"),
-            (self.empty_content, "returned empty content"),
-            (self.model_not_found, "unavailable"),
-            (self.streaming_closed, "closed stream prematurely"),
-            (self.timeout, "timed out"),
-        ):
-            if flagged:
-                return reason
-        return "failed"
+        reasons = (
+            (self.json_decode, "returned invalid JSON"), (self.truncated, "returned a truncated summary (output token cap)"),
+            (self.empty_content, "returned empty content"), (self.model_not_found, "unavailable"),
+            (self.streaming_closed, "closed stream prematurely"), (self.timeout, "timed out"),
+        )
+        return next((reason for flagged, reason in reasons if flagged), "failed")
 
 
 def _classify_summary_failure(e: Exception) -> _SummaryFailureKind:
@@ -586,8 +575,8 @@ def _next_timeout_cooldown(compressor: Any) -> int:
     """Bump ``compressor._consecutive_timeout_failures`` and return the ladder rung for it.
 
     Module-level (not a method) so callers that bind a single real method onto a stub still exercise the ladder."""
-    compressor._consecutive_timeout_failures = getattr(compressor, "_consecutive_timeout_failures", 0) + 1
-    return _TIMEOUT_COOLDOWN_LADDER[min(compressor._consecutive_timeout_failures, len(_TIMEOUT_COOLDOWN_LADDER)) - 1]
+    n = compressor._consecutive_timeout_failures = getattr(compressor, "_consecutive_timeout_failures", 0) + 1
+    return _TIMEOUT_COOLDOWN_LADDER[min(n, len(_TIMEOUT_COOLDOWN_LADDER)) - 1]
 
 
 _MIN_SUMMARY_TOKENS = 2000
@@ -1026,22 +1015,17 @@ def _content_length_for_budget(raw_content: Any) -> int:
         return len(raw_content)
     if not isinstance(raw_content, list):
         return len(str(raw_content or ""))
-    total = 0
-    for p in raw_content:
-        if isinstance(p, dict):
-            # Any text-bearing part counts its text; image_url payload size is irrelevant.
-            total += _IMAGE_CHAR_EQUIVALENT if _is_image_part(p) else len(p.get("text", "") or "")
-        else:
-            total += len(p if isinstance(p, str) else str(p))
-    return total
+    # Any text-bearing part counts its text; image_url payload size is irrelevant.
+    return sum(
+        (_IMAGE_CHAR_EQUIVALENT if _is_image_part(p) else len(p.get("text", "") or "")) if isinstance(p, dict) else len(str(p))
+        for p in raw_content
+    )
 
 
 def _serialized_length_for_budget(value: Any) -> int:
     """Return a stable char-length for non-content replay/metadata fields."""
-    if value is None or value == "":
-        return 0
-    if isinstance(value, str):
-        return len(value)
+    if isinstance(value, str) or value is None:
+        return len(value or "")
     try:
         return len(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
     except (TypeError, ValueError):
@@ -1068,21 +1052,15 @@ def _reasoning_details_text_chars(value: Any) -> int:
     """Textual thinking chars inside a ``reasoning_details`` envelope.
 
     Counts only thinking text, never signed/base64 envelope blobs."""
-    if not value:
-        return 0
     if isinstance(value, str):
         return len(value)
-    if isinstance(value, dict):
-        value = [value]
-    if not isinstance(value, list):
-        return 0
-    total = 0
-    for part in value:
-        if isinstance(part, str):
-            total += len(part)
-        elif isinstance(part, dict):
-            total += sum(len(t) for t in (part.get(k) for k in ("thinking", "text", "summary")) if isinstance(t, str))
-    return total
+    parts = [value] if isinstance(value, dict) else value if isinstance(value, list) else []
+    return sum(
+        len(part) if isinstance(part, str)
+        else sum(len(t) for t in (part.get(k) for k in ("thinking", "text", "summary")) if isinstance(t, str))
+        if isinstance(part, dict) else 0
+        for part in parts
+    )
 
 
 def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -> int:
@@ -1093,11 +1071,8 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     the full shape; a mismatched size class protects blob-heavy rows as "small" and compaction re-fires.
     ``charge_stale_thinking=False`` skips newest-turn-only thinking keys. Accounting only; never mutates."""
     content = msg.get("content") or ""
-    if isinstance(content, str):
-        tokens = estimate_tokens_rough(content) + 10  # +10 for role/key overhead
-    else:
-        content_len = _content_length_for_budget(content)
-        tokens = content_len // _CHARS_PER_TOKEN + 10
+    text_tokens = estimate_tokens_rough(content) if isinstance(content, str) else _content_length_for_budget(content) // _CHARS_PER_TOKEN
+    tokens = text_tokens + 10  # +10 for role/key overhead
     tokens += sum(estimate_tokens_rough(str(tc)) for tc in msg.get("tool_calls") or [] if isinstance(tc, dict))
     for key in _ALWAYS_REPLAYED_BUDGET_KEYS:
         tokens += _serialized_length_for_budget(msg.get(key)) // _CHARS_PER_TOKEN
@@ -1140,25 +1115,19 @@ def _with_part_text(item: Any, text: str) -> Any:
 
 def _content_text_for_contains(content: Any) -> str:
     """Return a best-effort text view of message content (for substring checks only)."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
     if isinstance(content, list):
         return "\n".join(t for t in map(_part_text, content) if isinstance(t, str) and t)
-    return str(content)
+    return "" if content is None else content if isinstance(content, str) else str(content)
 
 
 def _append_text_to_content(content: Any, text: str, *, prepend: bool = False) -> Any:
     """Append or prepend plain text to message content (string or multimodal list)."""
     if content is None:
         return text
-    if isinstance(content, str):
-        return text + content if prepend else content + text
     if isinstance(content, list):
         text_block = {"type": "text", "text": text}
         return [text_block, *content] if prepend else [*content, text_block]
-    rendered = str(content)
+    rendered = content if isinstance(content, str) else str(content)
     return text + rendered if prepend else rendered + text
 
 
@@ -1171,9 +1140,8 @@ def _replace_image_parts(parts: Any, placeholder: str) -> Optional[List[Any]]:
 
 def _tool_content_has_images(content: Any) -> bool:
     """True when a tool-result body (part list or ``_multimodal`` envelope) carries images."""
-    if isinstance(content, dict) and content.get("_multimodal"):
-        return _content_has_images(content.get("content"))
-    return _content_has_images(content)
+    inner = content.get("content") if isinstance(content, dict) and content.get("_multimodal") else content
+    return _content_has_images(inner)
 
 
 def _strip_images_from_tool_msg(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1314,9 +1282,7 @@ def _summary_part_text(part: Any) -> str:
     ptype = part.get("type")
     if ptype == "text":
         return part.get("text", "")
-    if ptype in _IMAGE_PART_TYPES:
-        return _image_part_label(part)
-    return f"[{ptype or 'attachment'}]"
+    return _image_part_label(part) if ptype in _IMAGE_PART_TYPES else f"[{ptype or 'attachment'}]"
 
 
 def _image_part_label(part: Dict[str, Any]) -> str:
@@ -1370,8 +1336,7 @@ def _sum_search_files(name, args, content, content_len, line_count):
 
 
 def _sum_browser(name, args, content, content_len, line_count):
-    url = args.get("url", "")
-    ref = args.get("ref", "")
+    url, ref = args.get("url", ""), args.get("ref", "")
     detail = f" {url}" if url else (f" ref={ref}" if ref else "")
     return f"[{name}]{detail} ({content_len:,} chars)"
 
@@ -1404,10 +1369,9 @@ def _sum_execute_code(name, args, content, content_len, line_count):
 
 def _sum_skill_view(name, args, content, content_len, line_count):
     skill = args.get("name", "?")
-    if content_len > _SKILL_VIEW_PRUNE_MIN_CHARS:
-        # Ghost-skill defense: canonical marker says instructions are gone and how to reload.
-        return f"[skill_view] name={skill} ({content_len:,} chars) " + _skill_pruned_marker(str(skill))
-    return f"[skill_view] name={skill} ({content_len:,} chars)"
+    # Ghost-skill defense: canonical marker says instructions are gone and how to reload.
+    marker = " " + _skill_pruned_marker(str(skill)) if content_len > _SKILL_VIEW_PRUNE_MIN_CHARS else ""
+    return f"[skill_view] name={skill} ({content_len:,} chars)" + marker
 
 
 def _sum_clarify(name, args, content, content_len, line_count):
@@ -1655,11 +1619,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         tail_messages: List[Dict[str, Any]],
     ) -> None:
         telemetry = getattr(self, "_active_compression_telemetry", None)
-        if not isinstance(telemetry, dict):
-            return
-        telemetry["protected_head_tokens"] = estimate_messages_tokens_rough(head_messages)
-        telemetry["middle_window_tokens"] = estimate_messages_tokens_rough(middle_messages)
-        telemetry["protected_tail_tokens"] = estimate_messages_tokens_rough(tail_messages)
+        if isinstance(telemetry, dict):
+            telemetry["protected_head_tokens"] = estimate_messages_tokens_rough(head_messages)
+            telemetry["middle_window_tokens"] = estimate_messages_tokens_rough(middle_messages)
+            telemetry["protected_tail_tokens"] = estimate_messages_tokens_rough(tail_messages)
 
     def _record_aux_compression_call(
         self, *, prompt_messages: List[Dict[str, Any]], max_tokens: int | None, duration_ms: int,
@@ -1681,17 +1644,13 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             telemetry["fit_margin"] = (telemetry["effective_aux_context"] - telemetry["aux_prompt_tokens"]
                                        - (telemetry["aux_output_reservation"] or 0))
         telemetry["aux_call_duration_ms"] = (telemetry.get("aux_call_duration_ms") or 0) + max(0, int(duration_ms))
-        if not isinstance(phase_timings, dict):
-            return
         for key in ("queue_wait_ms", "prompt_build_ms", "time_to_first_progress_ms", "summary_generation_ms", "commit_ms"):
-            if key not in phase_timings:
+            if not isinstance(phase_timings, dict) or key not in phase_timings:
                 continue
             value = _safe_int(phase_timings[key])
             # Wait and generation phases accumulate across retries; the rest are point readings.
-            if key in {"queue_wait_ms", "summary_generation_ms"} and value is not None:
-                telemetry[key] = (telemetry.get(key) or 0) + value
-            else:
-                telemetry[key] = value
+            accumulate = key in {"queue_wait_ms", "summary_generation_ms"} and value is not None
+            telemetry[key] = (telemetry.get(key) or 0) + value if accumulate else value
 
     def _emit_init_summary_once(self) -> None:
         """Emit the init log line once, on first context-length resolution (keeps __init__ non-blocking)."""
@@ -1715,9 +1674,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 config_context_length=self._config_context_length, provider=self.provider,
             )
             # Raise-only small-context floor; must run after context_length resolves and before threshold_tokens derives.
-            self.threshold_percent = self._effective_threshold_percent(
-                self._resolved_context_length, self._base_threshold_percent,
-            )
+            self.threshold_percent = self._effective_threshold_percent(self._resolved_context_length, self._base_threshold_percent)
             self._emit_init_summary_once()
         return self._resolved_context_length
 
@@ -1756,9 +1713,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if self._tail_token_budget is None:
             if getattr(self, "tail_mode", "lean") == "lean":
                 # Lean mode: tail is a small clamped recency window; the summary carries continuity.
-                self._tail_token_budget = max(
-                    LEAN_TAIL_FLOOR_TOKENS, min(LEAN_TAIL_CAP_TOKENS, int(self.context_length * 0.025)),
-                )
+                self._tail_token_budget = max(LEAN_TAIL_FLOOR_TOKENS, min(LEAN_TAIL_CAP_TOKENS, int(self.context_length * 0.025)))
             else:
                 self._tail_token_budget = int(self.threshold_tokens * self.summary_target_ratio)
         return self._tail_token_budget
@@ -2427,18 +2382,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     def _automatic_compression_blocked_locally(self, *, ignore_cooldown: bool = False) -> bool:
         """Evaluate the automatic-compaction gate on in-memory state only."""
         # Summary-LLM cooldown: without this every turn re-fires and re-inserts the fallback marker (#11529).
-        # Manual /compress passes force=True, which clears the cooldown first.
-        _cooldown_remaining = self._summary_failure_cooldown_until - time.monotonic()
-        if _cooldown_remaining > 0 and not ignore_cooldown:
-            if not self.quiet_mode:
-                logger.debug("Compression deferred — summary LLM in cooldown for %.0fs more", _cooldown_remaining)
-            return True
-        # Structural no-op backoff is transient (in-memory, no strikes); auto-compaction resumes when it lapses.
-        _structural_remaining = self._structural_no_op_backoff_until - time.monotonic()
-        if _structural_remaining > 0:
-            if not self.quiet_mode:
-                logger.debug("Compression deferred — structural no-op backoff for %.0fs more", _structural_remaining)
-            return True
+        # Manual /compress passes force=True, which clears the cooldown first. Structural no-op backoff is
+        # transient (in-memory, no strikes); auto-compaction resumes when it lapses.
+        for until, skip, what in (
+            (self._summary_failure_cooldown_until, ignore_cooldown, "summary LLM in cooldown"),
+            (self._structural_no_op_backoff_until, False, "structural no-op backoff"),
+        ):
+            remaining = until - time.monotonic()
+            if remaining > 0 and not skip:
+                if not self.quiet_mode:
+                    logger.debug("Compression deferred — %s for %.0fs more", what, remaining)
+                return True
         # Anti-thrash back-off must not be permanent: after _ANTI_THRASH_RECOVERY_SECONDS blocked, allow ONE
         # probe by dropping counters to 1 strike (persisted). Deadline is armed lazily and persisted on the row.
         if self._tripped():
@@ -2511,7 +2465,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         min_protect = min(protect_tail_count, len(result), _MAX_TAIL_MESSAGE_FLOOR)
         boundary, _ = self._walk_tail_budget(result, 0, protect_tail_tokens, min_protect, cut_at_break=True)
         # Apply the floor in count-space: `max` in index-space would invert (smaller index = MORE protected).
-        return len(result) - max(len(result) - boundary, min_protect)
+        return min(boundary, len(result) - min_protect)
 
     @staticmethod
     def _dedupe_tool_results(result: List[Dict[str, Any]]) -> int:
@@ -2651,8 +2605,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         protected_skills = _collect_protected_skill_names(result, prune_boundary)
         # Pass 2: summarize old tool results. Pass 3: shrink large tool_call arguments INSIDE the parsed JSON so
         # the result stays valid; otherwise providers 400 on every turn until the call leaves the window.
-        for i in range(max(0, prune_boundary)):
-            pruned += self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars, protected_skills)
+        pruned += sum(
+            self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars, protected_skills)
+            for i in range(max(0, prune_boundary))
+        )
         for i in range(max(0, prune_boundary)):
             self._truncate_tool_call_args_at(result, i)
         # Pass 3.5: retire image payloads inside the protected tail; re-sent embeds otherwise make
@@ -3390,29 +3346,18 @@ Write only the summary body. Do not include any preamble or prefix."""
         text = _content_text_for_contains(message.get("content")).strip()
         # Recovery nudges are scaffolding, not human turns; lazy import avoids an import cycle.
         from agent.conversation_loop import (
-            _CODEX_ACK_CONTINUATION_NUDGE,
-            _CODEX_INCOMPLETE_NUDGE,
-            _DROPPED_TOOLCALL_NUDGE_CONTENT,
-            _EMPTY_TOOL_RESPONSE_NUDGE,
-            _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
-            _LENGTH_CONTINUATION_NETWORK_STUB,
+            _CODEX_ACK_CONTINUATION_NUDGE, _CODEX_INCOMPLETE_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT,
+            _EMPTY_TOOL_RESPONSE_NUDGE, _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX, _LENGTH_CONTINUATION_NETWORK_STUB,
             _LENGTH_CONTINUATION_OUTPUT_LIMIT,
         )
 
         return text in {
-            COMPRESSION_CONTINUATION_USER_CONTENT,
-            _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
-            MAX_ITERATIONS_SUMMARY_REQUEST,
-            _CODEX_INCOMPLETE_NUDGE,
-            _CODEX_ACK_CONTINUATION_NUDGE,
-            _DROPPED_TOOLCALL_NUDGE_CONTENT,
-            _EMPTY_TOOL_RESPONSE_NUDGE,
-            _LENGTH_CONTINUATION_NETWORK_STUB,
+            COMPRESSION_CONTINUATION_USER_CONTENT, _LEGACY_COMPRESSION_CONTINUATION_USER_CONTENT,
+            MAX_ITERATIONS_SUMMARY_REQUEST, _CODEX_INCOMPLETE_NUDGE, _CODEX_ACK_CONTINUATION_NUDGE,
+            _DROPPED_TOOLCALL_NUDGE_CONTENT, _EMPTY_TOOL_RESPONSE_NUDGE, _LENGTH_CONTINUATION_NETWORK_STUB,
             _LENGTH_CONTINUATION_OUTPUT_LIMIT,
         } or text.startswith((
-            _BACKGROUND_PROCESS_NOTIFICATION_PREFIX,
-            TODO_INJECTION_HEADER + "\n",
-            _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
+            _BACKGROUND_PROCESS_NOTIFICATION_PREFIX, TODO_INJECTION_HEADER + "\n", _LENGTH_CONTINUATION_DROPPED_TOOLS_PREFIX,
         ))
 
     @staticmethod
@@ -3472,16 +3417,14 @@ Write only the summary body. Do not include any preamble or prefix."""
     @classmethod
     def _blank_echo_indices_after(cls, messages: List[Dict[str, Any]], user_idx: int) -> set[int]:
         """Return contiguous blank echoes after a user event; removable only if an assistant follows."""
-        indices: set[int] = set()
         if user_idx < 0:
-            return indices
+            return set()
         idx = user_idx + 1
         while idx < len(messages) and cls._is_blank_user_turn(messages[idx]):
-            indices.add(idx)
             idx += 1
-        if not indices or idx >= len(messages):
+        if idx == user_idx + 1 or idx >= len(messages) or messages[idx].get("role") != "assistant":
             return set()
-        return indices if messages[idx].get("role") == "assistant" else set()
+        return set(range(user_idx + 1, idx))
 
     @classmethod
     def _derive_auto_focus_topic(cls, messages: List[Dict[str, Any]]) -> Optional[str]:
@@ -3611,12 +3554,11 @@ Write only the summary body. Do not include any preamble or prefix."""
                 # Legacy end-marker form: live content follows the marker inside/after one part.
                 for index, item in enumerate(content):
                     text = _part_text(item)
-                    if not isinstance(text, str) or _SUMMARY_END_MARKER not in text:
-                        continue
-                    remainder = text.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
-                    legacy_blocks = [_with_part_text(item, remainder)] if remainder else []
-                    legacy_blocks += [later.copy() if isinstance(later, dict) else later for later in content[index + 1:]]
-                    return _unwrapped(legacy_blocks) if legacy_blocks else None
+                    if isinstance(text, str) and _SUMMARY_END_MARKER in text:
+                        remainder = text.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
+                        legacy_blocks = [_with_part_text(item, remainder)] if remainder else []
+                        legacy_blocks += [later.copy() if isinstance(later, dict) else later for later in content[index + 1:]]
+                        return _unwrapped(legacy_blocks) if legacy_blocks else None
                 return None
 
             # Strip the PRIOR CONTEXT header from the first block that carries it.
@@ -3780,7 +3722,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         last_asst_idx = self._find_last_assistant_message_idx(messages, head_end)
         if last_asst_idx < 0 or last_asst_idx >= cut_idx:
             return cut_idx
-        # Pull back to the assistant, then re-align so a preceding tool group is not split.
         new_cut = self._align_boundary_backward(messages, last_asst_idx)
         if not self.quiet_mode:
             logger.debug(
@@ -3831,12 +3772,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         # A user message is already a clean boundary: deliberately NO _align_boundary_backward
         # here, it would pull the cut into the preceding tool group and split it.
         user_indices = self._real_user_indices_desc(messages, head_end)
-        if not user_indices:
+        if not user_indices or user_indices[min(n, len(user_indices)) - 1] >= cut_idx:
             return cut_idx
-        target_idx = user_indices[min(n, len(user_indices)) - 1]
-        if target_idx >= cut_idx:
-            return cut_idx
-        return max(target_idx, head_end + 1)
+        return max(user_indices[min(n, len(user_indices)) - 1], head_end + 1)
 
     def _find_turn_pair_end(self, messages: List[Dict[str, Any]], user_idx: int) -> int:
         """Return the index after the turn-pair (user -> assistant -> tools) at *user_idx*.
@@ -4013,9 +3951,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         latest_actionable_idx = self._find_last_user_message_idx(messages, 0)
         if compress_end == latest_actionable_idx:
             bridge_idx = latest_actionable_idx - 1
-            if bridge_idx >= 0 and messages[bridge_idx].get("role") == "tool":
+            bridge_role = messages[bridge_idx].get("role") if bridge_idx >= 0 else None
+            if bridge_role == "tool":
                 bridge_idx = self._align_boundary_backward(messages, latest_actionable_idx)
-            elif bridge_idx < 0 or messages[bridge_idx].get("role") != "assistant":
+            elif bridge_role != "assistant":
                 bridge_idx = -1
             if bridge_idx > compress_start:
                 compress_end = bridge_idx
@@ -4418,11 +4357,12 @@ def _handoff_only_content(content: Any) -> Any:
     projected: list[Any] = []
     for item in content:
         text = _part_text(item)
-        if isinstance(text, str) and _SUMMARY_END_MARKER in text:
+        if not isinstance(text, str):
+            continue
+        if _SUMMARY_END_MARKER in text:
             projected.append(_with_part_text(item, text.split(_SUMMARY_END_MARKER, 1)[0] + _SUMMARY_END_MARKER))
             return projected
-        if isinstance(text, str):
-            projected.append(item.copy() if isinstance(item, dict) else item)
+        projected.append(item.copy() if isinstance(item, dict) else item)
     return projected
 
 
@@ -4445,18 +4385,15 @@ def split_user_originated_turn(message: Any) -> tuple[Optional[Dict[str, Any]], 
         if message.get("timestamp") is not None:
             handoff["timestamp"] = message["timestamp"]
         drop_stale_api_content(handoff)
-
         # Hidden is the legacy compaction wrapper and doesn't hide an unwrapped human payload; other
         # kinds are synthetic.
         display_kind = message.get("display_kind")
-        if display_kind and display_kind != "hidden":
-            return handoff, None
-        candidate = ContextCompressor._strip_context_summary_handoff_message(message)
+        candidate = None if display_kind and display_kind != "hidden" else ContextCompressor._strip_context_summary_handoff_message(message)
         if candidate is None:
             return handoff, None
+    elif message.get("display_kind"):
+        return None, None
     else:
-        if message.get("display_kind"):
-            return None, None
         candidate = message.copy()
 
     for key in (
@@ -4467,9 +4404,7 @@ def split_user_originated_turn(message: Any) -> tuple[Optional[Dict[str, Any]], 
     carrier_metadata = message.get("display_metadata")
     if isinstance(carrier_metadata, dict):
         durable_metadata = {
-            key: copy.deepcopy(carrier_metadata[key])
-            for key in SUMMARY_CARRIER_DURABLE_DISPLAY_METADATA_KEYS
-            if key in carrier_metadata
+            key: copy.deepcopy(carrier_metadata[key]) for key in SUMMARY_CARRIER_DURABLE_DISPLAY_METADATA_KEYS if key in carrier_metadata
         }
         if durable_metadata:
             candidate["display_metadata"] = durable_metadata
@@ -4496,9 +4431,7 @@ def history_before_user_originated_turn(
     handoff, live_view = split_user_originated_turn(messages[index])
     if live_view is None:
         raise ValueError("selected row is not a user-originated turn")
-    prefix = [message.copy() for message in messages[:index]]
-    if handoff is not None:
-        prefix.append(handoff)
+    prefix = [message.copy() for message in messages[:index]] + ([handoff] if handoff is not None else [])
     return prefix, live_view
 
 
@@ -4506,28 +4439,23 @@ def retryable_user_text(content: Any) -> str:
     """Return lossless retry text or raise before destructive mutation.
 
     Media and unknown structured parts fail closed (no attachment replay protocol)."""
-    if isinstance(content, str):
-        text = content
-    elif isinstance(content, list):
-        chunks: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                chunks.append(part)
-                continue
-            if not isinstance(part, dict):
-                raise ValueError("retry does not support non-text content")
-            if part.get("type") not in {"text", "input_text", "output_text"}:
-                raise ValueError("retry does not support media or unknown content parts")
-            if set(part) - {"type", "text"}:
-                raise ValueError("retry cannot losslessly flatten annotated text parts")
-            part_text = part.get("text")
-            if not isinstance(part_text, str):
-                raise ValueError("retry text parts must contain text")
-            chunks.append(part_text)
-        text = "".join(chunks)
-    else:
+    if not isinstance(content, (str, list)):
         raise ValueError("retry does not support non-text content")
-
+    chunks: list[str] = []
+    for part in [content] if isinstance(content, str) else content:
+        if isinstance(part, str):
+            chunks.append(part)
+            continue
+        if not isinstance(part, dict):
+            raise ValueError("retry does not support non-text content")
+        if part.get("type") not in {"text", "input_text", "output_text"}:
+            raise ValueError("retry does not support media or unknown content parts")
+        if set(part) - {"type", "text"}:
+            raise ValueError("retry cannot losslessly flatten annotated text parts")
+        if not isinstance(part.get("text"), str):
+            raise ValueError("retry text parts must contain text")
+        chunks.append(part["text"])
+    text = "".join(chunks)
     if not text.strip():
         raise ValueError("retry found no text to send")
     return text
