@@ -159,8 +159,7 @@ def _resolve_verify(
         if not os.path.isfile(ca_path):
             logger.warning(
                 "CA bundle path does not exist: %s — falling back to default certificates",
-                ca_path,
-            )
+                ca_path)
             return _default_verify()
         return ssl.create_default_context(cafile=ca_path)
     return _default_verify()
@@ -283,8 +282,7 @@ def _poll_for_token(
         poll_interval=max(1, min(poll_interval, DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS)),
         validate_success=_validate,
         on_non_json_error=lambda _r: RuntimeError(
-            "Token endpoint returned a non-JSON error response"
-        ),
+            "Token endpoint returned a non-JSON error response"),
         on_error=_error,
         # Enriched at the SOURCE so the CLI login and the dashboard/desktop poller
         # (web_server._nous_poller surfaces str(e) to the UI) both inherit the guidance.

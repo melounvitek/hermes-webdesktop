@@ -432,8 +432,7 @@ def _read_shared_nous_state() -> Optional[Dict[str, Any]]:
     if not isinstance(payload, dict):
         return None
     has_tokens = (
-        _nonempty_str(payload.get("refresh_token")) and _nonempty_str(payload.get("access_token"))
-    )
+        _nonempty_str(payload.get("refresh_token")) and _nonempty_str(payload.get("access_token")))
     return payload if has_tokens else None
 
 
@@ -1461,8 +1460,7 @@ def _pick_nous_model_after_login(
             print(_policy_notice)
         print(
             f"Showing {len(model_ids)} curated models — "
-            "use \"Enter custom model name\" for others."
-        )
+            "use \"Enter custom model name\" for others.")
         return _prompt_model_selection(
             model_ids, pricing=pricing, unavailable_models=unavailable_models, portal_url=_portal,
             unavailable_message=unavailable_message, confirm_provider="nous",

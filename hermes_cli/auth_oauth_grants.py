@@ -491,8 +491,7 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
     # ``_provider_state_transaction`` uses.
     with _auth_store_lock():
         profile_store = (
-            _load_auth_store(profile_path) if profile_path.exists() else {"providers": {}}
-        )
+            _load_auth_store(profile_path) if profile_path.exists() else {"providers": {}})
         with _auth_store_lock(target_path=root_path):
             root_store = _load_auth_store(root_path) if root_path.exists() else {"providers": {}}
             run = _HealPass(profile_store, root_store, provider_id, root_singleton)
