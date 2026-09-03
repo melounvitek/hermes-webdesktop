@@ -1,10 +1,8 @@
-"""Provider-agnostic billing/credit recovery links.
+"""Provider-agnostic billing/credit recovery links for billing-classified failures.
 
-Maps a billing-classified failure onto a recovery link + label. *Detection* is
-:mod:`agent.error_classifier` (``FailoverReason.billing``), the single source of
-truth for "credit wall vs. rate limit / auth / transport". The :class:`BillingBlock`
-rides the turn result and the gateway ``message.complete`` event so every surface
-renders one structured signal instead of re-parsing error text.
+Detection lives in :mod:`agent.error_classifier` (``FailoverReason.billing``); the
+:class:`BillingBlock` rides the turn result and the gateway ``message.complete`` event
+so every surface renders one structured signal instead of re-parsing error text.
 """
 
 from __future__ import annotations
@@ -17,12 +15,9 @@ from utils import base_url_host_matches
 
 @dataclass
 class BillingBlock:
-    """Structured billing-wall descriptor shared across every surface.
-
-    ``is_nous`` is the routing bit: Nous has an in-app billing surface (desktop
-    Settings → Billing, TUI/CLI ``/topup``) preferred over ``billing_url``;
-    third-party providers have none, so ``billing_url`` is the deep link needed.
-    """
+    """Structured billing-wall descriptor shared across every surface. ``is_nous`` is the routing bit:
+    Nous has an in-app billing surface (Settings → Billing, ``/topup``) preferred over ``billing_url``;
+    third-party providers have none, so ``billing_url`` is the deep link needed."""
 
     provider: str
     provider_label: str
@@ -43,10 +38,9 @@ class _Provider:
     hosts: tuple[str, ...] = ()
 
 
-# Single source of truth: slug(s) + base_url host(s) → curated "add credits"
-# page (not marketing homes). Hosts back the OpenAI-compatible fallback where the
-# slug is a generic bucket but base_url reveals the real upstream. Unknown
-# providers degrade to a readable label with no invented URL.
+# Single source of truth: slug(s) + base_url host(s) → curated "add credits" page.
+# Hosts back the OpenAI-compatible fallback where the slug is a generic bucket but
+# base_url reveals the real upstream. Unknown providers get a readable label, no URL.
 _PROVIDERS: tuple[_Provider, ...] = (
     _Provider("OpenAI", "https://platform.openai.com/settings/organization/billing", ("openai",), ("api.openai.com",)),
     _Provider("Anthropic", "https://console.anthropic.com/settings/billing", ("anthropic",), ("api.anthropic.com",)),
@@ -69,9 +63,7 @@ _BY_SLUG: dict[str, _Provider] = {slug: p for p in _PROVIDERS for slug in p.slug
 
 def is_nous_inference_route(provider: str, base_url: str) -> bool:
     """True when the failing route is the Nous-managed inference gateway."""
-    return (provider or "").strip().lower() == "nous" or base_url_host_matches(
-        str(base_url or ""), "inference-api.nousresearch.com"
-    )
+    return (provider or "").strip().lower() == "nous" or base_url_host_matches(str(base_url or ""), "inference-api.nousresearch.com")
 
 
 def _nous_billing_url() -> Optional[str]:
@@ -85,23 +77,17 @@ def _nous_billing_url() -> Optional[str]:
 
 def _resolve_provider_link(slug: str, base_url: str) -> tuple[str, Optional[str]]:
     """Resolve ``(label, url)``: exact slug → base_url host → readable-label fallback."""
-    hit = _BY_SLUG.get(slug)
+    base = str(base_url or "")
+    hit = _BY_SLUG.get(slug) or next(
+        (p for p in _PROVIDERS if any(base_url_host_matches(base, host) for host in p.hosts)), None
+    )
     if hit:
         return hit.label, hit.url
-    base = str(base_url or "")
-    for p in _PROVIDERS:
-        if any(base_url_host_matches(base, host) for host in p.hosts):
-            return p.label, p.url
     return slug.replace("_", " ").replace("-", " ").strip().title() or "your provider", None
 
 
 def build_billing_block(*, provider: str, base_url: str, model: str, message: str = "") -> BillingBlock:
-    """Build the billing descriptor for a billing-classified failure.
-
-    ``message`` is the guidance already assembled by the agent loop
-    (:func:`agent.conversation_loop._billing_or_entitlement_message`), carried
-    through unchanged so every surface shows identical copy.
-    """
+    """Billing descriptor for a billing-classified failure; ``message`` (agent-loop guidance) passes through unchanged."""
     slug = (provider or "").strip().lower()
     model = (model or "").strip()
     if is_nous_inference_route(slug, base_url):
