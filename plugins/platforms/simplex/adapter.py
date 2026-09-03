@@ -92,7 +92,6 @@ class SimplexAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig, **kwargs):
         super().__init__(config=config, platform=Platform("simplex"))
-
         extra = getattr(config, "extra", {}) or {}
         self.ws_url = extra.get("ws_url", "ws://127.0.0.1:5225").rstrip("/")
         # Auto-accept is on by default; env wins over the ``_env_enablement`` seed.
@@ -104,7 +103,6 @@ class SimplexAdapter(BasePlatformAdapter):
         # Without SIMPLEX_GROUP_ALLOWED group messages are ignored (safer default); ``*`` = any group.
         group_allowed_str = _get_scoped_secret("SIMPLEX_GROUP_ALLOWED", "") or extra.get("group_allowed", "")
         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
-
         self._ws = None  # websockets connection
         self._ws_task: Optional[asyncio.Task] = None
         self._health_task: Optional[asyncio.Task] = None
@@ -130,7 +128,6 @@ class SimplexAdapter(BasePlatformAdapter):
         except ImportError:
             logger.error("SimpleX: 'websockets' package not installed. Run: pip install websockets")
             return False
-
         if not self.ws_url:
             logger.error("SimpleX: SIMPLEX_WS_URL is required")
             return False
@@ -174,7 +171,6 @@ class SimplexAdapter(BasePlatformAdapter):
         """Maintain a persistent WebSocket connection to the daemon."""
         import websockets as _wsclient
         from websockets.exceptions import ConnectionClosed
-
         backoff = WS_RETRY_DELAY_INITIAL
         while self._running:
             try:
@@ -425,12 +421,11 @@ class SimplexAdapter(BasePlatformAdapter):
 
     async def _send_ws(self, payload: dict) -> None:
         """Fire-and-forget JSON write; drops cleanly when the WS is missing/closed."""
-        ws = self._ws
-        if not ws:
+        if not self._ws:
             logger.debug("SimpleX: WS send dropped (not connected)")
             return
         try:
-            await ws.send(json.dumps(payload))
+            await self._ws.send(json.dumps(payload))
         except Exception as e:
             logger.warning("SimpleX: WS send error: %s", e)
 
@@ -524,7 +519,6 @@ class SimplexAdapter(BasePlatformAdapter):
         the ``image`` field. Uses Pillow when available, else ImageMagick ``convert``."""
         import subprocess
         import tempfile
-
         p = Path(file_path)
         png_path = file_path
         thumb_uri = ""
@@ -532,7 +526,6 @@ class SimplexAdapter(BasePlatformAdapter):
         try:
             from PIL import Image
             import io
-
             img = Image.open(file_path)
             if needs_png:
                 png_path = str(p.with_suffix(".png"))
@@ -557,11 +550,9 @@ class SimplexAdapter(BasePlatformAdapter):
                 os.remove(tmp_path)
             except (FileNotFoundError, subprocess.SubprocessError) as exc:
                 logger.warning("SimpleX: image conversion unavailable: %s", exc)
-
         return png_path, thumb_uri
 
-    async def send_image(
-        self, chat_id: str, image_url: str, caption: Optional[str] = None, **kwargs) -> SendResult:
+    async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None, **kwargs) -> SendResult:
         """Send an image. Supports ``file://`` URLs and ``http(s)://`` URLs."""
         if image_url.startswith("file://"):
             file_path = unquote(image_url[7:])
@@ -578,30 +569,24 @@ class SimplexAdapter(BasePlatformAdapter):
         item = {"filePath": png_path, "msgContent": {"type": "image", "image": thumb_uri, "text": caption or ""}}
         return await self._send_items(chat_id, [item], "Failed to send image")
 
-    async def send_image_file(
-        self, chat_id: str, image_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, **kwargs) -> SendResult:
-        """Send a local image file via SimpleX."""
+    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
+                              reply_to: Optional[str] = None, **kwargs) -> SendResult:
         return await self.send_image(chat_id, f"file://{image_path}", caption=caption, **kwargs)
 
-    async def send_video(
-        self, chat_id: str, video_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, **kwargs) -> SendResult:
-        """Send a video file via SimpleX (as a file attachment)."""
+    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None,
+                         reply_to: Optional[str] = None, **kwargs) -> SendResult:
+        """Videos go as file attachments."""
         return await self.send_document(chat_id, video_path, caption=caption)
 
-    async def send_document(
-        self, chat_id: str, file_path: str, caption: Optional[str] = None,
-        filename: Optional[str] = None, **kwargs) -> SendResult:
-        """Send a document/file attachment."""
+    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None,
+                            filename: Optional[str] = None, **kwargs) -> SendResult:
         if not Path(file_path).exists():
             return SendResult(success=False, error="File not found")
         item = {"filePath": file_path, "msgContent": {"type": "file", "text": caption or ""}}
         return await self._send_items(chat_id, [item], "Failed to send document")
 
-    async def send_voice(
-        self, chat_id: str, audio_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, duration: int = 0, **kwargs) -> SendResult:
+    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None,
+                         reply_to: Optional[str] = None, duration: int = 0, **kwargs) -> SendResult:
         """Send an audio file as an inline SimpleX voice note (``msgContent.type == "voice"``)."""
         if not Path(audio_path).exists():
             return SendResult(success=False, error="Voice file not found")
@@ -613,10 +598,8 @@ class SimplexAdapter(BasePlatformAdapter):
         """SimpleX has no typing-indicator API — no-op."""
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
-        """Return basic chat info."""
-        if chat_id.startswith("group:"):
-            return {"chat_id": chat_id, "type": "group", "name": chat_id[6:]}
-        return {"chat_id": chat_id, "type": "dm", "name": chat_id}
+        is_group = chat_id.startswith("group:")
+        return {"chat_id": chat_id, "type": "group" if is_group else "dm", "name": chat_id[6:] if is_group else chat_id}
 
 
 def check_requirements() -> bool:
@@ -625,19 +608,18 @@ def check_requirements() -> bool:
         return False
     try:
         import websockets  # noqa: F401
+        return True
     except ImportError:
         return False
-    return True
 
 
 def validate_config(config) -> bool:
-    """Validate that the platform config has enough info to connect."""
     extra = getattr(config, "extra", {}) or {}
     return bool(_get_scoped_secret("SIMPLEX_WS_URL") or extra.get("ws_url", ""))
 
 
 def is_connected(config) -> bool:
-    """Check whether SimpleX is configured (env or config.yaml)."""
+    """Configured (env or config.yaml) ⇒ shown as connected in status."""
     return validate_config(config)
 
 
