@@ -99,6 +99,12 @@ class _Reject(Exception):
         super().__init__(tool_error(message))
 
 
+def _check(cond: Any, message: str) -> None:
+    """Reject (as a tool error) unless ``cond`` is truthy."""
+    if not cond:
+        raise _Reject(message)
+
+
 def _kanban_handler(tool_name: str) -> Callable:
     """Wrap a handler so every failure is a structured tool error.
 
@@ -145,8 +151,7 @@ def _default_task_id(arg: Optional[str]) -> Optional[str]:
 
 def _require_task_id(args: dict) -> str:
     tid = _default_task_id(args.get("task_id"))
-    if not tid:
-        raise _Reject(_TASK_ID_REQUIRED)
+    _check(tid, _TASK_ID_REQUIRED)
     return tid
 
 
@@ -248,8 +253,8 @@ def _coerce_str_list(value: Any, name: str, what: str, *, strip: bool = False):
 
 
 def _require_dict_metadata(metadata: Any) -> None:
-    if metadata is not None and not isinstance(metadata, dict):
-        raise _Reject(f"metadata must be an object/dict, got {type(metadata).__name__}")
+    _check(metadata is None or isinstance(metadata, dict),
+           f"metadata must be an object/dict, got {type(metadata).__name__}")
 
 
 def _merge_artifacts(metadata: Any, artifacts: list[str]) -> dict:
@@ -271,8 +276,7 @@ def _merge_artifacts(metadata: Any, artifacts: list[str]) -> dict:
 def _require_text(args: dict, name: str, message: Optional[str] = None) -> Any:
     """``args[name]``; rejects when missing or blank."""
     value = args.get(name)
-    if not value or not str(value).strip():
-        raise _Reject(message or f"{name} is required")
+    _check(value and str(value).strip(), message or f"{name} is required")
     return value
 
 
@@ -492,8 +496,7 @@ def _handle_show(args: dict, **kw) -> str:
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
         task = kb.get_task(conn, tid)
-        if task is None:
-            return tool_error(f"task {tid} not found")
+        _check(task is not None, f"task {tid} not found")
         return json.dumps({
             "task": _fields(task, _TASK_FIELDS),
             "parents": kb.parent_ids(conn, tid),
@@ -512,16 +515,12 @@ def _handle_list(args: dict, **kw) -> str:
     _require_orchestrator_tool("kanban_list")
     include_archived = _parse_bool_arg(args, "include_archived")
     limit = args.get("limit")
-    if limit is None:
-        limit = KANBAN_LIST_DEFAULT_LIMIT
     try:
-        limit = int(limit)
+        limit = KANBAN_LIST_DEFAULT_LIMIT if limit is None else int(limit)
     except (TypeError, ValueError):
         return tool_error("limit must be an integer")
-    if limit < 1:
-        return tool_error("limit must be >= 1")
-    if limit > KANBAN_LIST_MAX_LIMIT:
-        return tool_error(f"limit must be <= {KANBAN_LIST_MAX_LIMIT}")
+    _check(limit >= 1, "limit must be >= 1")
+    _check(limit <= KANBAN_LIST_MAX_LIMIT, f"limit must be <= {KANBAN_LIST_MAX_LIMIT}")
     with _board(args.get("board")) as (kb, conn):
         # Match CLI list: dependencies cleared since the last dispatcher tick
         # should be visible to orchestrators immediately.
@@ -561,8 +560,7 @@ def _handle_complete(args: dict, **kw) -> str:
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
     if artifacts:
         metadata = _merge_artifacts(metadata, artifacts)
-    if not (summary or result):
-        return tool_error("provide at least one of: summary (preferred), result")
+    _check(summary or result, "provide at least one of: summary (preferred), result")
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
@@ -588,8 +586,7 @@ def _handle_complete(args: dict, **kw) -> str:
                 f"in-flight (no state change). Retry kanban_complete with the same "
                 f"summary/metadata and either drop these ids from created_cards, or pass "
                 f"created_cards=[] to skip the card-claim check entirely.")
-        if not ok:
-            return tool_error(f"could not complete {tid} (unknown id or already terminal)")
+        _check(ok, f"could not complete {tid} (unknown id or already terminal)")
         run = kb.latest_run(conn, tid)
         return _ok(task_id=tid, run_id=run.id if run else None)
 
@@ -602,8 +599,8 @@ def _handle_block(args: dict, **kw) -> str:
         _require_text(args, "reason", "reason is required — explain what input you need"))
     kind = args.get("kind")
     with _board(args.get("board")) as (kb, conn):
-        if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
-            return tool_error(f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
+        _check(kind is None or kind in kb.VALID_BLOCK_KINDS,
+               f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
         # The goal loop treats ANY blocked status as terminal, so kanban_block
         # would be an escape hatch around the completion judge: goal_mode tasks
         # may only block on genuine external blockers.
@@ -615,8 +612,7 @@ def _handle_block(args: dict, **kw) -> str:
                 f"finished or cannot proceed for another reason, call kanban_complete instead — "
                 f"the completion judge will evaluate it.")
         ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
-        if not ok:
-            return tool_error(f"could not block {tid} (unknown id or not in running/ready)")
+        _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         run = kb.latest_run(conn, tid)
         # Report where the task actually landed; routing may not leave it in 'blocked'.
         landed = kb.get_task(conn, tid)
@@ -635,8 +631,7 @@ def _handle_request_review(args: dict, **kw) -> str:
     _require_dict_metadata(metadata)
     if metadata is not None:
         metadata = _redact_metadata(metadata)
-        if metadata is None:
-            return tool_error("metadata could not be safely serialized")
+        _check(metadata is not None, "metadata could not be safely serialized")
     metadata = _stamp_worker_session_metadata(tid, metadata)
     reviewer = args.get("reviewer") or None
     if reviewer:
@@ -647,9 +642,8 @@ def _handle_request_review(args: dict, **kw) -> str:
         ok, fail_reason = kb.request_review(
             conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
             expected_run_id=_worker_run_id(tid), with_reason=True)
-        if not ok:
-            detail = fail_reason or "unknown id or not in running/ready"
-            return tool_error(f"could not request review for {tid}: {detail}")
+        _check(ok, f"could not request review for {tid}: "
+                   f"{fail_reason or 'unknown id or not in running/ready'}")
         run = kb.latest_run(conn, tid)
         landed = kb.get_task(conn, tid)
         return _ok(task_id=tid, run_id=run.id if run else None,
@@ -665,9 +659,7 @@ def _handle_request_changes(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         ok, detail = kb.request_changes(
             conn, tid, reason=reason, expected_run_id=_worker_run_id(tid))
-        if not ok:
-            return tool_error(
-                f"could not request changes for {tid}: {detail or 'invalid review state'}")
+        _check(ok, f"could not request changes for {tid}: {detail or 'invalid review state'}")
         landed = kb.get_task(conn, tid)
         run = kb.latest_run(conn, tid)
         return _ok(task_id=tid, run_id=run.id if run else None,
@@ -686,8 +678,7 @@ def _handle_heartbeat(args: dict, **kw) -> str:
         kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
         ok = kb.heartbeat_worker(
             conn, tid, note=args.get("note"), expected_run_id=_worker_run_id(tid))
-        if not ok:
-            return tool_error(f"could not heartbeat {tid} (unknown id or not running)")
+        _check(ok, f"could not heartbeat {tid} (unknown id or not running)")
         return _ok(task_id=tid)
 
 
@@ -696,9 +687,8 @@ def _handle_comment(args: dict, **kw) -> str:
     """Append a comment to a task's thread."""
     _reject_delegated_child_mutation("kanban_comment")
     tid = args.get("task_id")
-    if not tid:
-        return tool_error("task_id is required (use the current task id if that's what "
-                          "you mean — pulls from env but kept explicit here)")
+    _check(tid, "task_id is required (use the current task id if that's what "
+                "you mean — pulls from env but kept explicit here)")
     body = _redact(_require_text(args, "body"))
     # Author comes from the worker's runtime identity, never caller args:
     # comments are injected into future workers' system prompts as
@@ -732,7 +722,7 @@ def _handle_attach(args: dict, **kw) -> str:
     try:
         data = base64.b64decode(str(content_b64), validate=True)
     except (binascii.Error, ValueError) as e:
-        return tool_error(f"content_base64 is not valid base64: {e}")
+        raise _Reject(f"content_base64 is not valid base64: {e}")
     return _store_attachment(args.get("board"), tid, filename, data, args.get("content_type"))
 
 
@@ -812,8 +802,7 @@ def _handle_attachments(args: dict, **kw) -> str:
     """List a task's attachments (read-only; no ownership restriction)."""
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
-        if kb.get_task(conn, tid) is None:
-            return tool_error(f"task {tid} not found")
+        _check(kb.get_task(conn, tid) is not None, f"task {tid} not found")
         return json.dumps({
             "ok": True, "task_id": tid,
             "attachments": [
@@ -826,9 +815,8 @@ def _handle_create(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_create")
     title = _require_text(args, "title")
     assignee = args.get("assignee")
-    if not assignee:
-        return tool_error("assignee is required — name the profile that should execute this "
-                          "task (the dispatcher will only spawn tasks with an assignee)")
+    _check(assignee, "assignee is required — name the profile that should execute this "
+                     "task (the dispatcher will only spawn tasks with an assignee)")
     # Prefer the request-scoped api_server origin binding over HERMES_SESSION_ID:
     # the env var is clobbered with a subagent's internal id whenever a child
     # agent is constructed in-process, which would stamp — and later wake —
@@ -852,8 +840,7 @@ def _handle_create(args: dict, **kw) -> str:
     goal_mode = _parse_bool_arg(args, "goal_mode")
     model_override = args.get("model")
     provider_override = args.get("provider")
-    if provider_override and not model_override:
-        return tool_error("'provider' requires 'model' to be set as well")
+    _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
     with _board(args.get("board")) as (kb, conn):
         if inherit_project and project_id is None:
@@ -988,13 +975,10 @@ def _handle_unblock(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_unblock")
     _require_orchestrator_tool("kanban_unblock")
     tid = args.get("task_id")
-    if not tid:
-        return tool_error("task_id is required")
+    _check(tid, "task_id is required")
     _enforce_worker_task_ownership(str(tid))
     with _board(args.get("board")) as (kb, conn):
-        ok = kb.unblock_task(conn, str(tid))
-        if not ok:
-            return tool_error(f"could not unblock {tid} (not blocked or unknown)")
+        _check(kb.unblock_task(conn, str(tid)), f"could not unblock {tid} (not blocked or unknown)")
         task = kb.get_task(conn, str(tid))
         return _ok(task_id=str(tid), status=task.status if task else None)
 
@@ -1005,8 +989,7 @@ def _handle_link(args: dict, **kw) -> str:
     _reject_delegated_child_mutation("kanban_link")
     parent_id = args.get("parent_id")
     child_id = args.get("child_id")
-    if not parent_id or not child_id:
-        return tool_error("both parent_id and child_id are required")
+    _check(parent_id and child_id, "both parent_id and child_id are required")
     with _board(args.get("board")) as (kb, conn):
         kb.link_tasks(conn, parent_id=parent_id, child_id=child_id)
         return _ok(parent_id=parent_id, child_id=child_id)
@@ -1033,6 +1016,6 @@ _TOOLS = (
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
-    _check = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
+    _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
     registry.register(name=_name, toolset="kanban", schema=_sch, handler=_handler, emoji=_emoji,
-                      check_fn=_check)
+                      check_fn=_gate)
