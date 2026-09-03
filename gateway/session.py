@@ -1,8 +1,5 @@
-"""
-Session management for the gateway: source tracking (where messages come
-from), the persisted routing index (SessionStore), reset policy evaluation and
-the dynamic "Current Session Context" system prompt section.
-"""
+"""Gateway session management: message sources, the persisted routing index (SessionStore),
+reset policy and the dynamic "Current Session Context" system prompt section."""
 
 import asyncio
 import hashlib
@@ -28,20 +25,14 @@ from .whatsapp_identity import (
 from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED  # noqa: F401
 from gateway.session_recovery import SessionRecoveryMixin
 from gateway.session_lifecycle import (  # noqa: F401 — _now & co. re-exported for callers/tests
-    SessionLifecycleMixin,
-    _iso,
-    _new_session_id,
-    _now,
-    _parse_iso,
-    auto_continue_freshness_window,
+    SessionLifecycleMixin, _iso, _new_session_id, _now, _parse_iso, auto_continue_freshness_window,
 )
 from gateway.session_transcript import SessionTranscriptMixin, TranscriptReadError  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- PII redaction helpers
-# ---------------------------------------------------------------------------
+# -- PII redaction helpers --------------------------------------------------------------------
 
 def _hash_id(value: str) -> str:
     """Deterministic 12-char hex hash of an identifier."""
@@ -64,10 +55,9 @@ def _hash_chat_id(value: str) -> str:
 def _is_path_unsafe(value: object, *, strict: bool = True) -> bool:
     """True if ``value`` could traverse outside the sessions dir.
 
-    Session ids become filenames, so the strict form rejects ``..``, ANY path
-    separator, and a leading Windows drive letter. ``strict=False`` is for
-    *logical* session keys, where interior ``/`` is legitimate (Google Chat
-    ``spaces/<id>/threads/<id>``): only a *leading* separator is rejected.
+    Session ids become filenames, so the strict form rejects ``..``, ANY path separator, and a
+    leading Windows drive letter. ``strict=False`` is for *logical* session keys, where interior
+    ``/`` is legitimate (Google Chat ``spaces/<id>/threads/<id>``): only a *leading* one is rejected.
     """
     if not value:
         return False
