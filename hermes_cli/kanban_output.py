@@ -11,13 +11,8 @@ from typing import Any, Callable, Iterable, Optional
 from hermes_cli import kanban_db as kb
 
 _STATUS_ICONS = {
-    "todo":     "◻",
-    "ready":    "▶",
-    "running":  "●",
-    "scheduled":"⏱",
-    "blocked":  "⊘",
-    "done":     "✓",
-    "archived": "—",
+    "todo": "◻", "ready": "▶", "running": "●", "scheduled": "⏱",
+    "blocked": "⊘", "done": "✓", "archived": "—",
 }
 
 _TASK_DICT_FIELDS = (
@@ -35,9 +30,7 @@ _RUNS_RUN_FIELDS = (
     "id", "profile", "status", "outcome", "started_at", "ended_at",
     "summary", "error", "metadata", "worker_pid", "step_key",
 )
-_ATTACHMENT_FIELDS = (
-    "id", "filename", "content_type", "size", "uploaded_by", "stored_path", "created_at",
-)
+_ATTACHMENT_FIELDS = ("id", "filename", "content_type", "size", "uploaded_by", "stored_path", "created_at")
 
 
 def _fmt_ts(ts: Optional[int]) -> str:
@@ -70,11 +63,11 @@ def _bulk_apply(ids: Iterable[str], op: Callable[[str], Any],
     """Run ``op(tid) -> bool`` per id, print ok/fail lines, exit 1 if any failed."""
     failed = False
     for tid in ids:
-        if not op(tid):
+        if op(tid):
+            print(ok_msg(tid))
+        else:
             failed = True
             print(fail_msg(tid), file=sys.stderr)
-        else:
-            print(ok_msg(tid))
     return 1 if failed else 0
 
 

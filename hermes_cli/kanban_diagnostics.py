@@ -248,14 +248,10 @@ def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
     hits = _active_hallucination_events(events, "completion_blocked_hallucination")
     if not hits:
         return []
-    actions = [DiagnosticAction(
-        kind="comment",
-        label="Add a comment explaining what to do",
-        suggested=False,
-    )] + _generic_recovery_actions(task, running=_is_running(task))
+    actions = [DiagnosticAction(kind="comment", label="Add a comment explaining what to do", suggested=False)]
+    actions += _generic_recovery_actions(task, running=_is_running(task))
     return [Diagnostic(
-        kind="hallucinated_cards",
-        severity="error",
+        kind="hallucinated_cards", severity="error",
         title="Worker claimed cards that don't exist",
         detail=(
             "The completing worker declared created_cards that either didn't "
@@ -265,9 +261,7 @@ def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
             "return values from kanban_create."
         ),
         actions=actions,
-        first_seen_at=_event_ts(hits[0]),
-        last_seen_at=_event_ts(hits[-1]),
-        count=len(hits),
+        first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
         data={"phantom_ids": _unique_payload_ids(hits, "phantom_cards")},
     )]
 
@@ -326,8 +320,7 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
         actions.append(_cli_hint(f"Specify manually: {cmd}", cmd))
 
     return [Diagnostic(
-        kind="triage_aux_unavailable",
-        severity="warning",
+        kind="triage_aux_unavailable", severity="warning",
         title=f"Triage {primary_desc} has no usable model",
         detail=(
             f"This task is still in triage and no working auxiliary model is "
@@ -337,9 +330,7 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
             f"main model so the auto fallback can take over."
         ),
         actions=actions,
-        first_seen_at=now,
-        last_seen_at=now,
-        count=1,
+        first_seen_at=now, last_seen_at=now, count=1,
         data={
             "task_id": task_id,
             "auto_decompose": auto_decompose,
@@ -356,8 +347,7 @@ def _rule_prose_phantom_refs(task, events, runs, now, cfg) -> list[Diagnostic]:
     if not hits:
         return []
     return [Diagnostic(
-        kind="prose_phantom_refs",
-        severity="warning",
+        kind="prose_phantom_refs", severity="warning",
         title="Completion summary references unknown task ids",
         detail=(
             "The completion summary mentions task ids that don't resolve "
@@ -366,9 +356,7 @@ def _rule_prose_phantom_refs(task, events, runs, now, cfg) -> list[Diagnostic]:
             "at cards that never existed."
         ),
         actions=_generic_recovery_actions(task, running=_is_running(task)),
-        first_seen_at=_event_ts(hits[0]),
-        last_seen_at=_event_ts(hits[-1]),
-        count=len(hits),
+        first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
         data={"phantom_refs": _unique_payload_ids(hits, "phantom_refs")},
     )]
 
@@ -410,10 +398,9 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
     actions: list[DiagnosticAction] = []
     if most_recent_outcome == "spawn_failed" and assignee and assignee != "default":
         # Spawn is failing specifically — profile setup issue.
-        actions.append(_cli_hint(
-            f"Verify profile: hermes -p {assignee} doctor", f"hermes -p {assignee} doctor", suggested=True,
-        ))
-        actions.append(_cli_hint(f"Fix profile auth: hermes -p {assignee} auth", f"hermes -p {assignee} auth"))
+        doctor, auth = f"hermes -p {assignee} doctor", f"hermes -p {assignee} auth"
+        actions.append(_cli_hint(f"Verify profile: {doctor}", doctor, suggested=True))
+        actions.append(_cli_hint(f"Fix profile auth: {auth}", auth))
     elif most_recent_outcome in {"timed_out", "crashed"}:
         # Worker got off the ground but died: logs diagnose, reclaim/reassign recover.
         task_id = _task_field(task, "id")
@@ -442,14 +429,9 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
             f"captured. Check the suggested command or the worker log."
         )
     return [Diagnostic(
-        kind="repeated_failures",
-        severity=severity,
-        title=title,
-        detail=detail,
-        actions=actions,
-        first_seen_at=now,
-        last_seen_at=now,
-        count=failures,
+        kind="repeated_failures", severity=severity,
+        title=title, detail=detail, actions=actions,
+        first_seen_at=now, last_seen_at=now, count=failures,
         data={
             "consecutive_failures": failures,
             "most_recent_outcome": most_recent_outcome,
@@ -511,14 +493,9 @@ def _rule_repeated_crashes(task, events, runs, now, cfg) -> list[Diagnostic]:
             f"no error text was captured. Check the worker log for more."
         )
     return [Diagnostic(
-        kind="repeated_crashes",
-        severity=severity,
-        title=title,
-        detail=detail,
-        actions=actions,
-        first_seen_at=now,
-        last_seen_at=now,
-        count=consecutive,
+        kind="repeated_crashes", severity=severity,
+        title=title, detail=detail, actions=actions,
+        first_seen_at=now, last_seen_at=now, count=consecutive,
         data={"consecutive_crashes": consecutive, "last_error": last_err},
     )]
 
@@ -560,8 +537,7 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
 
     blocked_at = _event_ts(latest_block) or now
     return [Diagnostic(
-        kind="review_dependency_deadlock",
-        severity="error",
+        kind="review_dependency_deadlock", severity="error",
         title=f"Review handoff blocks {len(child_ids)} dependent task(s)",
         detail=(
             "This implementation is sticky-blocked for review while its "
@@ -571,9 +547,7 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
             "first-class review lifecycle."
         ),
         actions=actions,
-        first_seen_at=blocked_at,
-        last_seen_at=blocked_at,
-        count=len(child_ids),
+        first_seen_at=blocked_at, last_seen_at=blocked_at, count=len(child_ids),
         data={
             "blocked_parent_id": task_id,
             "waiting_child_ids": child_ids,
@@ -595,11 +569,11 @@ def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
     if age_hours < hours:
         return []
     # Any comment / unblock after the block breaks the "stale" signal.
-    if any(_event_kind(ev) in {"commented", "unblocked"} and _event_ts(ev) > last_blocked_ts for ev in events):
+    if any(_event_kind(ev) in {"commented", "unblocked"} and _event_ts(ev) > last_blocked_ts
+           for ev in events):
         return []
     return [Diagnostic(
-        kind="stuck_in_blocked",
-        severity="warning",
+        kind="stuck_in_blocked", severity="warning",
         title=f"Task has been blocked for {int(age_hours)}h",
         detail=(
             f"This task transitioned to blocked {int(age_hours)}h ago and "
@@ -608,9 +582,7 @@ def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
             f"either unblock with feedback or answer with a comment."
         ),
         actions=[DiagnosticAction(kind="comment", label="Add a comment / unblock the task", suggested=True)],
-        first_seen_at=last_blocked_ts,
-        last_seen_at=last_blocked_ts,
-        count=1,
+        first_seen_at=last_blocked_ts, last_seen_at=last_blocked_ts, count=1,
         data={"blocked_at": last_blocked_ts, "age_hours": round(age_hours, 1)},
     )]
 
@@ -655,8 +627,7 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
         cmd = f"hermes kanban events {task_id}"
         actions.append(_cli_hint(f"Check block reasons: {cmd}", cmd, suggested=True))
     return [Diagnostic(
-        kind="block_unblock_cycling",
-        severity="warning",
+        kind="block_unblock_cycling", severity="warning",
         title=f"Task block→unblock cycled {cycles}x in {int(window_seconds/3600)}h",
         detail=(
             f"This task has been blocked {cycles} times after being "
@@ -712,16 +683,12 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         severity = "warning"
 
     actions = [
-        DiagnosticAction(
-            kind="reassign",
-            label="Reassign to a different worker",
-            payload={"current_assignee": assignee},
-        ),
+        DiagnosticAction(kind="reassign", label="Reassign to a different worker",
+                         payload={"current_assignee": assignee}),
         _cli_hint("Check dispatcher status", "hermes kanban diagnostics"),
     ]
     return [Diagnostic(
-        kind="stranded_in_ready",
-        severity=severity,
+        kind="stranded_in_ready", severity=severity,
         title=f"Ready for {age_str} with no worker",
         detail=(
             f"This task has been ready for {age_str} but nothing has "
@@ -731,9 +698,7 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
             f"is correct and that a worker is actually polling for it."
         ),
         actions=actions,
-        first_seen_at=last_ready_ts,
-        last_seen_at=last_ready_ts,
-        count=1,
+        first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
         data={
             "ready_since": last_ready_ts,
             "age_seconds": int(age_seconds),
@@ -823,7 +788,9 @@ def compute_task_diagnostics(
     if graph is not None:
         cfg["_graph"] = graph
     if not _has_explicit_threshold(config) and "failure_limit" in config:
-        cfg["failure_threshold"] = _positive_int(config.get("failure_limit"), DEFAULT_CONFIG["failure_threshold"])
+        cfg["failure_threshold"] = _positive_int(
+            config.get("failure_limit"), DEFAULT_CONFIG["failure_threshold"],
+        )
     out: list[Diagnostic] = []
     for rule in _RULES:
         try:
