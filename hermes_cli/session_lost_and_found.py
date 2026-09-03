@@ -13,13 +13,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli.session_recovery import (
-    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _immediate_transaction, _placeholder_titles,
-    _quoted_columns, _table_columns,
+    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _count_rows, _immediate_transaction,
+    _placeholder_titles, _quoted_columns, _table_columns,
 )
 
 # Hermes session ids are timestamps (20260812_135332_ab12cd): the strongest sentinel for schema-less rows.
 SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_")
-
 MESSAGE_ROLES = frozenset({"user", "assistant", "tool", "system"})
 
 # Values observed in sessions.source across gateway platforms and tooling.
@@ -37,7 +36,6 @@ SESSION_MODEL_USAGE_NFIELD = 18
 # Plausible unix-epoch window for started_at heuristics on legacy layouts.
 _EPOCH_LOW = 1_000_000_000.0   # 2001
 _EPOCH_HIGH = 4_000_000_000.0  # 2096
-
 SQLITE3_CLI_GUIDANCE = (
     "A last-resort page-level salvage is available when a `.recover`-capable `sqlite3` command-line shell is "
     "installed: its `.recover` command can rebuild rows into lost_and_found tables even when the table schemas are "
@@ -103,24 +101,20 @@ def run_cli_lost_and_found_recover(
             dump.kill()
             load.kill()
             raise LostAndFoundError(f"sqlite3 .recover timed out after {timeout:.0f}s")
-        attempt = {
+        attempts.append({
             "command": command, "dump_returncode": dump.returncode, "load_returncode": load.returncode,
             "dump_stderr_tail": dump_err.decode("utf-8", "replace")[-2000:],
             "load_stderr_tail": load_err.decode("utf-8", "replace")[-2000:],
-        }
-        attempts.append(attempt)
-        attempt["usable"] = _lost_and_found_db_usable(lf_path)
-        if attempt["usable"]:
+            "usable": _lost_and_found_db_usable(lf_path),
+        })
+        if attempts[-1]["usable"]:
             return {"binary": sqlite3_bin, "attempts": attempts}
-    raise LostAndFoundError(
-        "sqlite3 .recover did not produce a usable lost_and_found database: "
-        + "; ".join(
-            f"[{a['command']}] dump rc={a['dump_returncode']} "
-            f"load rc={a['load_returncode']} "
-            f"{a['dump_stderr_tail'] or a['load_stderr_tail']}".strip()
-            for a in attempts
-        )
+    details = "; ".join(
+        f"[{a['command']}] dump rc={a['dump_returncode']} load rc={a['load_returncode']} "
+        f"{a['dump_stderr_tail'] or a['load_stderr_tail']}".strip()
+        for a in attempts
     )
+    raise LostAndFoundError(f"sqlite3 .recover did not produce a usable lost_and_found database: {details}")
 
 
 def _lost_and_found_db_usable(lf_path: Path) -> bool:
@@ -144,12 +138,11 @@ def _notnull_defaults(conn: sqlite3.Connection, table: str) -> dict[int, Any]:
     for index, row in enumerate(conn.execute(f'PRAGMA table_info("{table}")')):
         if not row[3]:  # notnull flag
             continue
-        default = row[4]
-        if default is None:
+        if row[4] is not None:
+            substitutes[index] = _parse_sql_default(str(row[4]))
+        else:
             declared = str(row[2] or "").upper()
             substitutes[index] = 0 if ("INT" in declared or "REAL" in declared) else ""
-            continue
-        substitutes[index] = _parse_sql_default(str(default))
     return substitutes
 
 
@@ -170,9 +163,9 @@ def _is_session_id(value: Any) -> bool:
 
 
 def _looks_like_source(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
-    return value in KNOWN_SOURCES or bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value))
+    return bool(value) and isinstance(value, str) and (
+        value in KNOWN_SOURCES or bool(re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value))
+    )
 
 
 def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional[str]:
@@ -180,9 +173,10 @@ def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional
     if len(cells) >= 3 and cells[0] is None:
         # Rowid-alias tables store their INTEGER PRIMARY KEY as NULL; messages is the only canonical
         # table shaped like that with a session id second and a role third.
-        if isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES:
-            return "messages"
-        return None
+        is_message = (
+            isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES
+        )
+        return "messages" if is_message else None
     if not _is_session_id(cells[0] if cells else None):
         return None
     second = cells[1] if len(cells) > 1 else None
@@ -236,10 +230,9 @@ def _copy_direct_tables(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -
         if not rows:
             copied[table] = 0
             continue
-        before = int(dest.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
+        before = _count_rows(dest, table)
         dest.executemany(f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})', rows)
-        after = int(dest.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-        copied[table] = after - before
+        copied[table] = _count_rows(dest, table) - before
     return copied
 
 
@@ -261,10 +254,8 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                 defaults.pop(index, None)
             targets[kind_name] = (_table_columns(dest, kind_name), defaults)
         lf_tables = [
-            str(row[0])
-            for row in lf_conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'lost_and_found%'"
-            )
+            str(row[0]) for row in
+            lf_conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'lost_and_found%'")
         ]
         report["lost_and_found_tables"] = lf_tables
         for lf_table in lf_tables:
@@ -286,18 +277,15 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                 try:
                     if kind == "sessions" and nfield == SESSIONS_LEGACY_MINIMAL_NFIELD:
                         # Pre-modern layout with unknown column order: salvage identity + timing only.
-                        inserted = (
-                            dest.execute(
-                                "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
-                                (
-                                    cells[0],
-                                    cells[1] if _looks_like_source(cells[1]) else "recovered",
-                                    _heuristic_started_at(cells),
-                                    "[best-effort recovered] legacy session row (layout unknown)",
-                                ),
-                            ).rowcount
-                            == 1
+                        row_values = (
+                            cells[0], cells[1] if _looks_like_source(cells[1]) else "recovered",
+                            _heuristic_started_at(cells),
+                            "[best-effort recovered] legacy session row (layout unknown)",
                         )
+                        inserted = dest.execute(
+                            "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
+                            row_values,
+                        ).rowcount == 1
                         report["legacy_minimal_sessions"] += int(inserted)
                     else:
                         # messages: the rowid-alias PK is NULL in the record; use the lost_and_found rowid.
@@ -338,7 +326,8 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
         for session_id, info in sorted(orphan_ids.items()):
             title = next(titles)
             dest.execute(
-                "INSERT INTO sessions (id, source, started_at, title, message_count) VALUES (?, 'recovered', ?, ?, ?)",
+                "INSERT INTO sessions (id, source, started_at, title, message_count) "
+                "VALUES (?, 'recovered', ?, ?, ?)",
                 (session_id, info["started_at"], title, info["message_count"]),
             )
             result["sessions_stubbed"] += 1

@@ -20,12 +20,10 @@ from hermes_state import (FTS_STORAGE_VERSION, SCHEMA_VERSION, SessionDB, _db_op
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
-
 _CANONICAL_TABLES = (
     "system_prompts", "sessions", "messages", "session_model_usage", "compression_locks", "gateway_routing",
     "async_delegations",
 )
-
 _TOPIC_TABLES = ("telegram_dm_topic_mode", "telegram_dm_topic_bindings")
 
 
@@ -40,9 +38,7 @@ def _init_delivery_ledger_schema(conn: sqlite3.Connection) -> None:
 _AUXILIARY_TABLE_SCHEMAS: dict[str, Callable[[sqlite3.Connection], None]] = {
     "delivery_obligations": _init_delivery_ledger_schema,
 }
-
 _AUXILIARY_TABLES = tuple(_AUXILIARY_TABLE_SCHEMAS)
-
 _INVENTORY_TABLES = (*_CANONICAL_TABLES, "state_meta", *_TOPIC_TABLES, *_AUXILIARY_TABLES)
 
 # Derived-index / optional-schema markers: a fresh destination regenerates these, never copies them.
@@ -50,7 +46,6 @@ _GENERATED_META_KEYS = frozenset({
     "fts_storage_version", "fts_optimize_available", "fts_rebuild_high_water", "fts_rebuild_progress",
     "fts_cjk_stale", "fts_cjk_rebuild_high_water", "fts_cjk_rebuild_progress", "telegram_dm_topic_schema_version",
 })
-
 _SIDECAR_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _MINIMUM_SPACE_HEADROOM = 256 * 1024 * 1024
 _MAX_SALVAGE_RANGE_QUERIES = 10_000
@@ -356,23 +351,11 @@ def inspect_session_database(source_path: Path, *, work_dir: Optional[Path] = No
         temp_dir.cleanup()
 
 
-def _ensure_auxiliary_destination_schema(destination: sqlite3.Connection, table: str) -> None:
-    """Create a lazy gateway-owned table on the destination; without it the copy would report
-    ``missing``/``no compatible columns`` and drop the rows."""
-    initialize = _AUXILIARY_TABLE_SCHEMAS.get(table)
-    if initialize is None:
-        raise SessionRecoverySafetyError(f"no destination schema initializer registered for table {table!r}")
-    initialize(destination)
-
-
 def _fresh_destination(output: Path, *, topic_tables: bool = False) -> sqlite3.Connection:
     """Initialize a current-schema database at ``output`` and open it with foreign keys off."""
-    destination_db = SessionDB(db_path=output)
-    try:
+    with SessionDB(db_path=output) as destination_db:
         if topic_tables:
             destination_db.apply_telegram_topic_migration()
-    finally:
-        destination_db.close()
     conn = _connect(output)
     conn.execute("PRAGMA foreign_keys=OFF")
     return conn
@@ -471,8 +454,7 @@ def _probe_populated_edge(source: sqlite3.Connection, table: str, *, edge: str, 
             span *= 2
             continue
         if row is None:  # nothing beyond candidate: the synthetic domain tail is provably empty
-            result["bound"] = candidate
-            result["capped"] = True
+            result.update(bound=candidate, capped=True)
             return result
         position = int(row[0])  # rows exist beyond; advance. Span never resets -> O(log range)
         span *= 2
@@ -497,9 +479,7 @@ class _RowidRangeSalvage:
         self.stopped_at_query_limit = False
 
     def _keep(self, values: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
-        if self.row_filter is None:
-            return values
-        return [row for row in values if self.row_filter(row, self.column_names)]
+        return values if self.row_filter is None else [r for r in values if self.row_filter(r, self.column_names)]
 
     def _skip(self, low: int, high: int, error: str) -> None:
         _append_skipped_range(self.result["skipped_rowid_ranges"], low, high, error)
@@ -956,8 +936,7 @@ def _recover_via_lost_and_found(
         destination_conn.close()
     copy_report: dict[str, dict[str, Any]] = {
         table: {
-            "mode": "lost_and_found_salvage",
-            "status": "partial",
+            "mode": "lost_and_found_salvage", "status": "partial",
             "copied_rows": int(mapping["direct_table_rows"].get(table) or 0) + int(mapping["mapped"].get(table) or 0),
             "error": "recovered via page-level lost_and_found salvage; "
             "row completeness cannot be verified against the source",
@@ -972,12 +951,11 @@ def _recover_via_lost_and_found(
         output, expected_counts={"sessions": None, "messages": None}, copy_report=copy_report, allow_partial=True,
         orphan_cleanup=orphan_cleanup,
     )
-    verification["loss_detected"] = True
     verification["warnings"].append(
         "BEST-EFFORT page-level salvage: the source table schemas were unreadable, so rows were rebuilt from raw "
         "pages and mapped heuristically. Review every count before trusting this output."
     )
-    verification["complete"] = False
+    verification.update(loss_detected=True, complete=False)
     return _recovery_report(
         source, output, inspection, disk_space, verification, on_source_change="healthy",
         allow_partial=True, mode="lost_and_found_salvage", best_effort=True, unreadable_schemas=missing_required,
@@ -1034,15 +1012,12 @@ def recover_session_database(
                 "Re-run with --allow-partial to salvage every readable row "
                 "into a new database (the source is never modified)."
             )
-        if allow_partial:
-            missing_required = [
-                table for table in ("sessions", "messages") if not inspection["tables"][table].get("available")
-            ]
-            if missing_required:  # no readable schema -> page-level lost_and_found salvage
-                return _recover_via_lost_and_found(
-                    source=source, snapshot_source=snapshot_source, snapshot_dir=Path(temp_dir.name), output=output,
-                    inspection=inspection, disk_space=disk_space, missing_required=missing_required,
-                )
+        missing_required = [t for t in ("sessions", "messages") if not inspection["tables"][t].get("available")]
+        if allow_partial and missing_required:  # no readable schema -> page-level lost_and_found salvage
+            return _recover_via_lost_and_found(
+                source=source, snapshot_source=snapshot_source, snapshot_dir=Path(temp_dir.name), output=output,
+                inspection=inspection, disk_space=disk_space, missing_required=missing_required,
+            )
         source_conn = _connect(snapshot_source)
         source_conn.execute("PRAGMA writable_schema=ON")
         destination_conn: Optional[sqlite3.Connection] = None
@@ -1055,8 +1030,8 @@ def recover_session_database(
                 if table not in _CANONICAL_TABLES and not inspection["tables"][table].get("available"):
                     copy_report[table] = {"status": "missing", "copied_rows": 0}
                     continue
-                if table in _AUXILIARY_TABLES:
-                    _ensure_auxiliary_destination_schema(destination_conn, table)
+                if table in _AUXILIARY_TABLES:  # lazy gateway table: create it or the copy reports "missing"
+                    _AUXILIARY_TABLE_SCHEMAS[table](destination_conn)
                 copy_report[table] = _copy_table(
                     source_conn, destination_conn, table, salvage=allow_partial, chunk_size=chunk_size,
                     progress_cb=progress_cb, source_rows=inspection["tables"][table].get("rows"),
@@ -1067,16 +1042,13 @@ def recover_session_database(
             source_conn.close()
             if destination_conn is not None:
                 destination_conn.close()
+        expected_counts = {
+            table: inspection["tables"][table].get("rows")
+            for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES)
+            if table in _CANONICAL_TABLES or inspection["tables"].get(table, {}).get("available")
+        }
         verification = _verify_recovered_database(
-            output,
-            expected_counts={
-                table: inspection["tables"][table].get("rows")
-                for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES)
-                if table in _CANONICAL_TABLES
-                or inspection["tables"].get(table, {}).get("available")
-            },
-            copy_report=copy_report,
-            allow_partial=allow_partial,
+            output, expected_counts=expected_counts, copy_report=copy_report, allow_partial=allow_partial,
             orphan_cleanup=orphan_cleanup,
         )
         return _recovery_report(

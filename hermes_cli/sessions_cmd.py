@@ -88,8 +88,7 @@ def _write_output(output, text, summary) -> None:
 # -- handlers that must run BEFORE SessionDB() is opened ----------------------
 
 def _cmd_repair(args):
-    from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
-    db_path = DEFAULT_DB_PATH
+    from hermes_state import DEFAULT_DB_PATH as db_path, SessionDB, _db_opens_cleanly, repair_state_db_schema
     if not db_path.exists():
         print(f"No session database at {db_path} (nothing to repair).")
         return
@@ -107,7 +106,6 @@ def _cmd_repair(args):
             print(f"  backup: {report['backup_path']}")
         print(f"  strategy: {report.get('strategy')}")
         try:
-            from hermes_state import SessionDB
             with SessionDB() as _repair_db:
                 n = _repair_db._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             print(f"✓ Repaired — {n} sessions recovered.")
@@ -117,10 +115,10 @@ def _cmd_repair(args):
     print(f"✗ Repair failed: {report.get('error')}")
     if report.get("backup_path"):
         print(f"  A backup is preserved at: {report['backup_path']}")
-    print("  Keep state.db and the backup; do not delete them.")
     # Without this pointer the user is at a dead end; lead with --inspect-only before writing.
     source_hint = report.get("backup_path") or db_path
     print(
+        "  Keep state.db and the backup; do not delete them.\n"
         "\n  Next step — offline recovery (never modifies the source):\n"
         f"    hermes sessions recover --source {source_hint} \\\n"
         "        --inspect-only\n"
@@ -171,15 +169,14 @@ def _cmd_recover(args):
     except (SessionRecoveryError, OSError, sqlite3.DatabaseError) as exc:
         print(f"Error: session recovery failed: {exc}\nThe supplied source database was not replaced or deleted.")
         return 1
-    if report_path is not None:
+    if report_path is None:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
         try:
-            written_report = write_recovery_report(report_path, report)
+            print(f"Recovery report: {write_recovery_report(report_path, report)}")
         except (FileExistsError, OSError) as exc:
             print(f"Error: could not write recovery report: {exc}")
             return 1
-        print(f"Recovery report: {written_report}")
-    else:
-        print(json.dumps(report, indent=2, sort_keys=True))
     if inspect_only:
         return 0 if report.get("recoverable") else 1
     return _print_recovery_verdict(report, output, allow_partial)
@@ -326,61 +323,60 @@ def _cmd_export(db, args):
         if filters:
             candidates = db.list_prune_candidates(**filters)
             if args.dry_run:
-                _print_dry_run_preview(candidates, filters)
-                return None
+                return _print_dry_run_preview(candidates, filters)
             return [s for s in (_redact(db.export_session(row["id"])) for row in candidates) if s]
         if args.dry_run:
-            print("--dry-run requires at least one filter.")
-            return None
+            return print("--dry-run requires at least one filter.")
         return [_redact(s) for s in db.export_all(source=None)]
     if getattr(args, "only", None):
-        return _export_only(args, _collect_sessions)
+        return _export_flat("only", args, _collect_sessions)
     if args.format == "trace":
         return _export_trace(db, args, filters)
-    if args.format in ("html", "jsonl"):
-        return (_export_html if args.format == "html" else _export_jsonl)(args, _collect_sessions)
+    if args.format in _FLAT_EXPORTERS:
+        return _export_flat(args.format, args, _collect_sessions)
     return _export_markdown(db, args, filters, _redact)
 
 
-def _export_only(args, collect):
+def _render_only(args, sessions):
     """--only user-prompts: one prompt record per line (jsonl) or headed sections (md)."""
-    if args.format not in ("jsonl", "md"):
-        print("--only user-prompts supports --format jsonl or md.")
-        return
     from hermes_cli.session_export import export_record_count, render_sessions_export
-    sessions = collect()
-    if sessions is None:
-        return
     rendered = render_sessions_export(sessions, fmt="markdown" if args.format == "md" else "jsonl", only=args.only)
     count, noun = export_record_count(sessions, only=args.only)
-    _write_output(args.output, rendered, f"Exported {count} {noun}{'' if count == 1 else 's'} to {args.output}")
+    return rendered, f"Exported {count} {noun}{'' if count == 1 else 's'} to {args.output}"
 
 
-def _export_html(args, collect):
+def _render_html(args, sessions):
     """One self-contained file (single session, or multi-session with sidebar)."""
-    if not args.output or args.output == "-":
-        print("HTML export requires an output file path.")
-        return
     from hermes_cli.session_export_html import generate_html_export, generate_multi_session_html_export
-    sessions = collect()
-    if sessions is None:
-        return
     single = len(sessions) == 1
     content = generate_html_export(sessions[0]) if single else generate_multi_session_html_export(sessions)
-    noun = "session" if single else "sessions"
-    _write_output(args.output, content, f"Exported {len(sessions)} {noun} to {args.output} (HTML)")
+    return content, f"Exported {len(sessions)} {'session' if single else 'sessions'} to {args.output} (HTML)"
 
 
-def _export_jsonl(args, collect):
-    if not args.output:
-        print("JSONL export requires an output path (use - for stdout).")
+def _render_jsonl(args, sessions):
+    lines = "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in sessions)
+    return lines, f"Exported {len(sessions)} {'session' if args.session_id else 'sessions'} to {args.output}"
+
+
+#: kind -> (usage error when the --output/--format combination is unusable, renderer)
+_FLAT_EXPORTERS = {
+    "only": (
+        lambda a: a.format not in ("jsonl", "md"), "--only user-prompts supports --format jsonl or md.", _render_only
+    ),
+    "html": (lambda a: not a.output or a.output == "-", "HTML export requires an output file path.", _render_html),
+    "jsonl": (lambda a: not a.output, "JSONL export requires an output path (use - for stdout).", _render_jsonl),
+}
+
+
+def _export_flat(kind, args, collect):
+    """Single-file export: validate the output target, collect sessions, render, write."""
+    unusable, message, render = _FLAT_EXPORTERS[kind]
+    if unusable(args):
+        print(message)
         return
     sessions = collect()
-    if sessions is None:
-        return
-    lines = "".join(json.dumps(s, ensure_ascii=False) + "\n" for s in sessions)
-    noun = "session" if args.session_id else "sessions"
-    _write_output(args.output, lines, f"Exported {len(sessions)} {noun} to {args.output}")
+    if sessions is not None:
+        _write_output(args.output, *render(args, sessions))
 
 
 def _export_trace(db, args, filters):
@@ -509,10 +505,9 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
             return
         exported_items.append((data, exported_path))
     message_count = sum(len(data.get("messages") or []) for data, _path in exported_items)
-    suffix = "" if message_count == 1 else "s"
     n = len(exported_items)
-    where = exported_items[0][1] if n == 1 else output_dir
-    print(f"Exported {n} session{'' if n == 1 else 's'} ({message_count} message{suffix}) to {where}")
+    print(f"Exported {n} session{'' if n == 1 else 's'} ({message_count} message{'' if message_count == 1 else 's'}) "
+          f"to {exported_items[0][1] if n == 1 else output_dir}")
     if not args.delete_after_verified:
         return
     for data, exported_path in exported_items:
@@ -537,8 +532,7 @@ def _cmd_delete(db, args):
     if not resolved_session_id:
         return _not_found(args.session_id)
     # The delete is honored (explicit id), but a pin is a "keep" flag: say so instead of silently destroying it.
-    _meta = db.get_session(resolved_session_id) or {}
-    _pinned_note = " (this session is PINNED)" if _meta.get("pinned") else ""
+    _pinned_note = " (this session is PINNED)" if (db.get_session(resolved_session_id) or {}).get("pinned") else ""
     if not args.yes:
         if not _confirm_prompt(f"Delete session '{resolved_session_id}'{_pinned_note} and all its messages? [y/N] "):
             print("Cancelled.")
@@ -564,10 +558,8 @@ def _prune_never_active_keyed(db, args):
     if older_than is not None:
         seconds = parse_duration_seconds(str(older_than))
         if seconds is None:
-            print(
-                f"Error: --older-than '{older_than}' is not a duration. "
-                "Use a bare number of days or a form like '2d' / '1w'."
-            )
+            print(f"Error: --older-than '{older_than}' is not a duration. "
+                  "Use a bare number of days or a form like '2d' / '1w'.")
             return
         days = seconds / 86400.0
     candidates = db.list_never_active_keyed_sessions(older_than_days=days)
@@ -598,11 +590,8 @@ def _note_pinned_skipped(db, filters, action):
     """Tell the user how many pinned rows bulk prune/archive spared (pin = durable keep; only
     `prune --include-pinned` opts in, archive always spares them)."""
     _base = {k: v for k, v in filters.items() if k != "include_pinned"}
-    skipped = max(
-        int(db.count_prune_matches(**_base, include_pinned=True))
-        - int(db.count_prune_matches(**_base, include_pinned=False)),
-        0,
-    )
+    with_pinned, without = (int(db.count_prune_matches(**_base, include_pinned=flag)) for flag in (True, False))
+    skipped = max(with_pinned - without, 0)
     if not skipped:
         return
     suffix = "" if skipped == 1 else "s"
@@ -645,11 +634,9 @@ def _cmd_prune_or_archive(db, args, action):
     # direct-open count would misdescribe its effect.
     skipped_open = db.count_open_prune_matches(**filters) if prune else 0
     if skipped_open:
-        print(
-            f"Note: {skipped_open} open session{'' if skipped_open == 1 else 's'} also match these filters but "
-            "will be skipped because prune only deletes ended sessions. Use `hermes sessions delete <id>` "
-            "to remove one explicitly."
-        )
+        print(f"Note: {skipped_open} open session{'' if skipped_open == 1 else 's'} also match these filters but "
+              "will be skipped because prune only deletes ended sessions. Use `hermes sessions delete <id>` "
+              "to remove one explicitly.")
     if not candidates:
         print(f"No sessions match ({describe_filters(filters)}).")
         return
@@ -663,12 +650,9 @@ def _cmd_prune_or_archive(db, args, action):
         shown = candidates if args.dry_run else candidates[:15]
         print(f"{len(candidates)} session(s) match ({describe_filters(filters)}; {_span}):")
         for s in shown:
-            title = (s.get("title") or "")[:36]
             model = (s.get("model") or "-").split("/")[-1][:24]
-            print(
-                f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
-                f"{s['message_count']:>4} msgs  {title}"
-            )
+            print(f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
+                  f"{s['message_count']:>4} msgs  {(s.get('title') or '')[:36]}")
         if len(candidates) > len(shown):
             print(f"  … and {len(candidates) - len(shown)} more")
         if args.dry_run:
@@ -718,8 +702,7 @@ def _cmd_pin(db, args, pinning):
             print(f"{'Pinned' if pinning else 'Unpinned'} session '{resolved}'.{f'  ({title})' if title else ''}")
         else:
             failures += _not_found(raw_id)
-    if failures:
-        return 1
+    return 1 if failures else None
 
 
 def _cmd_pinned(db, args):
@@ -744,11 +727,6 @@ def _cmd_retitle_skills(db, args):
     from agent.title_generator import generate_title
     limit = max(1, int(getattr(args, "limit", 200) or 200))
     apply_changes = bool(getattr(args, "apply", False))
-
-    def _is_titlelike(candidate: str) -> bool:
-        """Reject non-titles: an auxiliary model occasionally answers the prompt instead of titling it
-        ('$ df -h /'). This is a REPAIR — never replace a serviceable title with that."""
-        return bool(candidate) and candidate[0].isalnum()
     candidates = db.list_skill_scaffolded_sessions(limit=limit)
     if not candidates:
         print("No sessions were titled from a /skill invocation.")
@@ -762,7 +740,9 @@ def _cmd_retitle_skills(db, args):
         new_title = generate_title(typed)
         if not new_title or new_title == row["title"]:
             continue
-        if not _is_titlelike(new_title):
+        if not new_title[0].isalnum():
+            # Non-title: an auxiliary model occasionally answers the prompt instead of titling it
+            # ('$ df -h /'). This is a REPAIR — never replace a serviceable title with that.
             print(f"  {session_id}\n    kept {row['title']!r} — got {new_title!r}")
             continue
         print(f"  {session_id}\n    {row['title']!r}\n    → {new_title!r}")
@@ -949,7 +929,6 @@ def _cmd_stats(db, args):
 # -- dispatch -----------------------------------------------------------------
 
 _PRE_DB_HANDLERS = {"repair": _cmd_repair, "recover": _cmd_recover, "import": _cmd_import}
-
 _DB_HANDLERS = {
     "list": _cmd_list, "export": _cmd_export, "delete": _cmd_delete, "rename": _cmd_rename, "pinned": _cmd_pinned,
     "prune": partial(_cmd_prune_or_archive, action="prune"), "pin": partial(_cmd_pin, pinning=True),

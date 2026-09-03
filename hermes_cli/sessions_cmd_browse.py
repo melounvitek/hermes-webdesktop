@@ -150,16 +150,15 @@ class _CursesBrowser:
         c = self.curses
         if self.confirm_delete is not None:  # y/n confirmation mode — only an explicit 'y' deletes
             target, self.confirm_delete = self.confirm_delete, None
-            if key in {ord("y"), ord("Y")}:
-                if self.delete_fn(target["id"]):
-                    self.sessions[:] = [s for s in self.sessions if s["id"] != target["id"]]
-                    self._refilter(reset_cursor=False)
-                    self.flash = "Deleted."
-                    if not self.sessions:
-                        return True
-                else:
-                    self.flash = "Delete failed."
-            return False
+            if key not in {ord("y"), ord("Y")}:
+                return False
+            if not self.delete_fn(target["id"]):
+                self.flash = "Delete failed."
+                return False
+            self.sessions[:] = [s for s in self.sessions if s["id"] != target["id"]]
+            self._refilter(reset_cursor=False)
+            self.flash = "Deleted."
+            return not self.sessions
         if key in (c.KEY_UP, c.KEY_DOWN):
             if self.filtered:
                 self.cursor = (self.cursor + (1 if key == c.KEY_DOWN else -1)) % len(self.filtered)
@@ -167,9 +166,9 @@ class _CursesBrowser:
             if self.filtered:
                 self.result = self.filtered[self.cursor]["id"]
             return True
-        elif key == 27:  # Esc: first clears the search, second exits
-            if not self.search:
-                return True
+        elif key == 27 and not self.search:  # Esc: first clears the search, second exits
+            return True
+        elif key == 27:
             self.search = ""
             self._refilter()
         elif key in {c.KEY_BACKSPACE, 127, 8}:
