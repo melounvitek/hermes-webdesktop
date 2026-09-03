@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import closing
 from typing import Any
 
 
@@ -194,7 +195,7 @@ class OSSBackend(Mem0Backend):
                     client = QdrantClient(url=url, api_key=vs_config.get("api_key"))
                 else:
                     return
-                try:
+                with closing(client):
                     if not client.collection_exists(collection_name):
                         return
                     vectors = client.get_collection(collection_name).config.params.vectors
@@ -204,17 +205,13 @@ class OSSBackend(Mem0Backend):
                     current_dims = getattr(vectors, "size", None)
                     if current_dims is not None and current_dims != expected_dims:
                         client.delete_collection(collection_name)
-                finally:
-                    client.close()
             elif provider == "pgvector":
                 import psycopg2
                 from psycopg2 import sql as pgsql
                 conn_params = {k: vs_config[k] for k in ("host", "port", "user", "password", "dbname", "sslmode") if vs_config.get(k)}
-                conn = psycopg2.connect(**conn_params)
-                conn.autocommit = True
-                try:
-                    cur = conn.cursor()
-                    try:
+                with closing(psycopg2.connect(**conn_params)) as conn:
+                    conn.autocommit = True
+                    with closing(conn.cursor()) as cur:
                         cur.execute(
                             "SELECT atttypmod FROM pg_attribute "
                             "WHERE attrelid = %s::regclass AND attname = 'vector'",
@@ -223,10 +220,6 @@ class OSSBackend(Mem0Backend):
                         row = cur.fetchone()
                         if row and row[0] > 0 and row[0] != expected_dims:
                             cur.execute(pgsql.SQL("DROP TABLE IF EXISTS {}").format(pgsql.Identifier(collection_name)))
-                    finally:
-                        cur.close()
-                finally:
-                    conn.close()
         except Exception:
             pass
 

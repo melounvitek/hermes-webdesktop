@@ -71,39 +71,32 @@ def _load_config() -> dict:
     return config
 
 
-# ---------------------------------------------------------------------------
-# Tool schemas
-# ---------------------------------------------------------------------------
-
 def _schema(name: str, description: str, properties: dict[str, tuple[str, str]], required: list[str]) -> dict:
     props = {k: {"type": t, "description": d} for k, (t, d) in properties.items()}
     return {"name": name, "description": description, "parameters": {"type": "object", "properties": props, "required": required}}
 
 
-SEARCH_SCHEMA = _schema(
+TOOL_SCHEMAS = [_schema(
     "mem0_search",
     "Search the user's memories by meaning; returns facts ranked by relevance. Use this before answering any question that may depend on what you know about the user (preferences, facts, history, people, projects, past decisions). For multi-part or multi-hop questions, call it several times — vary the wording and run follow-up searches on what earlier results reveal; one search is rarely enough.",
     {"query": ("string", "What to search for."), "top_k": ("integer", "Max results (default: 10, max: 50)."), "rerank": ("boolean", "Rerank results for relevance (default: false, platform mode only).")},
     ["query"],
-)
-ADD_SCHEMA = _schema(
+), _schema(
     "mem0_add",
     "Store a durable fact about the user, verbatim (no LLM extraction). Call this the moment the user states a lasting preference, correction, decision, or personal detail worth recalling on future turns — don't wait to be asked to remember. Skip transient chit-chat and facts you've already stored.",
     {"content": ("string", "The fact to store.")},
     ["content"],
-)
-UPDATE_SCHEMA = _schema(
+), _schema(
     "mem0_update",
     "Replace the text of an existing memory by its ID (take the ID from a mem0_search result). Use when a stored fact has changed or was wrong — correct it in place instead of adding a duplicate.",
     {"memory_id": ("string", "Memory UUID to update."), "text": ("string", "New text content.")},
     ["memory_id", "text"],
-)
-DELETE_SCHEMA = _schema(
+), _schema(
     "mem0_delete",
     "Delete a memory by its ID (take the ID from a mem0_search result). Use when a stored fact is obsolete or the user asks you to forget it; prefer mem0_update if the fact merely changed.",
     {"memory_id": ("string", "Memory UUID to delete.")},
     ["memory_id"],
-)
+)]
 
 _PROMPT_BODY = (
     "You have persistent memory of this user from past conversations. You should call mem0_search before answering anything that could depend on prior context (the user's preferences, facts, history, people, projects, or earlier decisions) — do not rely on the chat window alone, and do not assume you have no memory.\n"
@@ -111,10 +104,6 @@ _PROMPT_BODY = (
     "Tools: mem0_search to find memories, mem0_add to store facts, mem0_update and mem0_delete to manage by ID."
 )
 
-
-# ---------------------------------------------------------------------------
-# MemoryProvider implementation
-# ---------------------------------------------------------------------------
 
 class Mem0MemoryProvider(MemoryProvider):
     """Mem0 memory with server-side extraction and semantic search (platform, self-hosted or OSS)."""
@@ -180,14 +169,12 @@ class Mem0MemoryProvider(MemoryProvider):
         except Exception:
             pass
         try:
+            from . import _backend
             if self._mode == "oss":
-                from ._backend import OSSBackend
-                return OSSBackend(self._config.get("oss", {}))
+                return _backend.OSSBackend(self._config.get("oss", {}))
             if self._host:
-                from ._backend import SelfHostedBackend
-                return SelfHostedBackend(self._api_key, self._host)
-            from ._backend import PlatformBackend
-            return PlatformBackend(self._api_key)
+                return _backend.SelfHostedBackend(self._api_key, self._host)
+            return _backend.PlatformBackend(self._api_key)
         except Exception as e:
             logger.error("Mem0 backend failed to initialize (%s mode): %s", self._mode, e)
             self._init_error = str(e)
@@ -337,7 +324,7 @@ class Mem0MemoryProvider(MemoryProvider):
             self._sync_thread.start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [SEARCH_SCHEMA, ADD_SCHEMA, UPDATE_SCHEMA, DELETE_SCHEMA]
+        return list(TOOL_SCHEMAS)
 
     # -- tool handlers: (required params, error label, body, client-error policy) ---
     # Client errors (bad ID / not found) never trip the breaker, except for mem0_add
