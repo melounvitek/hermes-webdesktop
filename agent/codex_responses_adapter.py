@@ -499,6 +499,7 @@ def _chat_messages_to_responses_input(
     def emit(new_items: List[Dict[str, Any]], msg: Dict[str, Any]) -> None:
         items.extend(new_items)
         item_sources.extend([msg] * len(new_items))
+
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -563,6 +564,7 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
 
     def _host_is(domain: str) -> bool:
         return hostname == domain or hostname.endswith("." + domain)
+
     return ResponsesRouteFlags(
         is_codex_backend=provider == "openai-codex" or (_host_is("chatgpt.com") and "/backend-api/codex" in lower),
         is_xai_responses=provider in {"xai", "xai-oauth"} or hostname == "api.x.ai",
@@ -930,6 +932,7 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
     def field(name: str) -> str:
         value = _field(error_obj, name)
         return str(value).strip() if isinstance(value, str) or value else ""
+
     code_str, message_str = field("code"), field("message")
     if code_str and message_str:
         return f"{code_str}: {message_str}"

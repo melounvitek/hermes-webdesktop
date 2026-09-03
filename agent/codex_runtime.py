@@ -384,6 +384,7 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
             (_fire_tool_completed if completed else _fire_tool_started)(item)
         elif completed and item_type == "agentMessage":
             _fire_agent_message_completed(item)
+
     handlers: dict[str, Callable[[dict], None]] = {
         "item/agentMessage/delta": lambda p: _fire_delta(p, "_fire_stream_delta"),
         "item/reasoning/delta": lambda p: _fire_delta(p, "_fire_reasoning_delta"),
@@ -397,6 +398,7 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         if handler is not None:
             params = note.get("params") or {}
             handler(params if isinstance(params, dict) else {})
+
     return on_event
 
 
@@ -604,6 +606,7 @@ def _raise_stream_error(event: Any) -> None:
     def _error_field(name: str) -> Any:
         value = _event_field(event, name)
         return _event_field(nested, name) if value is None and nested is not None else value
+
     raw_message = _error_field("message")
     message = (str(raw_message) if raw_message is not None else "stream emitted error event").strip() or "stream emitted error event"
     raise _StreamErrorEvent(message, code=_error_field("code"), param=_error_field("param"))
@@ -1042,6 +1045,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             # pool. ``client is None`` is the shared primary client — never force-shut.
             if client is not None:
                 agent._abort_request_openai_client(active_client, reason="codex_stream_close_failed")
+
     on_commentary_message = (
         _fenced(lambda text: agent._fire_streamed_codex_commentary(text))
         if getattr(agent, "interim_assistant_callback", None) is not None and getattr(agent, "show_commentary", True)

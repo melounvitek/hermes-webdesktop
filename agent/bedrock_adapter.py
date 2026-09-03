@@ -639,6 +639,7 @@ def convert_messages_to_converse(messages: List[Dict]) -> Tuple[Optional[List[Di
             converse_msgs[-1]["content"].extend(blocks)
         else:
             converse_msgs.append({"role": role, "content": blocks})
+
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content")
@@ -809,6 +810,7 @@ def stream_converse_with_callbacks(
             return
         block = current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})
         parts.absorb_reasoning(reasoning, block, on_reasoning_delta)
+
     for event in event_stream.get("stream", []):
         if on_event is not None:
             try:
@@ -885,6 +887,7 @@ def build_converse_kwargs(
 
     def cache_here(placement: str) -> bool:
         return cache_enabled and cache_point_allowed(model, placement)
+
     inference_config: Dict[str, Any] = {}
     if max_tokens is not None:
         inference_config["maxTokens"] = max_tokens
