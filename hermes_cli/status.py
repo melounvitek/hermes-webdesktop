@@ -17,8 +17,7 @@ from hermes_cli.models import provider_label
 from hermes_cli.runtime_provider import resolve_requested_provider
 from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_cli.status_auth import (  # renderers wired into _SECTIONS below
-    _render_api_keys, _render_apikey_providers, _render_auth_providers, _render_nous_gateway,
-)
+    _render_api_keys, _render_apikey_providers, _render_auth_providers, _render_nous_gateway)
 from hermes_constants import OPENROUTER_MODELS_URL
 from hermes_constants import is_termux as _is_termux
 
@@ -313,8 +312,7 @@ def _render_sessions(ctx):
     # runtime/active_sessions.json by hand.
     try:
         from hermes_cli.active_sessions import (
-            active_session_registry_snapshot, format_age, resolve_max_concurrent_sessions,
-        )
+            active_session_registry_snapshot, format_age, resolve_max_concurrent_sessions)
         cap = resolve_max_concurrent_sessions(ctx.config)
     except Exception:
         cap = None
@@ -365,8 +363,7 @@ def _render_footer(ctx):
 _SECTIONS = (
     _render_header, _render_environment, _render_api_keys, _render_auth_providers, _render_nous_gateway,
     _render_apikey_providers, _render_terminal, _render_platforms, _render_gateway, _render_cron,
-    _render_sessions, _render_deep, _render_footer,
-)
+    _render_sessions, _render_deep, _render_footer)
 
 
 def show_status(args):

@@ -27,8 +27,7 @@ def is_sqlite_wal_reset_vulnerable(version_info: tuple[int, ...]) -> bool:
         info < (3, 7, 0)
         or info >= (3, 51, 3)
         or (3, 50, 7) <= info < (3, 51, 0)
-        or (3, 44, 6) <= info < (3, 45, 0)
-    )
+        or (3, 44, 6) <= info < (3, 45, 0))
 
 
 @dataclass(frozen=True)
@@ -84,8 +83,7 @@ def probe_sqlite_runtime(python: str | Path, *, timeout: float = 30.0) -> SQLite
     try:
         result = subprocess.run(
             [str(python), "-I", "-c", _PROBE_SCRIPT], capture_output=True, text=True, timeout=timeout,
-            check=False, env=isolated_interpreter_env(),
-        )
+            check=False, env=isolated_interpreter_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0:
@@ -98,7 +96,6 @@ def probe_sqlite_runtime(python: str | Path, *, timeout: float = 30.0) -> SQLite
             python_version=_version_tuple(payload["python_version"]),
             sqlite_version=_version_tuple(payload["sqlite_version"]),
             sqlite_version_string=str(payload["sqlite_version_string"]),
-            sqlite_source_id=str(payload.get("sqlite_source_id", "")),
-        )
+            sqlite_source_id=str(payload.get("sqlite_source_id", "")))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None

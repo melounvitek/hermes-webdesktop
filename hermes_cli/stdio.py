@@ -114,8 +114,7 @@ def _augment_path_with_known_tools() -> None:
         os.path.join(local_appdata, "hermes", "git", "bin"),
         os.path.join(local_appdata, "hermes", "git", "usr", "bin"),
         os.path.join(local_appdata, "hermes", "hermes-agent", "venv", "Scripts"),
-        os.path.join(local_appdata, "Microsoft", "WinGet", "Links"),
-    ]
+        os.path.join(local_appdata, "Microsoft", "WinGet", "Links")]
     existing = os.environ.get("PATH", "")
     existing_lower = {p.lower() for p in existing.split(os.pathsep) if p}
     prepend = [d for d in candidate_dirs if os.path.isdir(d) and d.lower() not in existing_lower]

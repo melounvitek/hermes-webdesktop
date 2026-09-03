@@ -234,8 +234,7 @@ def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: boo
             logger.debug(
                 "refusing byte-level read of %s: a live connection exists in "
                 "this process and close() would cancel its POSIX locks",
-                path,
-            )
+                path)
             return None
         try:
             with open(path, "rb") as handle:
@@ -258,6 +257,5 @@ def offline_file_access(path: Path | str, *, what: str = "read"):
                 f"Refusing to {what} {path}: a connection to it is still open "
                 "in this process, and raw file access would cancel that "
                 "connection's POSIX advisory locks. Close all database "
-                "handles (stop the gateway/dashboard) and retry."
-            )
+                "handles (stop the gateway/dashboard) and retry.")
         yield

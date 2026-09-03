@@ -43,8 +43,7 @@ def _prompt_vercel_sandbox_settings(config: dict):
     # (key, prompt label, default, parser) — unparseable input leaves the value untouched.
     for key, label, default, parse in (
         ("container_cpu", "  CPU cores", 1, float),
-        ("container_memory", "  Memory in MB (5120 = 5GB)", 5120, int),
-    ):
+        ("container_memory", "  Memory in MB (5120 = 5GB)", 5120, int)):
         try:
             terminal[key] = parse(prompt(label, str(terminal.get(key, default))))
         except ValueError:

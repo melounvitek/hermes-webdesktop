@@ -36,8 +36,7 @@ def _validate_phone_number_id(value: str) -> tuple[bool, Optional[str]]:
             "That looks like a phone number — but this field needs the "
             "Phone Number ID (Meta's internal ID, 15-17 digits, e.g. "
             "'7794189252778687'). Look just BELOW the 'From' dropdown in "
-            "API Setup → it's labelled 'Phone number ID'."
-        )
+            "API Setup → it's labelled 'Phone number ID'.")
     if len(s) < 13:
         return False, "Phone Number ID looks too short (expected 13-18 digits)"
     if len(s) > 20:
@@ -83,8 +82,7 @@ def _validate_app_secret(value: str) -> tuple[bool, Optional[str]]:
         return False, (
             "App Secret should be a hex string (only digits 0-9 and "
             "letters a-f). Make sure you copied the 'App secret' from "
-            "Settings → Basic, not some other token."
-        )
+            "Settings → Basic, not some other token.")
     if len(s) != 32:
         return False, f"App Secret should be exactly 32 hex characters (got {len(s)})"
     return True, None
@@ -103,8 +101,7 @@ def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
             "Meta WhatsApp access tokens start with 'EAA'. Check that "
             "you're copying from the right place (API Setup → 'Generate "
             "access token', or Business Settings → System Users → "
-            "'Generate token' for a permanent one)."
-        )
+            "'Generate token' for a permanent one).")
     if len(s) < 100:
         return False, f"Access token looks too short ({len(s)} chars, expected 100+)"
     return True, None
@@ -133,8 +130,7 @@ def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -
 
 def _prompt_validated(
     message: str, validator, *, current: Optional[str] = None, help_text: Optional[str] = None,
-    secret: bool = False,
-) -> Optional[str]:
+    secret: bool = False) -> Optional[str]:
     """Repeat the prompt until the user enters a valid value or aborts.
 
     Returns the validated value, or None if the user gave up (empty response after an error, or
@@ -291,8 +287,7 @@ def run_whatsapp_cloud_setup() -> int:
         "     → 'Connect with customers through WhatsApp'",
         "  2. App Dashboard → WhatsApp → API Setup",
         "  3. Click 'Generate access token' (temp 24h token is fine to",
-        "     start; switch to a System User permanent token later)", "",
-    )
+        "     start; switch to a System User permanent token later)", "")
     try:
         input("Press Enter to continue, or Ctrl+C to abort... ")
     except (EOFError, KeyboardInterrupt):
@@ -311,8 +306,7 @@ def run_whatsapp_cloud_setup() -> int:
         current = get_env_value(env_var) or None
         value = _prompt_validated(
             label, lambda v, _val=validator: (True, None) if not v else _val(v),
-            current=current, help_text=help_text,
-        )
+            current=current, help_text=help_text)
         _save_optional(env_var, value, current)
         ids[env_var] = value or current
     print()
@@ -344,8 +338,7 @@ def run_whatsapp_cloud_setup() -> int:
         "", "  Who is allowed to message the bot? (Comma-separated phone",
         "  numbers with country code, no '+' / spaces / dashes. Use '*'",
         "  to allow anyone — only safe if you've also configured Meta's",
-        "  recipient whitelist for app-development mode.)", "",
-    )
+        "  recipient whitelist for app-development mode.)", "")
     allow_default = get_env_value("WHATSAPP_CLOUD_ALLOWED_USERS") or None
     try:
         allowed = line_input(
@@ -396,8 +389,7 @@ def run_whatsapp_cloud_setup() -> int:
         "    6. Add your phone to Meta's recipient list:",
         "         App Dashboard → WhatsApp → API Setup → 'To' →",
         "         'Manage phone number list'", "",
-        "    7. DM the bot's test number from your phone.", "",
-    )
+        "    7. DM the bot's test number from your phone.", "")
     _header("Optional: polish your bot's WhatsApp profile")
     effective_waba = ids["WHATSAPP_CLOUD_WABA_ID"]
     _lines(
@@ -407,8 +399,7 @@ def run_whatsapp_cloud_setup() -> int:
         "  it once you're up and running:", "",
         "    • Display name + profile picture:",
         "        https://business.facebook.com/wa/manage/phone-numbers/"
-        + (f"?waba_id={effective_waba}" if effective_waba else ""),
-    )
+        + (f"?waba_id={effective_waba}" if effective_waba else ""))
     if not effective_waba:
         print("        (select your WhatsApp Business Account on that page)")
     _lines(
@@ -419,6 +410,5 @@ def run_whatsapp_cloud_setup() -> int:
         "        Requires Meta's business verification process —",
         "        Business Manager → Security Center → Start Verification.", "",
         "  Docs: https://hermes-agent.nousresearch.com/docs/user-guide/",
-        "        messaging/whatsapp-cloud", "",
-    )
+        "        messaging/whatsapp-cloud", "")
     return 0

@@ -8,9 +8,7 @@ Origin helpers (``_row``, ``_first_env_value``, ...) are imported lazily from
 
 from hermes_cli.auth import AuthError
 from hermes_cli.nous_account import (
-    format_nous_portal_entitlement_message,
-    get_nous_portal_account_info,
-)
+    format_nous_portal_entitlement_message, get_nous_portal_account_info)
 from hermes_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
 
@@ -87,13 +85,11 @@ _OAUTH_BLOCKS = (
     ("Qwen OAuth", "get_qwen_auth_status", "qwen auth qwen-oauth", (
         ("Auth file:", "auth_file", None, None),
         ("Access exp:", "expires_at_ms", _qwen_expiry, None),
-        ("Error:", "error", None, False),
-    )),
+        ("Error:", "error", None, False))),
     ("MiniMax OAuth", "get_minimax_oauth_auth_status", "hermes auth add minimax-oauth", (
         ("Region:", "region", None, True),
         ("Access exp:", "expires_at", None, None),
-        ("Error:", "error", None, False),
-    )),
+        ("Error:", "error", None, False))),
     ("xAI OAuth", "get_xai_oauth_auth_status", "hermes auth add xai-oauth", _FILE_REFRESH_ROWS),
 )
 
@@ -155,8 +151,7 @@ def _render_auth_providers(ctx):
         "Nous Portal", logged_in,
         "logged in" if logged_in
         else "not logged in (Nous inference key configured)" if inference
-        else "not logged in (run: hermes portal)",
-    )
+        else "not logged in (run: hermes portal)")
     portal_url = nous_status.get("portal_base_url") or "(unknown)"
     inference_url = nous_status.get("inference_base_url") or (info.inference_base_url if info else None)
     for label, value, show in (
@@ -168,8 +163,7 @@ def _render_auth_providers(ctx):
          logged_in or inference or nous_status.get("agent_key_expires_at")),
         ("Refresh:", "yes" if nous_status.get("has_refresh_token") else "no",
          logged_in or nous_status.get("has_refresh_token")),
-        ("Error:", nous_error, nous_error),
-    ):
+        ("Error:", nous_error, nous_error)):
         if show:
             _detail(label, value)
     for name, getter, hint, rows in _OAUTH_BLOCKS:

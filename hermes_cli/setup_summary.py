@@ -43,8 +43,7 @@ _WEB_MISSING = ("EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_
 _DONE_BANNER = (
     "┌─────────────────────────────────────────────────────────┐",
     "│              ✓ Setup Complete!                          │",
-    "└─────────────────────────────────────────────────────────┘",
-)
+    "└─────────────────────────────────────────────────────────┘")
 # (command, description) rows; the description carries its own alignment padding.
 _EDIT_WIZARD_ROWS = (
     ("hermes setup", "          Re-run the full wizard"),
@@ -219,8 +218,7 @@ def _always_on_rows(config, feats):
 
 _TOOL_ROW_BUILDERS = (
     _vision_row, _web_row, _browser_row, _image_gen_row, _video_gen_row, _tts_row, _stt_row,
-    _modal_row, _home_assistant_row, _spotify_row, _skills_hub_row, _always_on_rows,
-)
+    _modal_row, _home_assistant_row, _spotify_row, _skills_hub_row, _always_on_rows)
 
 
 def _print_cmd_rows(rows):
@@ -242,8 +240,7 @@ def _print_setup_summary(config: dict, hermes_home):
     """Print the setup completion summary."""
     from hermes_cli.setup import (
         color, Colors, get_config_path, get_env_path, get_nous_subscription_features, _info, print_header,
-        print_warning,
-    )
+        print_warning)
     from hermes_constants import display_hermes_home as _dhh
     # Provider readiness — the one thing setup must produce. A user who cancelled the API-key
     # prompt mid-wizard used to exit "successfully" with NO working model; say so loudly.
