@@ -1,9 +1,8 @@
 """Contextual first-touch onboarding hints.
 
 Each hint is shown once per install the *first* time a user hits a behavior
-fork (message-while-running, first long tool, ...), tracked in ``config.yaml``
-under ``onboarding.seen.<flag>``. Kept tiny and dependency-free so both the CLI
-and gateway can import it.
+fork, tracked in ``config.yaml`` under ``onboarding.seen.<flag>``. Kept tiny and
+dependency-free so both the CLI and gateway can import it.
 """
 
 from __future__ import annotations
@@ -22,10 +21,8 @@ OPENCLAW_RESIDUE_FLAG = "openclaw_residue_cleanup"
 PROFILE_BUILD_FLAG = "profile_build_offered"
 
 
-# ── Hint content ──────────────────────────────────────────────────────────
 # Busy-input hints are keyed by the effective busy_input_mode that was just
 # applied so the message matches reality; "interrupt" is the default branch.
-
 _BUSY_INPUT_HINTS_GATEWAY = {
     "queue": (
         "💡 First-time tip — I queued your message instead of interrupting. "
@@ -115,36 +112,33 @@ def openclaw_residue_hint_cli() -> str:
 
 
 def detect_openclaw_residue(home: Optional[Path] = None) -> bool:
-    """True if ``$HOME/.openclaw`` is a directory (pure check; ``home`` override for tests)."""
-    base = home or Path.home()
+    """True if ``$HOME/.openclaw`` is a directory (``home`` override for tests)."""
     try:
-        return (base / ".openclaw").is_dir()
+        return ((home or Path.home()) / ".openclaw").is_dir()
     except OSError:
         return False
 
 
-# ── Onboarding profile-build path (opt-in, consent-gated) ─────────────────
+def _onboarding_section(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    onboarding = config.get("onboarding") if isinstance(config, Mapping) else None
+    return onboarding if isinstance(onboarding, Mapping) else {}
+
 
 def profile_build_mode(config: Mapping[str, Any]) -> str:
-    """``config.onboarding.profile_build``: ``"off"`` never offers; anything else -> ``"ask"`` (offer on first contact).
+    """``config.onboarding.profile_build``: ``"off"`` never offers; anything else -> ``"ask"``.
 
-    This only governs whether the offer is made; lookups inside the flow are
+    Only governs whether the offer is made; lookups inside the flow are
     consented to separately in conversation.
     """
-    onboarding = config.get("onboarding") if isinstance(config, Mapping) else None
-    if not isinstance(onboarding, Mapping):
-        return "ask"
-    mode = onboarding.get("profile_build")
-    if isinstance(mode, str) and mode.strip().lower() == "off":
-        return "off"
-    return "ask"
+    mode = _onboarding_section(config).get("profile_build")
+    return "off" if isinstance(mode, str) and mode.strip().lower() == "off" else "ask"
 
 
 def profile_build_directive() -> str:
     """System-note directive appended to the very first message ever.
 
-    Runs a short opt-in profile-build flow persisting to the user-profile memory
-    store; phrased so the agent ASKS before any lookup and never silently reads
+    Short opt-in profile-build flow persisting to the user-profile memory store;
+    phrased so the agent ASKS before any lookup and never silently reads
     connected accounts.
     """
     return (
@@ -167,19 +161,10 @@ def profile_build_directive() -> str:
     )
 
 
-# ── State read / write ────────────────────────────────────────────────────
-
-def _get_seen_dict(config: Mapping[str, Any]) -> Mapping[str, Any]:
-    onboarding = config.get("onboarding") if isinstance(config, Mapping) else None
-    if not isinstance(onboarding, Mapping):
-        return {}
-    seen = onboarding.get("seen")
-    return seen if isinstance(seen, Mapping) else {}
-
-
 def is_seen(config: Mapping[str, Any], flag: str) -> bool:
-    """Return True if the user has already been shown this first-touch hint."""
-    return bool(_get_seen_dict(config).get(flag))
+    """True if the user has already been shown this first-touch hint."""
+    seen = _onboarding_section(config).get("seen")
+    return bool(seen.get(flag)) if isinstance(seen, Mapping) else False
 
 
 def mark_seen(config_path: Path, flag: str) -> bool:

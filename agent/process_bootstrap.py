@@ -1,9 +1,9 @@
 """Process-level bootstrap helpers for ``run_agent``.
 
-Lazy OpenAI SDK import (``_load_openai_cls`` / ``_OpenAIProxy``, preserving
-``isinstance`` and ``patch("run_agent.OpenAI")`` patterns), crash-resistant
-stdio (``_SafeWriter``), env-only HTTP proxy resolution, and Codex dual-stack
-(Happy Eyeballs) connection racing. ``run_agent`` re-exports every name.
+Lazy OpenAI SDK import (``_OpenAIProxy`` keeps ``isinstance`` and
+``patch("run_agent.OpenAI")`` working), crash-resistant stdio (``_SafeWriter``),
+env-only HTTP proxy resolution, and Codex dual-stack (Happy Eyeballs)
+connection racing. ``run_agent`` re-exports every name.
 """
 
 from __future__ import annotations
@@ -25,26 +25,20 @@ _HAPPY_EYEBALLS_DELAY_SECONDS = 0.25
 
 
 def _interleave_addrinfos(addrinfos: list[tuple]) -> list[tuple]:
-    """Interleave resolved address families while preserving resolver order."""
+    """Round-robin the resolved address families (deduped), preserving resolver order within each."""
     queues: dict[int, list[tuple]] = {}
-    family_order: list[int] = []
     seen: set[tuple] = set()
     for addrinfo in addrinfos:
         family, socktype, proto, _canonname, sockaddr = addrinfo
         marker = (family, socktype, proto, sockaddr)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        if family not in queues:
-            queues[family] = []
-            family_order.append(family)
-        queues[family].append(addrinfo)
-
+        if marker not in seen:
+            seen.add(marker)
+            queues.setdefault(family, []).append(addrinfo)
     interleaved: list[tuple] = []
     while any(queues.values()):
-        for family in family_order:
-            if queues[family]:
-                interleaved.append(queues[family].pop(0))
+        for queue in queues.values():
+            if queue:
+                interleaved.append(queue.pop(0))
     return interleaved
 
 
@@ -81,17 +75,13 @@ def _happy_eyeballs_create_connection(
         candidate = socket.socket(family, socktype, proto)
         try:
             if source_address is not None:
-                local_infos = socket.getaddrinfo(
-                    source_address[0], source_address[1], family=family, type=socktype
-                )
+                local_infos = socket.getaddrinfo(source_address[0], source_address[1], family=family, type=socktype)
                 if not local_infos:
-                    raise OSError(
-                        f"getaddrinfo returned no local {family} address for {source_address[0]}"
-                    )
+                    raise OSError(f"getaddrinfo returned no local {family} address for {source_address[0]}")
                 candidate.bind(local_infos[0][4])
             candidate.setblocking(False)
             result = candidate.connect_ex(sockaddr)
-            if result == 0 or result == errno.EISCONN:
+            if result in (0, errno.EISCONN):
                 return candidate
             if result not in in_progress:
                 raise OSError(result, os.strerror(result))
@@ -109,9 +99,8 @@ def _happy_eyeballs_create_connection(
                 raise socket.timeout("timed out")
 
             if pending and now >= next_launch:
-                addrinfo = pending.pop(0)
                 try:
-                    winner = start_attempt(addrinfo)
+                    winner = start_attempt(pending.pop(0))
                 except OSError as exc:
                     last_error = exc
                     if not active:
@@ -126,8 +115,7 @@ def _happy_eyeballs_create_connection(
                 until_launch = max(0.0, next_launch - now)
                 wait_timeout = until_launch if wait_timeout is None else min(wait_timeout, until_launch)
 
-            events = selector.select(wait_timeout)
-            for key, _mask in events:
+            for key, _mask in selector.select(wait_timeout):
                 candidate = key.fileobj
                 error_code = candidate.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
                 selector.unregister(candidate)
@@ -143,9 +131,7 @@ def _happy_eyeballs_create_connection(
                 next_launch = time.monotonic()
 
         if winner is None:
-            if last_error is not None:
-                raise last_error
-            raise OSError(f"Could not connect to {host}:{port}")
+            raise last_error if last_error is not None else OSError(f"Could not connect to {host}:{port}")
 
         try:
             selector.unregister(winner)
@@ -206,19 +192,15 @@ class _HappyEyeballsSyncBackend:
 
 
 def _uses_codex_cloud_transport(base_url: str) -> bool:
-    return (
-        base_url_hostname(base_url).lower() == "chatgpt.com"
-        and "/backend-api/codex" in str(base_url).lower()
-    )
+    return base_url_hostname(base_url).lower() == "chatgpt.com" and "/backend-api/codex" in str(base_url).lower()
 
 
 def _enable_happy_eyeballs(transport, skip_pool_types: tuple = ()) -> None:
     """Install the racing backend on one httpx transport.
 
-    Reaches into private ``transport._pool._network_backend`` (httpcore is
-    pinned 1.0.x); hasattr-guarded so an incompatible httpcore degrades to the
-    default serial backend instead of crashing. Pools of ``skip_pool_types``
-    (proxies) are left alone.
+    Reaches into private ``transport._pool._network_backend`` (httpcore pinned
+    1.0.x); hasattr-guarded so an incompatible httpcore degrades to the default
+    serial backend. Pools of ``skip_pool_types`` (proxies) are left alone.
     """
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
@@ -229,11 +211,11 @@ def _enable_happy_eyeballs(transport, skip_pool_types: tuple = ()) -> None:
 
 
 def enable_happy_eyeballs_on_client(client) -> None:
-    """Install the racing backend on every direct transport of a ready-built httpx.Client
-    (for callers that build clients inline, e.g. Codex OAuth/device-login in hermes_cli.auth).
+    """Install the racing backend on every direct transport of a ready-built httpx.Client.
 
-    Proxy-backed pools are skipped (TCP connect goes to the proxy host) and
-    async clients need nothing (anyio already races per RFC 8305). Best-effort.
+    For callers that build clients inline (Codex OAuth/device-login). Proxy-backed
+    pools are skipped (TCP connect goes to the proxy host); async clients need
+    nothing (anyio already races per RFC 8305). Best-effort.
     """
     try:
         import httpcore
@@ -243,9 +225,7 @@ def enable_happy_eyeballs_on_client(client) -> None:
         )
     except Exception:
         return
-
-    transports = [getattr(client, "_transport", None)]
-    transports.extend((getattr(client, "_mounts", None) or {}).values())
+    transports = [getattr(client, "_transport", None), *(getattr(client, "_mounts", None) or {}).values()]
     for transport in transports:
         _enable_happy_eyeballs(transport, proxy_pool_types)
 
@@ -314,8 +294,7 @@ class _SafeWriter:
 
 def _get_proxy_from_env() -> Optional[str]:
     """First configured proxy URL from HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (any case), or None."""
-    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
-                "https_proxy", "http_proxy", "all_proxy"):
+    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
         value = os.environ.get(key, "").strip()
         if value:
             return normalize_proxy_url(value)
@@ -323,56 +302,44 @@ def _get_proxy_from_env() -> Optional[str]:
 
 
 def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
-    """Return an env-configured proxy unless NO_PROXY excludes this base URL."""
+    """Env-configured proxy unless NO_PROXY excludes this base URL."""
     proxy = _get_proxy_from_env()
-    if not proxy or not base_url:
-        return proxy
-
-    host = base_url_hostname(base_url)
+    host = base_url_hostname(base_url) if proxy and base_url else ""
     if not host:
         return proxy
-
     try:
         if urllib.request.proxy_bypass_environment(host):
             return None
     except Exception:
         pass
-
     return proxy
 
 
 def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True) -> Optional[Any]:
-    """Build an httpx client for OpenAI SDK calls with env-only proxy policy.
+    """httpx client for OpenAI SDK calls with env-only proxy policy (None on failure).
 
     Explicit no-proxy mounts disable httpx's ``trust_env`` path so macOS system
     proxies (which omit the ExceptionsList) are never applied. ``keepalive_expiry``
     reaps idle connections before reverse proxies' 30-60 s timeouts (a custom
     socket_options transport broke streaming and stripped TCP_NODELAY). ``verify``
-    lets auxiliary calls honor the same ``ssl_ca_cert``/``ssl_verify``/``HERMES_CA_BUNDLE``
-    as the main client; it goes on the client AND the mounts, since a mounted
-    transport owns its SSL context.
+    goes on the client AND the mounts, since a mounted transport owns its SSL context.
     """
     try:
         import httpx
 
         proxy = _get_proxy_for_base_url(base_url)
-
         limits = httpx.Limits(max_keepalive_connections=20, max_connections=100, keepalive_expiry=20.0)
-        # Generous read=None for SSE streaming endpoints.
-        timeout = httpx.Timeout(connect=15.0, read=None, write=15.0, pool=10.0)
-
+        timeout = httpx.Timeout(connect=15.0, read=None, write=15.0, pool=10.0)  # read=None for SSE streaming
         transport_cls = httpx.AsyncHTTPTransport if async_mode else httpx.HTTPTransport
         client_cls = httpx.AsyncClient if async_mode else httpx.Client
-        mounts = {}
+        mounts = None
         if proxy is None:
-            http_transport = transport_cls(verify=verify)
-            https_transport = transport_cls(verify=verify)
+            mounts = {"http://": transport_cls(verify=verify), "https://": transport_cls(verify=verify)}
             # Async transports race natively (anyio happy_eyeballs_delay=0.25).
             if not async_mode and _uses_codex_cloud_transport(base_url):
-                _enable_happy_eyeballs(http_transport)
-                _enable_happy_eyeballs(https_transport)
-            mounts = {"http://": http_transport, "https://": https_transport}
-        return client_cls(limits=limits, timeout=timeout, proxy=proxy, mounts=mounts or None, verify=verify)
+                for transport in mounts.values():
+                    _enable_happy_eyeballs(transport)
+        return client_cls(limits=limits, timeout=timeout, proxy=proxy, mounts=mounts, verify=verify)
     except Exception:
         return None
 

@@ -10,11 +10,10 @@ from agent.redact import redact_sensitive_text
 def describe_compression_lock_skip(lock_signal: Any) -> str:
     """User-facing text for a manual /compress skipped by the compression lock.
 
-    ``lock_signal`` is ``agent._compression_skipped_due_to_lock`` (or the TUI's
-    ``CompressionLockHeld.holder``): a holder string when another compressor
-    CONFIRMED holds the lock, else ``True``/``None``. A failed acquire is NOT
-    proof another compression is running (``try_acquire_compression_lock``
-    swallows ``sqlite3.Error``), so the two cases are worded differently.
+    ``lock_signal`` is a holder string when another compressor CONFIRMED holds
+    the lock, else ``True``/``None``. A failed acquire is NOT proof another
+    compression is running (``try_acquire_compression_lock`` swallows
+    ``sqlite3.Error``), so the two cases are worded differently.
     """
     if isinstance(lock_signal, str) and lock_signal.strip():
         return (
@@ -28,10 +27,6 @@ def describe_compression_lock_skip(lock_signal: Any) -> str:
     )
 
 
-def _state_flag(state: Any, name: str) -> bool:
-    return state is not None and getattr(state, name, False) is True
-
-
 def summarize_manual_compression(
     before_messages: Sequence[dict[str, Any]],
     after_messages: Sequence[dict[str, Any]],
@@ -40,14 +35,18 @@ def summarize_manual_compression(
     *,
     compression_state: Any = None,
 ) -> dict[str, Any]:
-    """Return consistent user-facing feedback for manual compression."""
+    """Consistent user-facing feedback (headline, token line, optional note) for manual compression."""
     before_count = len(before_messages)
     after_count = len(after_messages)
     noop = list(after_messages) == list(before_messages)
-    aborted = _state_flag(compression_state, "_last_compress_aborted")
-    refused_would_grow = _state_flag(compression_state, "_last_compress_refused_would_grow")
-    fallback_used = _state_flag(compression_state, "_last_summary_fallback_used")
-    failure_reason = getattr(compression_state, "_last_summary_error", None) if compression_state is not None else None
+
+    def flag(name: str) -> bool:
+        return getattr(compression_state, name, False) is True
+
+    aborted = flag("_last_compress_aborted")
+    refused_would_grow = flag("_last_compress_refused_would_grow")
+    fallback_used = flag("_last_summary_fallback_used")
+    failure_reason = getattr(compression_state, "_last_summary_error", None)
     if not isinstance(failure_reason, str) or not failure_reason.strip():
         failure_reason = None
 
@@ -85,8 +84,7 @@ def summarize_manual_compression(
     if failure_reason and (aborted or fallback_used):
         # Crosses a user-facing UI boundary: never let a disabled global redaction
         # preference expose credentials embedded in provider exception text.
-        safe_reason = redact_sensitive_text(failure_reason.strip(), force=True)
-        note = f"{note} Reason: {safe_reason}"
+        note = f"{note} Reason: {redact_sensitive_text(failure_reason.strip(), force=True)}"
 
     return {
         "noop": noop,
