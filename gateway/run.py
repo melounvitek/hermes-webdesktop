@@ -668,14 +668,12 @@ def _prepare_gateway_status_message(platform: Any, event_type: str, message: str
         return text
 
     text = _redact_gateway_user_facing_secrets(text)
-    if _TELEGRAM_NOISY_STATUS_RE.search(text):
-        # Opt-in `compression.progress_notices` lets ROUTINE progress through; membership comes from the
-        # template constants, so other noise (aux failures, retry chatter) stays suppressed even when open.
-        if not (
-            _gateway_compression_progress_notices_enabled()
-            and _COMPRESSION_PROGRESS_STATUS_RE.search(text)
-        ):
-            return None
+    # Opt-in `compression.progress_notices` lets ROUTINE progress through; membership comes from the
+    # template constants, so other noise (aux failures, retry chatter) stays suppressed even when open.
+    if _TELEGRAM_NOISY_STATUS_RE.search(text) and not (
+        _gateway_compression_progress_notices_enabled() and _COMPRESSION_PROGRESS_STATUS_RE.search(text)
+    ):
+        return None
     if _looks_like_gateway_provider_error(text):
         return _gateway_provider_error_reply(text)
     return text
@@ -1343,14 +1341,11 @@ def _collect_auto_append_media_tags(
 ) -> tuple[List[str], bool]:
     """Collect real media tags from current-turn producer-tool results only.
 
-    Two guards: a producer-tool allowlist (docs/logs/search results contain example MEDIA: strings
-    that must never become attachments) and current-turn isolation (no leaking an earlier turn's
-    result). If mid-run compression shrank the list below the original history length the slice
-    is untrustworthy: scan every message, dedup via ``history_media_paths``.
+    Producer allowlist: docs/logs/search results contain example MEDIA: strings that must never
+    become attachments. Current-turn isolation: if mid-run compression shrank the list below the
+    history length the slice is untrustworthy, so scan every message (dedup via history_media_paths).
     """
     history_media_paths = history_media_paths or set()
-    # Only trust the slice boundary when the message list still contains the
-    # full history prefix. Otherwise scan everything (compression-safe fallback).
     if history_offset and len(messages) >= history_offset:
         new_messages = messages[history_offset:]
     else:
@@ -1397,10 +1392,9 @@ def _collect_auto_append_media_tags(
 
 
 def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
-    """Collect every media path already delivered in prior assistant/tool output.
+    """Collect every media path already delivered in prior assistant/tool output (dedup set).
 
-    Used to dedup auto-appended and model-emitted MEDIA tags so a file is not re-sent later; both
-    the JSON-payload and assistant-message shapes must be covered or delivery repeats.
+    Both the JSON-payload and assistant-message shapes must be covered or delivery repeats.
     """
     paths: set = set()
     tool_name_by_call_id = _tool_name_by_call_id(agent_history)
@@ -1410,8 +1404,7 @@ def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
             path = match.group(1).strip().rstrip('",}')
             if path:
                 paths.add(path)
-        # The regex alone misses quoted/spaced paths that extract_media accepts — use the same
-        # extractor so the dedup set sees every path that could actually have been delivered.
+        # The regex misses quoted/spaced paths extract_media accepts; use the same extractor to dedup.
         media_files, _ = BasePlatformAdapter.extract_media(content)
         paths.update(path for path, _is_voice in media_files)
 
@@ -1442,15 +1435,11 @@ def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
                         break
     return paths
 
-# ---------------------------------------------------------------------------
-# SSL certificate auto-detection for NixOS and other non-standard systems.
-# Must run BEFORE any HTTP library (discord, aiohttp, etc.) is imported.
-# ---------------------------------------------------------------------------
 def _ensure_ssl_certs() -> None:
-    """Set SSL_CERT_FILE if the system doesn't expose CA certs to Python.
+    """Set SSL_CERT_FILE when the system hides CA certs from Python (NixOS etc.).
 
-    A set-but-missing path makes every later httpx/OpenAI client fail in ssl.load_verify_locations(),
-    so treat it as unset and fall back to certifi.
+    Must run BEFORE any HTTP library (discord, aiohttp) is imported. A set-but-missing path makes
+    every later httpx/OpenAI client fail in ssl.load_verify_locations(), so treat it as unset.
     """
     configured_cert = os.environ.get("SSL_CERT_FILE")
     if configured_cert:
@@ -1494,17 +1483,13 @@ def _ensure_ssl_certs() -> None:
             return
 
 def _home_target_env_var(platform_name: str) -> str:
-    """Return the configured home-target env var for a platform.
+    """Return the home-target env var for a platform.
 
-    Built-in ``_HOME_TARGET_ENV_VARS`` first, then the plugin registry
-    (``cron.scheduler._resolve_home_env_var``), then ``<PLATFORM>_HOME_CHANNEL`` for unknown names.
+    Built-in ``_HOME_TARGET_ENV_VARS``, then the plugin registry, then ``<PLATFORM>_HOME_CHANNEL``.
     """
     from cron.scheduler import _resolve_home_env_var
 
-    resolved = _resolve_home_env_var(platform_name)
-    if resolved:
-        return resolved
-    return f"{platform_name.upper()}_HOME_CHANNEL"
+    return _resolve_home_env_var(platform_name) or f"{platform_name.upper()}_HOME_CHANNEL"
 
 
 def _home_thread_env_var(platform_name: str) -> str:
@@ -1530,22 +1515,18 @@ def _clear_planned_restart_notification() -> None:
     _planned_restart_notification_path().unlink(missing_ok=True)
 
 
-# Mark this process as a gateway so cli.py's module-level load_cli_config()
-# knows not to clobber TERMINAL_CWD if lazily imported.
+# Gateway marker so a lazily imported cli.py load_cli_config() doesn't clobber TERMINAL_CWD.
 os.environ["_HERMES_GATEWAY"] = "1"
 
 _ensure_ssl_certs()
 
-# Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home, get_hermes_home_override
 from utils import atomic_json_write  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
 _hermes_home = get_hermes_home()
 
-# Load environment variables from ~/.hermes/.env first.
-# User-managed env files should override stale shell exports on restart.
+# Load ~/.hermes/.env first: user-managed env files must override stale shell exports on restart.
 from dotenv import load_dotenv  # noqa: F401  # backward-compat for tests that monkeypatch this symbol
 from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
@@ -1556,14 +1537,12 @@ def _reload_runtime_env_preserving_config_authority() -> None:
     """Reload .env for fresh credentials without letting stale .env override config.
 
     Long-lived gateways reload ~/.hermes/.env per turn for rotated keys; config.yaml stays
-    authoritative for budget settings (else stale HERMES_MAX_ITERATIONS wins). NO-OP in multiplex
-    mode: secrets come from the per-turn ``set_secret_scope`` mapping, and mutating ``os.environ``
-    would leak the default profile's keys to every profile.
+    authoritative for budgets (else stale HERMES_MAX_ITERATIONS wins). Multiplex mode never reloads
+    .env globally (secrets come from the per-turn ``set_secret_scope``; mutating ``os.environ`` would
+    leak the default profile's keys to every profile) but still honors the max_turns bridge.
     """
     from agent.secret_scope import is_multiplex_active
     if is_multiplex_active():
-        # Credentials come from the active profile's secret scope, not os.environ: still honor the
-        # config.yaml agent.max_turns bridge below (scoped home), but never reload .env globally.
         _bridge_max_turns_from_config(_hermes_home)
         return
 
@@ -1574,10 +1553,7 @@ def _reload_runtime_env_preserving_config_authority() -> None:
 
 
 def _bridge_max_turns_from_config(home: "Path") -> None:
-    """Re-bridge config.yaml agent.max_turns (+ sessions.*) into env on the per-turn reload.
-
-    Managed overlay applies here too, else a managed max_turns would revert after one turn.
-    """
+    """Re-bridge agent.max_turns (+ sessions.*) per turn; managed overlay applies or it reverts."""
     config_path = home / 'config.yaml'
     if not config_path.exists():
         return
@@ -1603,12 +1579,6 @@ def _current_max_iterations() -> int:
 from contextlib import asynccontextmanager as _asynccontextmanager, contextmanager as _contextmanager, suppress
 
 
-# Platforms that bind a host TCP port. In a profile multiplexer the default profile owns the single
-# shared listener (serving every profile via the /p/<profile>/ prefix), so a SECONDARY profile
-# enabling one is always a misconfiguration and is skipped (SecondaryPortBindingConfigError) rather
-# than taking down the multiplexer. Lives in gateway.config so dashboard validation enforces it too.
-
-
 class MultiplexConfigError(RuntimeError):
     """A profile multiplexer config is invalid.
 
@@ -1618,15 +1588,18 @@ class MultiplexConfigError(RuntimeError):
 
 
 class SecondaryPortBindingConfigError(MultiplexConfigError):
-    """A secondary profile conflicts with the multiplexer's shared listener."""
+    """A secondary profile enabled a port-binding platform.
+
+    The default profile owns the single shared listener (serving every profile via /p/<profile>/),
+    so this is always a misconfiguration and is skipped rather than taking down the multiplexer.
+    """
 
 
 class HygieneTurnHoldExceeded(Exception):
-    """The hygiene-compression turn-hold budget elapsed while the summary model was still streaming.
+    """Hygiene-compression turn-hold budget elapsed while the summary model was still streaming.
 
-    An availability boundary, not a failure: the compressor is healthy but the user turn cannot
-    wait. Must NOT be routed through the idle-timeout failure path (AGENT_COMPRESSION_TIMEOUT,
-    "no output" message, failure cooldown ladder).
+    Availability boundary, not a failure: must NOT take the idle-timeout failure path
+    (AGENT_COMPRESSION_TIMEOUT, "no output" message, failure cooldown ladder).
     """
 
 
@@ -1634,28 +1607,22 @@ def _multiplex_profile_homes(config: object) -> list[tuple[str, "Path"]]:
     """Return the authoritative profile set for one multiplex gateway config."""
     from hermes_cli.profiles import profiles_to_serve
 
-    return list(
-        profiles_to_serve(
-            multiplex=True, profile_allowlist=getattr(config, "multiplex_profile_allowlist", None)
-        )
-    )
+    return list(profiles_to_serve(
+        multiplex=True, profile_allowlist=getattr(config, "multiplex_profile_allowlist", None)))
 
 
 def _enable_multiplex_log_routing(config: object) -> bool:
     """Route agent.log/errors.log/gateway.log records to their owning profile.
 
-    ``setup_logging(mode="gateway")`` binds the file handlers to the launch home, so under
-    ``multiplex_profiles`` every secondary profile's records land in the default profile's logs.
-    Swap in the profile routers once the served-profile set is known; inert for single-profile.
+    ``setup_logging(mode="gateway")`` binds file handlers to the launch home, so under multiplexing
+    every secondary profile's records would land in the default profile's logs. Inert single-profile.
     """
     if not getattr(config, "multiplex_profiles", False):
         return False
     try:
         from hermes_logging import enable_profile_log_routing
 
-        return enable_profile_log_routing(
-            [home for _name, home in _multiplex_profile_homes(config)]
-        )
+        return enable_profile_log_routing([home for _name, home in _multiplex_profile_homes(config)])
     except Exception:
         logger.debug("could not enable per-profile log routing", exc_info=True)
         return False
@@ -1664,11 +1631,10 @@ def _enable_multiplex_log_routing(config: object) -> bool:
 def _handoff_watch_scopes(runner: object) -> list:
     """``(profile_name, home)`` pairs whose ``state.db`` the watcher must poll.
 
-    ``/handoff`` writes into the store of the profile the CLI ran under, but an unscoped watcher
-    polls only the ROOT store, so a secondary profile's handoff is never seen and the CLI times out.
-    ``(None, None)`` = root poll, always first; SECONDARY profiles are added, the default is not
-    repeated. Defensive: a raising resolver would silently disable the watcher, so failures
-    degrade to the root poll.
+    ``/handoff`` writes into the store of the profile the CLI ran under; an unscoped watcher polls
+    only the ROOT store, so a secondary profile's handoff would never be seen (CLI times out).
+    ``(None, None)`` = root poll, always first; secondary profiles follow (default not repeated).
+    A raising resolver degrades to the root poll rather than silently disabling the watcher.
     """
     scopes: list = [(None, None)]
     try:
@@ -1686,9 +1652,9 @@ def _handoff_watch_scopes(runner: object) -> list:
 async def _reclaim_stale(runner: object) -> None:
     """Fail handoffs left in ``running`` by a gateway that died mid-dispatch.
 
-    Runs once per store at watcher startup. ``running`` is only set for one in-process dispatch,
-    so a row still in it belongs to a dead process, can never reach a terminal state, and blocks
-    ``request_handoff`` for that session forever. Defensive: a raising reclaim would abort startup.
+    Runs once per store at watcher startup. ``running`` is only set for one in-process dispatch, so
+    a leftover row belongs to a dead process and blocks ``request_handoff`` for that session forever.
+    Defensive: a raising reclaim would abort startup.
     """
     session_db = getattr(runner, "_session_db", None)
     if session_db is None:
@@ -1741,15 +1707,12 @@ def _profile_runtime_scope(
     hydrate_secrets: bool = True):
     """Scope config/skills/memory AND credentials to a profile for one turn (multiplexed path only).
 
-    (1) ``set_hermes_home_override`` redirects ``get_hermes_home()`` — a contextvar, so it reaches
-    the agent worker thread via ``copy_context()``; (2) ``set_secret_scope`` makes the profile's
-    ``.env`` the credential source so ``get_secret`` never reads ``os.environ``. Loading ``.env``
-    does NOT mutate ``os.environ``, which keeps subprocesses from inheriting cross-profile secrets.
+    ``set_hermes_home_override`` is a contextvar (reaches the agent worker via ``copy_context()``);
+    ``set_secret_scope`` makes the profile ``.env`` the credential source without mutating
+    ``os.environ``, so subprocesses never inherit cross-profile secrets.
     """
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
-    from agent.secret_scope import (
-        set_secret_scope, reset_secret_scope
-    )
+    from agent.secret_scope import set_secret_scope, reset_secret_scope
 
     home_token = set_hermes_home_override(str(profile_home))
     if prepared_secret_scope is not None:
@@ -1757,14 +1720,13 @@ def _profile_runtime_scope(
     elif hydrate_secrets:
         secrets = _load_profile_secret_scope(Path(profile_home))
     else:
-        # Caller already hydrated external sources off-loop (#99519).
+        # Caller already hydrated external sources off-loop.
         from agent.secret_scope import build_profile_secret_scope
 
         secrets = build_profile_secret_scope(Path(profile_home))
     secret_token = set_secret_scope(secrets)
-    # Per-turn terminal scope (third seam of the profile boundary): install the routed profile's
-    # COMPLETE terminal policy — never ambient env — via tools.terminal_scope, else terminal_tool
-    # reads process-global TERMINAL_* vars a prior profile's turn pinned (first-writer-wins leak).
+    # Third profile seam: install the routed profile's COMPLETE terminal policy (never ambient env),
+    # else terminal_tool reads process-global TERMINAL_* vars a prior turn pinned (first-writer-wins).
     from tools.terminal_scope import install_and_reset_profile_terminal_scope
 
     with install_and_reset_profile_terminal_scope(Path(profile_home)):
@@ -1787,9 +1749,9 @@ def load_gateway_config_for_runner() -> "GatewayConfig":
     """Load gateway config for the process-level GatewayRunner.
 
     With multiplexing on, reload under the default profile's ``_profile_runtime_scope`` so platform
-    tokens in that profile's ``.env`` resolve through the secret scope (as secondary profiles do);
-    unscoped, ``_getenv`` falls through to ``os.environ``, which often lacks a token that lives only
-    under ``profiles/<name>/.env``. Off -> identical to ``load_gateway_config()``.
+    tokens in that profile's ``.env`` resolve via the secret scope (as secondary profiles do);
+    unscoped, ``_getenv`` falls to ``os.environ``, which often lacks a token living only under
+    ``profiles/<name>/.env``. Off -> identical to ``load_gateway_config()``.
     """
     cfg = load_gateway_config()
     if not getattr(cfg, "multiplex_profiles", False):
@@ -1825,8 +1787,7 @@ async def _discover_gateway_mcp_tools(config: object) -> None:
             with _profile_runtime_scope(Path(profile_home)):
                 await loop.run_in_executor(None, copy_context().run, discover_mcp_tools)
         except Exception:
-            logger.warning(
-                "MCP tool discovery failed for profile '%s'", profile_name, exc_info=True)
+            logger.warning("MCP tool discovery failed for profile '%s'", profile_name, exc_info=True)
 
 
 def _platform_has_bot_credential(platform: "Platform", platform_config: "PlatformConfig") -> bool:
@@ -1846,16 +1807,13 @@ def _platform_has_bot_credential(platform: "Platform", platform_config: "Platfor
     api_key = getattr(platform_config, "api_key", None) or ""
     if isinstance(api_key, str) and api_key.strip():
         return True
-    # Matrix also authenticates by password login (MATRIX_USER_ID + MATRIX_PASSWORD in ``extra``),
-    # so a token-only check would evict a reconnectable config from the retry queue on the first
-    # transient failure; mirror the adapter's gate: homeserver + user_id + password. Read ONLY from
-    # extra (build_config() already copies env vars there) — an env fallback would report "has
-    # credential" for every Matrix config on the box, including the empty-primary multiplex case.
+    # Matrix also authenticates by password (MATRIX_USER_ID + MATRIX_PASSWORD in ``extra``); a
+    # token-only check would evict a reconnectable config from the retry queue on the first transient
+    # failure. Mirror the adapter's gate, reading ONLY extra (build_config() copies env vars there):
+    # an env fallback would report "has credential" for every Matrix config (incl. empty-primary mux).
     if platform is Platform.MATRIX:
         extra = getattr(platform_config, "extra", None) or {}
-        if all(
-            str(extra.get(key) or "").strip() for key in ("homeserver", "user_id", "password")
-        ):
+        if all(str(extra.get(key) or "").strip() for key in ("homeserver", "user_id", "password")):
             return True
     return False
 
@@ -1871,9 +1829,8 @@ os.environ["HERMES_TURN_LEASE_TIMEOUT"] = str(
     _DEFAULT_CONFIG["agent"]["gateway_turn_lease_timeout"]
 )
 
-# Bridge config.yaml values into the environment so os.getenv() picks them up.
-# config.yaml is authoritative and unconditionally wins over .env for these keys; a `not in
-# os.environ` guard would let stale .env entries (an old HERMES_MAX_ITERATIONS) shadow config.
+# Bridge config.yaml values into env so os.getenv() picks them up. config.yaml unconditionally wins
+# over .env for these keys; a `not in os.environ` guard would let stale .env entries shadow config.
 _AGENT_ENV_BRIDGE = {
     "gateway_timeout": "HERMES_AGENT_TIMEOUT",
     "gateway_turn_lease_timeout": "HERMES_TURN_LEASE_TIMEOUT",
@@ -1907,9 +1864,8 @@ def _bridge_section_to_env(section: Any, mapping: Dict[str, str]) -> None:
 def _bridge_max_turns_to_env(agent_cfg: Any) -> None:
     """Bridge ``agent.max_turns`` preserving its raw spelling ("none", "unlimited", "120").
 
-    ``resolve_turn_limit`` (via ``_current_max_iterations``) interprets it. Python None (`null` /
-    bare `key:`) clears a stale bridge instead: str(None) -> "None" would map to the unlimited
-    sentinel rather than "absent = default".
+    Python None (`null` / bare `key:`) clears a stale bridge instead: str(None) -> "None" would map
+    to the unlimited sentinel rather than "absent = default".
     """
     if not isinstance(agent_cfg, dict) or "max_turns" not in agent_cfg:
         return
@@ -1966,19 +1922,16 @@ def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
             # Placeholders (".", "auto", "cwd") resolve to Path.home() later; only explicit paths bridge.
             if str(_val) in {".", "auto", "cwd"}:
                 continue
-            # Expand "~" for local/container cwd so Popen never gets a literal "~/" (the kernel rejects
-            # it); SSH cwd is interpreted by the remote shell, so keep "~" there. Predicate shared with
-            # terminal_tool so the sites can't drift.
+            # Expand "~" for local/container cwd so Popen never gets a literal "~/" (kernel rejects it);
+            # SSH cwd is interpreted by the remote shell: keep "~". Predicate shared w/ terminal_tool.
             if isinstance(_val, str) and not _is_ssh_remote_tilde_cwd(_terminal_backend, _val.strip()):
                 _val = os.path.expanduser(_val)
         os.environ[_env_var] = json.dumps(_val) if isinstance(_val, (list, dict)) else str(_val)
 
 
 def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
-    """Bridge auxiliary model/endpoint overrides (vision, approval, plugin-registered tasks).
-
-    Compression config is read from config.yaml directly by run_agent.py/auxiliary_client.py.
-    """
+    """Bridge auxiliary model/endpoint overrides (vision, approval, plugin tasks); compression reads
+    config.yaml directly."""
     _aux_bridged_keys = {"vision", "approval"}
     try:
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
@@ -2002,8 +1955,7 @@ def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
 
 def _bridge_config_to_env(_cfg: dict) -> None:
     """Export config.yaml settings to the env vars os.getenv() consumers read."""
-    # Top-level simple values (fallback only — don't override .env)
-    for _key, _val in _cfg.items():
+    for _key, _val in _cfg.items():  # top-level scalars: fallback only, never override .env
         if isinstance(_val, (str, int, float, bool)) and _key not in os.environ:
             os.environ[_key] = str(_val)
     _terminal_cfg = _cfg.get("terminal", {})
@@ -2020,8 +1972,8 @@ def _bridge_config_to_env(_cfg: dict) -> None:
     _bridge_section_to_env(_display_cfg, _DISPLAY_ENV_BRIDGE)
     if (
         isinstance(_display_cfg, dict)
-        # Documented as a service-manager override, so preserve it when already set; the other
-        # display bridges stay config-authoritative for backwards compatibility.
+        # Documented service-manager override: env wins when already set (other display bridges stay
+        # config-authoritative for backwards compatibility).
         and "busy_steer_ack_enabled" in _display_cfg
         and "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED" not in os.environ
     ):
@@ -2032,8 +1984,7 @@ def _bridge_config_to_env(_cfg: dict) -> None:
     _security_cfg = _cfg.get("security", {})
     if isinstance(_security_cfg, dict) and _security_cfg.get("redact_secrets") is not None:
         os.environ["HERMES_REDACT_SECRETS"] = str(_security_cfg["redact_secrets"]).lower()
-    # Media settings (delivery allowlist, recency trust, strict mode) use the shared bridge so
-    # standalone entrypoints (`hermes cron run`, gateway-less ticks) apply the SAME policy.
+    # Media policy uses the shared bridge so standalone entrypoints (`hermes cron run`) match.
     _gateway_cfg = _cfg.get("gateway", {})
     if isinstance(_gateway_cfg, dict):
         from gateway.media_policy import apply_media_policy_env
@@ -2053,9 +2004,8 @@ def _bridge_config_to_env(_cfg: dict) -> None:
 def _load_bridge_config(config_path: Path) -> dict:
     """Raw config read for the presence-sensitive env bridge, with the managed overlay applied.
 
-    Raw (not defaults-merged) is deliberate: only keys the user actually wrote may be bridged, else
-    all of DEFAULT_CONFIG would be exported. Managed values overlay BEFORE bridging so a pinned
-    timezone/redact_secrets/max_turns/terminal setting wins at the env layer too (fail-open).
+    Raw (not defaults-merged) so only keys the user wrote are bridged, else all of DEFAULT_CONFIG
+    would be exported. Managed overlay applies BEFORE bridging so pinned values win in env too.
     """
     from hermes_cli.config import _expand_env_vars, read_user_config_raw
     cfg = _expand_env_vars(read_user_config_raw(config_path))
@@ -2085,7 +2035,7 @@ if _config_path.exists():
             "your current config.yaml. Run `hermes doctor` to investigate.",
             file=sys.stderr)
 
-# Apply IPv4 preference if configured (before any HTTP clients are created).
+# IPv4 preference must apply before any HTTP clients are created.
 try:
     from hermes_constants import apply_ipv4_preference
     _network_cfg = _cfg.get("network", {})
@@ -2094,29 +2044,24 @@ try:
 except Exception as _bootstrap_exc:
     print(f"  Warning: IPv4 preference application failed: {_bootstrap_exc}", file=sys.stderr)
 
-# Validate config structure early — log warnings so gateway operators see problems
 try:
     from hermes_cli.config import print_config_warnings
     print_config_warnings()
 except Exception as _bootstrap_exc:
     print(f"  Warning: config validation failed: {_bootstrap_exc}", file=sys.stderr)
 
-# Warn if user has deprecated MESSAGING_CWD / TERMINAL_CWD in .env
 try:
     from hermes_cli.config import warn_deprecated_cwd_env_vars
     warn_deprecated_cwd_env_vars()
 except Exception as _bootstrap_exc:
     print(f"  Warning: deprecation check failed: {_bootstrap_exc}", file=sys.stderr)
 
-# Gateway runs in quiet mode - suppress debug output and use cwd directly (no temp dirs)
-os.environ["HERMES_QUIET"] = "1"
+os.environ["HERMES_QUIET"] = "1"  # gateway runs quiet: no debug output, cwd used directly
 
-# HERMES_EXEC_ASK is set in start_gateway(), not at import time. Importing this module from CLI
-# tools (e.g. send_message → _gateway_runner_ref) must not flip interactive CLI sessions into ask-
-# mode, or Dangerous Command prompts become silent pending_approval with no Approve/Deny UI.
+# HERMES_EXEC_ASK is set in start_gateway(), NOT at import: CLI tools importing this module must not
+# flip interactive sessions into ask-mode (approval prompts would become silent pending_approval).
 
-# Terminal cwd for messaging platforms: config.yaml terminal.cwd is canonical (bridged to
-# TERMINAL_CWD above); MESSAGING_CWD is a backward-compat fallback.
+# Terminal cwd: config.yaml terminal.cwd is canonical (bridged above); MESSAGING_CWD is legacy fallback.
 from gateway.cwd_placeholder import CWD_PLACEHOLDERS, resolve_placeholder_terminal_cwd
 
 _configured_cwd = os.environ.get("TERMINAL_CWD", "")
@@ -2145,11 +2090,8 @@ from gateway.delivery import (
     DeliveryRouter,
     resolve_delivery_transport,  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
 )
-from gateway.turn_lease import (
-    SessionTurnLeaseRegistry)
-from gateway.session_state import (
-    SessionState, legacy_dict_property, legacy_lease_token_property
-)
+from gateway.turn_lease import SessionTurnLeaseRegistry
+from gateway.session_state import SessionState, legacy_dict_property, legacy_lease_token_property
 from gateway.authz_mixin import GatewayAuthorizationMixin
 from gateway.kanban_watchers import GatewayKanbanWatchersMixin
 from gateway.slash_commands import GatewaySlashCommandsMixin
@@ -2191,10 +2133,7 @@ logger = logging.getLogger(__name__)
 
 
 def _best_effort(fn: Callable[[], Any], debug_msg: Optional[str] = None) -> Any:
-    """Call ``fn``, swallowing any Exception (logged at debug when ``debug_msg`` has a ``%s`` slot).
-
-    Returns ``fn()``'s value, or None on failure.
-    """
+    """Call ``fn``; return None on any Exception (debug-logged via ``debug_msg`` ``%s`` if given)."""
     try:
         return fn()
     except Exception as exc:
@@ -2203,10 +2142,9 @@ def _best_effort(fn: Callable[[], Any], debug_msg: Optional[str] = None) -> Any:
         return None
 
 
-# Ceiling for the shutdown quiesce of the gateway-owned thread pool. Drain has
-# already waited for the agents, so what is left here is short blocking work
-# (a transcript append, a routing save); anything slower is a stuck worker we
-# must not wait on, and the caller clamps this to the watchdog leash anyway.
+# Shutdown quiesce ceiling for the gateway-owned thread pool. Drain already waited for the agents;
+# what remains is short blocking work — anything slower is a stuck worker we must not wait on
+# (the caller clamps this to the watchdog leash anyway).
 _EXECUTOR_QUIESCE_TIMEOUT = 2.0
 
 
@@ -2236,9 +2174,7 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
         ).strip().lower()
         if dm_policy != "open" and group_policy != "open":
             continue
-        gateway_allow_all = _getenv(
-            "GATEWAY_ALLOW_ALL_USERS", ""
-        ).lower() in {"true", "1", "yes"}
+        gateway_allow_all = _getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
         platform_opted_in = gateway_allow_all or (
             allow_all_env and _getenv(allow_all_env, "").lower() in {"true", "1", "yes"}
         )
@@ -2252,15 +2188,14 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
 # second message can't slip past the "already running" guard before the agent actually exists.
 _AGENT_PENDING_SENTINEL = object()
 
-# Conversation-scoped per-session state registry (legacy contract). The state itself lives in
-# ``SessionState.conversation`` and boundaries clear it via ``ConversationState.clear()`` (new
-# fields are picked up automatically). Retained for (a) plain-dict stores not yet folded into
-# SessionState (``_pending_model_notes``), popped per-key by _clear_conversation_scope, and (b) the
-# public test contract. NOT in this list (different lifecycles): _running_agents/_running_agents_ts/
-# _active_session_leases/_busy_ack_ts/_turn_lease_tokens (turn-scoped, owned by
-# _release_running_agent_state and the dispatch finally); _session_run_generation (monotonic —
-# clearing breaks stale-run detection); _agent_cache (own eviction path _evict_cached_agent);
-# approval/slash-confirm state (cleared via _clear_session_boundary_security_state).
+# Conversation-scoped per-session state registry (legacy contract). State lives in
+# ``SessionState.conversation`` and boundaries clear it via ``ConversationState.clear()``; this list
+# remains for plain-dict stores not yet folded in (``_pending_model_notes``, popped per-key by
+# _clear_conversation_scope) and the public test contract. NOT listed (different lifecycles):
+# turn-scoped _running_agents*/_active_session_leases/_busy_ack_ts/_turn_lease_tokens (owned by
+# _release_running_agent_state + dispatch finally); _session_run_generation (monotonic — clearing
+# breaks stale-run detection); _agent_cache (_evict_cached_agent); approval/slash-confirm state
+# (_clear_session_boundary_security_state).
 _CONVERSATION_SCOPED_STATE: tuple = (
     "_session_model_overrides",
     "_pending_one_turn_model_restores",
@@ -2269,8 +2204,7 @@ _CONVERSATION_SCOPED_STATE: tuple = (
     "_pending_model_notes",
     "_last_resolved_model",
     "_queued_events",
-    # Stall-watchdog "already notified" latch (#72016). Cleared on /new so a
-    # fresh conversation can warn again if it later stalls with pending inbound.
+    # Stall-watchdog "already notified" latch; cleared on /new so a fresh conversation can warn again.
     "_session_stall_notified",
     # Sidecar notes staged but never consumed (turn aborted before run_sync) must not leak into a
     # future conversation's first user message — session keys are source-derived and REUSED.
@@ -2328,13 +2262,8 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
     capabilities = runtime.get("capabilities")
     capabilities = (
-        {
-            key: value
-            for key, value in capabilities.items()
-            if isinstance(key, str) and isinstance(value, bool)
-        }
-        if isinstance(capabilities, dict)
-        else {}
+        {k: v for k, v in capabilities.items() if isinstance(k, str) and isinstance(v, bool)}
+        if isinstance(capabilities, dict) else {}
     )
 
     return {**_runtime_agent_kwargs(runtime), "max_tokens": max_tokens, "capabilities": capabilities}
@@ -2372,8 +2301,7 @@ class _GatewayModelContext:
 def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModelContext:
     """Resolve the configured gateway route and its effective context window.
 
-    Shared authority for status/session banners and slash commands. Call it off the event loop:
-    credential resolution and model metadata may block.
+    Shared by status/session banners and slash commands. Call off the event loop (may block).
     """
     from agent.model_metadata import DEFAULT_FALLBACK_CONTEXT, get_model_context_length
 
@@ -2410,8 +2338,7 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
         api_key = runtime.get("api_key")
 
     def _pin_still_applies() -> bool:
-        # A configured context_length pin is dropped when the effective route no longer matches the
-        # configured one; an unresolvable check also drops it.
+        # Drop a configured context_length pin when the effective route no longer matches (or on error).
         from hermes_cli.route_identity import should_clear_context_pin
         return not should_clear_context_pin(
             configured_model, resolved_model, configured_base_url, base_url, configured_provider, provider)
@@ -2446,9 +2373,7 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
 
 def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
     """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
-    from hermes_cli.runtime_provider import (
-        resolve_runtime_provider, format_runtime_provider_error
-    )
+    from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
     try:
         runtime = resolve_runtime_provider(requested=provider)
     except Exception as exc:
@@ -2478,13 +2403,9 @@ def _credential_pool_for_provider(provider: Optional[str]):
     if not provider or not str(provider).strip():
         return None
     try:
-        return _resolve_runtime_agent_kwargs_for_provider(str(provider).strip()).get(
-            "credential_pool"
-        )
+        return _resolve_runtime_agent_kwargs_for_provider(str(provider).strip()).get("credential_pool")
     except Exception:
-        logger.debug(
-            "Failed to resolve credential pool for provider=%s", provider, exc_info=True
-        )
+        logger.debug("Failed to resolve credential pool for provider=%s", provider, exc_info=True)
         return None
 
 
@@ -2492,8 +2413,7 @@ def _try_resolve_fallback_provider() -> dict | None:
     """Attempt to resolve credentials from the fallback_model/fallback_providers config."""
     from hermes_cli.runtime_provider import resolve_runtime_provider
     try:
-        # Canonical loader so managed overlay, ${VAR} expansion and root-model normalization
-        # reach the fallback chain (a raw read misses administrator-pinned fallback_providers).
+        # Canonical loader so managed overlay / ${VAR} expansion reach the fallback chain.
         cfg = _load_gateway_runtime_config()
         fb_list = get_fallback_chain(cfg)
         if not fb_list:
@@ -2505,12 +2425,10 @@ def _try_resolve_fallback_provider() -> dict | None:
                 runtime = resolve_runtime_provider(
                     requested=entry.get("provider"), explicit_base_url=entry.get("base_url"),
                     explicit_api_key=resolve_entry_api_key(entry))
-                # Log the literal config `provider`, not the resolved runtime category: an Ollama
-                # fallback resolves via the OpenAI-compatible path and would log as "openrouter".
+                # Log the config `provider`, not the runtime category (Ollama would log "openrouter").
                 logger.info(
                     "Fallback provider resolved: %s model=%s",
-                    entry.get("provider") or runtime.get("provider"),
-                    entry.get("model"))
+                    entry.get("provider") or runtime.get("provider"), entry.get("model"))
                 return {**_runtime_agent_kwargs(runtime), "model": entry.get("model")}
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
@@ -2527,10 +2445,8 @@ def _event_media_type_at(event, index: int) -> str:
 
 
 def _event_media_kind_is(event, index: int, mime_prefix: str, fallback_types: frozenset) -> bool:
-    """Trust the per-attachment MIME; fall back to the message-level type only when it is unknown.
-
-    Otherwise a document uploaded alongside an image is base64'd as vision and the provider 400s.
-    """
+    """Per-attachment MIME first, message-level type only when unknown (else a document uploaded
+    alongside an image is base64'd as vision and the provider 400s)."""
     mtype = _event_media_type_at(event, index)
     if mtype:
         return mtype.startswith(mime_prefix)
@@ -2562,8 +2478,7 @@ def _event_media_is_video(event, index: int) -> bool:
 def _build_media_placeholder(event) -> str:
     """Text placeholder for media-only events (later replaced by vision enrichment).
 
-    Media queued during active processing is dequeued via .text only, so a caption-less event
-    would otherwise be lost.
+    Queued media is dequeued via .text only, so a caption-less event would otherwise be lost.
     """
     parts = []
     media_urls = getattr(event, "media_urls", None) or []
@@ -2584,8 +2499,8 @@ def _build_document_context_note(
 ) -> str:
     """Context note prepended to a user turn when they attach a document.
 
-    ``content_inlined=False`` = adapter cached the file without injecting content, so tell the agent
-    to read it. Binary docs (PDF, DOCX, …) must say *extract* the text; "ask the user" made it punt.
+    ``content_inlined=False`` = cached without content, so tell the agent to read it. Binary docs
+    must say *extract* the text; "ask the user" made it punt.
     """
     if mtype.startswith("text/") and content_inlined:
         return (
@@ -2608,9 +2523,7 @@ def _build_document_context_note(
 
 
 def _format_duration(seconds: float) -> str:
-    total = int(round(seconds))
-    if total < 0:
-        total = 0
+    total = max(0, int(round(seconds)))
     hours, rem = divmod(total, 3600)
     minutes, secs = divmod(rem, 60)
     if hours:
@@ -2662,8 +2575,7 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
 def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
     """Consume and return the full pending event for a session.
 
-    Queued follow-ups keep their media metadata so they re-enter the normal image/STT/document
-    preprocessing path instead of collapsing to a placeholder string.
+    Media metadata is kept so follow-ups re-enter normal image/STT/document preprocessing.
     """
     return adapter.get_pending_message(session_key)
 
@@ -2684,37 +2596,29 @@ def _reap_gateway_turn_processes(
 
     ``task_id`` is session-scoped, so a *replacement* turn can spawn its own process mid-reap;
     ``is_still_current`` (closure over the captured run_generation) lets the caller bail instead of
-    killing it. That turn snapshots its own baseline, so nothing stays unreaped.
+    killing it — that turn snapshots its own baseline, so nothing stays unreaped.
     """
     if not task_id:
-        # ProcessSession.task_id defaults to "" for sessionless callers; a blank id would match
-        # (and kill) every unrelated empty-task process. Nothing session-scoped to reap.
+        # Blank task_id (sessionless callers) would match and kill every unrelated empty-task process.
         return 0
     if is_still_current is not None:
         try:
             if not is_still_current():
                 logger.debug(
                     "Skipping reap for turn %s (%s): a newer turn already "
-                    "claimed this session; it owns its own baseline.",
-                    task_id,
-                    source)
+                    "claimed this session; it owns its own baseline.", task_id, source)
                 return 0
         except Exception:
             logger.debug(
                 "is_still_current check failed for turn %s (%s); reaping anyway",
-                task_id,
-                source,
-                exc_info=True)
+                task_id, source, exc_info=True)
 
     from tools.process_registry import process_registry
 
     try:
-        killed = process_registry.kill_started_since(
-            task_id, process_baseline, source=source
-        )
+        killed = process_registry.kill_started_since(task_id, process_baseline, source=source)
     except Exception:
-        # Runs on a detached daemon thread (fire-and-forget from interrupt and timeout paths); an
-        # uncaught exception would only reach threading.excepthook. Swallow and log normally.
+        # Detached daemon thread: an uncaught exception would only reach threading.excepthook.
         logger.warning(
             "Failed to reap background processes for turn %s (%s)", task_id, source, exc_info=True
         )
@@ -2722,26 +2626,20 @@ def _reap_gateway_turn_processes(
     if killed:
         logger.warning(
             "Reaped %d background process(es) created by abandoned turn %s (%s)",
-            killed,
-            task_id,
-            source)
+            killed, task_id, source)
     return killed
 
 
 _TURN_STACK_DUMP_FRAME_MARKERS = (
-    "run_conversation",
-    "run_sync",
-    "_run_sync_with_timeout_lifecycle",
-    "finalize_turn",
-    "end_turn",
-    "run_in_session")
+    "run_conversation", "run_sync", "_run_sync_with_timeout_lifecycle",
+    "finalize_turn", "end_turn", "run_in_session")
 
 
 def _dump_wedged_turn_stacks(task_id: str) -> None:
     """Log the stack of every thread that looks like turn work, at reap time.
 
-    The reaper's hard interrupt frees the wedged worker before a profiler can attach, so dump BEFORE
-    interrupting. Best-effort, bounded (turn-machinery threads only, capped output), never raises.
+    The hard interrupt frees the wedged worker before a profiler can attach, so dump BEFORE it.
+    Best-effort, bounded (turn-machinery threads only, capped output), never raises.
     """
     try:
         frames = sys._current_frames()
@@ -2762,15 +2660,11 @@ def _dump_wedged_turn_stacks(task_id: str) -> None:
                 break
             logger.error(
                 "Wedged-turn stack dump (task=%s thread=%s ident=%s):\n%s",
-                task_id,
-                names.get(ident, "?"),
-                ident,
-                "".join(stack[-25:]))
+                task_id, names.get(ident, "?"), ident, "".join(stack[-25:]))
         if dumped == 0:
             logger.error(
                 "Wedged-turn stack dump for task %s: no thread with "
-                "turn-machinery frames found (worker may have already exited)",
-                task_id)
+                "turn-machinery frames found (worker may have already exited)", task_id)
     except Exception:
         logger.debug("Wedged-turn stack dump failed", exc_info=True)
 
@@ -2786,8 +2680,7 @@ def _abandon_timed_out_gateway_turn(
             return False
         timeout_fired.set()
 
-    # Capture the wedged worker's stack BEFORE interrupting: the interrupt frees the blocked
-    # frame, destroying the only evidence of where the turn was stuck.
+    # BEFORE interrupting: the interrupt frees the blocked frame, destroying the only evidence.
     _dump_wedged_turn_stacks(task_id)
 
     agent = agent_holder[0] if agent_holder else None
@@ -2819,9 +2712,7 @@ def _watch_gateway_turn_inactivity(
         if agent is None or not hasattr(agent, "get_activity_summary"):
             continue
         try:
-            idle_seconds = float(
-                agent.get_activity_summary().get("seconds_since_activity", 0.0)
-            )
+            idle_seconds = float(agent.get_activity_summary().get("seconds_since_activity", 0.0))
         except Exception:
             continue
         if idle_seconds < timeout:
@@ -2833,12 +2724,10 @@ def _watch_gateway_turn_inactivity(
         return
 
 
-_CONTROL_INTERRUPT_MESSAGES = frozenset(
-    {
-        _INTERRUPT_REASON_STOP.lower(), _INTERRUPT_REASON_RESET.lower(),
-        _INTERRUPT_REASON_TIMEOUT.lower(), _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
-        _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(), _INTERRUPT_REASON_GATEWAY_RESTART.lower()}
-)
+_CONTROL_INTERRUPT_MESSAGES = frozenset({
+    _INTERRUPT_REASON_STOP.lower(), _INTERRUPT_REASON_RESET.lower(),
+    _INTERRUPT_REASON_TIMEOUT.lower(), _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
+    _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(), _INTERRUPT_REASON_GATEWAY_RESTART.lower()})
 
 
 def _is_control_interrupt_message(message: Optional[str]) -> bool:
@@ -2852,14 +2741,12 @@ def _is_control_interrupt_message(message: Optional[str]) -> bool:
 def _strip_response_attachments_for_direct_send(response: str, adapter) -> str:
     """Return the visible text portion of a response before direct send().
 
-    Queued follow-up resends replay only explicit ``MEDIA:`` attachments; bare local paths and image
-    URLs stay visible because the post-stream uploader ignores them. No broad ``MEDIA:`` regex after
-    ``extract_media()`` — it deliberately preserves protected code spans and unvalidated tags.
+    Replays only explicit ``MEDIA:`` attachments; bare paths/URLs stay visible (the post-stream
+    uploader ignores them). No broad ``MEDIA:`` regex after ``extract_media()``: it deliberately
+    preserves protected code spans and unvalidated tags.
     """
     _, cleaned = adapter.extract_media(response)
-    cleaned = cleaned.replace("[[audio_as_voice]]", "").strip()
-    cleaned = cleaned.replace("[[as_document]]", "").strip()
-    return cleaned.strip()
+    return cleaned.replace("[[audio_as_voice]]", "").replace("[[as_document]]", "").strip()
 
 
 def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None]:
@@ -2883,7 +2770,6 @@ def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None
         line = line.strip()
         if line.startswith("name:"):
             raw = line.split(":", 1)[1].strip()
-            # Strip YAML quote wrappers if present
             if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
                 raw = raw[1:-1]
             declared_name = raw.strip()
@@ -2891,28 +2777,22 @@ def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None
     if not declared_name:
         return None, None
     slug = declared_name.lower().replace(" ", "-").replace("_", "-")
-    # Mirror _SKILL_INVALID_CHARS and _SKILL_MULTI_HYPHEN from skill_commands
-    import re as _re
-    slug = _re.sub(r"[^a-z0-9-]", "", slug)
-    slug = _re.sub(r"-{2,}", "-", slug).strip("-")
+    # Mirrors _SKILL_INVALID_CHARS / _SKILL_MULTI_HYPHEN from skill_commands
+    slug = re.sub(r"[^a-z0-9-]", "", slug)
+    slug = re.sub(r"-{2,}", "-", slug).strip("-")
     if not slug:
         return None, declared_name
     return slug, declared_name
 
 
 def _check_unavailable_skill(command_name: str) -> str | None:
-    """Match a command to a known-but-inactive skill.
-
-    Returns a hint if the skill exists but is disabled or optional-install only; else None.
-    """
-    # Normalize: command uses hyphens, skill names may use hyphens or underscores
+    """Hint when a command matches a skill that is disabled or optional-install only; else None."""
     normalized = command_name.lower().replace("_", "-")
     try:
         from tools.skills_tool import _get_disabled_skill_names
         from agent.skill_utils import get_all_skills_dirs, is_excluded_skill_path
         disabled = _get_disabled_skill_names()
 
-        # Check disabled skills across all dirs (local + external)
         for skills_dir in get_all_skills_dirs():
             if not skills_dir.exists():
                 continue
@@ -2922,8 +2802,7 @@ def _check_unavailable_skill(command_name: str) -> str | None:
                 slug, declared_name = _skill_slug_from_frontmatter(skill_md)
                 if not slug or not declared_name:
                     continue
-                # disabled is keyed by the declared frontmatter name (what
-                # skills.disabled / skills.platform_disabled store).
+                # disabled is keyed by the declared frontmatter name (what skills.disabled stores).
                 if slug == normalized and declared_name in disabled:
                     return (
                         f"The **{command_name}** skill is installed but disabled.\n"
@@ -2939,17 +2818,15 @@ def _check_unavailable_skill(command_name: str) -> str | None:
                 if is_excluded_skill_path(skill_md):
                     continue
                 slug, _declared = _skill_slug_from_frontmatter(skill_md)
-                if not slug:
+                if not slug or slug != normalized:
                     continue
-                if slug == normalized:
-                    # Build install path: official/<category>/<name>
-                    rel = skill_md.parent.relative_to(optional_dir)
-                    parts = list(rel.parts)
-                    install_path = f"official/{'/'.join(parts)}"
-                    return (
-                        f"The **{command_name}** skill is available but not installed.\n"
-                        f"Install it with: `hermes skills install {install_path}`"
-                    )
+                # Install path: official/<category>/<name>
+                rel = skill_md.parent.relative_to(optional_dir)
+                install_path = f"official/{'/'.join(rel.parts)}"
+                return (
+                    f"The **{command_name}** skill is available but not installed.\n"
+                    f"Install it with: `hermes skills install {install_path}`"
+                )
     except Exception:
         pass
     return None
@@ -2964,25 +2841,20 @@ def _teams_pipeline_plugin_enabled() -> bool:
     """Return True when the standalone Teams pipeline plugin is enabled."""
     config = _load_gateway_config()
     enabled = cfg_get(config, "plugins", "enabled", default=[])
-    if not isinstance(enabled, list):
-        return False
-    return "teams_pipeline" in enabled or "teams-pipeline" in enabled
+    return isinstance(enabled, list) and ("teams_pipeline" in enabled or "teams-pipeline" in enabled)
 
 
 def _gateway_config_home() -> Path:
     """Return the Hermes home that gateway config reads should use."""
     override = get_hermes_home_override()
-    if override:
-        return Path(override)
-    return _hermes_home
+    return Path(override) if override else _hermes_home
 
 
 def _load_gateway_config(config_path: "Path | None" = None) -> dict:
     """Load and parse a gateway config.yaml, returning {} on any error (fail-open).
 
     Defaults to the active gateway home (``_hermes_home`` monkeypatches apply); multiplexed callers
-    may pass a profile path. Managed scope is overlaid here because neither read_raw_config nor
-    yaml.safe_load carries the managed merge, and pinned values must be honored.
+    may pass a profile path.
     """
     if config_path is None:
         config_path = _gateway_config_home() / 'config.yaml'
@@ -2990,8 +2862,7 @@ def _load_gateway_config(config_path: "Path | None" = None) -> dict:
     used_canonical = False
     try:
         from hermes_cli.config import get_config_path, read_raw_config
-        # Fast path: reuse the shared cache when _hermes_home agrees with the canonical config
-        # location; otherwise fall through to a direct read (monkeypatched _hermes_home in tests).
+        # Fast path via shared cache when the path is canonical; else direct read (test monkeypatches).
         if config_path == get_config_path():
             raw = read_raw_config()
             used_canonical = True
@@ -3008,8 +2879,7 @@ def _load_gateway_config(config_path: "Path | None" = None) -> dict:
             logger.debug("Could not load gateway config from %s", config_path)
             raw = {}
 
-    # read_raw_config() returns raw YAML WITHOUT the managed merge (that lives in load_config), so
-    # the managed overlay is required on both paths for the gateway to honor pinned values.
+    # Neither read_raw_config() nor yaml.safe_load carries the managed merge; overlay on both paths.
     try:
         from hermes_cli import managed_scope
         raw = managed_scope.apply_managed_overlay(raw if isinstance(raw, dict) else {})
@@ -3017,9 +2887,8 @@ def _load_gateway_config(config_path: "Path | None" = None) -> dict:
         pass
     if not isinstance(raw, dict):
         return {}
-    # Canonicalize model-id aliases (model.name / model.model → model.default) and migrate stale
-    # root-level provider/base_url into the model section. The gateway bypasses load_config(), so
-    # without this replay ``model: {name: <id>}`` resolves to an empty model. Fail-open.
+    # Canonicalize model-id aliases (model.name/model.model → model.default) and migrate stale root
+    # provider/base_url: the gateway bypasses load_config(), else ``model: {name: <id>}`` is empty.
     try:
         from hermes_cli.config import _normalize_root_model_keys
         raw = _normalize_root_model_keys(raw)
@@ -3043,12 +2912,9 @@ def _checkpoint_agent_kwargs(config: dict | None) -> dict:
     defaults = DEFAULT_CONFIG["checkpoints"]
     return {
         "checkpoints_enabled": cp_cfg.get("enabled", defaults["enabled"]),
-        "checkpoint_max_snapshots": cp_cfg.get(
-            "max_snapshots", defaults["max_snapshots"]),
-        "checkpoint_max_total_size_mb": cp_cfg.get(
-            "max_total_size_mb", defaults["max_total_size_mb"]),
-        "checkpoint_max_file_size_mb": cp_cfg.get(
-            "max_file_size_mb", defaults["max_file_size_mb"])}
+        "checkpoint_max_snapshots": cp_cfg.get("max_snapshots", defaults["max_snapshots"]),
+        "checkpoint_max_total_size_mb": cp_cfg.get("max_total_size_mb", defaults["max_total_size_mb"]),
+        "checkpoint_max_file_size_mb": cp_cfg.get("max_file_size_mb", defaults["max_file_size_mb"])}
 
 
 def _load_gateway_runtime_config() -> dict:
@@ -3067,11 +2933,8 @@ def _load_gateway_runtime_config() -> dict:
 
 
 def _resolve_gateway_model(config: dict | None = None) -> str:
-    """Read model from config.yaml (single source of truth).
-
-    Otherwise temporary AIAgent instances (e.g. /compress) use the hardcoded default, which fails
-    when the active provider is openai-codex.
-    """
+    """Read model from config.yaml (single source of truth), else temporary AIAgents (e.g. /compress)
+    use the hardcoded default, which fails under openai-codex."""
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
@@ -3084,11 +2947,8 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
 def _channel_override_lookup_keys(
     chat_id: str, *, thread_id: Optional[str] = None, parent_id: Optional[str] = None
 ) -> list[str]:
-    """Ordered, de-duplicated ``channel_overrides`` lookup keys.
-
-    Matches ``resolve_channel_prompt``: exact thread/channel id first, then parent channel/forum id
-    (Discord threads inherit parent overrides).
-    """
+    """Ordered, de-duplicated ``channel_overrides`` lookup keys (matches ``resolve_channel_prompt``:
+    exact id first, then parent — Discord threads inherit parent overrides)."""
     keys: list[str] = []
     seen: set[str] = set()
     for key in (chat_id, thread_id, parent_id):
@@ -3106,10 +2966,7 @@ def _get_channel_override(
     config: GatewayConfig, platform: Platform, chat_id: str, *, thread_id: Optional[str] = None,
     parent_id: Optional[str] = None,
 ) -> Optional[ChannelOverride]:
-    """Per-channel override for this platform/chat_id, or None.
-
-    Looks up ``chat_id``, then ``thread_id``, then ``parent_id`` (child channels inherit parent).
-    """
+    """Per-channel override via chat_id, then thread_id, then parent_id; None if absent."""
     platforms = getattr(config, "platforms", None)
     if not platforms:
         return None
@@ -3117,9 +2974,7 @@ def _get_channel_override(
     if not platform_config or not platform_config.channel_overrides:
         return None
     overrides = platform_config.channel_overrides
-    for key in _channel_override_lookup_keys(
-        chat_id, thread_id=thread_id, parent_id=parent_id
-    ):
+    for key in _channel_override_lookup_keys(chat_id, thread_id=thread_id, parent_id=parent_id):
         ov = overrides.get(key)
         if ov is not None:
             return ov
@@ -3127,10 +2982,7 @@ def _get_channel_override(
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
-    """Resolve the Hermes update command as argv parts, or ``None``.
-
-    Tries ``shutil.which("hermes")``, then ``sys.executable -m hermes_cli.main`` (no shim on PATH).
-    """
+    """Hermes update command argv: ``hermes`` on PATH, else ``python -m hermes_cli.main``, else None."""
     import shutil
 
     hermes_bin = shutil.which("hermes")
@@ -3156,9 +3008,7 @@ def _parse_session_key(session_key: str) -> "dict | None":
     """
     parts = session_key.split(":")
     if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
-        result = {
-            "platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]
-        }
+        result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
         if len(parts) > 5 and parts[3] in {"dm", "thread"}:
             result["thread_id"] = parts[5]
         return result
@@ -3213,8 +3063,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
     _sid = evt.get("session_id", "unknown")
     _cmd = evt.get("command", "unknown")
 
-    # watch_disabled and overflow events carry their human-readable summary in `message`
-    # (shared formatter in tools/process_registry.py).
+    # watch_disabled / overflow events carry their summary in `message` (process_registry formatter).
     if evt_type in ("watch_disabled", "watch_overflow_tripped", "watch_overflow_released"):
         return f"[IMPORTANT: {evt.get('message', '')}]"
 
@@ -3233,7 +3082,6 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
         return text
 
     if evt_type == "async_delegation":
-        # Reuse the shared rich formatter (self-contained task-source block).
         from tools.process_registry import format_process_notification
         return format_process_notification(evt)
 
@@ -3243,9 +3091,8 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
 def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
     """Drain gateway-owned watch events without spinning on requeued events.
 
-    Process completions belong to per-process watchers, async delegation completions to
-    ``_async_delegation_watcher``; requeueing them inside ``while not queue.empty()`` never
-    terminates, so detach the batch first and requeue foreign events afterwards.
+    Foreign events (process completions, async delegations) requeued inside ``while not
+    queue.empty()`` never terminate, so detach the batch first and requeue afterwards.
     """
     watch_events: list[dict] = []
     requeue: list[dict] = []
@@ -3267,8 +3114,7 @@ def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
     return watch_events
 
 
-# Weak ref to the active GatewayRunner (set in GatewayRunner.__init__), used by tools such as
-# send_message that must route through a live adapter for plugin platforms.
+# Weak ref to the active GatewayRunner; tools like send_message route through its live adapters.
 import weakref as _weakref
 _gateway_runner_ref: _weakref.ref = lambda: None
 
@@ -3278,20 +3124,17 @@ def _normalize_empty_agent_response(
 ) -> str:
     """Normalize empty/None agent responses into user-facing messages.
 
-    Covers ``failed`` plus the case where the agent did work (api_calls > 0) but returned no text,
-    and surfaces a retry hint when it never ran (api_calls == 0, not interrupted/failed): the
-    post-/stop silent-drop where a stale generation token returns an empty result.
+    Covers ``failed``, work done (api_calls > 0) with no text, and never-ran (api_calls == 0,
+    the post-/stop silent-drop from a stale generation token) with a retry hint.
     """
     if response:
         return response
 
     if agent_result.get("failed"):
-        # None-safe: the result dict is built with ``'error': holder.get('error')`` and can carry an
-        # EXPLICIT None, bypassing dict.get's default and rendering "The request failed: None".
+        # ``error`` can be an EXPLICIT None (bypasses dict.get default) -> would render "failed: None".
         error_detail = agent_result.get("error") or "unknown error"
         error_str = str(error_detail).lower()
-        # Session-persistence failures get a dedicated recovery message: suggesting /reset would
-        # destroy the user's context without fixing the storage problem (locks, full disk).
+        # Persistence failures: suggesting /reset would destroy context without fixing storage.
         failure_reason = str(agent_result.get("failure_reason") or "")
         if failure_reason.startswith("session_persistence_failed") or (
             "session storage" in error_str
@@ -3308,8 +3151,7 @@ def _normalize_empty_agent_response(
                 "Your message should already be saved — please send it again in a moment."
             )
         is_context_failure = any(
-            p in error_str
-            for p in ("context", "token", "too large", "too long", "exceed", "payload")
+            p in error_str for p in ("context", "token", "too large", "too long", "exceed", "payload")
         ) or ("400" in error_str and history_len > 50)
         if is_context_failure:
             return (
@@ -3323,9 +3165,8 @@ def _normalize_empty_agent_response(
 
     api_calls = int(agent_result.get("api_calls", 0) or 0)
     if agent_result.get("interrupted"):
-        # Interrupted with api_calls > 0 = deliberately stopped/steered; silence is intentional and
-        # queued messages come via the recursive drain in _run_agent. With ZERO api_calls the
-        # message was never processed (stale /stop interrupt flag), so surface it.
+        # Interrupted with api_calls > 0 = deliberately stopped/steered; silence is intentional (queued
+        # messages arrive via the recursive drain). ZERO api_calls = never processed (stale /stop flag).
         if api_calls == 0:
             return (
                 "⚠️ Your message was interrupted before processing started "
@@ -3343,8 +3184,7 @@ def _normalize_empty_agent_response(
             "This may be a transient error — try sending your message again."
         )
 
-    # api_calls == 0, not failed, not interrupted (all returned above): the agent never ran
-    # (post-/stop generation race). Without this the turn is silently dropped with no reply.
+    # api_calls == 0, not failed/interrupted: agent never ran (post-/stop race); don't drop silently.
     if api_calls == 0 and not agent_result.get("partial"):
         return (
             "⚠️ Your message wasn't processed (the previous turn was still "
@@ -3357,9 +3197,8 @@ def _normalize_empty_agent_response(
 def _is_gateway_hidden_reasoning_incomplete_turn(agent_result: dict) -> bool:
     """Detect retry-exhausted turns with hidden reasoning but no visible answer.
 
-    The loop returns the retry-exhaustion sentinel as BOTH ``final_response`` and ``error``, so a
-    non-empty ``final_response`` proves nothing. Hidden only when the sentinel is present and
-    ``final_response`` is empty or echoes it; any other text is a real answer.
+    The loop returns the retry-exhaustion sentinel as BOTH ``final_response`` and ``error``, so
+    non-empty ``final_response`` proves nothing; any text other than the sentinel is a real answer.
     """
     if not isinstance(agent_result, dict):
         return False
@@ -3377,8 +3216,8 @@ def _is_gateway_hidden_reasoning_incomplete_turn(agent_result: dict) -> bool:
 def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
     """True only when a gateway turn really completed successfully.
 
-    Restart recovery uses ``resume_pending`` as a durable marker; a soft interrupt can look like a
-    normal result with an empty final response, and clearing the marker then loses the signal.
+    ``resume_pending`` is a durable restart-recovery marker; a soft interrupt can look like a normal
+    empty result, and clearing then loses the signal.
     """
     if not isinstance(agent_result, dict):
         return False
@@ -3397,9 +3236,7 @@ def _preserve_queued_followup_history_offset(
     Each recursive ``_run_agent()`` advances ``history_offset``; uncorrected, the outer persistence
     step sees only the *last* queued turn as "new" and drops earlier ones.
     """
-    if not isinstance(followup_result, dict):
-        return followup_result
-    if not isinstance(current_result, dict):
+    if not isinstance(followup_result, dict) or not isinstance(current_result, dict):
         return followup_result
 
     current_offset = current_result.get("history_offset")
@@ -3417,35 +3254,28 @@ def _preserve_queued_followup_history_offset(
 async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None:
     """Best-effort dispose for an adapter that never made it onto ``self.adapters``.
 
-    A failed connect leaves the adapter uninstalled, so nothing else calls ``disconnect()``;
-    resources opened in ``__init__`` (e.g. SQLite fds) would leak until GC (not prompt for
-    asyncio-bound objects) and exhaust the fd ulimit over a long retry loop. ``adapter`` may be
-    ``None`` (half-constructed / ``_create_adapter`` returned None).
+    A failed connect leaves it uninstalled so nothing else calls ``disconnect()``; resources opened
+    in ``__init__`` (e.g. SQLite fds) would leak until GC (not prompt for asyncio-bound objects) and
+    exhaust the fd ulimit over a long retry loop. ``adapter`` may be ``None`` (half-constructed).
     """
     if adapter is None:
         return
     try:
         await adapter.disconnect()
     except Exception:
-        # Half-constructed adapters (e.g. APIServerAdapter that crashed in aiohttp setup) can raise
-        # from disconnect(); that must not abort the watcher loop. ``asyncio.CancelledError`` is a
-        # BaseException, so cancellation is not swallowed; dispose failures are best-effort.
+        # Half-constructed adapters can raise from disconnect(); must not abort the watcher loop.
+        # CancelledError is a BaseException, so cancellation is not swallowed.
         logger.debug(
             "Adapter dispose raised on unowned adapter %r",
-            getattr(adapter, "name", type(adapter).__name__),
-            exc_info=True)
+            getattr(adapter, "name", type(adapter).__name__), exc_info=True)
 
 
-# Max seconds between platform reconnect retries (primary watcher and
-# secondary-profile reconnects share this policy — tune in one place).
+# Max seconds between platform reconnect retries (primary watcher and secondary profiles share it).
 _RECONNECT_BACKOFF_CAP = 300
 
-# Seconds a platform may sit continuously in the reconnect queue before it is flagged
-# NEEDS_ATTENTION. Retrying never stops (transient outages must self-heal); this only makes a
-# permanently-failing loop loud. 0 disables.
-_RECONNECT_ATTENTION_AFTER_SECONDS = _float_env(
-    "HERMES_RECONNECT_ATTENTION_AFTER_SECONDS", 7200
-)
+# Seconds continuously in the reconnect queue before NEEDS_ATTENTION. Retrying never stops (transient
+# outages must self-heal); this only makes a permanently-failing loop loud. 0 disables.
+_RECONNECT_ATTENTION_AFTER_SECONDS = _float_env("HERMES_RECONNECT_ATTENTION_AFTER_SECONDS", 7200)
 
 
 def _reconnect_backoff(attempt: int) -> int:
@@ -3467,9 +3297,8 @@ def _reconnect_needs_attention(info: dict, now: float) -> bool:
     return (now - queued_at) >= _RECONNECT_ATTENTION_AFTER_SECONDS
 
 
-# Sentinel for "no explicit session DB pinned on this runner", so ``_session_db`` can distinguish
-# "resolve from the active profile scope" from a deliberate ``runner._session_db = None`` (disables
-# DB-backed commands, as many test suites do). Mirrors ``gateway.session._DB_UNPINNED``.
+# "No session DB pinned": lets ``_session_db`` distinguish "resolve from profile scope" from a
+# deliberate ``runner._session_db = None`` (disables DB commands). Mirrors gateway.session._DB_UNPINNED.
 _SESSION_DB_UNPINNED = object()
 
 
@@ -3530,8 +3359,7 @@ def _builtin_adapter_import(module: str, adapter_name: str, requirement: str):
     return getattr(mod, adapter_name), getattr(mod, requirement)
 
 
-# Built-in (non-plugin) adapters: platform -> (module, adapter class, requirements probe
-# name, warning when the probe fails). Signal additionally validates its config below.
+# platform -> (module, adapter class, requirements probe, warning on probe failure).
 _BUILTIN_ADAPTERS: dict[Platform, tuple[str, str, str, str]] = {
     Platform.WHATSAPP_CLOUD: ("whatsapp_cloud", "WhatsAppCloudAdapter", "check_whatsapp_cloud_requirements",
                               "WhatsApp Cloud: aiohttp/httpx missing — reinstall hermes-agent"),
@@ -5549,9 +5377,11 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # HERMES_HOME, so multi-profile setups (distinct HERMES_HOME each) run concurrently untripped.
     from gateway.status import get_running_pid
     existing_pid = get_running_pid()
-    if existing_pid is not None and existing_pid != os.getpid():
-        if not await _start_gateway_replace_existing_instance(existing_pid, replace):
-            return False
+    if (
+        existing_pid is not None and existing_pid != os.getpid()
+        and not await _start_gateway_replace_existing_instance(existing_pid, replace)
+    ):
+        return False
 
     _start_gateway_configure_logging(verbosity)
 
