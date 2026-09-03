@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -117,10 +118,8 @@ def consume_gateway_turn_context_notes(agent: Any) -> str:
     system prompt stays byte-stable and a cached agent never replays a stale note)."""
     notes = getattr(agent, "_gateway_turn_context_notes", "") or ""
     if hasattr(agent, "_gateway_turn_context_notes"):
-        try:
+        with suppress(Exception):
             agent._gateway_turn_context_notes = ""
-        except Exception:
-            pass
     return notes if isinstance(notes, str) else ""
 
 
@@ -129,11 +128,10 @@ def append_notes_to_multimodal_content(content: Any, notes: str) -> bool:
     message (the sidecar path returns ``None`` for non-string content)."""
     if not notes or not isinstance(content, list):
         return False
-    try:
+    with suppress(Exception):
         content.append({"type": "text", "text": notes})
         return True
-    except Exception:
-        return False
+    return False
 
 
 # Surfaces whose sessions must not be auto-titled: cron names its own session and
@@ -339,7 +337,7 @@ def _persist_under_lock(agent: Any, fn, failure_msg: str, pending_cli_message: A
 def _publish_runtime_main(agent: Any) -> None:
     """Tell auxiliary_client the live main provider/model for this turn (after primary
     restoration settled the runtime). Never raises: failure loses only the scope."""
-    try:
+    with suppress(Exception):
         from agent.auxiliary_client import set_runtime_main
         from agent.prompt_cache_scope import resolve_prompt_cache_scope_safe
         # Rotation-stable prompt-cache scope (lineage root), memoized per segment; a new
@@ -352,8 +350,6 @@ def _publish_runtime_main(agent: Any) -> None:
             )},
             cache_scope=_cache_scope,
         )
-    except Exception:
-        pass
 
 
 def _refresh_mcp_tools_between_turns(agent: Any) -> None:
@@ -425,15 +421,13 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
 
     # Pre-turn connection health check: clean up dead TCP connections.
     if agent.api_mode != "anthropic_messages":
-        try:
+        with suppress(Exception):
             if agent._cleanup_dead_connections():
                 agent._emit_status(
                     "🔌 Detected stale connections from a previous provider "
                     "issue — cleaned up automatically. Proceeding with fresh "
                     "connection."
                 )
-        except Exception:
-            pass
     # Replay compression warning through status_callback for gateway platforms.
     if agent._compression_warning:
         agent._replay_compression_warning()
@@ -526,14 +520,12 @@ def _emit_reaction(agent: Any, original_user_message: Any) -> None:
     reaction_callback = getattr(agent, "reaction_callback", None)
     if reaction_callback is None:
         return
-    try:
+    with suppress(Exception):
         from agent.reactions import detect_reaction
 
         kind = detect_reaction(original_user_message)
         if kind:
             reaction_callback(kind)
-    except Exception:
-        pass
 
 
 def _ensure_session_row(agent: Any, pending_cli_message: Any) -> None:
@@ -644,25 +636,19 @@ def _memory_turn_start_and_prefetch(agent: Any, original_user_message: Any) -> s
     if not agent._memory_manager:
         return ""
     _query = original_user_message if isinstance(original_user_message, str) else ""
-    try:
+    with suppress(Exception):
         agent._memory_manager.on_turn_start(agent._user_turn_count, _query)
-    except Exception:
-        pass
     ext_prefetch_cache = ""
-    try:
+    with suppress(Exception):
         if not is_trivial_prompt(_query):
             ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
-    except Exception:
-        pass
     # Deterministic recall indicator via _emit_status so the model can't silently
     # drop injected memory.
     if ext_prefetch_cache:
-        try:
+        with suppress(Exception):
             _recall_indicator = agent._memory_manager.describe_recall()
             if _recall_indicator:
                 agent._emit_status(_recall_indicator)
-        except Exception:
-            pass
     return ext_prefetch_cache
 
 

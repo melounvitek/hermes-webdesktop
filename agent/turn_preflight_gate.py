@@ -7,6 +7,7 @@ assembled requests, not raw ``messages``) and the call into
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from typing import Any
 
 from agent.message_metadata import append_message
@@ -51,10 +52,8 @@ def run_preflight_gate(
         agent._emit_status("❌ Ollama runtime context is too small for Hermes tool use")
         v.api_call_count -= 1
         agent._api_call_count = v.api_call_count
-        try:
+        with suppress(Exception):
             agent.iteration_budget.refund()
-        except Exception:
-            pass
         v.action = "break"
         return v
 

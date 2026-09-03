@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import random
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -66,10 +67,8 @@ def prepare_iteration(agent: Any,*, messages: Any, api_call_count: Any) -> Itera
     _sanitize_cursor = getattr(agent, "_sanitize_args_cursor", None)
     if _sanitize_cursor is None:
         _sanitize_cursor = {}
-        try:
+        with suppress(Exception):
             agent._sanitize_args_cursor = _sanitize_cursor
-        except Exception:
-            pass
     repaired_tool_calls = agent._sanitize_tool_call_arguments(
         messages, logger=request_logger, session_id=agent.session_id, cursor=_sanitize_cursor
     )
@@ -144,12 +143,10 @@ def _inject_steer_into_newest_tool_result(agent: Any, messages: Any, steer_text:
                 _sm["content"] = existing + marker
             else:
                 # Multimodal content blocks — append a text block.
-                try:
+                with suppress(Exception):
                     blocks = list(existing) if existing else []
                     blocks.append({"type": "text", "text": marker})
                     _sm["content"] = blocks
-                except Exception:
-                    pass
             logger.debug(
                 "Pre-API-call steer drain: injected into tool msg at index %d", _si
             )
