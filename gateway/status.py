@@ -118,11 +118,10 @@ def recorded_gateway_home_conflicts(
     """True when a persisted gateway record names a DIFFERENT HERMES_HOME.
 
     Cross-profile kill guard: a contaminated PID record can truthfully name another profile's
-    live gateway; destructive callers must refuse or profile B's stop SIGTERMs profile A and
-    both supervisors restart-loop.
-    ``expected_home`` overrides the comparison base (``profile delete``). Legacy records without
-    ``hermes_home`` return False (they prove nothing; callers pair this with PID + start-time
-    guards). A comparison failure returns True: destructive + unprovable ownership => fail closed.
+    live gateway; destructive callers must refuse or profile B's stop SIGTERMs profile A and both
+    supervisors restart-loop. ``expected_home`` overrides the comparison base (``profile delete``).
+    Legacy records without ``hermes_home`` return False (they prove nothing; callers pair this with
+    PID + start-time guards). A comparison failure returns True: unprovable ownership fails closed.
     """
     recorded_home = record.get("hermes_home") if isinstance(record, dict) else None
     if not isinstance(recorded_home, str) or not recorded_home.strip():
@@ -253,23 +252,23 @@ def terminate_pid(
             raise OSError(f"refusing to force-kill PID {pid}; malformed start time") from exc
         if expected <= 0 or current <= 0 or abs(expected - current) > 0.001:
             raise OSError(f"refusing to force-kill PID {pid}; process identity changed")
-    if force and _IS_WINDOWS:
-        # Hide flags: a bare taskkill spawn from windowless pythonw.exe would
-        # flash a conhost window on every force-kill.
-        from hermes_cli._subprocess_compat import windows_hide_flags
-        try:
-            result = subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True,
-                encoding="utf-8", errors="replace", timeout=10, creationflags=windows_hide_flags(),
-            )
-        except FileNotFoundError:
-            os.kill(pid, signal.SIGTERM)
-            return
-        if result.returncode != 0:
-            details = (result.stderr or result.stdout or "").strip()
-            raise OSError(details or f"taskkill failed for PID {pid}")
+    if not (force and _IS_WINDOWS):
+        os.kill(pid, signal.SIGTERM if not force else getattr(signal, "SIGKILL", signal.SIGTERM))
         return
-    os.kill(pid, signal.SIGTERM if not force else getattr(signal, "SIGKILL", signal.SIGTERM))
+    # Hide flags: a bare taskkill spawn from windowless pythonw.exe would flash a conhost window.
+    from hermes_cli._subprocess_compat import windows_hide_flags
+
+    try:
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10, creationflags=windows_hide_flags(),
+        )
+    except FileNotFoundError:
+        os.kill(pid, signal.SIGTERM)
+        return
+    if result.returncode != 0:
+        details = (result.stderr or result.stdout or "").strip()
+        raise OSError(details or f"taskkill failed for PID {pid}")
 
 
 def _scope_hash(identity: str) -> str:
@@ -425,9 +424,8 @@ def _command_line_belongs_to_profile(command: str, profile_home: Path) -> bool:
             or f"-p {profile_lc}" in command_lc
             or f"hermes_home={home_lc}" in command_lc
         )
-    # Default profile: accept unless argv names some other profile or a conflicting
-    # explicit HERMES_HOME= (its absence is not disqualifying -- HERMES_HOME
-    # usually arrives via the environment).
+    # Default profile: accept unless argv names another profile or a conflicting explicit
+    # HERMES_HOME= (its absence is not disqualifying -- HERMES_HOME usually arrives via the env).
     if "--profile " in command_lc or " -p " in command_lc:
         return False
     return not ("hermes_home=" in command_lc and f"hermes_home={home_lc}" not in command_lc)
@@ -737,10 +735,9 @@ def acquire_gateway_runtime_lock() -> bool:
 def release_gateway_runtime_lock() -> None:
     """Release the gateway runtime lock when owned by this process."""
     global _gateway_lock_handle
-    handle = _gateway_lock_handle
+    handle, _gateway_lock_handle = _gateway_lock_handle, None
     if handle is None:
         return
-    _gateway_lock_handle = None
     _release_file_lock(handle)
     with contextlib.suppress(OSError):
         handle.close()
@@ -759,10 +756,10 @@ def owns_gateway_runtime_lock() -> bool:
 def _probe_lock_file(handle) -> bool:
     """True when another process holds the lock (a won probe is released); closes ``handle``."""
     try:
-        if _try_acquire_file_lock(handle):
+        held = not _try_acquire_file_lock(handle)
+        if not held:
             _release_file_lock(handle)
-            return False
-        return True
+        return held
     finally:
         with contextlib.suppress(OSError):
             handle.close()
@@ -787,6 +784,7 @@ def is_gateway_runtime_lock_active(lock_path: Optional[Path] = None) -> bool:
 
 
 def _strict_path_exists(path: Path, label: str) -> bool:
+    """Like ``path.exists()`` but raises RuntimeError instead of False on EACCES-style errors."""
     try:
         path.stat()
         return True
@@ -890,9 +888,8 @@ def write_runtime_status(
             # ISO start of the current retry episode; None clears it.
             ("retrying_since", retrying_since, None),
         ))
-        # Per-entry writer provenance: top-level pid/start_time only identify the
-        # most recent writer, so /api/status tells "written by the live process" from
-        # "preserved from a prior one" by exact (pid, start_time) equality, not clocks.
+        # Per-entry writer provenance: top-level pid/start_time only identify the most recent
+        # writer; /api/status tells "live" from "preserved" by exact (pid, start_time) equality.
         platform_payload.update(
             updated_at=_utc_now_iso(), writer_pid=current_record["pid"],
             writer_start_time=current_record["start_time"],
@@ -988,10 +985,10 @@ def resolve_gateway_liveness(
     cached by default so polling does not re-flock ``gateway.lock``); (2) caller-supplied HTTP
     health probe (gateway in another container); (3) runtime status PID validated against the live
     process table with ``expected_home`` so a recycled PID of another profile never counts. Rung 3
-    only uses the LOCAL state record -- the probe body's PID belongs to another host; pass
-    ``runtime`` if already read. ``pid_probe``/``runtime_reader``/``runtime_pid_probe`` are the
-    dashboard's injection/test seam. A rung that raises degrades to the next (never 500 a status
-    endpoint) and sets ``probe_error``.
+    only uses the LOCAL state record (the probe body's PID belongs to another host); pass
+    ``runtime`` if already read. The ``*_probe``/``runtime_reader`` kwargs are the dashboard's
+    injection/test seam. A rung that raises degrades to the next (never 500 a status endpoint) and
+    sets ``probe_error``.
     """
     _pid_probe = pid_probe or (get_running_pid_cached if use_cache else get_running_pid)
     _runtime_reader = runtime_reader or read_runtime_status
@@ -1123,9 +1120,8 @@ def acquire_scoped_lock(
         "metadata": metadata or {},
         "updated_at": _utc_now_iso(),
     }
-    # Profile label for cross-profile conflict diagnostics ("token already in use
-    # (PID 559)" alone does not say WHICH profile). Omitted when not inferable;
-    # readers fall back to hermes_home.
+    # Profile label for cross-profile conflict diagnostics ("token already in use (PID 559)" alone
+    # does not say WHICH profile). Omitted when not inferable; readers fall back to hermes_home.
     profile = _profile_label_for_home(_get_process_hermes_home())
     if profile:
         record["profile"] = profile
