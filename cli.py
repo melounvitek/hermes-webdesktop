@@ -6036,25 +6036,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         terminal_cwd = os.getenv("TERMINAL_CWD", os.getcwd())
         terminal_timeout = os.getenv("TERMINAL_TIMEOUT", "60")
         
-        user_config_path = _hermes_home / 'config.yaml'
-        project_config_path = Path(__file__).parent / 'cli-config.yaml'
-        if user_config_path.exists():
-            config_path = user_config_path
-        else:
-            config_path = project_config_path
+        config_path = _hermes_home / 'config.yaml'
+        if not config_path.exists():
+            config_path = Path(__file__).parent / 'cli-config.yaml'
         config_status = "(loaded)" if config_path.exists() else "(not found)"
-        
+
         # ``self.api_key`` may be a callable (Azure Foundry Entra ID bearer
         # provider). Never invoke it; just identify the auth surface.
         from agent.azure_identity_adapter import is_token_provider
 
-        # Prefer the LIVE agent's credential when one exists: HermesCLI's
-        # constructor seeds self.api_key from OPENAI/OPENROUTER env vars
-        # before provider resolution runs, so on non-OpenAI providers (Nous,
-        # Anthropic, ...) the constructor value is a different vendor's key
-        # than the one actually authenticating requests. /config displaying
-        # an sk-proj-... OpenAI key next to a Nous base URL was the visible
-        # symptom (full-surface CLI QA sweep, Aug 2026).
+        # Prefer the LIVE agent's credential: the constructor seeds self.api_key
+        # from OPENAI/OPENROUTER env vars before provider resolution, so on
+        # non-OpenAI providers it is a different vendor's key than the one
+        # actually authenticating (an sk-proj-... key next to a Nous base URL).
         display_key = self.api_key
         agent = getattr(self, "agent", None)
         if agent is not None and getattr(agent, "api_key", None):
@@ -6759,23 +6753,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _chat_run_agent(self, turn, message):
         """Agent-thread body: bind per-thread callbacks/approval key, prepend one-shot notes, run the turn."""
-        # Set callbacks inside the agent thread so thread-local storage
-        # in terminal_tool is populated for this thread.  The main thread
-        # registration (run() line ~9046) is invisible here because
-        # _callback_tls is threading.local().  Matches the pattern used
-        # by acp_adapter/server.py for ACP sessions.
+        # Callbacks are thread-local in terminal_tool (_callback_tls), so the
+        # main-thread registration in run() is invisible here — re-register.
         set_sudo_password_callback(self._sudo_password_callback)
         set_approval_callback(self._approval_callback)
         try:
             set_secret_capture_callback(self._secret_capture_callback)
         except Exception:
             pass
-        # Bind this turn's approval session key into the contextvar so
-        # ``tools.approval.is_current_session_yolo_enabled()`` resolves
-        # against the same key that ``/yolo`` toggles under (see
-        # ``_toggle_yolo`` → ``enable_session_yolo(self.session_id)``).
-        # Mirrors ``tui_gateway/server.py`` and ``gateway/run.py`` which
-        # bind the same contextvar before invoking the agent.
+        # Bind this turn's approval session key so
+        # ``tools.approval.is_current_session_yolo_enabled()`` resolves against
+        # the same key ``/yolo`` toggles under (``enable_session_yolo(self.session_id)``).
         try:
             from tools.approval import (
                 reset_current_session_key,
@@ -6788,28 +6776,23 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             reset_current_session_key = None  # type: ignore[assignment]
             _approval_session_token = None
         agent_message = turn.voice_prefix + message if turn.voice_prefix else message
-        # Prepend pending notes via _prepend_note_to_message, which
-        # handles both plain-string and multimodal content-parts list
-        # messages. Naive ``note + "\n\n" + agent_message`` crashed with
-        # TypeError when an image was attached (agent_message is a list)
-        # and a /model or /reload-skills note was queued for the turn.
-        # Same one-shot queue for the /model note and the /reload-skills note.
+        # One-shot /model and /reload-skills notes. _prepend_note_to_message
+        # handles multimodal content-part lists too (a naive string concat
+        # raised TypeError when an image was attached).
         for _note_attr in ("_pending_model_switch_note", "_pending_skills_reload_note"):
             _note = getattr(self, _note_attr, None)
             if _note:
                 agent_message = _prepend_note_to_message(agent_message, _note)
                 setattr(self, _note_attr, None)
-        # Barged mid-speech (VAD or record key)? Tell the model it was
-        # cut off — same one-shot, API-local note channel as above.
+        # Barged mid-speech (VAD or record key)? Tell the model it was cut off.
         from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE, take_speech_interrupted
         if take_speech_interrupted():
             agent_message = _prepend_note_to_message(agent_message, SPEECH_INTERRUPTED_NOTE)
         _moa_cfg = getattr(self, "_pending_moa_config", None)
         self._pending_moa_config = None
-        # Model/skill notes and voice instructions are API-local. Keep
-        # the original staged input as the durable transcript value so a
-        # close-path marker follows the same dict into turn setup rather
-        # than producing a second noted user row (#63766).
+        # Notes and voice instructions are API-local: the original staged input
+        # stays the durable transcript value so a close-path marker follows the
+        # same dict instead of producing a second noted user row (#63766).
         _persist_clean_user_message = (
             message if (turn.voice_prefix or agent_message != message) else None
         )
@@ -6848,23 +6831,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         finally:
             if _one_turn_model_restore:
                 self._restore_model_runtime_snapshot(_one_turn_model_restore)
-            # Surface any credit notices queued during the turn (cold-start
-            # seed / per-turn capture) now that the response is done — printing
-            # at this boundary paints cleanly above the prompt instead of being
-            # buried behind the streaming output.
+            # Credit notices queued during the turn paint cleanly above the
+            # prompt at this boundary instead of behind the streaming output.
             self._flush_credit_notices()
-            # Clear thread-local callbacks so a reused thread doesn't
-            # hold stale references to a disposed CLI instance.
+            # Clear thread-local callbacks so a reused thread never holds stale
+            # references to a disposed CLI instance.
             try:
                 set_sudo_password_callback(None)
                 set_approval_callback(None)
                 set_secret_capture_callback(None)
             except Exception:
                 pass
-            # Release the per-turn approval session key. ``_session_yolo``
-            # state itself is preserved across turns (so /yolo persists
-            # for the whole CLI run); we just unbind the contextvar so a
-            # reused thread doesn't see stale identity on its next run.
+            # Unbind the per-turn approval key (``_session_yolo`` state itself
+            # persists across turns so /yolo lasts the whole CLI run).
             if _approval_session_token is not None and reset_current_session_key is not None:
                 try:
                     reset_current_session_key(_approval_session_token)
@@ -6873,12 +6852,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _chat_monitor_agent_thread(self, turn, agent_thread):
         """Poll the interrupt queue while the agent thread runs; returns the interrupting message (or None)."""
-        # Ambient "thinking" sound: calm bubble blips while the agent
-        # works in voice mode with no audio flowing, so the user knows
-        # it's alive during long thinking/tool stretches. Skipped per-blip
-        # while TTS speaks, the mic records, or a barge capture is live;
-        # stopped outright as soon as the turn ends. voice.thinking_sound
-        # gates it (default on); macOS is handled inside (TCC-safe skip).
+        # Ambient "thinking" blips while the agent works in voice mode with no
+        # audio flowing; skipped per-blip while TTS speaks, the mic records or a
+        # barge capture is live. voice.thinking_sound gates it (default on).
         if self._voice_mode:
             try:
                 from tools.voice_mode import start_thinking_sound
@@ -6893,23 +6869,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             except Exception:
                 turn.thinking_started = False
 
-        # Monitor the dedicated interrupt queue while the agent runs.
-        # _interrupt_queue is separate from _pending_input, so process_loop
-        # and chat() never compete for the same queue.
-        # When a clarify question is active, user input is handled entirely
-        # by the Enter key binding (routed to the clarify response queue),
-        # so we skip interrupt processing to avoid stealing that input.
         interrupt_msg = None
         while agent_thread.is_alive():
             if hasattr(self, '_interrupt_queue'):
                 try:
                     interrupt_msg = self._interrupt_queue.get(timeout=0.1)
                     if interrupt_msg:
-                        # If clarify is active, the Enter handler routes
-                        # input directly; this queue shouldn't have anything.
-                        # But if it does (race condition), don't interrupt —
-                        # and don't drop the message either: park it in
-                        # _pending_input so it runs as the next turn.
+                        # While a clarify question is active the Enter binding
+                        # routes input to the clarify queue; anything landing here
+                        # is a race — don't interrupt, park it as the next turn.
                         if self._clarify_state or self._clarify_freetext:
                             try:
                                 self._pending_input.put(interrupt_msg)
@@ -6922,11 +6890,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                         if turn.stop_event is not None:
                             turn.stop_event.set()
                         self.agent.interrupt(interrupt_msg)
-                        # Clear any active overlay states the interrupted agent
-                        # left behind.  approval/clarify/sudo/secret prompts gate
-                        # input (read_only condition + keypress filter) until
-                        # explicitly reset — without this the CLI freezes after
-                        # an interrupt until the prompt's own timeout expires (#14026).
+                        # approval/clarify/sudo/secret prompts gate input until
+                        # explicitly reset — without this the CLI freezes after an
+                        # interrupt until the prompt's own timeout (#14026).
                         self._clear_active_overlays_for_interrupt()
                         # Debug: log to file (stdout may be devnull from redirect_stdout)
                         try:
@@ -6941,31 +6907,22 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                             pass
                         break
                 except queue.Empty:
-                    # Force prompt_toolkit to flush any pending stdout
-                    # output from the agent thread.  Without this, the
-                    # StdoutProxy buffer only flushes on renderer passes
-                    # triggered by input events — on macOS this causes
-                    # the CLI to appear frozen until the user types. (#1624)
+                    # Flush the StdoutProxy buffer: it otherwise only flushes on
+                    # input-triggered renderer passes, so on macOS the CLI looks
+                    # frozen until the user types (#1624).
                     self._invalidate(min_interval=0.15)
             else:
                 # Fallback for non-interactive mode (e.g., single-query)
                 agent_thread.join(0.1)
 
-        # Wait for the agent thread to finish.  After an interrupt the
-        # agent may take a few seconds to clean up (kill subprocess, persist
-        # session).  Poll instead of a blocking join so the process_loop
-        # stays responsive — if the user sent another interrupt or the
-        # agent gets stuck, we can break out instead of freezing forever.
         if interrupt_msg is not None:
-            # Interrupt path: poll briefly, then move on.  The agent
-            # thread is daemon — it dies on process exit regardless.
+            # After an interrupt the agent may take seconds to clean up (kill
+            # subprocess, persist). Poll instead of a blocking join so another
+            # interrupt (Ctrl+C sets _should_exit) or a stuck agent can't freeze
+            # us; the thread is daemon and dies on process exit regardless.
             for _wait_tick in range(50):  # 50 * 0.2s = 10s max
                 agent_thread.join(timeout=0.2)
-                if not agent_thread.is_alive():
-                    break
-                # Check if user fired ANOTHER interrupt (Ctrl+C sets
-                # _should_exit which process_loop checks on next pass).
-                if getattr(self, '_should_exit', False):
+                if not agent_thread.is_alive() or getattr(self, '_should_exit', False):
                     break
             if agent_thread.is_alive():
                 logger.warning(
@@ -6975,26 +6932,19 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     agent_thread.ident,
                 )
         else:
-            # Normal completion: agent thread should be done already,
-            # but guard against edge cases.
-            agent_thread.join(timeout=30)
+            agent_thread.join(timeout=30)  # should be done already; guard edge cases
         return interrupt_msg
 
     def _chat_settle_turn(self, turn):
         """After the agent thread ends: freeze timers, flush streams, drain TTS, sync history/session id."""
-        # Freeze per-prompt elapsed timer once the agent thread has
-        # exited (or been abandoned as a daemon after interrupt).
+        # Freeze the per-prompt timer (thread exited or abandoned after interrupt).
         if self._prompt_start_time is not None:
             self._prompt_duration = max(0.0, time.time() - self._prompt_start_time)
             self._prompt_start_time = None
-        # Record when this agent loop finished so the status bar can show
-        # idle time since the last final response.
-        self._last_turn_finished_at = time.time()
+        self._last_turn_finished_at = time.time()  # status bar idle time
 
-        # Proactively clean up async clients whose event loop is dead.
-        # The agent thread may have created AsyncOpenAI clients bound
-        # to a per-thread event loop; if that loop is now closed, those
-        # clients' __del__ would crash prompt_toolkit's loop on GC.
+        # AsyncOpenAI clients the agent thread bound to a now-closed per-thread
+        # loop would crash prompt_toolkit's loop from __del__ on GC.
         try:
             from agent.auxiliary_client import cleanup_stale_async_clients
             cleanup_stale_async_clients()
@@ -7004,34 +6954,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Flush any remaining streamed text and close the box
         self._flush_stream()
 
-        # Signal end-of-text to TTS consumer and wait for it to finish
         if turn.use_streaming_tts and turn.text_queue is not None:
-            turn.text_queue.put(None)  # sentinel
+            turn.text_queue.put(None)  # end-of-text sentinel
             if turn.tts_thread is not None:
                 turn.tts_thread.join(timeout=120)
-            # Mark normal completion only if the thread actually
-            # finished.  If join() timed out and the thread is still
-            # alive, leave _tts_normal_exit False so the finally block
-            # sets stop_event to kill the runaway worker.
+            # Only a thread that actually finished counts as a normal exit; if the
+            # join timed out, leave it False so the finally block's stop_event
+            # kills the runaway worker.
             if turn.tts_thread is not None and not turn.tts_thread.is_alive():
                 turn.tts_normal_exit = True
 
-        # Drain any remaining agent output still in the StdoutProxy
-        # buffer so tool/status lines render ABOVE our response box.
-        # The flush pushes data into the renderer queue; the short
-        # sleep lets the renderer actually paint it before we draw.
+        # Drain the StdoutProxy buffer so tool/status lines render ABOVE the
+        # response box; the sleep lets the renderer paint before we draw.
         sys.stdout.flush()
         time.sleep(0.15)
 
-        # Update history with full conversation
         self.conversation_history = turn.result.get("messages", self.conversation_history) if turn.result else self.conversation_history
 
-        # If auto-compression fired mid-turn, the agent created a new
-        # continuation session and mutated self.agent.session_id. Sync
-        # the CLI's session_id so /status, /resume, title generation,
-        # and the exit summary all target the live child session rather
-        # than the ended parent. Mirrors the gateway's post-run sync
-        # (gateway/run.py around line 9983).
+        # Mid-turn auto-compression creates a continuation session and mutates
+        # self.agent.session_id; sync so /status, /resume, titling and the exit
+        # summary target the live child rather than the ended parent.
         if (
             self.agent
             and getattr(self.agent, "session_id", None)
@@ -7047,14 +6989,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Get the final response
         response = turn.result.get("final_response", "") if turn.result else ""
 
-        # Session titling now runs at TURN START (agent/turn_context.py)
-        # from the user's message alone, so it is already done — or in
-        # flight — by the time we get here, instead of waiting on a final
-        # response that a failed or interrupted turn never produces.
-
-        # Handle failed or partial results (e.g., non-retryable errors, rate limits,
-        # truncated output, invalid tool calls). Both "failed" and "partial" with
-        # an empty final_response mean the agent couldn't produce a usable answer.
+        # (Session titling runs at TURN START in agent/turn_context.py, so a
+        # failed/interrupted turn does not need a final response for it.)
+        # "failed" or "partial" with an empty final_response: no usable answer.
         if turn.result and (turn.result.get("failed") or turn.result.get("partial")) and not response:
             error_detail = turn.result.get("error", "Unknown error")
             response = f"Error: {error_detail}"
@@ -7072,31 +7009,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
         self._chat_print_response_panel(turn, response, response_previewed)
 
-        # #60920: Print interruption marker with history suppressed so it
-        # is never recorded in _OUTPUT_HISTORY. The marker was previously
-        # appended to `response` which caused a duplicate on terminal redraw
-        # when _replay_output_history replayed it. Printing it here with
-        # _suspend_output_history preserves the user-visible indicator while
-        # keeping _OUTPUT_HISTORY clean for replay.
+        # #60920: history suppressed so the marker is never recorded in
+        # _OUTPUT_HISTORY (appending it to `response` duplicated it on redraw).
         if _show_interrupt_marker:
             with _suspend_output_history():
                 _cprint(f"\n{_DIM}── [Interrupted — processing new message] ──{_RST}")
 
 
-        # Focus view: dim recovery line reporting what was hidden this turn
-        # (and how to reveal it). Printed after the response so the turn
-        # reads prompt → answer → "⋯ N tool lines hidden". Display-only;
-        # resets the counter for the next turn.
+        # Focus view: "⋯ N tool lines hidden" after the answer; resets the counter.
         try:
             self._emit_focus_recovery_line()
         except Exception:
             pass
 
-        # Play terminal bell when agent finishes (if enabled).
-        # Works over SSH — the bell propagates to the user's terminal.
-        self._ring_bell(context="turn complete")
+        self._ring_bell(context="turn complete")  # propagates over SSH
 
-        # Notify when iteration budget was hit
         if turn.result and not turn.result.get("completed") and not turn.result.get("interrupted"):
             _api_calls = turn.result.get("api_calls", 0)
             if _api_calls >= getattr(self.agent, "max_iterations", 500):
@@ -7107,17 +7034,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     f"response may be incomplete{_RST}"
                 )
 
-        # Speak response aloud if voice TTS is enabled
-        # Skip batch TTS when streaming TTS already handled it
+        # Batch TTS unless streaming TTS already spoke the response.
         if self._voice_tts and response and not turn.use_streaming_tts:
             self._voice_speak_response_async(response)
 
-
-        # Re-queue the interrupt message (and any that arrived while we were
-        # processing the first) as the next prompt for process_loop.
-        # Only reached when busy_input_mode == "interrupt" (the default).
-        # In "queue" mode Enter routes directly to _pending_input so this
-        # block is never hit.
+        # Re-queue the interrupt message (plus any that arrived meanwhile) as
+        # the next prompt. Only reached in busy_input_mode == "interrupt"; in
+        # "queue" mode Enter routes straight to _pending_input.
         if pending_message and hasattr(self, '_pending_input'):
             all_parts = [pending_message]
             while not self._interrupt_queue.empty():
@@ -7523,59 +7446,35 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
     def _tui_signal_handler(self, signum, frame):
         """Handle SIGHUP/SIGTERM by triggering graceful cleanup.
 
-        Calls ``self.agent.interrupt()`` first so the agent daemon
-        thread's poll loop sees the per-thread interrupt and kills the
-        tool's subprocess group via ``_kill_process`` (os.killpg).
-        Without this, the main thread dies from KeyboardInterrupt and
-        the daemon thread is killed with it — before it can run one
-        more poll iteration to clean up the subprocess, which was
-        spawned with ``os.setsid`` and therefore survives as an orphan
-        with PPID=1.
+        The agent is hard-interrupted first (see _interrupt_agent_for_signal) so
+        its daemon thread can kill the tool's setsid subprocess group before the
+        main thread unwinds — otherwise the child survives as an orphan (PPID=1).
 
-        Grace window (``HERMES_SIGTERM_GRACE``, default 1.5 s) gives
-        the daemon time to: detect the interrupt (next 200 ms poll) →
-        call _kill_process (SIGTERM + 1 s wait + SIGKILL if needed) →
-        return from _wait_for_process.  ``time.sleep`` releases the
-        GIL so the daemon actually runs during the window.
-
-        Guarded ``logger.debug``: CPython's ``logging`` module is not
-        reentrant-safe.  ``Logger.isEnabledFor`` caches level results
-        in ``Logger._cache``; under shutdown races the cache can be
-        cleared (``_clear_cache``) or mid-mutation when the signal
-        fires, raising ``KeyError: <level_int>`` (e.g. ``KeyError: 10``
-        for DEBUG) inside the handler.  That KeyError then escapes
-        before ``raise KeyboardInterrupt()`` can fire, which bypasses
-        prompt_toolkit's normal interrupt unwind and surfaces as the
-        EIO cascade from issue #13710.  Wrap the log in a bare
-        ``try/except`` so the handler can never raise through it.
+        The ``logger.debug`` is guarded: CPython's logging is not reentrant-safe;
+        ``Logger.isEnabledFor`` caches in ``Logger._cache``, which under shutdown
+        races can be cleared or mid-mutation when the signal fires, raising
+        ``KeyError: <level_int>`` inside the handler. That escapes before the
+        KeyboardInterrupt, bypasses prompt_toolkit's interrupt unwind and surfaces
+        as the EIO cascade of #13710.
         """
         try:
             logger.debug("Received signal %s, triggering graceful shutdown", signum)
         except Exception:
             pass  # never let logging raise from a signal handler (#13710 regression)
-        # Shutdown intent is now unambiguous — arm the exit backstop
-        # IMMEDIATELY, before the graceful unwind below.  If any step of
-        # that unwind wedges (main thread parked in a syscall, prompt_toolkit
-        # teardown never returning), _run_cleanup never runs and would
-        # never arm its own watchdog — leaving a "dead" CLI alive for
-        # minutes (#65998 class).  Never raises.
+        # Arm the exit backstop IMMEDIATELY: if the unwind below wedges (main
+        # thread parked in a syscall, prompt_toolkit teardown never returning),
+        # _run_cleanup never runs and would never arm its own watchdog, leaving
+        # a "dead" CLI alive for minutes (#65998 class). Never raises.
         _arm_exit_watchdog_on_shutdown_signal()
         if getattr(self, "_agent_running", False):
             _interrupt_agent_for_signal(getattr(self, "agent", None), signum)
-        # Prefer a clean prompt_toolkit exit over `raise KeyboardInterrupt()`.
-        # Raising KBI from a signal handler unwinds into whatever Python
-        # frame the interpreter happens to be running — typically an
-        # `await asyncio.sleep()` inside prompt_toolkit's
-        # `_poll_output_size` coroutine.  The KBI becomes a Task
-        # exception, prompt_toolkit's `_handle_exception` prints
-        # "Unhandled exception in event loop" + the full traceback, and
-        # parks the terminal on "Press ENTER to continue..." (#13710
-        # variant — same root cause, different surface).
-        #
-        # `app.exit()` scheduled via `call_soon_threadsafe` lets the
-        # event loop unwind normally; `app.run()` returns and our
-        # existing `except (EOFError, KeyboardInterrupt, BrokenPipeError)`
-        # block at the bottom of the input loop handles the rest.
+        # Prefer a clean prompt_toolkit exit over `raise KeyboardInterrupt()`: a
+        # KBI raised from a signal handler lands in whatever frame is running —
+        # typically `await asyncio.sleep()` in pt's `_poll_output_size` — becomes
+        # a Task exception, pt prints "Unhandled exception in event loop" and
+        # parks the terminal on "Press ENTER to continue..." (#13710 variant).
+        # `app.exit()` via `call_soon_threadsafe` lets the loop unwind normally;
+        # `app.run()` returns and run()'s except block handles the rest.
         try:
             from prompt_toolkit.application.current import get_app_or_none
             _app = get_app_or_none()
@@ -8004,32 +7903,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         """Teardown after the prompt_toolkit app exits: interrupt the agent, stop voice/pet, persist + close the session, run cleanup, print the exit summary."""
         self._should_exit = True
         self._pet_stop_anim()
-        # Immediate feedback: prompt_toolkit has just torn down the input
-        # box + status bar, so without a line here the terminal sits
-        # silent for the whole cleanup window (session flush, memory
-        # shutdown, MCP/browser/terminal teardown) and the exit looks
-        # hung. Print before any potentially-slow step.
+        # prompt_toolkit just tore down the input box + status bar; without a
+        # line here the terminal sits silent through the whole cleanup window
+        # (session flush, memory shutdown, MCP/browser/terminal teardown).
         try:
             print(f"{_DIM}Shutting down… (finalizing session){_RST}", flush=True)
         except Exception:
             pass
-        # Interrupt the agent immediately so its daemon thread stops making
-        # API calls and exits promptly (agent_thread is daemon, so the
-        # process will exit once the main thread finishes, but interrupting
-        # avoids wasted API calls and lets run_conversation clean up).
+        # Interrupt the agent now so its daemon thread stops making API calls
+        # and run_conversation gets to clean up.
         if self.agent and getattr(self, '_agent_running', False):
             try:
                 request_hard_interrupt(self.agent)
             except Exception:
                 pass
-        # Shut down voice recorder (release persistent audio stream)
+        # Release the persistent audio stream.
         if hasattr(self, '_voice_recorder') and self._voice_recorder:
             try:
                 self._voice_recorder.shutdown()
             except Exception:
                 pass
             self._voice_recorder = None
-        # Clean up old temp voice recordings
         try:
             from tools.voice_mode import cleanup_temp_recordings
             cleanup_temp_recordings()
@@ -8039,30 +7933,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         set_sudo_password_callback(None)
         set_approval_callback(None)
         set_secret_capture_callback(None)
-        # Flush any in-memory turn transcript before marking the session
-        # closed.  On SIGHUP/SIGTERM/window close the agent thread may not
-        # reach its normal run_conversation() persistence path before the
-        # daemon thread is reaped.
+        # On SIGHUP/SIGTERM/window close the agent thread may not reach its normal
+        # run_conversation() persistence before the daemon thread is reaped.
         self._persist_active_session_before_close()
 
-        # Close session in SQLite
         if hasattr(self, '_session_db') and self._session_db and self.agent:
             try:
                 self._session_db.end_session(self.agent.session_id, "cli_close")
             except (Exception, KeyboardInterrupt) as e:
                 logger.debug("Could not close session in DB: %s", e)
-            # Started-and-immediately-quit sessions never gained content;
-            # drop the empty row so /resume and `hermes sessions list`
-            # stay clean (gemini-cli#27770 port). No-op for resumed or
-            # titled sessions and anything with messages or children.
             if not getattr(self, '_delete_session_on_exit', False):
+                # Started-and-immediately-quit sessions never gained content; drop
+                # the empty row so /resume and `hermes sessions list` stay clean
+                # (gemini-cli#27770 port). No-op for resumed/titled sessions and
+                # anything with messages or children.
                 try:
                     self._discard_session_if_empty(self.agent.session_id)
                 except (Exception, KeyboardInterrupt) as e:
                     logger.debug("Could not prune empty session: %s", e)
-            # /exit --delete: also remove the current session's transcripts
-            # and SQLite history. Ported from google-gemini/gemini-cli#19332.
-            if getattr(self, '_delete_session_on_exit', False):
+            else:
+                # /exit --delete: remove transcripts + SQLite history (gemini-cli#19332 port).
                 try:
                     from hermes_constants import get_hermes_home as _ghh
                     _sessions_dir = _ghh() / "sessions"
@@ -8073,10 +7963,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                         _cprint(f"  {_DIM}✗ Session {_escape(_sid)} not found for deletion{_RST}")
                 except (Exception, KeyboardInterrupt) as e:
                     logger.debug("Could not delete session on exit: %s", e)
-        # Plugin hook: on_session_end — safety net for interrupted exits.
-        # run_conversation() already fires this per-turn on normal completion,
-        # so only fire here if the agent was mid-turn (_agent_running) when
-        # the exit occurred, meaning run_conversation's hook didn't fire.
+        # on_session_end safety net: run_conversation() fires it per turn on normal
+        # completion, so only fire here when the exit happened mid-turn.
         if self.agent and getattr(self, '_agent_running', False):
             try:
                 from hermes_cli.lifecycle import invoke_hook as _invoke_hook
@@ -8439,34 +8327,28 @@ def _install_single_query_signal_handlers(cli):
 
 def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""
-    # Parse toolsets - handle both string and tuple/list inputs
-    # Default to hermes-cli toolset which includes cronjob management tools
     toolsets_list = None
-    if toolsets:
-        if isinstance(toolsets, str):
-            toolsets_list = [t.strip() for t in toolsets.split(",")]
-        elif isinstance(toolsets, (list, tuple)):
-            # Fire may pass multiple --toolsets as a tuple
-            toolsets_list = []
-            for t in toolsets:
-                if isinstance(t, str):
-                    toolsets_list.extend([x.strip() for x in t.split(",")])
-                else:
-                    toolsets_list.append(str(t))
-    else:
-        # Coding posture (base Hermes): with no explicit --toolsets, collapse
-        # to the coding toolset (+ enabled MCP servers) when sitting in a code
-        # workspace. See agent/coding_context.py.
-        _coding = None
+    if isinstance(toolsets, str) and toolsets:
+        toolsets_list = [t.strip() for t in toolsets.split(",")]
+    elif isinstance(toolsets, (list, tuple)) and toolsets:
+        # Fire may pass multiple --toolsets as a tuple
+        toolsets_list = []
+        for t in toolsets:
+            if isinstance(t, str):
+                toolsets_list.extend([x.strip() for x in t.split(",")])
+            else:
+                toolsets_list.append(str(t))
+    elif not toolsets:
+        # Coding posture: with no explicit --toolsets, collapse to the coding
+        # toolset (+ enabled MCP servers) inside a code workspace
+        # (agent/coding_context.py); otherwise the shared platform resolver so
+        # MCP servers are included at runtime.
         try:
             from agent.coding_context import coding_selection
-            _coding = coding_selection(platform="cli", config=CLI_CONFIG)
+            toolsets_list = coding_selection(platform="cli", config=CLI_CONFIG)
         except Exception:
-            _coding = None
-        if _coding is not None:
-            toolsets_list = _coding
-        else:
-            # Use the shared resolver so MCP servers are included at runtime
+            toolsets_list = None
+        if toolsets_list is None:
             from hermes_cli.tools_config import _get_platform_tools
             toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
 
@@ -8544,85 +8426,75 @@ def _start_worktree_setup(list_tools, list_toolsets, worktree, w):
 
     Returns the ``_join_worktree`` callable that waits for the setup, publishes
     ``_active_worktree``/TERMINAL_CWD and schedules stale-worktree GC — or None when
-    no worktree is wanted (list commands, or -w not requested).
+    no worktree is wanted (list commands exit immediately, or -w not requested).
     """
-    # Skip worktree for list commands (they exit immediately)
-    if not list_tools and not list_toolsets:
-        # ── Git worktree isolation (#652) ──
-        # Create an isolated worktree so this agent instance doesn't collide
-        # with other agents working on the same repo.
-        use_worktree = worktree or w or CLI_CONFIG.get("worktree", False)
-        if use_worktree:
-            # Overlap tool discovery with the network/subprocess-bound
-            # worktree setup (base fetch + parallel `git worktree add`
-            # release the GIL for most of their wall time). show_banner()
-            # then hits the warm cache instead of paying ~0.4s serially.
-            # Only done on the -w path: on plain `hermes` there is no I/O
-            # wait to hide and the extra thread just contends for CPU.
-            def _prewarm_tools() -> None:
-                try:
-                    import model_tools as _mt
-                    _mt.get_tool_definitions(quiet_mode=True)
-                except Exception:
-                    logger.debug("tool prewarm failed", exc_info=True)
+    if list_tools or list_toolsets:
+        return None
+    # Git worktree isolation (#652): this agent instance must not collide with
+    # other agents working on the same repo.
+    if not (worktree or w or CLI_CONFIG.get("worktree", False)):
+        return None
+    # Overlap tool discovery with the network/subprocess-bound worktree setup
+    # (both release the GIL for most of their wall time) so show_banner() hits
+    # the warm cache instead of paying ~0.4s serially. Only on the -w path: on
+    # plain `hermes` there is no I/O wait to hide and the thread just contends.
+    def _prewarm_tools() -> None:
+        try:
+            import model_tools as _mt
+            _mt.get_tool_definitions(quiet_mode=True)
+        except Exception:
+            logger.debug("tool prewarm failed", exc_info=True)
 
-            threading.Thread(
-                target=_prewarm_tools, name="tool-prewarm", daemon=True
-            ).start()
-            # Worktree creation itself (~0.2-0.6s of git subprocess wall
-            # time) runs concurrently with the rest of startup; join right
-            # after HermesCLI construction, before anything consumes
-            # TERMINAL_CWD / wt_info. Failure semantics preserved: setup
-            # failure still aborts the session (checked at join).
-            _sync_base = CLI_CONFIG.get("worktree_sync", True)
-            _wt_result: dict = {}
+    threading.Thread(
+        target=_prewarm_tools, name="tool-prewarm", daemon=True
+    ).start()
+    # Worktree creation (~0.2-0.6s of git wall time) runs concurrently with the
+    # rest of startup; joined right after HermesCLI construction, before anything
+    # consumes TERMINAL_CWD / wt_info. Setup failure still aborts the session.
+    _sync_base = CLI_CONFIG.get("worktree_sync", True)
+    _wt_result: dict = {}
 
-            def _create_worktree() -> None:
-                try:
-                    _wt_result["info"] = _setup_worktree(sync_base=_sync_base)
-                except Exception:
-                    logger.debug("worktree setup failed", exc_info=True)
-                    _wt_result["info"] = None
+    def _create_worktree() -> None:
+        try:
+            _wt_result["info"] = _setup_worktree(sync_base=_sync_base)
+        except Exception:
+            logger.debug("worktree setup failed", exc_info=True)
+            _wt_result["info"] = None
 
-            _wt_thread = threading.Thread(
-                target=_create_worktree, name="worktree-setup", daemon=True
-            )
-            _wt_thread.start()
+    _wt_thread = threading.Thread(
+        target=_create_worktree, name="worktree-setup", daemon=True
+    )
+    _wt_thread.start()
 
-            def _join_worktree() -> Optional[Dict[str, str]]:
-                _wt_thread.join(timeout=120)
-                info = _wt_result.get("info")
-                if info:
-                    global _active_worktree
-                    _active_worktree = info
-                    os.environ["TERMINAL_CWD"] = info["path"]
-                    atexit.register(_cleanup_worktree, info)
-                    # Prune stale worktrees from crashed/killed sessions in
-                    # the background — pure GC, nothing downstream depends
-                    # on it. Ordered AFTER _setup_worktree so the two never
-                    # race on git's worktrees metadata; the new tree itself
-                    # is immune to reaping (<24h age gate + live pid lock).
-                    _repo = _git_repo_root()
-                    if _repo:
-                        def _worktree_maintenance(repo: str) -> None:
-                            _prune_stale_worktrees(repo)
-                            # Same pass: repack when packs sprawl, so object
-                            # lookups (and the next `worktree add`) stay fast
-                            # on multi-agent boxes. After the pruner so the
-                            # repack sees final refs.
-                            _maintain_pack_health(repo)
+    def _join_worktree() -> Optional[Dict[str, str]]:
+        _wt_thread.join(timeout=120)
+        info = _wt_result.get("info")
+        if info:
+            global _active_worktree
+            _active_worktree = info
+            os.environ["TERMINAL_CWD"] = info["path"]
+            atexit.register(_cleanup_worktree, info)
+            # Prune stale worktrees from crashed sessions in the background —
+            # pure GC. Ordered AFTER _setup_worktree so the two never race on
+            # git's worktrees metadata; the new tree is immune to reaping
+            # (<24h age gate + live pid lock).
+            _repo = _git_repo_root()
+            if _repo:
+                def _worktree_maintenance(repo: str) -> None:
+                    _prune_stale_worktrees(repo)
+                    # Repack when packs sprawl so object lookups (and the next
+                    # `worktree add`) stay fast on multi-agent boxes; after the
+                    # pruner so the repack sees final refs.
+                    _maintain_pack_health(repo)
 
-                        threading.Thread(
-                            target=_worktree_maintenance,
-                            args=(_repo,),
-                            name="worktree-prune",
-                            daemon=True,
-                        ).start()
-                return info
-        else:
-            _join_worktree = None
-    else:
-        _join_worktree = None
+                threading.Thread(
+                    target=_worktree_maintenance,
+                    args=(_repo,),
+                    name="worktree-prune",
+                    daemon=True,
+                ).start()
+        return info
+
     return _join_worktree
 
 
