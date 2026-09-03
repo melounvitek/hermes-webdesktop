@@ -135,14 +135,12 @@ def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = N
     if supported:
         logger.debug("Hindsight API %s version %s supports update_mode='append'", api_url, version)
     else:
-        logger.warning(
-            "Hindsight API at %s reports version %r, older than %s. "
-            "Falling back to per-process document_id — retains across "
-            "processes/sessions create separate documents instead of "
-            "appending to a session-scoped one. Upgrade Hindsight to "
-            "%s+ to enable update_mode='append' deduplication.",
-            api_url, version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
-        )
+        logger.warning("Hindsight API at %s reports version %r, older than %s. "
+                       "Falling back to per-process document_id — retains across "
+                       "processes/sessions create separate documents instead of "
+                       "appending to a session-scoped one. Upgrade Hindsight to "
+                       "%s+ to enable update_mode='append' deduplication.",
+                       api_url, version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND, _MIN_VERSION_FOR_UPDATE_MODE_APPEND)
     return supported
 
 
@@ -184,9 +182,7 @@ def _context_thread(target, name: str) -> threading.Thread:
     Threads start with an EMPTY Context; under multiplex_profiles get_secret fails
     closed without the profile's secret scope + HERMES_HOME override. (The shared
     loop needs no wrap: run_coroutine_threadsafe inherits the submitter's context.)"""
-    return threading.Thread(
-        target=contextvars.copy_context().run, args=(target,), daemon=True, name=name,
-    )
+    return threading.Thread(target=contextvars.copy_context().run, args=(target,), daemon=True, name=name)
 
 
 RETAIN_SCHEMA = {
@@ -494,10 +490,7 @@ class HindsightMemoryProvider(MemoryProvider):
             text = f"{type(exc).__name__}: {exc}".lower()
             if self._mode != "local_embedded" or not any(m in text for m in _RETRIABLE_CONNECTION_MARKERS):
                 raise
-            logger.info(
-                "Hindsight embedded daemon appears unreachable; recreating client and retrying once: %s",
-                exc,
-            )
+            logger.info("Hindsight embedded daemon appears unreachable; recreating client and retrying once: %s", exc)
             self._client = None
             self._client = client = self._get_client()
             return self._run_sync(operation(client))
@@ -622,12 +615,9 @@ class HindsightMemoryProvider(MemoryProvider):
                 if dropped:
                     self._pending_retain_ops.clear()
             if dropped:
-                logger.warning(
-                    "Prefetch: server retain visibility timed out after %.1fs; "
-                    "dropping %d unresolved op(s) so later prefetches stay "
-                    "bounded (recall may miss the just-completed turn)",
-                    timeout, dropped,
-                )
+                logger.warning("Prefetch: server retain visibility timed out after %.1fs; "
+                               "dropping %d unresolved op(s) so later prefetches stay "
+                               "bounded (recall may miss the just-completed turn)", timeout, dropped)
                 return False
             time.sleep(self._RETAIN_OP_POLL_INTERVAL_S)
 
@@ -780,12 +770,10 @@ class HindsightMemoryProvider(MemoryProvider):
         # retries forever, reloading embedding models (~958MB RAM, ~33% CPU)
         # with no user-visible error.
         if hasattr(os, "geteuid") and os.geteuid() == 0:
-            msg = (
-                "Hindsight local_embedded mode cannot run as root "
-                "(PostgreSQL initdb refuses root). Skipping the embedded "
-                "memory daemon. Run Hermes as a non-root user, or switch "
-                "to cloud / local_external mode via 'hermes memory setup'."
-            )
+            msg = ("Hindsight local_embedded mode cannot run as root "
+                   "(PostgreSQL initdb refuses root). Skipping the embedded "
+                   "memory daemon. Run Hermes as a non-root user, or switch "
+                   "to cloud / local_external mode via 'hermes memory setup'.")
             logger.warning(msg)
             # Also print: otherwise the user would only see Hermes get sluggish.
             with contextlib.suppress(Exception):
@@ -930,8 +918,7 @@ class HindsightMemoryProvider(MemoryProvider):
     # -- retain ------------------------------------------------------------------
 
     def _build_turn_messages(self, user_content: str, assistant_content: str) -> List[Dict[str, str]]:
-        # One conversation turn -> both messages share the turn-level event timestamp.
-        now = _event_timestamp()
+        now = _event_timestamp()  # one turn -> both messages share the event timestamp
         return [{"role": role, "content": f"{prefix}: {content}", "timestamp": now} for role, prefix, content in
                 (("user", self._retain_user_prefix, user_content), ("assistant", self._retain_assistant_prefix, assistant_content))]
 
@@ -1007,8 +994,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
         self._session_turns.append(json.dumps(self._build_turn_messages(user_content, assistant_content), ensure_ascii=False))
         self._turn_counter = self._turn_index = self._turn_counter + 1
-        remainder = self._turn_counter % self._retain_every_n_turns
-        if remainder:
+        if remainder := self._turn_counter % self._retain_every_n_turns:
             logger.debug("sync_turn: buffered turn %d (will retain at turn %d)",
                          self._turn_counter, self._turn_counter + (self._retain_every_n_turns - remainder))
             return
@@ -1066,9 +1052,7 @@ class HindsightMemoryProvider(MemoryProvider):
                      self._bank_id, len(query), self._budget)
         results = self._recall(query)
         logger.debug("Tool hindsight_recall: %d results", len(results))
-        if not results:
-            return "No relevant memories found."
-        return "\n".join(f"{i}. {r.text}" for i, r in enumerate(results, 1))
+        return "\n".join(f"{i}. {r.text}" for i, r in enumerate(results, 1)) or "No relevant memories found."
 
     def _tool_reflect(self, args: dict) -> str:
         query = args["query"]
@@ -1138,14 +1122,11 @@ class HindsightMemoryProvider(MemoryProvider):
         # 3. Rotate to the new session.
         if parent_session_id:
             self._parent_session_id = str(parent_session_id).strip()
-        self._session_id = new_id
-        self._document_id = _mint_document_id(new_id)
+        self._session_id, self._document_id = new_id, _mint_document_id(new_id)
         self._session_turns = []
         self._turn_counter = self._turn_index = self._last_retained_turn_count = 0
-        logger.debug(
-            "Hindsight on_session_switch: new_session=%s parent=%s reset=%s doc=%s",
-            self._session_id, self._parent_session_id, reset, self._document_id,
-        )
+        logger.debug("Hindsight on_session_switch: new_session=%s parent=%s reset=%s doc=%s",
+                     self._session_id, self._parent_session_id, reset, self._document_id)
 
     def _close_client(self) -> None:
         if self._mode != "local_embedded":
