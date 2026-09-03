@@ -47,16 +47,14 @@ def _report_compression_timeout(
     mark_context_compression_timed_out(agent)
     if total_exhausted:
         logger.warning(
-            "Context compression reached its total ceiling "
-            "after %.1fs (progress observed=%s); continuing "
+            "Context compression reached its total ceiling after %.1fs (progress observed=%s); continuing "
             "without compression",
             waited,
             progress_observed,
         )
     else:
         logger.warning(
-            "Context compression made no progress for %.1fs "
-            "(total wait %.1fs, ceiling %.1fs); continuing "
+            "Context compression made no progress for %.1fs (total wait %.1fs, ceiling %.1fs); continuing "
             "without compression",
             since_progress,
             waited,
@@ -92,17 +90,14 @@ def _report_compression_timeout(
         emit(
             "⚠ Context compression reached its total ceiling "
             f"after {waited:.1f}s{progress}. No messages were "
-            "dropped — continuing without compression. Run "
-            "/compress to retry or /new for a clean session."
+            "dropped — continuing without compression. Run /compress to retry or /new for a clean session."
         )
     else:
         emit(
             "⚠ Context compression timed out "
             f"after {idle:.1f}s with no output from the summary "
-            "model. No messages were dropped — continuing "
-            "without compression. Run /compress to retry, /new "
-            "for a clean session, or check "
-            "auxiliary.compression."
+            "model. No messages were dropped — continuing without compression. Run /compress to retry, /new "
+            "for a clean session, or check auxiliary.compression."
         )
 
 
@@ -113,8 +108,7 @@ def _warn_commit_overrun(agent, waited: float, ceiling: float) -> None:
         emit(
             "⚠ Context compression commit is taking unusually "
             f"long ({waited:.0f}s, ceiling {ceiling:.0f}s). "
-            "Waiting for it to finish safely — if this persists, "
-            "check SessionDB health (disk / lock contention)."
+            "Waiting for it to finish safely — if this persists, check SessionDB health (disk / lock contention)."
         )
 
 

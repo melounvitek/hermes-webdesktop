@@ -109,10 +109,8 @@ COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE = (
 # provider limit kills it. Must stay visible on gateways: never add it to
 # ROUTINE_COMPRESSION_STATUS_SAMPLES or _TELEGRAM_NOISY_STATUS_RE.
 CONTEXT_OVERFLOW_BLOCKED_WARNING_TEMPLATE = (
-    "⚠ Context is over the compression threshold "
-    "(~{tokens:,} tokens >= {threshold:,}) "
-    "but compression is currently blocked ({reason}). "
-    "The model may stop responding. Run /new to start a fresh "
+    "⚠ Context is over the compression threshold (~{tokens:,} tokens >= {threshold:,}) "
+    "but compression is currently blocked ({reason}). The model may stop responding. Run /new to start a fresh "
     "session or /compress to retry immediately."
 )
 
@@ -951,15 +949,13 @@ def _retry_compression_on_fallback_chain(
         except Exception:
             logger.warning(
                 "compression stall-fallback fence factory failed; the retry "
-                "will run on an unpublished fence (a /stop mid-retry cannot "
-                "serialize against its commit boundary)",
+                "will run on an unpublished fence (a /stop mid-retry cannot serialize against its commit boundary)",
                 exc_info=True,
             )
     if not isinstance(retry_fence, CompressionCommitFence):
         logger.warning(
             "compression stall-fallback retry running on an unpublished fence; "
-            "hard-interrupt admission will read the aborted attempt's fence "
-            "rather than the retry's commit boundary"
+            "hard-interrupt admission will read the aborted attempt's fence rather than the retry's commit boundary"
         )
         retry_fence = CompressionCommitFence()
     idle = float(route.get("timeout") or idle_timeout_seconds)
@@ -1022,8 +1018,7 @@ def _await_worker_within_budget(
             since_progress = fence.seconds_since_progress()
             if not fence.deadline_exceeded and since_progress < idle and waited < ceiling:
                 logger.info(
-                    "Context compression still streaming after %.0fs "
-                    "(last progress %.1fs ago) — extending wait "
+                    "Context compression still streaming after %.0fs (last progress %.1fs ago) — extending wait "
                     "(ceiling %.0fs)",
                     waited,
                     since_progress,
@@ -1053,10 +1048,8 @@ def _await_in_flight_commit(
             log = logger.warning if overrun_reports <= 2 else logger.error
             log(
                 "Context compression SessionDB commit still running "
-                "%.1fs past the total ceiling (waited %.1fs, ceiling "
-                "%.1fs); commit cannot be abandoned mid-flight — "
-                "continuing to wait (check SessionDB health if this "
-                "persists)",
+                "%.1fs past the total ceiling (waited %.1fs, ceiling %.1fs); commit cannot be abandoned mid-flight — "
+                "continuing to wait (check SessionDB health if this persists)",
                 waited - ceiling,
                 waited,
                 ceiling,
@@ -1108,10 +1101,8 @@ def _release_cancelled_worker(
         else:
             logger.warning(
                 "Cancelled compression worker did not exit within %.1fs "
-                "grace — orphaning it behind the poison fence (late "
-                "result will be discarded); retaining the session "
-                "compression lease until it exits so no new attempt "
-                "overlaps it",
+                "grace — orphaning it behind the poison fence (late result will be discarded); retaining the session "
+                "compression lease until it exits so no new attempt overlaps it",
                 grace,
             )
     fence.release_cancelled_compression_lock()
@@ -1166,8 +1157,7 @@ def run_compress_context_with_progress_timeout(
             "Context compression pool saturated (%d workers busy) — "
             "refusing new compression this cycle and continuing without "
             "compression. Wedged workers are fence-cancelled and free their "
-            "slot when they return; if this persists, check the summary "
-            "provider health.",
+            "slot when they return; if this persists, check the summary provider health.",
             _COMPRESS_EXECUTOR_MAX_WORKERS,
         )
         # Saturation refusals must hit the same telemetry stream as other failures, or
@@ -1264,8 +1254,7 @@ def run_compress_context_with_progress_timeout(
                 logger.debug("compress_context timeout callback failed", exc_info=True)
         else:
             logger.warning(
-                "Context compression made no progress for %.1fs "
-                "(total wait %.1fs, ceiling %.1fs); continuing without "
+                "Context compression made no progress for %.1fs (total wait %.1fs, ceiling %.1fs); continuing without "
                 "compression",
                 since_progress,
                 waited,
@@ -1959,10 +1948,8 @@ def _lower_threshold_to_aux_context(
     agent._compression_warning = msg
     agent._emit_status(msg)
     logger.warning(
-        "Auxiliary compression model %s has %d token context, "
-        "below the main model's compression threshold of %d "
-        "tokens — auto-lowered session threshold to %d to "
-        "keep compression working.",
+        "Auxiliary compression model %s has %d token context, below the main model's compression threshold of %d "
+        "tokens — auto-lowered session threshold to %d to keep compression working.",
         aux_model,
         aux_context,
         old_threshold,
@@ -2007,8 +1994,7 @@ def check_compression_model_feasibility(agent: Any) -> None:
                     "⚠ Configured auxiliary compression provider "
                     f"'{_aux_cfg_provider}' is unavailable — context "
                     "compression will drop middle turns without a summary. "
-                    "Check auxiliary.compression in config.yaml and "
-                    "reauthenticate that provider."
+                    "Check auxiliary.compression in config.yaml and reauthenticate that provider."
                 )
             else:
                 msg = (
@@ -2314,8 +2300,7 @@ def _pruned_skill_reload_notice(compressed: list) -> str:
         "the skill instructions that governed it were pruned. Before "
         f"executing any preserved task that depends on these skills, reload "
         f"them first: {calls}. After reloading, re-check that each pending "
-        "task is still justified — findings recorded before the boundary may "
-        "have invalidated it."
+        "task is still justified — findings recorded before the boundary may have invalidated it."
     )
 
 
@@ -2697,8 +2682,7 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
                         pass  # test doubles without the method
             except Exception as _wm_err:
                 logger.warning(
-                    "compression watermark capture failed for "
-                    "session=%s (%s) — concurrent appends this cycle "
+                    "compression watermark capture failed for session=%s (%s) — concurrent appends this cycle "
                     "will be archived with the snapshot",
                     lease.sid,
                     _wm_err,
@@ -2749,8 +2733,7 @@ def _sit_out_lock_contention(
         agent._last_compression_lock_warning_sid = lease.sid
         try:
             agent._emit_warning(
-                "⚠ Skipping concurrent compression — another path "
-                "is already compressing this session. Will retry "
+                "⚠ Skipping concurrent compression — another path is already compressing this session. Will retry "
                 "after it finishes."
             )
         except Exception:
@@ -2823,8 +2806,7 @@ def _acquire_compression_lease(
                 logger.warning(
                     "compression lock subsystem unavailable for session=%s "
                     "— proceeding without lock. This usually means a stale "
-                    "in-memory module after an update; restart the process "
-                    "(or `hermes update`) to resync.",
+                    "in-memory module after an update; restart the process (or `hermes update`) to resync.",
                     _lock_sid,
                 )
             _lock_acquired = True  # acquired-but-unlocked compatibility path
@@ -2926,10 +2908,8 @@ def _adopt_grown_durable_parent(agent: Any, lease: _CompressionLease, messages: 
         _preflush_ok = True
     if not _preflush_ok:
         logger.warning(
-            "compression: session=%s grew before lease "
-            "(%d → %d msgs) but the pre-adoption flush of the "
-            "live tail failed; skipping durable-snapshot "
-            "adoption so un-persisted user input is kept",
+            "compression: session=%s grew before lease (%d → %d msgs) but the pre-adoption flush of the "
+            "live tail failed; skipping durable-snapshot adoption so un-persisted user input is kept",
             lease.sid,
             len(messages),
             len(durable_parent),
@@ -3180,10 +3160,8 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
         agent._cached_system_prompt = new_system_prompt
         if cached_system_prompt is not None:
             logger.info(
-                "Compaction rebuilt a drifted system prompt "
-                "(session=%s, %d -> %d chars): builder output changed "
-                "since the stored snapshot (update, config change, or "
-                "memory/skills growth)",
+                "Compaction rebuilt a drifted system prompt (session=%s, %d -> %d chars): builder output changed "
+                "since the stored snapshot (update, config change, or memory/skills growth)",
                 agent.session_id or "none",
                 len(cached_system_prompt),
                 len(new_system_prompt),
@@ -3229,8 +3207,7 @@ def _salvage_or_refuse_grown_transcript(
                 _rough_out = _salv_est
     if _rough_out > _rough_in:
         logger.warning(
-            "Compression refused: compressed transcript would be "
-            "larger than the original (session=%s, ~%s -> ~%s "
+            "Compression refused: compressed transcript would be larger than the original (session=%s, ~%s -> ~%s "
             "tokens); keeping the original transcript unchanged",
             agent.session_id or "none",
             f"{_rough_in:,}",
@@ -3244,10 +3221,8 @@ def _salvage_or_refuse_grown_transcript(
             pass
         try:
             agent._emit_warning(
-                "⚠️ Compression refused: the generated summary "
-                "would have GROWN the conversation instead of "
-                "shrinking it. No messages were dropped — "
-                "conversation continues unchanged."
+                "⚠️ Compression refused: the generated summary would have GROWN the conversation instead of "
+                "shrinking it. No messages were dropped — conversation continues unchanged."
             )
         except Exception:
             pass
@@ -3666,8 +3641,7 @@ def _candidate_rejected(
     if not _compressor_attempt_is_current(agent.context_compressor, attempt_generation):
         logger.warning(
             "Discarding late compression candidate: attempt generation "
-            "%s was superseded by a newer attempt (current: %s) "
-            "(session=%s).",
+            "%s was superseded by a newer attempt (current: %s) (session=%s).",
             attempt_generation,
             getattr(agent.context_compressor, "_compression_attempt_generation", None),
             agent.session_id or "none",
