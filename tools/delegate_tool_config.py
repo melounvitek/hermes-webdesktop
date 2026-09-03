@@ -458,22 +458,18 @@ def _resolve_child_runtime(
         logger.debug("Could not load delegation reasoning_effort: %s", exc)
 
     kwargs: Dict[str, Any] = {
-        "base_url": effective_base_url,
-        "api_key": override_api_key or parent_api_key,
-        "model": effective_model,
+        "base_url": effective_base_url, "api_key": override_api_key or parent_api_key, "model": effective_model,
         "provider": effective_provider,
         "capabilities": _inherit_parent_capabilities(parent_agent, override_provider, override_base_url),
-        "api_mode": effective_api_mode,
-        "acp_command": effective_acp_command,
-        "acp_args": effective_acp_args,
+        "api_mode": effective_api_mode, "acp_command": effective_acp_command, "acp_args": effective_acp_args,
         "reasoning_config": child_reasoning,
         # Inherit the parent's fallback chain EXCEPT under a pinned provider: a mid-run 429/auth failure must not
         # silently reroute the quiet child onto the parent's fallbacks. Predictability > liveness for explicit pins.
         "fallback_model": None if override_provider else (getattr(parent_agent, "_fallback_chain", None) or None),
         "openrouter_min_coding_score": getattr(parent_agent, "openrouter_min_coding_score", None),
+        # Routing filters reset to their defaults under a pinned provider (see _ROUTING_FILTER_DEFAULTS).
+        **{a: d if override_provider else getattr(parent_agent, a, d) for a, d in _ROUTING_FILTER_DEFAULTS},
     }
-    for attr, pinned_default in _ROUTING_FILTER_DEFAULTS:
-        kwargs[attr] = pinned_default if override_provider else getattr(parent_agent, attr, pinned_default)
     if not override_provider:
         kwargs["provider_data_collection"] = kwargs["provider_data_collection"] or ""
     child_max_tokens = override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
