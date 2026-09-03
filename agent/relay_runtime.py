@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import asyncio
+import contextlib
 import contextvars
 import importlib
 import inspect
@@ -19,9 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
-from hermes_cli.relay_plugin_cutover import (
-    RELAY_PLUGINS_CONFIG_ENV, configured_legacy_relay_env_vars
-)
+from hermes_cli.relay_plugin_cutover import (RELAY_PLUGINS_CONFIG_ENV, configured_legacy_relay_env_vars)
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,6 @@ def _scope_op_executor():
         with _SCOPE_OP_EXECUTOR_LOCK:
             if _SCOPE_OP_EXECUTOR is None:
                 from tools.daemon_pool import DaemonThreadPoolExecutor
-
                 _SCOPE_OP_EXECUTOR = DaemonThreadPoolExecutor(
                     max_workers=8, thread_name_prefix="relay-scope-op"
                 )
@@ -101,9 +99,8 @@ def pop_relay_scope(
     """
     pop = relay.scope.pop
     kwargs = {
-        key: value
-        for key, value in (("output", output), ("metadata", metadata), ("timestamp", timestamp))
-        if value is not None
+        key: value for key,
+        value in (("output", output), ("metadata", metadata), ("timestamp", timestamp)) if value is not None
     }
     try:
         params = inspect.signature(pop).parameters
@@ -181,7 +178,6 @@ def _load_segments_config() -> dict[str, Any]:
     segments: dict[str, Any] = {}
     try:
         from gateway.run import _load_gateway_config  # late import
-
         telemetry = (_load_gateway_config().get("gateway") or {}).get("telemetry") or {}
         segments = telemetry.get("session_segments") or {}
     except Exception:  # noqa: BLE001 - config absence must not crash
@@ -484,10 +480,8 @@ class RelayRuntime:
                 return None
             session = self._sessions.get(session_id)
             if session is None:
-                session = RelaySession(
-                    session_id=session_id,
-                    parent_session_id=self._subagent_parents.get(session_id, ""),
-                )
+                parent_session_id = self._subagent_parents.get(session_id, "")
+                session = RelaySession(session_id=session_id, parent_session_id=parent_session_id)
                 self._sessions[session_id] = session
         with session.lock:
             if session.closing:
@@ -528,16 +522,11 @@ class RelayRuntime:
                 logger.warning(
                     "Hermes Relay segment close failed (session=%s segment=%d); "
                     "abandoning the old segment span",
-                    session.session_id,
-                    session.segment - 1,
-                    exc_info=True,
+                    session.session_id, session.segment - 1, exc_info=True,
                 )
             scope_metadata = runtime_metadata(
                 self.runtime_id,
-                **{
-                    "hermes.session.segment": session.segment,
-                    "hermes.session.segment_reason": reason,
-                },
+                **{"hermes.session.segment": session.segment, "hermes.session.segment_reason": reason},
             )
             try:
                 self._open_session_scope(session, scope_metadata, resolve_parent=False)
@@ -545,9 +534,7 @@ class RelayRuntime:
                 logger.warning(
                     "Hermes Relay segment open failed (session=%s segment=%d); "
                     "keeping the prior scope handle",
-                    session.session_id,
-                    session.segment,
-                    exc_info=True,
+                    session.session_id, session.segment, exc_info=True,
                 )
 
     def register_subagent(
@@ -597,9 +584,7 @@ class RelayRuntime:
                 return None if session.closing else session
         return None
 
-    def _session_context(
-        self, session: RelaySession, *, allow_closing: bool
-    ) -> contextvars.Context:
+    def _session_context(self, session: RelaySession, *, allow_closing: bool) -> contextvars.Context:
         """Copy the current context and overlay the session's saved Relay vars."""
         with session.lock:
             if session.closing and not allow_closing:
@@ -707,16 +692,13 @@ class RelayRuntime:
         self._begin_operation()
         return RelayOperationLease(self)
 
-    def emit_mark(
-        self, name: str, event: dict[str, Any], *, data: Any = None, metadata: Any = None
-    ) -> bool:
+    def emit_mark(self, name: str, event: dict[str, Any], *, data: Any = None, metadata: Any = None) -> bool:
         """Emit a mark parented to the Hermes session identified by ``event``."""
         session = self.ensure_session(event)
         if session is None:
             return False
         self.run_in_session(
-            session, self.relay.scope.event, name, handle=session.handle, data=data,
-            metadata=metadata,
+            session, self.relay.scope.event, name, handle=session.handle, data=data, metadata=metadata,
         )
         return True
 
@@ -755,24 +737,17 @@ class RelayRuntime:
             if top is None or _same_handle(top, handle):
                 break
             # Never pop the session root while draining for a nested handle.
-            if (
-                session_root is not None and _same_handle(top, session_root)
-                and handle is not session_root
-            ):
+            if (session_root is not None and _same_handle(top, session_root) and handle is not session_root):
                 break
             try:
-                pop_relay_scope(
-                    self.relay, top, output={"outcome": "cancelled", "hermes.orphan_drain": True},
-                    metadata=metadata,
-                )
+                orphan_output = {"outcome": "cancelled", "hermes.orphan_drain": True}
+                pop_relay_scope(self.relay, top, output=orphan_output, metadata=metadata)
                 drained += 1
             except Exception:
                 logger.warning("Hermes Relay orphaned scope drain failed", exc_info=True)
                 break
         if drained:
-            logger.warning(
-                "Hermes Relay drained %d orphaned scope(s) before closing %s", drained, handle
-            )
+            logger.warning("Hermes Relay drained %d orphaned scope(s) before closing %s", drained, handle)
         try:
             pop_relay_scope(self.relay, handle, output=output, metadata=metadata)
             return None
@@ -792,9 +767,7 @@ class RelayRuntime:
         """
         if handle is None:
             return None
-        run_in_session = (
-            self._run_in_session_untracked if operation_already_held else self.run_in_session
-        )
+        run_in_session = (self._run_in_session_untracked if operation_already_held else self.run_in_session)
         try:
             failure = run_in_session(
                 session, self._pop_with_drain, handle, output=output or {},
@@ -874,13 +847,14 @@ class RelayRuntime:
             with self._sessions_lock:
                 session_ids = list(self._sessions)
             for session_id in session_ids:
-                self._safe(self._close_session, {"session_id": session_id})
+                _warn_on_error("runtime operation", self._close_session, {"session_id": session_id})
             if self._plugin_configuration_registered:
                 if self._plugins_active():
                     self.release_managed_execution(RELAY_PLUGINS_EXECUTION_CONSUMER)
                 _PLUGIN_CONFIGURATION.release(self)
                 self._plugin_configuration_registered = False
-                self._safe(atexit.unregister, self.shutdown, quiet=True)
+                with contextlib.suppress(Exception):
+                    atexit.unregister(self.shutdown)
         except Exception:
             with self._sessions_lock:
                 self._shutdown_started = False
@@ -888,15 +862,6 @@ class RelayRuntime:
             return
         with self._sessions_lock:
             self._shutdown_complete.set()
-
-    @staticmethod
-    def _safe(callback: Callable[..., Any], *args: Any, quiet: bool = False, **kwargs: Any) -> Any:
-        try:
-            return callback(*args, **kwargs)
-        except Exception:
-            if not quiet:
-                logger.warning("Hermes Relay runtime operation failed", exc_info=True)
-            return None
 
 
 @dataclass(frozen=True)
@@ -935,16 +900,14 @@ class RelayHostRegistry:
         self._lock = threading.RLock()
         self._hosts: dict[str, RelayHost] = {}
 
-    def for_profile(
-        self, profile_key: str | None = None, *, create: bool = True
-    ) -> RelayHost | None:
+    def for_profile(self, profile_key: str | None = None, *, create: bool = True) -> RelayHost | None:
         key = profile_key or current_profile_key()
         host = self._hosts.get(key)
         if host is not None or not create:
             return host
         with self._lock:
             host = self._hosts.get(key)
-            if host is not None or not create:
+            if host is not None:
                 return host
             try:
                 host = RelayRuntime(profile_key=key)
@@ -1082,9 +1045,8 @@ class RelaySessionCoordinator:
         session = None
         if isinstance(host, RelayRuntime):
             session = _warn_on_error(
-                "conversation initialization", self._open_conversation_session, host,
-                profile_key=profile_key, session_id=session_id, platform=platform,
-                parent_session_id=parent_session_id, model=model,
+                "conversation initialization", self._open_conversation_session, host, profile_key=profile_key,
+                session_id=session_id, platform=platform, parent_session_id=parent_session_id, model=model,
             )
         return ConversationLease(
             profile_key=profile_key, session_id=session_id, platform=platform, host=host,
@@ -1102,14 +1064,11 @@ class RelaySessionCoordinator:
         metadata = {"hermes.execution_surface": platform or "unknown"}
         if parent_session_id and parent_session_id != session_id:
             return host.register_subagent(
-                {"parent_session_id": parent_session_id, "child_session_id": session_id},
-                metadata=metadata,
+                {"parent_session_id": parent_session_id, "child_session_id": session_id}, metadata=metadata,
             )
         return host.ensure_session({"session_id": session_id}, metadata=metadata)
 
-    def begin_turn(
-        self, lease: ConversationLease, *, turn_id: str, task_id: str
-    ) -> RelayTurnContext:
+    def begin_turn(self, lease: ConversationLease, *, turn_id: str, task_id: str) -> RelayTurnContext:
         if lease.released:
             raise RuntimeError("Hermes Relay conversation lease is released")
         turn = RelayTurnContext(lease=lease, turn_id=turn_id, task_id=task_id)
@@ -1184,9 +1143,7 @@ class RelaySessionCoordinator:
                     self._reset_turn_context(turn)
                 self._consume_deferred_close(lease)
 
-    def _close_turn_scope(
-        self, host: RelayRuntime, turn: RelayTurnContext, *, outcome: str
-    ) -> None:
+    def _close_turn_scope(self, host: RelayRuntime, turn: RelayTurnContext, *, outcome: str) -> None:
         """Pop the turn's logical LLM children, then the turn scope itself (LIFO)."""
         self._finish_logical_calls(turn, outcome=outcome)
         if turn.handle is None:
@@ -1214,9 +1171,7 @@ class RelaySessionCoordinator:
             return
         with lease.session.lock:
             pending = lease.session.close_pending and not lease.session.closing
-        if pending and not self.has_active_turn(
-            profile_key=lease.profile_key, session_id=lease.session_id
-        ):
+        if pending and not self.has_active_turn(profile_key=lease.profile_key, session_id=lease.session_id):
             host.close_session({"session_id": lease.session_id})
 
     def notify_session_compacted(
@@ -1365,9 +1320,7 @@ def active_turn(session_id: str | None = None) -> RelayTurnContext | None:
     return turn
 
 
-def resolve_execution_context(
-    session_id: str,
-) -> tuple[RelayRuntime | None, RelaySession | None, Any]:
+def resolve_execution_context(session_id: str) -> tuple[RelayRuntime | None, RelaySession | None, Any]:
     """Resolve one active turn/session parent for managed Relay execution."""
     if _MANAGED_CALLBACK_DEPTH.get() > 0:
         # Nested managed execution is impossible (see _MANAGED_CALLBACK_DEPTH); the
@@ -1404,23 +1357,17 @@ def emit_mark(name: str, *, session_id: str, data: Any = None, metadata: Any = N
         return False
 
 
-def apply_tool_request_intercepts(
-    *, session_id: str, tool_name: str, args: dict[str, Any]
-) -> dict[str, Any]:
+def apply_tool_request_intercepts(*, session_id: str, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
     """Return Relay-rewritten arguments at Hermes's authorization boundary."""
     if not session_id:
         return args
     runtime = get_runtime(create=False)
     if runtime is None:
         return args
-    return runtime.apply_tool_request_intercepts(
-        session_id=session_id, tool_name=tool_name, args=args
-    )
+    return runtime.apply_tool_request_intercepts(session_id=session_id, tool_name=tool_name, args=args)
 
 
-def _is_relay_wrapped_callback_error(
-    relay_error: BaseException, callback_error: BaseException
-) -> bool:
+def _is_relay_wrapped_callback_error(relay_error: BaseException, callback_error: BaseException) -> bool:
     """Match Relay's native callback wrapper without masking policy errors."""
     if relay_error is callback_error:
         return True
@@ -1476,7 +1423,6 @@ def _configured_plugin_inputs(relay: Any) -> tuple[dict[str, Any], list[Any]] | 
                 ", ".join(legacy_vars),
             )
         return None
-
     config_path = Path(configured).expanduser()
     try:
         with config_path.open("rb") as config_file:
@@ -1507,9 +1453,7 @@ def _resolve_plugin_awaitable(value: Any) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(value)
-    return _run_on_daemon_thread(
-        lambda: asyncio.run(value), name="hermes-nemo-relay-plugin-lifecycle"
-    )
+    return _run_on_daemon_thread(lambda: asyncio.run(value), name="hermes-nemo-relay-plugin-lifecycle")
 
 
 def _session_id(event: dict[str, Any]) -> str:

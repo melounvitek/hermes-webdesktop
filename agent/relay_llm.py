@@ -80,9 +80,8 @@ class _ManagedAttempt:
         )
         self.operation = _relay_operation_name(name, metadata)
         self.relay_kwargs = {
-            "handle": self.parent, "metadata": _relay_metadata(name, metadata),
-            "model_name": model_name, "codec": _codec(runtime.relay, metadata),
-            "response_codec": _codec(runtime.relay, metadata),
+            "handle": self.parent, "metadata": _relay_metadata(name, metadata), "model_name": model_name,
+            "codec": _codec(runtime.relay, metadata), "response_codec": _codec(runtime.relay, metadata),
         }
         # Provider callback bookkeeping: "value"/"json" once it returned, "error" if it raised.
         self.raw_response: dict[str, Any] = {}
@@ -138,8 +137,7 @@ class _ManagedAttempt:
     def run_managed(self, relay_call: Callable[..., Any], *callbacks: Any) -> Any:
         """Return the awaitable running ``relay_call`` inside the session context."""
         return self.runtime.run_in_session_async(
-            self.session, relay_call, self.operation, self.relay_request, *callbacks,
-            **self.relay_kwargs,
+            self.session, relay_call, self.operation, self.relay_request, *callbacks, **self.relay_kwargs,
         )
 
     def resolve_failure(self, exc: BaseException, defer_logical_completion: bool) -> Any:
@@ -153,10 +151,7 @@ class _ManagedAttempt:
             and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)
         ):
             raise callback_error
-        if (
-            not isinstance(exc, Exception) or callback_error is not None
-            or "value" not in self.raw_response
-        ):
+        if (not isinstance(exc, Exception) or callback_error is not None or "value" not in self.raw_response):
             raise
         logger.warning(
             "NeMo Relay LLM post-processing failed after provider success; "
@@ -176,40 +171,34 @@ class _ManagedAttempt:
 
 
 def execute(
-    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, session_id: str,
-    name: str, model_name: str, metadata: dict[str, Any] | None = None,
-    defer_logical_completion: bool = False,
+    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, session_id: str, name: str,
+    model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
 ) -> Any:
     """Run one non-streaming physical provider attempt through Relay."""
-    attempt = _ManagedAttempt.resolve(
-        session_id, request, metadata, name=name, model_name=model_name
-    )
+    attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
     if attempt is None:
         return callback(request)
-
-    invoke = partial(attempt.invoke, callback)
     try:
-        managed = _run_awaitable(attempt.run_managed(attempt.runtime.relay.llm.execute, invoke))
+        managed = _run_awaitable(attempt.run_managed(
+            attempt.runtime.relay.llm.execute, partial(attempt.invoke, callback)
+        ))
     except BaseException as exc:
         return attempt.resolve_failure(exc, defer_logical_completion)
     return attempt.result(managed, defer_logical_completion)
 
 
 async def execute_async(
-    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, session_id: str,
-    name: str, model_name: str, metadata: dict[str, Any] | None = None,
-    defer_logical_completion: bool = False,
+    request: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *, session_id: str, name: str,
+    model_name: str, metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
 ) -> Any:
     """Run one asynchronous physical provider attempt through Relay."""
-    attempt = _ManagedAttempt.resolve(
-        session_id, request, metadata, name=name, model_name=model_name
-    )
+    attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
     if attempt is None:
         return await callback(request)
-
-    invoke = partial(attempt.invoke_async, callback)
     try:
-        managed = await attempt.run_managed(attempt.runtime.relay.llm.execute, invoke)
+        managed = await attempt.run_managed(
+            attempt.runtime.relay.llm.execute, partial(attempt.invoke_async, callback)
+        )
     except BaseException as exc:
         return attempt.resolve_failure(exc, defer_logical_completion)
     return attempt.result(managed, defer_logical_completion)
@@ -252,10 +241,9 @@ def _has_running_event_loop() -> bool:
 
 
 def stream_current(
-    request: dict[str, Any], stream_factory: Callable[[dict[str, Any]], Any], *, name: str,
-    model_name: str, finalizer: Callable[[], Any], metadata: dict[str, Any] | None = None,
-    defer_logical_completion: bool = False,
-    completed_response_predicate: Callable[[Any], bool] | None = None,
+    request: dict[str, Any], stream_factory: Callable[[dict[str, Any]], Any], *, name: str, model_name: str,
+    finalizer: Callable[[], Any], metadata: dict[str, Any] | None = None,
+    defer_logical_completion: bool = False, completed_response_predicate: Callable[[Any], bool] | None = None,
 ) -> Any:
     """Run a provider stream under the inherited Hermes turn when present.
 
@@ -317,12 +305,10 @@ class ManagedLlmStream(Iterator[Any]):
     _provider_completed = False
 
     def __init__(
-        self, request: dict[str, Any], stream_factory: Callable[[dict[str, Any]], Any], *,
-        session_id: str, name: str, model_name: str, finalizer: Callable[[], Any],
-        on_stream_created: Callable[[Any], None] | None = None,
-        on_chunk: Callable[[Any], None] | None = None,
-        chunk_adapter: Callable[[Any], Any] | None = None,
-        accept_chunk: Callable[[Any], bool] | None = None,
+        self, request: dict[str, Any], stream_factory: Callable[[dict[str, Any]], Any], *, session_id: str,
+        name: str, model_name: str, finalizer: Callable[[], Any],
+        on_stream_created: Callable[[Any], None] | None = None, on_chunk: Callable[[Any], None] | None = None,
+        chunk_adapter: Callable[[Any], Any] | None = None, accept_chunk: Callable[[Any], bool] | None = None,
         completed_response_predicate: Callable[[Any], bool] | None = None,
         metadata: dict[str, Any] | None = None, defer_logical_completion: bool = False,
     ) -> None:
@@ -336,13 +322,9 @@ class ManagedLlmStream(Iterator[Any]):
         self._accept_chunk = accept_chunk
         self._raw_chunks: list[tuple[Any, Any]] = []
         self._prefetched_chunks: list[Any] = []
-        attempt = _ManagedAttempt.resolve(
-            session_id, request, metadata, name=name, model_name=model_name
-        )
+        attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
         if attempt is None:
-            self._start_unmanaged(
-                request, stream_factory, on_stream_created, completed_response_predicate
-            )
+            self._start_unmanaged(request, stream_factory, on_stream_created, completed_response_predicate)
             return
         self._logical = attempt.logical
         self._start_managed(
@@ -390,9 +372,7 @@ class ManagedLlmStream(Iterator[Any]):
                         chunk = run_callback(next, raw_iterator)
                     except StopIteration:
                         break
-                    if self._accept_chunk is not None and not run_callback(
-                        self._accept_chunk, chunk
-                    ):
+                    if self._accept_chunk is not None and not run_callback(self._accept_chunk, chunk):
                         break
                     encoded_chunk = _jsonable(chunk)
                     self._raw_chunks.append((encoded_chunk, chunk))
@@ -441,8 +421,7 @@ class ManagedLlmStream(Iterator[Any]):
         try:
             self._stream = loop.run_until_complete(
                 attempt.run_managed(
-                    attempt.runtime.relay.llm.stream_execute, provider_stream, observe_chunk,
-                    relay_finalizer,
+                    attempt.runtime.relay.llm.stream_execute, provider_stream, observe_chunk, relay_finalizer,
                 )
             )
         except BaseException as exc:
@@ -488,8 +467,7 @@ class ManagedLlmStream(Iterator[Any]):
             return
         _complete_logical(
             self._logical, outcome=outcome, model_name=self._logical_model_name,
-            provider_name=self._logical_provider_name,
-            response_model_name=self._logical_response_model_name,
+            provider_name=self._logical_provider_name, response_model_name=self._logical_response_model_name,
             operation_lease=self._runtime_lease,
         )
         self._logical = None
@@ -568,9 +546,7 @@ class ManagedLlmStream(Iterator[Any]):
                 try:
                     _aclose_on_loop(loop, relay_stream)
                 except Exception:
-                    logger.debug(
-                        "Relay stream cleanup failed during provider fallback", exc_info=True
-                    )
+                    logger.debug("Relay stream cleanup failed during provider fallback", exc_info=True)
                 loop.close()
             self._finish_logical("success")
         finally:
@@ -833,9 +809,7 @@ def _provider_request(
                 final.pop(key, None)
             elif key not in baseline or not _json_equal(intercepted[key], baseline[key]):
                 final[key] = intercepted[key]
-        _restore_provider_message_extensions(
-            original, final, baseline=baseline, intercepted=intercepted
-        )
+        _restore_provider_message_extensions(original, final, baseline=baseline, intercepted=intercepted)
     headers = getattr(request, "headers", None)
     if isinstance(headers, dict):
         headers = {
@@ -854,10 +828,7 @@ def _codex_codec_tools(body: dict[str, Any]) -> None:
         body.pop("tools", None)
     elif isinstance(body.get("tools"), list):
         body["tools"] = [
-            {
-                "type": "function",
-                "function": {key: value for key, value in tool.items() if key != "type"},
-            }
+            {"type": "function", "function": {key: value for key, value in tool.items() if key != "type"}}
             if isinstance(tool, dict) and tool.get("type") == "function" and "function" not in tool
             else tool
             for tool in body["tools"]
@@ -875,9 +846,7 @@ def _chat_codec_tools(body: dict[str, Any]) -> None:
 
 
 # api_mode -> in-place normalizer producing the codec-facing ``tools`` shape.
-_CODEC_TOOL_NORMALIZERS = {
-    "codex_responses": _codex_codec_tools, "chat_completions": _chat_codec_tools
-}
+_CODEC_TOOL_NORMALIZERS = {"codex_responses": _codex_codec_tools, "chat_completions": _chat_codec_tools}
 
 
 def _relay_request_body(request: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -891,8 +860,7 @@ def _relay_request_body(request: dict[str, Any], metadata: dict[str, Any] | None
 
 
 def _restore_provider_message_extensions(
-    original: dict[str, Any], final: dict[str, Any], *, baseline: dict[str, Any],
-    intercepted: dict[str, Any],
+    original: dict[str, Any], final: dict[str, Any], *, baseline: dict[str, Any], intercepted: dict[str, Any],
 ) -> None:
     """Restore provider wire fields that Relay's typed codec cannot represent."""
     message_lists = tuple(body.get("messages") for body in (original, final, baseline, intercepted))
@@ -913,8 +881,7 @@ def _restore_provider_message_extensions(
 
 
 def _codec_round_trip_request_body(
-    relay: Any, relay_request: Any, *, relay_request_body: dict[str, Any],
-    metadata: dict[str, Any] | None,
+    relay: Any, relay_request: Any, *, relay_request_body: dict[str, Any], metadata: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Return the codec-only request shape used to identify real rewrites."""
     codec = _codec(relay, metadata)
@@ -927,19 +894,13 @@ def _codec_round_trip_request_body(
         if isinstance(content, dict):
             return _provider_request_body(content, metadata)
     except Exception:
-        logger.warning(
-            "NeMo Relay request codec baseline failed; ignoring request rewrites", exc_info=True
-        )
+        logger.warning("NeMo Relay request codec baseline failed; ignoring request rewrites", exc_info=True)
         return None
-    logger.warning(
-        "NeMo Relay request codec returned an unsupported baseline; ignoring request rewrites"
-    )
+    logger.warning("NeMo Relay request codec returned an unsupported baseline; ignoring request rewrites")
     return None
 
 
-def _provider_request_body(
-    content: dict[str, Any], metadata: dict[str, Any] | None
-) -> dict[str, Any]:
+def _provider_request_body(content: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
     body = dict(content)
     if _api_mode(metadata) != "codex_responses":
         return body
@@ -984,9 +945,7 @@ def _jsonable(value: Any) -> Any:
         except Exception:
             pass
     try:
-        attributes = {
-            str(key): item for key, item in vars(value).items() if not str(key).startswith("_")
-        }
+        attributes = {str(key): item for key, item in vars(value).items() if not str(key).startswith("_")}
     except (TypeError, AttributeError):
         return str(value)
     return _jsonable(attributes) if attributes else str(value)
@@ -1018,9 +977,7 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 def _run_awaitable(
-    value: Any,
-    *,
-    loop_error: str = "Synchronous Relay LLM execution cannot run on an event-loop thread",
+    value: Any, *, loop_error: str = "Synchronous Relay LLM execution cannot run on an event-loop thread",
 ) -> Any:
     if not inspect.isawaitable(value):
         return value

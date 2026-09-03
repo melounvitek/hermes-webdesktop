@@ -17,7 +17,6 @@ def _unprefix_oauth_tool_name(name: str) -> str:
     """
     from agent.anthropic_adapter import _OAUTH_TOOL_NAME_REVERSE_ALIASES
     from tools.registry import registry as _tool_registry
-
     bare = name[len(_MCP_PREFIX):]
     for candidate in (name, "mcp_" + bare, bare):
         if _tool_registry.get_entry(candidate):
@@ -29,9 +28,8 @@ class AnthropicTransport(ProviderTransport):
     """Transport for api_mode='anthropic_messages'."""
 
     _STOP_REASON_MAP = {
-        "end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length",
-        "stop_sequence": "stop", "refusal": "content_filter",
-        "model_context_window_exceeded": "length",
+        "end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length", "stop_sequence": "stop",
+        "refusal": "content_filter", "model_context_window_exceeded": "length",
     }
 
     @property
@@ -41,13 +39,11 @@ class AnthropicTransport(ProviderTransport):
     def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> Any:
         """Convert OpenAI messages to an Anthropic (system, messages) tuple; ``base_url`` affects thinking-signature handling."""
         from agent.anthropic_adapter import convert_messages_to_anthropic
-
         return convert_messages_to_anthropic(messages, base_url=kwargs.get("base_url"))
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> Any:
         """Convert OpenAI tool schemas to Anthropic input_schema format."""
         from agent.anthropic_adapter import convert_tools_to_anthropic
-
         return convert_tools_to_anthropic(tools)
 
     def build_kwargs(
@@ -56,12 +52,10 @@ class AnthropicTransport(ProviderTransport):
     ) -> Dict[str, Any]:
         """Build Anthropic messages.create() kwargs (converts messages and tools internally)."""
         from agent.anthropic_adapter import build_anthropic_kwargs
-
         return build_anthropic_kwargs(
             model=model, messages=messages, tools=tools, max_tokens=params.get("max_tokens", 16384),
             reasoning_config=params.get("reasoning_config"), tool_choice=params.get("tool_choice"),
-            is_oauth=params.get("is_oauth", False),
-            preserve_dots=params.get("preserve_dots", False),
+            is_oauth=params.get("is_oauth", False), preserve_dots=params.get("preserve_dots", False),
             context_length=params.get("context_length"), base_url=params.get("base_url"),
             fast_mode=params.get("fast_mode", False),
             drop_context_1m_beta=params.get("drop_context_1m_beta", False),
@@ -71,13 +65,11 @@ class AnthropicTransport(ProviderTransport):
         """Parse content blocks (text/thinking/tool_use), map stop_reason, collect reasoning_details."""
         import json
         from agent.anthropic_adapter import _sanitize_replay_block, _to_plain_data
-
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
         text_parts, reasoning_parts, reasoning_details, tool_calls = [], [], [], []
         # Anthropic signs each thinking block against the blocks PRECEDING it; when thinking
         # interleaves with tool_use the parallel lists lose that order and replay -> HTTP 400.
         ordered_blocks = []
-
         for block in response.content:
             block_dict = _to_plain_data(block)
             clean_block = None
@@ -101,7 +93,6 @@ class AnthropicTransport(ProviderTransport):
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
                     name = _unprefix_oauth_tool_name(name)
                 tool_calls.append(ToolCall(id=block.id, name=name, arguments=json.dumps(block.input)))
-
         provider_data = {}
         if reasoning_details:
             provider_data["reasoning_details"] = reasoning_details
@@ -112,7 +103,6 @@ class AnthropicTransport(ProviderTransport):
         )
         if _has_signed_thinking and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in ordered_blocks):
             provider_data["anthropic_content_blocks"] = ordered_blocks
-
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None, tool_calls=tool_calls or None,
             finish_reason=self.map_finish_reason(response.stop_reason),

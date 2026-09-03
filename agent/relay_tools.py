@@ -21,7 +21,6 @@ def execute(
     runtime, session, parent = relay_runtime.resolve_execution_context(session_id)
     if runtime is None or session is None or not runtime.managed_execution_enabled():
         return callback(args), args
-
     observed_args = args
     raw_result: dict[str, Any] = {}
     callback_error: BaseException | None = None
@@ -68,7 +67,6 @@ def execute(
             )
             return raw_result["value"], observed_args
         raise
-
     if "value" in raw_result and _json_equal(managed, raw_result["json"]):
         return raw_result["value"], observed_args
     if isinstance(managed, str):
@@ -110,6 +108,5 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 def _run_awaitable(value: Any) -> Any:
     return relay_llm._run_awaitable(
-        value,
-        loop_error="Synchronous Hermes Relay tool execution cannot run on an active event-loop thread",
+        value, loop_error="Synchronous Hermes Relay tool execution cannot run on an active event-loop thread",
     )
