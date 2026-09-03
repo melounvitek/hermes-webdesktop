@@ -4,8 +4,7 @@ This module owns the resolution ORDER (:func:`resolve_runtime_provider`), the ap
 helpers and the pool / OAuth / explicit paths. Custom-provider lookup lives in
 :mod:`hermes_cli.runtime_provider_custom`; Azure Foundry, OpenRouter/bare-custom, Bedrock and
 external-process builders in :mod:`hermes_cli.runtime_provider_backends`. Both are re-exported
-here so ``hermes_cli.runtime_provider.<name>`` imports and test patches keep working.
-"""
+here so ``hermes_cli.runtime_provider.<name>`` imports and test patches keep working."""
 
 from __future__ import annotations
 
@@ -18,38 +17,23 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 from hermes_cli import auth as auth_mod
-from agent.credential_pool import (
-    CredentialPool,
-    PooledCredential,
-    credential_pool_matches_provider,
-    custom_provider_pool_key_candidates,  # noqa: F401 — read via origin by runtime_provider_custom (patchable)
+from agent.credential_pool import (  # custom_provider_pool_key_candidates is read via origin by runtime_provider_custom
+    CredentialPool, PooledCredential, credential_pool_matches_provider, custom_provider_pool_key_candidates,  # noqa: F401
     load_pool,
 )
 from agent.secret_scope import get_secret as _get_secret
-from hermes_cli.auth import (
-    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER,
-    AuthError,
-    DEFAULT_CODEX_BASE_URL,
-    DEFAULT_QWEN_BASE_URL,
-    DEFAULT_XAI_OAUTH_BASE_URL,
-    PROVIDER_REGISTRY,
-    _agent_key_is_usable,
-    _nous_inference_env_override,
-    format_auth_error,
-    resolve_provider,
-    resolve_nous_runtime_credentials,
-    resolve_codex_runtime_credentials,
-    resolve_xai_oauth_runtime_credentials,
-    resolve_qwen_runtime_credentials,
-    resolve_api_key_provider_credentials,
-    resolve_external_process_provider_credentials,  # noqa: F401 — read via origin by runtime_provider_backends
-    has_usable_secret,
-    is_actual_local_base_url,
-    normalize_actual_base_url,
+from hermes_cli.auth import (  # resolve_external_process_provider_credentials is read via origin by runtime_provider_backends
+    ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, AuthError, DEFAULT_CODEX_BASE_URL, DEFAULT_QWEN_BASE_URL, DEFAULT_XAI_OAUTH_BASE_URL,
+    PROVIDER_REGISTRY, _agent_key_is_usable, _nous_inference_env_override, format_auth_error, resolve_provider,
+    resolve_nous_runtime_credentials, resolve_codex_runtime_credentials, resolve_xai_oauth_runtime_credentials,
+    resolve_qwen_runtime_credentials, resolve_api_key_provider_credentials,
+    resolve_external_process_provider_credentials,  # noqa: F401
+    has_usable_secret, is_actual_local_base_url, normalize_actual_base_url,
 )
 from hermes_cli import config as _config_mod
+from hermes_cli import models as _models  # attribute access keeps ``hermes_cli.models.<name>`` patches effective
 from hermes_constants import OPENROUTER_BASE_URL
-from hermes_cli.providers import is_official_openai_host
+from hermes_cli.providers import determine_api_mode, is_official_openai_host, nous_api_mode
 from utils import base_url_host_matches, base_url_hostname, env_int
 
 
@@ -93,8 +77,7 @@ def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider
     The model picker can select Custom while ``model.provider`` still reflects a previous provider.
     Non-loopback URLs are rejected unless the YAML provider is already ``custom`` or a local-server
     alias (ollama/vllm/llamacpp — else a legit LAN ollama endpoint silently falls through to
-    OpenRouter), so a stale OpenRouter/Z.ai base_url cannot hijack local sessions.
-    """
+    OpenRouter), so a stale OpenRouter/Z.ai base_url cannot hijack local sessions."""
     cfg_provider_norm = (cfg_provider or "").strip().lower()
     bu = (cfg_base_url or "").strip()
     if not bu:
@@ -112,11 +95,8 @@ def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider
 # so the runtime resolver stays in lockstep: api.meta.ai — prompt caching only on Responses;
 # api.router.com — /v1/chat/completions is a minimal shim; api.anthropic.com — native Messages.
 _HOST_MANDATED_API_MODES = {
-    "api.x.ai": "codex_responses",
-    "api.meta.ai": "codex_responses",
-    "api.actual.inc": "codex_responses",
-    "api.router.com": "codex_responses",
-    "api.anthropic.com": "anthropic_messages",
+    "api.x.ai": "codex_responses", "api.meta.ai": "codex_responses", "api.actual.inc": "codex_responses",
+    "api.router.com": "codex_responses", "api.anthropic.com": "anthropic_messages",
 }
 
 # codex_app_server is opt-in: hand the whole turn to a `codex app-server` subprocess (Codex's own
@@ -129,8 +109,7 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
 
     Exact-hostname matches reject lookalike subdomains (api.anthropic.com.attacker.test) and
     path-segment spoofing (proxy.test/api.anthropic.com/v1). Official OpenAI hosts (incl. the
-    data-residency us./eu. regional hosts) need Responses for GPT-5.x tool calls with reasoning.
-    """
+    data-residency us./eu. regional hosts) need Responses for GPT-5.x tool calls with reasoning."""
     normalized = (base_url or "").strip().lower().rstrip("/")
     hostname = base_url_hostname(base_url)
     mandated = _HOST_MANDATED_API_MODES.get(hostname)
@@ -151,9 +130,7 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
     ``anthropic``, ``responses``, …) are canonicalized first so old configs keep their transport
     instead of silently falling through to hostname-based detection."""
     if isinstance(raw, str):
-        from hermes_cli.config import _canonical_api_mode
-
-        normalized = _canonical_api_mode(raw).lower()
+        normalized = _config_mod._canonical_api_mode(raw).lower()
         if normalized in _VALID_API_MODES:
             return normalized
     return None
@@ -164,12 +141,7 @@ def _fallback_api_mode(provider: str, base_url: str, model: str = "") -> str:
     first, then the transport the provider overlay declares via ``providers.determine_api_mode``
     (``openai-api`` pointed at us.api.openai.com 400'd on every tool call without it), then
     ``chat_completions``."""
-    detected = _detect_api_mode_for_url(base_url)
-    if detected:
-        return detected
-    from hermes_cli.providers import determine_api_mode
-
-    return determine_api_mode(provider, base_url, model) or "chat_completions"
+    return _detect_api_mode_for_url(base_url) or determine_api_mode(provider, base_url, model) or "chat_completions"
 
 
 def _resolve_plain_custom_api_mode(model_cfg: Dict[str, Any], base_url: str) -> str:
@@ -221,9 +193,7 @@ def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str, *, target
     if not model_name:
         return "chat_completions"
     try:
-        from hermes_cli.models import copilot_model_api_mode
-
-        return copilot_model_api_mode(model_name, api_key=api_key)
+        return _models.copilot_model_api_mode(model_name, api_key=api_key)
     except Exception:
         return "chat_completions"
 
@@ -234,9 +204,7 @@ def _azure_inferred_api_mode(effective_model: str, api_mode: str) -> str:
     if not effective_model or api_mode == "anthropic_messages":
         return api_mode
     try:
-        from hermes_cli.models import azure_foundry_model_api_mode
-
-        inferred = azure_foundry_model_api_mode(effective_model)
+        inferred = _models.azure_foundry_model_api_mode(effective_model)
     except Exception:
         inferred = None
     return inferred or api_mode
@@ -248,15 +216,9 @@ def _configured_or_fallback_api_mode(
     """Persisted ``model.api_mode`` when it belongs to this provider, else URL/transport fallback.
 
     OpenCode Zen/Go serve both anthropic_messages and chat_completions models, so (when
-    ``opencode_by_model``) their mode is always re-derived from the effective model.
-    """
-    if opencode_by_model:
-        from hermes_cli.models import opencode_provider_family
-
-        if opencode_provider_family(provider) is not None:
-            from hermes_cli.models import opencode_model_api_mode
-
-            return opencode_model_api_mode(provider, effective_model)
+    ``opencode_by_model``) their mode is always re-derived from the effective model."""
+    if opencode_by_model and _models.opencode_provider_family(provider) is not None:
+        return _models.opencode_model_api_mode(provider, effective_model)
     return _configured_api_mode(provider, model_cfg) or _fallback_api_mode(provider, base_url, effective_model)
 
 
@@ -362,8 +324,7 @@ def _host_gated_env_key_candidates(base_url: str, *, ollama: bool) -> list:
 
     Sending OPENAI/OPENROUTER/OLLAMA keys to an unrelated endpoint leaks credentials
     (GHSA-76xc-57q6-vm5m); match on HOST, not substring. ``_host_derived_api_key`` skips OLLAMA,
-    so callers that want it opt in via ``ollama``.
-    """
+    so callers that want it opt in via ``ollama``."""
     is_openai = base_url_host_matches(base_url, "openai.com") or base_url_host_matches(base_url, "openai.azure.com")
     candidates = []
     if ollama:
@@ -393,12 +354,6 @@ def _registry_base_url(provider: str) -> str:
     return pconfig.inference_base_url if pconfig else ""
 
 
-def _nous_inference_base_url_override() -> str:
-    """Trusted ``NOUS_INFERENCE_BASE_URL`` override (bypasses the network host allowlist); one
-    normalization path via ``auth._nous_inference_env_override``."""
-    return _nous_inference_env_override() or ""
-
-
 def _nous_min_key_ttl() -> int:
     return max(60, env_int("HERMES_NOUS_MIN_KEY_TTL_SECONDS", 1800))
 
@@ -407,22 +362,12 @@ def _resolve_nous_creds() -> Dict[str, Any]:
     return resolve_nous_runtime_credentials(timeout_seconds=float(_getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")))
 
 
-def _nous_api_mode(model: str) -> str:
-    from hermes_cli.providers import nous_api_mode
-
-    return nous_api_mode(model)
-
-
 def _finalize_base_url(provider: str, api_mode: str, base_url: str) -> str:
     """Shared tail for pool-entry and api-key paths: OpenCode /v1 rule (OpenCode URLs end with /v1
     for OpenAI-compatible models but the Anthropic SDK prepends its own /v1/messages — strip for
     anthropic_messages, re-append otherwise), then LM Studio normalization."""
-    from hermes_cli.models import opencode_provider_family
-
-    if opencode_provider_family(provider) is not None:
-        from hermes_cli.models import normalize_opencode_base_url
-
-        base_url = normalize_opencode_base_url(provider, api_mode, base_url)
+    if _models.opencode_provider_family(provider) is not None:
+        base_url = _models.normalize_opencode_base_url(provider, api_mode, base_url)
     if provider == "lmstudio":
         base_url = auth_mod._normalize_lmstudio_runtime_base_url(base_url)
     return base_url
@@ -465,9 +410,7 @@ def _get_model_config() -> Dict[str, Any]:
         cfg["default"] = cfg["model"]
     _default = cfg.get("default")
     if isinstance(_default, dict):
-        from hermes_cli.config import split_model_config_default
-
-        cfg_model, cfg_provider = split_model_config_default(_default)
+        cfg_model, cfg_provider = _config_mod.split_model_config_default(_default)
         cfg_provider = cfg_provider or str(model_cfg.get("provider") or "")
         cfg["default"] = cfg_model
         if cfg_provider and not cfg.get("provider"):
@@ -531,12 +474,9 @@ from hermes_cli.runtime_provider_backends import (  # noqa: E402,F401
 # are valid only against the Anthropic Messages endpoint, so a stale model.api_mode from a prior
 # OpenAI-compatible provider is never honoured for it (it would 404 on /chat/completions).
 _POOL_ENTRY_SIMPLE_MODES: Dict[str, tuple] = {
-    "openai-codex": ("codex_responses", DEFAULT_CODEX_BASE_URL),
-    "xai-oauth": ("codex_responses", DEFAULT_XAI_OAUTH_BASE_URL),
-    "qwen-oauth": ("chat_completions", DEFAULT_QWEN_BASE_URL),
-    "minimax-oauth": ("anthropic_messages", lambda: _registry_base_url("minimax-oauth")),
-    "openrouter": ("chat_completions", OPENROUTER_BASE_URL),
-    "xai": ("codex_responses", ""),
+    "openai-codex": ("codex_responses", DEFAULT_CODEX_BASE_URL), "xai-oauth": ("codex_responses", DEFAULT_XAI_OAUTH_BASE_URL),
+    "qwen-oauth": ("chat_completions", DEFAULT_QWEN_BASE_URL), "openrouter": ("chat_completions", OPENROUTER_BASE_URL),
+    "minimax-oauth": ("anthropic_messages", lambda: _registry_base_url("minimax-oauth")), "xai": ("codex_responses", ""),
 }
 
 
@@ -548,7 +488,7 @@ def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_u
     if provider == "anthropic":
         return "anthropic_messages", _anthropic_cfg_base_url(model_cfg) or base_url or _ANTHROPIC_DEFAULT_BASE_URL
     if provider == "nous":
-        return _nous_api_mode(effective_model), _nous_inference_base_url_override() or base_url
+        return nous_api_mode(effective_model), (_nous_inference_env_override() or "") or base_url
     if provider == "copilot":
         api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""), target_model=effective_model)
         return api_mode, base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
@@ -674,7 +614,7 @@ def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, ta
     state = auth_mod.get_provider_auth_state("nous") or {}
     base_url = (
         explicit_base_url
-        or _nous_inference_base_url_override()
+        or (_nous_inference_env_override() or "")
         or str(state.get("inference_base_url") or auth_mod.DEFAULT_NOUS_INFERENCE_URL).strip().rstrip("/")
     )
     # The agent_key compatibility field is used for inference only when it holds a NAS invoke JWT;
@@ -689,7 +629,7 @@ def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, ta
         expires_at = creds.get("expires_at")
         base_url = explicit_base_url or creds.get("base_url", "").rstrip("/") or base_url
     return _runtime(
-        "nous", _nous_api_mode(_effective_model(model_cfg, target_model)), base_url, api_key,
+        "nous", nous_api_mode(_effective_model(model_cfg, target_model)), base_url, api_key,
         source="explicit", expires_at=expires_at, requested_provider=requested_provider,
     )
 
@@ -727,9 +667,7 @@ def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg,
 # Providers with a dedicated explicit-credential builder; everything else goes through the
 # registry ``api_key`` path (or None when the provider takes no explicit creds).
 _EXPLICIT_RESOLVERS: Dict[str, Callable[..., Dict[str, Any]]] = {
-    "anthropic": _explicit_anthropic,
-    "openai-codex": _explicit_codex,
-    "nous": _explicit_nous,
+    "anthropic": _explicit_anthropic, "openai-codex": _explicit_codex, "nous": _explicit_nous,
     "azure-foundry": _explicit_azure_foundry,
 }
 
@@ -771,23 +709,15 @@ class _OAuthRuntimeSpec:
 # ``resolve`` entries are late-bound lambdas so tests can monkeypatch the module-level
 # ``resolve_*_runtime_credentials`` names.
 _OAUTH_RUNTIME_PROVIDERS: Dict[str, _OAuthRuntimeSpec] = {
-    "nous": _OAuthRuntimeSpec(
-        _resolve_nous_creds, _nous_api_mode, "portal", "expires_at",
-        "Auto-detected Nous provider but credentials failed",
-    ),
-    "openai-codex": _OAuthRuntimeSpec(
-        lambda: resolve_codex_runtime_credentials(), "codex_responses", "hermes-auth-store", "last_refresh",
-        "Auto-detected Codex provider but credentials failed",
-    ),
-    "xai-oauth": _OAuthRuntimeSpec(
-        lambda: resolve_xai_oauth_runtime_credentials(), "codex_responses", "hermes-auth-store", "last_refresh",
-        "Auto-detected xAI OAuth provider but credentials failed",
-        default_base_url=DEFAULT_XAI_OAUTH_BASE_URL,
-    ),
-    "qwen-oauth": _OAuthRuntimeSpec(
-        lambda: resolve_qwen_runtime_credentials(), "chat_completions", "qwen-cli", "expires_at_ms",
-        "Qwen OAuth credentials failed",
-    ),
+    "nous": _OAuthRuntimeSpec(_resolve_nous_creds, nous_api_mode, "portal", "expires_at",
+                              "Auto-detected Nous provider but credentials failed"),
+    "openai-codex": _OAuthRuntimeSpec(lambda: resolve_codex_runtime_credentials(), "codex_responses", "hermes-auth-store",
+                                      "last_refresh", "Auto-detected Codex provider but credentials failed"),
+    "xai-oauth": _OAuthRuntimeSpec(lambda: resolve_xai_oauth_runtime_credentials(), "codex_responses", "hermes-auth-store",
+                                   "last_refresh", "Auto-detected xAI OAuth provider but credentials failed",
+                                   default_base_url=DEFAULT_XAI_OAUTH_BASE_URL),
+    "qwen-oauth": _OAuthRuntimeSpec(lambda: resolve_qwen_runtime_credentials(), "chat_completions", "qwen-cli",
+                                    "expires_at_ms", "Qwen OAuth credentials failed"),
 }
 
 
@@ -817,9 +747,7 @@ def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, A
     pconfig = PROVIDER_REGISTRY.get(provider)
     if not (pconfig and pconfig.auth_type == "oauth_minimax"):
         return None
-    from hermes_cli.auth import resolve_minimax_oauth_runtime_credentials
-
-    creds = resolve_minimax_oauth_runtime_credentials()
+    creds = auth_mod.resolve_minimax_oauth_runtime_credentials()
     return _runtime(
         provider, "anthropic_messages", creds["base_url"], creds["api_key"],
         source=creds.get("source", "oauth"), requested_provider=requested_provider,
@@ -905,12 +833,10 @@ _LOCAL_BYPASS_CLOUD_HOSTS = ("openrouter.ai", "anthropic.com", "openai.com")
 def _raise_if_provider_disabled(requested_provider: str) -> None:
     """Honour ``providers.<name>.enabled: false`` for built-ins too (the custom lookup gate only
     covers custom blocks); a typed error lets the fallback chain advance."""
-    from hermes_cli.config import is_provider_enabled, load_config
-
-    full_cfg = load_config()
+    full_cfg = _config_mod.load_config()
     provs_cfg = full_cfg.get("providers") if isinstance(full_cfg, dict) else None
     block = provs_cfg.get(requested_provider) if isinstance(provs_cfg, dict) else None
-    if isinstance(block, dict) and not is_provider_enabled(block):
+    if isinstance(block, dict) and not _config_mod.is_provider_enabled(block):
         raise ValueError(
             f"provider {requested_provider!r} is disabled in config "
             f"(providers.{requested_provider}.enabled: false)"
@@ -995,12 +921,10 @@ def _opencode_free_runtime(provider, requested_provider, model_cfg, target_model
     """OpenCode Zen free tier (*-free slugs) is served ANONYMOUSLY on the Zen relay only: unknown
     bearers 401 and the Go relay rejects free models, so free slugs route through the keyless Zen
     runtime BEFORE the pool / explicit / api_key paths."""
-    from hermes_cli.models import opencode_provider_family, opencode_zen_free_runtime
-
-    if opencode_provider_family(provider) is None:
+    if _models.opencode_provider_family(provider) is None:
         return None
     model = str(target_model or model_cfg.get("default") or model_cfg.get("model") or "").strip()
-    free_runtime = opencode_zen_free_runtime(provider, model)
+    free_runtime = _models.opencode_zen_free_runtime(provider, model)
     if free_runtime is not None:
         free_runtime["requested_provider"] = requested_provider
     return free_runtime
@@ -1024,8 +948,7 @@ def resolve_runtime_provider(
       8. OpenRouter / bare-custom fallback
 
     target_model: overrides model_cfg["default"] when computing provider-specific api_mode
-    (e.g. OpenCode Zen/Go where different models route through different API surfaces).
-    """
+    (e.g. OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
 
