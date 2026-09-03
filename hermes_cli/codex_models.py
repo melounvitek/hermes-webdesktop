@@ -5,17 +5,18 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Optional
 
-import os
-
 logger = logging.getLogger(__name__)
 
+# Curated offline fallback (first-run, transient API failure). Only slugs the ChatGPT Codex
+# OAuth backend actually accepts: the public API's "-pro" variants and the retired
+# gpt-5.2-codex / gpt-5.1-codex-max / gpt-5.1-codex-mini return HTTP 400 there ("not supported
+# when using Codex with a ChatGPT account"), so listing them leaked dead picker choices. If
+# OpenAI re-enables any, live discovery (_fetch_models_from_api) picks them up automatically.
 DEFAULT_CODEX_MODELS: List[str] = [
-    # GPT-5.6 series (Sol/Terra/Luna). The public API exposes "-pro"
-    # variants, but the ChatGPT Codex OAuth backend rejects them with HTTP 400,
-    # so the curated offline fallback must not surface those dead choices.
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
@@ -23,31 +24,11 @@ DEFAULT_CODEX_MODELS: List[str] = [
     "gpt-5.4-mini",
     "gpt-5.4",
     "gpt-5.3-codex",
-    # gpt-5.3-codex-spark is in research preview and is exposed *only* via
-    # the Codex CLI / OAuth backend (chatgpt.com/backend-api/codex/models)
-    # for ChatGPT Pro subscribers. It is NOT available in the public OpenAI
-    # API, so it intentionally stays out of the "openai" provider catalog
-    # in hermes_cli/models.py — only the openai-codex (OAuth) provider
-    # surfaces it. The Codex backend reports ``supported_in_api: false`` for
-    # this slug; that flag describes API availability, not Codex backend
-    # availability, so the fetch/cache code paths below intentionally do
-    # not filter on it. PR #12994 removed this entry on the assumption it
-    # was unsupported — that was wrong; restored here. Keep it in the
-    # curated fallback so Pro users still see Spark in `/model` when live
-    # discovery is unavailable (offline first run, transient API failure).
+    # Research preview exposed ONLY via the Codex OAuth backend for ChatGPT Pro subscribers —
+    # not in the public API, so it stays out of the "openai" catalog in hermes_cli/models.py.
+    # The backend reports ``supported_in_api: false`` for it; that flag describes API
+    # availability, not Codex availability, so fetch/cache paths must not filter on it.
     "gpt-5.3-codex-spark",
-    # NOTE: gpt-5.2-codex / gpt-5.1-codex-max / gpt-5.1-codex-mini were
-    # previously listed here but the chatgpt.com Codex backend returns
-    # HTTP 400 "The '<model>' model is not supported when using Codex with
-    # a ChatGPT account." for all three on every ChatGPT Pro account we've
-    # tested (verified live 2026-05-27). Keeping them in the fallback list
-    # leaked dead slugs into /model when live discovery was unavailable
-    # (transient API failure, first-run before refresh) and surfaced HTTP 400
-    # crashes on selection. The Codex CLI public catalog still references
-    # these slugs, which is why they survived previously — but those entries
-    # describe the public OpenAI API, not the OAuth-backed Codex backend
-    # Hermes uses. Removed here. If OpenAI re-enables them on Codex backend,
-    # live discovery will pick them up automatically via _fetch_models_from_api.
 ]
 
 _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
@@ -57,10 +38,8 @@ _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
     ("gpt-5.5", ("gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex")),
     ("gpt-5.4-mini", ("gpt-5.3-codex",)),
     ("gpt-5.4", ("gpt-5.3-codex",)),
-    # Surface Spark whenever any compatible Codex template is present so
-    # accounts hitting the live endpoint with an older lineup still see
-    # Spark in the picker. Backend gates real availability by ChatGPT Pro
-    # entitlement; Hermes does not.
+    # Spark surfaces whenever a compatible template is present; the backend (not Hermes)
+    # gates real availability by ChatGPT Pro entitlement.
     ("gpt-5.3-codex-spark", ("gpt-5.3-codex",)),
 ]
 
@@ -71,12 +50,8 @@ def _dedupe(model_ids) -> List[str]:
 
 
 def _add_forward_compat_models(model_ids: List[str]) -> List[str]:
-    """Add Clawdbot-style synthetic forward-compat Codex models.
-
-    If a newer Codex slug isn't returned by live discovery, surface it when an older compatible
-    template model is present. This mirrors Clawdbot's synthetic catalog / forward-compat behavior
-    for GPT-5 Codex variants.
-    """
+    """Surface newer Codex slugs missing from live discovery when an older compatible template is
+    present (Clawdbot-style synthetic forward-compat catalog)."""
     ordered = _dedupe(model_ids)
     seen = set(ordered)
     for synthetic_model, template_models in _FORWARD_COMPAT_TEMPLATE_MODELS:
@@ -87,17 +62,13 @@ def _add_forward_compat_models(model_ids: List[str]) -> List[str]:
 
 
 def _add_context_variants(model_ids: List[str]) -> List[str]:
-    """Insert ``-900k`` large-context picker variants after eligible base slugs.
+    """Insert ``<slug>-900k`` large-context picker variants after eligible base slugs.
 
-    The base slugs keep the cheaper advertised 272K limit by default; each verified slug gets an
-    explicit ``<slug>-900k`` picker entry that opts into the large window. The suffix is Hermes-side
-    only — it is stripped before the model id hits the wire (agent/transports/codex.py,
+    Base slugs keep the cheaper advertised 272K limit; the variant opts into the large window.
+    The suffix is Hermes-side only — stripped before the id hits the wire (agent/transports/codex.py,
     agent/auxiliary_client.py).
     """
-    from agent.model_metadata import (
-        CODEX_CONTEXT_VARIANT_SUFFIX,
-        has_codex_context_variant,
-    )
+    from agent.model_metadata import CODEX_CONTEXT_VARIANT_SUFFIX, has_codex_context_variant
 
     out: List[str] = []
     present = set(model_ids)
@@ -117,15 +88,11 @@ def _finalize_codex_models(model_ids: List[str]) -> List[str]:
 
 
 def _extract_chatgpt_account_id(access_token: str) -> Optional[str]:
-    """Best-effort extraction of ``chatgpt_account_id`` from the OAuth JWT.
+    """Best-effort ``chatgpt_account_id`` from the OAuth JWT; None on any parse error.
 
-    The Codex backend requires the ``ChatGPT-Account-Id`` header for the per-account catalog.
-    Without it, ``GET /backend-api/codex/models`` returns ``{"models":[]}`` (HTTP 200) — which
-    masquerades as "no models available" and silently degrades the picker to the curated fallback
-    list.
-
-    Returns ``None`` on any parse error — the probe then degrades gracefully to the unauthenticated
-    fallback list instead of crashing.
+    The Codex backend requires the ``ChatGPT-Account-Id`` header for the per-account catalog;
+    without it ``GET /backend-api/codex/models`` returns ``{"models":[]}`` with HTTP 200, which
+    masquerades as "no models" and silently degrades the picker to the curated fallback.
     """
     try:
         parts = access_token.split(".")
@@ -144,11 +111,10 @@ def _extract_chatgpt_account_id(access_token: str) -> Optional[str]:
 
 
 def _ranked_slugs(entries: object) -> List[str]:
-    """Visible model slugs from a Codex catalog ``models`` list, sorted by (priority, slug), deduped.
+    """Visible slugs from a Codex catalog ``models`` list, sorted by (priority, slug), deduped.
 
-    Does not filter on ``supported_in_api``: that flag describes the public OpenAI API, while
-    Hermes openai-codex talks to the same OAuth-backed Codex backend as Codex CLI, which still
-    accepts slugs marked false there (for example gpt-5.3-codex-spark).
+    Does not filter on ``supported_in_api``: that flag describes the public OpenAI API, while the
+    OAuth-backed Codex backend still accepts slugs marked false there (gpt-5.3-codex-spark).
     """
     sortable = []
     for item in entries:
@@ -198,7 +164,6 @@ def _read_default_model(codex_home: Path) -> Optional[str]:
         return None
     try:
         import tomllib
-
         payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return None
@@ -220,20 +185,12 @@ def _read_cache_models(codex_home: Path) -> List[str]:
 
 
 def get_codex_model_ids(access_token: Optional[str] = None) -> List[str]:
-    """Return available Codex model IDs, trying API first, then local sources.
-
-    Resolution order: API (live, if token provided) > config.toml default > local cache > hardcoded
-    defaults.
-    """
+    """Available Codex model IDs: live API (if token) > config.toml default > local cache > defaults."""
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or str(Path.home() / ".codex")).expanduser()
-
-    # Try live API if we have a token
     if access_token:
         api_models = _fetch_models_from_api(access_token)
         if api_models:
             return _finalize_codex_models(api_models)
-
-    # Fall back to local sources
     default_model = _read_default_model(codex_home)
     return _finalize_codex_models(_dedupe([
         *([default_model] if default_model else []),
