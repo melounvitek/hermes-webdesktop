@@ -1146,21 +1146,18 @@ class CLICommandsMixin:
             # Relay aliasing: a relay-fronted gateway has only a RELAY block yet /handoff discord
             # is deliverable. UX pre-check only — the gateway watcher re-checks before dispatch.
             relay_fronts = False
-            try:
+            with suppress(Exception):
                 from gateway.relay import relay_platform_identities
                 relay_cfg = gw_config.platforms.get(Platform.RELAY)
                 if relay_cfg and relay_cfg.enabled:
                     relay_fronts = platform_name in {p for p, _ in relay_platform_identities()}
-            except Exception:
-                relay_fronts = False
             if not relay_fronts:
                 return _cp(f"  Platform '{platform_name}' is not configured/enabled in the "
                            "gateway.")
         home = gw_config.get_home_channel(platform)
         if not home or not home.chat_id:
-            _cp(f"  No home channel configured for {platform_name}.",
-                "  Set one with /sethome on the destination chat first.")
-            return None
+            return _cp(f"  No home channel configured for {platform_name}.",
+                       "  Set one with /sethome on the destination chat first.")
         return home
 
     def _handoff_prepare_session(self):
@@ -1184,9 +1181,7 @@ class CLICommandsMixin:
             return _cp(f"  Could not ensure session row in state.db: {exc}")
         session_title = ""
         with suppress(Exception):
-            row = self._session_db.get_session(self.session_id)
-            if row:
-                session_title = row.get("title") or ""
+            session_title = (self._session_db.get_session(self.session_id) or {}).get("title") or ""
         return session_title or self.session_id[:8]
 
     def _handoff_wait(self, platform_name: str, session_title: str) -> bool:
@@ -1451,19 +1446,15 @@ class CLICommandsMixin:
         actions = worktree_gc.reclaim_worktrees(repo_root, dry_run=dry_run, records=tree_records)
         actions += worktree_gc.reclaim_branches(repo_root, dry_run=dry_run)
         if actions:
-            for line in actions:
-                print(f"  {line}")
-            print(f"  {len(actions)} action(s) {'planned' if dry_run else 'done'}.")
+            _pr(*(f"  {line}" for line in actions),
+                f"  {len(actions)} action(s) {'planned' if dry_run else 'done'}.")
         else:
             print("  Nothing to reclaim — remaining trees/branches carry real work.")
-        kept = [
-            record for record in tree_records
-            if record.verdict == "keep" and "kanban" not in record.reason and "in use" not in record.reason
-        ]
+        kept = [r for r in tree_records
+                if r.verdict == "keep" and "kanban" not in r.reason and "in use" not in r.reason]
         if kept:
-            print(f"  Preserved {len(kept)} tree(s) with real work:")
-            for record in kept:
-                print(f"    {record.name}: {record.reason}")
+            _pr(f"  Preserved {len(kept)} tree(s) with real work:",
+                *(f"    {record.name}: {record.reason}" for record in kept))
 
     def _worktree_list(self, repo_root: str, rest: str) -> None:
         try:
@@ -1473,11 +1464,7 @@ class CLICommandsMixin:
             out = result.stdout.strip() if result.returncode == 0 else ""
         except Exception:
             out = ""
-        if out:
-            for line in out.splitlines():
-                print(f"  {line}")
-        else:
-            print("  Could not list worktrees.")
+        _pr(*(f"  {line}" for line in out.splitlines()) if out else ("  Could not list worktrees.",))
 
     def _worktree_new(self, repo_root: str, rest: str) -> None:
         import cli as _cli
