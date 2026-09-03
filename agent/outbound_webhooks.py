@@ -1,31 +1,14 @@
-"""Outbound webhook notifications.
+"""Outbound webhook notifications: ``hooks.outbound`` in config.yaml -> notify-only callbacks
+on the plugin hook manager, so every ``invoke_hook()`` site can push lifecycle events to
+external HTTP endpoints (outbound mirror of ``gateway/platforms/webhook.py``).
 
-Reads ``hooks.outbound:`` from config.yaml and registers notify-only callbacks on
-the plugin hook manager, so every ``invoke_hook()`` site can push lifecycle events
-to external HTTP endpoints. Outbound mirror of ``gateway/platforms/webhook.py``.
-
-* Delivery is fire-and-forget through a bounded queue and one daemon worker
-  thread; callbacks serialize, enqueue, and return ``None`` immediately, so a
-  target can never block a tool call or influence agent flow.
-* Payloads are HMAC-SHA256 signed (``X-Hermes-Signature-256: sha256=<hex>`` over
-  the raw body) when a secret is configured.
-* No consent prompt (no code runs on this machine); ``HERMES_SAFE_MODE=1`` still
-  skips registration. Registration is idempotent.
-
-Config::
-
-    hooks:
-      outbound:
-        - url: https://ci.example.com/hermes-events
-          events: [on_session_end, subagent_stop]
-          secret_env: HERMES_OUTBOUND_WEBHOOK_SECRET   # or inline ``secret``
-          matcher: "terminal|delegate_task"            # pre/post_tool_call only
-          timeout: 10                                  # seconds, clamped to [1, 60]
-          name: ci-notify
-
-POST body: ``{hook_event_name, profile, tool_name, tool_input, session_id, cwd,
-extra, delivery_id, timestamp}``. Headers: ``Content-Type``, ``User-Agent``,
-``X-Hermes-Event``, ``X-Hermes-Delivery``, ``X-Hermes-Signature-256`` (if secret).
+* Fire-and-forget: callbacks serialize, enqueue on a bounded queue and return ``None``; one
+  daemon worker POSTs, so a target can never block a tool call or influence agent flow.
+* HMAC-SHA256 signed (``X-Hermes-Signature-256: sha256=<hex>`` over the raw body) when a
+  secret is configured.  ``HERMES_SAFE_MODE=1`` skips registration; registration is idempotent.
+* Entry keys: url, events, secret_env|secret, matcher (pre/post_tool_call only), timeout
+  (clamped to [1, 60]), name.  Body: ``{hook_event_name, profile, tool_name, tool_input,
+  session_id, cwd, extra, delivery_id, timestamp}``.
 """
 
 from __future__ import annotations
@@ -68,9 +51,7 @@ QUEUE_MAX_SIZE = 256
 _registered: Set[Tuple[str, str, str]] = set()
 _registered_lock = threading.Lock()
 
-_delivery_queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue(
-    maxsize=QUEUE_MAX_SIZE
-)
+_delivery_queue: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue(maxsize=QUEUE_MAX_SIZE)
 _worker_lock = threading.Lock()
 _worker: Optional[threading.Thread] = None
 
@@ -104,22 +85,18 @@ def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
     """
     if not isinstance(cfg, dict):
         return []
-
     from utils import env_var_enabled
 
     if env_var_enabled("HERMES_SAFE_MODE"):
         logger.info("HERMES_SAFE_MODE=1 — outbound webhook registration skipped")
         return []
-
     targets = iter_configured_targets(cfg)
     if not targets:
         return []
-
     from hermes_cli.plugins import get_plugin_manager
 
     manager = get_plugin_manager()
     home_key = _home_key()
-
     registered: List[WebhookTarget] = []
     with _registered_lock:
         for target in targets:
@@ -128,19 +105,15 @@ def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
                 key = (home_key, event, target.url)
                 if key in _registered:
                     continue
-                manager._hooks.setdefault(event, []).append(
-                    _make_callback(event, target)
-                )
+                manager._hooks.setdefault(event, []).append(_make_callback(event, target))
                 _registered.add(key)
                 wired_any = True
                 logger.info(
-                    "outbound webhook registered: %s -> %s (matcher=%s, "
-                    "timeout=%ds)",
+                    "outbound webhook registered: %s -> %s (matcher=%s, timeout=%ds)",
                     event, target.label, target.matcher, target.timeout,
                 )
             if wired_any:
                 registered.append(target)
-
     return registered
 
 
@@ -149,9 +122,14 @@ def iter_configured_targets(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget
     if not isinstance(cfg, dict):
         return []
     hooks_cfg = cfg.get("hooks")
-    return _parse_outbound_block(
-        hooks_cfg.get("outbound") if isinstance(hooks_cfg, dict) else None
-    )
+    raw = hooks_cfg.get("outbound") if isinstance(hooks_cfg, dict) else None
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        logger.warning("hooks.outbound must be a list of webhook targets; got %s", type(raw).__name__)
+        return []
+    targets = (_parse_single_target(i, entry) for i, entry in enumerate(raw))
+    return [t for t in targets if t is not None]
 
 
 def flush(timeout: float = 5.0) -> bool:
@@ -167,11 +145,9 @@ def flush(timeout: float = 5.0) -> bool:
 
 
 def re_register_config_hooks() -> None:
-    """Re-register outbound webhooks after a plugin force-reload cleared ``_hooks``.
-
-    Only the current home's idempotence keys are cleared so a force-reload in one
-    profile cannot invalidate another profile's still-live registration.
-    """
+    """Re-register outbound webhooks after a plugin force-reload cleared ``_hooks``.  Only the
+    current home's idempotence keys are cleared so a force-reload in one profile cannot
+    invalidate another profile's still-live registration."""
     from hermes_cli.config import load_config
 
     _forget_home_registrations(_registered, _registered_lock)
@@ -191,19 +167,6 @@ def reset_for_tests() -> None:
 
 
 # --- Config parsing -------------------------------------------------------------
-
-def _parse_outbound_block(raw: Any) -> List[WebhookTarget]:
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        logger.warning(
-            "hooks.outbound must be a list of webhook targets; got %s",
-            type(raw).__name__,
-        )
-        return []
-    targets = (_parse_single_target(i, entry) for i, entry in enumerate(raw))
-    return [t for t in targets if t is not None]
-
 
 def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     from hermes_cli.plugins import VALID_HOOKS
@@ -255,7 +218,6 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     except (TypeError, ValueError):
         warn(".timeout must be an int (got %r); using default %ds", timeout_raw, DEFAULT_TIMEOUT_SECONDS)
         timeout = DEFAULT_TIMEOUT_SECONDS
-    timeout = max(1, min(timeout, MAX_TIMEOUT_SECONDS))
 
     name = raw.get("name")
     return WebhookTarget(
@@ -264,7 +226,7 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
         name=name.strip() if isinstance(name, str) else "",
         secret=_resolve_secret(index, raw),
         matcher=matcher,
-        timeout=timeout,
+        timeout=max(1, min(timeout, MAX_TIMEOUT_SECONDS)),
     )
 
 
@@ -276,8 +238,8 @@ def _resolve_secret(index: int, raw: Dict[str, Any]) -> Optional[str]:
         if value:
             return value
         logger.warning(
-            "hooks.outbound[%d].secret_env=%r is not set in the environment "
-            "— deliveries will be UNSIGNED", index, secret_env.strip(),
+            "hooks.outbound[%d].secret_env=%r is not set in the environment — deliveries will be UNSIGNED",
+            index, secret_env.strip(),
         )
         return None
     secret = raw.get("secret")
@@ -297,8 +259,7 @@ def _make_callback(event: str, target: WebhookTarget):
             body = _serialize_payload(event, kwargs, delivery_id)
         except Exception:  # a bad payload must not hurt the loop
             logger.warning(
-                "outbound webhook payload serialization failed (event=%s "
-                "target=%s)", event, target.label, exc_info=True,
+                "outbound webhook payload serialization failed (event=%s target=%s)", event, target.label, exc_info=True,
             )
             return None
         _enqueue(_build_delivery(event, target, body, delivery_id))
@@ -309,14 +270,10 @@ def _make_callback(event: str, target: WebhookTarget):
     return _callback
 
 
-def _serialize_payload(
-    event: str, kwargs: Dict[str, Any], delivery_id: str,
-) -> bytes:
-    """Render the POST body: shell-hooks stdin shape plus delivery metadata.
-
-    ``delivery_id`` (also the ``X-Hermes-Delivery`` header) and ``timestamp`` live
-    inside the HMAC-signed body, so they double as replay protection.
-    """
+def _serialize_payload(event: str, kwargs: Dict[str, Any], delivery_id: str) -> bytes:
+    """Render the POST body: shell-hooks stdin shape plus delivery metadata.  ``delivery_id``
+    (also the ``X-Hermes-Delivery`` header) and ``timestamp`` live inside the HMAC-signed
+    body, so they double as replay protection."""
     # Profile resolved at fire time so a multiplexed gateway's receivers can tell which profile emitted.
     from hermes_cli.profiles import get_active_profile_name
 
@@ -330,9 +287,7 @@ def _serialize_payload(
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
 
-def _build_delivery(
-    event: str, target: WebhookTarget, body: bytes, delivery_id: str,
-) -> Dict[str, Any]:
+def _build_delivery(event: str, target: WebhookTarget, body: bytes, delivery_id: str) -> Dict[str, Any]:
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Hermes-Agent-Outbound-Webhook",
@@ -340,17 +295,11 @@ def _build_delivery(
         "X-Hermes-Delivery": delivery_id,
     }
     if target.secret:
-        digest = hmac.new(
-            target.secret.encode("utf-8"), body, hashlib.sha256
-        ).hexdigest()
+        digest = hmac.new(target.secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         headers["X-Hermes-Signature-256"] = f"sha256={digest}"
     return {
-        "url": target.url,
-        "label": target.label,
-        "event": event,
-        "body": body,
-        "headers": headers,
-        "timeout": target.timeout,
+        "url": target.url, "label": target.label, "event": event,
+        "body": body, "headers": headers, "timeout": target.timeout,
     }
 
 
@@ -360,8 +309,8 @@ def _enqueue(delivery: Dict[str, Any]) -> None:
         _delivery_queue.put_nowait(delivery)
     except queue.Full:
         logger.warning(
-            "outbound webhook queue full (%d pending) — dropping %s event "
-            "for %s", QUEUE_MAX_SIZE, delivery["event"], delivery["label"],
+            "outbound webhook queue full (%d pending) — dropping %s event for %s",
+            QUEUE_MAX_SIZE, delivery["event"], delivery["label"],
         )
 
 
@@ -372,13 +321,10 @@ def _ensure_worker() -> None:
     with _worker_lock:
         if _worker is not None and _worker.is_alive():
             return
-        _worker = threading.Thread(
-            target=_worker_loop, name="outbound-webhooks", daemon=True,
-        )
+        _worker = threading.Thread(target=_worker_loop, name="outbound-webhooks", daemon=True)
         _worker.start()
-        # Daemon worker: a short-lived process could exit right after enqueuing
-        # on_session_end. Drain at interpreter shutdown, bounded so a dead
-        # endpoint can only delay exit, never hang it.
+        # Daemon worker: a short-lived process could exit right after enqueuing on_session_end.
+        # Drain at interpreter shutdown, bounded so a dead endpoint can only delay exit, never hang it.
         atexit.register(flush, timeout=5.0)
 
 
@@ -411,49 +357,34 @@ _opener = urlrequest.build_opener(_NoRedirectHandler)
 
 def _deliver(delivery: Dict[str, Any]) -> None:
     """POST with bounded retries: retry on connection errors and 5xx; 4xx and 3xx are final."""
+    event, label = delivery["event"], delivery["label"]
     last_error = ""
     for attempt in range(1, MAX_DELIVERY_ATTEMPTS + 1):
-        req = urlrequest.Request(
-            delivery["url"],
-            data=delivery["body"],
-            headers=delivery["headers"],
-            method="POST",
-        )
+        req = urlrequest.Request(delivery["url"], data=delivery["body"], headers=delivery["headers"], method="POST")
         try:
             with _opener.open(req, timeout=delivery["timeout"]) as resp:
                 status = getattr(resp, "status", 200)
             if 200 <= status < 300:
-                logger.debug(
-                    "outbound webhook delivered: %s -> %s (HTTP %d)",
-                    delivery["event"], delivery["label"], status,
-                )
+                logger.debug("outbound webhook delivered: %s -> %s (HTTP %d)", event, label, status)
                 return
             last_error = f"HTTP {status}"
         except urlerror.HTTPError as exc:
             last_error = f"HTTP {exc.code}"
             if 300 <= exc.code < 400:
                 logger.warning(
-                    "outbound webhook target redirected (event=%s target=%s): "
-                    "%s -> %s — redirects are not followed; update the "
-                    "configured url", delivery["event"], delivery["label"],
-                    last_error, exc.headers.get("Location", "?"),
+                    "outbound webhook target redirected (event=%s target=%s): %s -> %s — redirects are not "
+                    "followed; update the configured url", event, label, last_error, exc.headers.get("Location", "?"),
                 )
                 return
             if 400 <= exc.code < 500:
-                logger.warning(
-                    "outbound webhook rejected (event=%s target=%s): %s — "
-                    "not retrying", delivery["event"], delivery["label"],
-                    last_error,
-                )
+                logger.warning("outbound webhook rejected (event=%s target=%s): %s — not retrying", event, label, last_error)
                 return
         except Exception as exc:
             last_error = str(exc) or type(exc).__name__
-
         if attempt < MAX_DELIVERY_ATTEMPTS:
             time.sleep(RETRY_BACKOFF_SECONDS * attempt)
 
     logger.warning(
-        "outbound webhook delivery failed after %d attempt(s) (event=%s "
-        "target=%s): %s",
-        MAX_DELIVERY_ATTEMPTS, delivery["event"], delivery["label"], last_error,
+        "outbound webhook delivery failed after %d attempt(s) (event=%s target=%s): %s",
+        MAX_DELIVERY_ATTEMPTS, event, label, last_error,
     )
