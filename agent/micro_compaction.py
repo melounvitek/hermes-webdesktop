@@ -75,23 +75,21 @@ class MicroCompactionMixin:
         next user message; user turns are never absorbed (alternation safety, verbatim user text).
         """
         limit = min(tail_start, len(messages))
-        idx = start
+
+        def _real_assistant(msg: Dict[str, Any]) -> bool:
+            return msg.get("role") == "assistant" and not self._is_context_summary_message(msg)
+
         # Skip user messages and (assistant-role) summary markers to reach a real assistant message;
         # otherwise a rehydrated cursor could absorb the marker itself.
-        while idx < limit:
-            msg = messages[idx]
-            if msg.get("role") == "assistant" and not self._is_context_summary_message(msg):
-                break
+        idx = start
+        while idx < limit and not _real_assistant(messages[idx]):
             idx += 1
         if idx >= limit:
             return None
 
         exchange_start = idx
         idx += 1
-        while idx < limit:
-            msg = messages[idx]
-            if msg.get("role") not in ("assistant", "tool") or self._is_context_summary_message(msg):
-                break
+        while idx < limit and messages[idx].get("role") in ("assistant", "tool") and not self._is_context_summary_message(messages[idx]):
             idx += 1
 
         # Boundary must close the turn: a mid-turn stop at tail_start would put the assistant marker
@@ -240,15 +238,7 @@ class MicroCompactionMixin:
         n_messages = len(messages)
         if n_messages < 4:
             return messages
-
-        compress_start = self._align_boundary_forward(messages, self._protect_head_size(messages))
-        compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
-        if compress_start >= compress_end:
-            return messages
-        cursor = self._resolve_compact_cursor(messages, compress_start, compress_end)
-        if cursor >= compress_end:
-            return messages
-        exchange = self._find_one_exchange(messages, cursor, compress_end)
+        exchange = self._next_exchange(messages)
         if exchange is None:
             return messages
         exchange_start, exchange_end = exchange
@@ -283,24 +273,7 @@ class MicroCompactionMixin:
         _exchange_tokens = estimate_tokens_rough(exchange_text)
         updated_summary = self._micro_summarize_one(exchange_text)
         if updated_summary is None:
-            # Track consecutive failures at the same cursor to avoid busy-looping every turn.
-            if exchange_start == self._micro_compact_last_failure_cursor:
-                self._micro_compact_consecutive_failures += 1
-            else:
-                self._micro_compact_consecutive_failures = 1
-                self._micro_compact_last_failure_cursor = exchange_start
-
-            _outcome = "summarize_failed"
-            if self._micro_compact_consecutive_failures >= _cc()._MICRO_COMPACT_MAX_CONSECUTIVE_FAILURES:
-                logger.info(
-                    "Micro-compaction: skipping exchange at cursor %d "
-                    "after %d consecutive failures",
-                    exchange_start, self._micro_compact_consecutive_failures,
-                )
-                # Skip the stuck exchange; it stays in the transcript for batch compression/defrag.
-                self._micro_compact_cursor = exchange_end
-                self._reset_micro_failure_tracking()
-                _outcome = "exchange_skipped"
+            _outcome = self._record_micro_failure(exchange_start, exchange_end)
             _telemetry(_outcome, messages, tokens_after=_tokens_before, exchange_tokens=_exchange_tokens)
             return messages
 
@@ -316,6 +289,37 @@ class MicroCompactionMixin:
             tokens_after=estimate_messages_tokens_rough(result), exchange_tokens=_exchange_tokens,
         )
         return result
+
+    def _record_micro_failure(self, exchange_start: int, exchange_end: int) -> str:
+        """Count a summarize failure at this cursor; skip the exchange after too many in a row."""
+        # Track consecutive failures at the same cursor to avoid busy-looping every turn.
+        if exchange_start == self._micro_compact_last_failure_cursor:
+            self._micro_compact_consecutive_failures += 1
+        else:
+            self._micro_compact_consecutive_failures = 1
+            self._micro_compact_last_failure_cursor = exchange_start
+        if self._micro_compact_consecutive_failures < _cc()._MICRO_COMPACT_MAX_CONSECUTIVE_FAILURES:
+            return "summarize_failed"
+        logger.info(
+            "Micro-compaction: skipping exchange at cursor %d "
+            "after %d consecutive failures",
+            exchange_start, self._micro_compact_consecutive_failures,
+        )
+        # Skip the stuck exchange; it stays in the transcript for batch compression/defrag.
+        self._micro_compact_cursor = exchange_end
+        self._reset_micro_failure_tracking()
+        return "exchange_skipped"
+
+    def _next_exchange(self, messages: List[Dict[str, Any]]) -> Optional[tuple[int, int]]:
+        """The next un-absorbed exchange inside the compressible window, or None."""
+        compress_start = self._align_boundary_forward(messages, self._protect_head_size(messages))
+        compress_end = self._find_tail_cut_by_tokens(messages, compress_start)
+        if compress_start >= compress_end:
+            return None
+        cursor = self._resolve_compact_cursor(messages, compress_start, compress_end)
+        if cursor >= compress_end:
+            return None
+        return self._find_one_exchange(messages, cursor, compress_end)
 
     @staticmethod
     def _rolling_summary_from_marker(content: Any) -> str:
@@ -403,11 +407,8 @@ class MicroCompactionMixin:
         if not session_db or not session_id:
             return
         try:
-            # Every row except the marker is a carried-forward original: archive pre-splice
-            # originals rewind-style.
-            session_db.archive_and_compact(
-                session_id, compacted_messages, tail_count=max(0, len(compacted_messages) - 1),
-            )
+            # Every row except the marker is a carried-forward original: archive rewind-style.
+            session_db.archive_and_compact(session_id, compacted_messages, tail_count=max(0, len(compacted_messages) - 1))
             # Shared post-commit stamp site with batch commit and proactive prune.
             _cc().stamp_db_persisted_markers(compacted_messages)
         except Exception:

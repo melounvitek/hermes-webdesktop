@@ -141,12 +141,9 @@ def inject_memory_provider_tools(agent: Any) -> int:
 
     existing_tool_names = {_tool_name(tool) for tool in tools if isinstance(tool, dict)}
     if not memory_provider_tools_exposed(agent):
-        # Say so once: a silent 0 leaves the provider looking "half on" with no
-        # clue which config key (platform_toolsets / disabled_toolsets) gated it.
-        _providers = [
-            p for p in (getattr(memory_manager, "providers", None) or [])
-            if getattr(p, "name", "") != "builtin"
-        ]
+        # Say so once: a silent 0 leaves the provider looking "half on" with no clue which
+        # config key (platform_toolsets / disabled_toolsets) gated it.
+        _providers = [p for p in (getattr(memory_manager, "providers", None) or []) if getattr(p, "name", "") != "builtin"]
         if _providers:
             logger.info(
                 "Memory provider(s) %s configured but the 'memory' toolset is "
@@ -291,24 +288,20 @@ class StreamingContextScrubber:
             return len(self._OPEN_TAG)
         return 0
 
-    def _is_block_boundary(self, buf: str, idx: int) -> bool:
-        if idx == 0:
-            return self._at_block_boundary
-        preceding = buf[:idx]
-        last_newline = preceding.rfind("\n")
+    def _ends_at_block_boundary(self, text: str) -> bool:
+        """Whether emitting ``text`` leaves the stream at a line start (blank tail after the last newline)."""
+        last_newline = text.rfind("\n")
         if last_newline == -1:
-            return self._at_block_boundary and preceding.strip() == ""
-        return preceding[last_newline + 1:].strip() == ""
+            return self._at_block_boundary and text.strip() == ""
+        return text[last_newline + 1:].strip() == ""
+
+    def _is_block_boundary(self, buf: str, idx: int) -> bool:
+        return self._at_block_boundary if idx == 0 else self._ends_at_block_boundary(buf[:idx])
 
     def _append_visible(self, out: list[str], text: str) -> None:
-        if not text:
-            return
-        out.append(text)
-        last_newline = text.rfind("\n")
-        if last_newline != -1:
-            self._at_block_boundary = text[last_newline + 1:].strip() == ""
-        else:
-            self._at_block_boundary = self._at_block_boundary and text.strip() == ""
+        if text:
+            out.append(text)
+            self._at_block_boundary = self._ends_at_block_boundary(text)
 
 
 def build_memory_context_block(raw_context: str) -> str:
@@ -427,11 +420,9 @@ class MemoryManager:
 
     @property
     def providers(self) -> List[MemoryProvider]:
-        """All registered providers in order."""
         return list(self._providers)
 
     def get_provider(self, name: str) -> Optional[MemoryProvider]:
-        """Get a provider by name, or None if not registered."""
         return next((p for p in self._providers if p.name == name), None)
 
     # -- System prompt -------------------------------------------------------
@@ -469,14 +460,13 @@ class MemoryManager:
         if provider.name == "builtin":
             return provider.prefetch(query, session_id=session_id)
 
-        result_box: Dict[str, str] = {}
-        error_box: Dict[str, Exception] = {}
+        result_box: Dict[str, Any] = {}
 
         def _run() -> None:
             try:
                 result_box["value"] = provider.prefetch(query, session_id=session_id) or ""
             except Exception as exc:  # pragma: no cover - re-raised by caller
-                error_box["value"] = exc
+                result_box["error"] = exc
 
         thread = threading.Thread(target=_ctx_bound(_run), daemon=True, name=f"memory-prefetch-{provider.name}")
         with self._external_prefetch_lock:
@@ -500,8 +490,8 @@ class MemoryManager:
         with self._external_prefetch_lock:
             if self._external_prefetch_threads.get(provider.name) is thread:
                 self._external_prefetch_threads.pop(provider.name, None)
-        if error_box:
-            raise error_box["value"]
+        if "error" in result_box:
+            raise result_box["error"]
         return result_box.get("value", "")
 
     def describe_recall(self) -> str:
@@ -619,13 +609,11 @@ class MemoryManager:
                 return None
             if self._sync_executor is None:
                 try:
-                    # Daemon workers: a provider wedged on a network call must
-                    # never block interpreter exit.
+                    # Daemon workers: a wedged provider must never block interpreter exit.
                     from tools.daemon_pool import DaemonThreadPoolExecutor
                     self._sync_executor = DaemonThreadPoolExecutor(max_workers=1, thread_name_prefix="mem-sync")
                 except Exception as e:  # pragma: no cover - resource exhaustion
                     logger.warning("Failed to create memory sync executor: %s", e)
-                    return None
             return self._sync_executor
 
     def flush_pending(self, timeout: Optional[float] = None) -> bool:
@@ -642,9 +630,9 @@ class MemoryManager:
             return True  # executor already shut down — nothing pending
         try:
             fut.result(timeout=timeout)
-            return True
         except Exception:
             return False
+        return True
 
     # -- Tools ---------------------------------------------------------------
 
@@ -676,11 +664,9 @@ class MemoryManager:
         return schemas
 
     def get_all_tool_names(self) -> set:
-        """Return set of all tool names across all providers."""
         return set(self._tool_to_provider.keys())
 
     def has_tool(self, tool_name: str) -> bool:
-        """Check if any provider handles this tool."""
         return tool_name in self._tool_to_provider
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
@@ -720,14 +706,14 @@ class MemoryManager:
             return
         snapshot = list(messages or [])
 
-        def _run() -> None:
+        def _run() -> None:  # both hooks already guard per-provider
             try:
                 self.on_session_end(snapshot)
-            except Exception as e:  # pragma: no cover - on_session_end guards per-provider
+            except Exception as e:  # pragma: no cover
                 logger.warning("Session-boundary extraction failed: %s", e)
             try:
                 self.on_session_switch(new_session_id, parent_session_id=parent_session_id, reset=True, reason=reason)
-            except Exception as e:  # pragma: no cover - on_session_switch guards per-provider
+            except Exception as e:  # pragma: no cover
                 logger.warning("Session-boundary switch failed: %s", e)
 
         self._submit_background(_run)
@@ -741,8 +727,7 @@ class MemoryManager:
         (``/undo``): same id, truncated transcript."""
         if not new_session_id:
             return
-        # Forward ``rewound`` only when set so it never pollutes providers' **kwargs.
-        if rewound:
+        if rewound:  # forward only when set so it never pollutes providers' **kwargs
             kwargs["rewound"] = True
         self._each_provider(
             "on_session_switch failed",
@@ -756,6 +741,11 @@ class MemoryManager:
             return int(getattr(provider, "pre_compress_checkpoint_api_version", _LEGACY_PRE_COMPRESS_API_VERSION))
         except (TypeError, ValueError):
             return None
+
+    @classmethod
+    def _is_checkpoint_provider(cls, provider: MemoryProvider, api_version: int) -> bool:
+        version = cls._checkpoint_api_version(provider)
+        return (_LEGACY_PRE_COMPRESS_API_VERSION if version is None else version) >= api_version
 
     def supports_pre_compress_checkpoint(self, api_version: int = PRE_COMPRESS_CHECKPOINT_API_VERSION) -> bool:
         """Return whether an active provider guarantees checkpoint API support."""
@@ -780,27 +770,25 @@ class MemoryManager:
         parts = []
         checkpoint_succeeded = False
         for provider in self._providers:
-            provider_version = self._checkpoint_api_version(provider)
-            if provider_version is None:
-                provider_version = _LEGACY_PRE_COMPRESS_API_VERSION
-            is_checkpoint_provider = provider_version >= checkpoint_api_version
+            is_checkpoint_provider = self._is_checkpoint_provider(provider, checkpoint_api_version)
             provider_messages = messages
-            if is_checkpoint_provider and evidence_messages is not None:
-                provider_messages = evidence_messages
+            kwargs: Dict[str, Any] = {}
+            if is_checkpoint_provider:
+                if evidence_messages is not None:
+                    provider_messages = evidence_messages
+                # v1 providers and bare-shape v2 providers never see the signal.
+                if _accepts_require_checkpoint(provider.on_pre_compress):
+                    kwargs["require_checkpoint"] = require_checkpoint
             try:
-                if is_checkpoint_provider and _accepts_require_checkpoint(provider.on_pre_compress):
-                    result = provider.on_pre_compress(provider_messages, require_checkpoint=require_checkpoint)
-                else:  # v1 providers and bare-shape v2 providers never see the signal
-                    result = provider.on_pre_compress(provider_messages)
+                result = provider.on_pre_compress(provider_messages, **kwargs)
                 if result and result.strip():
                     parts.append(result)
             except Exception as e:
                 logger.debug("Memory provider '%s' on_pre_compress failed: %s", provider.name, e)
                 if require_checkpoint and is_checkpoint_provider:
                     raise
-            else:
-                if is_checkpoint_provider:
-                    checkpoint_succeeded = True
+                continue
+            checkpoint_succeeded = checkpoint_succeeded or is_checkpoint_provider
         if require_checkpoint and not checkpoint_succeeded:
             raise RuntimeError(
                 "No active memory provider completed pre-compress checkpoint "
@@ -824,12 +812,12 @@ class MemoryManager:
 
         def _notify(provider: MemoryProvider) -> None:
             mode = self._provider_memory_write_metadata_mode(provider)
-            if mode == "keyword":
-                provider.on_memory_write(action, target, content, metadata=dict(metadata or {}))
+            if mode == "legacy":
+                provider.on_memory_write(action, target, content)
             elif mode == "positional":
                 provider.on_memory_write(action, target, content, dict(metadata or {}))
             else:
-                provider.on_memory_write(action, target, content)
+                provider.on_memory_write(action, target, content, metadata=dict(metadata or {}))
 
         self._each_provider(
             "on_memory_write failed", _notify, providers=[p for p in self._providers if p.name != "builtin"],
@@ -933,14 +921,10 @@ class MemoryManager:
                 self._shutdown_drain_state.update(status="drained", active_tasks=0)
             return
 
-        abandoned_writes = abandoned_prefetches = active_tasks = 0
-        for future in pending:
-            if not future.cancel():
-                active_tasks += 1
-            elif tracked[future] == "prefetch":
-                abandoned_prefetches += 1
-            else:
-                abandoned_writes += 1
+        cancelled = [tracked[future] for future in pending if future.cancel()]
+        active_tasks = len(pending) - len(cancelled)
+        abandoned_prefetches = cancelled.count("prefetch")
+        abandoned_writes = len(cancelled) - abandoned_prefetches
 
         with self._sync_executor_lock:
             self._shutdown_drain_state.update(
