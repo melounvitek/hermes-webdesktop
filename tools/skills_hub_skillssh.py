@@ -370,42 +370,26 @@ class SkillsShSource(SkillSource):
 
         base = plain.split("/")[-1]
         sanitized = re.sub(r'[^a-z0-9/_-]+', '-', plain).strip('-')
-        sanitized_base = sanitized.split("/")[-1] if sanitized else ""
-        slash_tail_clean = base.lstrip('@').split('/')[-1]
-
+        tail = base.lstrip('@')
         variants = {
-            plain,
-            plain.replace("_", "-"),
-            plain.replace("/", "-"),
-            base,
-            base.replace("_", "-"),
-            sanitized,
-            sanitized.replace("/", "-") if sanitized else "",
-            sanitized_base,
-            slash_tail_clean,
-            slash_tail_clean.replace("_", "-"),
+            plain, plain.replace("_", "-"), plain.replace("/", "-"),
+            base, base.replace("_", "-"),
+            sanitized, sanitized.replace("/", "-"), sanitized.split("/")[-1],
+            tail, tail.replace("_", "-"),
         }
         return {v for v in variants if v}
 
     @staticmethod
     def _extract_repo_slug(repo_value: str) -> Optional[str]:
-        repo_value = repo_value.strip()
-        if repo_value.startswith("https://github.com/"):
-            repo_value = repo_value[len("https://github.com/"):]
+        repo_value = repo_value.strip().removeprefix("https://github.com/")
         parts = repo_value.strip("/").split("/")
-        if len(parts) >= 2:
-            return f"{parts[0]}/{parts[1]}"
-        return None
+        return f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else None
 
     @staticmethod
     def _extract_first_match(pattern: re.Pattern, text: str) -> Optional[str]:
         match = pattern.search(text)
-        if not match:
-            return None
-        value = next((group for group in match.groups() if group), None)
-        if value is None:
-            return None
-        return _strip_html(value).strip() or None
+        value = next((group for group in match.groups() if group), None) if match else None
+        return (_strip_html(value).strip() or None) if value is not None else None
 
     def _detail_to_metadata(self, canonical: str, detail: Optional[dict]) -> Dict[str, Any]:
         parts = canonical.split("/", 2)
@@ -438,10 +422,8 @@ class SkillsShSource(SkillSource):
 
     @classmethod
     def _normalize_identifier(cls, identifier: str) -> str:
-        for prefix in cls._ID_PREFIX_ALIASES:
-            if identifier.startswith(prefix):
-                return identifier[len(prefix):]
-        return identifier
+        prefix = next((p for p in cls._ID_PREFIX_ALIASES if identifier.startswith(p)), "")
+        return identifier[len(prefix):]
 
     @classmethod
     def _candidate_identifiers(cls, identifier: str) -> List[str]:

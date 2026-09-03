@@ -473,12 +473,8 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
         if not needs_enrichment:
             return 0
 
-        enriched = 0
-        consecutive_failures = 0
+        enriched = consecutive_failures = processed = 0
         max_consecutive_failures = 50
-        processed = 0
-        import threading
-        lock = threading.Lock()
 
         from concurrent.futures import ThreadPoolExecutor, as_completed
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -490,15 +486,14 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                     handle = future.result()
                 except Exception:
                     handle = None
-                with lock:
-                    if handle:
-                        if not meta.extra:
-                            meta.extra = {}
-                        meta.extra["owner"] = handle
-                        enriched += 1
-                        consecutive_failures = 0
-                    else:
-                        consecutive_failures += 1
+                if handle:
+                    if not meta.extra:
+                        meta.extra = {}
+                    meta.extra["owner"] = handle
+                    enriched += 1
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
 
                 if processed % 1000 == 0:
                     logger.info(
@@ -506,18 +501,17 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                         processed, len(needs_enrichment), enriched,
                     )
 
-                with lock:
-                    if consecutive_failures >= max_consecutive_failures:
-                        logger.warning(
-                            "ClawHub owner enrichment: %d consecutive failures — "
-                            "aborting early (%d/%d processed, %d enriched). "
-                            "The ClawHub API may be down or rate-limited.",
-                            max_consecutive_failures, processed,
-                            len(needs_enrichment), enriched,
-                        )
-                        for f in futures:
-                            f.cancel()
-                        break
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.warning(
+                        "ClawHub owner enrichment: %d consecutive failures — "
+                        "aborting early (%d/%d processed, %d enriched). "
+                        "The ClawHub API may be down or rate-limited.",
+                        max_consecutive_failures, processed,
+                        len(needs_enrichment), enriched,
+                    )
+                    for f in futures:
+                        f.cancel()
+                    break
 
         return enriched
 
@@ -595,8 +589,6 @@ class ClawHubSource(GuardedFetchMixin, SkillSource):
                             files[name] = zf.read(info.filename).decode("utf-8")
                         except (UnicodeDecodeError, KeyError):
                             logger.debug("Skipping non-text file in ZIP: %s", name)
-                            continue
-
                 return files
 
             except zipfile.BadZipFile:

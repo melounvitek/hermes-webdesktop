@@ -177,33 +177,28 @@ def install_from_quarantine(
     if install_dir.exists():
         shutil.rmtree(install_dir)
 
-    skill_md = quarantine_path / "SKILL.md"
-    if skill_md.exists():
-        try:
-            skill_size = skill_md.stat().st_size
-            if skill_size > 100_000:
-                logger.warning(
-                    "Skill '%s' has a large SKILL.md (%s chars). "
-                    "Large skills consume significant context when loaded. "
-                    "Consider asking the author to split it into smaller files.",
-                    safe_skill_name,
-                    f"{skill_size:,}",
-                )
-        except OSError:
-            pass
+    try:
+        skill_size = (quarantine_path / "SKILL.md").stat().st_size
+    except OSError:
+        skill_size = 0
+    if skill_size > 100_000:
+        logger.warning(
+            "Skill '%s' has a large SKILL.md (%s chars). "
+            "Large skills consume significant context when loaded. "
+            "Consider asking the author to split it into smaller files.",
+            safe_skill_name,
+            f"{skill_size:,}",
+        )
 
     # A symlink in the bundle would copy its target into skills/ and leak it
     # to the agent on the next skill_view.
     for entry in quarantine_path.rglob("*"):
-        if not _is_path_redirect(entry):
-            continue
-        try:
-            rel = entry.relative_to(quarantine_resolved)
-        except ValueError:
-            rel = entry
-        raise ValueError(
-            f"Installed skill contains symlinks, which is not allowed: {rel}"
-        )
+        if _is_path_redirect(entry):
+            try:
+                rel = entry.relative_to(quarantine_resolved)
+            except ValueError:
+                rel = entry
+            raise ValueError(f"Installed skill contains symlinks, which is not allowed: {rel}")
 
     install_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(quarantine_path), str(install_dir))
@@ -230,14 +225,9 @@ def install_from_quarantine(
 
     try:
         from tools.skill_usage import record_installed
-
         record_installed(safe_skill_name)
     except Exception:
-        logger.debug(
-            "Unable to record skill install lifecycle for %s",
-            safe_skill_name,
-            exc_info=True,
-        )
+        logger.debug("Unable to record skill install lifecycle for %s", safe_skill_name, exc_info=True)
 
     return install_dir
 
@@ -325,9 +315,7 @@ def check_for_skill_updates(
         row = {"name": entry.get("name", ""), "identifier": identifier, "source": source_name}
 
         bundle = None
-        for src in sources:
-            if not _source_matches(src, source_name):
-                continue
+        for src in filter(lambda s: _source_matches(s, source_name), sources):
             try:
                 bundle = src.fetch(identifier)
             except Exception:
