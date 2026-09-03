@@ -1,15 +1,10 @@
-#!/usr/bin/env python3
-"""``/init`` — build the prompt that generates or updates a project AGENTS.md.
-
-1. Inspect the project with its own read-only tools (``read_file`` / ``search_files`` on manifests,
-CI configs, lockfiles, existing docs) to learn the layout, toolchain, and the exact build/test/lint
-commands. 2.
-"""
+"""``/init`` — build the prompt that asks the agent to generate or update a project AGENTS.md."""
 
 from __future__ import annotations
 
-# The quality bar, embedded in every prompt so the generated file reads like a
-# maintainer wrote it — concrete and command-exact, not generic advice.
+import os
+
+# Embedded in every prompt so the generated file reads like a maintainer wrote it.
 _QUALITY_BAR = """\
 Quality bar for the file you write (this is what separates a useful AGENTS.md
 from noise):
@@ -32,17 +27,9 @@ from noise):
   "Pitfalls"). Flat and scannable — no deep nesting."""
 
 
-def build_init_prompt(
-    cwd: str,
-    existing_file: str | None = None,
-    extra: str = "",
-) -> str:
-    """Build the agent prompt for a ``/init`` request.
-
-    When ``existing_file`` (current ``AGENTS.md`` content) is given, the prompt switches to
-    update-and-merge discipline instead of fresh generation. ``extra`` is the user's free text
-    after ``/init`` to honor while authoring.
-    """
+def build_init_prompt(cwd: str, existing_file: str | None = None, extra: str = "") -> str:
+    """Build the ``/init`` prompt; ``existing_file`` (current AGENTS.md) switches to merge discipline,
+    ``extra`` is the user's free text after ``/init``."""
     extra = (extra or "").strip()
 
     parts: list[str] = [
@@ -106,8 +93,6 @@ def build_init_prompt(
 
 def build_init_prompt_for_cwd(cwd: str | None = None, extra: str = "") -> str:
     """Convenience wrapper used by the dispatch surfaces."""
-    import os
-
     resolved = os.path.abspath(cwd or os.getcwd())
     existing: str | None = None
     agents_path = os.path.join(resolved, "AGENTS.md")

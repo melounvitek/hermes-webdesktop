@@ -1,7 +1,8 @@
 """Hermes Desktop (Chat GUI) uninstaller.
 
-This holds the desktop's own ``connection.json`` / ``updates.json`` and Chromium cache — pure GUI
-state, safe to remove on a GUI uninstall.
+Removes only GUI state — built Electron artifacts, the packaged app, and the desktop's own
+``userData`` (connection.json / updates.json / Chromium cache). Never agent source, venv, config,
+sessions or .env under ``$HERMES_HOME``.
 """
 
 import os
@@ -14,16 +15,13 @@ from hermes_constants import get_hermes_home
 from hermes_cli.colors import Colors, color
 
 
-def log_info(msg: str):
-    print(f"{color('→', Colors.CYAN)} {msg}")
+def _logger(mark: str, col: str):
+    return lambda msg: print(f"{color(mark, col)} {msg}")
 
 
-def log_success(msg: str):
-    print(f"{color('✓', Colors.GREEN)} {msg}")
-
-
-def log_warn(msg: str):
-    print(f"{color('⚠', Colors.YELLOW)} {msg}")
+log_info = _logger("→", Colors.CYAN)
+log_success = _logger("✓", Colors.GREEN)
+log_warn = _logger("⚠", Colors.YELLOW)
 
 
 def _env_dir(var: str, fallback: Path) -> Path:
@@ -32,37 +30,26 @@ def _env_dir(var: str, fallback: Path) -> Path:
     return Path(value) if value else fallback
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
-
-
 def _agent_root(hermes_home: Path) -> Path:
     """The agent checkout root — same layout install.sh / install.ps1 use."""
     return hermes_home / "hermes-agent"
 
 
 def desktop_userdata_dir() -> Path:
-    """Return the Electron ``userData`` directory for the desktop app.
-
-    Mirrors Electron's ``app.getPath('userData')`` for an app named "Hermes" on each platform. This
-    is GUI-only state (connection.json, updates.json, Chromium cache) and never holds agent config
-    or sessions.
-    """
+    """Electron ``app.getPath('userData')`` for an app named "Hermes" on each platform (GUI-only state)."""
     home = Path.home()
     if sys.platform == "darwin":
         return home / "Library" / "Application Support" / "Hermes"
     if sys.platform == "win32":
         return _env_dir("APPDATA", home / "AppData" / "Roaming") / "Hermes"
-    # Linux / other POSIX — XDG config home.
     return _env_dir("XDG_CONFIG_HOME", home / ".config") / "Hermes"
 
 
 def source_built_gui_artifacts(hermes_home: Path) -> "list[Path]":
     """GUI build artifacts produced by ``hermes desktop`` inside the checkout.
 
-    These are removable on a GUI uninstall without harming the agent: the Python agent runs from
-    ``hermes-agent/`` source + ``venv/`` and never needs the Electron build output or node_modules.
+    The Python agent runs from ``hermes-agent/`` source + ``venv/`` and never needs the Electron
+    build output or node_modules (the workspace-root node_modules only carries Electron, ~200MB).
     """
     agent_root = _agent_root(hermes_home)
     desktop_dir = agent_root / "apps" / "desktop"
@@ -70,76 +57,54 @@ def source_built_gui_artifacts(hermes_home: Path) -> "list[Path]":
         desktop_dir / "dist",
         desktop_dir / "release",
         desktop_dir / "node_modules",
-        # Workspace-root node_modules carries Electron (devDependency of the
-        # desktop workspace, ~200MB). The agent does not use any npm package,
-        # so this is GUI tooling — safe to drop on a GUI uninstall.
         agent_root / "node_modules",
         hermes_home / "desktop-build-stamp.json",
     ]
 
 
 def packaged_gui_app_paths() -> "list[Path]":
-    """Standard install locations of the packaged desktop distributable.
+    """Standard install locations of the packaged desktop distributable for the current OS.
 
-    Returns every candidate for the current OS; the caller filters to those that actually exist. We
-    never glob system-wide — only the well-known electron-builder output locations for the "Hermes"
-    product.
+    Every candidate is returned; the caller filters to those that exist. Never globs system-wide —
+    only the well-known electron-builder output locations for the "Hermes" product.
     """
     home = Path.home()
     paths: list[Path] = []
     if sys.platform == "darwin":
-        paths += [
-            Path("/Applications/Hermes.app"),
-            home / "Applications" / "Hermes.app",
-        ]
+        paths += [Path("/Applications/Hermes.app"), home / "Applications" / "Hermes.app"]
     elif sys.platform == "win32":
         local_base = _env_dir("LOCALAPPDATA", home / "AppData" / "Local")
         paths += [
-            # NSIS per-user install (perMachine=false → Programs\Hermes).
-            local_base / "Programs" / "Hermes",
-            # Older / alternate layout some builds used.
-            local_base / "hermes-desktop",
+            local_base / "Programs" / "Hermes",  # NSIS per-user install (perMachine=false)
+            local_base / "hermes-desktop",  # older / alternate layout some builds used
         ]
         program_files = os.environ.get("ProgramFiles")
         if program_files:
-            # NSIS per-machine fallback (needs admin to remove).
-            paths.append(Path(program_files) / "Hermes")
+            paths.append(Path(program_files) / "Hermes")  # NSIS per-machine fallback (needs admin)
     else:
-        # Linux: AppImage is a single file the user placed somewhere; we can
-        # only reliably clean the desktop entry + icon we know the name of.
-        # The AppImage itself lives wherever the user put it, so we surface a
-        # hint rather than guessing. deb/rpm installs are owned by the system
-        # package manager and must be removed via apt/dnf — see the message in
-        # ``uninstall_gui``.
+        # Linux: an AppImage lives wherever the user put it and deb/rpm files belong to the package
+        # manager (see the hint in ``uninstall_gui``), so only the desktop entry + hicolor icons
+        # ``hermes desktop`` installs are cleaned here.
         from hermes_cli.linux_desktop_entry import desktop_entry_path
 
         data_base = _env_dir("XDG_DATA_HOME", home / ".local" / "share")
         paths += [
-            # The launcher entry `hermes desktop` installs. Its icon is
-            # also copied into the hicolor tree (see
-            # linux_desktop_entry._install_icon_to_hicolor) — remove
-            # every size dir the installer could have written.
             desktop_entry_path(),
-            # Some packaged builds emit this casing.
-            data_base / "applications" / "Hermes.desktop",
+            data_base / "applications" / "Hermes.desktop",  # some packaged builds emit this casing
             data_base / "icons" / "hicolor" / "scalable" / "apps" / "hermes.png",
         ]
-        # Fixed-size hicolor dirs the installer may have written (resized
-        # panel sizes plus leftover native-size copies from older builds).
+        # Fixed-size hicolor dirs the installer may have written (panel sizes + older native-size copies).
         for size in ("24x24", "32x32", "48x48", "256x256", "512x512", "1024x1024"):
             paths.append(data_base / "icons" / "hicolor" / size / "apps" / "hermes.png")
     return paths
 
 
 def agent_is_installed(hermes_home: Path) -> bool:
-    """Return True when a usable Python agent install exists under HERMES_HOME.
+    """True when a usable Python agent install exists under HERMES_HOME (gates the desktop UI's options).
 
-    Used by the desktop UI to decide which uninstall options to offer: if the agent isn't present (a
-    future "lite" GUI-only client), the "remove agent" options are hidden.
+    Package source or a venv alone is enough — a source checkout without a venv is still "the agent is here".
     """
     agent_root = _agent_root(hermes_home)
-    # A real install has the package source + a venv. Either signal alone is
-    # enough — a source checkout without a venv is still "the agent is here".
     return any((agent_root / sub).is_dir() for sub in ("hermes_cli", "venv", ".venv"))
 
 
@@ -152,14 +117,9 @@ def gui_is_installed(hermes_home: Path) -> bool:
 
 
 def gui_install_summary(hermes_home: "Path | None" = None) -> dict:
-    """Structured snapshot of what's installed, for the desktop UI to render.
-
-    Returns JSON-serializable primitives (paths as strings, booleans for the questions the UI gates
-    on) so the Electron main process can forward it to the renderer via IPC.
-    """
+    """JSON-serializable snapshot of what's installed, for the desktop UI to render via IPC."""
     home: Path = hermes_home if hermes_home is not None else get_hermes_home()
     userdata = desktop_userdata_dir()
-
     return {
         "hermes_home": str(home),
         "agent_installed": agent_is_installed(home),
@@ -170,11 +130,6 @@ def gui_install_summary(hermes_home: "Path | None" = None) -> dict:
         "userdata_exists": userdata.exists(),
         "platform": sys.platform,
     }
-
-
-# ---------------------------------------------------------------------------
-# Removal
-# ---------------------------------------------------------------------------
 
 
 def _remove_path(path: Path) -> bool:
@@ -191,16 +146,9 @@ def _remove_path(path: Path) -> bool:
     return False
 
 
-def uninstall_gui(
-    hermes_home: "Path | None" = None, *, remove_userdata: bool = True
-) -> "list[Path]":
-    """Remove the desktop GUI's artifacts, leaving the agent + user data intact.
-
-    Never touches ``hermes-agent/hermes_cli`` (agent source), ``venv/``, or any config / sessions /
-    .env under ``$HERMES_HOME``.
-    """
+def uninstall_gui(hermes_home: "Path | None" = None, *, remove_userdata: bool = True) -> "list[Path]":
+    """Remove the desktop GUI's artifacts, leaving the agent + user data intact."""
     home: Path = hermes_home if hermes_home is not None else get_hermes_home()
-
     removed: list[Path] = []
 
     def _remove_existing(paths) -> bool:
@@ -230,18 +178,11 @@ def uninstall_gui(
     if not removed:
         log_info("No desktop GUI artifacts found to remove")
 
-    # Linux deb/rpm installs are owned by the package manager; we can't (and
-    # shouldn't) rmtree files under /usr. Surface the hint so the user can
-    # finish the job. AppImages live wherever the user dropped them.
     if sys.platform.startswith("linux"):
-        # The desktop entry was removed above (it is in
-        # ``packaged_gui_app_paths``), but the menu caches still list it.
-        # Reindex so Hermes disappears from the launcher.
+        # The desktop entry was removed above but the menu caches still list it; reindex so Hermes
+        # disappears from the launcher.
         try:
-            from hermes_cli.linux_desktop_entry import (
-                desktop_entry_path,
-                refresh_desktop_databases,
-            )
+            from hermes_cli.linux_desktop_entry import desktop_entry_path, refresh_desktop_databases
 
             entry = desktop_entry_path()
             if entry in removed:
@@ -250,6 +191,7 @@ def uninstall_gui(
         except Exception as e:
             log_warn(f"Could not refresh the application menu cache: {e}")
 
+        # deb/rpm files under /usr belong to the package manager; AppImages live wherever the user dropped them.
         log_info(
             "If you installed the desktop via a .deb / .rpm package, remove it "
             "with your package manager (e.g. 'sudo apt remove hermes' or "

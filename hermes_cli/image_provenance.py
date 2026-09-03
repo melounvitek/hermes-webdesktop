@@ -1,11 +1,9 @@
 """Image-authored deployment provenance for immutable Hermes runtimes.
 
 The published image bakes ``/etc/hermes/image-provenance.json`` outside both ``$HERMES_HOME`` and
-the mutable checkout. A bind-mounted checkout (including ``.git``) therefore cannot hide the build
-fact, and environment or config values cannot forge it.
-
-Absence preserves every pre-existing source/package install path. Presence fails closed: an
-unreadable, non-regular, or malformed marker still means the runtime is image-managed; it is an
+the mutable checkout, so a bind-mounted checkout cannot hide the build fact and env/config cannot
+forge it. Absence preserves every pre-existing source/package install path. Presence fails closed:
+an unreadable, non-regular, or malformed marker still means the runtime is image-managed — an
 integrity defect, never permission to mutate the image in place.
 """
 
@@ -41,15 +39,8 @@ class ImageProvenance:
 
 def _invalid(path: Path, reason: str) -> ImageProvenance:
     return ImageProvenance(
-        schema=IMAGE_PROVENANCE_SCHEMA,
-        deployment_kind="image",
-        manager="unknown",
-        image=None,
-        version=None,
-        revision=None,
-        marker_path=str(path),
-        valid=False,
-        error=reason,
+        schema=IMAGE_PROVENANCE_SCHEMA, deployment_kind="image", manager="unknown",
+        image=None, version=None, revision=None, marker_path=str(path), valid=False, error=reason,
     )
 
 
@@ -62,15 +53,11 @@ def _optional_string(payload: dict, name: str) -> Optional[str]:
     return value.strip() or None
 
 
-def read_image_provenance(
-    marker_path: Optional[Path] = None,
-) -> Optional[ImageProvenance]:
-    """Read the baked marker without consulting environment or config.
+def read_image_provenance(marker_path: Optional[Path] = None) -> Optional[ImageProvenance]:
+    """Read the baked marker without consulting environment or config. Never raises.
 
-    ``marker_path`` is a dependency-injection seam for tests and alternate image builders. Normal
-    callers always use the image-owned absolute path. This function never raises.
+    ``marker_path`` is a dependency-injection seam for tests and alternate image builders.
     """
-
     path = IMAGE_PROVENANCE_PATH
     try:
         path = Path(marker_path) if marker_path is not None else path
@@ -81,8 +68,7 @@ def read_image_provenance(
         marker_stat = path.lstat()
     except FileNotFoundError:
         return None
-    except BaseException as exc:
-        # Permission errors and other lookup failures do not prove absence.
+    except BaseException as exc:  # permission errors and other lookup failures do not prove absence
         return _invalid(path, f"marker_presence_unreadable:{type(exc).__name__}")
 
     if not stat.S_ISREG(marker_stat.st_mode):
@@ -90,17 +76,14 @@ def read_image_provenance(
 
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        # The file may disappear between lstat/read; it was nevertheless
-        # observed present, so the decision remains fail-closed.
+    except Exception as exc:  # may vanish between lstat/read; it was observed present, so fail closed
         return _invalid(path, f"marker_unreadable:{type(exc).__name__}")
 
     if not isinstance(payload, dict):
         return _invalid(path, "marker_not_object")
 
     schema = payload.get("schema")
-    # ``bool`` is an ``int`` subclass in Python.  Schema ``true`` must not be
-    # accepted as schema 1, hence the exact type check.
+    # ``bool`` subclasses ``int``: schema ``true`` must not be accepted as schema 1.
     if type(schema) is not int or schema != IMAGE_PROVENANCE_SCHEMA:
         return _invalid(path, "unsupported_marker_schema")
     if payload.get("deployment_kind") != "image":
@@ -116,9 +99,6 @@ def read_image_provenance(
         return _invalid(path, f"invalid_{exc.args[0]}")
 
     return ImageProvenance(
-        schema=IMAGE_PROVENANCE_SCHEMA,
-        deployment_kind="image",
-        manager=manager.strip(),
-        marker_path=str(path),
-        **optional,
+        schema=IMAGE_PROVENANCE_SCHEMA, deployment_kind="image", manager=manager.strip(),
+        marker_path=str(path), **optional,
     )

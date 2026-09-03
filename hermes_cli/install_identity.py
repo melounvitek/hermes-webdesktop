@@ -23,8 +23,7 @@ _INSTALL_ID_PUBLICATION_LOCK = threading.Lock()
 @contextlib.contextmanager
 def _install_id_file_lock(root: Path):
     """Serialize identity publication across processes on POSIX and Windows."""
-    lock_path = root / ".install_id.lock"
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    fd = os.open(root / ".install_id.lock", os.O_RDWR | os.O_CREAT, 0o600)
     windows = os.name == "nt"
     try:
         if windows:
@@ -71,6 +70,17 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _read_existing(path: Path) -> tuple[Optional[str], bool]:
+    """``(valid id or None, mint?)`` — mint on a missing or malformed file, never on a read failure."""
+    try:
+        existing = path.read_text(encoding="utf-8").strip().lower()
+    except FileNotFoundError:
+        return None, True
+    except (OSError, UnicodeDecodeError):
+        return None, False
+    return (existing, False) if _INSTALL_ID_RE.fullmatch(existing) else (None, True)
+
+
 def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
     """Read or atomically mint the opaque id for the physical install.
 
@@ -79,14 +89,9 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
     """
     root = get_default_hermes_root() if root is None else root
     path = root / _INSTALL_ID_FILENAME
-    try:
-        existing = path.read_text(encoding="utf-8").strip().lower()
-        if _INSTALL_ID_RE.fullmatch(existing):
-            return existing
-    except FileNotFoundError:
-        pass
-    except (OSError, UnicodeDecodeError):
-        return None
+    existing, mint = _read_existing(path)
+    if not mint:
+        return existing
 
     try:
         root.mkdir(parents=True, exist_ok=True)
@@ -94,18 +99,13 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
         return None
 
     try:
-        # Windows byte-range locks can report a same-process lock conflict
-        # instead of waiting for another thread. Serialize threads here, then
-        # retain the file lock as the cross-process publication fence.
+        # Windows byte-range locks can report a same-process lock conflict instead of waiting for
+        # another thread. Serialize threads here, then retain the file lock as the cross-process
+        # publication fence.
         with _INSTALL_ID_PUBLICATION_LOCK, _install_id_file_lock(root):
-            try:
-                existing = path.read_text(encoding="utf-8").strip().lower()
-                if _INSTALL_ID_RE.fullmatch(existing):
-                    return existing
-            except FileNotFoundError:
-                pass
-            except (OSError, UnicodeDecodeError):
-                return None
+            existing, mint = _read_existing(path)
+            if not mint:
+                return existing
 
             minted = uuid.uuid4().hex
             fd, tmp_name = tempfile.mkstemp(dir=str(root), prefix=".install_id-")
@@ -127,22 +127,21 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
         return None
 
 
-def get_install_id(
-    *,
-    cache: dict[str, Optional[str]] | None = None,
-) -> Optional[str]:
+def get_install_id(*, cache: dict[str, Optional[str]] | None = None) -> Optional[str]:
     """Return the process-cached stable id for the active Hermes root."""
     root = get_default_hermes_root()
     root_key = str(root)
     target_cache = _INSTALL_ID_CACHE if cache is None else cache
-    cached = target_cache.get("value")
-    if cached and target_cache.get("root") in (None, root_key):
-        return cached
 
-    with _INSTALL_ID_LOCK:
+    def _cached() -> Optional[str]:
         cached = target_cache.get("value")
-        if cached and target_cache.get("root") in (None, root_key):
-            return cached
+        return cached if cached and target_cache.get("root") in (None, root_key) else None
+
+    if value := _cached():
+        return value
+    with _INSTALL_ID_LOCK:
+        if value := _cached():
+            return value
         value = read_or_create_install_id(root)
         if value:
             target_cache["root"] = root_key

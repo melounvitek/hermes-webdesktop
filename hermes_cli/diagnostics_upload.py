@@ -1,26 +1,21 @@
 """Client for uploading ``hermes debug share`` bundles to Nous-internal S3.
 
-1. POST {NAS_BASE}/api/diagnostics/upload-url → {uploadUrl, viewUrl, id, ...} (the request body
-carries ``sizeBytes``; NAS signs it into the presigned URL's ``ContentLength``, so the PUT must send
-exactly that many bytes) 2. PUT <uploadUrl> (the gzipped bundle, Content-Type application/gzip)
+1. POST {NAS_BASE}/api/diagnostics/upload-url → {uploadUrl, viewUrl, id, ...}. The request body
+   carries ``sizeBytes``; NAS signs it into the presigned URL's ``ContentLength``, so the PUT must
+   send exactly that many bytes.
+2. PUT <uploadUrl> (the gzipped bundle, Content-Type application/gzip).
 
-NAS is stateless — the object's existence in S3 is the only state, so there is no confirm/callback
-step.
+NAS is stateless — the object's existence in S3 is the only state, so there is no confirm step.
 """
 
 import json
 import os
 import urllib.request
 
-# Base URL of the Nous account service that mints the signed upload URL.
-# Overridable via env so the feature can be pointed at staging / a local dev
-# NAS instance during testing.
-NAS_BASE = os.environ.get(
-    "HERMES_DIAGNOSTICS_BASE_URL", "https://portal.nousresearch.com"
-)
+# Overridable via env so the feature can be pointed at staging / a local dev NAS instance.
+NAS_BASE = os.environ.get("HERMES_DIAGNOSTICS_BASE_URL", "https://portal.nousresearch.com")
 
-# Network timeout for each request (seconds). The upload itself can be larger
-# (a gzipped log bundle), so the PUT gets a more generous window.
+# Network timeouts (seconds); the PUT carries the gzipped log bundle so it gets a more generous window.
 _REQUEST_TIMEOUT = 30
 _UPLOAD_TIMEOUT = 120
 
@@ -38,10 +33,7 @@ def _urlopen_checked(req: urllib.request.Request, *, timeout: int, what: str):
         return resp.read()
 
 
-def request_upload_url(
-    content_type: str = "application/gzip",
-    size_bytes: int | None = None,
-) -> dict:
+def request_upload_url(content_type: str = "application/gzip", size_bytes: int | None = None) -> dict:
     """Ask NAS to mint a presigned PUT URL for a diagnostics bundle.
 
     Returns the parsed JSON, expected to carry at least ``uploadUrl``, ``viewUrl`` and ``id``.
@@ -51,69 +43,37 @@ def request_upload_url(
     if size_bytes is not None:
         payload["sizeBytes"] = int(size_bytes)
 
-    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{NAS_BASE}/api/diagnostics/upload-url",
-        data=data,
+        data=json.dumps(payload).encode("utf-8"),
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": _USER_AGENT,
-        },
+        headers={"Content-Type": "application/json", "Accept": "application/json", "User-Agent": _USER_AGENT},
     )
-    body = _urlopen_checked(
-        req, timeout=_REQUEST_TIMEOUT, what="diagnostics upload-url request"
-    ).decode("utf-8")
+    body = _urlopen_checked(req, timeout=_REQUEST_TIMEOUT, what="diagnostics upload-url request").decode("utf-8")
 
     try:
         result = json.loads(body)
     except (ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"diagnostics upload-url returned non-JSON response: {body[:200]}"
-        ) from exc
+        raise RuntimeError(f"diagnostics upload-url returned non-JSON response: {body[:200]}") from exc
 
     if not isinstance(result, dict) or not result.get("uploadUrl"):
-        raise RuntimeError(
-            "diagnostics upload-url response missing 'uploadUrl': "
-            f"{body[:200]}"
-        )
+        raise RuntimeError(f"diagnostics upload-url response missing 'uploadUrl': {body[:200]}")
     return result
 
 
-def put_bundle(
-    upload_url: str,
-    data: bytes,
-    content_type: str = "application/gzip",
-) -> None:
-    """PUT the gzipped *data* bundle to a presigned *upload_url*.
+def put_bundle(upload_url: str, data: bytes, content_type: str = "application/gzip") -> None:
+    """PUT the gzipped *data* bundle to a presigned *upload_url*. Raises on non-2xx.
 
-    Sets the ``Content-Type`` header (must match what NAS pinned when signing the URL, otherwise S3
-    rejects the signature). Raises on non-2xx.
+    ``Content-Type`` must match what NAS pinned when signing the URL, otherwise S3 rejects the signature.
     """
     req = urllib.request.Request(
-        upload_url,
-        data=data,
-        method="PUT",
-        headers={
-            "Content-Type": content_type,
-            "User-Agent": _USER_AGENT,
-        },
+        upload_url, data=data, method="PUT", headers={"Content-Type": content_type, "User-Agent": _USER_AGENT}
     )
     _urlopen_checked(req, timeout=_UPLOAD_TIMEOUT, what="diagnostics bundle PUT")
 
 
 def share_to_nous(report_bundle: bytes) -> dict:
-    """Orchestrate the full Nous-S3 upload of a gzipped *report_bundle*.
-
-    Two steps: mint a presigned PUT URL (sending the exact ``sizeBytes`` NAS signs into the URL's
-    ``ContentLength``), then PUT the bundle. NAS is stateless — the object's existence in S3 is the
-    only state, so there is no confirm/callback step.
-    """
-    size_bytes = len(report_bundle)
-    info = request_upload_url(
-        content_type="application/gzip", size_bytes=size_bytes
-    )
+    """Mint a presigned PUT URL (with the exact ``sizeBytes`` NAS signs), then PUT *report_bundle*."""
+    info = request_upload_url(content_type="application/gzip", size_bytes=len(report_bundle))
     put_bundle(info["uploadUrl"], report_bundle, content_type="application/gzip")
-
     return info

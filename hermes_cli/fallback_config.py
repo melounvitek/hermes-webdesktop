@@ -6,9 +6,7 @@ from typing import Any
 
 
 def _normalized_base_url(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    return value.strip().rstrip("/")
+    return value.strip().rstrip("/") if isinstance(value, str) else ""
 
 
 def resolve_entry_api_key(entry: dict[str, Any] | None) -> str | None:
@@ -34,13 +32,7 @@ def resolve_entry_api_key(entry: dict[str, Any] | None) -> str | None:
 
 
 def _iter_fallback_entries(raw: Any) -> list[dict[str, Any]]:
-    if isinstance(raw, dict):
-        candidates = [raw]
-    elif isinstance(raw, list):
-        candidates = raw
-    else:
-        return []
-
+    candidates = [raw] if isinstance(raw, dict) else raw if isinstance(raw, list) else []
     entries: list[dict[str, Any]] = []
     for entry in candidates:
         if not isinstance(entry, dict):
@@ -49,15 +41,10 @@ def _iter_fallback_entries(raw: Any) -> list[dict[str, Any]]:
         model = str(entry.get("model") or "").strip()
         if not provider or not model:
             continue
-
-        normalized = dict(entry)
-        normalized["provider"] = provider
-        normalized["model"] = model
-
+        normalized = {**entry, "provider": provider, "model": model}
         base_url = _normalized_base_url(entry.get("base_url"))
         if base_url:
             normalized["base_url"] = base_url
-
         entries.append(normalized)
     return entries
 
@@ -78,17 +65,13 @@ def get_fallback_chain(config: dict[str, Any] | None) -> list[dict[str, Any]]:
     provider/model/base_url route as an earlier entry. The returned list always contains fresh dict
     copies.
     """
-
     config = config or {}
     chain: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-
     for key in ("fallback_providers", "fallback_model"):
         for entry in _iter_fallback_entries(config.get(key)):
             identity = _entry_identity(entry)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            chain.append(entry)
-
+            if identity not in seen:
+                seen.add(identity)
+                chain.append(entry)
     return chain
