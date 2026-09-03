@@ -47,6 +47,12 @@ def _plines(agent: Any, *lines: str) -> None:
         print(f"{agent.log_prefix}{line}")
 
 
+def _blines(agent: Any, *lines: str) -> None:
+    """``_buffer_vprint`` each line (surfaces only if every retry+fallback exhausts)."""
+    for line in lines:
+        agent._buffer_vprint(line)
+
+
 def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
@@ -128,8 +134,7 @@ def _recover_unicode_encode_error(
     if isinstance(active_system_prompt, str):
         _sanitized_system = _strip_non_ascii(active_system_prompt)
         if _sanitized_system != active_system_prompt:
-            active_system_prompt = _sanitized_system
-            agent._cached_system_prompt = _sanitized_system
+            active_system_prompt = agent._cached_system_prompt = _sanitized_system
             _system_sanitized = True
     if isinstance(getattr(agent, "ephemeral_system_prompt", None), str):
         _sanitized_ephemeral = _strip_non_ascii(agent.ephemeral_system_prompt)
@@ -235,8 +240,7 @@ def _print_nous_401_diagnostics(agent: Any, api_error: Exception) -> None:
     """Nous 401 that survived a credential refresh: likely Portal OAuth expired/revoked,
     no credits, or agent key blocked."""
     from agent.conversation_loop import _print_nous_entitlement_guidance
-    from hermes_constants import display_hermes_home as _dhh_fn
-    _dhh = _dhh_fn()
+    from hermes_constants import display_hermes_home
     _body_text = ""
     try:
         _body = getattr(api_error, "body", None) or getattr(api_error, "response", None)
@@ -254,7 +258,7 @@ def _print_nous_401_diagnostics(agent: Any, api_error: Exception) -> None:
         "   Troubleshooting:",
         "     • Re-authenticate: hermes auth add nous",
         "     • Check credits / billing: https://portal.nousresearch.com",
-        f"     • Verify stored credentials: {_dhh}/auth.json",
+        f"     • Verify stored credentials: {display_hermes_home()}/auth.json",
         "     • Switch providers temporarily: /model <model> --provider openrouter",
     )
 
@@ -263,7 +267,7 @@ def _print_anthropic_401_diagnostics(agent: Any, key: Any) -> None:
     """Anthropic 401 that survived a credential refresh: show auth method + fixes."""
     from agent.anthropic_adapter import _is_oauth_token
     from agent.azure_identity_adapter import is_token_provider
-    from hermes_constants import display_hermes_home as _dhh_fn
+    from hermes_constants import display_hermes_home
     _plines(agent, "🔐 Anthropic 401 — authentication failed.")
     if is_token_provider(key):
         # Azure Foundry Entra ID: JWT minted per-request by an httpx hook; 401 = Azure
@@ -281,7 +285,7 @@ def _print_anthropic_401_diagnostics(agent: Any, key: Any) -> None:
             f"   Auth method: {auth_method}",
             f"   Token prefix: {key[:12]}..." if isinstance(key, str) and len(key) > 12 else "   Token: (empty or short)",
         )
-    _dhh = _dhh_fn()
+    _dhh = display_hermes_home()
     _plines(
         agent,
         "   Troubleshooting:",
@@ -866,31 +870,29 @@ def log_api_error_attempt(
     _base = getattr(agent, "base_url", "unknown")
     _model = getattr(agent, "model", "unknown")
     _status_code_str = f" [HTTP {status_code}]" if status_code else ""
-    agent._buffer_vprint(f"⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}")
-    agent._buffer_vprint(f"   🔌 Provider: {_provider}  Model: {_model}")
-    agent._buffer_vprint(f"   🌐 Endpoint: {_base}")
-    agent._buffer_vprint(f"   📝 Error: {_error_summary}")
+    _blines(
+        agent,
+        f"⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}",
+        f"   🔌 Provider: {_provider}  Model: {_model}",
+        f"   🌐 Endpoint: {_base}",
+        f"   📝 Error: {_error_summary}",
+    )
     if status_code and status_code < 500:
         _err_body = getattr(api_error, "body", None)
         _err_body_str = str(_err_body)[:300] if _err_body else None
         if _err_body_str:
-            agent._buffer_vprint(f"   📋 Details: {_err_body_str}")
-    agent._buffer_vprint(f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
+            _blines(agent, f"   📋 Details: {_err_body_str}")
+    _blines(agent, f"   ⏱️  Elapsed: {elapsed_time:.2f}s  Context: {len(api_messages)} msgs, ~{approx_tokens:,} tokens")
 
     if agent._is_openrouter_url() and "support tool use" in error_msg:
-        agent._buffer_vprint(
-            f"   💡 No OpenRouter providers for {_model} support tool calling with your current settings."
-        )
+        _blines(agent, f"   💡 No OpenRouter providers for {_model} support tool calling with your current settings.")
         if agent.providers_allowed:
-            agent._buffer_vprint(
-                "      Your provider_routing.only restriction is filtering out tool-capable providers."
+            _blines(
+                agent,
+                "      Your provider_routing.only restriction is filtering out tool-capable providers.",
+                "      Try removing the restriction or adding providers that support tools for this model.",
             )
-            agent._buffer_vprint(
-                "      Try removing the restriction or adding providers that support tools for this model."
-            )
-        agent._buffer_vprint(
-            f"      Check which providers support tools: https://openrouter.ai/models/{_model}"
-        )
+        _blines(agent, f"      Check which providers support tools: https://openrouter.ai/models/{_model}")
 
     # Bare 404 on a ``vendor/model`` catalogue usually means the id lost its prefix; the
     # provider never names the model, so we do.
@@ -902,11 +904,11 @@ def log_api_error_attempt(
         except Exception:
             _suggestion = None
         if _suggestion:
-            agent._buffer_vprint(
-                f"   💡 Model '{_model}' is not a valid id for provider {_provider} — "
-                f"it is missing its vendor prefix."
+            _blines(
+                agent,
+                f"   💡 Model '{_model}' is not a valid id for provider {_provider} — it is missing its vendor prefix.",
+                f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`.",
             )
-            agent._buffer_vprint(f"      Did you mean '{_suggestion}'?  Re-pick it with `hermes model`.")
     return error_type, error_msg, _provider, _base, _model
 
 
@@ -1104,25 +1106,28 @@ def describe_invalid_response(agent: Any, response: Any, api_duration: float) ->
             except (TypeError, ValueError):
                 pass
 
-    if _resp_error_code == 524:
-        _failure_hint = f"upstream provider timed out (Cloudflare 524, {api_duration:.0f}s)"
-    elif _resp_error_code == 504:
-        _failure_hint = f"upstream gateway timeout (504, {api_duration:.0f}s)"
-    elif _resp_error_code == 429:
-        _failure_hint = "rate limited by upstream provider (429)"
-    elif _resp_error_code in {500, 502}:
-        _failure_hint = f"upstream server error ({_resp_error_code}, {api_duration:.0f}s)"
-    elif _resp_error_code in {503, 529}:
-        _failure_hint = f"upstream provider overloaded ({_resp_error_code})"
-    elif _resp_error_code is not None:
-        _failure_hint = f"upstream error (code {_resp_error_code}, {api_duration:.0f}s)"
-    elif api_duration < 10:
-        _failure_hint = f"fast response ({api_duration:.1f}s) — likely rate limited"
-    elif api_duration > 60:
-        _failure_hint = f"slow response ({api_duration:.0f}s) — likely upstream timeout"
-    else:
-        _failure_hint = f"response time {api_duration:.1f}s"
-    return error_msg, provider_name, _failure_hint
+    return error_msg, provider_name, _failure_hint_for(_resp_error_code, api_duration)
+
+
+def _failure_hint_for(code: Optional[int], api_duration: float) -> str:
+    """Human-readable hint from the provider error code and response time."""
+    if code == 524:
+        return f"upstream provider timed out (Cloudflare 524, {api_duration:.0f}s)"
+    if code == 504:
+        return f"upstream gateway timeout (504, {api_duration:.0f}s)"
+    if code == 429:
+        return "rate limited by upstream provider (429)"
+    if code in {500, 502}:
+        return f"upstream server error ({code}, {api_duration:.0f}s)"
+    if code in {503, 529}:
+        return f"upstream provider overloaded ({code})"
+    if code is not None:
+        return f"upstream error (code {code}, {api_duration:.0f}s)"
+    if api_duration < 10:
+        return f"fast response ({api_duration:.1f}s) — likely rate limited"
+    if api_duration > 60:
+        return f"slow response ({api_duration:.0f}s) — likely upstream timeout"
+    return f"response time {api_duration:.1f}s"
 
 
 @dataclass
