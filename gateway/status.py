@@ -247,10 +247,10 @@ def terminate_pid(
         if current_start_time is None:
             raise OSError(f"refusing to force-kill PID {pid}; process start time is unavailable")
         try:
-            expected, current = float(expected_start_time), float(current_start_time)
+            same = _start_times_agree(current_start_time, expected_start_time)
         except (TypeError, ValueError) as exc:
             raise OSError(f"refusing to force-kill PID {pid}; malformed start time") from exc
-        if expected <= 0 or current <= 0 or abs(expected - current) > 0.001:
+        if not same:
             raise OSError(f"refusing to force-kill PID {pid}; process identity changed")
     if not (force and _IS_WINDOWS):
         os.kill(pid, signal.SIGTERM if not force else getattr(signal, "SIGKILL", signal.SIGTERM))
@@ -269,6 +269,12 @@ def terminate_pid(
     if result.returncode != 0:
         details = (result.stderr or result.stdout or "").strip()
         raise OSError(details or f"taskkill failed for PID {pid}")
+
+
+def _start_times_agree(current: Any, *recorded: Any) -> bool:
+    """Same process object: all fingerprints > 0 and within 1ms of ``current``; raises on junk."""
+    cur = float(current)
+    return cur > 0 and all(r > 0 and abs(r - cur) <= 0.001 for r in map(float, recorded))
 
 
 def _scope_hash(identity: str) -> str:
@@ -1590,14 +1596,14 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
     if current_start is None or any(start is None for start in starts):
         raise RuntimeError("gateway creation time is unavailable")
     try:
-        current = float(current_start)
-        recorded = tuple(float(start) for start in starts)
+        same = _start_times_agree(current_start, *starts)
     except (TypeError, ValueError) as exc:
         raise RuntimeError("gateway creation time is malformed") from exc
-    if current <= 0 or any(start <= 0 or abs(start - current) > 0.001 for start in recorded):
+    if not same:
         raise RuntimeError("gateway process identity changed")
     if not all(_record_matches_live_gateway_pid(record, pid) for record in records):
         raise RuntimeError("runtime metadata does not identify a live gateway")
+    current = float(current_start)
     if not _IS_WINDOWS:
         return pid, current
     # Windows persists a centisecond fingerprint; SCM checks need the exact psutil epoch.
