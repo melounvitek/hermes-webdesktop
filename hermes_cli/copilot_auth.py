@@ -346,6 +346,27 @@ def _write_jwt_store(path: Path, store: dict) -> None:
     os.replace(tmp, path)
 
 
+def _jwt_disk_path() -> Optional[Path]:
+    """Path to the on-disk exchanged-JWT cache (profile-aware), or None."""
+    try:
+        from hermes_constants import get_hermes_home
+        return Path(get_hermes_home()) / _JWT_DISK_FILENAME
+    except Exception:
+        return None
+
+
+def _with_jwt_store(verb: str, op):
+    """Run ``op(path, store_or_None)`` against the disk store; any failure is logged, never raised."""
+    path = _jwt_disk_path()
+    if not path:
+        return None
+    try:
+        return op(path, _read_jwt_store(path))
+    except Exception as exc:
+        logger.debug("Failed to %s Copilot JWT: %s", verb, exc)
+        return None
+
+
 def evict_cached_exchanged_token(raw_token: str) -> None:
     """Drop any cached exchanged JWT for ``raw_token`` (in-process + on-disk).
 
@@ -359,61 +380,40 @@ def evict_cached_exchanged_token(raw_token: str) -> None:
     # Eviction is an explicit "force a fresh exchange" signal, so the negative-cache entry
     # must go too — the next exchange_copilot_token() must be allowed to hit the network.
     _exchange_failure_cache.pop(fp, None)
-    path = _jwt_disk_path()
-    if not path:
-        return
-    try:
-        store = _read_jwt_store(path)
+
+    def _evict(path, store):
         if store is not None and fp in store:
             del store[fp]
             _write_jwt_store(path, store)
-    except Exception as exc:
-        logger.debug("Failed to evict cached Copilot JWT: %s", exc)
 
-
-def _jwt_disk_path() -> Optional[Path]:
-    """Path to the on-disk exchanged-JWT cache (profile-aware), or None."""
-    try:
-        from hermes_constants import get_hermes_home
-        return Path(get_hermes_home()) / _JWT_DISK_FILENAME
-    except Exception:
-        return None
+    _with_jwt_store("evict cached", _evict)
 
 
 def _load_jwt_from_disk(fp: str) -> Optional[tuple[str, float, Optional[str]]]:
     """Persisted exchanged JWT for ``fp`` → (api_token, expires_at, base_url), or None."""
-    path = _jwt_disk_path()
-    if not path:
-        return None
-    try:
-        entry = (_read_jwt_store(path) or {}).get(fp)
+    def _load(path, store):
+        entry = (store or {}).get(fp)
         if not isinstance(entry, dict):
             return None
         api_token = entry.get("api_token", "")
         expires_at = float(entry.get("expires_at", 0) or 0)
-        if api_token and expires_at:
-            return api_token, expires_at, entry.get("base_url")
-    except Exception as exc:
-        logger.debug("Failed to load persisted Copilot JWT: %s", exc)
-    return None
+        return (api_token, expires_at, entry.get("base_url")) if api_token and expires_at else None
+
+    return _with_jwt_store("load persisted", _load)
 
 
 def _save_jwt_to_disk(fp: str, api_token: str, expires_at: float, base_url: Optional[str]) -> None:
     """Persist an exchanged JWT (0o600), pruning expired entries."""
-    path = _jwt_disk_path()
-    if not path:
-        return
-    try:
+    def _save(path, store):
         now = time.time()
-        store = {
-            k: v
-            for k, v in (_read_jwt_store(path) or {}).items()
+        kept = {
+            k: v for k, v in (store or {}).items()
             if isinstance(v, dict) and float(v.get("expires_at", 0) or 0) > now
         }
-        store[fp] = {"api_token": api_token, "expires_at": expires_at, "base_url": base_url}
-        _write_jwt_store(path, store)
-    except Exception as exc:
-        logger.debug("Failed to persist Copilot JWT: %s", exc)
+        kept[fp] = {"api_token": api_token, "expires_at": expires_at, "base_url": base_url}
+        _write_jwt_store(path, kept)
+
+    _with_jwt_store("persist", _save)
 
 
 # Hard wall-clock cap for the token-exchange HTTP call. urllib's ``timeout`` only bounds
