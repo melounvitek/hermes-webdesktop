@@ -114,7 +114,7 @@ class GatewayTurnMixin:
             logger.info("Runtime provider supplied explicit model override: %s -> %s", model, runtime_model)
             model = runtime_model
 
-        cfg = getattr(self, "config", None)
+        cfg = getattr(self, "config", None)  # getattr: bare object.__new__ test runners
         if cfg and source is not None:
             ch = _get_channel_override(
                 cfg,
@@ -715,14 +715,17 @@ class GatewayTurnMixin:
             # Charge the idle budget from the LAST PROGRESS event, not from the start of this wait
             # slice — otherwise silence can approach 2x the configured timeout.
             _hyg_waited = time.monotonic() - attempt.wait_started
-            _idle_left = max(hs.timeout_seconds - fence.seconds_since_progress(), 0.005)
-            _slice = min(_idle_left, max(hs.total_ceiling_seconds - _hyg_waited, 0.005))
+            _slice = min(
+                max(hs.timeout_seconds - fence.seconds_since_progress(), 0.005),
+                max(hs.total_ceiling_seconds - _hyg_waited, 0.005),
+            )
             # Cap the slice at the remaining turn-hold budget so it is re-checked at least that
             # often — a continuously-streaming worker would otherwise keep the slice large and hold
             # the turn until the ceiling. Budget exhausted → immediate timeout → abandonment path.
             _turn_hold_remaining = hs.max_turn_hold_seconds - (time.monotonic() - attempt.wait_started)
             _slice = 0.005 if _turn_hold_remaining <= 0 else min(_slice, max(_turn_hold_remaining, 0.005))
             # Short poll so a /stop or /restart cancel is not stuck behind a full idle window.
+            _idle_left = max(hs.timeout_seconds - fence.seconds_since_progress(), 0.005)
             _slice = min(_slice, 0.25)
             try:
                 _compressed, _ = await asyncio.wait_for(asyncio.shield(attempt.future), timeout=_slice)
@@ -1982,6 +1985,18 @@ class GatewayTurnMixin:
             "Try again or use /reset to start a fresh session."
         )
 
+    def _hmwa_discard_stale_result(self, source, _quick_key, run_generation):
+        """A newer run generation superseded this turn: drop its deferred post-delivery callback."""
+        logger.info(
+            "Discarding stale agent result for %s — generation %d is no longer current",
+            _quick_key or "?", run_generation,
+        )
+        _stale_adapter = self._adapter_for_source(source)
+        if getattr(type(_stale_adapter), "pop_post_delivery_callback", None) is not None:
+            _stale_adapter.pop_post_delivery_callback(_quick_key, generation=run_generation)
+        elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
+            _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         from gateway.run import _load_gateway_config
@@ -2129,15 +2144,7 @@ class GatewayTurnMixin:
             await self._hmwa_stop_typing_for_turn(event, source)
 
             if not self._is_session_run_current(_quick_key, run_generation):
-                logger.info(
-                    "Discarding stale agent result for %s — generation %d is no longer current",
-                    _quick_key or "?", run_generation,
-                )
-                _stale_adapter = self._adapter_for_source(source)
-                if getattr(type(_stale_adapter), "pop_post_delivery_callback", None) is not None:
-                    _stale_adapter.pop_post_delivery_callback(_quick_key, generation=run_generation)
-                elif _stale_adapter and hasattr(_stale_adapter, "_post_delivery_callbacks"):
-                    _stale_adapter._post_delivery_callbacks.pop(_quick_key, None)
+                self._hmwa_discard_stale_result(source, _quick_key, run_generation)
                 return None
 
             response, _intentional_silence, agent_messages = await self._hmwa_shape_agent_response(
