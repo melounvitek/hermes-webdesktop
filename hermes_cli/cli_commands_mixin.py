@@ -34,9 +34,7 @@ from hermes_cli.browser_connect import (
     launch_chrome_debug, local_port_in_use, manual_chrome_debug_command)
 
 
-# ---------------------------------------------------------------------------------------
 # Output helpers. Slash-command text is user-visible: every literal below is load-bearing.
-# ---------------------------------------------------------------------------------------
 def _cp(*lines: str) -> None:
     """``_cprint`` each line (lazy import: cli.py imports this module)."""
     from cli import _cprint
@@ -76,6 +74,28 @@ def _accent(text: str) -> str:
 def _accent_line(text: str) -> str:
     """Two-space indented accent line (the standard slash-command headline shape)."""
     return f"  {_accent(text)}"
+
+
+def _probe(module: str, name: str, default, *args):
+    """``<module>.<name>(*args)`` or ``default`` when the import or the call fails (optional
+    subsystems: browser backends, async delegations, wake word, ...)."""
+    try:
+        import importlib
+        return getattr(importlib.import_module(module), name)(*args)
+    except Exception:
+        return default
+
+
+_FAILED = object()
+
+
+def _attempt(label: str, errors, fn, *args, **kwargs):
+    """``fn(*args, **kwargs)``, or ``_FAILED`` after printing ``  <label>: <exc>`` for ``errors``."""
+    try:
+        return fn(*args, **kwargs)
+    except errors as exc:
+        _cp(f"  {label}: {exc}")
+        return _FAILED
 
 
 def _say_block(*lines: str) -> None:
@@ -137,9 +157,7 @@ def _print_capped(lines_text: str, limit: int, tail: str, emit) -> None:
         emit(lines_text)
 
 
-# ---------------------------------------------------------------------------------------
 # Small data tables.
-# ---------------------------------------------------------------------------------------
 
 # /cron flag tables: flag -> opts key. Order-sensitive in _parse_cron_flags: bool flags never
 # consume a value; --repeat is int-validated separately.
@@ -274,8 +292,7 @@ def _parse_cron_flags(tokens):
             try:
                 opts["repeat"] = int(tokens[i + 1])
             except ValueError:
-                print("(._.) --repeat must be an integer")
-                return None
+                return print("(._.) --repeat must be an integer")
             i += 2
         elif token in _CRON_VALUE_FLAGS and has_value:
             opts[_CRON_VALUE_FLAGS[token]] = tokens[i + 1]
@@ -286,9 +303,7 @@ def _parse_cron_flags(tokens):
     return opts
 
 
-# ---------------------------------------------------------------------------------------
 # Session-switch plumbing shared by /resume and /branch.
-# ---------------------------------------------------------------------------------------
 def _end_current_session(cli, reason: str) -> None:
     """Flush un-persisted messages, then end the current session row with ``reason``.
     Best-effort on both steps (the switch proceeds even if the DB write fails)."""
@@ -367,9 +382,7 @@ def _refresh_tui_before_print(cli) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------------------
 # /browser sub-handlers.
-# ---------------------------------------------------------------------------------------
 def _print_lightpanda_engine_status() -> None:
     """``/browser status`` line(s) about ``browser.engine: lightpanda`` — silent unless set;
     says whether it is in use or which higher-precedence setting shadows it."""
@@ -541,14 +554,6 @@ def _browser_disconnect(cli) -> None:
             "Browser tools are back to default mode (headless local browser or cloud provider).]")
 
 
-def _browser_tool_attr(name: str, default):
-    """``tools.browser_tool.<name>()`` or ``default`` when the import/call fails."""
-    try:
-        import tools.browser_tool as bt
-        return getattr(bt, name)()
-    except Exception:
-        return default
-
 
 # /browser status headline per local browser.engine value.
 _LOCAL_ENGINE_LINES = {
@@ -562,12 +567,7 @@ _LOCAL_ENGINE_LINES = {
 def _browser_status() -> None:
     current = os.environ.get("BROWSER_CDP_URL", "").strip()
     print()
-    try:
-        from tools.browser_use_cli import is_browser_use_cli_mode
-        _bu_mode = is_browser_use_cli_mode()
-    except Exception:
-        _bu_mode = False
-    if _bu_mode:
+    if _probe("tools.browser_use_cli", "is_browser_use_cli_mode", False):
         _pr("🌐 Browser: Browser Use mode (browser_exec via the Browser Use CLI 3.0)",
             "   Local Chrome via CDP, or Browser Use cloud browsers")
         _print_lightpanda_engine_status()
@@ -586,12 +586,12 @@ def _browser_status() -> None:
         except Exception:
             print("   Status: ⚠ not reachable (browser may not be running)")
     else:
-        provider = _browser_tool_attr("_get_cloud_provider", None)
+        provider = _probe("tools.browser_tool", "_get_cloud_provider", None)
         if provider is not None:
             print(f"🌐 Browser: {provider.provider_name()} (cloud)")
             _print_lightpanda_engine_status()
         else:
-            engine = _browser_tool_attr("_get_browser_engine", "auto")
+            engine = _probe("tools.browser_tool", "_get_browser_engine", "auto")
             _pr(*_LOCAL_ENGINE_LINES.get(engine, _LOCAL_ENGINE_LINES["auto"]))
             if engine == "lightpanda":
                 _print_lightpanda_engine_status()
@@ -606,13 +606,10 @@ class CLICommandsMixin:
     def _checkpoint_manager(self, disabled_lines):
         """The agent's checkpoint manager, or None after printing why it is unavailable."""
         if not hasattr(self, 'agent') or not self.agent:
-            print("  No active agent session.")
-            return None
+            return print("  No active agent session.")
         mgr = self.agent._checkpoint_mgr
         if not mgr.enabled:
-            for line in disabled_lines:
-                print(line)
-            return None
+            return _pr(*disabled_lines)
         return mgr
 
     def _handle_rollback_command(self, command: str):
@@ -922,11 +919,7 @@ class CLICommandsMixin:
         if finished:
             _cp(f"  Recently finished: {len(finished)}")
         # Background (async) delegations — delegate_task(background=true)
-        try:
-            from tools.async_delegation import list_async_delegations
-            delegations = list_async_delegations()
-        except Exception:
-            delegations = []
+        delegations = _probe("tools.async_delegation", "list_async_delegations", [])
         if delegations:
             running_d = [d for d in delegations if d.get("status") in ("running", "stalling")]
             _cp(f"  Background delegations: {len(running_d)} running")
@@ -1073,19 +1066,19 @@ class CLICommandsMixin:
             class _TTYBuf(StringIO):
                 def isatty(self) -> bool:
                     return True
+
             buf = _TTYBuf()
             with redirect_stdout(buf):
                 tools_disable_enable_command(ns)
             for line in buf.getvalue().splitlines():
                 _cp(line)
+
         parts = _shlex_args(cmd)
         subcommand = parts[0] if parts else ""
         if subcommand not in {"list", "disable", "enable"}:
-            self.show_tools()
-            return
+            return self.show_tools()
         if subcommand == "list":
-            _run_capture(Namespace(tools_action="list", platform="cli"))
-            return
+            return _run_capture(Namespace(tools_action="list", platform="cli"))
         names = parts[1:]
         if not names:
             return _pr(f"(._.) Usage: /tools {subcommand} <name> [name ...]",
@@ -1113,6 +1106,12 @@ class CLICommandsMixin:
     _HANDOFF_RUNNING_TIMEOUT = 900.0  # full synthetic agent turn + delivery
     _HANDOFF_HEARTBEAT_EVERY = 30.0
 
+    @staticmethod
+    def _handoff_keep(*lines: str) -> bool:
+        """Print ``lines`` and keep the CLI session (the True verdict of /handoff)."""
+        _cp(*lines)
+        return True
+
     def _handle_handoff_command(self, cmd_original: str) -> bool:
         """Handle ``/handoff <platform>`` — transfer this CLI session to a gateway platform.
 
@@ -1120,10 +1119,9 @@ class CLICommandsMixin:
         Returns False only on ``completed`` (caller exits like /quit); True keeps the session."""
         platform_name = _command_arg(cmd_original).lower()
         if not platform_name:
-            _cp("  Usage: /handoff <platform>",
-                "  Hands the current session off to that platform's home channel.",
-                "  The CLI session ends here; resume it later with /resume.")
-            return True
+            return self._handoff_keep("  Usage: /handoff <platform>",
+                                      "  Hands the current session off to that platform's home channel.",
+                                      "  The CLI session ends here; resume it later with /resume.")
         home = self._handoff_validate_target(platform_name)
         if home is None:
             return True
@@ -1131,8 +1129,8 @@ class CLICommandsMixin:
         if session_title is None:
             return True
         if not self._session_db.request_handoff(self.session_id, platform_name):
-            _cp("  Session is already in flight for handoff. Wait for it to settle, then retry.")
-            return True
+            return self._handoff_keep(
+                "  Session is already in flight for handoff. Wait for it to settle, then retry.")
         _cp(f"  Queued handoff of '{session_title}' → {platform_name} (home: {home.name}).",
             "  Waiting for the gateway to pick it up...")
         return self._handoff_wait(platform_name, session_title)
@@ -1143,18 +1141,15 @@ class CLICommandsMixin:
         try:
             from gateway.config import load_gateway_config, Platform
         except Exception as exc:  # pragma: no cover — gateway pkg always shipped
-            _cp(f"  Could not load gateway config: {exc}")
-            return None
+            return _cp(f"  Could not load gateway config: {exc}")
         try:
             platform = Platform(platform_name)
         except (ValueError, KeyError):
-            _cp(f"  Unknown platform '{platform_name}'.")
-            return None
+            return _cp(f"  Unknown platform '{platform_name}'.")
         try:
             gw_config = load_gateway_config()
         except Exception as exc:
-            _cp(f"  Could not load gateway config: {exc}")
-            return None
+            return _cp(f"  Could not load gateway config: {exc}")
         pcfg = gw_config.platforms.get(platform)
         if not pcfg or not pcfg.enabled:
             # Relay aliasing: a relay-fronted gateway has only a RELAY block yet /handoff discord
@@ -1168,8 +1163,8 @@ class CLICommandsMixin:
             except Exception:
                 relay_fronts = False
             if not relay_fronts:
-                _cp(f"  Platform '{platform_name}' is not configured/enabled in the gateway.")
-                return None
+                return _cp(f"  Platform '{platform_name}' is not configured/enabled in the "
+                           "gateway.")
         home = gw_config.get_home_channel(platform)
         if not home or not home.chat_id:
             _cp(f"  No home channel configured for {platform_name}.",
@@ -1182,23 +1177,20 @@ class CLICommandsMixin:
         display title (None after printing why the handoff cannot start)."""
         # An in-flight agent run would race the gateway's switch_session and the synthetic turn.
         if getattr(self, "_agent_running", False):
-            _cp("  Agent is busy. Wait for the current turn to finish, then retry /handoff.")
-            return None
+            return _cp("  Agent is busy. Wait for the current turn to finish, then retry /handoff.")
         if not self._session_db:
             with suppress(Exception):
                 from hermes_state import SessionDB
                 self._session_db = SessionDB()
         if not self._session_db:
-            _cp(_db_unavailable_line())
-            return None
+            return _cp(_db_unavailable_line())
         # Ensure the session row exists (an empty session has flushed nothing yet): the gateway
         # needs a row to switch_session onto; set_session_title's INSERT OR IGNORE creates it.
         try:
             if not self._session_db.get_session(self.session_id):
                 self._session_db.set_session_title(self.session_id, f"handoff-{self.session_id[:8]}")
         except Exception as exc:
-            _cp(f"  Could not ensure session row in state.db: {exc}")
-            return None
+            return _cp(f"  Could not ensure session row in state.db: {exc}")
         session_title = ""
         with suppress(Exception):
             row = self._session_db.get_session(self.session_id)
@@ -1239,9 +1231,8 @@ class CLICommandsMixin:
                 return False
             if current == "failed":
                 err = (state_row or {}).get("error") or "unknown error"
-                _cp(f"  Handoff failed: {err}",
-                    "  Your CLI session is intact. Try /handoff again, or /resume on the platform manually.")
-                return True
+                return self._handoff_keep(f"  Handoff failed: {err}",
+                                          "  Your CLI session is intact. Try /handoff again, or /resume on the platform manually.")
             now = _time.time()
             if current == "pending":
                 if now >= pending_deadline:
@@ -1252,11 +1243,11 @@ class CLICommandsMixin:
                     next_heartbeat = now + self._HANDOFF_HEARTBEAT_EVERY
                 if running_deadline is not None and now >= running_deadline:
                     # Do NOT fail the row: the gateway owns it (split-brain bug otherwise).
-                    _cp("  The gateway is taking unusually long to finish the transfer.",
+                    return self._handoff_keep(
+                        "  The gateway is taking unusually long to finish the transfer.",
                         f"  Check {platform_name} — the session may still arrive there.",
                         "  This CLI is no longer waiting. Avoid continuing this session here;",
                         "  if nothing arrives, retry /handoff once the state settles.")
-                    return True
             _time.sleep(0.5)
 
         try:  # pending timed out: CAS-clear so the user can retry
@@ -1268,9 +1259,9 @@ class CLICommandsMixin:
                 self._session_db.fail_handoff(self.session_id, "timed out waiting for gateway")
         except Exception:
             pass
-        _cp("  Timed out waiting for the gateway. Is `hermes gateway` running?",
+        return self._handoff_keep(
+            "  Timed out waiting for the gateway. Is `hermes gateway` running?",
             "  Your CLI session is intact.")
-        return True
 
     # ---- /resume, /sessions, /branch ------------------------------------------------------
     def _handle_resume_command(self, cmd_original: str) -> None:
@@ -1568,7 +1559,7 @@ class CLICommandsMixin:
             try:
                 from hermes_cli.config import cfg_get, read_raw_config
                 self.system_prompt = prompt_text(
-                cfg_get(read_raw_config(), "agent", "system_prompt", default=""))
+                    cfg_get(read_raw_config(), "agent", "system_prompt", default=""))
             except Exception:
                 self.system_prompt = ""
             self.agent = None  # Force re-init
@@ -1657,6 +1648,7 @@ class CLICommandsMixin:
                 print("  ┊ composing spritesheet…")
             elif event == "save":
                 print("  ┊ saving…")
+
         try:
             result = orchestrate.hatch_pet(
                 base_image=drafts[0], slug=slug, display_name=display_name, concept=concept,
@@ -1961,7 +1953,7 @@ class CLICommandsMixin:
         turn_route = self._resolve_turn_agent_config(prompt)
         runtime = turn_route["runtime"]
 
-        def run_background():
+        def produce():
             set_sudo_password_callback(self._sudo_password_callback)
             set_approval_callback(self._approval_callback)
             with suppress(Exception):
@@ -1987,37 +1979,54 @@ class CLICommandsMixin:
                         self._spinner_text = text
                         if self._app:
                             self._app.invalidate()
+
                 bg_agent.thinking_callback = _bg_thinking
                 result = bg_agent.run_conversation(user_message=prompt, task_id=task_id)
                 response = result.get("final_response", "") if result else ""
                 if not response and result and result.get("error"):
                     response = f"Error: {result['error']}"
-                _print_side_result_panel(
-                    self,
-                    header_lines=[f"  ✅ Background task #{task_num} complete",
-                                  f"  Prompt: \"{preview}\""],
-                    body=response,
-                    title_suffix=f"(background #{task_num})",
-                    empty_note="  (No response generated)")
-                if self.bell_on_complete:
-                    sys.stdout.write("\a")
-                    sys.stdout.flush()
-            except Exception as e:
-                _refresh_tui_before_print(self)
-                _cp(f"  ❌ Background task #{task_num} failed: {e}")
+                return response
             finally:
                 with suppress(Exception):
                     set_sudo_password_callback(None)
                     set_approval_callback(None)
                     set_secret_capture_callback(None)
-                self._background_tasks.pop(task_id, None)
-                if not self._agent_running:  # clear spinner only if no foreground agent owns it
-                    self._spinner_text = ""
-                if self._app:
-                    self._invalidate(min_interval=0)
-        thread = threading.Thread(target=run_background, daemon=True, name=f"bg-task-{task_id}")
+
+        def done():
+            self._background_tasks.pop(task_id, None)
+            if not self._agent_running:  # clear spinner only if no foreground agent owns it
+                self._spinner_text = ""
+
+        thread = self._side_worker(
+            produce, name=f"bg-task-{task_id}", fail_label=f"Background task #{task_num}",
+            header_lines=[f"  ✅ Background task #{task_num} complete", f"  Prompt: \"{preview}\""],
+            title_suffix=f"(background #{task_num})", empty_note="  (No response generated)",
+            bell=True, on_done=done)
         self._background_tasks[task_id] = thread
         thread.start()
+
+    def _side_worker(self, produce, *, name, fail_label, header_lines, title_suffix, empty_note,
+                     bell=False, on_done=None) -> threading.Thread:
+        """Daemon thread for /bg and /btw: ``produce()`` returns the body to print in a side-result
+        panel; failures print ``fail_label`` failed; the TUI is always re-invalidated afterwards."""
+        def run():
+            try:
+                body = produce()
+                _print_side_result_panel(self, header_lines=header_lines, body=body,
+                                         title_suffix=title_suffix, empty_note=empty_note)
+                if bell and self.bell_on_complete:
+                    sys.stdout.write("\a")
+                    sys.stdout.flush()
+            except Exception as e:
+                _refresh_tui_before_print(self)
+                _cp(f"  ❌ {fail_label} failed: {e}")
+            finally:
+                if on_done is not None:
+                    on_done()
+                if self._app:
+                    self._invalidate(min_interval=0)
+
+        return threading.Thread(target=run, daemon=True, name=name)
 
     def _handle_btw_command(self, cmd: str):
         """Handle /btw <question> — answer a side question about this conversation from a
@@ -2044,22 +2053,14 @@ class CLICommandsMixin:
         _cp(f"  💬 Side question: \"{preview}\"",
             "  Answering from a snapshot of this conversation — the current work continues.\n")
 
-        def run_side_question():
-            try:
-                from agent.side_question import answer_side_question
-                answer = answer_side_question(
-                    question, history_snapshot, parent_agent=parent_agent, main_runtime=main_runtime,
-                )
-                _print_side_result_panel(
-                    self, header_lines=[f"  💬 /btw: \"{preview}\""], body=answer,
-                    title_suffix="(btw)", empty_note="  (No answer generated)")
-            except Exception as e:
-                _refresh_tui_before_print(self)
-                _cp(f"  ❌ /btw failed: {e}")
-            finally:
-                if self._app:
-                    self._invalidate(min_interval=0)
-        threading.Thread(target=run_side_question, daemon=True, name="btw-side-question").start()
+        def produce():
+            from agent.side_question import answer_side_question
+            return answer_side_question(
+                question, history_snapshot, parent_agent=parent_agent, main_runtime=main_runtime)
+
+        self._side_worker(produce, name="btw-side-question", fail_label="/btw",
+                          header_lines=[f"  💬 /btw: \"{preview}\""], title_suffix="(btw)",
+                          empty_note="  (No answer generated)").start()
 
     # ---- /bundles, /browser ---------------------------------------------------------------
     def _handle_bundles_command(self, cmd: str) -> None:
@@ -2164,10 +2165,9 @@ class CLICommandsMixin:
             return _cp(f"  Interval too small — minimum is {MIN_INTERVAL_SECONDS}s.")
         if not prompt.strip():
             return _cp("  Usage: /heartbeat every <interval> <prompt> — the prompt is required.")
-        try:
-            state = mgr.set(prompt, interval)
-        except ValueError as exc:
-            return _cp(f"  Invalid heartbeat: {exc}")
+        state = _attempt("Invalid heartbeat", ValueError, mgr.set, prompt, interval)
+        if state is _FAILED:
+            return
         self._start_heartbeat_watchdog()
         _cp(f"  ♥ Heartbeat set (every {format_interval(state.interval_seconds)}): {state.prompt}",
             _dim_line("Fires as a normal turn whenever the session is idle and the interval has "
@@ -2288,10 +2288,8 @@ class CLICommandsMixin:
         except ValueError:
             return _cp("  /goal wait: <pid> must be an integer process id.")
         reason = wtokens[1].strip() if len(wtokens) > 1 else ""
-        try:
-            mgr.wait_on(pid, reason=reason)
-        except (RuntimeError, ValueError) as exc:
-            return _cp(f"  /goal wait: {exc}")
+        if _attempt("/goal wait", (RuntimeError, ValueError), mgr.wait_on, pid, reason=reason) is _FAILED:
+            return
         rtxt = f" ({reason})" if reason else ""
         _cp(f"  ⏳ Goal parked on pid {pid}{rtxt}. Loop pauses until it exits.")
 
@@ -2304,25 +2302,21 @@ class CLICommandsMixin:
             for line in mgr.render_gates().splitlines():
                 _cp(f"  {line}")
         elif gate_lower.startswith("add "):
-            try:
-                gate = mgr.add_gate(gate_arg[len("add"):].strip())
-            except (RuntimeError, ValueError) as exc:
-                return _cp(f"  /goal gate add: {exc}")
-            _cp(f"  ⚿ Gate added: $ {gate.command} "
-                f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
-                f"It must pass before the goal can complete.")
+            gate = _attempt("/goal gate add", (RuntimeError, ValueError),
+                            mgr.add_gate, gate_arg[len("add"):].strip())
+            if gate is not _FAILED:
+                _cp(f"  ⚿ Gate added: $ {gate.command} "
+                    f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
+                    f"It must pass before the goal can complete.")
         elif gate_lower.startswith("remove ") or gate_lower.startswith("rm "):
-            try:
-                removed = mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip()))
-            except (RuntimeError, ValueError, IndexError) as exc:
-                return _cp(f"  /goal gate remove: {exc}")
-            _cp(f"  ✓ Gate removed: $ {removed}")
+            removed = _attempt("/goal gate remove", (RuntimeError, ValueError, IndexError),
+                               lambda: mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip())))
+            if removed is not _FAILED:
+                _cp(f"  ✓ Gate removed: $ {removed}")
         elif gate_lower == "clear":
-            try:
-                prev = mgr.clear_gates()
-            except RuntimeError as exc:
-                return _cp(f"  /goal gate clear: {exc}")
-            _cp(f"  ✓ Cleared {_plural(prev, 'gate')}.")
+            prev = _attempt("/goal gate clear", RuntimeError, mgr.clear_gates)
+            if prev is not _FAILED:
+                _cp(f"  ✓ Cleared {_plural(prev, 'gate')}.")
         else:
             _cp("  Usage: /goal gate [list | add <command> | remove <N> | clear]")
 
@@ -2331,10 +2325,10 @@ class CLICommandsMixin:
         lines become a completion contract, the remaining prose the headline. Kicks the loop off."""
         from hermes_cli.goals import parse_contract
         headline, contract = parse_contract(arg)
-        try:
-            state = mgr.set(headline or arg, contract=contract if not contract.is_empty() else None)
-        except ValueError as exc:
-            return _cp(f"  Invalid goal: {exc}")
+        state = _attempt("Invalid goal", ValueError, mgr.set, headline or arg,
+                         contract=contract if not contract.is_empty() else None)
+        if state is _FAILED:
+            return
         self._print_goal_set(state, "Completion contract:")
         against = " against the contract above" if state.has_contract() else ""
         _cp(_dim_line(f"After each turn, a judge model checks if the goal is done{against}. "
@@ -2363,10 +2357,9 @@ class CLICommandsMixin:
             import logging as _logging
             _logging.getLogger(__name__).debug("goal draft failed: %s", exc)
             contract = None
-        try:
-            state = mgr.set(objective, contract=contract)
-        except ValueError as exc:
-            return _cp(f"  Invalid goal: {exc}")
+        state = _attempt("Invalid goal", ValueError, mgr.set, objective, contract=contract)
+        if state is _FAILED:
+            return
         self._print_goal_set(state, "Drafted completion contract:")
         if state.has_contract():
             _cp(_dim_line("Tighten any field by re-setting the goal with inline lines "
@@ -2417,24 +2410,19 @@ class CLICommandsMixin:
                 idx = int(rest.split()[0])
             except ValueError:
                 return _cp("  /subgoal remove: <n> must be an integer (1-based index).")
-            try:
-                removed = mgr.remove_subgoal(idx)
-            except (IndexError, RuntimeError) as exc:
-                return _cp(f"  /subgoal remove: {exc}")
-            _cp(f"  ✓ Removed subgoal {idx}: {removed}")
+            removed = _attempt("/subgoal remove", (IndexError, RuntimeError), mgr.remove_subgoal, idx)
+            if removed is not _FAILED:
+                _cp(f"  ✓ Removed subgoal {idx}: {removed}")
         elif verb == "clear":
-            try:
-                prev = mgr.clear_subgoals()
-            except RuntimeError as exc:
-                return _cp(f"  /subgoal clear: {exc}")
-            _cp(f"  ✓ Cleared {_plural(prev, 'subgoal')}." if prev else _dim_line('No subgoals to clear.'))
+            prev = _attempt("/subgoal clear", RuntimeError, mgr.clear_subgoals)
+            if prev is not _FAILED:
+                _cp(f"  ✓ Cleared {_plural(prev, 'subgoal')}." if prev
+                    else _dim_line('No subgoals to clear.'))
         else:  # append the whole arg as a new subgoal
-            try:
-                text = mgr.add_subgoal(arg)
-            except (ValueError, RuntimeError) as exc:
-                return _cp(f"  /subgoal: {exc}")
-            idx = len(mgr.state.subgoals) if mgr.state else 0
-            _cp(f"  ✓ Added subgoal {idx}: {text}")
+            text = _attempt("/subgoal", (ValueError, RuntimeError), mgr.add_subgoal, arg)
+            if text is not _FAILED:
+                idx = len(mgr.state.subgoals) if mgr.state else 0
+                _cp(f"  ✓ Added subgoal {idx}: {text}")
 
     # ---- /skin, /prompt -------------------------------------------------------------------
     def _handle_skin_command(self, cmd: str):
@@ -2607,11 +2595,10 @@ class CLICommandsMixin:
         from hermes_cli.colors import Colors as _Colors
         new_state = _toggle_target(arg, current)
         if new_state == "status":
-            _cp(f"  {_Colors.BOLD}{label}:{_Colors.RESET} {'ON' if current else 'OFF'}{status_line}")
-            return None
+            state = "ON" if current else "OFF"
+            return _cp(f"  {_Colors.BOLD}{label}:{_Colors.RESET} {state}{status_line}")
         if new_state is None:
-            _cp(f"  Usage: {usage}")
-            return None
+            return _cp(f"  Usage: {usage}")
         if _save(config_key, new_state):
             state = (f"{_Colors.GREEN}ON{_Colors.RESET}" if new_state
                      else f"{_Colors.DIM}OFF{_Colors.RESET}")
