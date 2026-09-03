@@ -442,8 +442,11 @@ class GatewayBusySessionMixin:
                 "because context compression is in flight (#56391)", session_key,
             )
             effective_mode = "queue"
-        steered = False
-        redirected = False
+        steered = redirected = False
+        agent_live = running_agent is not None and running_agent is not _AGENT_PENDING_SENTINEL
+        plain_text = (
+            event.message_type == MessageType.TEXT and not event.media_urls and not event.media_types
+        )
         if effective_mode == "steer":
             steer_text = await self._prepare_busy_steer_text(event)
             # Steerable: plain text, OR every attachment is voice media folded into steer_text.
@@ -451,47 +454,31 @@ class GatewayBusySessionMixin:
             _steer_all_voice = bool(_steer_media_urls) and (
                 len(self._pending_event_audio_paths(event)) == len(_steer_media_urls)
             )
-            can_steer = (
-                steer_text
-                and (
-                    (
-                        event.message_type == MessageType.TEXT
-                        and not event.media_urls
-                        and not event.media_types
-                    )
-                    or _steer_all_voice
-                )
-                and running_agent is not None
-                and running_agent is not _AGENT_PENDING_SENTINEL
-                and hasattr(running_agent, "steer")
-            )
-            if can_steer:
-                try:
-                    steered = bool(running_agent.steer(steer_text))
-                except Exception as exc:
-                    logger.warning("Gateway steer failed for session %s: %s", session_key, exc)
-                    steered = False
+            if steer_text and (plain_text or _steer_all_voice) and agent_live and hasattr(running_agent, "steer"):
+                steered = self._try_agent_verb(running_agent, "steer", steer_text, session_key)
             if not steered:
                 effective_mode = "queue"
         elif (
-            effective_mode == "interrupt"
-            and event.message_type == MessageType.TEXT
-            and not event.media_urls
-            and not event.media_types
-            and running_agent is not None
-            and running_agent is not _AGENT_PENDING_SENTINEL
+            effective_mode == "interrupt" and plain_text and agent_live
             and getattr(running_agent, "_supports_active_turn_redirect", False) is True
             and hasattr(running_agent, "redirect")
         ):
-            try:
-                redirected = bool(running_agent.redirect((event.text or "").strip()))
-            except Exception as exc:
-                logger.warning("Gateway redirect failed for session %s: %s", session_key, exc)
-                redirected = False
+            redirected = self._try_agent_verb(
+                running_agent, "redirect", (event.text or "").strip(), session_key
+            )
         return self._BusySteerOutcome(
             effective_mode=effective_mode, demoted_for_subagents=demoted_for_subagents,
             demoted_for_compression=demoted_for_compression, steered=steered, redirected=redirected,
         )
+
+    @staticmethod
+    def _try_agent_verb(running_agent, verb: str, text: str, session_key: str) -> bool:
+        """Call ``running_agent.<verb>(text)`` (steer/redirect); False + warning on failure."""
+        try:
+            return bool(getattr(running_agent, verb)(text))
+        except Exception as exc:
+            logger.warning("Gateway %s failed for session %s: %s", verb, session_key, exc)
+            return False
 
     async def _interrupt_running_agent_for_busy_event(self, event: MessageEvent, adapter, running_agent) -> None:
         """Interrupt mode: abort in-flight tool calls; the agent loop exits at its next check point."""
