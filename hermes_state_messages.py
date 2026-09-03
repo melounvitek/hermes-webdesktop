@@ -44,6 +44,7 @@ _SET_COUNTERS_SQL = "UPDATE sessions SET message_count = ?, tool_call_count = ?"
 _RESET_COUNTERS_SQL = "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?"
 _SET_DISPLAY_META_SQL = "UPDATE messages SET display_metadata = ? WHERE id = ?"
 _ARCHIVE_ACTIVE_SQL = "UPDATE messages SET active = 0, compacted = 1 WHERE session_id = ? AND active = 1"
+_INVALID = object()  # _json_or sentinel where the fallback must be distinguishable from JSON null
 
 
 def _json_or(raw: Any, fallback: Any, warning: str) -> Any:
@@ -116,8 +117,7 @@ class SessionMessagesMixin:
         row = conn.execute("SELECT source, session_key FROM sessions WHERE id = ?", (session_id,)).fetchone()
         if row is None:
             return
-        source = str(row["source"] or "").strip()
-        session_key = str(row["session_key"] or "").strip()
+        source, session_key = (str(row[k] or "").strip() for k in ("source", "session_key"))
         if source and session_key:
             conn.execute(_BUMP_GENERATION_SQL, (source, session_key))
 
@@ -153,10 +153,8 @@ class SessionMessagesMixin:
         if not display_metadata:
             return None
         if isinstance(display_metadata, str):
-            try:
-                display_metadata = json.loads(display_metadata)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Ignoring non-JSON display metadata on write")
+            display_metadata = _json_or(display_metadata, _INVALID, "Ignoring non-JSON display metadata on write")
+            if display_metadata is _INVALID:
                 return None
             if not isinstance(display_metadata, dict):
                 logger.warning("Ignoring non-object display metadata on write")
@@ -447,10 +445,6 @@ class SessionMessagesMixin:
             (session_id, role, int(offset)))
         return row[0] if row else None
 
-    def latest_user_message_row_id(self, session_id: str) -> Optional[int]:
-        """Row id of the most recent active user message, or ``None``."""
-        return self.latest_message_row_id(session_id, role="user")
-
     def get_message_role(self, session_id: str, row_id: int) -> Optional[str]:
         """Role of the active message at *row_id* in *session_id*, or ``None``."""
         if not session_id:
@@ -470,7 +464,7 @@ class SessionMessagesMixin:
             message_timestamp = _coerce_timestamp(msg.get("timestamp"), now_ts)
             cur = conn.execute(_INSERT_MESSAGE_SQL, self._message_row_params(
                 session_id, role, msg, tool_calls, message_timestamp, keep_reasoning=role == "assistant"))
-            if isinstance(msg, dict) and cur.lastrowid is not None:
+            if cur.lastrowid is not None:
                 msg["_row_id"] = cur.lastrowid
             inserted += 1
             tool_calls_total += _tool_calls_count(tool_calls)
@@ -567,23 +561,18 @@ class SessionMessagesMixin:
                 # compressor's caller turns the error into a keep-the-original no-op).
                 patched_model_config = self._merge_model_config_json(
                     conn, session_id, model_config_patch, on_missing="raise")
-            tail_ids: list[int] = []
-            tail_tool_calls = 0
-            if watermark is not None:
-                tail_ids, tail_tool_calls = self._tail_rows_after_watermark(
-                    conn, "SELECT id, tool_calls FROM messages "
-                    "WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
-                    (session_id, int(watermark)))
+            tail_ids, tail_tool_calls = ([], 0) if watermark is None else self._tail_rows_after_watermark(
+                conn, "SELECT id, tool_calls FROM messages WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id",
+                (session_id, int(watermark)))
             # Rewind targets sit AT/BELOW the watermark (the compressor only saw rows up
             # to it); without the bound a concurrent append would steal a LIMIT slot.
             rewind_ids: list[int] = []
             if tail_count > 0:
                 bound = watermark is not None
-                tail_rows = conn.execute(
+                rewind_ids = [int(row["id"]) for row in conn.execute(
                     f"SELECT id FROM messages WHERE session_id = ? AND active = 1{' AND id <= ?' if bound else ''} "
                     "ORDER BY id DESC LIMIT ?",
-                    (session_id, *((int(watermark),) if bound else ()), int(tail_count))).fetchall()
-                rewind_ids = [int(row["id"]) for row in tail_rows]
+                    (session_id, *((int(watermark),) if bound else ()), int(tail_count))).fetchall()]
             rewind_ids += tail_ids
             if rewind_ids:
                 placeholders = _placeholders(rewind_ids)
@@ -654,8 +643,7 @@ class SessionMessagesMixin:
         msg = dict(row)
         if summary_flag and msg.pop("_compressed_summary", 0):
             msg["_compressed_summary"] = True
-        if "content" in msg:
-            msg["content"] = self._decode_content(msg["content"])
+        msg["content"] = self._decode_content(msg["content"])
         if msg.get("tool_calls"):
             msg["tool_calls"] = _json_or(
                 msg["tool_calls"], [], f"Failed to deserialize tool_calls in {warn_context}, falling back to []")
@@ -733,8 +721,8 @@ class SessionMessagesMixin:
             after_rows = conn.execute(
                 "SELECT * FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC LIMIT ?",
                 (session_id, around_message_id, window)).fetchall()
-        rows = list(reversed(before_rows)) + list(after_rows)
-        window_msgs = [self._row_to_message_dict(r, warn_context="get_messages_around", summary_flag=False) for r in rows]
+        window_msgs = [self._row_to_message_dict(r, warn_context="get_messages_around", summary_flag=False)
+                       for r in (*reversed(before_rows), *after_rows)]
         # before_rows includes the anchor itself.
         return {"window": window_msgs, "messages_before": max(0, len(before_rows) - 1), "messages_after": len(after_rows)}
 
@@ -793,11 +781,9 @@ class SessionMessagesMixin:
         compaction summarized away. ``repair_alternation`` repairs the loaded list for LIVE
         REPLAY callers (a durable ``user;user`` pair would otherwise re-trigger the
         per-request repair forever); the stored transcript is never mutated."""
-        session_ids = [session_id]
-        if include_ancestors and not self._is_explicit_branch_session(session_id):
-            session_ids = self._session_lineage_root_to_tip(session_id)
         rows = self._fetch_conversation_rows(
-            session_ids, self._active_clause(include_inactive, include_compacted), with_session_id=False)
+            self._resume_lineage_ids(session_id) if include_ancestors else [session_id],
+            self._active_clause(include_inactive, include_compacted), with_session_id=False)
         if include_compacted:
             rows = self._dedupe_display_generations(rows)
         return self._rows_to_conversation(
@@ -809,13 +795,12 @@ class SessionMessagesMixin:
         Rotation column-clones the concurrent tail into the child, so copies need not be
         adjacent: the exact ``(timestamp, canonical content)`` clone index is checked first,
         then the adjacent heuristic. A rotated child carrier wins over the ancestor copy."""
-        canonical_content, _is_composite = self._canonical_replayed_user_content(msg)
+        canonical_content = self._canonical_replayed_user_content(msg)[0]
         exact_clone_key = self._exact_replayed_user_clone_key(msg.get("timestamp"), canonical_content)
         previous_exact = exact_user_clones.get(exact_clone_key) if exact_clone_key is not None else None
         duplicate = None
         if previous_exact is not None:
-            previous_index = next(
-                (index for index, candidate in enumerate(messages) if candidate is previous_exact), None)
+            previous_index = next((i for i, candidate in enumerate(messages) if candidate is previous_exact), None)
             if previous_index is not None:
                 duplicate = (previous_index, True)
         if duplicate is None:
@@ -1007,16 +992,16 @@ class SessionMessagesMixin:
         the current ask in the parent and again inside a composite child carrier: carriers
         compare by canonical live payload, ordinary users by exact string. The child carrier
         wins (it owns the durable row id and the retained scaffold)."""
-        from hermes_state import SessionDB
         if msg.get("role") != "user":
             return None
-        content, prefer_current = SessionDB._canonical_replayed_user_content(msg)
+        canonical = SessionMessagesMixin._canonical_replayed_user_content
+        content, prefer_current = canonical(msg)
         if content in (None, "", []):
             return None
         for index in range(len(messages) - 1, -1, -1):
             prev = messages[index]
             if prev.get("role") == "user":
-                prev_content, prev_is_composite = SessionDB._canonical_replayed_user_content(prev)
+                prev_content, prev_is_composite = canonical(prev)
                 if prev_content == content and (prefer_current or prev_is_composite or isinstance(content, str)):
                     return index, prefer_current
             elif prev.get("role") == "assistant" and (prev.get("content") or prev.get("tool_calls")):
@@ -1128,11 +1113,12 @@ class SessionMessagesMixin:
         continuation (same binding as ``_NON_CONTINUATION_CHILD_FILTER_SQL``)."""
         if session.get("source") == "tool":
             return True
-        raw = session.get("model_config")
-        try:
-            cfg = json.loads(raw) if isinstance(raw, str) else raw
-        except (TypeError, json.JSONDecodeError):
-            return False
+        cfg = session.get("model_config")
+        if isinstance(cfg, str):
+            try:
+                cfg = json.loads(cfg)
+            except json.JSONDecodeError:
+                return False
         if not isinstance(cfg, dict):
             return False
         markers = (cfg.get("_branched_from"), cfg.get("_delegate_from"))
