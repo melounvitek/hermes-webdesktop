@@ -377,10 +377,10 @@ def _maybe_grow_local_window(agent: Any, compressor: Any,
     """Grow a managed local model's context window before compressing; returns the new
     window when the ladder granted one, else None."""
     provider = (getattr(agent, "provider", "") or "").strip().lower()
-    if provider not in ("llamacpp", "llama.cpp", "llama-cpp", "custom"):
-        return None
     base_url = getattr(agent, "base_url", "") or ""
-    if "127.0.0.1" not in base_url and "localhost" not in base_url:
+    if provider not in ("llamacpp", "llama.cpp", "llama-cpp", "custom") or not (
+        "127.0.0.1" in base_url or "localhost" in base_url
+    ):
         return None
     try:
         from hermes_cli.local_runtime.growth import maybe_grow_window
@@ -553,16 +553,10 @@ def _billing_failure_result(
             capability="model access", provider=provider, base_url=str(base_url), model=model,
             unverified=unverified,
         )
-    final = _billing_terminal_label(summary, unverified)
-    if guidance:
-        final += f"\n\n{guidance}"
+    final = _billing_terminal_label(summary, unverified) + (f"\n\n{guidance}" if guidance else "")
     return {
-        "final_response": final,
-        "messages": messages,
-        "api_calls": api_call_count,
-        "completed": False,
-        "failed": True,
-        "error": summary,
+        "final_response": final, "messages": messages, "api_calls": api_call_count,
+        "completed": False, "failed": True, "error": summary,
         "failure_reason": classified.reason.value,
         # Classifier's own retry verdict so the UI shows Retry only when a re-run can differ.
         "failure_retryable": bool(classified.retryable),
@@ -875,13 +869,11 @@ def _canonicalize_tool_call_arguments(arg_str: str) -> str:
     _CANON_ARGS_CACHE[arg_str] = canonical
     _canon_args_cache_bytes += len(arg_str) + len(canonical)
     while len(_CANON_ARGS_CACHE) > _CANON_ARGS_CACHE_MAX or (
-        _canon_args_cache_bytes > _CANON_ARGS_CACHE_MAX_BYTES
-        and len(_CANON_ARGS_CACHE) > 1
+        _canon_args_cache_bytes > _CANON_ARGS_CACHE_MAX_BYTES and len(_CANON_ARGS_CACHE) > 1
     ):
         try:
             evicted_key = next(iter(_CANON_ARGS_CACHE))
-            evicted_val = _CANON_ARGS_CACHE.pop(evicted_key)
-            _canon_args_cache_bytes -= len(evicted_key) + len(evicted_val)
+            _canon_args_cache_bytes -= len(evicted_key) + len(_CANON_ARGS_CACHE.pop(evicted_key))
         except (StopIteration, KeyError, RuntimeError):
             break
     return canonical
@@ -945,12 +937,8 @@ def _content_policy_blocked_result(
     """Terminal turn result for a content-policy block (deterministic for the unchanged
     prompt, so no retry); shared by the HTTP-200 and exception paths."""
     return {
-        "final_response": final_response,
-        "messages": messages,
-        "api_calls": api_call_count,
-        "completed": False,
-        "failed": True,
-        "error": f"content_policy_blocked: {error_detail}",
+        "final_response": final_response, "messages": messages, "api_calls": api_call_count,
+        "completed": False, "failed": True, "error": f"content_policy_blocked: {error_detail}",
     }
 
 
@@ -960,13 +948,8 @@ def _partial_turn_result(
     """Incomplete-turn result whose ``error`` mirrors ``final_response``; ``flags`` add the
     recovery-contract keys (``failed``, ``compression_deferred``, ...)."""
     return {
-        "final_response": final_response,
-        "messages": messages,
-        "completed": False,
-        "api_calls": api_call_count,
-        "error": final_response,
-        "partial": True,
-        **flags,
+        "final_response": final_response, "messages": messages, "completed": False,
+        "api_calls": api_call_count, "error": final_response, "partial": True, **flags,
     }
 
 
@@ -1038,20 +1021,18 @@ def _rewrite_system_content_blocks(system_message: dict, effective: str) -> bool
     over the ``[static prefix, volatile tail]`` list would drop both cache_control
     breakpoints). Returns False when the shape cannot be safely patched."""
     content = system_message.get("content")
-    if not isinstance(content, list) or not content:
-        return False
-    if not all(isinstance(part, dict) and part.get("type") == "text" for part in content):
+    if not isinstance(content, list) or not content or not all(
+        isinstance(part, dict) and part.get("type") == "text" for part in content
+    ):
         return False
     if len(content) == 1:
         content[0]["text"] = effective
         return True
     if len(content) == 2:
         head = content[0].get("text") or ""
-        if head and effective.startswith(head):
-            tail = effective[len(head):]
-            if tail:
-                content[1]["text"] = tail
-                return True
+        if head and effective.startswith(head) and effective[len(head):]:
+            content[1]["text"] = effective[len(head):]
+            return True
     return False
 
 
@@ -1062,9 +1043,7 @@ def _sync_failover_system_message(agent, api_messages, active_system_prompt):
     if not isinstance(sp, str) or not sp:
         return active_system_prompt
     if api_messages and api_messages[0].get("role") == "system":
-        effective = sp
-        if agent.ephemeral_system_prompt:
-            effective = (effective + "\n\n" + agent.ephemeral_system_prompt).strip()
+        effective = (sp + "\n\n" + agent.ephemeral_system_prompt).strip() if agent.ephemeral_system_prompt else sp
         if not _rewrite_system_content_blocks(api_messages[0], effective):
             api_messages[0]["content"] = effective
     return sp
@@ -1235,13 +1214,9 @@ def _notify_context_engine_turn_complete(
     if not _engine_overrides_hook(engine, "on_turn_complete"):
         return
     try:
-        engine.on_turn_complete(
-            # Structural clones: dict(m) would let a hook write into nested containers
-            # of the persisted transcript (#80498).
-            [_clone_message_for_send(m) for m in messages],
-            usage=usage,
-            **meta,
-        )
+        # Structural clones: dict(m) would let a hook write into nested containers of the
+        # persisted transcript (#80498).
+        engine.on_turn_complete([_clone_message_for_send(m) for m in messages], usage=usage, **meta)
     except Exception:
         logger.warning(
             "Context engine on_turn_complete hook failed (session=%s)",
@@ -1360,6 +1335,12 @@ class _LoopState:
     assistant_message: Any = None
 
 
+# _LoopState fields seeded from TurnContext (same name minus the leading underscore).
+_CTX_FIELDS = frozenset({
+    "user_message", "original_user_message", "conversation_history", "effective_task_id", "turn_id",
+    "_should_review_memory", "_plugin_user_context", "_ext_prefetch_cache", "messages",
+    "active_system_prompt", "current_turn_user_idx", "_preflight_compression_blocked",
+})
 # Keyword names each phase helper takes (minus ``agent``), cached per function object.
 _PHASE_PARAMS: Dict[Any, tuple] = {}
 # Verdict fields the loop latches (only ever sets True) instead of copying back:
@@ -1447,8 +1428,7 @@ def run_conversation(
 
     # The gateway caches agents across turns; compression state is per-turn, or a stale
     # in-place boundary would make a later uncompressed result look compacted.
-    agent._last_compaction_in_place = False
-    agent._last_compression_attempt_recorded = False
+    agent._last_compaction_in_place = agent._last_compression_attempt_recorded = False
     agent._last_compression_attempt_in_place = None
     begin_fast_mode_turn(agent, conversation_history)
 
@@ -1497,21 +1477,9 @@ def run_conversation(
     agent._last_turn_usage = None
 
     s = _LoopState(
-        user_message=_ctx.user_message,
-        system_message=system_message,
-        moa_config=moa_config,
-        original_user_message=_ctx.original_user_message,
-        conversation_history=_ctx.conversation_history,
-        effective_task_id=_ctx.effective_task_id,
-        turn_id=_ctx.turn_id,
-        _should_review_memory=_ctx.should_review_memory,
-        _plugin_user_context=_ctx.plugin_user_context,
-        _ext_prefetch_cache=_ctx.ext_prefetch_cache,
-        messages=_ctx.messages,
-        active_system_prompt=_ctx.active_system_prompt,
-        current_turn_user_idx=_ctx.current_turn_user_idx,
-        _preflight_compression_blocked=_ctx.preflight_compression_blocked,
+        system_message=system_message, moa_config=moa_config,
         max_compression_attempts=getattr(agent, "max_compression_attempts", 3),
+        **{f.name: getattr(_ctx, f.name.lstrip("_")) for f in fields(_LoopState) if f.name in _CTX_FIELDS},
     )
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex
     # app-server subprocess (see agent/transports/codex_app_server_session.py).
@@ -1536,15 +1504,9 @@ def run_conversation(
             continue
         _run_phase(announce_api_call, agent, s)
 
-        s.api_start_time = time.time()
-        s.retry_count = 0
-        s.max_retries = agent._api_max_retries
-        s._retry = TurnRetryState()
-        s.finish_reason = "stop"
-        s.response = None
-        s.api_kwargs = None
-        s.api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
-        agent._current_api_request_id = s.api_request_id
+        s.api_start_time, s.retry_count, s.max_retries = time.time(), 0, agent._api_max_retries
+        s._retry, s.finish_reason, s.response, s.api_kwargs = TurnRetryState(), "stop", None, None
+        s.api_request_id = agent._current_api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
 
         early_result = _run_api_retry_loop(agent, s)
         if early_result is not None:
@@ -1583,9 +1545,7 @@ def run_conversation(
     if s._compression_timeout_exhausted:
         # Reuse the gateway's context-recovery contract: transcript stays intact while
         # future input can move to a clean session (#98722).
-        result["error"] = _COMPRESSION_TIMEOUT_FINAL_RESPONSE
-        result["partial"] = True
-        result["compression_exhausted"] = True
+        result.update(error=_COMPRESSION_TIMEOUT_FINAL_RESPONSE, partial=True, compression_exhausted=True)
     return result
 
 
