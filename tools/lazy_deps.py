@@ -250,10 +250,9 @@ def _ensure_target_ready(target: Path) -> Optional[str]:
     stamp = target / _TARGET_STAMP_NAME
     try:
         if target.exists():
-            try:
+            have = ""
+            with contextlib.suppress(OSError):
                 have = stamp.read_text(encoding="utf-8").strip()
-            except OSError:
-                have = ""
             if have and have != want:
                 logger.info("Lazy install target %s was built for ABI %r but running ABI is %r; wiping stale packages.", target, have, want)
                 for child in target.iterdir():
@@ -759,9 +758,8 @@ def ensure_and_bind(feature: str, importer: Callable[[], dict[str, Any]], target
         logger.warning("Failed to ensure feature %r: %s", feature, exc)
         return False
     try:
-        bindings = importer()
+        target_globals.update(importer())
     except ImportError as exc:
         logger.warning("Failed to import feature %r after install: %s", feature, exc)
         return False
-    target_globals.update(bindings)
     return True
