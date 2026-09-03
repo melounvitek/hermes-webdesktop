@@ -16,6 +16,7 @@ from agent import relay_runtime
 from hermes_cli import __version__
 
 from .shared_metrics import SharedMetricsStore
+from . import shared_metrics_contract as contract
 from .shared_metrics_contract import (
     CLIENT_ACTIVE_MARK,
     MODEL_CALL_PROFILE_MODEL,
@@ -28,15 +29,6 @@ from .shared_metrics_contract import (
     TASK_SCOPE,
     TOOL_APPROVAL_MARK,
     TOOL_CALL_SCOPE,
-    model_call_fields,
-    skill_lifecycle_fields,
-    skill_load_fields,
-    task_start_fields,
-    task_terminal_fields,
-    task_terminal_state,
-    tool_approval_outcome,
-    tool_category,
-    tool_terminal_fields,
 )
 from .shared_metrics_subscriber import SharedMetricsSubscriber
 
@@ -237,7 +229,7 @@ class _Runtime:
                     return None
                 self._emit_client_active(session)
                 task_context = session.relay_session.context.copy()
-                start_fields = task_start_fields(event)
+                start_fields = contract.task_start_fields(event)
                 handle = task_context.run(
                     self._with_scope_stack, self.relay.scope.push,
                     TASK_SCOPE, self.relay.ScopeType.Function,
@@ -280,7 +272,7 @@ class _Runtime:
         if not request_id:
             return
         model_call_key = (task_id, request_id)
-        fields = model_call_fields(event)
+        fields = contract.model_call_fields(event)
         retry_ordinal = _retry_ordinal(event)
         with session.lock:
             if session.closing:
@@ -329,7 +321,7 @@ class _Runtime:
             model_call = session.model_calls.get(model_call_key) if model_call_key else None
             if model_call is None:
                 return
-            model_call.fields = model_call_fields(event)
+            model_call.fields = contract.model_call_fields(event)
             if finish:
                 self._finish_model_call(session, model_call_key)
 
@@ -354,7 +346,7 @@ class _Runtime:
         session, task = self._approval_task(event)
         if session is None or task is None:
             return
-        outcome = tool_approval_outcome(event)
+        outcome = contract.tool_approval_outcome(event)
         attribution = "unattributed"
         with session.lock:
             if session.closing or not self._event_matches_task_turn(task, event):
@@ -415,32 +407,30 @@ class _Runtime:
     def record_skill_lifecycle(self, event: dict[str, Any]) -> None:
         """Emit one allowlisted skill fact without its local identity."""
         if _text(event, "action").strip().lower() == "loaded":
-            mark, fields = SKILL_LOAD_MARK, skill_load_fields(event)
+            mark, fields = SKILL_LOAD_MARK, contract.skill_load_fields(event)
         else:
-            mark, fields = SKILL_LIFECYCLE_MARK, skill_lifecycle_fields(event)
+            mark, fields = SKILL_LIFECYCLE_MARK, contract.skill_lifecycle_fields(event)
         if fields is None:
             return
 
         session_id, task_id = _text(event, "session_id"), _text(event, "task_id")
         session, task = self._task_pair(event, allow_task_id_fallback=not session_id)
-        if session is not None:
-            if task is None:
-                return
-            with session.lock:
-                if (
-                    session.closing
-                    or session.tasks.get(task.task_id) is not task
-                    or not self._event_matches_task_turn(task, event)
-                ):
-                    return
+        if session is None:
+            if not (session_id and task_id):
+                # No owning task: a bare process-level mark.
+                self._with_scope_stack(
+                    self.relay.scope.event, mark, data=fields, metadata=self._event_metadata()
+                )
+            return
+        if task is None:
+            return
+        with session.lock:
+            if (
+                not session.closing
+                and session.tasks.get(task.task_id) is task
+                and self._event_matches_task_turn(task, event)
+            ):
                 self._mark(session, task, mark, fields)
-            return
-        if session_id and task_id:
-            return
-
-        self._with_scope_stack(
-            self.relay.scope.event, mark, data=fields, metadata=self._event_metadata()
-        )
 
     def finish_task(self, event: dict[str, Any]) -> None:
         """Close one task scope exactly once with bounded terminal fields."""
@@ -485,10 +475,7 @@ class _Runtime:
             return
         self._flush_and_export("Hermes shared-metrics shutdown flush failed")
         self._deregister()
-        # The final export may have started a send; give it the same bounded chance
-        # deactivate() gets, or a short-lived CLI exits and kills the daemon thread mid-request.
-        self._join_send_thread()
-        self._unregister_atexit()
+        self._release()
 
     def _deregister(self) -> None:
         self._safe(self.relay.subscribers.deregister, self._subscriber_name)
@@ -511,15 +498,21 @@ class _Runtime:
         with self._task_sessions_lock:
             self._task_sessions.clear()
             self._turn_sessions.clear()
+        self._release()
+
+    def _release(self) -> None:
+        """Let an in-flight send finish briefly, then drop the atexit hook.
+
+        A short-lived CLI process would otherwise exit and kill the daemon send thread
+        mid-request — the common case for this feature's one cadence.
+        """
         self._join_send_thread()
-        self._unregister_atexit()
+        with contextlib.suppress(Exception):
+            atexit.unregister(self.shutdown)
 
     def _join_send_thread(self, timeout: float = 2.0) -> None:
-        """Give an in-flight send a brief, bounded chance to finish at exit.
-
-        Pending packages stay in SQLite and go out next run, so blocking on a slow network
-        is the wrong trade; the daemon thread dies with the process.
-        """
+        """Bounded on purpose: pending packages stay in SQLite and go out next run, so
+        blocking on a slow network is the wrong trade; the daemon thread dies with the process."""
         with self._send_lock:
             thread = self._send_thread
         if thread is not None and thread.is_alive():
@@ -581,10 +574,6 @@ class _Runtime:
                 self._finish_task(session, task_id, {**base_event, "task_id": task_id})
             self._end_pending_model_calls(session, base_event)
         return True
-
-    def _unregister_atexit(self) -> None:
-        with contextlib.suppress(Exception):
-            atexit.unregister(self.shutdown)
 
     def _task_session(
         self, event: dict[str, Any], *, allow_task_id_fallback: bool = False
@@ -711,12 +700,12 @@ class _Runtime:
             task, self.relay.tools.call, TOOL_CALL_SCOPE, {},
             handle=task.handle, metadata=self._event_metadata(),
         )
-        return _ToolCall(handle, tool_category(event), monotonic_ns())
+        return _ToolCall(handle, contract.tool_category(event), monotonic_ns())
 
     def _finish_tool_call(
         self, task: _TaskRun, tool_call: _ToolCall, event: dict[str, Any]
     ) -> None:
-        fields = tool_terminal_fields(
+        fields = contract.tool_terminal_fields(
             event,
             category=tool_call.category,
             approval_outcome=tool_call.approval_outcome,
@@ -731,7 +720,7 @@ class _Runtime:
     def _end_pending_tool_calls(
         self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
     ) -> None:
-        task_outcome, _, _ = task_terminal_state(event)
+        task_outcome, _, _ = contract.task_terminal_state(event)
         status = {"cancelled": "cancelled", "timed_out": "timeout"}.get(task_outcome, "error")
         for key in [key for key in session.tool_calls if key[0] == task.task_id]:
             self._finish_tool_call(task, session.tool_calls.pop(key), {**event, "status": status})
@@ -775,7 +764,7 @@ class _Runtime:
             return False
         self._end_pending_tool_calls(session, task, event)
         self._end_pending_model_calls(session, {**event, "task_id": task_id})
-        fields = task_terminal_fields(
+        fields = contract.task_terminal_fields(
             {**task.start_fields, **event},
             duration_ms=max(0, (monotonic_ns() - task.started_ns) // 1_000_000),
             model_call_count=len(task.model_call_ids),
@@ -827,13 +816,12 @@ class _Runtime:
 
         with self._send_lock:
             # One in-flight pass per process; the next hook fire picks up what is pending.
-            if self._send_thread is not None and self._send_thread.is_alive():
-                return
-            self._send_thread = threading.Thread(
-                target=self._run_send_pass, args=(resolved.endpoint,),
-                name="hermes-shared-metrics-send", daemon=True,
-            )
-            self._send_thread.start()
+            if self._send_thread is None or not self._send_thread.is_alive():
+                self._send_thread = threading.Thread(
+                    target=self._run_send_pass, args=(resolved.endpoint,),
+                    name="hermes-shared-metrics-send", daemon=True,
+                )
+                self._send_thread.start()
 
     def _run_send_pass(self, endpoint: str) -> None:
         from hermes_cli.observability.shared_metrics_sender import SharedMetricsSender
