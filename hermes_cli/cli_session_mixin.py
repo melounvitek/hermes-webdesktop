@@ -7,6 +7,7 @@ inside each method (``from cli import ...``) — never at module load time (impo
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sys
@@ -41,6 +42,12 @@ def _timestamp_or(value, default):
         return datetime.fromtimestamp(float(value))
     except Exception:
         return default
+
+
+def _squash(text: str, limit: int = 120) -> str:
+    """Collapse whitespace and cap to *limit* cells with an ellipsis."""
+    text = " ".join(text.split())
+    return text[: limit - 1] + "…" if len(text) > limit else text
 
 
 def _dim_notice(cli, msg: str, quiet: bool) -> None:
@@ -151,20 +158,15 @@ class CLISessionMixin:
         if current and os.path.realpath(recorded) == os.path.realpath(current):
             return
         if not os.path.isdir(recorded):
-            _dim_notice(self, 
-                f"⚠ Session's working directory is gone: {recorded} — staying in {current or '.'}",
-                quiet,
-            )
-            return
-        try:
-            os.chdir(recorded)
-        except OSError as e:
-            _dim_notice(
-                self, f"⚠ Could not enter session's working directory {recorded}: {e}", quiet
-            )
-            return
-        os.environ["TERMINAL_CWD"] = recorded
-        _dim_notice(self, f"↻ Working directory: {recorded}", quiet)
+            msg = f"⚠ Session's working directory is gone: {recorded} — staying in {current or '.'}"
+        else:
+            try:
+                os.chdir(recorded)
+                os.environ["TERMINAL_CWD"] = recorded
+                msg = f"↻ Working directory: {recorded}"
+            except OSError as e:
+                msg = f"⚠ Could not enter session's working directory {recorded}: {e}"
+        _dim_notice(self, msg, quiet)
 
     def _restore_session_yolo(self, session_meta: dict, *, quiet: bool = False) -> None:
         """Re-enable YOLO bypass on resume when the session row's ``model_config.yolo_mode``
@@ -252,10 +254,8 @@ class CLISessionMixin:
         from cli import display_hermes_home
         session_meta = {}
         if self._session_db:
-            try:
+            with contextlib.suppress(Exception):
                 session_meta = self._session_db.get_session(self.session_id) or {}
-            except Exception:
-                session_meta = {}
 
         title = (session_meta.get("title") or "").strip()
         created_at = _timestamp_or(session_meta.get("started_at"), self.session_start)
@@ -273,30 +273,24 @@ class CLISessionMixin:
         is_running = bool(getattr(self, "_agent_running", False))
 
         reasoning_label = None
-        try:
-            rc = getattr(agent, "reasoning_config", None) or getattr(self, "reasoning_config", None)
-            if isinstance(rc, dict):
-                if rc.get("enabled") is False:
-                    reasoning_label = "off"
-                elif rc.get("effort"):
-                    reasoning_label = str(rc.get("effort"))
-            show_r = getattr(self, "show_reasoning", None)
-            if reasoning_label and show_r is not None:
-                reasoning_label += f" (display: {'on' if show_r else 'off'})"
-        except Exception:
-            reasoning_label = None
+        rc = getattr(agent, "reasoning_config", None) or getattr(self, "reasoning_config", None)
+        if isinstance(rc, dict):
+            if rc.get("enabled") is False:
+                reasoning_label = "off"
+            elif rc.get("effort"):
+                reasoning_label = str(rc.get("effort"))
+        show_r = getattr(self, "show_reasoning", None)
+        if reasoning_label and show_r is not None:
+            reasoning_label += f" (display: {'on' if show_r else 'off'})"
 
         approval_label = None
         try:
             from tools.approval import _get_approval_mode, is_approval_bypass_active_for_session
             approval_label = _get_approval_mode()
-            try:
-                if is_approval_bypass_active_for_session(getattr(self, "session_key", "") or ""):
-                    approval_label += " (YOLO bypass active)"
-            except Exception:
-                pass
+            if is_approval_bypass_active_for_session(getattr(self, "session_key", "") or ""):
+                approval_label += " (YOLO bypass active)"
         except Exception:
-            approval_label = None
+            pass
 
         # Context window usage: reuse the status-bar snapshot (tokens / max / percent).
         ctx_label = None
@@ -396,8 +390,8 @@ class CLISessionMixin:
             if not ts:
                 return ""
             try:
-                from datetime import datetime
-                return f"  [{datetime.fromtimestamp(float(ts)).strftime(getattr(self, 'timestamp_format', '%H:%M'))}]"
+                stamp = _timestamp_or(ts, None)
+                return f"  [{stamp.strftime(getattr(self, 'timestamp_format', '%H:%M'))}]" if stamp else ""
             except (ValueError, OSError, TypeError):
                 return ""
 
@@ -410,10 +404,9 @@ class CLISessionMixin:
             _cli_visible_print(f"    ({hidden_tool_messages} tool {noun} hidden)")
             hidden_tool_messages = 0
 
-        _cli_visible_print()
-        _cli_visible_print("+" + "-" * 50 + "+")
-        _cli_visible_print("|" + " " * 12 + "(^_^) Conversation History" + " " * 11 + "|")
-        _cli_visible_print("+" + "-" * 50 + "+")
+        rule = "+" + "-" * 50 + "+"
+        for line in ("", rule, "|" + " " * 12 + "(^_^) Conversation History" + " " * 11 + "|", rule):
+            _cli_visible_print(line)
 
         for msg in self.conversation_history:
             role = msg.get("role", "unknown")
@@ -435,14 +428,12 @@ class CLISessionMixin:
                 continue
 
             _cli_visible_print(f"\n  [Hermes #{visible_index}]{_ts_suffix(msg)}")
-            tool_calls = msg.get("tool_calls") or []
+            n_calls = len(msg.get("tool_calls") or [])
             if not content_text:
                 suffix = ""
-                if tool_calls:
-                    noun = "call" if len(tool_calls) == 1 else "calls"
-                    preview = f"(requested {len(tool_calls)} tool {noun})"
-                else:
-                    preview = "(no text response)"
+                preview = "(no text response)"
+                if n_calls:
+                    preview = f"(requested {n_calls} tool {'call' if n_calls == 1 else 'calls'})"
             _cli_visible_print(f"    {preview}{suffix}")
 
         flush_tool_summary()
@@ -451,7 +442,7 @@ class CLISessionMixin:
     def _notify_session_boundary(self, event_type: str) -> None:
         """Fire a session-boundary plugin hook (on_session_finalize / on_session_reset).
         Non-blocking; errors swallowed. Safe from shutdown, /new, /reset."""
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.lifecycle import finalize_session, invoke_hook
 
             context = {
@@ -463,8 +454,6 @@ class CLISessionMixin:
                 finalize_session(**context)
             else:
                 invoke_hook(event_type, **context)
-        except Exception:
-            pass
 
     def _discard_session_if_empty(self, session_id: Optional[str]) -> bool:
         """Drop a just-ended session row that never gained content (quit-immediately, /new,
@@ -536,16 +525,12 @@ class CLISessionMixin:
             # /new can arrive mid-turn before _flush_messages_to_session_db() ran — flush
             # the current turn to the OLD session before rotating or it is silently lost.
             if self.agent:
-                try:
+                with contextlib.suppress(Exception):
                     self.agent._flush_messages_to_session_db(
                         self.conversation_history, conversation_history=self.conversation_history,
                     )
-                except Exception:
-                    pass
-            try:
+            with contextlib.suppress(Exception):
                 self._session_db.end_session(old_session_id, "new_session")
-            except Exception:
-                pass
             self._discard_session_if_empty(old_session_id)
 
         self.session_start = datetime.now()
@@ -574,16 +559,14 @@ class CLISessionMixin:
             if hasattr(self.agent, "_last_flushed_db_idx"):
                 self.agent._last_flushed_db_idx = 0
             if hasattr(self.agent, "_todo_store"):
-                try:
+                with contextlib.suppress(Exception):
                     from tools.todo_tool import TodoStore
                     self.agent._todo_store = TodoStore()
-                except Exception:
-                    pass
             if hasattr(self.agent, "_invalidate_system_prompt"):
                 self.agent._invalidate_system_prompt()
 
             if self._session_db:
-                try:
+                with contextlib.suppress(Exception):
                     self.agent._session_db_created = False
                     self._session_db.create_session(
                         session_id=self.session_id,
@@ -594,29 +577,24 @@ class CLISessionMixin:
                         },
                     )
                     self.agent._session_db_created = True
-                except Exception:
-                    pass
                 if title:
                     title = _apply_new_session_title(self, title)
             # Tell memory providers the session_id rotated (reset=True flushes per-session
             # state) BEFORE the plugin on_session_reset hook. With old history, end-of-session
             # extraction and this switch are queued as ONE task on the serialized worker —
             # end strictly before switch, without blocking /new. No history → switch inline.
-            try:
-                _mm = getattr(self.agent, "_memory_manager", None)
-                if _mm is not None:
-                    if _boundary_snapshot:
-                        _mm.commit_session_boundary_async(
-                            _boundary_snapshot, new_session_id=self.session_id,
-                            parent_session_id=old_session_id or "", reason="new_session",
-                        )
-                    else:
-                        _mm.on_session_switch(
-                            self.session_id, parent_session_id=old_session_id or "",
-                            reset=True, reason="new_session",
-                        )
-            except Exception:
-                pass
+            _mm = getattr(self.agent, "_memory_manager", None)
+            with contextlib.suppress(Exception):
+                if _mm is not None and _boundary_snapshot:
+                    _mm.commit_session_boundary_async(
+                        _boundary_snapshot, new_session_id=self.session_id,
+                        parent_session_id=old_session_id or "", reason="new_session",
+                    )
+                elif _mm is not None:
+                    _mm.on_session_switch(
+                        self.session_id, parent_session_id=old_session_id or "",
+                        reset=True, reason="new_session",
+                    )
             self._notify_session_boundary("on_session_reset")
 
         if not silent:
@@ -640,12 +618,11 @@ class CLISessionMixin:
         self._pending_resume_sessions = None
         if not isinstance(text, str):
             return False
-        stripped = text.strip()
         # Only a pure number selects; "/resume 3", titles etc. fall through.
-        if not stripped.isdigit():
+        if not text.strip().isdigit():
             return False
-        index = int(stripped)
-        if index < 1 or index > len(pending):
+        index = int(text.strip())
+        if not 1 <= index <= len(pending):
             _cprint(f"  Resume index {index} is out of range.")
             _cprint("  Use /resume with no arguments to see available sessions.")
             return True
@@ -822,15 +799,11 @@ class CLISessionMixin:
         if agent is None:
             return
         if invalidate_prompt and hasattr(agent, "_invalidate_system_prompt"):
-            try:
+            with contextlib.suppress(Exception):
                 agent._invalidate_system_prompt()
-            except Exception:
-                pass
         if hasattr(agent, "_last_flushed_db_idx"):
-            try:
+            with contextlib.suppress(Exception):
                 agent._last_flushed_db_idx = len(self.conversation_history)
-            except Exception:
-                pass
         if hasattr(agent, "_session_messages"):
             agent._session_messages = self.conversation_history
         if hasattr(agent, "_db_flush_scan_prefix"):
@@ -937,16 +910,11 @@ class CLISessionMixin:
 
         # Publish only after the durable rewind succeeds (or no store exists).
         self._publish_truncated_history(truncated, invalidate_prompt=True)
-        if self.agent is not None:
-            # Same hook /branch fires; rewound=True invalidates per-turn document caches.
-            try:
-                _mm = getattr(self.agent, "_memory_manager", None)
-                if _mm is not None and self.session_id:
-                    _mm.on_session_switch(
-                        self.session_id, parent_session_id="", reset=False, rewound=True
-                    )
-            except Exception:
-                pass
+        # Same hook /branch fires; rewound=True invalidates per-turn document caches.
+        _mm = getattr(self.agent, "_memory_manager", None)
+        if _mm is not None and self.session_id:
+            with contextlib.suppress(Exception):
+                _mm.on_session_switch(self.session_id, parent_session_id="", reset=False, rewound=True)
 
         turn_word = "turn" if turns_undone == 1 else "turns"
         print(
@@ -974,12 +942,10 @@ class CLISessionMixin:
         """Record this terminal's live session for bare ``hermes -c``. Called whenever
         ``self.session_id`` is (re)assigned so a later bare ``-c`` in THIS terminal resumes
         this conversation's live tip. Best-effort; no-op without a terminal identity."""
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.terminal_breadcrumbs import write_breadcrumb
 
             write_breadcrumb(self.session_id)
-        except Exception:
-            pass
 
     def _transfer_session_yolo(self, old_session_id: str, new_session_id: str) -> None:
         """Move YOLO bypass state to a new session key when ``self.session_id`` is reassigned
@@ -1068,10 +1034,8 @@ class CLISessionMixin:
         db = getattr(self, "_session_db", None)
         if db is None or not session_key or session_key == "default":
             return
-        try:
+        with contextlib.suppress(Exception):
             db.set_session_yolo(session_key, enabled)
-        except Exception:
-            pass
 
     def _manual_compress(self, cmd_original: str = ""):
         """Manually trigger context compression.
@@ -1083,7 +1047,7 @@ class CLISessionMixin:
         No ``compression_enabled`` gate: that flag disables *automatic* compaction only, and
         the context-overflow error path directs users here when it is off.
         """
-        if not self.conversation_history or len(self.conversation_history) < 4:
+        if len(self.conversation_history or ()) < 4:
             print("(._.) Not enough conversation to compress (need at least 4 messages).")
             return
         if not self.agent:
@@ -1097,11 +1061,8 @@ class CLISessionMixin:
         from agent.conversation_compression import finalize_context_engine_compression_notification
         from agent.model_metadata import estimate_request_tokens_rough
 
-        raw_args = ""
-        if cmd_original:
-            _parts = cmd_original.strip().split(None, 1)
-            if len(_parts) > 1:
-                raw_args = _parts[1].strip()
+        _parts = (cmd_original or "").strip().split(None, 1)
+        raw_args = _parts[1].strip() if len(_parts) > 1 else ""
         # Strip --preview/--dry-run/--aggressive before positional parsing.
         raw_args, preview, aggressive = extract_compress_flags(raw_args)
         partial, keep_last, focus_topic = parse_partial_compress_args(raw_args)
@@ -1221,9 +1182,7 @@ class CLISessionMixin:
         from cli import CLI_CONFIG, _DIM, _RST, _cprint
         if not CLI_CONFIG.get("display", {}).get("persist_prompts", True):
             return
-        detail, outcome = (" ".join(s.split()) for s in (detail, outcome))
-        detail = detail[:119] + "…" if len(detail) > 120 else detail
-        outcome = outcome[:119] + "…" if len(outcome) > 120 else outcome
+        detail, outcome = (_squash(s) for s in (detail, outcome))
         _cprint(f"\n{_DIM}{icon} {label}: {detail} → {outcome}{_RST}")
 
     def _clear_terminal_on_exit(self):
@@ -1239,13 +1198,11 @@ class CLISessionMixin:
         try:
             stream.write("\033[3J\033[2J\033[H")
             stream.flush()
-            return
         except Exception:
-            pass
-        try:
-            os.system("cls" if os.name == "nt" else "clear")
-        except Exception:
-            pass
+            try:
+                os.system("cls" if os.name == "nt" else "clear")
+            except Exception:
+                pass
 
     def _persist_active_session_before_close(self):
         """Best-effort flush of the agent's live ``_session_messages`` before ``end_session()``
@@ -1343,19 +1300,16 @@ class CLISessionMixin:
         elapsed = datetime.now() - self.session_start
         hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
+        duration_str = f"{seconds}s"
         if hours > 0:
-            duration_str = f"{hours}h {minutes}m {seconds}s"
+            duration_str = f"{hours}h {minutes}m {duration_str}"
         elif minutes > 0:
-            duration_str = f"{minutes}m {seconds}s"
-        else:
-            duration_str = f"{seconds}s"
+            duration_str = f"{minutes}m {duration_str}"
 
         session_title = None
         if self._session_db:
-            try:
+            with contextlib.suppress(Exception):
                 session_title = self._session_db.get_session_title(self.session_id)
-            except Exception:
-                pass
 
         print("Resume this session with:")
         # Session IDs are profile-constrained: non-default profiles need `-p <profile>` in

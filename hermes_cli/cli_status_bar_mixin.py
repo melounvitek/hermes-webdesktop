@@ -19,6 +19,19 @@ from typing import Any, Dict, Optional
 _SB = "class:status-bar"
 _DIM = "class:status-bar-dim"
 _STRONG = "class:status-bar-strong"
+_AGENT_COUNTERS = (
+    "session_input_tokens", "session_output_tokens", "session_cache_read_tokens",
+    "session_cache_write_tokens", "session_prompt_tokens", "session_completion_tokens",
+    "session_total_tokens", "session_api_calls",
+)
+
+
+def _threshold_style(value, ladder, fallback: str) -> str:
+    """First ``class:status-bar-<name>`` whose ``value >= bound`` in a descending ladder."""
+    for bound, name in ladder:
+        if value >= bound:
+            return f"class:status-bar-{name}"
+    return f"class:status-bar-{fallback}"
 
 
 def _finite(v):
@@ -37,9 +50,7 @@ class CLIStatusBarMixin:
             return "class:status-bar-critical"
         if percent_used > 80:
             return "class:status-bar-bad"
-        if percent_used >= 50:
-            return "class:status-bar-warn"
-        return "class:status-bar-good"
+        return _threshold_style(percent_used, ((50, "warn"),), "good")
 
     def _cache_hit_rate(self, snapshot: dict, precision: int = 1) -> "tuple[float, str] | None":
         """Return (cache_pct, label) or None without cache data. Prefers the baseline-delta pct
@@ -57,11 +68,7 @@ class CLIStatusBarMixin:
 
     def _cache_hit_rate_style(self, cache_pct: float) -> str:
         """Higher is better (opposite of context %)."""
-        if cache_pct >= 70:
-            return "class:status-bar-good"
-        if cache_pct >= 40:
-            return "class:status-bar-warn"
-        return "class:status-bar-bad"
+        return _threshold_style(cache_pct, ((70, "good"), (40, "warn")), "bad")
 
     @staticmethod
     def _battery_status_style(category: str) -> str:
@@ -85,18 +92,17 @@ class CLIStatusBarMixin:
         except Exception:
             reading = None
 
+        def _detail(no_battery: str) -> str:
+            if reading is None:
+                return ""
+            return f" — {format_battery(reading)}" if reading.available else f" — {no_battery}"
+
         if arg in ("status", "show"):
             state = "on" if self._battery_visible else "off"
+            detail = _detail("no battery detected on this machine")
             if reading is not None and reading.available:
-                self._console_print(
-                    f"  Battery indicator {state} — currently {format_battery(reading)}"
-                )
-            elif reading is not None:
-                self._console_print(
-                    f"  Battery indicator {state} — no battery detected on this machine"
-                )
-            else:
-                self._console_print(f"  Battery indicator {state}")
+                detail = f" — currently {format_battery(reading)}"
+            self._console_print(f"  Battery indicator {state}{detail}")
             return
 
         if arg in ("on", "true", "yes"):
@@ -111,24 +117,16 @@ class CLIStatusBarMixin:
 
         self._battery_visible = target
         save_config_value("display.battery", target)
-        if not target:
-            self._console_print("  Battery indicator off")
-        elif reading is not None and not reading.available:
+        if target:
             self._console_print(
-                "  Battery indicator on — no battery detected, so nothing will show here"
+                f"  Battery indicator on{_detail('no battery detected, so nothing will show here')}"
             )
-        elif reading is not None:
-            self._console_print(f"  Battery indicator on — {format_battery(reading)}")
         else:
-            self._console_print("  Battery indicator on")
+            self._console_print("  Battery indicator off")
 
     @staticmethod
     def _compression_count_style(count: int) -> str:
-        if count >= 10:
-            return "class:status-bar-bad"
-        if count >= 5:
-            return "class:status-bar-warn"
-        return _DIM
+        return _threshold_style(count, ((10, "bad"), (5, "warn")), "dim")
 
     def _build_context_bar(self, percent_used: Optional[int], width: int = 10) -> str:
         safe_percent = max(0, min(100, percent_used or 0))
@@ -206,14 +204,7 @@ class CLIStatusBarMixin:
             "context_tokens": 0,
             "context_length": None,
             "context_percent": None,
-            "session_input_tokens": 0,
-            "session_output_tokens": 0,
-            "session_cache_read_tokens": 0,
-            "session_cache_write_tokens": 0,
-            "session_prompt_tokens": 0,
-            "session_completion_tokens": 0,
-            "session_total_tokens": 0,
-            "session_api_calls": 0,
+            **dict.fromkeys(_AGENT_COUNTERS, 0),
             "compressions": 0,
             "active_background_tasks": 0,
             "active_background_processes": 0,
@@ -280,11 +271,7 @@ class CLIStatusBarMixin:
         if not agent:
             return snapshot
 
-        for key in (
-            "session_input_tokens", "session_output_tokens", "session_cache_read_tokens",
-            "session_cache_write_tokens", "session_prompt_tokens", "session_completion_tokens",
-            "session_total_tokens", "session_api_calls",
-        ):
+        for key in _AGENT_COUNTERS:
             snapshot[key] = getattr(agent, key, 0) or 0
 
         compressor = getattr(agent, "context_compressor", None)
@@ -382,11 +369,12 @@ class CLIStatusBarMixin:
         pending = str(getattr(self, "_pending_title", None) or "").strip()
         session_id = str(getattr(self, "session_id", "") or "")
         now = time.monotonic()
-        if not pending:
-            cached_session_id = getattr(self, "_status_bar_title_session_id", None)
-            checked_at = float(getattr(self, "_status_bar_title_checked_at", 0.0) or 0.0)
-            if cached_session_id == session_id and now - checked_at < 1.5:
-                return str(getattr(self, "_status_bar_title_cache", "") or "")
+        checked_at = float(getattr(self, "_status_bar_title_checked_at", 0.0) or 0.0)
+        cache_fresh = (
+            getattr(self, "_status_bar_title_session_id", None) == session_id and now - checked_at < 1.5
+        )
+        if not pending and cache_fresh:
+            return str(getattr(self, "_status_bar_title_cache", "") or "")
         title = pending
         db = getattr(self, "_session_db", None)
         if not pending and db is not None and session_id:
@@ -417,19 +405,16 @@ class CLIStatusBarMixin:
         cw = cls._status_bar_display_width
         if cw(text) <= max_width:
             return text
-        ellipsis = "..."
-        ellipsis_width = cw(ellipsis)
+        ellipsis_width = cw("...")
         if max_width <= ellipsis_width:
-            return ellipsis[:max_width]
-        out = []
-        width = 0
+            return "..."[:max_width]
+        out, width = [], 0
         for ch in text:
-            ch_width = cw(ch)
-            if width + ch_width + ellipsis_width > max_width:
+            if width + cw(ch) + ellipsis_width > max_width:
                 break
             out.append(ch)
-            width += ch_width
-        return "".join(out).rstrip() + ellipsis
+            width += cw(ch)
+        return "".join(out).rstrip() + "..."
 
     @classmethod
     def _status_title_badge(cls, title: str, width: int) -> "tuple[str, int] | None":
@@ -524,8 +509,7 @@ class CLIStatusBarMixin:
             return 0
         width = width or self._get_tui_terminal_width()
         if width and width > 10:
-            import math
-            return max(1, math.ceil(self._status_bar_display_width(spinner_line) / width))
+            return max(1, -(-self._status_bar_display_width(spinner_line) // width))
         return 1
 
     def _render_spinner_text(self) -> str:
@@ -898,13 +882,8 @@ class CLIStatusBarMixin:
         if self._pet_anim_running:
             return
         self._pet_resolve_config()
-        with self._pet_lock:
-            kitty = (
-                self._pet_enabled
-                and self._pet_renderer is not None
-                and self._pet_renderer.mode == "kitty"
-            )
-        if kitty:
+        view = self._pet_view()
+        if view is not None and view[1]:
             self._pet_queue_kitty_frame()
         self._pet_anim_running = True
         self._pet_anim_thread = threading.Thread(target=self._pet_anim_loop, daemon=True)
@@ -1090,19 +1069,15 @@ class CLIStatusBarMixin:
             segs = self._status_bar_segments(
                 snapshot, width, field_set, self._is_session_yolo_active(), styled=False
             )
-            parts = ["".join(t for _, t in seg) for seg in segs]
-            if width < 52:
-                battery_prefix = f"{battery_label} │ " if battery_label else ""
-                text = f"{battery_prefix}⚕ {model_short}"
-                if parts:
-                    text = battery_prefix + " · ".join(parts)
-                return self._right_align_status_title(text, session_title, width)
+            parts = ["".join(t for _, t in seg) for seg in segs] or [f"⚕ {model_short}"]
+            # Narrow bars always join the battery with │; wider tiers use the tier separator.
             if battery_label:
                 parts.insert(0, battery_label)
-            if not parts:
-                parts = [f"⚕ {model_short}"]
-            sep = " · " if width < 76 else " │ "
-            return self._right_align_status_title(sep.join(parts), session_title, width)
+            if width < 52:
+                text = f"{parts[0]} │ " + " · ".join(parts[1:]) if battery_label else " · ".join(parts)
+            else:
+                text = (" · " if width < 76 else " │ ").join(parts)
+            return self._right_align_status_title(text, session_title, width)
         except Exception:
             return f"⚕ {self.model if getattr(self, 'model', None) else 'Hermes'}"
 
@@ -1129,14 +1104,10 @@ class CLIStatusBarMixin:
             )
             sep = " · " if width < 76 else " │ "
             frags: list = []
-            for seg in segs:
+            for seg in segs or [[(_SB, " ⚕ "), (_STRONG, snapshot["model_short"])]]:
                 if frags:
                     frags.append((_DIM, sep))
                 frags.extend(seg)
-            if not frags:
-                frags = [(_SB, " ⚕ "), (_STRONG, snapshot["model_short"])]
-            frags.append((_SB, " "))
-
             # Stash indicator (📌 N) after every width tier so a parked draft is never
             # invisible; before the battery prepend, and the first thing the trim drops.
             try:
@@ -1144,12 +1115,8 @@ class CLIStatusBarMixin:
             except Exception:
                 stash_indicator = ""
             if stash_indicator and _ok("stash"):
-                pieces = [(_DIM, " · "), (_STRONG, stash_indicator)]
-                if frags and frags[-1] == (_SB, " "):
-                    frags[-1:-1] = pieces  # keep the one-cell right margin
-                else:
-                    frags.extend(pieces)
-
+                frags.extend([(_DIM, " · "), (_STRONG, stash_indicator)])
+            frags.append((_SB, " "))  # one-cell right margin
             # Battery is the first element when enabled: prepend ahead of the ⚕ marker.
             battery_label = snapshot.get("battery_label") or ""
             if battery_label and _ok("battery"):

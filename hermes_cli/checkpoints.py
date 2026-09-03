@@ -66,8 +66,6 @@ def _print_archives(archives) -> None:
 def cmd_prune(args: argparse.Namespace) -> int:
     from tools.checkpoint_manager import prune_checkpoints, store_status
 
-    retention_days = args.retention_days
-    max_size_mb = args.max_size_mb
     delete_orphans = not args.keep_orphans
 
     # Restricts orphan deletion to exactly the identities shown in the confirmation preview
@@ -102,15 +100,15 @@ def cmd_prune(args: argparse.Namespace) -> int:
         orphan_allowlist.update(p["path"] for p in pre_v2_orphans)
 
     print("Pruning checkpoint store…")
-    print(f"  retention_days:    {retention_days}")
+    print(f"  retention_days:    {args.retention_days}")
     print(f"  delete_orphans:    {delete_orphans}")
-    print(f"  max_total_size_mb: {max_size_mb}")
+    print(f"  max_total_size_mb: {args.max_size_mb}")
     print()
 
     result = prune_checkpoints(
-        retention_days=retention_days,
+        retention_days=args.retention_days,
         delete_orphans=delete_orphans,
-        max_total_size_mb=max_size_mb,
+        max_total_size_mb=args.max_size_mb,
         orphan_allowlist=orphan_allowlist,
     )
     print(f"Scanned:         {result['scanned']}")
@@ -123,11 +121,10 @@ def cmd_prune(args: argparse.Namespace) -> int:
 
 def _confirm(prompt: str) -> bool:
     try:
-        resp = input(f"{prompt} [y/N]: ").strip().lower()
+        return input(f"{prompt} [y/N]: ").strip().lower() in {"y", "yes"}
     except (EOFError, KeyboardInterrupt):
         print()
         return False
-    return resp in {"y", "yes"}
 
 
 def _confirmed(args: argparse.Namespace, prompt: str) -> bool:
