@@ -135,7 +135,9 @@ class StreamingTTSConsumer:
         if not self.active:
             return False
         if not self._adapter.supports_streaming_tts(self._chat_id, self._audio_format):
-            logger.debug("adapter %s does not support streaming TTS", getattr(self._adapter, "name", "?"))
+            logger.debug(
+                "adapter %s does not support streaming TTS", getattr(self._adapter, "name", "?"),
+            )
             return False
         try:
             self._handle = await self._adapter.begin_streaming_tts(
@@ -176,7 +178,9 @@ class StreamingTTSConsumer:
                 return
             if not self._aborted and self._handle is not None:
                 try:
-                    await self._adapter.finish_streaming_tts(self._handle, interrupted=self._aborted)
+                    await self._adapter.finish_streaming_tts(
+                        self._handle, interrupted=self._aborted,
+                    )
                 except Exception as exc:
                     logger.debug("finish_streaming_tts error: %s", exc)
                     self._settle(failed=True)

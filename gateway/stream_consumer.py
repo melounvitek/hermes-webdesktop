@@ -103,11 +103,8 @@ class GatewayStreamConsumer(
     StreamThinkFilterMixin,
 ):
     """Async consumer that progressively edits a platform message with streamed tokens.
-
-    Usage: ``agent.stream_delta_callback = consumer.on_delta``; ``task =
-    create_task(consumer.run())``; after the agent finishes ``consumer.finish()``
-    then ``await task`` for the final edit.
-    """
+    Usage: ``agent.stream_delta_callback = consumer.on_delta``; ``create_task(consumer.run())``;
+    after the agent finishes ``consumer.finish()`` then ``await task`` for the final edit."""
 
     _MAX_FLOOD_STRIKES = 3  # consecutive flood failures before edits are disabled
 
@@ -206,13 +203,11 @@ class GatewayStreamConsumer(
 
     def _clear_turn_final_flags(self) -> None:
         """Reset every turn-final delivery flag to "nothing delivered yet".
-
-        ``_delivered_final_text`` is the cleaned turn-final payload the gateway compares
-        to the completed final_response before trusting the flags (a successful
-        finalize edit may carry a stale preview); None = legacy trust.  A payload-less
-        ``_turn_split_delivery`` must NOT inherit legacy trust; ``_delivery_ambiguous``
-        (a full-final send timed out but MAY have landed) is the only case that does.
-        """
+        ``_delivered_final_text`` is the cleaned turn-final payload the gateway compares to
+        the completed final_response before trusting the flags (a successful finalize edit
+        may carry a stale preview); None = legacy trust.  A payload-less
+        ``_turn_split_delivery`` must NOT inherit legacy trust; ``_delivery_ambiguous`` (a
+        full-final send timed out but MAY have landed) is the only case that does."""
         self._final_response_sent = False
         self._final_content_delivered = False  # content landed even if the cosmetic edit failed
         self._delivered_final_text: Optional[str] = None
@@ -220,11 +215,9 @@ class GatewayStreamConsumer(
         self._delivery_ambiguous = False
 
     def _stream_is_message(self) -> bool:
-        """Whether THIS chat's transport treats the stream as the message.
-
-        Per-chat probe first (a relay adapter's class attribute only reflects its
-        primary identity), else the legacy attribute; both on the CLASS (MagicMock-safe).
-        """
+        """Whether THIS chat's transport treats the stream as the message: per-chat probe
+        first (a relay adapter's class attribute only reflects its primary identity), else
+        the legacy attribute; both on the CLASS (MagicMock-safe)."""
         probe = getattr(type(self.adapter), "stream_is_message_for_chat", None)
         if not callable(probe):
             return getattr(self.adapter, "draft_stream_is_message", False) is True
@@ -249,12 +242,9 @@ class GatewayStreamConsumer(
         return "\n\n---\n".join(p for p in (self._accumulated, progress) if p)
 
     def _metadata_for_send(self, *, final: bool = False, expect_edits: bool = False) -> dict | None:
-        """Per-send metadata.
-
-        ``final`` → notify=True (Mattermost treats notify-worthy sends as final when a
-        broken thread root may fall back flat); ``expect_edits`` keeps editable
-        previews on Telegram's legacy send path.
-        """
+        """Per-send metadata.  ``final`` → notify=True (Mattermost treats notify-worthy sends
+        as final when a broken thread root may fall back flat); ``expect_edits`` keeps
+        editable previews on Telegram's legacy send path."""
         meta = dict(self.metadata) if self.metadata else {}
         if self._initial_reply_to_id:
             meta["reply_to_message_id"] = self._initial_reply_to_id
@@ -292,12 +282,9 @@ class GatewayStreamConsumer(
         self._stream_ledger += text
 
     def _mark_skip_redundant_finalize(self) -> None:
-        """Mark the turn final as delivered by a prior mid-stream edit.
-
-        Records what was ACKED on the wire, not ``_accumulated``: a throttled stream's
-        last ack may be an older cursor-suffixed preview, which must not suppress the
-        corrective send.
-        """
+        """Mark the turn final as delivered by a prior mid-stream edit.  Records what was
+        ACKED on the wire, not ``_accumulated``: a throttled stream's last ack may be an
+        older cursor-suffixed preview, which must not suppress the corrective send."""
         acked = self._last_sent_text or self._accumulated
         if self.cfg.cursor and acked.endswith(self.cfg.cursor):
             acked = acked[: -len(self.cfg.cursor)]
@@ -315,24 +302,19 @@ class GatewayStreamConsumer(
         return ensure_closed_code_fences(self._clean_for_display(text or "")).strip()
 
     def _record_turn_final_payload(self, text: str) -> None:
-        """Record what the user actually saw as this turn's final answer.
-
-        On a split ``text`` is only the trailing chunk, so the un-truncated
-        ``_stream_ledger`` is recorded instead — else the gateway sees a mismatch and
-        re-sends an answer the user already received.
-        """
+        """Record what the user actually saw as this turn's final answer.  On a split ``text``
+        is only the trailing chunk, so the un-truncated ``_stream_ledger`` is recorded — else
+        the gateway sees a mismatch and re-sends an answer the user already received."""
         if self._turn_split_delivery and self._stream_ledger:
             text = self._stream_ledger
         self._delivered_final_text = self._display_payload(text)
 
     def delivered_final_matches(self, final_text: str) -> Optional[bool]:
-        """Tri-state reconcile of the recorded turn-final payload against ``final_text``.
-
-        A *successful* finalize edit can still carry only a stale preview, so call
-        success alone must not confirm delivery.  True: recorded payload (or an
-        earlier segment/commentary) matches.  False: payload differs, or payload-less
-        split.  None: nothing recorded on a legacy/ambiguous path (caller trusts flags).
-        """
+        """Tri-state reconcile of the recorded turn-final payload against ``final_text`` (a
+        *successful* finalize edit can still carry a stale preview, so call success alone
+        must not confirm delivery).  True: recorded payload (or an earlier segment /
+        commentary) matches.  False: payload differs, or payload-less split.  None: nothing
+        recorded on a legacy/ambiguous path (caller trusts flags)."""
         target = self._display_payload(final_text)
         if not target:
             return None
@@ -372,29 +354,23 @@ class GatewayStreamConsumer(
         reopen: bool = False,
     ) -> asyncio.Future:
         """Queue an interaction boundary (approval / clarify prompt) from sync context.
-
-        run() finalizes the current native stream (``placeholder`` when empty), then
-        per ``reopen``: False (approval; unbounded waits) degrades to one send() at
-        got_done; True (clarify) keeps native enabled so post-prompt output re-opens
-        a fresh stream.  Returns (Future, cancelled_flag); the Future resolves True
-        once processed (cancelled_flag is legacy, no longer read).  Without native
-        streaming returns a bare, already-resolved Future.
-        """
+        run() finalizes the current native stream (``placeholder`` when empty), then per
+        ``reopen``: False (approval; unbounded waits) degrades to one send() at got_done;
+        True (clarify) keeps native enabled so post-prompt output re-opens a fresh stream.
+        Returns (Future, cancelled_flag); the Future resolves True once processed
+        (cancelled_flag is legacy, no longer read).  Without native streaming returns a
+        bare, already-resolved Future."""
         loop = None
         with contextlib.suppress(RuntimeError):
             loop = asyncio.get_running_loop()
-
+        boundary_future = loop.create_future() if loop else concurrent.futures.Future()
         if not self._use_native_streaming:
-            f = asyncio.Future() if loop else concurrent.futures.Future()
-            f.set_result(True)
-            return f
-
+            boundary_future.set_result(True)
+            return boundary_future
         # Instance attributes are race-free: boundaries are processed one at a time.
         self._boundary_placeholder = placeholder or _DEFAULT_BOUNDARY_PLACEHOLDER
         self._boundary_reason = reason or "Approval"
         self._boundary_reopen = bool(reopen)
-
-        boundary_future = loop.create_future() if loop else concurrent.futures.Future()
         cancelled_flag = {"cancelled": False}
         self._queue.put((_APPROVAL_BOUNDARY, boundary_future, cancelled_flag))
         return boundary_future, cancelled_flag
@@ -405,11 +381,9 @@ class GatewayStreamConsumer(
             self._queue.put((_COMMENTARY, text))
 
     def flush_pending_sync(self, timeout: float = 5.0) -> bool:
-        """Block the agent worker thread until everything queued so far is delivered.
-
-        ``(_FLUSH, Event)`` barrier: run() drains earlier items (FIFO), finalizes the
-        segment, sets the event.  False on timeout (consumer task may not be running).
-        """
+        """Block the agent worker thread until everything queued so far is delivered:
+        ``(_FLUSH, Event)`` barrier — run() drains earlier items (FIFO), finalizes the
+        segment, sets the event.  False on timeout (consumer task may not be running)."""
         evt = threading.Event()
         try:
             self._queue.put((_FLUSH, evt))
@@ -426,11 +400,8 @@ class GatewayStreamConsumer(
         )
 
     def request_reopen_seed(self) -> None:
-        """Thread-safe: request an EAGER native re-seed after a clarify answer.
-
-        No-op unless reopen-pending on a native stream with no stream open, so a
-        stray call can't open a spurious bubble mid-stream or on approval.
-        """
+        """Thread-safe: request an EAGER native re-seed after a clarify answer.  No-op unless
+        reopen-pending, so a stray call can't open a spurious bubble mid-stream or on approval."""
         if self._reopen_seed_pending():
             self._queue.put(_REOPEN_SEED)
 
@@ -444,11 +415,9 @@ class GatewayStreamConsumer(
 
     @staticmethod
     def _signal_flush(flush_event) -> None:
-        """Wake a thread blocked in flush_pending_sync(), swallowing errors.
-
-        Every loop path that consumed a ``_FLUSH`` barrier (incl. early ``continue``)
-        must call this; a missed set stalls the caller for the full timeout.
-        """
+        """Wake a thread blocked in flush_pending_sync(), swallowing errors.  Every loop path
+        that consumed a ``_FLUSH`` barrier (incl. early ``continue``) must call this; a
+        missed set stalls the caller for the full timeout."""
         if flush_event is not None:
             with contextlib.suppress(Exception):
                 flush_event.set()
@@ -474,12 +443,9 @@ class GatewayStreamConsumer(
         self._draft_id = type(self)._draft_id_counter
 
     async def _handle_approval_boundary(self, boundary_future, cancelled_flag=None) -> None:
-        """Serially process an interaction boundary dequeued by run().
-
-        The stream is never kept open across a prompt: the WeCom finalize ack only
-        confirms server receipt, and after a long idle gap the client may stop
-        tracking the stream.
-        """
+        """Serially process an interaction boundary dequeued by run().  The stream is never
+        kept open across a prompt: the WeCom finalize ack only confirms server receipt, and
+        after a long idle gap the client may stop tracking the stream."""
         _reason = self._boundary_reason or "Approval"
         try:
             boundary_ok = True
@@ -513,10 +479,8 @@ class GatewayStreamConsumer(
                     boundary_future.set_result(boundary_ok)
 
     async def _finalize_boundary_stream(self, _reason: str) -> bool:
-        """Close the open native stream at a boundary; send() the pre-prompt text if that fails.
-
-        Returns False only when both finalize and the fallback send failed.
-        """
+        """Close the open native stream at a boundary; send() the pre-prompt text if that
+        fails.  False only when both finalize and the fallback send failed."""
         finalize_text = self._accumulated or self._boundary_placeholder
         try:
             if await self._send_frame(finalize_text, finalize=True):
@@ -548,23 +512,18 @@ class GatewayStreamConsumer(
         return fallback_ok
 
     def on_delta(self, text: str) -> None:
-        """Thread-safe callback from the agent's worker thread.
-
-        ``None`` signals a tool boundary: the current message is finalized and
-        subsequent text goes out as a new message below any tool-progress messages.
-        """
+        """Thread-safe callback from the agent's worker thread.  ``None`` signals a tool
+        boundary: the current message is finalized and subsequent text goes out as a new
+        message below any tool-progress messages."""
         if text:
             self._queue.put(text)
         elif text is None:
             self.on_segment_break()
 
     def finish(self, final_text: Optional[str] = None) -> None:
-        """Signal stream completion.
-
-        ``final_text`` is the AUTHORITATIVE completed final_response (incl.
-        post-stream augmentation the accumulator never saw); the drain loop adopts
-        it as the finalize payload.  Interrupt/error paths call ``finish()`` bare.
-        """
+        """Signal stream completion.  ``final_text`` is the AUTHORITATIVE completed
+        final_response (incl. post-stream augmentation the accumulator never saw); the drain
+        loop adopts it as the finalize payload.  Interrupt/error paths call ``finish()`` bare."""
         if final_text is not None:
             self._queue.put((_FINAL_TEXT, final_text))
         self._queue.put(_DONE)
@@ -639,9 +598,7 @@ class GatewayStreamConsumer(
 
     def _resolve_length_budget(self) -> "tuple[Callable[[str], int], int]":
         """Per-chat length function (relay adapters differ per chat, e.g. utf16) + budget.
-
-        isinstance gate: MagicMock auto-attributes aren't callables; test doubles use len.
-        """
+        isinstance gate: MagicMock auto-attributes aren't callables; test doubles use len."""
         len_fn: "Callable[[str], int]" = (
             self.adapter.message_len_fn_for_chat(self.chat_id)
             if isinstance(self.adapter, _BasePlatformAdapter)
@@ -651,9 +608,7 @@ class GatewayStreamConsumer(
 
     async def _start_transports(self) -> None:
         """Resolve native/draft transport; native wins (adapters declaring it can't edit).
-
-        The empty seed frame shows "typing" before the first token; on failure → edit path.
-        """
+        The empty seed frame shows "typing" before the first token; on failure → edit path."""
         self._use_native_streaming = self._resolve_native_streaming()
         if self._use_native_streaming:
             logger.debug("Stream consumer using native-stream transport (chat=%s)", self.chat_id)
@@ -673,11 +628,9 @@ class GatewayStreamConsumer(
             )
 
     def _drain_queue(self) -> "_Tick":
-        """Drain everything queued so far into one tick.
-
-        Control sentinels stop the drain (they take effect this tick); _FINAL_TEXT /
-        _TOOL_PROGRESS / text deltas fold into state so simultaneous items batch.
-        """
+        """Drain everything queued so far into one tick.  Control sentinels stop the drain
+        (they take effect this tick); _FINAL_TEXT / _TOOL_PROGRESS / text deltas fold into
+        state so simultaneous items batch."""
         tick = _Tick()
         while True:
             try:
@@ -723,13 +676,11 @@ class GatewayStreamConsumer(
         return False  # keep draining to batch simultaneous progress lines
 
     def _adopt_final_text(self, final_raw: str) -> None:
-        """Adopt the authoritative final (see finish()) as the finalize content.
-
-        Only if this consumer streamed something (a no-stream turn keeps the
-        gateway's final-send ownership).  Split delivery: wholesale adoption would
-        repeat sealed heads, refusing makes the gateway resend the ENTIRE body — so
-        append only the suffix when the final strictly prefix-extends the ledger.
-        """
+        """Adopt the authoritative final (see finish()) as the finalize content — only if this
+        consumer streamed something (a no-stream turn keeps the gateway's final-send
+        ownership).  Split delivery: wholesale adoption would repeat sealed heads, refusing
+        makes the gateway resend the ENTIRE body — so append only the suffix when the final
+        strictly prefix-extends the ledger."""
         if not (self._accumulated or self._message_id or self._last_sent_text):
             return
         if not self._turn_split_delivery:
@@ -745,10 +696,8 @@ class GatewayStreamConsumer(
 
     async def _eager_reopen_seed(self) -> None:
         """Eager re-seed after a clarify answer (gate re-checked: state may have advanced).
-
-        Trade-off: WeCom's ~6-minute stream limit (errcode 846608, from the FIRST
-        frame) now starts at the reply instant; on expiry we degrade to send().
-        """
+        Trade-off: WeCom's ~6-minute stream limit (errcode 846608, from the FIRST frame)
+        now starts at the reply instant; on expiry we degrade to send()."""
         if not self._reopen_seed_pending():
             return
         if await self._try_seed_frame("Eager reopen seed raised, disabling native: %s"):
@@ -789,11 +738,9 @@ class GatewayStreamConsumer(
         )
 
     async def _split_first_send(self, tick: "_Tick") -> str:
-        """No message to edit yet and the buffer overflows: seal only the head chunks.
-
-        The tail stays in _accumulated so it becomes the active preview later deltas
-        edit in place.  Returns "return" (turn finished) or "continue".
-        """
+        """No message to edit yet and the buffer overflows: seal only the head chunks; the
+        tail stays in _accumulated as the active preview later deltas edit in place.
+        Returns "return" (turn finished) or "continue"."""
         chunks = self._truncate_for_stream(self._accumulated, self._safe_limit, self._len_fn)
         if len(chunks) <= 1:
             # Malformed/legacy adapter result must still be splittable.
@@ -969,11 +916,8 @@ class GatewayStreamConsumer(
         ) or self._use_native_streaming
 
     async def _deliver_commentary(self, commentary_text: str) -> None:
-        """Post commentary as its own message.
-
-        Cumulative transports keep the stream going — resetting _accumulated would
-        break the append-only invariant / lose pre-commentary text.
-        """
+        """Post commentary as its own message.  Cumulative transports keep the stream going —
+        resetting _accumulated would break the append-only invariant / lose text."""
         cumulative = self._cumulative_transport()
         if not cumulative:
             self._reset_segment_state()
@@ -984,13 +928,11 @@ class GatewayStreamConsumer(
 
     async def _end_segment(self, tick: "_Tick") -> None:
         """Tool boundary: edit-based transports reset so the next chunk is a fresh message.
-
-        Cumulative transports must NOT reset — clearing _accumulated makes the next
-        frame a non-prefix snapshot and the connector re-appends the whole answer.
-        preserve_no_edit: "__no_edit__" (platform never returned a real id — Signal,
-        github_comment webhook) must keep its sentinel or every tool boundary posts a
-        new message; the continuation goes out once via _send_fallback_final.
-        """
+        Cumulative transports must NOT reset — clearing _accumulated makes the next frame a
+        non-prefix snapshot and the connector re-appends the whole answer.  preserve_no_edit:
+        "__no_edit__" (platform never returned a real id — Signal, github_comment webhook)
+        must keep its sentinel or every tool boundary posts a new message; the
+        continuation goes out once via _send_fallback_final."""
         if self._cumulative_transport():
             return
         # If the segment-break edit didn't land (flood control / fallback mode),
@@ -1005,13 +947,10 @@ class GatewayStreamConsumer(
         self._reset_segment_state(preserve_no_edit=True)
 
     async def _on_cancelled(self) -> None:
-        """Best-effort final edit on task cancel.
-
-        finalize=True so REQUIRES_EDIT_FINALIZE platforms apply formatting;
-        is_turn_final=False because this handler owns the flags.  Only a successful
-        best-effort edit confirms delivery — a partial send may be just "Let me
-        search…", not the answer.
-        """
+        """Best-effort final edit on task cancel: finalize=True so REQUIRES_EDIT_FINALIZE
+        platforms apply formatting; is_turn_final=False because this handler owns the flags.
+        Only a successful edit confirms delivery — a partial send may be just "Let me
+        search…", not the answer."""
         best_effort_ok = False
         if self._accumulated and self._message_id:
             with contextlib.suppress(Exception):

@@ -56,7 +56,7 @@ class GatewayVoiceMixin:
         """Route voice transcripts back through the adapter that captured them."""
         if hasattr(adapter, "_voice_input_callback"):
             adapter._voice_input_callback = functools.partial(
-                self._handle_voice_channel_input, adapter=adapter
+                self._handle_voice_channel_input, adapter=adapter,
             )
 
     def _load_voice_modes(self) -> Dict[str, str]:
@@ -95,7 +95,8 @@ class GatewayVoiceMixin:
             target.discard(chat_id)
             return
         target.add(chat_id)
-        if isinstance(other := getattr(adapter, clear_from, None), set):
+        other = getattr(adapter, clear_from, None)
+        if isinstance(other, set):
             other.discard(chat_id)
 
     def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
@@ -160,7 +161,7 @@ class GatewayVoiceMixin:
         voice_profile = self._adapter_profile_for_source(event.source)
         if hasattr(adapter, "_on_voice_disconnect"):
             adapter._on_voice_disconnect = functools.partial(
-                self._handle_voice_timeout_cleanup, adapter=adapter
+                self._handle_voice_timeout_cleanup, adapter=adapter,
             )
         # Let the adapter's inactivity timer see the live voice-reply mode so it doesn't
         # disconnect a deliberately text-only (/voice off) session.
@@ -297,7 +298,8 @@ class GatewayVoiceMixin:
         with suppress(Exception):
             channel = adapter._client.get_channel(text_ch_id)
             if channel:
-                safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+                safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone")
+                safe_text = safe_text.replace("@here", "@\u200bhere")
                 await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
         # Synthetic MessageEvent for the normal pipeline; the SimpleNamespace raw_message lets
         # _get_guild_id() extract guild_id so _send_voice_reply() plays audio in the voice channel.
@@ -365,7 +367,7 @@ class GatewayVoiceMixin:
         from tools.tts_tool import text_to_speech_tool
 
         result_json = await asyncio.to_thread(
-            text_to_speech_tool, text=text, output_path=audio_path
+            text_to_speech_tool, text=text, output_path=audio_path,
         )
         try:
             result = json.loads(result_json)
