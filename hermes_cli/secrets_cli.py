@@ -15,14 +15,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-# The Bitwarden backend (``agent.secret_sources.bitwarden``) pulls in ``cryptography`` at import
-# time; on Windows the mapped ``cryptography._rust.pyd`` makes the ``hermes update`` self-lock
-# preflight defer. This module is registered parse-time from ``hermes_cli.main``, so the backend
-# import stays lazy and nothing touches ``bw`` until a handler runs.
-#
-# ``_BWS_VERSION`` is duplicated here (plain string) so ``register_cli`` can render the
-# ``install --help`` text without importing the backend. ``agent.secret_sources.bitwarden._BWS_VERSION``
-# is the source of truth; bump both together.
+# The Bitwarden backend pulls in ``cryptography`` at import time; on Windows that mapped native
+# module makes the ``hermes update`` self-lock preflight defer. This module is registered
+# parse-time from ``hermes_cli.main``, so the backend import stays lazy (nothing touches ``bw``
+# until a handler runs) and ``_BWS_VERSION`` is duplicated here for the ``install --help`` text.
+# ``agent.secret_sources.bitwarden._BWS_VERSION`` is the source of truth; bump both together.
 _BWS_VERSION = "2.0.0"
 
 from hermes_cli._secrets_common import (
@@ -56,8 +53,8 @@ def _load_bw():
 
 
 def __getattr__(name: str):
-    """PEP 562 lazy ``bw`` attribute: callers and tests monkeypatch ``hermes_cli.secrets_cli.bw``
-    directly, and resolving it at import time would re-import ``cryptography`` eagerly."""
+    """PEP 562 lazy ``bw`` attribute (tests monkeypatch ``secrets_cli.bw``); an eager binding
+    would re-import ``cryptography`` at import time."""
     if name == "bw":
         return _load_bw()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -526,12 +523,9 @@ _REGION_PRESETS = [
 def _resolve_server_url(
     args: argparse.Namespace, secrets_cfg: dict, console: Console,
 ) -> Optional[str]:
-    """Pick a Bitwarden server URL for setup.
-
-    Resolution order: ``--server-url`` flag, ``BWS_SERVER_URL`` env var (already set in the shell),
-    existing ``secrets.bitwarden.server_url`` (re-runs), then the interactive US / EU / self-hosted
-    menu. None (after printing) when a custom URL is left empty.
-    """
+    """Pick a Bitwarden server URL: ``--server-url``, then ``BWS_SERVER_URL``, then the existing
+    ``secrets.bitwarden.server_url``, then the interactive US / EU / self-hosted menu. None (after
+    printing) when a custom URL is left empty."""
     if args.server_url and args.server_url.strip():
         return args.server_url.strip()
 

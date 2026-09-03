@@ -138,29 +138,22 @@ class _SetupNavigationState:
     """Per-invocation navigation state for the synchronous setup wizard."""
 
     def __init__(self, *, section_index: int = -1, prompt_index: int = 0):
-        self.section_index = section_index
+        self.reset(section_index)
         self.prompt_index = prompt_index
-        self.active_prompt_index = -1
-        self.resolved_choices: list[object] = []
-        self.replay_choices: list[object] = []
 
     def reset(self, section_index: int = -1, replay: list | None = None) -> None:
         """Rewind per-section counters (entering a section, or leaving the wizard)."""
         self.section_index = section_index
         self.prompt_index = 0
         self.active_prompt_index = -1
-        self.resolved_choices = []
-        self.replay_choices = copy.deepcopy(replay or [])
+        self.resolved_choices: list[object] = []
+        self.replay_choices: list[object] = copy.deepcopy(replay or [])
 
 
-_SETUP_NAVIGATION: ContextVar[_SetupNavigationState | None] = ContextVar(
-    "hermes_setup_navigation", default=None
-)
+_SETUP_NAVIGATION: ContextVar[_SetupNavigationState | None] = ContextVar("hermes_setup_navigation", default=None)
 
 
-def _handle_setup_menu_navigation(
-    event: MenuNavigationEvent, value: object = None
-) -> MenuNavigationStart | None:
+def _handle_setup_menu_navigation(event: MenuNavigationEvent, value: object = None) -> MenuNavigationStart | None:
     """Translate shared curses menu events into setup control flow."""
     state = _SETUP_NAVIGATION.get()
     if state is None:
@@ -177,14 +170,8 @@ def _handle_setup_menu_navigation(
         return MenuNavigationStart(allow_back=allow_back)
     if event is MenuNavigationEvent.RESOLVE:
         prompt_index = state.active_prompt_index
-        if prompt_index < 0:
-            return None
-        resolved = copy.deepcopy(value)
-        if prompt_index < len(state.resolved_choices):
-            state.resolved_choices[prompt_index] = resolved
-            del state.resolved_choices[prompt_index + 1 :]
-        else:
-            state.resolved_choices.append(resolved)
+        if prompt_index >= 0:  # replace this answer and drop every later one
+            state.resolved_choices[prompt_index:] = [copy.deepcopy(value)]
         return None
     if event is MenuNavigationEvent.CANCEL:
         raise _SetupCancelled()
@@ -207,11 +194,9 @@ def _setup_navigation_scope():
 
 
 def _run_setup_steps(steps: list[tuple[str, Callable[[], None]]]) -> None:
-    """Run setup sections with left-arrow navigation between choices.
-
-    Left arrow at a section's first choice returns to the previous section; from a later, nested
-    choice it replays earlier selections invisibly and reopens only the preceding prompt.
-    """
+    """Run setup sections with left-arrow navigation: at a section's first choice it returns to
+    the previous section; from a later choice it replays earlier selections invisibly and reopens
+    only the preceding prompt."""
     state = _SETUP_NAVIGATION.get()
     section_index = 0
     answers_by_section: dict[int, list[object]] = {}
@@ -256,11 +241,8 @@ def _run_setup_steps(steps: list[tuple[str, Callable[[], None]]]) -> None:
 def run_setup_action_with_navigation(
     label: str, action: Callable[[], None], *, cancelled_message: str = "Setup cancelled."
 ) -> None:
-    """Run a setup-style menu flow with Escape and nested Left navigation.
-
-    Shared commands such as ``hermes model`` use the wizard's pickers outside ``run_setup_wizard``;
-    this installs the navigation context for them and reuses the prompt replay state machine.
-    """
+    """Run a setup-style menu flow with Escape and nested Left navigation — for commands such as
+    ``hermes model`` that use the wizard's pickers outside ``run_setup_wizard``."""
     with _setup_navigation_scope():
         try:
             _run_setup_steps([(label, action)])
@@ -278,12 +260,9 @@ def _curses_prompt_choice(question: str, choices: list, default: int = 0, descri
 
 
 def prompt_choice(question: str, choices: list, default: int = 0, description: str | None = None) -> int:
-    """Prompt for a choice from a list with arrow key navigation.
-
-    Escape cancels an active setup wizard; outside setup it keeps the default. The curses
-    component owns its own numbered fallback, so a cancel result must never be mistaken for a
-    request to open another prompt. Ctrl+C exits the wizard.
-    """
+    """Prompt for a choice from a list with arrow key navigation. Escape cancels an active setup
+    wizard; outside setup it keeps the default (the curses component owns its own numbered
+    fallback, so a cancel result must never open another prompt). Ctrl+C exits the wizard."""
     idx = _curses_prompt_choice(question, choices, default, description=description)
     if idx < 0:
         return default
@@ -295,22 +274,15 @@ def prompt_choice(question: str, choices: list, default: int = 0, description: s
 
 
 def is_noninteractive() -> bool:
-    """True when no human is available to answer a prompt.
-
-    The dashboard/desktop spawn CLI actions with ``stdin=DEVNULL`` and ``HERMES_NONINTERACTIVE=1``
-    (see ``hermes_cli/web_server.py``); there ``input()`` raises ``EOFError`` immediately, and a
-    prompt that aborts on EOF would kill the spawned action. Honour the flag so callers fall back
-    to their default.
-    """
+    """True when no human is available to answer a prompt: the dashboard/desktop spawn CLI actions
+    with ``stdin=DEVNULL`` and ``HERMES_NONINTERACTIVE=1`` (``hermes_cli/web_server.py``), where a
+    prompt that aborts on EOF would kill the spawned action — callers fall back to their default."""
     return os.environ.get("HERMES_NONINTERACTIVE", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def prompt_yes_no(question: str, default: bool = True) -> bool:
-    """Prompt for yes/no. Ctrl+C exits, empty input returns default.
-
-    Non-interactive callers (``HERMES_NONINTERACTIVE=1`` or a closed/redirected stdin) have no
-    one to answer, so fall back to ``default`` instead of aborting the whole process.
-    """
+    """Prompt for yes/no. Ctrl+C exits; empty input, ``HERMES_NONINTERACTIVE=1`` or a
+    closed/redirected stdin return ``default`` instead of aborting the whole process."""
     if is_noninteractive():
         return default
     # Inside setup, route binary selections through the curses menu so ESC and left-arrow work
@@ -340,11 +312,8 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
 
 
 def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list:
-    """Multi-select checklist; returns the sorted indices of selected items.
-
-    ``pre_selected`` indices start checked; Space toggles, Enter on the appended "Continue →"
-    confirms, cancel keeps the pre-selection. Numbered fallback when curses is unavailable.
-    """
+    """Multi-select checklist; returns the sorted indices of selected items. ``pre_selected``
+    start checked; Space toggles, Enter confirms, cancel keeps the pre-selection."""
     from hermes_cli.curses_ui import curses_checklist
     pre = set(pre_selected or [])
     return sorted(curses_checklist(title, items, pre, cancel_returns=pre))
@@ -398,12 +367,9 @@ def _print_banner(*lines: str) -> None:
 
 
 def setup_model_provider(config: dict, *, quick: bool = False):
-    """Configure the inference provider and default model.
-
-    Delegates to the ``hermes model`` flow (provider picker, credential prompting, model pick,
-    persistence) so there is one code path — any provider added there is available here.
-    *quick* skips credential rotation, vision and TTS (first-time quick setup).
-    """
+    """Configure the inference provider and default model via the ``hermes model`` flow (one code
+    path — any provider added there is available here). *quick* is accepted for the first-time
+    quick setup caller; rotation, vision and TTS keep safe defaults either way."""
     from hermes_cli.config import load_config, save_config
     print_header("Inference Provider")
     _info("Choose how to connect to your main chat model.",
@@ -465,8 +431,7 @@ def _prompt_int_setting(section: dict, key: str, label: str, current, accept) ->
 
 
 _TOOL_PROGRESS_HELP = (
-    "Tool Progress Display",
-    "Controls how much tool activity is shown (CLI and messaging).",
+    "Tool Progress Display", "Controls how much tool activity is shown (CLI and messaging).",
     "  off     — Silent, just the final response",
     "  new     — Show tool name only when it changes (less noise)",
     "  all     — Show every tool call with a short preview",
@@ -475,14 +440,11 @@ _TOOL_PROGRESS_HELP = (
 )
 _SESSION_RESET_HELP = (
     "Messaging sessions (Telegram, Discord, etc.) accumulate context over time.",
-    "Each message adds to the conversation history, which means growing API costs.",
-    "",
+    "Each message adds to the conversation history, which means growing API costs.", "",
     "To manage this, sessions can automatically reset after a period of inactivity",
     "or at a fixed time each day. When a reset happens, the agent saves important",
-    "things to its persistent memory first — but the conversation context is cleared.",
-    "",
-    "You can also manually reset anytime by typing /reset in chat.",
-    "",
+    "things to its persistent memory first — but the conversation context is cleared.", "",
+    "You can also manually reset anytime by typing /reset in chat.", "",
 )
 _SESSION_RESET_CHOICES = [
     "Inactivity + daily reset (reset whichever comes first)",
@@ -517,9 +479,7 @@ def setup_agent_settings(config: dict):
         print_success(f"Max iterations set to {max_iter}")
 
     # ── Tool Progress Display ──
-    print_info("")
-    for line in _TOOL_PROGRESS_HELP:
-        print_info(line)
+    _info("", *_TOOL_PROGRESS_HELP)
 
     current_mode = cfg_get(config, "display", "tool_progress", default="all")
     mode = prompt("Tool progress mode", current_mode)
@@ -544,8 +504,7 @@ def setup_agent_settings(config: dict):
 
     # ── Session Reset Policy ──
     print_header("Session Reset Policy")
-    for line in _SESSION_RESET_HELP:
-        print_info(line)
+    _info(*_SESSION_RESET_HELP)
 
     current_policy = config.get("session_reset", {})
     current_mode = current_policy.get("mode", "none")
@@ -591,16 +550,14 @@ def setup_tools(config: dict, first_install: bool = False):
 
 
 _SEND_CONSENT_EXPLAINER = (
-    "",
-    "Sending uploads each daily package to the Nous telemetry",
+    "", "Sending uploads each daily package to the Nous telemetry",
     "service. Packages carry your profile-scoped install ID, a",
     "stable random UUID that identifies this profile across days",
     "(it contains no personal information and is reset by deleting",
     "the shared-metrics directory). Only packages whose entire",
     "collection period falls inside a recorded consent window are",
     "ever sent — data from before you opt in, or from any gap",
-    "while sending was off, stays on this machine. Sending can be",
-    "turned off again at any time.",
+    "while sending was off, stays on this machine. Sending can be", "turned off again at any time.",
 )
 
 
@@ -625,8 +582,7 @@ def setup_telemetry(config: dict):
         return
 
     print_success("Local shared metrics enabled.")
-    for line in _SEND_CONSENT_EXPLAINER:
-        print_info(line)
+    _info(*_SEND_CONSENT_EXPLAINER)
     shared_metrics["send"] = prompt_yes_no("Send shared metrics to Nous?", default=shared_metrics.get("send") is True)
     _record_send_consent_change(enabled=shared_metrics["send"])
     if shared_metrics["send"]:
@@ -811,15 +767,12 @@ def _run_setup_wizard_impl(args):
 
     # Existing installation == a provider is configured
     from hermes_cli.auth import get_active_provider
-    is_existing = bool(
-        get_env_value("OPENROUTER_API_KEY") or get_env_value("OPENAI_BASE_URL") or get_active_provider() is not None
-    )
-    _print_banner(
-        "│             ⚕ Hermes Agent Setup Wizard                │",
-        "├─────────────────────────────────────────────────────────┤",
-        "│  Let's configure your Hermes Agent installation.       │",
-        "│  Press Ctrl+C at any time to exit.                     │",
-    )
+    is_existing = bool(get_env_value("OPENROUTER_API_KEY") or get_env_value("OPENAI_BASE_URL")
+                       or get_active_provider() is not None)
+    _print_banner("│             ⚕ Hermes Agent Setup Wizard                │",
+                  "├─────────────────────────────────────────────────────────┤",
+                  "│  Let's configure your Hermes Agent installation.       │",
+                  "│  Press Ctrl+C at any time to exit.                     │")
 
     migration_ran = False
     if is_existing:

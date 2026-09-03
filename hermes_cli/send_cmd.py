@@ -93,10 +93,8 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
 
     platforms = dict(raw.get("platforms") or {})
 
-    # Merge in configured-but-undiscovered platforms so `--list` never hides a working send
-    # target: the directory only holds platforms the gateway has discovered channels for, so a
-    # platform configured via env/config.yaml that never ran discovery (e.g. a fresh SimpleX
-    # setup used only for outbound `hermes send`) would otherwise be invisible.
+    # Merge in configured-but-undiscovered platforms (e.g. a fresh SimpleX setup used only for
+    # outbound sends) so `--list` never hides a working send target.
     try:
         from gateway.config import load_gateway_config
 
@@ -165,9 +163,8 @@ def _load_hermes_env() -> None:
     env_path = home / ".env"
     if load_dotenv and env_path.exists():
         try:
-            # utf-8-sig strips a leading UTF-8 BOM (PowerShell 5.1 Set-Content -Encoding UTF8 /
-            # Notepad) and is a no-op otherwise; plain "utf-8" would keep U+FEFF on the first key
-            # name and silently drop it from os.environ under its canonical name.
+            # utf-8-sig strips a leading BOM (PowerShell 5.1 / Notepad); plain "utf-8" would keep
+            # U+FEFF on the first key name and silently drop it from os.environ.
             load_dotenv(str(env_path), override=True, encoding="utf-8-sig")
         except UnicodeDecodeError:
             try:
@@ -184,16 +181,14 @@ def _load_hermes_env() -> None:
         except Exception:
             pass
 
-    # Bridge top-level config.yaml scalars into the environment (never overriding values already
-    # in the env) so gateway.config.load_gateway_config() sees them.
+    # Bridge top-level config.yaml scalars into the environment (never overriding existing values).
     import os
     config_path = home / "config.yaml"
     if not config_path.exists():
         return
 
     try:
-        # Presence-sensitive env bridge: raw read is deliberate — only keys the user actually
-        # wrote get bridged. Overlay + expansion below.
+        # Raw read is deliberate — only keys the user actually wrote get bridged.
         from hermes_cli.config import read_user_config_raw
         raw = read_user_config_raw(config_path)
     except Exception:
@@ -205,8 +200,7 @@ def _load_hermes_env() -> None:
     except Exception:
         pass
 
-    # Managed scope: overlay administrator-pinned values before bridging to env, so a managed
-    # top-level scalar wins here too. Fail-open via the helper.
+    # Managed scope: administrator-pinned values win here too (fail-open via the helper).
     try:
         from hermes_cli import managed_scope
         raw = managed_scope.apply_managed_overlay(raw if isinstance(raw, dict) else {})
@@ -223,9 +217,7 @@ def _load_hermes_env() -> None:
 
 def cmd_send(args: argparse.Namespace) -> None:
     """Entry point wired into the top-level argparse dispatcher."""
-    # The gateway config loader (used downstream by send_message_tool and the channel directory)
-    # needs platform credentials and home channels in os.environ.
-    _load_hermes_env()
+    _load_hermes_env()  # the downstream gateway config loader reads credentials from os.environ
 
     if getattr(args, "list_targets", False):  # --list short-circuits everything else
         # `hermes send --list telegram` lands "telegram" in the `message` positional.
@@ -259,9 +251,8 @@ def cmd_send(args: argparse.Namespace) -> None:
     # Lazy import keeps `hermes send --help` fast (no tool registry / gateway config stack).
     from tools.send_message_tool import send_message_tool
 
-    # send_message_tool auto-loads gateway config + env and routes to the platform adapter
-    # (bot-token path for Telegram/Discord/Slack/Signal/SMS/WhatsApp; live-adapter path for
-    # plugin platforms). It takes the standard tool-call dict and returns a JSON string.
+    # Routes to the platform adapter (bot-token path for built-ins, live-adapter path for plugin
+    # platforms); takes the standard tool-call dict and returns a JSON string.
     result = send_message_tool({"action": "send", "target": target, "message": message})
     sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False)))
 

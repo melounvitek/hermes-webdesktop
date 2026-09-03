@@ -47,9 +47,7 @@ def _run_nous_flow(config: dict, *, context: str, cancel_exc: tuple, cancel_line
 
 
 def _run_portal_one_shot(config: dict) -> None:
-    """One-shot Nous Portal setup (``hermes setup --portal`` / ``hermes portal``); the login,
-    model pick and Tool Gateway opt-in are delegated to ``_model_flow_nous`` so ``hermes portal``
-    always offers a picker."""
+    """One-shot Nous Portal setup (``hermes setup --portal`` / ``hermes portal``)."""
     from hermes_cli.setup import _info, _print_banner, print_error, print_info, print_success
     _print_banner("│     ⚕ Hermes Setup — Nous Portal (one-shot)             │")
     _info(None, "  One subscription, 300+ models, plus the Tool Gateway:",
@@ -79,8 +77,8 @@ def _run_portal_one_shot(config: dict) -> None:
 
 
 def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
-    """Streamlined first-time setup via Nous Portal: OAuth, model, terminal & messaging.
-    Everything else gets sensible defaults (``hermes setup <section>`` / ``hermes model`` later)."""
+    """Streamlined first-time setup via Nous Portal: OAuth, model, terminal & messaging;
+    everything else gets defaults."""
     from hermes_cli.setup import (
         _apply_default_agent_settings, _info, print_header, print_info, _print_macos_fda_tip,
         _print_setup_summary, print_success, print_warning, prompt_choice, save_config, setup_gateway,
@@ -134,10 +132,9 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
 
 
 def _print_macos_fda_tip() -> None:
-    """One-time macOS onboarding tip: a single Full Disk Access grant kills every per-folder
-    permission prompt. Same prompt-free probe as doctor's check_macos_full_disk_access (the TCC
-    db dir is FDA-gated but probing it never triggers a dialog). Silent on non-macOS and when FDA
-    is already granted or indeterminate."""
+    """One-time macOS tip: one Full Disk Access grant kills every per-folder prompt. Same
+    prompt-free probe as doctor's check_macos_full_disk_access (the FDA-gated TCC dir never
+    triggers a dialog); silent on non-macOS and when FDA is granted or indeterminate."""
     from hermes_cli.setup import _info
     if sys.platform != "darwin":
         return
@@ -156,16 +153,11 @@ def _print_macos_fda_tip() -> None:
 
 
 def _blank_slate_minimal_toolsets(config: dict):
-    """Write the minimal toolset state for a Blank Slate install.
-
-    Only ``file``, ``terminal``, ``vision`` and ``skills`` stay on: ``read_file`` can't read images
-    (it points at ``vision_analyze``), and the always-seeded ``hermes-agent`` skill needs
-    ``skill_view``. Two layers enforce the selection: ``platform_toolsets["cli"]`` (an explicit
-    list the resolver treats as authoritative, so defaults aren't re-expanded) and
-    ``agent.disabled_toolsets`` (global hard-suppression applied last in ``_get_platform_tools``,
-    overriding even the platform-toolset recovery that would re-add e.g. ``kanban``). Users
-    re-enable via ``hermes tools`` or by editing ``agent.disabled_toolsets``.
-    """
+    """Write the minimal toolset state for a Blank Slate install: only ``file``, ``terminal``,
+    ``vision`` (``read_file`` can't read images) and ``skills`` (the seeded ``hermes-agent`` skill
+    needs ``skill_view``) stay on. Two layers enforce it: ``platform_toolsets["cli"]`` (explicit,
+    so defaults aren't re-expanded) and ``agent.disabled_toolsets`` (hard-suppression applied last
+    in ``_get_platform_tools``, overriding the recovery that would re-add e.g. ``kanban``)."""
     keep = {"file", "terminal", "vision", "skills"}
     config.setdefault("platform_toolsets", {})["cli"] = sorted(keep)
 
@@ -191,9 +183,7 @@ def _blank_slate_minimal_toolsets(config: dict):
 
 
 def _blank_slate_minimize_config(config: dict):
-    """Turn OFF the optional config features (compression, memory/profile capture, checkpoints,
-    smart routing, auto session reset; quiet display). All opt-in afterwards via
-    ``hermes setup agent`` / ``hermes config set``."""
+    """Turn OFF every optional config feature; all opt back in via ``hermes setup agent``."""
     config.setdefault("agent", {})["max_turns"] = 90
     config.setdefault("compression", {})["enabled"] = False
     mem = config.setdefault("memory", {})
@@ -221,9 +211,8 @@ def _set_bundled_skills_opt_out(opt_out: bool, log_label: str, on_success=None, 
 
 
 def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
-    """Blank Slate setup — essentials only (provider/model, file + terminal), everything else OFF;
-    then either finish now or walk through opting capabilities back in. Nothing is enabled that
-    the user did not explicitly choose."""
+    """Blank Slate setup — essentials only, everything else OFF; then finish now or walk through
+    opting capabilities back in. Nothing is enabled that the user did not explicitly choose."""
     from hermes_cli.setup import (
         _blank_slate_minimal_toolsets, _blank_slate_minimize_config, _blank_slate_walkthrough, _info,
         print_header, print_info, _print_setup_summary, print_success, prompt_choice, save_config,
