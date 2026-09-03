@@ -519,6 +519,19 @@ def _is_retired(conn: sqlite3.Connection, room_id: str) -> bool:
     return conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone() is not None
 
 
+def _room_row(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...], room_id: str) -> sqlite3.Row:
+    """Fetch one hosted_rooms row or raise the precise not-found/expired error."""
+    row = conn.execute(sql, params).fetchone()
+    if row is None:
+        _raise_room_not_found(conn, room_id)
+    return row
+
+
+def _require_authority(room: sqlite3.Row, gateway_id: str, epoch: int, message: str) -> None:
+    if str(room["authority_gateway_id"]) != gateway_id or int(room["authority_epoch"]) != epoch:
+        raise AuthorityConflictError(message)
+
+
 def _reload(conn: sqlite3.Connection, sql: str, params: tuple, missing: str) -> sqlite3.Row:
     """Re-read a row this transaction just wrote; a miss is an invariant violation."""
     row = conn.execute(sql, params).fetchone()
@@ -1012,9 +1025,7 @@ def rename_room(
     actor_json = _system_actor_json("room-control")
     payload_json = _payload_json({"name": name})
     with _transaction(db_path, immediate=True) as conn:
-        room = conn.execute(_SELECT_ROOM_WITH_BYTES, (room_id,)).fetchone()
-        if room is None:
-            _raise_room_not_found(conn, room_id)
+        room = _room_row(conn, _SELECT_ROOM_WITH_BYTES, (room_id,), room_id)
         if room["disbanded_at"] is not None:
             raise RoomNotFoundError("hosted room not found")
         existing = _load_event(conn, room_id, event_id)
@@ -1068,13 +1079,11 @@ def append_event(
             if _event_content(existing) != (kind, actor_json, authority_epoch, payload_json):
                 raise EventConflictError("event_id already exists with different content")
             return _event_from_row(existing, idempotent=True)
-        room = conn.execute(
+        room = _room_row(
+            conn,
             """SELECT next_seq, event_bytes, authority_gateway_id, authority_epoch
-                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
-        if room is None:
-            _raise_room_not_found(conn, room_id)
-        if room["authority_gateway_id"] != authority_gateway_id or int(room["authority_epoch"]) != authority_epoch:
-            raise AuthorityConflictError("stale hosted room authority")
+                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,), room_id)
+        _require_authority(room, authority_gateway_id, authority_epoch, "stale hosted room authority")
         seq = int(room["next_seq"])
         event_bytes = _insert_event(
             conn, room, room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, now,
@@ -1138,12 +1147,11 @@ def room_state(db_path: Path | str, *, room_id: Any, include_disbanded: bool = F
     """Return durable replay and authority state for one room."""
     room_id = _room_id(room_id)
     with _transaction(db_path) as conn:
-        row = conn.execute(
+        row = _room_row(
+            conn,
             f"""SELECT {_ROOM_COLUMNS} FROM hosted_rooms WHERE room_id=? AND (disbanded_at IS NULL
                 OR ?)""",
-            (room_id, int(include_disbanded))).fetchone()
-        if row is None:
-            _raise_room_not_found(conn, room_id)
+            (room_id, int(include_disbanded)), room_id)
         claim_row = conn.execute(
             f"""SELECT {_EVENT_COLUMNS} FROM hosted_room_events WHERE room_id=?
                 AND kind='authority.claimed' AND authority_epoch=? ORDER BY seq DESC LIMIT 1""",
@@ -1205,11 +1213,10 @@ def claim_authority(
     claim_payload_json = _claim_payload_json(expected_gateway_id, new_gateway_id, target_epoch)
 
     with _transaction(db_path, immediate=True) as conn:
-        row = conn.execute(
+        row = _room_row(
+            conn,
             """SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes
-                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,)).fetchone()
-        if row is None:
-            _raise_room_not_found(conn, room_id)
+                FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL""", (room_id,), room_id)
         current_gateway = str(row["authority_gateway_id"])
         current_epoch = int(row["authority_epoch"])
         existing_event = _load_event(conn, room_id, event_id)
@@ -1220,9 +1227,8 @@ def claim_authority(
                 raise EventConflictError("event_id already exists with different content")
             if current_gateway != new_gateway_id or current_epoch != target_epoch:
                 raise AuthoritySupersededError("authority claim succeeded but was later superseded")
-        elif current_gateway != expected_gateway_id or current_epoch != expected_epoch:
-            raise AuthorityConflictError("hosted room authority changed")
         else:
+            _require_authority(row, expected_gateway_id, expected_epoch, "hosted room authority changed")
             existing_event = _append_authority_claim(
                 conn, row, room_id=room_id, event_id=event_id, expected_gateway_id=expected_gateway_id,
                 expected_epoch=expected_epoch, new_gateway_id=new_gateway_id, target_epoch=target_epoch,
@@ -1274,8 +1280,7 @@ def disband_room(
         replay = _disband_replay(conn, room_id, room)
         if replay is not None:
             return replay
-        if str(room["authority_gateway_id"]) != expected_gateway_id or int(room["authority_epoch"]) != expected_epoch:
-            raise AuthorityConflictError("stale hosted room authority")
+        _require_authority(room, expected_gateway_id, expected_epoch, "stale hosted room authority")
         disband_bytes = _insert_event(
             conn, room, room_id, int(room["next_seq"]), "system:room-disbanded", "room.disbanded",
             _system_actor_json("room-control"), int(room["authority_epoch"]),
@@ -1294,7 +1299,7 @@ def disband_room(
             conn, _SELECT_EVENT, (room_id, "system:room-disbanded"),
             "room disband event could not be reloaded")
         _prune_disbanded_rooms_locked(conn, now=now, max_gateway_event_bytes=MAX_GATEWAY_EVENT_BYTES)
-    return {"room_id": room_id, "disbanded_at": now, "idempotent": False, "event": _event_from_row(event), }
+    return {"room_id": room_id, "disbanded_at": now, "idempotent": False, "event": _event_from_row(event)}
 
 
 def read_events(
@@ -1306,11 +1311,10 @@ def read_events(
     limit = _bounded_limit(limit, MAX_LOG_LIMIT)
 
     with _transaction(db_path) as conn:
-        room = conn.execute(
+        room = _room_row(
+            conn,
             """SELECT next_seq, authority_gateway_id, authority_epoch FROM hosted_rooms
-                WHERE room_id=? AND (disbanded_at IS NULL OR ?)""", (room_id, int(include_disbanded))).fetchone()
-        if room is None:
-            _raise_room_not_found(conn, room_id)
+                WHERE room_id=? AND (disbanded_at IS NULL OR ?)""", (room_id, int(include_disbanded)), room_id)
         latest_seq = int(room["next_seq"]) - 1
         authority = {"gateway_id": str(room["authority_gateway_id"]), "epoch": int(room["authority_epoch"])}
         if since_seq > latest_seq:
