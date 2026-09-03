@@ -90,12 +90,11 @@ def _maybe_upgrade_client() -> None:
             outcome = install_specs([f"hindsight-client>={_MIN_CLIENT_VERSION}"], timeout=120)
             if outcome.ok:
                 logger.info("hindsight-client upgraded to >=%s", _MIN_CLIENT_VERSION)
-            elif outcome.blocked:
-                logger.warning("Auto-upgrade unavailable: %s. Run: uv pip install 'hindsight-client>=%s'",
-                               outcome.reason, _MIN_CLIENT_VERSION)
             else:
-                logger.warning("Auto-upgrade failed: %s. Run: uv pip install 'hindsight-client>=%s'",
-                               (outcome.stderr or "").strip() or "install error", _MIN_CLIENT_VERSION)
+                what, why = (("unavailable", outcome.reason) if outcome.blocked
+                             else ("failed", (outcome.stderr or "").strip() or "install error"))
+                logger.warning("Auto-upgrade %s: %s. Run: uv pip install 'hindsight-client>=%s'",
+                               what, why, _MIN_CLIENT_VERSION)
     except Exception:
         pass  # packaging not available or other issue — proceed anyway
 
@@ -431,9 +430,9 @@ class HindsightMemoryProvider(MemoryProvider):
             mode = cfg.get("mode", "cloud")
             if mode in _LOCAL_MODES:
                 return _check_local_runtime()[0]
-            if mode == "local_external":
-                return True
-            return bool(_cloud_api_key(cfg)) or bool(cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", ""))
+            return mode == "local_external" or bool(
+                _cloud_api_key(cfg) or cfg.get("api_url") or os.environ.get("HINDSIGHT_API_URL", "")
+            )
         except Exception:
             return False
 
@@ -533,18 +532,18 @@ class HindsightMemoryProvider(MemoryProvider):
         llm_provider = _daemon_llm_provider(cfg.get("llm_provider", ""))
         logger.debug("Creating HindsightEmbedded client (profile=%s, provider=%s)",
                      cfg.get("profile", "hermes"), llm_provider)
+        self._idle_timeout = self._int_setting(
+            "idle_timeout", "HINDSIGHT_IDLE_TIMEOUT", _DEFAULT_IDLE_TIMEOUT, env_default=self._idle_timeout,
+        )
         kwargs = dict(
             profile=cfg.get("profile", "hermes"),
             llm_provider=llm_provider,
             llm_api_key=cfg.get("llmApiKey") or cfg.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", ""),
             llm_model=cfg.get("llm_model", ""),
+            idle_timeout=self._idle_timeout,
         )
         if self._llm_base_url:
             kwargs["llm_base_url"] = self._llm_base_url
-        self._idle_timeout = self._int_setting(
-            "idle_timeout", "HINDSIGHT_IDLE_TIMEOUT", _DEFAULT_IDLE_TIMEOUT, env_default=self._idle_timeout,
-        )
-        kwargs["idle_timeout"] = self._idle_timeout
         return HindsightEmbedded(**kwargs)
 
     def _new_cloud_client(self):
@@ -638,11 +637,8 @@ class HindsightMemoryProvider(MemoryProvider):
         """Record the async ``operation_id``/``operation_ids`` of an aretain_batch reply
         (pending until recall-visible). No id (older API / sync completion) leaves
         only the local queue drain as a signal."""
-        ids: list[str] = []
-        single = getattr(retain_response, "operation_id", None)
-        if single:
-            ids.append(str(single))
-        ids.extend(str(op) for op in (getattr(retain_response, "operation_ids", None) or []) if op)
+        raw_ids = [getattr(retain_response, "operation_id", None), *(getattr(retain_response, "operation_ids", None) or [])]
+        ids = [str(op) for op in raw_ids if op]
         if not ids:
             return
         self._retain_ops_bank_id = bank_id
@@ -757,9 +753,8 @@ class HindsightMemoryProvider(MemoryProvider):
         self._config = cfg = _load_config()
         for name in _SESSION_KWARGS:
             setattr(self, f"_{name}", str(kwargs.get(name) or "").strip())
-        self._turn_index = 0
+        self._turn_index = self._last_retained_turn_count = 0
         self._session_turns = []
-        self._last_retained_turn_count = 0
         self._mode = cfg.get("mode", "cloud")
         self._timeout = self._int_setting("timeout", "HINDSIGHT_TIMEOUT", _DEFAULT_TIMEOUT)
         self._idle_timeout = self._int_setting("idle_timeout", "HINDSIGHT_IDLE_TIMEOUT", _DEFAULT_IDLE_TIMEOUT)
@@ -925,11 +920,7 @@ class HindsightMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         mode = self._memory_mode if self._memory_mode in ("context", "tools") else "hybrid"
         label = "" if mode == "hybrid" else f" ({mode} mode)"
-        return (
-            f"# Hindsight Memory\n"
-            f"Active{label}. Bank: {self._bank_id}, budget: {self._budget}.\n"
-            f"{_SYSTEM_PROMPT_TAILS[mode]}"
-        )
+        return f"# Hindsight Memory\nActive{label}. Bank: {self._bank_id}, budget: {self._budget}.\n{_SYSTEM_PROMPT_TAILS[mode]}"
 
     # -- recall ------------------------------------------------------------------
 
@@ -946,16 +937,23 @@ class HindsightMemoryProvider(MemoryProvider):
         return False
 
     def _recall_kwargs(self, query: str) -> dict:
-        kwargs: dict = {
-            "bank_id": self._bank_id, "query": query,
-            "budget": self._budget, "max_tokens": self._recall_max_tokens,
-        }
+        kwargs: dict = {"bank_id": self._bank_id, "query": query, "budget": self._budget, "max_tokens": self._recall_max_tokens}
         if self._recall_tags:
-            kwargs["tags"] = self._recall_tags
-            kwargs["tags_match"] = self._recall_tags_match
+            kwargs.update(tags=self._recall_tags, tags_match=self._recall_tags_match)
         if self._recall_types:
             kwargs["types"] = self._recall_types
         return kwargs
+
+    def _recall(self, query: str) -> list:
+        recall_kwargs = self._recall_kwargs(query)
+        resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
+        return resp.results or []
+
+    def _reflect(self, query: str) -> str | None:
+        resp = self._run_hindsight_operation(
+            lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget)
+        )
+        return resp.text
 
     def _do_recall(self, query: str) -> _RecallResult:
         """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)."""
@@ -964,13 +962,10 @@ class HindsightMemoryProvider(MemoryProvider):
         try:
             if self._prefetch_method == "reflect":
                 logger.debug("Recall: calling reflect (bank=%s, query_len=%d)", self._bank_id, len(query))
-                resp = self._run_hindsight_operation(lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget))
-                return _RecallResult(resp.text or "", 0)  # synthesis -> no discrete count
-            recall_kwargs = self._recall_kwargs(query)
+                return _RecallResult(self._reflect(query) or "", 0)  # synthesis -> no discrete count
             logger.debug("Recall: calling recall (bank=%s, query_len=%d, budget=%s)",
                          self._bank_id, len(query), self._budget)
-            resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-            results = resp.results or []
+            results = self._recall(query)
             logger.debug("Recall: returned %d results", len(results))
             return _RecallResult("\n".join(f"- {r.text}" for r in results if r.text), len(results))
         except Exception as e:
@@ -1030,8 +1025,7 @@ class HindsightMemoryProvider(MemoryProvider):
             recalled = self._do_recall(query)
             if recalled.text:
                 with self._prefetch_lock:
-                    self._prefetch_result = recalled.text
-                    self._prefetch_count = recalled.count
+                    self._prefetch_result, self._prefetch_count = recalled.text, recalled.count
 
         self._prefetch_thread = _context_thread(_run, "hindsight-prefetch")
         self._prefetch_thread.start()
@@ -1041,10 +1035,8 @@ class HindsightMemoryProvider(MemoryProvider):
     def _build_turn_messages(self, user_content: str, assistant_content: str) -> List[Dict[str, str]]:
         # One conversation turn -> both messages share the turn-level event timestamp.
         now = _event_timestamp()
-        return [
-            {"role": "user", "content": f"{self._retain_user_prefix}: {user_content}", "timestamp": now},
-            {"role": "assistant", "content": f"{self._retain_assistant_prefix}: {assistant_content}", "timestamp": now},
-        ]
+        return [{"role": role, "content": f"{prefix}: {content}", "timestamp": now} for role, prefix, content in
+                (("user", self._retain_user_prefix, user_content), ("assistant", self._retain_assistant_prefix, assistant_content))]
 
     def _build_metadata(self, *, message_count: int, turn_index: int) -> Dict[str, str]:
         metadata: Dict[str, str] = {
@@ -1054,10 +1046,7 @@ class HindsightMemoryProvider(MemoryProvider):
         }
         if self._retain_source:
             metadata["source"] = self._retain_source
-        for name in _METADATA_ATTRS:
-            value = getattr(self, f"_{name}")
-            if value:
-                metadata[name] = value
+        metadata.update({name: value for name in _METADATA_ATTRS if (value := getattr(self, f"_{name}"))})
         return metadata
 
     def _build_retain_kwargs(
@@ -1200,11 +1189,9 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _tool_recall(self, args: dict) -> str:
         query = args["query"]
-        recall_kwargs = self._recall_kwargs(query)
         logger.debug("Tool hindsight_recall: bank=%s, query_len=%d, budget=%s",
                      self._bank_id, len(query), self._budget)
-        resp = self._run_hindsight_operation(lambda client: client.arecall(**recall_kwargs))
-        results = resp.results or []
+        results = self._recall(query)
         logger.debug("Tool hindsight_recall: %d results", len(results))
         if not results:
             return "No relevant memories found."
@@ -1214,11 +1201,9 @@ class HindsightMemoryProvider(MemoryProvider):
         query = args["query"]
         logger.debug("Tool hindsight_reflect: bank=%s, query_len=%d, budget=%s",
                      self._bank_id, len(query), self._budget)
-        resp = self._run_hindsight_operation(
-            lambda client: client.areflect(bank_id=self._bank_id, query=query, budget=self._budget)
-        )
-        logger.debug("Tool hindsight_reflect: response_len=%d", len(resp.text or ""))
-        return resp.text or "No relevant memories found."
+        text = self._reflect(query) or ""
+        logger.debug("Tool hindsight_reflect: response_len=%d", len(text))
+        return text or "No relevant memories found."
 
     # tool name -> (required arg, handler)
     _TOOL_HANDLERS = {
@@ -1274,7 +1259,6 @@ class HindsightMemoryProvider(MemoryProvider):
                     job()
                 except Exception as e:
                     logger.warning("Hindsight flush-on-switch failed: %s", e, exc_info=True)
-
             # Same writer queue as sync_turn: FIFO behind queued old-session retains,
             # no two threads racing aretain_batch on one document, shutdown drain intact.
             if not self._shutting_down.is_set():
@@ -1291,13 +1275,30 @@ class HindsightMemoryProvider(MemoryProvider):
         self._session_id = new_id
         self._document_id = _mint_document_id(new_id)
         self._session_turns = []
-        self._turn_counter = 0
-        self._turn_index = 0
-        self._last_retained_turn_count = 0
+        self._turn_counter = self._turn_index = self._last_retained_turn_count = 0
         logger.debug(
             "Hindsight on_session_switch: new_session=%s parent=%s reset=%s doc=%s",
             self._session_id, self._parent_session_id, reset, self._document_id,
         )
+
+    def _close_client(self) -> None:
+        if self._mode != "local_embedded":
+            self._run_sync(self._client.aclose())
+            return
+        # HindsightEmbedded.close() closes its sync client from this thread ("attached
+        # to a different loop" before aiohttp releases the session): aclose the inner
+        # client on the shared loop first, then let the wrapper clean up bookkeeping.
+        inner_client = getattr(self._client, "_client", None)
+        if inner_client is not None and hasattr(inner_client, "aclose"):
+            _run_sync(inner_client.aclose())
+            try:
+                self._client._client = None
+            except Exception:
+                pass
+        try:
+            self._client.close()
+        except RuntimeError:
+            pass
 
     def shutdown(self) -> None:
         logger.debug("Hindsight shutdown: stopping writer + waiting for background threads")
@@ -1318,23 +1319,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._join_prefetch(5.0)
         if self._client is not None:
             try:
-                if self._mode == "local_embedded":
-                    # HindsightEmbedded.close() closes its sync client from this thread
-                    # ("attached to a different loop" before aiohttp releases the
-                    # session): aclose the inner client on the shared loop first.
-                    inner_client = getattr(self._client, "_client", None)
-                    if inner_client is not None and hasattr(inner_client, "aclose"):
-                        _run_sync(inner_client.aclose())
-                        try:
-                            self._client._client = None
-                        except Exception:
-                            pass
-                    try:
-                        self._client.close()
-                    except RuntimeError:
-                        pass
-                else:
-                    self._run_sync(self._client.aclose())
+                self._close_client()
             except Exception:
                 pass
             self._client = None

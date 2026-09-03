@@ -70,13 +70,16 @@ def _module_name(provider_dir: Path, name: str) -> str:
     return f"plugins.memory.{name}" if _is_bundled(provider_dir) else f"{_USER_NAMESPACE}.{name}"
 
 
+def _external_source_dirs() -> List[Path]:
+    """User then project plugin roots that exist (precedence order)."""
+    return [d for d in (_get_user_plugins_dir(), _get_project_plugins_dir()) if d]
+
+
 def _iter_provider_dirs() -> List[Tuple[str, Path]]:
     """``(name, path)`` for bundled, then user-installed, then project-local; first-seen wins."""
     dirs = [(child.name, child) for child in _loader.iter_plugin_dirs(_MEMORY_PLUGINS_DIR)]
     seen = {name for name, _ in dirs}
-    for source_dir in (_get_user_plugins_dir(), _get_project_plugins_dir()):
-        if not source_dir:
-            continue
+    for source_dir in _external_source_dirs():
         for child in sorted(source_dir.iterdir()):
             if (
                 child.is_dir()
@@ -111,9 +114,7 @@ def find_provider_dir(name: str) -> Optional[Path]:
     bundled = _MEMORY_PLUGINS_DIR / name
     if bundled.is_dir() and (bundled / "__init__.py").exists():
         return bundled
-    for source_dir in (_get_user_plugins_dir(), _get_project_plugins_dir()):
-        if not source_dir:
-            continue
+    for source_dir in _external_source_dirs():
         candidate = source_dir / name
         if candidate.is_dir() and _is_memory_provider_dir(candidate):
             return candidate
@@ -196,9 +197,7 @@ def load_memory_provider(
             return _load_provider_from_dir(provider_dir, register_skills=register_skills)
         return _load_provider_from_entry_point(entry_point, register_skills=register_skills)
 
-    return _loader.load_named(
-        name, provider_dir, _load, kind="Memory provider", noun="provider", logger=logger,
-    )
+    return _loader.load_named(name, provider_dir, _load, kind="Memory provider", noun="provider", logger=logger)
 
 
 def _instantiate_subclass(namespace) -> Optional["MemoryProvider"]:
@@ -207,8 +206,7 @@ def _instantiate_subclass(namespace) -> Optional["MemoryProvider"]:
 
     for attr_name in dir(namespace):
         attr = getattr(namespace, attr_name, None)
-        if (isinstance(attr, type) and issubclass(attr, MemoryProvider)
-                and attr is not MemoryProvider):
+        if isinstance(attr, type) and issubclass(attr, MemoryProvider) and attr is not MemoryProvider:
             try:
                 return attr()
             except Exception:

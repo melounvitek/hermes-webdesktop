@@ -57,6 +57,8 @@ _LANGFUSE_CLIENT_LOCK = threading.Lock()
 _READ_FILE_LINE_RE = re.compile(r"^\s*(\d+)\|(.*)$")
 _READ_FILE_HEAD_LINES = 25
 _READ_FILE_TAIL_LINES = 15
+_READ_FILE_META_KEYS = ("total_lines", "file_size", "truncated", "is_binary", "is_image", "hint",
+                        "_warning", "mime_type", "dimensions", "similar_files", "error")
 
 # Langfuse-issued keys always carry these prefixes. Anything else is a leftover
 # template value: the SDK accepts it at construction time but silently drops
@@ -223,9 +225,8 @@ def _get_langfuse() -> Optional[Langfuse]:
             "secret_key": secret_key,
             "base_url": _env("HERMES_LANGFUSE_BASE_URL") or _env("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com",
         }
-        for key, hermes_name, plain_name in (("environment", "HERMES_LANGFUSE_ENV", "LANGFUSE_ENV"),
-                                             ("release", "HERMES_LANGFUSE_RELEASE", "LANGFUSE_RELEASE")):
-            value = _env(hermes_name) or _env(plain_name)
+        for key, name in (("environment", "ENV"), ("release", "RELEASE")):
+            value = _env(f"HERMES_LANGFUSE_{name}") or _env(f"LANGFUSE_{name}")
             if value:
                 kwargs[key] = value
         sample_rate = _env("HERMES_LANGFUSE_SAMPLE_RATE")
@@ -339,12 +340,9 @@ def _parse_read_file_lines(content: str) -> list[dict[str, Any]]:
 def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> dict[str, Any]:
     normalized: dict[str, Any] = {}
     if isinstance(args, dict):
-        path = args.get("path")
-        if isinstance(path, str) and path:
-            normalized["path"] = path
-        for key in ("offset", "limit"):
-            if isinstance(args.get(key), int):
-                normalized[key] = args[key]
+        if isinstance(args.get("path"), str) and args["path"]:
+            normalized["path"] = args["path"]
+        normalized.update({key: args[key] for key in ("offset", "limit") if isinstance(args.get(key), int)})
 
     lines = _parse_read_file_lines(value.get("content", ""))
     if lines:
@@ -361,10 +359,7 @@ def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> 
     elif value.get("content"):
         normalized["content_preview"] = {"text": value.get("content", "")}
 
-    for key in ("total_lines", "file_size", "truncated", "is_binary", "is_image", "hint",
-                "_warning", "mime_type", "dimensions", "similar_files", "error"):
-        if key in value:
-            normalized[key] = value[key]
+    normalized.update({key: value[key] for key in _READ_FILE_META_KEYS if key in value})
 
     base64_content = value.get("base64_content")
     if isinstance(base64_content, str) and base64_content:
@@ -441,12 +436,8 @@ def _serialize_system_prompt(system_prompt: Any) -> Optional[dict[str, Any]]:
         for block in system_prompt:
             if isinstance(block, dict):
                 # Anthropic: {"type": "text", "text": ...}; Bedrock Converse: {"text": ...}.
-                block_type = block.get("type")
-                if block_type == "text" or (block_type is None and "text" in block):
-                    piece = block.get("text", "")
-                    if isinstance(piece, str) and piece:
-                        parts.append(piece)
-            elif isinstance(block, str) and block:
+                block = block.get("text", "") if block.get("type") in ("text", None) and "text" in block else None
+            if isinstance(block, str) and block:
                 parts.append(block)
         text = "\n\n".join(parts)
     else:
@@ -481,9 +472,9 @@ def _serialize_messages(messages: Any) -> list[dict[str, Any]]:
         item = {"role": role, "content": _capture_content(message.get("content"), parse_json_strings=(role == "tool"))}
         if role == "tool":
             if message.get("tool_call_id"):
-                item["tool_call_id"] = message.get("tool_call_id")
+                item["tool_call_id"] = message["tool_call_id"]
             if message.get("name"):
-                item["name"] = _safe_value(message.get("name"))
+                item["name"] = _safe_value(message["name"])
         if message.get("tool_calls"):
             item["tool_calls"] = _capture_content(message.get("tool_calls"), parse_json_strings=True)
         serialized.append(item)
@@ -612,9 +603,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         "capture_mode": _capture_mode(),
     }
     # session_id must be in trace_context for Langfuse session grouping.
-    trace_ctx: Dict[str, Any] = {"trace_id": trace_id}
-    if session_id:
-        trace_ctx["session_id"] = session_id
+    trace_ctx: Dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
 
     def open_root():
         ctx = client.start_as_current_observation(
@@ -658,12 +647,9 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
     if observation is None:
         return
     try:
-        update_kwargs: Dict[str, Any] = {}
-        if output is not None:
-            update_kwargs["output"] = output
-        for key, val in (("metadata", metadata), ("usage_details", usage_details), ("cost_details", cost_details)):
-            if val:
-                update_kwargs[key] = val
+        update_kwargs: Dict[str, Any] = {} if output is None else {"output": output}
+        update_kwargs.update({k: v for k, v in (("metadata", metadata), ("usage_details", usage_details),
+                                                ("cost_details", cost_details)) if v})
         if update_kwargs:
             observation.update(**update_kwargs)
         observation.end()
@@ -791,6 +777,19 @@ def _request_key(api_call_count: Any) -> str:
     return str(api_call_count or 0)
 
 
+def _client_and_key(task_id: str, session_id: str, turn_id: str, api_request_id: str) -> tuple[Any, str]:
+    """(client, trace key) for a hook; client is None when tracing is unavailable."""
+    client = _get_langfuse()
+    if client is None:
+        return None, ""
+    return client, _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
+
+
+def _add_duration(metadata: Dict[str, Any], api_duration: Any) -> None:
+    if api_duration and api_duration > 0:
+        metadata["api_duration_s"] = round(api_duration, 3)
+
+
 def _pop_generation(task_key: str, api_call_count: Any) -> tuple[Optional[TraceState], Any]:
     """Detach the open generation for one API call. Returns (state, generation); either may be None."""
     with _STATE_LOCK:
@@ -817,11 +816,9 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
     # turn-scoped pre_llm_call would otherwise open an orphan root trace.
     if not isinstance(messages, list):
         return
-    client = _get_langfuse()
+    client, task_key = _client_and_key(task_id, session_id, turn_id, api_request_id)
     if client is None:
         return
-
-    task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     with _STATE_LOCK:
         _get_or_start_state_locked(
             task_key, task_id=task_id, session_id=session_id, platform=platform, provider=provider,
@@ -850,19 +847,13 @@ def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, refe
         if not isinstance(ref, dict):
             continue
         usage = ref.get("usage") or {}
-        usage_details = {}
-        if isinstance(usage, dict):
-            for key, attr, _ in _USAGE_FIELDS:
-                if usage.get(attr):
-                    usage_details[key] = usage[attr]
+        usage_details = {key: usage[attr] for key, attr, _ in _USAGE_FIELDS if usage.get(attr)} if isinstance(usage, dict) else {}
         cost_usd = ref.get("cost_usd")
         cost_details = {"total": float(cost_usd)} if isinstance(cost_usd, (int, float)) else {}
 
         label = ref.get("label") or "advisor"
         metadata = {"moa_role": "reference", "label": label}
-        for key in ("provider", "cost_status", "cost_source", "temperature"):
-            if ref.get(key) is not None:
-                metadata[key] = ref[key]
+        metadata.update({k: ref[k] for k in ("provider", "cost_status", "cost_source", "temperature") if ref.get(k) is not None})
 
         observation = _start_child_observation(
             state, client=client, name=f"MoA advisor: {label}", as_type="generation",
@@ -880,7 +871,7 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
                        approx_input_tokens: int = 0, conversation_history: Any = None,
                        user_message: Any = None, turn_id: str = "", api_request_id: str = "",
                        request: Any = None, system_prompt: Any = None, **_: Any) -> None:
-    client = _get_langfuse()
+    client, task_key = _client_and_key(task_id, session_id, turn_id, api_request_id)
     if client is None:
         return
 
@@ -897,8 +888,6 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
     langfuse_input = _messages_for_langfuse_input(system_prompt=system_prompt, pre_coerced=input_messages)
     has_system = bool(langfuse_input) and langfuse_input[0].get("role") == "system"
     system_chars = len(str(langfuse_input[0].get("content") or "")) if has_system else 0
-
-    task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     req_key = _request_key(api_call_count)
 
     with _STATE_LOCK:
@@ -929,7 +918,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
                      assistant_content_chars: int = 0, assistant_tool_call_count: int = 0,
                      assistant_response: Any = None, turn_id: str = "", api_request_id: str = "",
                      response_model: Any = None, moa_references: Any = None, **_: Any) -> None:
-    client = _get_langfuse()
+    client, task_key = _client_and_key(task_id, session_id, turn_id, api_request_id)
     if client is None:
         return
 
@@ -937,7 +926,6 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     if isinstance(response_model, str) and response_model:
         model = response_model
 
-    task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     state, generation = _pop_generation(task_key, api_call_count)
     if state is None or generation is None:
         return
@@ -955,7 +943,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         output = {
             "content": f"[{assistant_content_chars} chars]" if assistant_content_chars else None,
             "reasoning": None,
-            "tool_calls": [{"id": f"tc_{i}"} for i in range(assistant_tool_call_count)] if assistant_tool_call_count else [],
+            "tool_calls": [{"id": f"tc_{i}"} for i in range(assistant_tool_call_count or 0)],
         }
 
     if output.get("tool_calls"):
@@ -975,8 +963,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
         usage_details, cost_details = {}, {}
 
     gen_metadata: Dict[str, Any] = {"tool_call_count": len(output.get("tool_calls", [])) or assistant_tool_call_count}
-    if api_duration and api_duration > 0:
-        gen_metadata["api_duration_s"] = round(api_duration, 3)
+    _add_duration(gen_metadata, api_duration)
     if finish_reason:
         gen_metadata["finish_reason"] = finish_reason
     _end_observation(generation, output=output, usage_details=usage_details,
@@ -990,11 +977,9 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
 def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = "",
                      session_id: str = "", tool_call_id: str = "",
                      turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
-    client = _get_langfuse()
+    client, task_key = _client_and_key(task_id, session_id, turn_id, api_request_id)
     if client is None:
         return
-
-    task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     with _STATE_LOCK:
         state = _TRACE_STATE.get(task_key)
         if state is None:
@@ -1056,11 +1041,9 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
     """Close (as ERROR) the open generation for a failed API request so the turn
     doesn't look hung until eviction; a non-retryable failure also finishes the
     turn, since the agent loop is about to unwind."""
-    client = _get_langfuse()
+    client, task_key = _client_and_key(task_id, session_id, turn_id, api_request_id)
     if client is None:
         return
-
-    task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     state, generation = _pop_generation(task_key, api_call_count)
     if state is None:
         return
@@ -1070,14 +1053,11 @@ def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_co
 
     # Error messages can embed request fragments (URLs w/ keys, prompt echoes) — capture-pipeline them.
     error_metadata: Dict[str, Any] = {"error": True, "error_type": error_type, "error_message": _capture_content(error_message)}
-    for key, val in (("status_code", status_code), ("retry_count", retry_count),
-                     ("max_retries", max_retries), ("retryable", retryable)):
-        if val is not None:
-            error_metadata[key] = val
+    error_metadata.update({k: v for k, v in (("status_code", status_code), ("retry_count", retry_count),
+                                             ("max_retries", max_retries), ("retryable", retryable)) if v is not None})
     if reason:
         error_metadata["reason"] = str(reason)
-    if api_duration and api_duration > 0:
-        error_metadata["api_duration_s"] = round(api_duration, 3)
+    _add_duration(error_metadata, api_duration)
 
     if generation is not None:
         try:
