@@ -2104,10 +2104,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             if isinstance(stored, (int, float, str)):
                 return True, max(default, coerce(stored))
             return True, None
-        except (TypeError, ValueError, json.JSONDecodeError, sqlite3.Error) as exc:
-            logger.debug("%s lookup failed: %s", label, exc)
         except Exception as exc:
-            logger.debug("%s lookup failed (non-sqlite): %s", label, exc)
+            suffix = "" if isinstance(exc, (TypeError, ValueError, sqlite3.Error)) else " (non-sqlite)"
+            logger.debug("%s lookup failed%s: %s", label, suffix, exc)
         return False, default
 
     def _durable_write(self, method: str, label: str, *args) -> bool:
@@ -2120,27 +2119,30 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         try:
             setter(session_id, *args)
             return True
-        except sqlite3.Error as exc:
-            logger.debug("%s persist failed: %s", label, exc)
         except Exception as exc:
-            logger.debug("%s persist failed (non-sqlite): %s", label, exc)
+            suffix = "" if isinstance(exc, sqlite3.Error) else " (non-sqlite)"
+            logger.debug("%s persist failed%s: %s", label, suffix, exc)
         return False
 
+    def _load_durable(self, attr: str, method: str, label: str, coerce, default, *args) -> None:
+        """Restore ``self.<attr>`` from the bound row; a non-numeric row resets it to ``default``."""
+        found, value = self._durable_read(method, label, coerce, default, *args)
+        if found:
+            setattr(self, attr, default if value is None else value)
+
     def _load_fallback_compression_streak(self) -> None:
-        found, value = self._durable_read(
+        self._load_durable(
+            "_fallback_compression_streak",
             "get_compression_fallback_streak", "compression fallback streak", int, 0,
         )
-        if found:
-            self._fallback_compression_streak = 0 if value is None else value
 
     def _load_proactive_prune_rearm_tokens(self) -> None:
         """Restore the cache-boundary runway for a resumed durable session."""
-        found, value = self._durable_read(
+        self._load_durable(
+            "_proactive_prune_rearm_tokens",
             "get_session_model_config_value", "proactive prune runway", int, 0,
             PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, 0,
         )
-        if found:
-            self._proactive_prune_rearm_tokens = 0 if value is None else value
 
     def _clear_durable_proactive_prune_rearm(self) -> None:
         """Best-effort removal of the persisted prune-runway key; transcript untouched."""
@@ -2157,11 +2159,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _load_ineffective_compression_count(self) -> None:
         """Load the durable anti-thrash strike count so a restart never disarms a guard."""
-        found, value = self._durable_read(
+        self._load_durable(
+            "_ineffective_compression_count",
             "get_compression_ineffective_count", "compression ineffective count", int, 0,
         )
-        if found:
-            self._ineffective_compression_count = 0 if value is None else value
 
     def _persist_ineffective_compression_count(self) -> None:
         self._durable_write(
@@ -2171,11 +2172,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _load_anti_thrash_recovery_deadline(self) -> None:
         """Restore the durable recovery deadline (wall-clock epoch); missing storage leaves it disarmed."""
-        found, value = self._durable_read(
+        self._load_durable(
+            "_anti_thrash_recovery_deadline",
             "get_compression_recovery_deadline", "compression recovery deadline", float, 0.0,
         )
-        if found:
-            self._anti_thrash_recovery_deadline = 0.0 if value is None else value
 
     def _set_anti_thrash_recovery_deadline(self, deadline: float) -> None:
         """Set the recovery deadline, persisting on change only (0 = disarmed)."""
@@ -2288,30 +2288,19 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return local_state
         try:
             state = getter(session_id)
-        except sqlite3.Error as exc:
+        except Exception as exc:
             if refresh:
                 self._last_cooldown_refresh_was_authoritative = False
-            logger.debug("compression failure cooldown lookup failed: %s", exc)
-            return local_state
-        except Exception:
-            if refresh:
-                self._last_cooldown_refresh_was_authoritative = False
+            if isinstance(exc, sqlite3.Error):
+                logger.debug("compression failure cooldown lookup failed: %s", exc)
             return local_state
         if refresh:
             self._last_cooldown_refresh_was_authoritative = True
-        if not state:
-            if refresh:
-                if local_state is not None and self._cooldown_persist_failed:
-                    # Local cooldown never reached the DB, so an empty row is not evidence it was cleared; keep local.
-                    return local_state
-                self._summary_failure_cooldown_until = 0.0
-                self._last_summary_error = None
-            return None
-
-        remaining_seconds = float(state.get("remaining_seconds") or 0.0)
+        remaining_seconds = float(state.get("remaining_seconds") or 0.0) if state else 0.0
         if remaining_seconds <= 0:
             if refresh:
                 if local_state is not None and self._cooldown_persist_failed:
+                    # Local cooldown never reached the DB, so an empty row is not evidence it was cleared; keep local.
                     return local_state
                 self._summary_failure_cooldown_until = 0.0
                 self._last_summary_error = None
@@ -2351,20 +2340,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         session_id = getattr(self, "_session_id", "")
         if not session_db or not session_id:
             return
-
-        recorder = getattr(session_db, "record_compression_failure_cooldown", None)
-        if recorder is None:
-            self._cooldown_persist_failed = True
-            return
-        try:
-            recorder(session_id, cooldown_until, error)
-            self._cooldown_persist_failed = False
-        except sqlite3.Error as exc:
-            self._cooldown_persist_failed = True
-            logger.debug("compression failure cooldown persist failed: %s", exc)
-        except Exception as exc:
-            self._cooldown_persist_failed = True
-            logger.debug("compression failure cooldown persist failed (non-sqlite): %s", exc)
+        # A store without the recorder or a failed write both leave the durable row unauthoritative.
+        self._cooldown_persist_failed = not self._durable_write(
+            "record_compression_failure_cooldown", "compression failure cooldown",
+            cooldown_until, error,
+        )
 
     def record_timeout_failure(self, error: str, failure_kind: str = "timeout") -> None:
         """Record a consecutive timeout/stall failure via the shared ladder.
@@ -2378,38 +2358,18 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _clear_compression_failure_cooldown(self) -> None:
         # Fence check BEFORE cooldown-clear: a late cancelled worker must not undo the host's timeout cooldown.
-        cancelled_check = getattr(self, "_compression_cancelled_check", None)
-        if callable(cancelled_check):
-            try:
-                if cancelled_check():
-                    logger.info(
-                        "Skipping compression cooldown clear: host already "
-                        "cancelled this compression attempt"
-                    )
-                    return
-            except Exception:
-                logger.debug(
-                    "compression cancellation check failed", exc_info=True
-                )
+        if self._compression_cancelled():
+            logger.info(
+                "Skipping compression cooldown clear: host already "
+                "cancelled this compression attempt"
+            )
+            return
         self._summary_failure_cooldown_until = 0.0
         self._last_summary_error = None
         self._consecutive_timeout_failures = 0
         self._cooldown_persist_failed = False
 
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
-        if not session_db or not session_id:
-            return
-
-        clearer = getattr(session_db, "clear_compression_failure_cooldown", None)
-        if clearer is None:
-            return
-        try:
-            clearer(session_id)
-        except sqlite3.Error as exc:
-            logger.debug("compression failure cooldown clear failed: %s", exc)
-        except Exception as exc:
-            logger.debug("compression failure cooldown clear failed (non-sqlite): %s", exc)
+        self._durable_write("clear_compression_failure_cooldown", "compression failure cooldown clear")
 
     def _compression_cancelled(self) -> bool:
         """Read the host-owned cooperative cancellation signal, if installed."""
@@ -2823,18 +2783,15 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _refresh_durable_guards(self) -> None:
         """Re-read durable cooldown + breaker state; called only when a gate is about to block."""
-        try:
-            self.get_active_compression_failure_cooldown(refresh=True)
-        except Exception as exc:
-            logger.debug("compression cooldown refresh failed: %s", exc)
-        try:
-            self._load_fallback_compression_streak()
-        except Exception as exc:
-            logger.debug("compression fallback-streak refresh failed: %s", exc)
-        try:
-            self._load_ineffective_compression_count()
-        except Exception as exc:
-            logger.debug("compression ineffective-count refresh failed: %s", exc)
+        for label, refresh in (
+            ("cooldown", lambda: self.get_active_compression_failure_cooldown(refresh=True)),
+            ("fallback-streak", self._load_fallback_compression_streak),
+            ("ineffective-count", self._load_ineffective_compression_count),
+        ):
+            try:
+                refresh()
+            except Exception as exc:
+                logger.debug("compression %s refresh failed: %s", label, exc)
 
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         """Return whether automatic compaction is in cooldown or tripped.
