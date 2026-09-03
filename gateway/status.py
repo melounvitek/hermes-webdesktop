@@ -188,7 +188,7 @@ def _get_gateway_lock_path(pid_path: Optional[Path] = None) -> Path:
 
 
 def _get_runtime_status_path() -> Path:
-    return _get_pid_path().with_name(_RUNTIME_STATUS_FILE)
+    return _get_process_hermes_home() / _RUNTIME_STATUS_FILE
 
 
 def _get_lock_dir() -> Path:
@@ -893,13 +893,11 @@ def write_runtime_status(
         # old adapter re-emits (removed profiles: forever).
         platforms = payload["platforms"] if isinstance(payload["platforms"], dict) else {}
         payload["platforms"] = {k: v for k, v in platforms.items() if not isinstance(k, str) or ":" not in k}
-    for key in ("kind", "pid", "argv", "start_time"):
-        payload[key] = current_record[key]
+    # Re-stamp identity + code fields on every write: the file can outlive its
+    # creator and the top-level record must describe the CURRENT writer.
+    payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
     payload["updated_at"] = _utc_now_iso()
-    # Re-stamp on every write: the file can outlive its creator and the top-level
-    # record must describe the CURRENT writer's code.
     payload.update(_get_code_identity_fields())
-
     _apply_set_fields(payload, (
         ("gateway_state", gateway_state, None),
         ("exit_reason", exit_reason, None),
@@ -909,7 +907,6 @@ def write_runtime_status(
         ("served_profiles", served_profiles, lambda v: list(v or [])),
         ("session_store", session_store, _coerce_session_store),
     ))
-
     if platform is not _UNSET:
         platform_payload = payload["platforms"].get(platform, {})
         _apply_set_fields(platform_payload, (
@@ -923,15 +920,15 @@ def write_runtime_status(
             # ISO start of the current retry episode; None clears it.
             ("retrying_since", retrying_since, None),
         ))
-        platform_payload["updated_at"] = _utc_now_iso()
         # Per-entry writer provenance: top-level pid/start_time only identify the
-        # most recent writer, so /api/status distinguishes "written by the live
-        # process" from "preserved from a prior one" by exact (pid, start_time)
-        # equality rather than clock heuristics.
-        platform_payload["writer_pid"] = current_record["pid"]
-        platform_payload["writer_start_time"] = current_record["start_time"]
+        # most recent writer, so /api/status tells "written by the live process" from
+        # "preserved from a prior one" by exact (pid, start_time) equality, not clocks.
+        platform_payload.update(
+            updated_at=_utc_now_iso(),
+            writer_pid=current_record["pid"],
+            writer_start_time=current_record["start_time"],
+        )
         payload["platforms"][platform] = platform_payload
-
     _write_json_file(path, payload)
     try:
         from agent.monitoring.gateway_health import emit_runtime_status_transition
@@ -945,9 +942,8 @@ def read_runtime_status(path: Optional[Path] = None) -> Optional[dict[str, Any]]
     return _read_json_file(path or _get_runtime_status_path())
 
 
-# Max age of a ``gateway_state.json`` snapshot before its liveness claim is
-# suspect: an older record with a dead PID outlived an ungracefully-killed
-# writer (taskkill /F, OOM, power loss) that never ran its shutdown handler.
+# Max age of a ``gateway_state.json`` snapshot before its liveness claim is suspect:
+# an older record outlived an ungracefully-killed writer (taskkill /F, OOM, power loss).
 _RUNTIME_STATUS_STALE_TTL_S = 120
 
 
