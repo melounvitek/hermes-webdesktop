@@ -93,6 +93,11 @@ def _tool_calls_count(tool_calls: Any) -> int:
     return 0 if tool_calls is None else (len(tool_calls) if isinstance(tool_calls, list) else 1)
 
 
+def _scrub_surrogates(value: Any) -> Any:
+    """Lone surrogates make sqlite3 raise UnicodeEncodeError and abort the whole write."""
+    return _sanitize_surrogates(value) if isinstance(value, str) else value
+
+
 def _stale_holder(row, now: float) -> bool:
     """A lock/lease row whose holder is expired or a provably dead local process."""
     from hermes_state import _compression_lock_holder_process_is_dead
@@ -242,7 +247,6 @@ class SessionMessagesMixin:
         """Bind values for ``_INSERT_MESSAGE_SQL`` from one message dict. *tool_calls* is the
         already-parsed value; *keep_reasoning* False stores NULL for every reasoning column.
         ``platform_message_id`` falls back to ``message_id`` (yuanbao's message-dict convention)."""
-        from hermes_state import _scrub_surrogates
         _str_or_none = lambda v: _scrub_surrogates(v) if isinstance(v, str) else None  # noqa: E731
         _reasoning = lambda key: msg.get(key) if keep_reasoning else None  # noqa: E731
         return (
@@ -342,7 +346,6 @@ class SessionMessagesMixin:
         newest-active-row-by-content, right after the serial turn has flushed); the model
         still receives ``role``/``content`` unchanged, so producer provenance survives
         without classifying by content at render time."""
-        from hermes_state import _scrub_surrogates
         if not session_id or not content or not display_kind:
             return False
         def _do(conn):
@@ -369,7 +372,6 @@ class SessionMessagesMixin:
         """Set (``emoji=None``: clear) *author*'s reaction. Tapback semantics: one per author
         per message; the same emoji again clears it, a different one replaces it. Returns
         the reaction list after the write, or ``None`` for a foreign row."""
-        from hermes_state import _scrub_surrogates
         if not session_id or message_row_id is None:
             return None
         def _do(conn):
@@ -617,7 +619,6 @@ class SessionMessagesMixin:
         compaction inserts that row BEFORE the sidecar is composed and the later persist
         identity-skips compacted dicts; without this a reload would reopen the prompt-cache
         divergence. The ``content`` match guards a racing rewrite. Returns 0/1."""
-        from hermes_state import _scrub_surrogates
         return self._write_rowcount(
             "UPDATE messages SET api_content = ? WHERE id = (SELECT id FROM messages "
             "WHERE session_id = ? AND role = 'user' AND active = 1 ORDER BY id DESC LIMIT 1"
