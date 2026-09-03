@@ -33,14 +33,9 @@ from agent.model_metadata import is_output_cap_error, parse_available_output_tok
 from agent.retry_utils import is_zai_coding_overload_error, zai_coding_overload_retry_ceiling
 from agent.error_classifier import FailoverReason
 from agent.message_sanitization import (
-    _looks_like_image_content_rejection,
-    _sanitize_messages_non_ascii,
-    _sanitize_messages_surrogates,
-    _sanitize_structure_non_ascii,
-    _sanitize_structure_surrogates,
-    _sanitize_tools_non_ascii,
-    _strip_images_from_messages,
-    _strip_non_ascii,
+    _looks_like_image_content_rejection, _sanitize_messages_non_ascii,
+    _sanitize_messages_surrogates, _sanitize_structure_non_ascii, _sanitize_structure_surrogates,
+    _sanitize_tools_non_ascii, _strip_images_from_messages, _strip_non_ascii,
     close_interrupted_tool_sequence,
 )
 from agent.turn_retry_state import TurnRetryState
@@ -53,9 +48,7 @@ def _image_error_max_dimension(error: Exception) -> Optional[int]:
     """Extract a provider-reported image dimension ceiling, if present."""
     parts = []
     for value in (
-        error,
-        getattr(error, "message", None),
-        getattr(error, "body", None),
+        error, getattr(error, "message", None), getattr(error, "body", None)
     ):
         if value:
             try:
@@ -94,13 +87,8 @@ def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
 
 
 def recover_before_classification(
-    agent: Any,
-    api_error: Exception,
-    *,
-    messages: List[Dict[str, Any]],
-    api_messages: Any,
-    api_kwargs: Any,
-    active_system_prompt: Any,
+    agent: Any, api_error: Exception, *, messages: List[Dict[str, Any]], api_messages: Any,
+    api_kwargs: Any, active_system_prompt: Any,
 ) -> Tuple[bool, Any]:
     """Recovery branches that run BEFORE ``classify_api_error``: UnicodeEncodeError
     sanitization (surrogates, then ASCII codec), provider image-content rejection
@@ -116,8 +104,7 @@ def recover_before_classification(
         # Surrogate errors: utf-8 refusing U+D800..U+DFFF
         # ("surrogates not allowed").
         _is_surrogate_error = (
-            "surrogate" in _err_str
-            or ("'utf-8'" in _err_str and not _is_ascii_codec)
+            "surrogate" in _err_str or ("'utf-8'" in _err_str and not _is_ascii_codec)
         )
         # Sanitize `messages` AND `api_messages` (which may carry
         # `reasoning_content`/`reasoning_details`), plus `api_kwargs` and
@@ -252,9 +239,7 @@ def recover_before_classification(
     # 4xx-only gate: 5xx/timeouts are transient and take the retry path.
     _status_ok = _err_status is None or (400 <= int(_err_status) < 500)
     if (
-        getattr(agent, "_vision_supported", True)
-        and _looks_like_image_rejection
-        and _status_ok
+        getattr(agent, "_vision_supported", True) and _looks_like_image_rejection and _status_ok
     ):
         agent._vision_supported = False
         _imgs_removed = _strip_images_from_messages(messages)
@@ -293,14 +278,8 @@ def recover_before_classification(
 
 
 def recover_after_classification(
-    agent: Any,
-    api_error: Exception,
-    classified: Any,
-    _retry: TurnRetryState,
-    *,
-    status_code: Optional[int],
-    error_context: Any,
-    messages: List[Dict[str, Any]],
+    agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState, *,
+    status_code: Optional[int], error_context: Any, messages: List[Dict[str, Any]],
     api_messages: Any,
 ) -> Tuple[bool, bool]:
     """One-shot recovery chain that runs AFTER ``classify_api_error`` and before the
@@ -315,16 +294,13 @@ def recover_after_classification(
     # Shared with the billing/entitlement helpers that stay in the loop module;
     # lazy so this module never imports agent.conversation_loop at load time.
     from agent.conversation_loop import (
-        _is_copilot_provider,
-        _is_nous_inference_route,
-        _print_nous_entitlement_guidance,
+        _is_copilot_provider, _is_nous_inference_route, _print_nous_entitlement_guidance
     )
 
     if (
         classified.reason == FailoverReason.billing
         and _is_nous_inference_route(
-            getattr(agent, "provider", "") or "",
-            getattr(agent, "base_url", "") or "",
+            getattr(agent, "provider", "") or "", getattr(agent, "base_url", "") or ""
         )
         and not _retry.nous_paid_entitlement_refresh_attempted
     ):
@@ -338,10 +314,8 @@ def recover_after_classification(
             return True, False
 
     recovered_with_pool, _retry.has_retried_429 = agent._recover_with_credential_pool(
-        status_code=status_code,
-        has_retried_429=_retry.has_retried_429,
-        classified_reason=classified.reason,
-        error_context=error_context,
+        status_code=status_code, has_retried_429=_retry.has_retried_429,
+        classified_reason=classified.reason, error_context=error_context,
         billing_unverified=classified.billing_unverified,
     )
     if recovered_with_pool:
@@ -356,8 +330,7 @@ def recover_after_classification(
         _retry.image_shrink_retry_attempted = True
         image_max_dimension = _image_error_max_dimension(api_error) or 8000
         if agent._try_shrink_image_parts_in_messages(
-            api_messages,
-            max_dimension=image_max_dimension,
+            api_messages, max_dimension=image_max_dimension
         ):
             agent._vprint(
                 f"{agent.log_prefix}📐 Image(s) exceeded provider size limit — "
@@ -659,20 +632,9 @@ def recover_after_classification(
 
 
 def nonretryable_client_error_result(
-    agent: Any,
-    api_error: Exception,
-    classified: Any,
-    *,
-    status_code: Optional[int],
-    api_kwargs: Any,
-    api_messages: Any,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    api_call_count: int,
-    approx_tokens: int,
-    provider: Any,
-    base_url: Any,
-    model: Any,
+    agent: Any, api_error: Exception, classified: Any, *, status_code: Optional[int],
+    api_kwargs: Any, api_messages: Any, messages: List[Dict[str, Any]], conversation_history: Any,
+    api_call_count: int, approx_tokens: int, provider: Any, base_url: Any, model: Any,
 ) -> Dict[str, Any]:
     """Terminal path for a non-retryable 4xx once fallback is exhausted: dump the
     request for debugging, flush the buffered retry trace, print actionable auth /
@@ -682,11 +644,8 @@ def nonretryable_client_error_result(
     # Result/guidance helpers stay in the loop module (tests import + patch them
     # there); lazy import avoids a load-time cycle.
     from agent.conversation_loop import (
-        _CONTENT_POLICY_RECOVERY_HINT,
-        _billing_failure_result,
-        _content_policy_blocked_result,
-        _print_billing_or_entitlement_guidance,
-        _print_nous_entitlement_guidance,
+        _CONTENT_POLICY_RECOVERY_HINT, _billing_failure_result, _content_policy_blocked_result,
+        _print_billing_or_entitlement_guidance, _print_nous_entitlement_guidance,
     )
 
     if api_kwargs is not None:
@@ -702,18 +661,15 @@ def nonretryable_client_error_result(
     _nonretryable_summary = agent._summarize_api_error(api_error)
     if classified.reason == FailoverReason.content_policy_blocked:
         agent._emit_status(
-            f"❌ Provider safety filter blocked this request: "
-            f"{_nonretryable_summary}"
+            f"❌ Provider safety filter blocked this request: " f"{_nonretryable_summary}"
         )
     elif classified.reason == FailoverReason.ssl_cert_verification:
         agent._emit_status(
-            f"❌ TLS certificate verification failed: "
-            f"{_nonretryable_summary}"
+            f"❌ TLS certificate verification failed: " f"{_nonretryable_summary}"
         )
     else:
         agent._emit_status(
-            f"❌ Non-retryable error (HTTP {status_code}): "
-            f"{_nonretryable_summary}"
+            f"❌ Non-retryable error (HTTP {status_code}): " f"{_nonretryable_summary}"
         )
     agent._vprint(f"{agent.log_prefix}❌ Non-retryable client error (HTTP {status_code}). Aborting.", force=True)
     agent._vprint(f"{agent.log_prefix}   🔌 Provider: {provider}  Model: {model}", force=True)
@@ -721,17 +677,12 @@ def nonretryable_client_error_result(
     # Actionable guidance for common auth errors
     if classified.is_auth or classified.reason == FailoverReason.billing:
         if classified.reason == FailoverReason.billing and _print_billing_or_entitlement_guidance(
-            agent,
-            capability="model access",
-            provider=provider,
-            base_url=str(base_url),
-            model=model,
-            unverified=classified.billing_unverified,
+            agent, capability="model access", provider=provider, base_url=str(base_url),
+            model=model, unverified=classified.billing_unverified,
         ):
             pass
         elif provider == "nous" and _print_nous_entitlement_guidance(
-            agent,
-            "Nous model access",
+            agent, "Nous model access"
         ):
             pass
         elif provider in {"openai-codex", "xai-oauth", "nous"} and status_code == 401:
@@ -837,22 +788,15 @@ def nonretryable_client_error_result(
             f"{_CONTENT_POLICY_RECOVERY_HINT}"
         )
         return _content_policy_blocked_result(
-            messages,
-            api_call_count,
-            final_response=_policy_response,
+            messages, api_call_count, final_response=_policy_response,
             error_detail=_nonretryable_summary,
         )
     # Billing walls get the same structured recovery descriptor as the
     # max-retries path so every surface renders one consistent signal.
     if classified.reason == FailoverReason.billing:
         return _billing_failure_result(
-            classified=classified,
-            summary=_nonretryable_summary,
-            messages=messages,
-            api_call_count=api_call_count,
-            provider=provider,
-            base_url=base_url,
-            model=model,
+            classified=classified, summary=_nonretryable_summary, messages=messages,
+            api_call_count=api_call_count, provider=provider, base_url=base_url, model=model,
         )
     return {
         "final_response": _nonretryable_summary,
@@ -865,22 +809,10 @@ def nonretryable_client_error_result(
 
 
 def max_retries_exhausted_result(
-    agent: Any,
-    api_error: Exception,
-    classified: Any,
-    *,
-    max_retries: int,
-    is_rate_limited: bool,
-    error_msg: str,
-    api_kwargs: Any,
-    api_messages: Any,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    api_call_count: int,
-    approx_tokens: int,
-    provider: Any,
-    base_url: Any,
-    model: Any,
+    agent: Any, api_error: Exception, classified: Any, *, max_retries: int, is_rate_limited: bool,
+    error_msg: str, api_kwargs: Any, api_messages: Any, messages: List[Dict[str, Any]],
+    conversation_history: Any, api_call_count: int, approx_tokens: int, provider: Any,
+    base_url: Any, model: Any,
 ) -> Dict[str, Any]:
     """Terminal path once ``retry_count >= max_retries`` and transport recovery +
     fallback both failed: flush the buffered trace, emit the billing / rate-limit /
@@ -890,9 +822,7 @@ def max_retries_exhausted_result(
     # Result/guidance helpers stay in the loop module (tests import + patch them
     # there); lazy import avoids a load-time cycle.
     from agent.conversation_loop import (
-        _billing_block_dict,
-        _billing_or_entitlement_message,
-        _billing_terminal_label,
+        _billing_block_dict, _billing_or_entitlement_message, _billing_terminal_label,
         _print_billing_or_entitlement_guidance,
     )
 
@@ -910,19 +840,12 @@ def max_retries_exhausted_result(
         else:
             agent._emit_status(f"❌ Billing or credits exhausted — {_final_summary}")
         _billing_guidance = _billing_or_entitlement_message(
-            capability="model access",
-            provider=provider,
-            base_url=str(base_url),
-            model=model,
+            capability="model access", provider=provider, base_url=str(base_url), model=model,
             unverified=classified.billing_unverified,
         )
         _print_billing_or_entitlement_guidance(
-            agent,
-            capability="model access",
-            provider=provider,
-            base_url=str(base_url),
-            model=model,
-            unverified=classified.billing_unverified,
+            agent, capability="model access", provider=provider, base_url=str(base_url),
+            model=model, unverified=classified.billing_unverified,
         )
     elif is_rate_limited:
         agent._emit_status(f"❌ Rate limited after {max_retries} retries — {_final_summary}")
@@ -964,9 +887,7 @@ def max_retries_exhausted_result(
         is_thinking_timeout,
     )
     _is_thinking_timeout = is_thinking_timeout(
-        classified,
-        model,
-        error_msg,
+        classified, model, error_msg
     )
     if _is_thinking_timeout:
         agent._vprint(
@@ -979,8 +900,7 @@ def max_retries_exhausted_result(
             force=True,
         )
         agent._vprint(
-            f"{agent.log_prefix}      Workarounds in priority order:",
-            force=True,
+            f"{agent.log_prefix}      Workarounds in priority order:", force=True
         )
         agent._vprint(
             f"{agent.log_prefix}      1. Set "
@@ -1024,8 +944,7 @@ def max_retries_exhausted_result(
         # Structured recovery descriptor so every surface renders
         # the same link + label from one signal (see helper).
         _billing_block = _billing_block_dict(
-            provider, base_url, model, _billing_guidance,
-            unverified=_billing_unverified,
+            provider, base_url, model, _billing_guidance, unverified=_billing_unverified
         )
     else:
         _final_response = f"API call failed after {max_retries} retries: {_final_summary}"
@@ -1036,8 +955,7 @@ def max_retries_exhausted_result(
             build_thinking_timeout_guidance,
         )
         _final_response += build_thinking_timeout_guidance(
-            provider=provider,
-            model=model,
+            provider=provider, model=model
         )
     elif _is_stream_drop:
         _final_response += (
@@ -1072,15 +990,8 @@ def max_retries_exhausted_result(
 
 
 def log_api_error_attempt(
-    agent: Any,
-    api_error: Exception,
-    *,
-    retry_count: int,
-    max_retries: int,
-    status_code: Optional[int],
-    elapsed_time: float,
-    api_messages: Any,
-    approx_tokens: int,
+    agent: Any, api_error: Exception, *, retry_count: int, max_retries: int,
+    status_code: Optional[int], elapsed_time: float, api_messages: Any, approx_tokens: int,
 ) -> Tuple[str, str, Any, Any, Any]:
     """Log one failed API attempt: the ``API call failed`` warning plus the buffered
     retry trace (provider/endpoint/error/4xx body/elapsed), the OpenRouter
@@ -1119,8 +1030,7 @@ def log_api_error_attempt(
     # OpenRouter "no tool endpoints" hint, buffered with the retry trace
     # so it only surfaces if every retry+fallback exhausts.
     if (
-        agent._is_openrouter_url()
-        and "support tool use" in error_msg
+        agent._is_openrouter_url() and "support tool use" in error_msg
     ):
         agent._buffer_vprint(
             f"   💡 No OpenRouter providers for {_model} support tool calling with your current settings."
@@ -1157,16 +1067,9 @@ def log_api_error_attempt(
 
 
 def interruptible_backoff_sleep(
-    agent: Any,
-    wait_time: float,
-    _retry: Optional[TurnRetryState],
-    *,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    api_call_count: int,
-    abort_message: str,
-    interrupt_text: str,
-    activity_label: str,
+    agent: Any, wait_time: float, _retry: Optional[TurnRetryState], *,
+    messages: List[Dict[str, Any]], conversation_history: Any, api_call_count: int,
+    abort_message: str, interrupt_text: str, activity_label: str,
 ) -> Optional[Dict[str, Any]]:
     """Sleep ``wait_time`` in 200 ms slices so interrupts are honoured promptly, touching
     activity every ~30 s so the gateway's inactivity monitor knows we are alive.
@@ -1205,15 +1108,8 @@ def interruptible_backoff_sleep(
 
 
 def compute_error_backoff(
-    agent: Any,
-    api_error: Exception,
-    *,
-    retry_count: int,
-    max_retries: int,
-    is_rate_limited: bool,
-    is_zai_coding_overload: bool,
-    base_url: Any,
-    model: Any,
+    agent: Any, api_error: Exception, *, retry_count: int, max_retries: int, is_rate_limited: bool,
+    is_zai_coding_overload: bool, base_url: Any, model: Any,
 ) -> float:
     """Pick the wait before the next API retry and announce it.
 
@@ -1241,10 +1137,7 @@ def compute_error_backoff(
     _backoff_policy = None
     if (is_rate_limited or is_zai_coding_overload) and not _retry_after:
         wait_time, _backoff_policy = adaptive_rate_limit_backoff(
-            retry_count,
-            base_url=str(base_url),
-            model=model,
-            error=api_error,
+            retry_count, base_url=str(base_url), model=model, error=api_error,
             default_wait=wait_time,
         )
     if is_rate_limited or is_zai_coding_overload:
@@ -1447,26 +1340,11 @@ class ClassifiedErrorVerdict:
 
 
 def route_classified_error(
-    agent: Any,
-    api_error: Exception,
-    classified: Any,
-    _retry: TurnRetryState,
-    *,
-    error_msg: str,
-    error_context: Any,
-    recovered_with_pool: bool,
-    base_url: Any,
-    model: Any,
-    messages: List[Dict[str, Any]],
-    api_messages: Any,
-    system_message: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    retry_count: int,
-    max_retries: int,
-    compression_attempts: int,
-    max_compression_attempts: int,
-    api_call_count: int,
+    agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState, *, error_msg: str,
+    error_context: Any, recovered_with_pool: bool, base_url: Any, model: Any,
+    messages: List[Dict[str, Any]], api_messages: Any, system_message: Any,
+    active_system_prompt: Any, conversation_history: Any, retry_count: int, max_retries: int,
+    compression_attempts: int, max_compression_attempts: int, api_call_count: int,
     effective_task_id: Any,
 ) -> ClassifiedErrorVerdict:
     """Ordered recovery steps between classification logging and overflow handling:
@@ -1478,9 +1356,7 @@ def route_classified_error(
     the cross-session breaker and re-enter the loop exactly once so the top-of-loop guard
     runs. Order is load-bearing."""
     from agent.conversation_loop import (
-        _arm_fallback_restart,
-        _ra,
-        conversation_history_after_compression,
+        _arm_fallback_restart, _ra, conversation_history_after_compression,
         estimate_request_tokens_rough,
     )
 
@@ -1493,18 +1369,12 @@ def route_classified_error(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ClassifiedErrorVerdict:
         return ClassifiedErrorVerdict(
-            action=action,
-            result=result,
-            status_code=status_code,
-            messages=messages,
-            active_system_prompt=active_system_prompt,
-            conversation_history=conversation_history,
-            retry_count=retry_count,
-            max_retries=max_retries,
+            action=action, result=result, status_code=status_code, messages=messages,
+            active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+            retry_count=retry_count, max_retries=max_retries,
             compression_attempts=compression_attempts,
             provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
-            is_rate_limited=is_rate_limited,
-            wrapped_output_cap_budget=_wrapped_output_cap_budget,
+            is_rate_limited=is_rate_limited, wrapped_output_cap_budget=_wrapped_output_cap_budget,
             is_zai_coding_overload=_is_zai_coding_overload,
         )
 
@@ -1515,8 +1385,7 @@ def route_classified_error(
     # ``compression.enabled: false`` forbids every automatic trigger, incl.
     # these overflow recovery paths; error out. Output-cap errors exempt.
     _overflow_reasons = {
-        FailoverReason.long_context_tier,
-        FailoverReason.payload_too_large,
+        FailoverReason.long_context_tier, FailoverReason.payload_too_large,
         FailoverReason.context_overflow,
     }
     _is_output_cap_error = (
@@ -1569,11 +1438,8 @@ def route_classified_error(
         old_ctx = compressor.context_length
         if old_ctx > _reduced_ctx:
             compressor.update_model(
-                model=agent.model,
-                context_length=_reduced_ctx,
-                base_url=agent.base_url,
-                api_key=getattr(agent, "api_key", ""),
-                provider=agent.provider,
+                model=agent.model, context_length=_reduced_ctx, base_url=agent.base_url,
+                api_key=getattr(agent, "api_key", ""), provider=agent.provider,
                 api_mode=agent.api_mode,
             )
             # Context probing flags — only set on built-in
@@ -1621,9 +1487,7 @@ def route_classified_error(
     # Eager fallback: rate-limit/billing switch immediately (primary won't
     # recover in the retry window); transport errors get 1 retry first.
     is_rate_limited = classified.reason in {
-        FailoverReason.rate_limit,
-        FailoverReason.billing,
-        FailoverReason.upstream_rate_limit,
+        FailoverReason.rate_limit, FailoverReason.billing, FailoverReason.upstream_rate_limit
     }
     # Some relays wrap upstream output-cap 400s as 429 (rate_limit). Only
     # the max_tokens clamp fixes it (#72281). Parsed once; gates the
@@ -1634,8 +1498,7 @@ def route_classified_error(
         else None
     )
     _is_transport_failure = classified.reason in {
-        FailoverReason.timeout,
-        FailoverReason.overloaded,
+        FailoverReason.timeout, FailoverReason.overloaded
     }
     # Z.AI overload 429s classify `overloaded`, which `is_rate_limited`
     # excludes. Detect directly so the long backoff runs, and raise the
@@ -1666,8 +1529,7 @@ def route_classified_error(
                     "upstream_provider", "aggregator"
                 )
                 agent._buffer_status(
-                    f"⚠️ Upstream {_upstream_name} rate-limited — "
-                    "switching to fallback model..."
+                    f"⚠️ Upstream {_upstream_name} rate-limited — " "switching to fallback model..."
                 )
             elif classified.reason == FailoverReason.billing:
                 if classified.billing_unverified:
@@ -1726,22 +1588,18 @@ def route_classified_error(
         _genuine_nous_rate_limit = False
         try:
             from agent.nous_rate_guard import (
-                is_genuine_nous_rate_limit,
-                record_nous_rate_limit,
+                is_genuine_nous_rate_limit, record_nous_rate_limit
             )
             _err_resp = getattr(api_error, "response", None)
             _err_hdrs = (
-                getattr(_err_resp, "headers", None)
-                if _err_resp else None
+                getattr(_err_resp, "headers", None) if _err_resp else None
             )
             _genuine_nous_rate_limit = is_genuine_nous_rate_limit(
-                headers=_err_hdrs,
-                last_known_state=agent._rate_limit_state,
+                headers=_err_hdrs, last_known_state=agent._rate_limit_state
             )
             if _genuine_nous_rate_limit:
                 record_nous_rate_limit(
-                    headers=_err_hdrs,
-                    error_context=error_context,
+                    headers=_err_hdrs, error_context=error_context
                 )
             else:
                 logger.info(

@@ -20,8 +20,7 @@ from typing import Any, Callable, Optional
 from agent.codex_responses_adapter import _format_responses_error
 from agent.redact import redact_sensitive_text
 from agent.transports.codex_app_server import (
-    CodexAppServerClient,
-    CodexAppServerError,
+    CodexAppServerClient, CodexAppServerError
 )
 from agent.transports.codex_event_projector import CodexEventProjector, ProjectionResult
 
@@ -175,12 +174,8 @@ class CodexAppServerSession:
     """
 
     def __init__(
-        self,
-        *,
-        cwd: Optional[str] = None,
-        codex_bin: str = "codex",
-        codex_home: Optional[str] = None,
-        permission_profile: Optional[str] = None,
+        self, *, cwd: Optional[str] = None, codex_bin: str = "codex",
+        codex_home: Optional[str] = None, permission_profile: Optional[str] = None,
         approval_callback: Optional[Callable[..., str]] = None,
         on_event: Optional[Callable[[dict], None]] = None,
         request_routing: Optional[_ServerRequestRouting] = None,
@@ -385,12 +380,8 @@ class CodexAppServerSession:
         return projection, aborted
 
     def run_turn(
-        self,
-        user_input: Any,
-        *,
-        turn_timeout: float = 600.0,
-        notification_poll_timeout: float = 0.25,
-        post_tool_quiet_timeout: float = 90.0,
+        self, user_input: Any, *, turn_timeout: float = 600.0,
+        notification_poll_timeout: float = 0.25, post_tool_quiet_timeout: float = 90.0,
     ) -> TurnResult:
         """Send a user message and block until turn/completed, bridging approvals
         and projecting items into Hermes' messages shape.
@@ -491,14 +482,9 @@ class CodexAppServerSession:
             return True
 
         self._drive_turn(
-            result,
-            turn_timeout=turn_timeout,
-            notification_poll_timeout=notification_poll_timeout,
-            timeout_label="turn",
-            before_poll=watchdog_tripped,
-            on_server_request=on_server_request,
-            on_note=on_note,
-            accept_final_text_at_deadline=True,
+            result, turn_timeout=turn_timeout, notification_poll_timeout=notification_poll_timeout,
+            timeout_label="turn", before_poll=watchdog_tripped, on_server_request=on_server_request,
+            on_note=on_note, accept_final_text_at_deadline=True,
         )
         with self._active_turn_lock:
             self._active_turn_id = None
@@ -506,15 +492,9 @@ class CodexAppServerSession:
         return result
 
     def _drive_turn(
-        self,
-        result: TurnResult,
-        *,
-        turn_timeout: float,
-        notification_poll_timeout: float,
-        timeout_label: str,
-        on_server_request: Callable[[dict], bool],
-        on_note: Callable[[dict, str], bool],
-        before_poll: Optional[Callable[[], bool]] = None,
+        self, result: TurnResult, *, turn_timeout: float, notification_poll_timeout: float,
+        timeout_label: str, on_server_request: Callable[[dict], bool],
+        on_note: Callable[[dict, str], bool], before_poll: Optional[Callable[[], bool]] = None,
         pre_scope_filter: Optional[Callable[[dict, str], bool]] = None,
         accept_final_text_at_deadline: bool = False,
     ) -> None:
@@ -579,10 +559,7 @@ class CodexAppServerSession:
             result.should_retire = True
 
     def compact_thread(
-        self,
-        *,
-        turn_timeout: float = 600.0,
-        notification_poll_timeout: float = 0.25,
+        self, *, turn_timeout: float = 600.0, notification_poll_timeout: float = 0.25
     ) -> TurnResult:
         """Trigger Codex-native history compaction for the current thread.
 
@@ -644,12 +621,8 @@ class CodexAppServerSession:
             return False
 
         self._drive_turn(
-            result,
-            turn_timeout=turn_timeout,
-            notification_poll_timeout=notification_poll_timeout,
-            timeout_label="compact turn",
-            on_server_request=on_server_request,
-            on_note=on_note,
+            result, turn_timeout=turn_timeout, notification_poll_timeout=notification_poll_timeout,
+            timeout_label="compact turn", on_server_request=on_server_request, on_note=on_note,
             pre_scope_filter=pre_scope_filter,
         )
         return result

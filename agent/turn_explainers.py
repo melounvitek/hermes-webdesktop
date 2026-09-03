@@ -8,13 +8,10 @@ import re
 from typing import Any, Dict, Optional
 
 from agent.tool_dispatch_helpers import (
-    _extract_error_preview,
-    _extract_file_mutation_targets,
-    _extract_landed_file_mutation_paths,
+    _extract_error_preview, _extract_file_mutation_targets, _extract_landed_file_mutation_paths
 )
 from agent.tool_result_classification import (
-    FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
-    file_mutation_result_landed,
+    FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS, file_mutation_result_landed
 )
 
 
@@ -22,11 +19,7 @@ class TurnExplainersMixin:
     """File-mutation failure footer + turn-completion explainer (see module docstring)."""
 
     def _record_file_mutation_result(
-        self,
-        tool_name: str,
-        args: Dict[str, Any],
-        result: Any,
-        is_error: bool,
+        self, tool_name: str, args: Dict[str, Any], result: Any, is_error: bool
     ) -> None:
         """Record a ``write_file`` / ``patch`` outcome for the turn-end verifier.
 
@@ -62,8 +55,7 @@ class TurnExplainersMixin:
                 # Keep the FIRST error per path unless a later success replaces it.
                 if path not in state:
                     state[path] = {
-                        "tool": tool_name,
-                        "error_preview": preview,
+                        "tool": tool_name, "error_preview": preview
                     }
         else:
             for path in targets:

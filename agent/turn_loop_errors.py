@@ -34,16 +34,8 @@ class OuterErrorVerdict:
 
 
 def handle_outer_loop_error(
-    agent: Any,
-    *,
-    e: Any,
-    _outer_error_count: Any,
-    api_call_count: Any,
-    messages: Any,
-    conversation_history: Any,
-    _turn_exit_reason: Any,
-    failed: Any,
-    final_response: Any,
+    agent: Any, *, e: Any, _outer_error_count: Any, api_call_count: Any, messages: Any,
+    conversation_history: Any, _turn_exit_reason: Any, failed: Any, final_response: Any,
 ) -> OuterErrorVerdict:
     """Handle an exception that escaped the response-processing block. Shutdown and
     local-processing errors are deterministic and end the turn; API-path errors retry until
@@ -51,20 +43,14 @@ def handle_outer_loop_error(
     assistant message is never appended here: a prefill/interim assistant may already be
     the tail; ``finalize_turn`` appends only when safe."""
     from agent.conversation_loop import (
-        _API_CALL_MODULES,
-        _LOCAL_PROCESSING_MODULES,
-        _MAX_OUTER_LOOP_ERRORS,
-        _is_interpreter_shutdown_error,
-        _ra,
+        _API_CALL_MODULES, _LOCAL_PROCESSING_MODULES, _MAX_OUTER_LOOP_ERRORS,
+        _is_interpreter_shutdown_error, _ra,
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> OuterErrorVerdict:
         return OuterErrorVerdict(
-            action=action,
-            _outer_error_count=_outer_error_count,
-            _turn_exit_reason=_turn_exit_reason,
-            failed=failed,
-            final_response=final_response,
+            action=action, _outer_error_count=_outer_error_count,
+            _turn_exit_reason=_turn_exit_reason, failed=failed, final_response=final_response,
         )
 
     # Count every escaped exception before classification so permanent
@@ -76,8 +62,7 @@ def handle_outer_loop_error(
     # Interpreter shutdown makes every executor op raise: break. (#93217)
     if sys.is_finalizing() or _is_interpreter_shutdown_error(e):
         error_msg = (
-            f"Interpreter is shutting down — cannot continue "
-            f"(API call #{api_call_count}): {e}"
+            f"Interpreter is shutting down — cannot continue " f"(API call #{api_call_count}): {e}"
         )
         try:
             agent._safe_print(f"❌ {error_msg}")

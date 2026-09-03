@@ -49,8 +49,7 @@ def get_active_provider() -> Optional[VideoGenProvider]:
         if provider is not None:
             return provider
         logger.debug(
-            "video_gen.provider='%s' configured but not registered; failing closed",
-            configured,
+            "video_gen.provider='%s' configured but not registered; failing closed", configured
         )
         return None
 

@@ -41,18 +41,9 @@ class EmptyResponseVerdict:
 
 
 def recover_empty_response(
-    agent: Any,
-    assistant_message: Any,
-    response: Any,
-    finish_reason: str,
-    *,
-    final_response: Any,
-    messages: List[Dict[str, Any]],
-    api_messages: Any,
-    conversation_history: Any,
-    active_system_prompt: Any,
-    api_call_count: int,
-    turn_exit_reason: Any,
+    agent: Any, assistant_message: Any, response: Any, finish_reason: str, *, final_response: Any,
+    messages: List[Dict[str, Any]], api_messages: Any, conversation_history: Any,
+    active_system_prompt: Any, api_call_count: int, turn_exit_reason: Any,
     preflight_compression_blocked: bool,
 ) -> EmptyResponseVerdict:
     """Recover from a final response with no visible content (see module docstring for
@@ -61,9 +52,7 @@ def recover_empty_response(
     surfaced only at the terminal step, for delivery — the persisted row keeps the
     ``(empty)`` sentinel."""
     from agent.conversation_loop import (
-        _EMPTY_TOOL_RESPONSE_NUDGE,
-        _sync_failover_system_message,
-        jittered_backoff,
+        _EMPTY_TOOL_RESPONSE_NUDGE, _sync_failover_system_message, jittered_backoff
     )
 
     _turn_exit_reason = turn_exit_reason
@@ -71,11 +60,8 @@ def recover_empty_response(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> EmptyResponseVerdict:
         return EmptyResponseVerdict(
-            action=action,
-            result=result,
-            final_response=final_response,
-            turn_exit_reason=_turn_exit_reason,
-            active_system_prompt=active_system_prompt,
+            action=action, result=result, final_response=final_response,
+            turn_exit_reason=_turn_exit_reason, active_system_prompt=active_system_prompt,
             preflight_compression_blocked=_preflight_compression_blocked,
         )
 
@@ -93,8 +79,7 @@ def recover_empty_response(
             len(_recovered),
         )
         agent._emit_status(
-            "↻ Stream interrupted — using delivered content "
-            "as final response"
+            "↻ Stream interrupted — using delivered content " "as final response"
         )
         final_response = _recovered
         # A streamed fragment isn't a confirmed preview: keep
@@ -130,11 +115,7 @@ def recover_empty_response(
     # Ollama puts <think> in content, not reasoning_content, so
     # _has_structured misses it; detect here to route to prefill.
     _has_inline_thinking = bool(
-        re.search(
-            r'<think>|<thinking>|<reasoning>',
-            final_response or "",
-            re.IGNORECASE,
-        )
+        re.search( r'<think>|<thinking>|<reasoning>', final_response or "", re.IGNORECASE )
     )
     if (
         _prior_was_tool
@@ -147,12 +128,10 @@ def recover_empty_response(
         agent._last_content_with_tools = None
         agent._last_content_tools_all_housekeeping = False
         logger.info(
-            "Empty response after tool calls — nudging model "
-            "to continue processing"
+            "Empty response after tool calls — nudging model " "to continue processing"
         )
         agent._buffer_status(
-            "⚠️ Model returned empty after tool calls — "
-            "nudging to continue"
+            "⚠️ Model returned empty after tool calls — " "nudging to continue"
         )
         # Append the empty assistant first so the sequence stays valid:
         # tool → assistant("(empty)") → user (APIs reject tool→user).
@@ -161,9 +140,7 @@ def recover_empty_response(
         _nudge_msg["_empty_recovery_synthetic"] = True
         append_message(messages, _nudge_msg)
         append_message(messages, {
-            "role": "user",
-            "content": _EMPTY_TOOL_RESPONSE_NUDGE,
-            "_empty_recovery_synthetic": True,
+            "role": "user", "content": _EMPTY_TOOL_RESPONSE_NUDGE, "_empty_recovery_synthetic": True
         })
         return _verdict("continue")
 
@@ -202,8 +179,7 @@ def recover_empty_response(
         final_response
     ).strip()
     _prefill_exhausted = (
-        _has_structured
-        and agent._thinking_prefill_retries >= 2
+        _has_structured and agent._thinking_prefill_retries >= 2
     )
     _empty_candidate = _truly_empty and (
         not _has_structured or _prefill_exhausted
@@ -213,9 +189,7 @@ def recover_empty_response(
         # signature so deterministic empties stop burning paid retries.
         # Fails open: missing usage or any output keeps the budget.
         _empty_guard.record_empty_attempt(
-            agent,
-            finish_reason=finish_reason,
-            response=response,
+            agent, finish_reason=finish_reason, response=response
         )
     _empty_retry_budget = (
         _empty_guard.empty_retry_budget(agent, response)
@@ -232,9 +206,7 @@ def recover_empty_response(
     ):
         agent._empty_content_retries += 1
         wait_time = jittered_backoff(
-            agent._empty_content_retries,
-            base_delay=5.0,
-            max_delay=60.0,
+            agent._empty_content_retries, base_delay=5.0, max_delay=60.0
         )
         logger.warning(
             "Empty response (no content or reasoning) — "
@@ -292,16 +264,14 @@ def recover_empty_response(
             agent.provider,
         )
         agent._buffer_status(
-            "⚠️ Model returning empty responses — "
-            "switching to fallback provider..."
+            "⚠️ Model returning empty responses — " "switching to fallback provider..."
         )
         if agent._try_activate_fallback():
             active_system_prompt = _sync_failover_system_message(
                 agent, api_messages, active_system_prompt)
             agent._empty_content_retries = 0
             agent._buffer_status(
-                f"↻ Switched to fallback: {agent.model} "
-                f"({agent.provider})"
+                f"↻ Switched to fallback: {agent.model} " f"({agent.provider})"
             )
             logger.info(
                 "Fallback activated after empty responses: "

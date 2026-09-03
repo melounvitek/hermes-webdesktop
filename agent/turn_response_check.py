@@ -43,32 +43,13 @@ class ResponseCheckVerdict:
 
 
 def check_api_response(
-    agent: Any,
-    *,
-    response: Any,
-    _retry: Any,
-    thinking_spinner: Any,
-    messages: Any,
-    api_messages: Any,
-    api_kwargs: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    finish_reason: Any,
-    retry_count: Any,
-    max_retries: Any,
-    compression_attempts: Any,
-    max_compression_attempts: Any,
-    length_continue_retries: Any,
-    truncated_response_parts: Any,
-    truncated_tool_call_retries: Any,
-    current_turn_user_idx: Any,
-    api_call_count: Any,
-    api_request_id: Any,
-    api_start_time: Any,
-    effective_task_id: Any,
-    turn_id: Any,
-    _preflight_compression_blocked: Any,
-    _last_preflight_pressure: Any,
+    agent: Any, *, response: Any, _retry: Any, thinking_spinner: Any, messages: Any,
+    api_messages: Any, api_kwargs: Any, active_system_prompt: Any, conversation_history: Any,
+    finish_reason: Any, retry_count: Any, max_retries: Any, compression_attempts: Any,
+    max_compression_attempts: Any, length_continue_retries: Any, truncated_response_parts: Any,
+    truncated_tool_call_retries: Any, current_turn_user_idx: Any, api_call_count: Any,
+    api_request_id: Any, api_start_time: Any, effective_task_id: Any, turn_id: Any,
+    _preflight_compression_blocked: Any, _last_preflight_pressure: Any,
 ) -> ResponseCheckVerdict:
     """Verify ``response`` in the original order. The retry buffer is NOT cleared on success
     (bytes back != usable content); ``_preflight_compression_blocked``/``_last_preflight_pressure``
@@ -80,19 +61,14 @@ def check_api_response(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ResponseCheckVerdict:
         return ResponseCheckVerdict(
-            action=action,
-            thinking_spinner=thinking_spinner,
-            messages=messages,
-            active_system_prompt=active_system_prompt,
-            finish_reason=finish_reason,
-            retry_count=retry_count,
-            compression_attempts=compression_attempts,
+            action=action, thinking_spinner=thinking_spinner, messages=messages,
+            active_system_prompt=active_system_prompt, finish_reason=finish_reason,
+            retry_count=retry_count, compression_attempts=compression_attempts,
             length_continue_retries=length_continue_retries,
             truncated_response_parts=truncated_response_parts,
             truncated_tool_call_retries=truncated_tool_call_retries,
             _preflight_compression_blocked=_preflight_compression_blocked,
-            _last_preflight_pressure=_last_preflight_pressure,
-            api_duration=api_duration,
+            _last_preflight_pressure=_last_preflight_pressure, api_duration=api_duration,
             result=result,
         )
 
@@ -119,25 +95,14 @@ def check_api_response(
 
     if response_invalid:
         _iv = retry_invalid_response(
-            agent,
-            response=response,
-            error_details=error_details,
-            _retry=_retry,
-            thinking_spinner=thinking_spinner,
-            messages=messages,
-            api_messages=api_messages,
-            api_kwargs=api_kwargs,
-            active_system_prompt=active_system_prompt,
-            conversation_history=conversation_history,
-            retry_count=retry_count,
-            max_retries=max_retries,
-            compression_attempts=compression_attempts,
-            api_call_count=api_call_count,
-            api_request_id=api_request_id,
-            api_start_time=api_start_time,
-            api_duration=api_duration,
-            effective_task_id=effective_task_id,
-            turn_id=turn_id,
+            agent, response=response, error_details=error_details, _retry=_retry,
+            thinking_spinner=thinking_spinner, messages=messages, api_messages=api_messages,
+            api_kwargs=api_kwargs, active_system_prompt=active_system_prompt,
+            conversation_history=conversation_history, retry_count=retry_count,
+            max_retries=max_retries, compression_attempts=compression_attempts,
+            api_call_count=api_call_count, api_request_id=api_request_id,
+            api_start_time=api_start_time, api_duration=api_duration,
+            effective_task_id=effective_task_id, turn_id=turn_id,
         )
         thinking_spinner = _iv.thinking_spinner
         active_system_prompt = _iv.active_system_prompt
@@ -184,9 +149,7 @@ def check_api_response(
         finish_reason = _finish_result.finish_reason
         assistant_message = _finish_result
         if agent._should_treat_stop_as_truncated(
-            finish_reason,
-            assistant_message,
-            messages,
+            finish_reason, assistant_message, messages
         ):
             agent._vprint(
                 f"{agent.log_prefix}⚠️  Treating suspicious Ollama/GLM stop response as truncated",
@@ -199,21 +162,11 @@ def check_api_response(
     # are deterministic: one fallback try, else return the refusal.
     if finish_reason == "content_filter":
         _rv = handle_content_policy_refusal(
-            agent,
-            response,
-            _retry,
-            thinking_spinner=thinking_spinner,
-            messages=messages,
-            api_messages=api_messages,
-            api_kwargs=api_kwargs,
-            active_system_prompt=active_system_prompt,
-            conversation_history=conversation_history,
-            api_call_count=api_call_count,
-            effective_task_id=effective_task_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            api_start_time=api_start_time,
-            retry_count=retry_count,
+            agent, response, _retry, thinking_spinner=thinking_spinner, messages=messages,
+            api_messages=api_messages, api_kwargs=api_kwargs,
+            active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+            api_call_count=api_call_count, effective_task_id=effective_task_id, turn_id=turn_id,
+            api_request_id=api_request_id, api_start_time=api_start_time, retry_count=retry_count,
             max_retries=max_retries,
         )
         thinking_spinner = None
@@ -226,20 +179,13 @@ def check_api_response(
 
     if finish_reason == "length":
         _tv = recover_from_truncation(
-            agent,
-            response,
-            finish_reason,
-            _retry,
-            messages=messages,
-            conversation_history=conversation_history,
-            api_kwargs=api_kwargs,
-            api_call_count=api_call_count,
-            effective_task_id=effective_task_id,
+            agent, response, finish_reason, _retry, messages=messages,
+            conversation_history=conversation_history, api_kwargs=api_kwargs,
+            api_call_count=api_call_count, effective_task_id=effective_task_id,
             current_turn_user_idx=current_turn_user_idx,
             length_continue_retries=length_continue_retries,
             truncated_response_parts=truncated_response_parts,
-            truncated_tool_call_retries=truncated_tool_call_retries,
-            retry_count=retry_count,
+            truncated_tool_call_retries=truncated_tool_call_retries, retry_count=retry_count,
             compression_attempts=compression_attempts,
         )
         messages = _tv.messages
@@ -258,12 +204,8 @@ def check_api_response(
     # Fold provider usage into compressor / anchors / session counters / state.db
     # (agent/turn_usage.py). A rearmed budget also clears the preflight-block latch.
     _usage_outcome = record_response_usage(
-        agent,
-        response,
-        messages=messages,
-        api_call_count=api_call_count,
-        api_duration=api_duration,
-        compression_attempts=compression_attempts,
+        agent, response, messages=messages, api_call_count=api_call_count,
+        api_duration=api_duration, compression_attempts=compression_attempts,
         max_compression_attempts=max_compression_attempts,
     )
     compression_attempts = _usage_outcome.compression_attempts
@@ -284,8 +226,7 @@ def check_api_response(
     from agent import relay_llm
 
     relay_llm.complete_logical_call(
-        api_request_id,
-        outcome="success",
+        api_request_id, outcome="success"
     )
     agent._touch_activity(f"API call #{api_call_count} completed")
     return _verdict("break")  # Success, exit retry loop
@@ -308,61 +249,34 @@ class InvalidResponseVerdict:
 
 
 def retry_invalid_response(
-    agent: Any,
-    *,
-    response: Any,
-    error_details: Any,
-    _retry: Any,
-    thinking_spinner: Any,
-    messages: Any,
-    api_messages: Any,
-    api_kwargs: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    retry_count: Any,
-    max_retries: Any,
-    compression_attempts: Any,
-    api_call_count: Any,
-    api_request_id: Any,
-    api_start_time: Any,
-    api_duration: Any,
-    effective_task_id: Any,
-    turn_id: Any,
+    agent: Any, *, response: Any, error_details: Any, _retry: Any, thinking_spinner: Any,
+    messages: Any, api_messages: Any, api_kwargs: Any, active_system_prompt: Any,
+    conversation_history: Any, retry_count: Any, max_retries: Any, compression_attempts: Any,
+    api_call_count: Any, api_request_id: Any, api_start_time: Any, api_duration: Any,
+    effective_task_id: Any, turn_id: Any,
 ) -> InvalidResponseVerdict:
     """Malformed/empty provider response: fire the error hook, stop the spinner, eager
     fallback (empty responses often mean rate limiting), terminal result at max retries,
     else jittered backoff that preserves a pending redirect."""
     from agent.conversation_loop import (
-        _arm_fallback_restart,
-        describe_invalid_response,
-        interruptible_backoff_sleep,
+        _arm_fallback_restart, describe_invalid_response, interruptible_backoff_sleep,
         jittered_backoff,
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> InvalidResponseVerdict:
         return InvalidResponseVerdict(
-            action=action,
-            thinking_spinner=thinking_spinner,
-            active_system_prompt=active_system_prompt,
-            retry_count=retry_count,
-            compression_attempts=compression_attempts,
-            result=result,
+            action=action, thinking_spinner=thinking_spinner,
+            active_system_prompt=active_system_prompt, retry_count=retry_count,
+            compression_attempts=compression_attempts, result=result,
         )
 
     agent._invoke_api_request_error_hook(
-        task_id=effective_task_id,
-        turn_id=turn_id,
-        api_request_id=api_request_id,
-        api_call_count=api_call_count,
-        api_start_time=api_start_time,
-        api_kwargs=api_kwargs,
+        task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+        api_call_count=api_call_count, api_start_time=api_start_time, api_kwargs=api_kwargs,
         error_type="InvalidAPIResponse",
         error_message=", ".join(error_details) or "Invalid API response",
         status_code=getattr(getattr(response, "error", None), "code", None),
-        retry_count=retry_count,
-        max_retries=max_retries,
-        retryable=True,
-        reason="invalid_response",
+        retry_count=retry_count, max_retries=max_retries, retryable=True, reason="invalid_response",
     )
     # Stop spinner silently — retry status is now buffered
     # and only surfaced if every retry+fallback exhausts.
@@ -431,9 +345,7 @@ def retry_invalid_response(
     # pending correction (restart_with_redirected_messages) instead of
     # destroying it with clear_interrupt().
     _interrupted = interruptible_backoff_sleep(
-        agent, wait_time, _retry,
-        messages=messages,
-        conversation_history=conversation_history,
+        agent, wait_time, _retry, messages=messages, conversation_history=conversation_history,
         api_call_count=api_call_count,
         abort_message="Interrupt detected during retry wait, aborting.",
         interrupt_text=f"Operation interrupted during retry ({_failure_hint}, attempt {retry_count}/{max_retries}).",

@@ -111,10 +111,7 @@ class CodexEventProjector:
         return ProjectionResult(messages=[{"role": "user", "content": "\n".join(text_parts)}])
 
     def _project_tool_item(
-        self,
-        item: dict,
-        item_id: str,
-        spec: Callable[[dict], tuple[str, str, dict, str]],
+        self, item: dict, item_id: str, spec: Callable[[dict], tuple[str, str, dict, str]]
     ) -> ProjectionResult:
         """Emit the (assistant tool_call, tool result) pair for a tool-shaped item.
 

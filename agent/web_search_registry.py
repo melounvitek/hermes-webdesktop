@@ -82,13 +82,7 @@ def _configured_backend(capability: str) -> Optional[str]:
 # a free tier on upgrade). Filtered by ``is_available()`` at walk time so
 # we don't surface a provider the user has no credentials for.
 _LEGACY_PREFERENCE = (
-    "firecrawl",
-    "parallel",
-    "tavily",
-    "exa",
-    "searxng",
-    "brave-free",
-    "ddgs",
+    "firecrawl", "parallel", "tavily", "exa", "searxng", "brave-free", "ddgs"
 )
 
 # Keyless free-tier walk — strictly LAST-resort, tried only after the
@@ -100,10 +94,7 @@ _LEGACY_PREFERENCE = (
 # entirely, and rate-limited requests fail over to the next ring vendor).
 # Disable the tier with ``web.keyless_fallback: false``.
 _KEYLESS_PREFERENCE = (
-    "exa",
-    "parallel",
-    "firecrawl",
-    "keenable",
+    "exa", "parallel", "firecrawl", "keenable"
 )
 
 
@@ -121,8 +112,7 @@ def _keyless_preference() -> tuple:
 
         start = _ring_cursor % len(_KEYLESS_RING)
         return tuple(
-            _KEYLESS_RING[(start + i) % len(_KEYLESS_RING)]
-            for i in range(len(_KEYLESS_RING))
+            _KEYLESS_RING[(start + i) % len(_KEYLESS_RING)] for i in range(len(_KEYLESS_RING))
         )
     except Exception as exc:  # noqa: BLE001 — ring optional in stripped envs
         logger.debug("keyless ring order unavailable: %s", exc)
@@ -156,8 +146,7 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
             return provider
         if provider is None:
             logger.debug(
-                "web backend '%s' configured but not registered; falling back",
-                configured,
+                "web backend '%s' configured but not registered; falling back", configured
             )
         else:
             logger.debug(

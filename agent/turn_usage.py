@@ -47,14 +47,8 @@ def _loop_mod():
 
 
 def record_response_usage(
-    agent: Any,
-    response: Any,
-    *,
-    messages: List[Dict[str, Any]],
-    api_call_count: int,
-    api_duration: float,
-    compression_attempts: int,
-    max_compression_attempts: int,
+    agent: Any, response: Any, *, messages: List[Dict[str, Any]], api_call_count: int,
+    api_duration: float, compression_attempts: int, max_compression_attempts: int,
 ) -> ResponseUsageOutcome:
     """Fold ``response.usage`` into compressor, anchors, session counters, state.db
     and the API-call log line (see module docstring). No-usage responses only
@@ -63,9 +57,7 @@ def record_response_usage(
     # Track actual token usage from response for context management
     if hasattr(response, 'usage') and response.usage:
         canonical_usage = normalize_usage(
-            response.usage,
-            provider=agent.provider,
-            api_mode=agent.api_mode,
+            response.usage, provider=agent.provider, api_mode=agent.api_mode
         )
         # Aggregator-only usage kept for pricing: advisor tokens are priced
         # at each advisor's OWN model rate and added as dollars below.
@@ -90,8 +82,7 @@ def record_response_usage(
                     getattr(agent, "_current_streamed_assistant_text", "") or ""
                 )
                 _moa_client.consume_and_save_trace(
-                    agent.session_id,
-                    aggregator_output_fallback=_agg_streamed_text or None,
+                    agent.session_id, aggregator_output_fallback=_agg_streamed_text or None
                 )
             except Exception as _moa_trace_exc:  # pragma: no cover - defensive
                 logger.debug("MoA trace flush failed: %s", _moa_trace_exc)
@@ -114,20 +105,14 @@ def record_response_usage(
         # it: only the real prompt count right after a compaction rearms the
         # budget.
         _completed_compaction_pending = bool(
-            getattr(
-                agent.context_compressor,
-                "_verify_compaction_cleared_threshold",
-                False,
-            )
+            getattr( agent.context_compressor, "_verify_compaction_cleared_threshold", False )
         )
         agent.context_compressor.update_from_response(usage_dict)
         # Usage-anchored accounting: snapshot exact provider usage against
         # the durable transcript; main-loop ONLY. MoA uses pre-fold
         # aggregator usage.
         _new_anchor = capture_usage_anchor(
-            aggregator_usage.prompt_tokens,
-            aggregator_usage.output_tokens,
-            messages,
+            aggregator_usage.prompt_tokens, aggregator_usage.output_tokens, messages
         )
         if _new_anchor is not None:
             agent._usage_anchor = _new_anchor
@@ -137,14 +122,11 @@ def record_response_usage(
             if api_call_count == 1:
                 agent._turn_base_usage_anchor = _new_anchor
         _compression_threshold = int(
-            getattr(agent.context_compressor, "threshold_tokens", 0)
-            or 0
+            getattr(agent.context_compressor, "threshold_tokens", 0) or 0
         )
         if _loop_mod()._should_rearm_compression_budget(
-            compression_attempts,
-            completed_compaction_pending=_completed_compaction_pending,
-            prompt_tokens=prompt_tokens,
-            threshold_tokens=_compression_threshold,
+            compression_attempts, completed_compaction_pending=_completed_compaction_pending,
+            prompt_tokens=prompt_tokens, threshold_tokens=_compression_threshold,
         ):
             logger.info(
                 "Compression budget rearmed after provider-confirmed "
@@ -164,9 +146,7 @@ def record_response_usage(
         # update_from_response); keep the latest call's — last request.
         agent._last_turn_usage = dict(usage_dict)
     elif getattr(
-        agent.context_compressor,
-        "awaiting_real_usage_after_compression",
-        False,
+        agent.context_compressor, "awaiting_real_usage_after_compression", False
     ):
         # No usage -> cannot adjudicate the prior compaction; consume the
         # pending verdict so later readings aren't charged to it and
@@ -226,11 +206,8 @@ def record_response_usage(
             _agg_cost_provider = _agg_slot.get("provider") or agent.provider
             _agg_cost_base_url = _agg_slot.get("base_url") or agent.base_url
         cost_result = estimate_usage_cost(
-            _agg_cost_model,
-            aggregator_usage,
-            provider=_agg_cost_provider,
-            base_url=_agg_cost_base_url,
-            api_key=getattr(agent, "api_key", ""),
+            _agg_cost_model, aggregator_usage, provider=_agg_cost_provider,
+            base_url=_agg_cost_base_url, api_key=getattr(agent, "api_key", ""),
         )
         if cost_result.amount_usd is not None:
             agent.session_estimated_cost_usd += float(cost_result.amount_usd)
@@ -307,6 +284,5 @@ def record_response_usage(
                 f"({hit_pct:.0f}% hit, {written:,} written)"
             )
     return ResponseUsageOutcome(
-        compression_attempts=compression_attempts,
-        rearmed=rearmed,
+        compression_attempts=compression_attempts, rearmed=rearmed
     )

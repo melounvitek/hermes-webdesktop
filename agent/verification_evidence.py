@@ -36,8 +36,7 @@ _TARGET_PREFIXES = ("test_", "tests", "spec", "__tests__")
 # command is not itself a test command; anything else is a test.
 _KIND_KEYWORDS = (
     (("lint", "eslint", "ruff"), "lint"),
-    (("typecheck", "tsc", "mypy", "pyright", "ty"), "typecheck"),
-    (("build",), "build"),
+    (("typecheck", "tsc", "mypy", "pyright", "ty"), "typecheck"), (("build",), "build"),
     (("fmt", "format"), "format"),
 )
 _PYTEST_SPELLINGS = (
@@ -462,16 +461,12 @@ def classify_verification_command(
 
     canonical, trailing_args = match
     return VerificationEvidence(
-        command=command,
-        canonical_command=canonical,
+        command=command, canonical_command=canonical,
         kind="ad_hoc" if is_ad_hoc else _kind_for_command(canonical),
         scope="targeted" if is_ad_hoc or any(map(_looks_like_target, trailing_args)) else "full",
-        status="passed" if int(exit_code) == 0 else "failed",
-        exit_code=int(exit_code),
-        cwd=str(Path(cwd or ".").resolve()),
-        root=_root_for(facts, cwd),
-        session_id=str(session_id or "default"),
-        output_summary=_summarize_output(output),
+        status="passed" if int(exit_code) == 0 else "failed", exit_code=int(exit_code),
+        cwd=str(Path(cwd or ".").resolve()), root=_root_for(facts, cwd),
+        session_id=str(session_id or "default"), output_summary=_summarize_output(output),
     )
 
 
@@ -496,16 +491,11 @@ def record_verify_run(
     """
     resolved = str(Path(root).resolve())
     return _insert_evidence(VerificationEvidence(
-        command=command,
-        canonical_command="hermes verify",
-        kind="verify",
+        command=command, canonical_command="hermes verify", kind="verify",
         scope=scope if scope in {"full", "targeted"} else "full",
-        status="passed" if ok else "failed",
-        exit_code=0 if ok else 1,
-        cwd=resolved,
+        status="passed" if ok else "failed", exit_code=0 if ok else 1, cwd=resolved,
         root=str((_project_facts(root) or {}).get("root") or resolved),
-        session_id=str(session_id or "default"),
-        output_summary=_summarize_output(output),
+        session_id=str(session_id or "default"), output_summary=_summarize_output(output),
     ))
 
 

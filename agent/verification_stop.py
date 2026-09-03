@@ -101,9 +101,7 @@ def _candidate_cwds(paths: Iterable[str]) -> list[Path]:
 
 
 def _verification_snapshot(
-    *,
-    session_id: str | None,
-    changed_paths: list[str],
+    *, session_id: str | None, changed_paths: list[str]
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """Return ``(status, facts)`` for the first edited workspace needing proof.
 
@@ -173,11 +171,7 @@ def _status_detail(status: dict[str, Any]) -> str:
 
 
 def build_verify_on_stop_nudge(
-    *,
-    session_id: str | None,
-    changed_paths: Iterable[str],
-    attempts: int = 0,
-    max_attempts: int = 2,
+    *, session_id: str | None, changed_paths: Iterable[str], attempts: int=0, max_attempts: int=2,
 ) -> str | None:
     """Return a synthetic follow-up when edited code lacks fresh verification."""
     # Prose-only turns (markdown, skills, README, LICENSE, ...) have nothing to verify.

@@ -42,26 +42,12 @@ class PreflightGateVerdict:
 
 
 def run_preflight_gate(
-    agent: Any,
-    *,
-    request_pressure_tokens: Any,
-    _moa_prepared_request: Any,
-    pending_moa_prepared_request: Any,
-    messages: Any,
-    system_message: Any,
-    user_message: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    api_call_count: Any,
-    compression_attempts: Any,
-    max_compression_attempts: Any,
-    effective_task_id: Any,
-    final_response: Any,
-    failed: Any,
-    _turn_exit_reason: Any,
-    _compression_timeout_exhausted: Any,
-    _preflight_compression_blocked: Any,
-    _provider_overflow_recovery_pending: Any,
+    agent: Any, *, request_pressure_tokens: Any, _moa_prepared_request: Any,
+    pending_moa_prepared_request: Any, messages: Any, system_message: Any, user_message: Any,
+    active_system_prompt: Any, conversation_history: Any, api_call_count: Any,
+    compression_attempts: Any, max_compression_attempts: Any, effective_task_id: Any,
+    final_response: Any, failed: Any, _turn_exit_reason: Any, _compression_timeout_exhausted: Any,
+    _preflight_compression_blocked: Any, _provider_overflow_recovery_pending: Any,
     _last_preflight_pressure: Any,
 ) -> PreflightGateVerdict:
     """Run the pre-API guard chain in the original order (#11529). ``_last_preflight_pressure``
@@ -73,21 +59,15 @@ def run_preflight_gate(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> PreflightGateVerdict:
         return PreflightGateVerdict(
-            action=action,
-            pending_moa_prepared_request=pending_moa_prepared_request,
-            messages=messages,
-            active_system_prompt=active_system_prompt,
-            conversation_history=conversation_history,
-            api_call_count=api_call_count,
-            compression_attempts=compression_attempts,
-            final_response=final_response,
-            failed=failed,
+            action=action, pending_moa_prepared_request=pending_moa_prepared_request,
+            messages=messages, active_system_prompt=active_system_prompt,
+            conversation_history=conversation_history, api_call_count=api_call_count,
+            compression_attempts=compression_attempts, final_response=final_response, failed=failed,
             _turn_exit_reason=_turn_exit_reason,
             _compression_timeout_exhausted=_compression_timeout_exhausted,
             _preflight_compression_blocked=_preflight_compression_blocked,
             _provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
-            _last_preflight_pressure=_last_preflight_pressure,
-            result=result,
+            _last_preflight_pressure=_last_preflight_pressure, result=result,
         )
 
     _runtime_context_error = _ollama_context_limit_error(
@@ -117,13 +97,11 @@ def run_preflight_gate(
     _provider_overflow_preflight = (
         _provider_overflow_recovery_pending
         and (
-            _preflight_threshold <= 0
-            or request_pressure_tokens >= _preflight_threshold
+            _preflight_threshold <= 0 or request_pressure_tokens >= _preflight_threshold
         )
     )
     if (
-        _provider_overflow_recovery_pending
-        and not _provider_overflow_preflight
+        _provider_overflow_recovery_pending and not _provider_overflow_preflight
     ):
         # The outer-loop rebuild includes system prompt, request-only injections and
         # tool schemas; only that full request with output runway may be sent.
@@ -136,9 +114,7 @@ def run_preflight_gate(
         _previous_preflight_pressure is not None
         and request_pressure_tokens >= _preflight_threshold
         and not _compression_warrants_another_preflight_pass(
-            _previous_preflight_pressure,
-            request_pressure_tokens,
-            _preflight_threshold,
+            _previous_preflight_pressure, request_pressure_tokens, _preflight_threshold
         )
     ):
         # Stop proactive retries this turn without consuming the shared overflow-
@@ -154,25 +130,16 @@ def run_preflight_gate(
         _compressor, "should_defer_preflight_to_real_usage", lambda _t: False
     )
     _pf = run_preflight_compression(
-        agent,
-        compressor=_compressor,
-        request_pressure_tokens=request_pressure_tokens,
+        agent, compressor=_compressor, request_pressure_tokens=request_pressure_tokens,
         provider_overflow_preflight=_provider_overflow_preflight,
         preflight_compression_blocked=_preflight_compression_blocked,
-        defer_preflight=_defer_preflight,
-        moa_prepared_request=_moa_prepared_request,
-        pending_moa_prepared_request=pending_moa_prepared_request,
-        messages=messages,
-        system_message=system_message,
-        user_message=user_message,
-        active_system_prompt=active_system_prompt,
-        conversation_history=conversation_history,
-        api_call_count=api_call_count,
-        compression_attempts=compression_attempts,
-        max_compression_attempts=max_compression_attempts,
-        effective_task_id=effective_task_id,
-        final_response=final_response,
-        failed=failed,
+        defer_preflight=_defer_preflight, moa_prepared_request=_moa_prepared_request,
+        pending_moa_prepared_request=pending_moa_prepared_request, messages=messages,
+        system_message=system_message, user_message=user_message,
+        active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+        api_call_count=api_call_count, compression_attempts=compression_attempts,
+        max_compression_attempts=max_compression_attempts, effective_task_id=effective_task_id,
+        final_response=final_response, failed=failed,
         compression_timeout_exhausted=_compression_timeout_exhausted,
         turn_exit_reason=_turn_exit_reason,
     )

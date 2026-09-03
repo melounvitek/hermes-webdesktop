@@ -111,13 +111,8 @@ def _read_package_json(root: Path) -> dict[str, Any] | None:
 
 # Ordered: the first lockfile present wins (grok's detectPackageManager).
 _LOCKFILE_MANAGERS = (
-    ("pnpm-lock.yaml", "pnpm"),
-    ("bun.lock", "bun"),
-    ("bun.lockb", "bun"),
-    ("yarn.lock", "yarn"),
-    ("package-lock.json", "npm"),
-    ("uv.lock", "uv"),
-    ("poetry.lock", "poetry"),
+    ("pnpm-lock.yaml", "pnpm"), ("bun.lock", "bun"), ("bun.lockb", "bun"), ("yarn.lock", "yarn"),
+    ("package-lock.json", "npm"), ("uv.lock", "uv"), ("poetry.lock", "poetry"),
     ("Pipfile.lock", "pipenv"),
 )
 
@@ -149,12 +144,10 @@ _SCRIPT_RUNNERS = {"pnpm": "pnpm {}", "bun": "bun run {}", "yarn": "yarn {}"}
 _NODE_INSTALL = {"pnpm": "pnpm install", "bun": "bun install", "yarn": "yarn install"}
 # Ordered: the first dependency present decides the framework (kind, label, default port).
 _NODE_FRAMEWORKS = (
-    (("next",), "nextjs", "Next.js", 3000),
-    (("@sveltejs/kit",), "sveltekit", "SvelteKit", 5173),
+    (("next",), "nextjs", "Next.js", 3000), (("@sveltejs/kit",), "sveltekit", "SvelteKit", 5173),
     (("astro",), "astro", "Astro", 4321),
     (("@remix-run/dev", "@remix-run/react"), "remix", "Remix", 3000),
-    (("react-scripts",), "cra", "Create React App", 3000),
-    (("vite",), "vite", "Vite", 5173),
+    (("react-scripts",), "cra", "Create React App", 3000), (("vite",), "vite", "Vite", 5173),
 )
 
 

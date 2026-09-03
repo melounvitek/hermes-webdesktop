@@ -80,12 +80,10 @@ def resolve_turn_liveness_settings(
 
     timeout_s = _resolve_finite_seconds(
         section.get("timeout_s", DEFAULT_TURN_LIVENESS_TIMEOUT_S),
-        default=DEFAULT_TURN_LIVENESS_TIMEOUT_S,
-        key=_CONFIG_TIMEOUT_KEY,
+        default=DEFAULT_TURN_LIVENESS_TIMEOUT_S, key=_CONFIG_TIMEOUT_KEY,
     )
     poll_s = _resolve_finite_seconds(
-        section.get("poll_s", DEFAULT_TURN_LIVENESS_POLL_S),
-        default=DEFAULT_TURN_LIVENESS_POLL_S,
+        section.get("poll_s", DEFAULT_TURN_LIVENESS_POLL_S), default=DEFAULT_TURN_LIVENESS_POLL_S,
         key=_CONFIG_POLL_KEY,
     )
     if poll_s <= 0:
@@ -104,16 +102,9 @@ class TurnLivenessWatchdog:
     """
 
     def __init__(
-        self,
-        agent: Any,
-        *,
-        session_id: str,
-        timeout_s: float,
-        poll_s: float,
-        stop_event: threading.Event,
-        activity_lock: threading.Lock,
-        is_turn_active: Callable[[], bool],
-        commit_abort: Callable[[ActivitySnapshot, str], bool],
+        self, agent: Any, *, session_id: str, timeout_s: float, poll_s: float,
+        stop_event: threading.Event, activity_lock: threading.Lock,
+        is_turn_active: Callable[[], bool], commit_abort: Callable[[ActivitySnapshot, str], bool],
         deactivate_turn: Callable[[], None],
     ) -> None:
         self._agent = agent

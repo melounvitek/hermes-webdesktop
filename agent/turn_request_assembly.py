@@ -39,27 +39,16 @@ class AssembledRequest:
 
 
 def assemble_api_request(
-    agent: Any,
-    *,
-    messages: Any,
-    current_turn_user_idx: Any,
-    _ext_prefetch_cache: Any,
-    _plugin_user_context: Any,
-    moa_config: Any,
-    active_system_prompt: Any,
-    original_user_message: Any,
-    pending_moa_prepared_request: Any,
-    request_logger: Any,
+    agent: Any, *, messages: Any, current_turn_user_idx: Any, _ext_prefetch_cache: Any,
+    _plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
+    original_user_message: Any, pending_moa_prepared_request: Any, request_logger: Any,
 ) -> AssembledRequest:
     """Assemble the request in the original order. ORDER IS LOAD-BEARING: cache breakpoints
     are injected only after whitespace normalization, the orphan sweep, thinking-only drop /
     user merge and surrogate stripping, so the same row's bytes never vary across turns."""
     from agent.conversation_loop import (
-        _apply_context_engine_selection,
-        _canonicalize_api_tool_calls,
-        _clone_message_for_send,
-        _midturn_request_pressure_tokens,
-        estimate_messages_tokens_rough,
+        _apply_context_engine_selection, _canonicalize_api_tool_calls, _clone_message_for_send,
+        _midturn_request_pressure_tokens, estimate_messages_tokens_rough,
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> AssembledRequest:
@@ -76,13 +65,9 @@ def assemble_api_request(
         )
 
     api_messages, effective_system = build_api_messages(
-        agent,
-        messages,
-        current_turn_user_idx=current_turn_user_idx,
-        ext_prefetch_cache=_ext_prefetch_cache,
-        plugin_user_context=_plugin_user_context,
-        moa_config=moa_config,
-        active_system_prompt=active_system_prompt,
+        agent, messages, current_turn_user_idx=current_turn_user_idx,
+        ext_prefetch_cache=_ext_prefetch_cache, plugin_user_context=_plugin_user_context,
+        moa_config=moa_config, active_system_prompt=active_system_prompt,
     )
 
     if moa_config:
@@ -126,8 +111,7 @@ def assemble_api_request(
                             # Multimodal turn: append MoA context as a trailing text
                             # part instead of silently dropping it.
                             _msg["content"] = [
-                                *_base,
-                                {"type": "text", "text": "\n\n" + _moa_context},
+                                *_base, {"type": "text", "text": "\n\n" + _moa_context}
                             ]
                         break
         except Exception as _moa_exc:
@@ -145,16 +129,10 @@ def assemble_api_request(
     # Per-turn context selection hook: an engine may select/replace context for THIS
     # call only — request-only, fail-open, and independent of should_compress().
     _sel_incoming = (
-        messages[current_turn_user_idx]
-        if 0 <= current_turn_user_idx < len(messages)
-        else None
+        messages[current_turn_user_idx] if 0 <= current_turn_user_idx < len(messages) else None
     )
     api_messages = _apply_context_engine_selection(
-        agent,
-        api_messages,
-        messages,
-        _sel_incoming,
-        logger=request_logger,
+        agent, api_messages, messages, _sel_incoming, logger=request_logger
     )
 
     # Runs unconditionally (not gated on context_compressor) so orphaned tool
@@ -178,8 +156,7 @@ def assemble_api_request(
     # Drop thinking-only assistant turns + merge adjacent users, API copy only:
     # Anthropic-style backends 400 on a trailing `thinking` block; history keeps it.
     api_messages = agent._drop_thinking_only_and_merge_users(
-        api_messages,
-        drop_codex_reasoning_items=agent.api_mode != "codex_responses",
+        api_messages, drop_codex_reasoning_items=agent.api_mode != "codex_responses"
     )
 
     # Normalize whitespace and tool-call JSON for bit-perfect prefixes across turns
@@ -213,15 +190,11 @@ def assemble_api_request(
             # Clamp per-destination: a configured 1h regresses to 5m on
             # Qwen/Alibaba routes, whose context cache is 5m-only (#84733).
             cache_ttl=effective_cache_ttl(
-                agent._cache_ttl,
-                provider=agent.provider,
-                model=agent.model,
+                agent._cache_ttl, provider=agent.provider, model=agent.model
             ),
             native_anthropic=agent._use_native_cache_layout,
             static_system_prefix=(
-                _static_system_prefix
-                if isinstance(_static_system_prefix, str)
-                else None
+                _static_system_prefix if isinstance(_static_system_prefix, str) else None
             ),
             direct_native_tool_cache=agent._direct_native_anthropic_tool_cache_capability(),
             # LiteLLM-style envelope routes forward part-level markers into

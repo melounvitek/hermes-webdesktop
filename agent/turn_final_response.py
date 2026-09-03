@@ -38,41 +38,24 @@ class FinalResponseVerdict:
 
 
 def finish_text_response(
-    agent: Any,
-    *,
-    assistant_message: Any,
-    response: Any,
-    finish_reason: Any,
-    messages: Any,
-    api_messages: Any,
-    conversation_history: Any,
-    api_call_count: Any,
-    user_message: Any,
-    active_system_prompt: Any,
-    final_response: Any,
-    _turn_exit_reason: Any,
-    _preflight_compression_blocked: Any,
-    codex_ack_continuations: Any,
-    truncated_response_parts: Any,
-    length_continue_retries: Any,
-    _pending_verification_response: Any,
-    _pending_verification_response_previewed: Any,
+    agent: Any, *, assistant_message: Any, response: Any, finish_reason: Any, messages: Any,
+    api_messages: Any, conversation_history: Any, api_call_count: Any, user_message: Any,
+    active_system_prompt: Any, final_response: Any, _turn_exit_reason: Any,
+    _preflight_compression_blocked: Any, codex_ack_continuations: Any,
+    truncated_response_parts: Any, length_continue_retries: Any,
+    _pending_verification_response: Any, _pending_verification_response_previewed: Any,
 ) -> FinalResponseVerdict:
     """Finish (or defer) a text-only assistant response in the original guard order. Every
     continuation path sets ``final_response = None`` so an acknowledgment never suppresses
     iteration-limit summarization; the final message is appended and flushed only after the
     stop gates accept it."""
     from agent.conversation_loop import (
-        _CODEX_ACK_CONTINUATION_NUDGE,
-        _DROPPED_TOOLCALL_NUDGE_CONTENT,
-        _join_truncated_parts,
+        _CODEX_ACK_CONTINUATION_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT, _join_truncated_parts
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> FinalResponseVerdict:
         return FinalResponseVerdict(
-            action=action,
-            active_system_prompt=active_system_prompt,
-            final_response=final_response,
+            action=action, active_system_prompt=active_system_prompt, final_response=final_response,
             _turn_exit_reason=_turn_exit_reason,
             _preflight_compression_blocked=_preflight_compression_blocked,
             codex_ack_continuations=codex_ack_continuations,
@@ -94,16 +77,9 @@ def finish_text_response(
     # Check if response only has think block with no actual content after it
     if not agent._has_content_after_think_block(final_response):
         _ev = recover_empty_response(
-            agent,
-            assistant_message,
-            response,
-            finish_reason,
-            final_response=final_response,
-            messages=messages,
-            api_messages=api_messages,
-            conversation_history=conversation_history,
-            active_system_prompt=active_system_prompt,
-            api_call_count=api_call_count,
+            agent, assistant_message, response, finish_reason, final_response=final_response,
+            messages=messages, api_messages=api_messages, conversation_history=conversation_history,
+            active_system_prompt=active_system_prompt, api_call_count=api_call_count,
             turn_exit_reason=_turn_exit_reason,
             preflight_compression_blocked=_preflight_compression_blocked,
         )
@@ -126,8 +102,7 @@ def finish_text_response(
     agent._clear_status_buffer()
 
     from agent.agent_runtime_helpers import (
-        intent_ack_continuation_mode,
-        trailing_continue_intent,
+        intent_ack_continuation_mode, trailing_continue_intent
     )
 
     _ack_mode = intent_ack_continuation_mode(agent)
@@ -147,9 +122,7 @@ def finish_text_response(
         and agent.valid_tool_names
         and codex_ack_continuations < 2
         and agent._looks_like_codex_intermediate_ack(
-            user_message=user_message,
-            assistant_content=final_response,
-            messages=messages,
+            user_message=user_message, assistant_content=final_response, messages=messages,
             require_workspace=(_ack_mode == "codex_only"),
         )
     ):
@@ -165,8 +138,7 @@ def finish_text_response(
         agent._emit_interim_assistant_message(interim_msg)
 
         continue_msg = {
-            "role": "user",
-            "content": _CODEX_ACK_CONTINUATION_NUDGE,
+            "role": "user", "content": _CODEX_ACK_CONTINUATION_NUDGE
         }
         append_message(messages, continue_msg)
         agent._session_messages = messages
@@ -242,10 +214,7 @@ def finish_text_response(
         messages.pop()
 
     _sg = apply_stop_gates(
-        agent,
-        final_msg,
-        final_response=final_response,
-        messages=messages,
+        agent, final_msg, final_response=final_response, messages=messages,
         conversation_history=conversation_history,
         pending_verification_response=_pending_verification_response,
         pending_verification_response_previewed=_pending_verification_response_previewed,

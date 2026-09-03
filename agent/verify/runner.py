@@ -94,10 +94,7 @@ def _tail(text: str, limit: int = _TAIL_CHARS) -> str:
 
 
 def _run_phase_command(
-    phase: str,
-    command: str,
-    root: Path,
-    timeout: float,
+    phase: str, command: str, root: Path, timeout: float,
     on_output: Callable[[str], None] | None = None,
 ) -> PhaseResult:
     started = time.monotonic()
@@ -175,10 +172,7 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
 
 
 def _run_start_phase(
-    recipe: Recipe,
-    root: Path,
-    ready_timeout: float,
-    port_override: int | None = None,
+    recipe: Recipe, root: Path, ready_timeout: float, port_override: int | None = None
 ) -> ReadinessResult:
     assert recipe.start is not None
     port = port_override or recipe.port or 8000
@@ -200,14 +194,9 @@ def _run_start_phase(
 
 
 def run_verify(
-    root: Path,
-    recipe: Recipe,
-    phases: tuple[str, ...] | list[str] | None = None,
-    phase_timeout: float = DEFAULT_PHASE_TIMEOUT,
-    ready_timeout: float = DEFAULT_READY_TIMEOUT,
-    skip_start: bool = False,
-    port_override: int | None = None,
-    stop_on_failure: bool = True,
+    root: Path, recipe: Recipe, phases: tuple[str, ...] | list[str] | None = None,
+    phase_timeout: float = DEFAULT_PHASE_TIMEOUT, ready_timeout: float = DEFAULT_READY_TIMEOUT,
+    skip_start: bool = False, port_override: int | None = None, stop_on_failure: bool = True,
     on_output: Callable[[str], None] | None = None,
 ) -> VerifyResult:
     """Run a verify pass for ``recipe`` at project ``root``.

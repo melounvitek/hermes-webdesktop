@@ -20,8 +20,7 @@ from agent.message_sanitization import _sanitize_surrogates
 # returned/live history to avoid role-alternation breaks; the assistant response is
 # real content and is not flagged. (#65919)
 _VERIFICATION_CONTINUATION_FLAGS = (
-    "_verification_stop_synthetic",
-    "_pre_verify_synthetic",
+    "_verification_stop_synthetic", "_pre_verify_synthetic"
 )
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
@@ -50,10 +49,7 @@ def _fill_assistant_tail_content(agent, tail: dict, final_response) -> None:
 
 
 def _record_kanban_budget_exhausted(
-    kanban_task: str,
-    api_call_count: int,
-    max_iterations: int,
-    logger: logging.Logger,
+    kanban_task: str, api_call_count: int, max_iterations: int, logger: logging.Logger
 ) -> None:
     """Record a terminal ``timed_out`` outcome for a kanban worker out of budget.
 
@@ -78,8 +74,7 @@ def _record_kanban_budget_exhausted(
                 release_claim=True,
                 end_run=True,
                 event_payload_extra={
-                    "budget_used": api_call_count,
-                    "budget_max": max_iterations,
+                    "budget_used": api_call_count, "budget_max": max_iterations
                 },
             )
         finally:
@@ -89,9 +84,7 @@ def _record_kanban_budget_exhausted(
                 pass
     except Exception:
         logger.warning(
-            "Failed to record budget-exhausted failure for task %s",
-            kanban_task,
-            exc_info=True,
+            "Failed to record budget-exhausted failure for task %s", kanban_task, exc_info=True
         )
 
 
@@ -136,23 +129,13 @@ def _guarded_cleanup(label: str, fn: Callable[[], Any], errors: List[str], logge
 
 
 def _resolve_budget_fallback(
-    agent,
-    *,
-    final_response,
-    api_call_count,
-    interrupted,
-    failed,
-    messages,
-    _turn_exit_reason,
-    _pending_verification_response,
-    _pending_verification_response_previewed,
-    logger,
+    agent, *, final_response, api_call_count, interrupted, failed, messages, _turn_exit_reason,
+    _pending_verification_response, _pending_verification_response_previewed, logger,
 ) -> Tuple[Any, Any, bool]:
     """Iteration-budget exhaustion. Returns ``(final_response, _turn_exit_reason,
     preserved_verification_fallback)``."""
     budget_exhausted = (
-        api_call_count >= agent.max_iterations
-        or agent.iteration_budget.remaining <= 0
+        api_call_count >= agent.max_iterations or agent.iteration_budget.remaining <= 0
     )
     budget_fallback_eligible = (
         budget_exhausted
@@ -209,9 +192,7 @@ def _rollback_interrupted_preflight_display(agent, interrupted) -> None:
         and getattr(agent, "context_compressor", None) is not None
     ):
         _rollback_fn = getattr(
-            agent.context_compressor,
-            "rollback_interrupted_preflight_display_tokens",
-            None,
+            agent.context_compressor, "rollback_interrupted_preflight_display_tokens", None
         )
         if callable(_rollback_fn):
             _rollback_fn(_preflight_snapshot)
@@ -392,8 +373,7 @@ def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_v
             or str(_turn_exit_reason) == "partial_stream_recovery"
         ):
             _explanation = agent._format_turn_completion_explanation(
-                _turn_exit_reason,
-                getattr(agent, "_last_persistence_error_cause", None),
+                _turn_exit_reason, getattr(agent, "_last_persistence_error_cause", None)
             )
             if _explanation:
                 # Replace the bare sentinel; keep a partial fragment and append why.
@@ -416,33 +396,17 @@ def _last_turn_reasoning(messages) -> Optional[Any]:
 
 
 def finalize_turn(
-    agent,
-    *,
-    final_response,
-    api_call_count,
-    interrupted,
-    failed,
-    messages,
-    conversation_history,
-    effective_task_id,
-    turn_id,
-    user_message,
-    original_user_message,
-    _should_review_memory,
-    _turn_exit_reason,
-    _pending_verification_response=None,
+    agent, *, final_response, api_call_count, interrupted, failed, messages, conversation_history,
+    effective_task_id, turn_id, user_message, original_user_message, _should_review_memory,
+    _turn_exit_reason, _pending_verification_response=None,
     _pending_verification_response_previewed=False,
 ):
     """Run the post-loop finalization and return the turn ``result`` dict."""
     from agent.conversation_loop import logger
 
     final_response, _turn_exit_reason, preserved_verification_fallback = _resolve_budget_fallback(
-        agent,
-        final_response=final_response,
-        api_call_count=api_call_count,
-        interrupted=interrupted,
-        failed=failed,
-        messages=messages,
+        agent, final_response=final_response, api_call_count=api_call_count,
+        interrupted=interrupted, failed=failed, messages=messages,
         _turn_exit_reason=_turn_exit_reason,
         _pending_verification_response=_pending_verification_response,
         _pending_verification_response_previewed=_pending_verification_response_previewed,
@@ -539,16 +503,9 @@ def finalize_turn(
         # ``_last_turn_usage`` holds the last API response's canonical usage dict, or
         # ``None`` on turns that never reached a provider response — by contract.
         _notify_context_engine_turn_complete(
-            agent,
-            messages,
-            usage=getattr(agent, "_last_turn_usage", None),
-            logger=logger,
-            turn_id=turn_id,
-            task_id=effective_task_id,
-            api_call_count=api_call_count,
-            interrupted=interrupted,
-            failed=failed,
-            turn_exit_reason=_turn_exit_reason,
+            agent, messages, usage=getattr(agent, "_last_turn_usage", None), logger=logger,
+            turn_id=turn_id, task_id=effective_task_id, api_call_count=api_call_count,
+            interrupted=interrupted, failed=failed, turn_exit_reason=_turn_exit_reason,
         )
     except Exception as exc:
         logger.warning("on_turn_complete notification failed: %s", exc)
@@ -635,10 +592,8 @@ def finalize_turn(
 
     # External memory provider: sync the completed turn + queue next prefetch.
     agent._sync_external_memory_for_turn(
-        original_user_message=original_user_message,
-        final_response=final_response,
-        interrupted=interrupted,
-        messages=messages,
+        original_user_message=original_user_message, final_response=final_response,
+        interrupted=interrupted, messages=messages,
     )
 
     # Background memory/skill review runs AFTER delivery so it never competes with the
@@ -654,8 +609,7 @@ def finalize_turn(
             # _spawn_background_review clones the snapshot structurally so the fork's
             # in-place sanitizers can't reach the live transcript.
             agent._spawn_background_review(
-                messages_snapshot=list(messages),
-                review_memory=_should_review_memory,
+                messages_snapshot=list(messages), review_memory=_should_review_memory,
                 review_skills=_should_review_skills,
             )
         except Exception:

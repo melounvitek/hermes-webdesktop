@@ -53,11 +53,8 @@ class CodexAppServerClient:
     """
 
     def __init__(
-        self,
-        codex_bin: str = "codex",
-        codex_home: Optional[str] = None,
-        extra_args: Optional[list[str]] = None,
-        env: Optional[dict[str, str]] = None,
+        self, codex_bin: str = "codex", codex_home: Optional[str] = None,
+        extra_args: Optional[list[str]] = None, env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
         # codex needs LLM provider creds (inherit_credentials=True) but must not
@@ -108,12 +105,8 @@ class CodexAppServerClient:
         self._stderr_reader.start()
 
     def initialize(
-        self,
-        client_name: str = "hermes",
-        client_title: str = "Hermes Agent",
-        client_version: str = "0.1",
-        capabilities: Optional[dict] = None,
-        timeout: float = 10.0,
+        self, client_name: str = "hermes", client_title: str = "Hermes Agent",
+        client_version: str = "0.1", capabilities: Optional[dict] = None, timeout: float = 10.0,
     ) -> dict:
         """Send ``initialize`` + ``initialized``; return the server's InitializeResponse."""
         if self._initialized:

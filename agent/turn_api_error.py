@@ -20,14 +20,9 @@ from agent.error_classifier import FailoverReason, classify_api_error
 from agent.message_sanitization import close_interrupted_tool_sequence
 from agent.turn_overflow import recover_from_overflow
 from agent.turn_recovery import (
-    compute_error_backoff,
-    interruptible_backoff_sleep,
-    log_api_error_attempt,
-    max_retries_exhausted_result,
-    nonretryable_client_error_result,
-    recover_after_classification,
-    recover_before_classification,
-    route_classified_error,
+    compute_error_backoff, interruptible_backoff_sleep, log_api_error_attempt,
+    max_retries_exhausted_result, nonretryable_client_error_result, recover_after_classification,
+    recover_before_classification, route_classified_error,
 )
 
 logger = logging.getLogger("agent.conversation_loop")
@@ -55,27 +50,11 @@ class ApiErrorVerdict:
 
 
 def handle_api_error(
-    agent: Any,
-    *,
-    api_error: Any,
-    _retry: Any,
-    thinking_spinner: Any,
-    messages: Any,
-    api_messages: Any,
-    api_kwargs: Any,
-    system_message: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    approx_tokens: Any,
-    retry_count: Any,
-    max_retries: Any,
-    compression_attempts: Any,
-    max_compression_attempts: Any,
-    api_call_count: Any,
-    api_request_id: Any,
-    api_start_time: Any,
-    effective_task_id: Any,
-    turn_id: Any,
+    agent: Any, *, api_error: Any, _retry: Any, thinking_spinner: Any, messages: Any,
+    api_messages: Any, api_kwargs: Any, system_message: Any, active_system_prompt: Any,
+    conversation_history: Any, approx_tokens: Any, retry_count: Any, max_retries: Any,
+    compression_attempts: Any, max_compression_attempts: Any, api_call_count: Any,
+    api_request_id: Any, api_start_time: Any, effective_task_id: Any, turn_id: Any,
 ) -> ApiErrorVerdict:
     """Recover from ``api_error`` in the original order. Every fallback activation must leave
     the retry loop with ``restart_with_rebuilt_messages`` armed (``"break"``) so the pre-API
@@ -84,17 +63,11 @@ def handle_api_error(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ApiErrorVerdict:
         return ApiErrorVerdict(
-            action=action,
-            thinking_spinner=thinking_spinner,
-            messages=messages,
-            active_system_prompt=active_system_prompt,
-            conversation_history=conversation_history,
-            approx_tokens=approx_tokens,
-            retry_count=retry_count,
-            max_retries=max_retries,
+            action=action, thinking_spinner=thinking_spinner, messages=messages,
+            active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+            approx_tokens=approx_tokens, retry_count=retry_count, max_retries=max_retries,
             compression_attempts=compression_attempts,
-            _provider_overflow_recovery_pending=_provider_overflow_recovery_pending,
-            result=result,
+            _provider_overflow_recovery_pending=_provider_overflow_recovery_pending, result=result,
         )
 
     # Stop spinner silently — retry status is buffered and
@@ -108,11 +81,7 @@ def handle_api_error(
     # Pre-classification recovery (encoding sanitization, image rejection,
     # Bedrock SDK streaming fallback) — see agent/turn_recovery.py.
     _recovered, active_system_prompt = recover_before_classification(
-        agent,
-        api_error,
-        messages=messages,
-        api_messages=api_messages,
-        api_kwargs=api_kwargs,
+        agent, api_error, messages=messages, api_messages=api_messages, api_kwargs=api_kwargs,
         active_system_prompt=active_system_prompt,
     )
     if _recovered:
@@ -133,8 +102,7 @@ def handle_api_error(
             agent.log_prefix, api_call_count, api_error,
         )
         _shutdown_summary = (
-            "Turn abandoned: the process was shutting down "
-            "before the model call could complete."
+            "Turn abandoned: the process was shutting down " "before the model call could complete."
         )
         return _verdict("return", {
             "final_response": _shutdown_summary,
@@ -151,12 +119,9 @@ def handle_api_error(
     _compressor = getattr(agent, "context_compressor", None)
     _ctx_len = getattr(_compressor, "context_length", 200000) if _compressor else 200000
     classified = classify_api_error(
-        api_error,
-        provider=getattr(agent, "provider", "") or "",
-        model=getattr(agent, "model", "") or "",
-        approx_tokens=approx_tokens,
-        context_length=_ctx_len,
-        num_messages=len(api_messages) if api_messages else 0,
+        api_error, provider=getattr(agent, "provider", "") or "",
+        model=getattr(agent, "model", "") or "", approx_tokens=approx_tokens,
+        context_length=_ctx_len, num_messages=len(api_messages) if api_messages else 0,
     )
     logger.debug(
         "Error classified: reason=%s status=%s retryable=%s compress=%s rotate=%s fallback=%s",
@@ -165,18 +130,10 @@ def handle_api_error(
         classified.should_rotate_credential, classified.should_fallback,
     )
     agent._invoke_api_request_error_hook(
-        task_id=effective_task_id,
-        turn_id=turn_id,
-        api_request_id=api_request_id,
-        api_call_count=api_call_count,
-        api_start_time=api_start_time,
-        api_kwargs=api_kwargs,
-        error_type=type(api_error).__name__,
-        error_message=str(api_error),
-        status_code=status_code,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        retryable=classified.retryable,
+        task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+        api_call_count=api_call_count, api_start_time=api_start_time, api_kwargs=api_kwargs,
+        error_type=type(api_error).__name__, error_message=str(api_error), status_code=status_code,
+        retry_count=retry_count, max_retries=max_retries, retryable=classified.retryable,
         reason=classified.reason.value,
     )
 
@@ -184,14 +141,8 @@ def handle_api_error(
     # pool, image/multimodal strips, per-provider 401 refresh, format-recovery
     # strips) — see agent/turn_recovery.py.
     _recovered, recovered_with_pool = recover_after_classification(
-        agent,
-        api_error,
-        classified,
-        _retry,
-        status_code=status_code,
-        error_context=error_context,
-        messages=messages,
-        api_messages=api_messages,
+        agent, api_error, classified, _retry, status_code=status_code, error_context=error_context,
+        messages=messages, api_messages=api_messages,
     )
     if _recovered:
         return _verdict("continue")
@@ -203,14 +154,8 @@ def handle_api_error(
     )
 
     error_type, error_msg, _provider, _base, _model = log_api_error_attempt(
-        agent,
-        api_error,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        status_code=status_code,
-        elapsed_time=elapsed_time,
-        api_messages=api_messages,
-        approx_tokens=approx_tokens,
+        agent, api_error, retry_count=retry_count, max_retries=max_retries, status_code=status_code,
+        elapsed_time=elapsed_time, api_messages=api_messages, approx_tokens=approx_tokens,
     )
 
     # Check for interrupt before deciding to retry
@@ -234,25 +179,12 @@ def handle_api_error(
         })
 
     _ce = route_classified_error(
-        agent,
-        api_error,
-        classified,
-        _retry,
-        error_msg=error_msg,
-        error_context=error_context,
-        recovered_with_pool=recovered_with_pool,
-        base_url=_base,
-        model=_model,
-        messages=messages,
-        api_messages=api_messages,
-        system_message=system_message,
-        active_system_prompt=active_system_prompt,
-        conversation_history=conversation_history,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        compression_attempts=compression_attempts,
-        max_compression_attempts=max_compression_attempts,
-        api_call_count=api_call_count,
+        agent, api_error, classified, _retry, error_msg=error_msg, error_context=error_context,
+        recovered_with_pool=recovered_with_pool, base_url=_base, model=_model, messages=messages,
+        api_messages=api_messages, system_message=system_message,
+        active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+        retry_count=retry_count, max_retries=max_retries, compression_attempts=compression_attempts,
+        max_compression_attempts=max_compression_attempts, api_call_count=api_call_count,
         effective_task_id=effective_task_id,
     )
     status_code = _ce.status_code
@@ -275,22 +207,12 @@ def handle_api_error(
         return _verdict("continue")
 
     _ov = recover_from_overflow(
-        agent,
-        api_error,
-        classified,
-        _retry,
-        status_code=status_code,
-        error_msg=error_msg,
-        wrapped_output_cap_budget=_wrapped_output_cap_budget,
-        messages=messages,
-        api_messages=api_messages,
-        system_message=system_message,
-        active_system_prompt=active_system_prompt,
-        conversation_history=conversation_history,
-        approx_tokens=approx_tokens,
-        compression_attempts=compression_attempts,
-        max_compression_attempts=max_compression_attempts,
-        api_call_count=api_call_count,
+        agent, api_error, classified, _retry, status_code=status_code, error_msg=error_msg,
+        wrapped_output_cap_budget=_wrapped_output_cap_budget, messages=messages,
+        api_messages=api_messages, system_message=system_message,
+        active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+        approx_tokens=approx_tokens, compression_attempts=compression_attempts,
+        max_compression_attempts=max_compression_attempts, api_call_count=api_call_count,
         effective_task_id=effective_task_id,
     )
     messages = _ov.messages
@@ -309,27 +231,13 @@ def handle_api_error(
         return _verdict("continue")
 
     _ue = settle_unrecovered_error(
-        agent,
-        api_error=api_error,
-        classified=classified,
-        _retry=_retry,
-        status_code=status_code,
-        error_msg=error_msg,
-        is_context_length_error=is_context_length_error,
-        is_rate_limited=is_rate_limited,
-        _is_zai_coding_overload=_is_zai_coding_overload,
-        _provider=_provider,
-        _base=_base,
-        _model=_model,
-        messages=messages,
-        api_messages=api_messages,
-        api_kwargs=api_kwargs,
-        active_system_prompt=active_system_prompt,
-        conversation_history=conversation_history,
-        approx_tokens=approx_tokens,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        compression_attempts=compression_attempts,
+        agent, api_error=api_error, classified=classified, _retry=_retry, status_code=status_code,
+        error_msg=error_msg, is_context_length_error=is_context_length_error,
+        is_rate_limited=is_rate_limited, _is_zai_coding_overload=_is_zai_coding_overload,
+        _provider=_provider, _base=_base, _model=_model, messages=messages,
+        api_messages=api_messages, api_kwargs=api_kwargs, active_system_prompt=active_system_prompt,
+        conversation_history=conversation_history, approx_tokens=approx_tokens,
+        retry_count=retry_count, max_retries=max_retries, compression_attempts=compression_attempts,
         api_call_count=api_call_count,
     )
     active_system_prompt = _ue.active_system_prompt
@@ -354,29 +262,11 @@ class UnrecoveredErrorVerdict:
 
 
 def settle_unrecovered_error(
-    agent: Any,
-    *,
-    api_error: Any,
-    classified: Any,
-    _retry: Any,
-    status_code: Any,
-    error_msg: Any,
-    is_context_length_error: Any,
-    is_rate_limited: Any,
-    _is_zai_coding_overload: Any,
-    _provider: Any,
-    _base: Any,
-    _model: Any,
-    messages: Any,
-    api_messages: Any,
-    api_kwargs: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    approx_tokens: Any,
-    retry_count: Any,
-    max_retries: Any,
-    compression_attempts: Any,
-    api_call_count: Any,
+    agent: Any, *, api_error: Any, classified: Any, _retry: Any, status_code: Any, error_msg: Any,
+    is_context_length_error: Any, is_rate_limited: Any, _is_zai_coding_overload: Any,
+    _provider: Any, _base: Any, _model: Any, messages: Any, api_messages: Any, api_kwargs: Any,
+    active_system_prompt: Any, conversation_history: Any, approx_tokens: Any, retry_count: Any,
+    max_retries: Any, compression_attempts: Any, api_call_count: Any,
 ) -> UnrecoveredErrorVerdict:
     """Decide the fate of an API error that every recovery chain declined: local validation /
     non-retryable client errors (Copilot stale-credential self-heal first, then fallback, then a
@@ -384,18 +274,13 @@ def settle_unrecovered_error(
     result), else the interruptible error backoff. ``FailoverReason.billing`` (402) is deliberately
     treated as non-retryable (#31273)."""
     from agent.conversation_loop import (
-        _arm_fallback_restart,
-        _is_copilot_provider,
-        _is_stale_copilot_credential_error,
+        _arm_fallback_restart, _is_copilot_provider, _is_stale_copilot_credential_error
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> UnrecoveredErrorVerdict:
         return UnrecoveredErrorVerdict(
-            action=action,
-            active_system_prompt=active_system_prompt,
-            retry_count=retry_count,
-            compression_attempts=compression_attempts,
-            result=result,
+            action=action, active_system_prompt=active_system_prompt, retry_count=retry_count,
+            compression_attempts=compression_attempts, result=result,
         )
 
     # Non-retryable: ValueError/TypeError are local bugs, except
@@ -428,12 +313,9 @@ def settle_unrecovered_error(
             not classified.retryable
             and not classified.should_compress
             and classified.reason not in {
-                FailoverReason.rate_limit,
-                FailoverReason.overloaded,
-                FailoverReason.context_overflow,
-                FailoverReason.payload_too_large,
-                FailoverReason.long_context_tier,
-                FailoverReason.thinking_signature,
+                FailoverReason.rate_limit, FailoverReason.overloaded,
+                FailoverReason.context_overflow, FailoverReason.payload_too_large,
+                FailoverReason.long_context_tier, FailoverReason.thinking_signature,
             }
         )
     ) and not is_context_length_error
@@ -474,19 +356,10 @@ def settle_unrecovered_error(
             compression_attempts = 0
             return _verdict("break")
         return _verdict("return", nonretryable_client_error_result(
-            agent,
-            api_error,
-            classified,
-            status_code=status_code,
-            api_kwargs=api_kwargs,
-            api_messages=api_messages,
-            messages=messages,
-            conversation_history=conversation_history,
-            api_call_count=api_call_count,
-            approx_tokens=approx_tokens,
-            provider=_provider,
-            base_url=_base,
-            model=_model,
+            agent, api_error, classified, status_code=status_code, api_kwargs=api_kwargs,
+            api_messages=api_messages, messages=messages, conversation_history=conversation_history,
+            api_call_count=api_call_count, approx_tokens=approx_tokens, provider=_provider,
+            base_url=_base, model=_model,
         ))
 
     if retry_count >= max_retries:
@@ -514,39 +387,22 @@ def settle_unrecovered_error(
             compression_attempts = 0
             return _verdict("break")
         return _verdict("return", max_retries_exhausted_result(
-            agent,
-            api_error,
-            classified,
-            max_retries=max_retries,
-            is_rate_limited=is_rate_limited,
-            error_msg=error_msg,
-            api_kwargs=api_kwargs,
-            api_messages=api_messages,
-            messages=messages,
-            conversation_history=conversation_history,
-            api_call_count=api_call_count,
-            approx_tokens=approx_tokens,
-            provider=_provider,
-            base_url=_base,
-            model=_model,
+            agent, api_error, classified, max_retries=max_retries, is_rate_limited=is_rate_limited,
+            error_msg=error_msg, api_kwargs=api_kwargs, api_messages=api_messages,
+            messages=messages, conversation_history=conversation_history,
+            api_call_count=api_call_count, approx_tokens=approx_tokens, provider=_provider,
+            base_url=_base, model=_model,
         ))
 
     wait_time = compute_error_backoff(
-        agent,
-        api_error,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        is_rate_limited=is_rate_limited,
-        is_zai_coding_overload=_is_zai_coding_overload,
-        base_url=_base,
-        model=_model,
+        agent, api_error, retry_count=retry_count, max_retries=max_retries,
+        is_rate_limited=is_rate_limited, is_zai_coding_overload=_is_zai_coding_overload,
+        base_url=_base, model=_model,
     )
     # Same preserve-redirect rule as the invalid-response wait: a steering
     # correction must survive backoff, not die as "Operation interrupted".
     _interrupted = interruptible_backoff_sleep(
-        agent, wait_time, _retry,
-        messages=messages,
-        conversation_history=conversation_history,
+        agent, wait_time, _retry, messages=messages, conversation_history=conversation_history,
         api_call_count=api_call_count,
         abort_message="Interrupt detected during retry wait, aborting.",
         interrupt_text=f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",

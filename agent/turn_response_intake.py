@@ -33,18 +33,9 @@ class ResponseIntakeVerdict:
 
 
 def normalize_model_response(
-    agent: Any,
-    *,
-    response: Any,
-    messages: Any,
-    api_messages: Any,
-    conversation_history: Any,
-    api_call_count: Any,
-    api_duration: Any,
-    api_start_time: Any,
-    api_request_id: Any,
-    effective_task_id: Any,
-    turn_id: Any,
+    agent: Any, *, response: Any, messages: Any, api_messages: Any, conversation_history: Any,
+    api_call_count: Any, api_duration: Any, api_start_time: Any, api_request_id: Any,
+    effective_task_id: Any, turn_id: Any,
 ) -> ResponseIntakeVerdict:
     """Normalize ``response`` into ``assistant_message`` (str content, never dict/list) and run
     the post-response hooks and continuation guards, in the original order."""
@@ -56,9 +47,7 @@ def normalize_model_response(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ResponseIntakeVerdict:
         return ResponseIntakeVerdict(
-            action=action,
-            assistant_message=assistant_message,
-            finish_reason=finish_reason,
+            action=action, assistant_message=assistant_message, finish_reason=finish_reason,
             result=result,
         )
 
@@ -97,8 +86,7 @@ def normalize_model_response(
 
     try:
         from hermes_cli.lifecycle import (
-            has_hook,
-            invoke_hook as _invoke_hook,
+            has_hook, invoke_hook as _invoke_hook
         )
         if has_hook("post_api_request"):
             _assistant_tool_calls = (
@@ -131,9 +119,7 @@ def normalize_model_response(
                 message_count=len(api_messages),
                 response_model=getattr(response, "model", None),
                 response=agent._api_response_payload_for_hook(
-                    response,
-                    assistant_message,
-                    finish_reason=finish_reason,
+                    response, assistant_message, finish_reason=finish_reason
                 ),
                 usage=agent._usage_summary_for_api_request_hook(response),
                 assistant_message=assistant_message,
@@ -208,12 +194,8 @@ def normalize_model_response(
 
     if agent.api_mode == "codex_responses" and finish_reason == "incomplete":
         _codex_result = continue_codex_incomplete(
-            agent,
-            assistant_message,
-            finish_reason,
-            messages=messages,
-            conversation_history=conversation_history,
-            api_call_count=api_call_count,
+            agent, assistant_message, finish_reason, messages=messages,
+            conversation_history=conversation_history, api_call_count=api_call_count,
         )
         if _codex_result is not None:
             return _verdict("return", _codex_result)

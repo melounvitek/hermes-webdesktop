@@ -56,15 +56,8 @@ class TTSProvider(CatalogProviderBase):
 
     @abc.abstractmethod
     def synthesize(
-        self,
-        text: str,
-        output_path: str,
-        *,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        speed: Optional[float] = None,
-        format: str = DEFAULT_OUTPUT_FORMAT,
-        **extra: Any,
+        self, text: str, output_path: str, *, voice: Optional[str]=None, model: Optional[str]=None,
+        speed: Optional[float]=None, format: str=DEFAULT_OUTPUT_FORMAT, ** extra: Any,
     ) -> str:
         """Synthesize ``text`` into ``output_path`` and return the written path.
 
@@ -77,13 +70,8 @@ class TTSProvider(CatalogProviderBase):
         """
 
     def stream(
-        self,
-        text: str,
-        *,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        format: str = "opus",
-        **extra: Any,
+        self, text: str, *, voice: Optional[str] = None, model: Optional[str] = None,
+        format: str = "opus", **extra: Any,
     ) -> Iterator[bytes]:
         """Stream synthesized audio bytes (optional).
 

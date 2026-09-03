@@ -83,8 +83,7 @@ class CanonicalUsage:
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
             cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
             reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
-            request_count=self.request_count + other.request_count,
-            raw_usage=None,
+            request_count=self.request_count + other.request_count, raw_usage=None,
         )
 
 
@@ -132,25 +131,15 @@ _UTC_NOW = lambda: datetime.now(timezone.utc)
 
 
 def _snap(
-    inp: str,
-    out: str,
-    cache_read: Optional[str] = None,
-    cache_write: Optional[str] = None,
-    *,
-    version: str,
-    url: Optional[str] = None,
-    **tiers: Any,
+    inp: str, out: str, cache_read: Optional[str] = None, cache_write: Optional[str] = None, *,
+    version: str, url: Optional[str] = None, **tiers: Any,
 ) -> PricingEntry:
     """Build an official-docs snapshot entry from per-million USD rate strings."""
     return PricingEntry(
-        input_cost_per_million=Decimal(inp),
-        output_cost_per_million=Decimal(out),
+        input_cost_per_million=Decimal(inp), output_cost_per_million=Decimal(out),
         cache_read_cost_per_million=Decimal(cache_read) if cache_read is not None else None,
         cache_write_cost_per_million=Decimal(cache_write) if cache_write is not None else None,
-        source="official_docs_snapshot",
-        source_url=url,
-        pricing_version=version,
-        **tiers,
+        source="official_docs_snapshot", source_url=url, pricing_version=version, **tiers,
     )
 
 
@@ -355,9 +344,7 @@ def _first_nonzero(obj: Any, *paths: tuple[str, ...]) -> int:
 
 
 def resolve_billing_route(
-    model_name: str,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
+    model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None
 ) -> BillingRoute:
     provider_name = (provider or "").strip().lower()
     base = (base_url or "").strip().lower()
@@ -441,8 +428,7 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
     # Anthropic dot-notation (opus-4.7) and Bedrock region-prefixed ids need
     # normalizing before a second lookup.
     normalize = {
-        "anthropic": _normalize_anthropic_model_name,
-        "bedrock": _normalize_bedrock_model_name,
+        "anthropic": _normalize_anthropic_model_name, "bedrock": _normalize_bedrock_model_name
     }.get(route.provider)
     if normalize:
         normalized = normalize(model)
@@ -455,19 +441,14 @@ def _lookup_official_docs_pricing(route: BillingRoute) -> Optional[PricingEntry]
 
 def _openrouter_pricing_entry(route: BillingRoute) -> Optional[PricingEntry]:
     return _pricing_entry_from_metadata(
-        fetch_model_metadata(),
-        route.model,
+        fetch_model_metadata(), route.model,
         source_url="https://openrouter.ai/docs/api/api-reference/models/get-models",
         pricing_version="openrouter-models-api",
     )
 
 
 def _pricing_entry_from_metadata(
-    metadata: Dict[str, Dict[str, Any]],
-    model_id: str,
-    *,
-    source_url: str,
-    pricing_version: str,
+    metadata: Dict[str, Dict[str, Any]], model_id: str, *, source_url: str, pricing_version: str
 ) -> Optional[PricingEntry]:
     if model_id not in metadata:
         return None
@@ -476,9 +457,7 @@ def _pricing_entry_from_metadata(
     completion = _to_decimal(pricing.get("completion"))
     request = _to_decimal(pricing.get("request"))
     cache_read = _to_decimal(
-        pricing.get("cache_read")
-        or pricing.get("cached_prompt")
-        or pricing.get("input_cache_read")
+        pricing.get("cache_read") or pricing.get("cached_prompt") or pricing.get("input_cache_read")
     )
     cache_write = _to_decimal(
         pricing.get("cache_write")
@@ -495,37 +474,28 @@ def _pricing_entry_from_metadata(
         input_cost_per_million=_per_million(prompt),
         output_cost_per_million=_per_million(completion),
         cache_read_cost_per_million=_per_million(cache_read),
-        cache_write_cost_per_million=_per_million(cache_write),
-        request_cost=request,
-        source="provider_models_api",
-        source_url=source_url,
-        pricing_version=pricing_version,
+        cache_write_cost_per_million=_per_million(cache_write), request_cost=request,
+        source="provider_models_api", source_url=source_url, pricing_version=pricing_version,
         fetched_at=_UTC_NOW(),
     )
 
 
 def get_pricing_entry(
-    model_name: str,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
+    model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> Optional[PricingEntry]:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
         return PricingEntry(
-            input_cost_per_million=_ZERO,
-            output_cost_per_million=_ZERO,
-            cache_read_cost_per_million=_ZERO,
-            cache_write_cost_per_million=_ZERO,
-            source="none",
+            input_cost_per_million=_ZERO, output_cost_per_million=_ZERO,
+            cache_read_cost_per_million=_ZERO, cache_write_cost_per_million=_ZERO, source="none",
             pricing_version="included-route",
         )
     if route.provider == "openrouter":
         return _openrouter_pricing_entry(route)
     if route.base_url:
         entry = _pricing_entry_from_metadata(
-            fetch_endpoint_model_metadata(route.base_url, api_key=api_key or ""),
-            route.model,
+            fetch_endpoint_model_metadata(route.base_url, api_key=api_key or ""), route.model,
             source_url=f"{route.base_url.rstrip('/')}/models",
             pricing_version="openai-compatible-models-api",
         )
@@ -535,10 +505,7 @@ def get_pricing_entry(
 
 
 def normalize_usage(
-    response_usage: Any,
-    *,
-    provider: Optional[str] = None,
-    api_mode: Optional[str] = None,
+    response_usage: Any, *, provider: Optional[str] = None, api_mode: Optional[str] = None
 ) -> CanonicalUsage:
     """Normalize raw API response usage into canonical token buckets.
 
@@ -566,8 +533,7 @@ def normalize_usage(
         # OpenAI's documented GPT-5.6+ field is `cache_write_tokens` (billed at
         # 1.25x); `cache_creation_tokens` is a fallback for older endpoints.
         cache_write_tokens = _first_nonzero(
-            u,
-            ("input_tokens_details", "cache_write_tokens"),
+            u, ("input_tokens_details", "cache_write_tokens"),
             ("input_tokens_details", "cache_creation_tokens"),
         )
         input_tokens = max(0, input_total - cache_read_tokens - cache_write_tokens)
@@ -583,18 +549,13 @@ def normalize_usage(
         # top-level cached_tokens — without these, direct sessions show 0 hits
         # and bill hits at the full input rate.
         cache_read_tokens = _first_nonzero(
-            u,
-            ("prompt_tokens_details", "cached_tokens"),
-            ("cache_read_input_tokens",),
-            ("prompt_cache_hit_tokens",),
-            ("cached_tokens",),
+            u, ("prompt_tokens_details", "cached_tokens"), ("cache_read_input_tokens",),
+            ("prompt_cache_hit_tokens",), ("cached_tokens",),
         )
         cache_write_tokens = _first_nonzero(
-            u,
-            ("prompt_tokens_details", "cache_write_tokens"),
+            u, ("prompt_tokens_details", "cache_write_tokens"),
             ("prompt_tokens_details", "cache_creation_input_tokens"),
-            ("cache_creation_input_tokens",),
-            ("cache_write_tokens",),
+            ("cache_creation_input_tokens",), ("cache_write_tokens",),
         )
         input_tokens = max(0, prompt_total - cache_read_tokens - cache_write_tokens)
 
@@ -602,8 +563,7 @@ def normalize_usage(
     # (OpenAI, OpenRouter, DeepSeek, ...): completion_tokens_details.reasoning_tokens.
     # Hidden thinking dominates output spend on reasoning models, so read both.
     reasoning_tokens = _first_nonzero(
-        u,
-        ("output_tokens_details", "reasoning_tokens"),
+        u, ("output_tokens_details", "reasoning_tokens"),
         ("completion_tokens_details", "reasoning_tokens"),
     )
 
@@ -623,11 +583,8 @@ def normalize_usage(
         )
 
     return CanonicalUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_read_tokens=cache_read_tokens,
-        cache_write_tokens=cache_write_tokens,
-        reasoning_tokens=reasoning_tokens,
+        input_tokens=input_tokens, output_tokens=output_tokens, cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens, reasoning_tokens=reasoning_tokens,
     )
 
 
@@ -636,22 +593,14 @@ def _unknown_cost(source: CostSource, *notes: str) -> CostResult:
 
 
 def estimate_usage_cost(
-    model_name: str,
-    usage: CanonicalUsage,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
+    model_name: str, usage: CanonicalUsage, *, provider: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None,
 ) -> CostResult:
     route = resolve_billing_route(model_name, provider=provider, base_url=base_url)
     if route.billing_mode == "subscription_included":
         return CostResult(
-            amount_usd=_ZERO,
-            status="included",
-            source="none",
-            label="included",
-            pricing_version="included-route",
-            notes=(_INCLUDED_NOTE,),
+            amount_usd=_ZERO, status="included", source="none", label="included",
+            pricing_version="included-route", notes=(_INCLUDED_NOTE,),
         )
 
     entry = get_pricing_entry(model_name, provider=provider, base_url=base_url, api_key=api_key)
@@ -683,10 +632,8 @@ def estimate_usage_cost(
 
     amount = _ZERO
     for tokens, rate in (
-        (usage.input_tokens, input_rate),
-        (usage.output_tokens, output_rate),
-        (usage.cache_read_tokens, cache_read_rate),
-        (usage.cache_write_tokens, cache_write_rate),
+        (usage.input_tokens, input_rate), (usage.output_tokens, output_rate),
+        (usage.cache_read_tokens, cache_read_rate), (usage.cache_write_tokens, cache_write_rate),
     ):
         if rate is not None:
             amount += Decimal(tokens) * rate / _ONE_MILLION
@@ -705,20 +652,13 @@ def estimate_usage_cost(
         notes.append("OpenRouter cost is estimated from the models API until reconciled.")
 
     return CostResult(
-        amount_usd=amount,
-        status=status,
-        source=entry.source,
-        label=label,
-        fetched_at=entry.fetched_at,
-        pricing_version=entry.pricing_version,
-        notes=tuple(notes),
+        amount_usd=amount, status=status, source=entry.source, label=label,
+        fetched_at=entry.fetched_at, pricing_version=entry.pricing_version, notes=tuple(notes),
     )
 
 
 def has_known_pricing(
-    model_name: str,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
+    model_name: str, provider: Optional[str] = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> bool:
     """True if pricing data exists for this model+route (direct lookup, no dummy usage)."""

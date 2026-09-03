@@ -46,21 +46,10 @@ class TruncationVerdict:
 
 
 def recover_from_truncation(
-    agent: Any,
-    response: Any,
-    finish_reason: str,
-    _retry: TurnRetryState,
-    *,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    api_kwargs: Any,
-    api_call_count: int,
-    effective_task_id: Any,
-    current_turn_user_idx: Any,
-    length_continue_retries: int,
-    truncated_response_parts: List[str],
-    truncated_tool_call_retries: int,
-    retry_count: int,
+    agent: Any, response: Any, finish_reason: str, _retry: TurnRetryState, *,
+    messages: List[Dict[str, Any]], conversation_history: Any, api_kwargs: Any, api_call_count: int,
+    effective_task_id: Any, current_turn_user_idx: Any, length_continue_retries: int,
+    truncated_response_parts: List[str], truncated_tool_call_retries: int, retry_count: int,
     compression_attempts: int,
 ) -> TruncationVerdict:
     """Recover from a truncated response. Order is load-bearing: thinking exhaustion and
@@ -73,13 +62,10 @@ def recover_from_truncation(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> TruncationVerdict:
         return TruncationVerdict(
-            action=action,
-            result=result,
-            messages=messages,
+            action=action, result=result, messages=messages,
             length_continue_retries=length_continue_retries,
             truncated_response_parts=truncated_response_parts,
-            truncated_tool_call_retries=truncated_tool_call_retries,
-            retry_count=retry_count,
+            truncated_tool_call_retries=truncated_tool_call_retries, retry_count=retry_count,
             compression_attempts=compression_attempts,
         )
 
@@ -218,8 +204,7 @@ def recover_from_truncation(
             response, "_content_filter_terminated", False
         )
         if (
-            _cf_terminated
-            and agent._fallback_index < len(agent._fallback_chain)
+            _cf_terminated and agent._fallback_index < len(agent._fallback_chain)
         ):
             agent._vprint(
                 f"{agent.log_prefix}🛡️  Content filter terminated "
@@ -262,8 +247,7 @@ def recover_from_truncation(
             # history. Append only the nudge.
             _interim_content = getattr(assistant_message, "content", None)
             _is_empty_partial_stub = (
-                getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID
-                and not _interim_content
+                getattr(response, "id", "") == PARTIAL_STREAM_STUB_ID and not _interim_content
             )
             if not _interim_content and not _is_empty_partial_stub:
                 # Thinking-only truncation: continuing with thinking ON
@@ -308,9 +292,7 @@ def recover_from_truncation(
                     _is_partial_stream_stub, _dropped_tools
                 )
                 continue_msg = {
-                    "role": "user",
-                    "content": _continue_content,
-                    "_length_continuation_nudge": True,
+                    "role": "user", "content": _continue_content, "_length_continuation_nudge": True
                 }
                 append_message(messages, continue_msg)
                 agent._session_messages = messages
@@ -367,9 +349,7 @@ def recover_from_truncation(
             ]
             if partial_response:
                 append_message(messages, {
-                    "role": "assistant",
-                    "content": partial_response,
-                    "finish_reason": "length",
+                    "role": "assistant", "content": partial_response, "finish_reason": "length"
                 })
             agent._session_messages = messages
             agent._cleanup_task_resources(effective_task_id)
@@ -480,13 +460,8 @@ def recover_from_truncation(
 
 
 def continue_codex_incomplete(
-    agent: Any,
-    assistant_message: Any,
-    finish_reason: str,
-    *,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    api_call_count: int,
+    agent: Any, assistant_message: Any, finish_reason: str, *, messages: List[Dict[str, Any]],
+    conversation_history: Any, api_call_count: int,
 ) -> Optional[Dict[str, Any]]:
     """Codex Responses ``status=incomplete`` continuation (max 3 per turn).
 
@@ -517,9 +492,7 @@ def continue_codex_incomplete(
         # provider state drifts per continuation and would defeat dedup
         # (#52711).
         last_interim_visible = (
-            agent._interim_assistant_visible_text(last_msg)
-            if isinstance(last_msg, dict)
-            else ""
+            agent._interim_assistant_visible_text(last_msg) if isinstance(last_msg, dict) else ""
         )
         current_interim_visible = agent._interim_assistant_visible_text(interim_msg)
         if last_interim_visible or current_interim_visible:
@@ -570,9 +543,7 @@ def continue_codex_incomplete(
         # bare retry is byte-identical and fails identically; append a
         # user-role nudge so the retry differs and asks for the answer.
         interim_replayable = (
-            interim_has_content
-            or interim_has_codex_reasoning
-            or interim_has_codex_message_items
+            interim_has_content or interim_has_codex_reasoning or interim_has_codex_message_items
         )
         # Replayable ≠ different: an interim holding only a ``compaction``
         # checkpoint in ``codex_reasoning_items`` is replayable yet re-sends
@@ -588,13 +559,11 @@ def continue_codex_incomplete(
             # assistant message; after a too-empty interim it would create
             # user→user / tool→user.
             _last_is_assistant = (
-                isinstance(_last_msg, dict)
-                and _last_msg.get("role") == "assistant"
+                isinstance(_last_msg, dict) and _last_msg.get("role") == "assistant"
             )
             if not _already_nudged and _last_is_assistant:
                 append_message(messages, {
-                    "role": "user",
-                    "content": _CODEX_INCOMPLETE_NUDGE,
+                    "role": "user", "content": _CODEX_INCOMPLETE_NUDGE
                 })
         if not agent.quiet_mode:
             agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({agent._codex_incomplete_retries}/3)")
@@ -634,32 +603,17 @@ class RefusalVerdict:
 
 
 def handle_content_policy_refusal(
-    agent: Any,
-    response: Any,
-    _retry: TurnRetryState,
-    *,
-    thinking_spinner: Any,
-    messages: List[Dict[str, Any]],
-    api_messages: Any,
-    api_kwargs: Any,
-    active_system_prompt: Any,
-    conversation_history: Any,
-    api_call_count: int,
-    effective_task_id: Any,
-    turn_id: Any,
-    api_request_id: Any,
-    api_start_time: float,
-    retry_count: int,
-    max_retries: int,
+    agent: Any, response: Any, _retry: TurnRetryState, *, thinking_spinner: Any,
+    messages: List[Dict[str, Any]], api_messages: Any, api_kwargs: Any, active_system_prompt: Any,
+    conversation_history: Any, api_call_count: int, effective_task_id: Any, turn_id: Any,
+    api_request_id: Any, api_start_time: float, retry_count: int, max_retries: int,
 ) -> RefusalVerdict:
     """HTTP-200 refusal (``finish_reason`` ``content_filter`` / ``guardrail_intervened``).
     Deterministic for the unchanged prompt — never retried: one configured-fallback try,
     else surface the refusal (explanation may live only in the reasoning channel). The
     caller stops its spinner reference; this stops the spinner object."""
     from agent.conversation_loop import (
-        _CONTENT_POLICY_RECOVERY_HINT,
-        _arm_fallback_restart,
-        _content_policy_blocked_result,
+        _CONTENT_POLICY_RECOVERY_HINT, _arm_fallback_restart, _content_policy_blocked_result
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> RefusalVerdict:
@@ -679,18 +633,11 @@ def handle_content_policy_refusal(
         _refusal_text = (agent._extract_reasoning(_refusal_result) or "").strip()
 
     agent._invoke_api_request_error_hook(
-        task_id=effective_task_id,
-        turn_id=turn_id,
-        api_request_id=api_request_id,
-        api_call_count=api_call_count,
-        api_start_time=api_start_time,
-        api_kwargs=api_kwargs,
+        task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+        api_call_count=api_call_count, api_start_time=api_start_time, api_kwargs=api_kwargs,
         error_type="ContentPolicyBlocked",
         error_message=_refusal_text or "model declined to respond (content_filter)",
-        status_code=None,
-        retry_count=retry_count,
-        max_retries=max_retries,
-        retryable=False,
+        status_code=None, retry_count=retry_count, max_retries=max_retries, retryable=False,
         reason=FailoverReason.content_policy_blocked.value,
     )
 
@@ -712,9 +659,7 @@ def handle_content_policy_refusal(
 
     agent._flush_status_buffer()
     _refusal_log = (
-        _refusal_text[:500] + "..."
-        if len(_refusal_text) > 500
-        else _refusal_text
+        _refusal_text[:500] + "..." if len(_refusal_text) > 500 else _refusal_text
     )
     logger.warning(
         "%sModel declined to respond (finish_reason=content_filter). "
@@ -741,8 +686,6 @@ def handle_content_policy_refusal(
     agent._cleanup_task_resources(effective_task_id)
     agent._persist_session(messages, conversation_history)
     return _verdict("return", _content_policy_blocked_result(
-        messages,
-        api_call_count,
-        final_response=_refusal_response,
+        messages, api_call_count, final_response=_refusal_response,
         error_detail=_refusal_text or "model declined (content_filter)",
     ))

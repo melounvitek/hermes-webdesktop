@@ -30,19 +30,9 @@ class ApiCallVerdict:
 
 
 def perform_api_call(
-    agent: Any,
-    *,
-    api_kwargs: Any,
-    _original_api_kwargs: Any,
-    _llm_middleware_trace: Any,
-    _moa_prepared_request: Any,
-    _retry: Any,
-    thinking_spinner: Any,
-    retry_count: Any,
-    api_call_count: Any,
-    api_request_id: Any,
-    effective_task_id: Any,
-    turn_id: Any,
+    agent: Any, *, api_kwargs: Any, _original_api_kwargs: Any, _llm_middleware_trace: Any,
+    _moa_prepared_request: Any, _retry: Any, thinking_spinner: Any, retry_count: Any,
+    api_call_count: Any, api_request_id: Any, effective_task_id: Any, turn_id: Any,
     interrupted: Any,
 ) -> ApiCallVerdict:
     """Issue the request. Streaming is preferred even without consumers (stale-stream /
@@ -52,9 +42,7 @@ def perform_api_call(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ApiCallVerdict:
         return ApiCallVerdict(
-            action=action,
-            response=response,
-            thinking_spinner=thinking_spinner,
+            action=action, response=response, thinking_spinner=thinking_spinner,
             interrupted=interrupted,
         )
 
@@ -97,9 +85,7 @@ def perform_api_call(
     def _perform_api_call(next_api_kwargs):
         if agent.api_mode == "codex_responses":
             next_api_kwargs = agent._get_transport().preflight_kwargs(
-                next_api_kwargs,
-                allow_stream=False,
-                is_github_responses=agent._is_copilot_url(),
+                next_api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
                 sanitize_harmony_tokens=agent._is_codex_backend(),
             )
         if _use_streaming:
@@ -142,20 +128,11 @@ def perform_api_call(
     _redirect_crossed_response = False
     try:
         response = run_llm_execution_middleware(
-            api_kwargs,
-            _perform_api_call,
-            original_request=_original_api_kwargs,
-            task_id=effective_task_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            session_id=agent.session_id or "",
-            platform=agent.platform or "",
-            model=agent.model,
-            provider=agent.provider,
-            base_url=agent.base_url,
-            api_mode=agent.api_mode,
-            api_call_count=api_call_count,
-            middleware_trace=list(_llm_middleware_trace),
+            api_kwargs, _perform_api_call, original_request=_original_api_kwargs,
+            task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+            session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
+            provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
+            api_call_count=api_call_count, middleware_trace=list(_llm_middleware_trace),
         )
     finally:
         if _redirect_lock is not None:
@@ -197,15 +174,8 @@ class ApiInterruptVerdict:
 
 
 def handle_api_interrupt(
-    agent: Any,
-    *,
-    _retry: Any,
-    thinking_spinner: Any,
-    messages: Any,
-    conversation_history: Any,
-    api_start_time: Any,
-    interrupted: Any,
-    final_response: Any,
+    agent: Any, *, _retry: Any, thinking_spinner: Any, messages: Any, conversation_history: Any,
+    api_start_time: Any, interrupted: Any, final_response: Any,
 ) -> ApiInterruptVerdict:
     """``InterruptedError`` during the provider call: a pending redirect keeps its correction
     queued for the outer-loop rebuild; otherwise keep any streamed partial text so the next
@@ -266,16 +236,8 @@ class NousRateGuardVerdict:
 
 
 def nous_rate_limit_guard(
-    agent: Any,
-    *,
-    _retry: Any,
-    api_messages: Any,
-    messages: Any,
-    conversation_history: Any,
-    active_system_prompt: Any,
-    retry_count: Any,
-    compression_attempts: Any,
-    api_call_count: Any,
+    agent: Any, *, _retry: Any, api_messages: Any, messages: Any, conversation_history: Any,
+    active_system_prompt: Any, retry_count: Any, compression_attempts: Any, api_call_count: Any,
 ) -> NousRateGuardVerdict:
     """Skip the call if another session recorded a Nous Portal rate limit: every attempt (incl.
     SDK retries) counts against RPH. Never lets the guard itself break the agent loop."""
@@ -285,11 +247,8 @@ def nous_rate_limit_guard(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> NousRateGuardVerdict:
         return NousRateGuardVerdict(
-            action=action,
-            active_system_prompt=active_system_prompt,
-            retry_count=retry_count,
-            compression_attempts=compression_attempts,
-            result=result,
+            action=action, active_system_prompt=active_system_prompt, retry_count=retry_count,
+            compression_attempts=compression_attempts, result=result,
         )
 
     # ── Nous Portal rate limit guard ──────────────────────
@@ -298,8 +257,7 @@ def nous_rate_limit_guard(
     if agent.provider == "nous":
         try:
             from agent.nous_rate_guard import (
-                nous_rate_limit_remaining,
-                format_remaining as _fmt_nous_remaining,
+                nous_rate_limit_remaining, format_remaining as _fmt_nous_remaining
             )
             _nous_remaining = nous_rate_limit_remaining()
             if _nous_remaining is not None and _nous_remaining > 0:

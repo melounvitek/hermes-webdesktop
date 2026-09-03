@@ -13,8 +13,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from agent.message_sanitization import (
-    _sanitize_structure_non_ascii,
-    _sanitize_structure_surrogates,
+    _sanitize_structure_non_ascii, _sanitize_structure_surrogates
 )
 from utils import env_var_enabled
 
@@ -36,28 +35,15 @@ class ApiRequestBuild:
 
 
 def build_api_request(
-    agent: Any,
-    *,
-    api_messages: Any,
-    _moa_prepared_request: Any,
-    tools_for_api: Any,
-    system_message: Any,
-    messages: Any,
-    original_user_message: Any,
-    approx_tokens: Any,
-    total_chars: Any,
-    retry_count: Any,
-    api_call_count: Any,
-    api_request_id: Any,
-    api_start_time: Any,
-    effective_task_id: Any,
-    turn_id: Any,
+    agent: Any, *, api_messages: Any, _moa_prepared_request: Any, tools_for_api: Any,
+    system_message: Any, messages: Any, original_user_message: Any, approx_tokens: Any,
+    total_chars: Any, retry_count: Any, api_call_count: Any, api_request_id: Any,
+    api_start_time: Any, effective_task_id: Any, turn_id: Any,
 ) -> ApiRequestBuild:
     """Assemble the attempt's request in the original order (every mutation happens BEFORE
     middleware/hooks/debug dumps observe the payload)."""
     from agent.conversation_loop import (
-        _moa_client_consumes_prepared_request,
-        _redecorate_prompt_cache_for_provider,
+        _moa_client_consumes_prepared_request, _redecorate_prompt_cache_for_provider,
         _system_prompt_for_hooks,
     )
     api_kwargs = None
@@ -66,13 +52,9 @@ def build_api_request(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ApiRequestBuild:
         return ApiRequestBuild(
-            action=action,
-            api_messages=api_messages,
-            _moa_prepared_request=_moa_prepared_request,
-            tools_for_api=tools_for_api,
-            api_kwargs=api_kwargs,
-            _original_api_kwargs=_original_api_kwargs,
-            _llm_middleware_trace=_llm_middleware_trace,
+            action=action, api_messages=api_messages, _moa_prepared_request=_moa_prepared_request,
+            tools_for_api=tools_for_api, api_kwargs=api_kwargs,
+            _original_api_kwargs=_original_api_kwargs, _llm_middleware_trace=_llm_middleware_trace,
         )
 
     agent._reset_stream_delivery_tracking()
@@ -87,10 +69,7 @@ def build_api_request(
     # breakpoints and re-render for the current provider.
     api_messages, _moa_prepared_request, tools_for_api = (
         _redecorate_prompt_cache_for_provider(
-            agent,
-            api_messages,
-            system_message=system_message,
-            moa_prepared=_moa_prepared_request,
+            agent, api_messages, system_message=system_message, moa_prepared=_moa_prepared_request,
             tools_for_api=tools_for_api,
         )
     )
@@ -98,8 +77,7 @@ def build_api_request(
         api_kwargs = agent._build_api_kwargs(api_messages)
     else:
         api_kwargs = agent._build_api_kwargs(
-            api_messages,
-            tools_for_api=tools_for_api,
+            api_messages, tools_for_api=tools_for_api
         )
     # Surrogate chokepoint (#50959): tool descriptions, extra_body and
     # kwargs strings can carry invalid code points (HTTP 400). One walk
@@ -109,9 +87,7 @@ def build_api_request(
         _sanitize_structure_non_ascii(api_kwargs)
     if agent.api_mode == "codex_responses":
         api_kwargs = agent._get_transport().preflight_kwargs(
-            api_kwargs,
-            allow_stream=False,
-            is_github_responses=agent._is_copilot_url(),
+            api_kwargs, allow_stream=False, is_github_responses=agent._is_copilot_url(),
             sanitize_harmony_tokens=agent._is_codex_backend(),
         )
     # OpenRouter caching replays identical responses, even empty ones; an
@@ -131,16 +107,9 @@ def build_api_request(
         from hermes_cli.middleware import apply_llm_request_middleware
 
         _llm_request_mw = apply_llm_request_middleware(
-            api_kwargs,
-            task_id=effective_task_id,
-            turn_id=turn_id,
-            api_request_id=api_request_id,
-            session_id=agent.session_id or "",
-            platform=agent.platform or "",
-            model=agent.model,
-            provider=agent.provider,
-            base_url=agent.base_url,
-            api_mode=agent.api_mode,
+            api_kwargs, task_id=effective_task_id, turn_id=turn_id, api_request_id=api_request_id,
+            session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
+            provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
             api_call_count=api_call_count,
         )
         api_kwargs = _llm_request_mw.payload
@@ -152,8 +121,7 @@ def build_api_request(
 
     try:
         from hermes_cli.lifecycle import (
-            has_hook,
-            invoke_hook as _invoke_hook,
+            has_hook, invoke_hook as _invoke_hook
         )
         if has_hook("pre_api_request"):
             request_messages = api_kwargs.get("messages")

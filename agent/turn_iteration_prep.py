@@ -32,18 +32,12 @@ class IterationPrep:
     request_logger: Any
 
 
-def prepare_iteration(
-    agent: Any,
-    *,
-    messages: Any,
-    api_call_count: Any,
-) -> IterationPrep:
+def prepare_iteration(agent: Any,*, messages: Any, api_call_count: Any) -> IterationPrep:
     """Prepare ``messages`` for this iteration in the original order. Every mutation here is
     cache-safe by construction: steer text lands in the newest tool result, the ghost-row
     filter only drops hidden scaffold placeholders, and repair runs BEFORE the request build."""
     from agent.conversation_loop import (
-        _INTERRUPT_SCAFFOLD_MARKER,
-        _maybe_inject_run_budget_wrapup,
+        _INTERRUPT_SCAFFOLD_MARKER, _maybe_inject_run_budget_wrapup
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> IterationPrep:
@@ -112,8 +106,7 @@ def prepare_iteration(
                         pass
                 _injected = True
                 logger.debug(
-                    "Pre-API-call steer drain: injected into tool msg at index %d",
-                    _si,
+                    "Pre-API-call steer drain: injected into tool msg at index %d", _si
                 )
                 break
         if not _injected:
@@ -149,10 +142,7 @@ def prepare_iteration(
         except Exception:
             pass
     repaired_tool_calls = agent._sanitize_tool_call_arguments(
-        messages,
-        logger=request_logger,
-        session_id=agent.session_id,
-        cursor=_sanitize_cursor,
+        messages, logger=request_logger, session_id=agent.session_id, cursor=_sanitize_cursor
     )
     if repaired_tool_calls > 0:
         request_logger.info(
@@ -205,12 +195,7 @@ class ApiCallAnnouncement:
 
 
 def announce_api_call(
-    agent: Any,
-    *,
-    messages: Any,
-    api_messages: Any,
-    api_call_count: Any,
-    approx_tokens: Any,
+    agent: Any, *, messages: Any, api_messages: Any, api_call_count: Any, approx_tokens: Any,
     total_chars: Any,
 ) -> ApiCallAnnouncement:
     """Print the request summary (verbose) or start the quiet-mode thinking indicator."""
@@ -266,21 +251,14 @@ class IterationStart:
 
 
 def begin_iteration(
-    agent: Any,
-    *,
-    messages: Any,
-    conversation_history: Any,
-    original_user_message: Any,
-    api_call_count: Any,
-    interrupted: Any,
-    _turn_exit_reason: Any,
+    agent: Any, *, messages: Any, conversation_history: Any, original_user_message: Any,
+    api_call_count: Any, interrupted: Any, _turn_exit_reason: Any,
 ) -> IterationStart:
     """Iteration entry in the original order: apply a pending redirect, reset the checkpoint
     dedup, then the interrupt / review-budget / iteration-budget exits. ``api_call_count`` is
     incremented here (the grace call consumes its flag instead of the budget)."""
     from agent.conversation_loop import (
-        _apply_active_turn_redirect,
-        _review_input_budget_exhausted,
+        _apply_active_turn_redirect, _review_input_budget_exhausted
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> IterationStart:
@@ -298,8 +276,7 @@ def begin_iteration(
         _apply_active_turn_redirect(agent, messages, _redirect_text)
         if isinstance(original_user_message, str):
             original_user_message = (
-                f"{original_user_message}\n\n"
-                f"User correction during the turn: {_redirect_text}"
+                f"{original_user_message}\n\n" f"User correction during the turn: {_redirect_text}"
             )
         agent._persist_session(messages, conversation_history)
 
@@ -360,30 +337,17 @@ class RetryRestartVerdict:
 
 
 def apply_retry_restarts(
-    agent: Any,
-    *,
-    _retry: Any,
-    response: Any,
-    interrupted: Any,
-    messages: Any,
-    conversation_history: Any,
-    user_message: Any,
-    api_kwargs: Any,
-    current_turn_user_idx: Any,
-    final_response: Any,
-    retry_count: Any,
-    api_call_count: Any,
-    length_continue_retries: Any,
-    _preflight_compression_blocked: Any,
-    _turn_exit_reason: Any,
+    agent: Any, *, _retry: Any, response: Any, interrupted: Any, messages: Any,
+    conversation_history: Any, user_message: Any, api_kwargs: Any, current_turn_user_idx: Any,
+    final_response: Any, retry_count: Any, api_call_count: Any, length_continue_retries: Any,
+    _preflight_compression_blocked: Any, _turn_exit_reason: Any,
 ) -> RetryRestartVerdict:
     """Consume the ``TurnRetryState`` restart flags after the retry loop, in the original
     priority order. Refunds the iteration budget/count for restarts that produced no valid
     assistant item; ``restart_with_rebuilt_messages`` is the single consumer that clears
     ``_preflight_compression_blocked`` so the fallback gets a fresh preflight (#84733)."""
     from agent.conversation_loop import (
-        _HANDOFF_SKIP_FINAL_RESPONSE,
-        _should_skip_model_call_for_reference_handoff,
+        _HANDOFF_SKIP_FINAL_RESPONSE, _should_skip_model_call_for_reference_handoff
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> RetryRestartVerdict:

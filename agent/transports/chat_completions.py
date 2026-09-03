@@ -9,13 +9,8 @@ from typing import Any, Dict
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.reasoning_effort import (
-    KIMI_K3_EFFORTS,
-    KIMI_K3_OVERRIDES,
-    OPENAI_COMPAT_WIRE_EFFORTS,
-    TOKENHUB_EFFORTS,
-    clamp_effort,
-    kimi_supported_efforts,
-    requested_effort,
+    KIMI_K3_EFFORTS, KIMI_K3_OVERRIDES, OPENAI_COMPAT_WIRE_EFFORTS, TOKENHUB_EFFORTS, clamp_effort,
+    kimi_supported_efforts, requested_effort,
 )
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
@@ -49,9 +44,7 @@ def _rename_tool_search_bridge_for_xai(
     from agent.transports.codex import _alias_reserved_tools
 
     return _alias_reserved_tools(
-        tools,
-        ("tool_search",),
-        name_of=lambda t: (t.get("function") or {}).get("name"),
+        tools, ("tool_search",), name_of=lambda t: (t.get("function") or {}).get("name"),
         rename=lambda t, alias: {**t, "function": {**t["function"], "name": alias}},
     )
 
@@ -73,13 +66,9 @@ def _static_prompt_instructions(messages: list[dict[str, Any]]) -> str:
 
 
 def _add_prompt_cache_key(
-    api_kwargs: dict[str, Any],
-    *,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]] | None,
-    supports_prompt_cache_key: bool,
-    session_id: str | None = None,
-    cache_scope_id: str | None = None,
+    api_kwargs: dict[str, Any], *, messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None, supports_prompt_cache_key: bool,
+    session_id: str | None = None, cache_scope_id: str | None = None,
 ) -> None:
     """Add a content-addressed ``prompt_cache_key`` only for a capable endpoint.
 
@@ -90,9 +79,7 @@ def _add_prompt_cache_key(
     # Share the Responses transport's hash + scope normalization so equivalent
     # prefixes hit one bucket across modes without merging unrelated sessions (#78941).
     from agent.transports.codex import (
-        _bound_prompt_cache_key_field,
-        _cache_scope_from_session_id,
-        _content_cache_key,
+        _bound_prompt_cache_key_field, _cache_scope_from_session_id, _content_cache_key
     )
 
     extra_body = api_kwargs.get("extra_body")
@@ -104,8 +91,7 @@ def _add_prompt_cache_key(
     if not supports_prompt_cache_key:
         return
     cache_key = _content_cache_key(
-        _static_prompt_instructions(messages),
-        tools,
+        _static_prompt_instructions(messages), tools,
         _cache_scope_from_session_id(cache_scope_id or session_id),
     )
     if cache_key:
@@ -259,11 +245,8 @@ def _finish_kwargs(
 ) -> dict[str, Any]:
     """Tail shared by both build paths: content-addressed prompt_cache_key, then return."""
     _add_prompt_cache_key(
-        api_kwargs,
-        messages=sanitized,
-        tools=api_kwargs.get("tools"),
-        supports_prompt_cache_key=supports_prompt_cache_key,
-        session_id=params.get("session_id"),
+        api_kwargs, messages=sanitized, tools=api_kwargs.get("tools"),
+        supports_prompt_cache_key=supports_prompt_cache_key, session_id=params.get("session_id"),
         cache_scope_id=params.get("cache_scope_id"),
     )
     return api_kwargs
@@ -349,10 +332,7 @@ class ChatCompletionsTransport(ProviderTransport):
         return tools
 
     def build_kwargs(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
+        self, model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
         **params,
     ) -> dict[str, Any]:
         """Build chat.completions.create() kwargs.
@@ -476,10 +456,8 @@ class ChatCompletionsTransport(ProviderTransport):
         extra_body_from_profile, top_level_from_profile = profile.build_api_kwargs_extras(
             reasoning_config=reasoning_config,
             supports_reasoning=params.get("supports_reasoning", False),
-            qwen_session_metadata=params.get("qwen_session_metadata"),
-            model=model,
-            base_url=params.get("base_url"),
-            ollama_num_ctx=params.get("ollama_num_ctx"),
+            qwen_session_metadata=params.get("qwen_session_metadata"), model=model,
+            base_url=params.get("base_url"), ollama_num_ctx=params.get("ollama_num_ctx"),
             session_id=params.get("session_id"),
         )
         api_kwargs.update(top_level_from_profile)
@@ -487,10 +465,8 @@ class ChatCompletionsTransport(ProviderTransport):
         extra_body: dict[str, Any] = {}
         profile_body = profile.build_extra_body(
             session_id=params.get("session_id"),
-            provider_preferences=params.get("provider_preferences"),
-            model=model,
-            base_url=params.get("base_url"),
-            reasoning_config=reasoning_config,
+            provider_preferences=params.get("provider_preferences"), model=model,
+            base_url=params.get("base_url"), reasoning_config=reasoning_config,
             openrouter_min_coding_score=params.get("openrouter_min_coding_score"),
         )
         for part in (profile_body, extra_body_from_profile, params.get("extra_body_additions")):
@@ -518,9 +494,7 @@ class ChatCompletionsTransport(ProviderTransport):
             if extra_body:
                 api_kwargs["extra_body"] = extra_body
         return _finish_kwargs(
-            api_kwargs,
-            sanitized,
-            params,
+            api_kwargs, sanitized, params,
             supports_prompt_cache_key=bool(getattr(profile, "supports_prompt_cache_key", False)),
         )
 
@@ -572,8 +546,7 @@ class ChatCompletionsTransport(ProviderTransport):
                     tc_provider_data["extra_content"] = extra
                 tool_calls.append(
                     ToolCall(
-                        id=getattr(tc, "id", None),
-                        name=function_name,
+                        id=getattr(tc, "id", None), name=function_name,
                         arguments=function_arguments if function_arguments is not None else "{}",
                         provider_data=tc_provider_data or None,
                     )
@@ -615,12 +588,8 @@ class ChatCompletionsTransport(ProviderTransport):
                     finish_reason = "content_filter"
 
         return NormalizedResponse(
-            content=content,
-            tool_calls=tool_calls,
-            finish_reason=finish_reason,
-            reasoning=reasoning,
-            usage=usage,
-            provider_data=provider_data or None,
+            content=content, tool_calls=tool_calls, finish_reason=finish_reason,
+            reasoning=reasoning, usage=usage, provider_data=provider_data or None,
         )
 
     def validate_response(self, response: Any) -> bool:

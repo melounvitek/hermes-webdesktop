@@ -80,8 +80,7 @@ class VisionMessagePrepMixin:
             return cached
 
         role_label = {
-            "assistant": "assistant",
-            "tool": "tool result",
+            "assistant": "assistant", "tool": "tool result"
         }.get(role, "user")
         analysis_prompt = (
             "Describe everything visible in this image in thorough detail. "
@@ -235,8 +234,7 @@ class VisionMessagePrepMixin:
             if not isinstance(msg, dict):
                 continue
             msg["content"] = self._preprocess_anthropic_content(
-                msg.get("content"),
-                str(msg.get("role", "user") or "user"),
+                msg.get("content"), str(msg.get("role", "user") or "user")
             )
         return transformed
 
@@ -304,10 +302,7 @@ class VisionMessagePrepMixin:
     _try_shrink_image_parts_in_messages = _forward_static("agent.conversation_compression", "try_shrink_image_parts_in_messages")
 
     def _try_strip_image_parts_from_tool_messages(
-        self,
-        api_messages: list,
-        *,
-        remember_model: bool = True,
+        self, api_messages: list, *, remember_model: bool = True
     ) -> bool:
         """Downgrade list-type tool messages to text summaries in place; returns True if any were downgraded.
 

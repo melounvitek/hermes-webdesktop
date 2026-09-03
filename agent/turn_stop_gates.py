@@ -33,13 +33,8 @@ class StopGateVerdict:
 
 
 def apply_stop_gates(
-    agent: Any,
-    final_msg: Dict[str, Any],
-    *,
-    final_response: Any,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    pending_verification_response: Any,
+    agent: Any, final_msg: Dict[str, Any], *, final_response: Any, messages: List[Dict[str, Any]],
+    conversation_history: Any, pending_verification_response: Any,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
     """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
@@ -51,16 +46,14 @@ def apply_stop_gates(
 
     def _verdict(continue_turn: bool) -> StopGateVerdict:
         return StopGateVerdict(
-            continue_turn=continue_turn,
-            final_response=None if continue_turn else final_response,
+            continue_turn=continue_turn, final_response=None if continue_turn else final_response,
             pending_verification_response=_pending_verification_response,
             pending_verification_response_previewed=_pending_verification_response_previewed,
         )
 
     try:
         from agent.verification_stop import (
-            build_verify_on_stop_nudge,
-            verify_on_stop_enabled,
+            build_verify_on_stop_nudge, verify_on_stop_enabled
         )
 
         if verify_on_stop_enabled():
@@ -89,9 +82,7 @@ def apply_stop_gates(
         except Exception:
             logger.debug("verify-on-stop interim flush failed", exc_info=True)
         append_message(messages, {
-            "role": "user",
-            "content": _verify_nudge,
-            "_verification_stop_synthetic": True,
+            "role": "user", "content": _verify_nudge, "_verification_stop_synthetic": True
         })
         agent._session_messages = messages
         # Internal nudge: stay silent on the terminal, debug-log only.
@@ -126,11 +117,8 @@ def apply_stop_gates(
             _verify_nudge2 = get_pre_verify_continue_message(
                 session_id=getattr(agent, "session_id", None) or "",
                 platform=getattr(agent, "platform", "") or "",
-                model=getattr(agent, "model", "") or "",
-                coding=coding,
-                attempt=_attempt,
-                final_response=final_response,
-                changed_paths=_edited,
+                model=getattr(agent, "model", "") or "", coding=coding, attempt=_attempt,
+                final_response=final_response, changed_paths=_edited,
             )
     except Exception:
         logger.debug("pre_verify hook check failed", exc_info=True)
@@ -148,9 +136,7 @@ def apply_stop_gates(
         except Exception:
             logger.debug("pre_verify interim flush failed", exc_info=True)
         append_message(messages, {
-            "role": "user",
-            "content": _verify_nudge2,
-            "_pre_verify_synthetic": True,
+            "role": "user", "content": _verify_nudge2, "_pre_verify_synthetic": True
         })
         agent._session_messages = messages
         logger.debug("pre_verify nudge issued (attempt %d)",
@@ -168,8 +154,7 @@ def apply_stop_gates(
         from agent.kanban_stop import build_kanban_stop_nudge
 
         _kanban_nudge = build_kanban_stop_nudge(
-            messages=messages,
-            attempts=getattr(agent, "_kanban_stop_nudges", 0),
+            messages=messages, attempts=getattr(agent, "_kanban_stop_nudges", 0)
         )
     except Exception:
         logger.debug("kanban stop-loop check failed", exc_info=True)
@@ -183,9 +168,7 @@ def apply_stop_gates(
         final_msg["_kanban_stop_synthetic"] = True
         append_message(messages, final_msg)
         append_message(messages, {
-            "role": "user",
-            "content": _kanban_nudge,
-            "_kanban_stop_synthetic": True,
+            "role": "user", "content": _kanban_nudge, "_kanban_stop_synthetic": True
         })
         agent._session_messages = messages
         logger.info(

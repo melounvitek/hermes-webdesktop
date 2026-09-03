@@ -63,14 +63,10 @@ class DurableTurnLease:
         timeout_s, poll_s = turn_liveness.resolve_turn_liveness_settings(liveness_config)
         if timeout_s is not None:
             self.liveness_thread = turn_liveness.TurnLivenessWatchdog(
-                self.agent,
-                session_id=self._current_session_id(),
-                timeout_s=timeout_s,
-                poll_s=poll_s,
-                stop_event=self.stop,
+                self.agent, session_id=self._current_session_id(), timeout_s=timeout_s,
+                poll_s=poll_s, stop_event=self.stop,
                 activity_lock=self.agent._liveness_activity_lock(),
-                is_turn_active=self.is_turn_active,
-                commit_abort=self.commit_liveness_abort,
+                is_turn_active=self.is_turn_active, commit_abort=self.commit_liveness_abort,
                 deactivate_turn=self.deactivate_after_liveness_abort,
             ).make_thread()
 
@@ -136,8 +132,7 @@ class DurableTurnLease:
         with agent._liveness_activity_lock():
             current_generation = getattr(agent, "_turn_liveness_activity_generation", 0)
             if (current_generation, getattr(agent, "_last_activity_ts", None)) != (
-                snapshot.generation,
-                snapshot.activity_ts,
+                snapshot.generation, snapshot.activity_ts
             ):
                 return False
         with self._lock:
@@ -256,11 +251,7 @@ def _durable_session_exists(db, session_id: str) -> bool:
 
 
 def admit_durable_turn_lease(
-    agent,
-    *,
-    session_id: str,
-    relay_turn_id: str,
-    task_context: Dict[str, Any],
+    agent, *, session_id: str, relay_turn_id: str, task_context: Dict[str, Any],
     conversation_history: Optional[List[Dict[str, Any]]],
 ) -> TurnLeaseAdmission:
     """Acquire the session turn lease when the session is durable; build (not start) its threads.
@@ -305,12 +296,8 @@ def admit_durable_turn_lease(
             )
 
     if not db.acquire_session_turn_lease(
-        session_id,
-        holder,
-        ttl_seconds=LEASE_TTL_SECONDS,
-        wait_seconds=LEASE_WAIT_SECONDS,
-        on_wait=_on_wait,
-        should_abort=lambda: getattr(agent, "_interrupt_requested", False),
+        session_id, holder, ttl_seconds=LEASE_TTL_SECONDS, wait_seconds=LEASE_WAIT_SECONDS,
+        on_wait=_on_wait, should_abort=lambda: getattr(agent, "_interrupt_requested", False),
     ):
         admission.early_result = _lease_not_acquired_result(agent, session_id, conversation_history)
         return admission

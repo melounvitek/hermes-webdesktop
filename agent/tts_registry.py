@@ -58,11 +58,7 @@ def _warn_builtin_collision(key: str) -> None:
 # Case-insensitive, whitespace-tolerant keys mirror how
 # ``tools.tts_tool._get_provider`` normalizes the configured ``tts.provider``.
 _registry: ProviderRegistry[TTSProvider] = ProviderRegistry(
-    label="TTS",
-    provider_cls=TTSProvider,
-    logger=logger,
-    normalize=lower_key,
-    builtin_names=_BUILTIN_NAMES,
-    on_builtin_collision=_warn_builtin_collision,
+    label="TTS", provider_cls=TTSProvider, logger=logger, normalize=lower_key,
+    builtin_names=_BUILTIN_NAMES, on_builtin_collision=_warn_builtin_collision,
 )
 _registry.export(globals())

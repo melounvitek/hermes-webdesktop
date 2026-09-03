@@ -11,10 +11,7 @@ import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.reasoning_effort import (
-    ACTUAL_RELAY_EFFORTS,
-    XAI_GROK46_EFFORTS,
-    XAI_LEGACY_EFFORTS,
-    clamp_effort,
+    ACTUAL_RELAY_EFFORTS, XAI_GROK46_EFFORTS, XAI_LEGACY_EFFORTS, clamp_effort,
     codex_supported_efforts,
 )
 from agent.transports.base import ProviderTransport
@@ -99,8 +96,7 @@ def _is_opencode_responses_backend(params: Dict[str, Any]) -> bool:
 
 
 def _alias_reserved_tools(
-    response_tools: List[Dict[str, Any]],
-    reserved_names: Tuple[str, ...],
+    response_tools: List[Dict[str, Any]], reserved_names: Tuple[str, ...],
     name_of: Callable[[dict], Any] = lambda t: t.get("name"),
     rename: Callable[[dict, str], dict] = lambda t, alias: {**t, "name": alias},
 ) -> Tuple[List[Dict[str, Any]], Dict[str, str]]:
@@ -393,8 +389,7 @@ class ResponsesApiTransport(ProviderTransport):
         issuer = self._resolve_issuer_kind(kwargs)
         self._last_issuer_kind = issuer
         return _chat_messages_to_responses_input(
-            messages,
-            is_xai_responses=kwargs.get("is_xai_responses") is True,
+            messages, is_xai_responses=kwargs.get("is_xai_responses") is True,
             is_github_responses=kwargs.get("is_github_responses") is True,
             replay_encrypted_reasoning=bool(kwargs.get("replay_encrypted_reasoning", True)),
             current_issuer_kind=issuer,
@@ -407,11 +402,8 @@ class ResponsesApiTransport(ProviderTransport):
         return _responses_tools(tools)
 
     def build_kwargs(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **params,
+        self, model: str, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None, **params,
     ) -> Dict[str, Any]:
         """Build Responses API kwargs (calls convert_messages/convert_tools internally).
 
@@ -458,8 +450,7 @@ class ResponsesApiTransport(ProviderTransport):
             "model": _strip_ctx_variant(model),
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(
-                payload_messages,
-                is_xai_responses=is_xai_responses,
+                payload_messages, is_xai_responses=is_xai_responses,
                 is_github_responses=is_github_responses,
                 replay_encrypted_reasoning=replay_encrypted_reasoning,
                 current_issuer_kind=issuer_kind,
@@ -587,8 +578,7 @@ class ResponsesApiTransport(ProviderTransport):
                 elif name in alias_map:
                     name = alias_map[name]
                 tool_calls.append(ToolCall(
-                    id=tc.id if hasattr(tc, "id") else (name or None),
-                    name=name,
+                    id=tc.id if hasattr(tc, "id") else (name or None), name=name,
                     arguments=tc.function.arguments if has_fn else getattr(tc, "arguments", "{}"),
                     provider_data=provider_data or None,
                 ))
@@ -627,11 +617,7 @@ class ResponsesApiTransport(ProviderTransport):
         return status == "incomplete" and str(raw_reason or "").strip().lower() == "content_filter"
 
     def preflight_kwargs(
-        self,
-        api_kwargs: Any,
-        *,
-        allow_stream: bool = False,
-        is_github_responses: bool = False,
+        self, api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False,
         sanitize_harmony_tokens: bool = False,
     ) -> dict:
         """Validate and sanitize Codex API kwargs before the call.

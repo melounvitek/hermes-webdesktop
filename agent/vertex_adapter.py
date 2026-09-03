@@ -210,8 +210,7 @@ def build_vertex_base_url(project_id: str, region: str = DEFAULT_REGION) -> str:
 
 
 def get_vertex_config(
-    credentials_path: Optional[str] = None,
-    region: Optional[str] = None,
+    credentials_path: Optional[str] = None, region: Optional[str] = None
 ) -> Tuple[Optional[str], Optional[str]]:
     """Resolve (access_token, base_url) for Vertex AI, or (None, None) on failure."""
     token, project_id = get_vertex_credentials(credentials_path)

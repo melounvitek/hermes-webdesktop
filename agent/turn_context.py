@@ -23,18 +23,14 @@ from agent.memory_manager import build_memory_context_block
 from agent.memory_provider import is_trivial_prompt
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.model_metadata import (
-    anchored_context_tokens,
-    estimate_messages_tokens_rough,
-    estimate_request_tokens_rough,
+    anchored_context_tokens, estimate_messages_tokens_rough, estimate_request_tokens_rough
 )
 
 logger = logging.getLogger(__name__)
 
 
 def _preflight_request_tokens(
-    agent: Any,
-    messages: List[Dict[str, Any]],
-    system_prompt: str,
+    agent: Any, messages: List[Dict[str, Any]], system_prompt: str
 ) -> int:
     """Token estimate for automatic preflight compression.
 
@@ -52,10 +48,7 @@ def _preflight_request_tokens(
         )
 
         native = estimate_native_responses_preflight_tokens(
-            agent,
-            messages,
-            system_prompt=system_prompt or "",
-            tools=tools,
+            agent, messages, system_prompt=system_prompt or "", tools=tools
         )
         if isinstance(native, int) and not isinstance(native, bool) and native >= 0:
             return native
@@ -66,9 +59,7 @@ def _preflight_request_tokens(
             exc_info=True,
         )
     return estimate_request_tokens_rough(
-        messages,
-        system_prompt=system_prompt or "",
-        tools=tools,
+        messages, system_prompt=system_prompt or "", tools=tools,
         charge_stale_thinking=_agent_stale_thinking_on_wire(agent),
     )
 
@@ -81,19 +72,15 @@ def _agent_stale_thinking_on_wire(agent: Any) -> bool:
         from agent.message_sanitization import stale_thinking_reaches_wire
 
         return stale_thinking_reaches_wire(
-            getattr(agent, "api_mode", "") or "",
-            getattr(agent, "provider", "") or "",
-            getattr(agent, "model", "") or "",
-            getattr(agent, "base_url", "") or "",
+            getattr(agent, "api_mode", "") or "", getattr(agent, "provider", "") or "",
+            getattr(agent, "model", "") or "", getattr(agent, "base_url", "") or "",
         )
     except Exception:
         return True
 
 
 def compose_user_api_content(
-    content: Any,
-    ext_prefetch_cache: str,
-    plugin_user_context: str,
+    content: Any, ext_prefetch_cache: str, plugin_user_context: str
 ) -> Optional[str]:
     """Compose the API-bound content of the current turn's user message.
 
@@ -121,9 +108,7 @@ def substitute_api_content(api_msg: Dict[str, Any]) -> Optional[str]:
     Returns the popped sidecar string, or ``None`` when absent."""
     sidecar = api_msg.pop("api_content", None)
     if (
-        isinstance(sidecar, str)
-        and sidecar
-        and api_msg.get("role") in ("user", "assistant")
+        isinstance(sidecar, str) and sidecar and api_msg.get("role") in ("user", "assistant")
     ):
         api_msg["content"] = sidecar
     return sidecar
@@ -317,17 +302,12 @@ def _compression_warrants_another_preflight_pass(
 
     Continue only if still over threshold AND the previous pass cut tokens by >5%."""
     return (
-        new_tokens >= threshold_tokens
-        and orig_tokens > 0
-        and new_tokens < orig_tokens * 0.95
+        new_tokens >= threshold_tokens and orig_tokens > 0 and new_tokens < orig_tokens * 0.95
     )
 
 
 def _should_run_preflight_estimate(
-    messages: List[Dict[str, Any]],
-    protect_first_n: int,
-    protect_last_n: int,
-    threshold_tokens: int,
+    messages: List[Dict[str, Any]], protect_first_n: int, protect_last_n: int, threshold_tokens: int
 ) -> bool:
     """Cheap gate for the (expensive) full preflight token estimate.
 
@@ -341,13 +321,8 @@ def _should_run_preflight_estimate(
 
 
 def _should_idle_compact(
-    *,
-    enabled: bool,
-    idle_after_seconds: int,
-    idle_gap_seconds: float,
-    tokens: int,
-    floor_tokens: int,
-    cooldown_active: bool,
+    *, enabled: bool, idle_after_seconds: int, idle_gap_seconds: float, tokens: int,
+    floor_tokens: int, cooldown_active: bool,
 ) -> bool:
     """Decide whether an idle-triggered compaction should run this turn.
 
@@ -420,15 +395,13 @@ def _publish_runtime_main(agent: Any) -> None:
         # session uses the physical id until build_api_kwargs re-resolves (#79017).
         _cache_scope = resolve_prompt_cache_scope_safe(agent) or ""
         set_runtime_main(
-            getattr(agent, "provider", "") or "",
-            getattr(agent, "model", "") or "",
+            getattr(agent, "provider", "") or "", getattr(agent, "model", "") or "",
             requested_provider=getattr(agent, "requested_provider", "") or "",
             base_url=getattr(agent, "base_url", "") or "",
             api_key=getattr(agent, "api_key", "") or "",
             api_mode=getattr(agent, "api_mode", "") or "",
             auth_mode=getattr(agent, "auth_mode", "") or "",
-            session_id=getattr(agent, "session_id", "") or "",
-            cache_scope=_cache_scope,
+            session_id=getattr(agent, "session_id", "") or "", cache_scope=_cache_scope,
         )
     except Exception:
         pass
@@ -454,12 +427,8 @@ def _refresh_mcp_tools_between_turns(agent: Any) -> None:
 
 
 def _bind_turn_identity(
-    agent: Any,
-    task_id: Optional[str],
-    stream_callback,
-    persist_user_message: Any,
-    persist_user_timestamp: Optional[float],
-    persist_user_platform_id: Optional[str],
+    agent: Any, task_id: Optional[str], stream_callback, persist_user_message: Any,
+    persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
 ) -> Tuple[str, str]:
     """Stage callback/persist overrides on the agent and bind this turn's task and turn
     ids. Returns ``(effective_task_id, turn_id)``."""
@@ -548,11 +517,8 @@ def _reset_per_turn_agent_state(agent: Any) -> None:
 
 
 def _stage_turn_user_message(
-    agent: Any,
-    user_message: Any,
-    persist_user_message: Any,
-    persist_user_timestamp: Optional[float],
-    persist_user_platform_id: Optional[str],
+    agent: Any, user_message: Any, persist_user_message: Any,
+    persist_user_timestamp: Optional[float], persist_user_platform_id: Optional[str],
     persist_user_display_kind: Optional[str],
     persist_user_display_metadata: Optional[Dict[str, Any]],
 ) -> Tuple[Dict[str, Any], Any]:
@@ -573,8 +539,7 @@ def _stage_turn_user_message(
         user_msg["content"] = user_message
     else:
         user_msg = stamp_message_timestamp(
-            {"role": "user", "content": user_message},
-            timestamp=persist_user_timestamp,
+            {"role": "user", "content": user_message}, timestamp=persist_user_timestamp
         )
         if isinstance(pending_cli_message, dict):
             agent._pending_cli_user_message = None
@@ -659,13 +624,8 @@ def _ensure_session_row(agent: Any, pending_cli_message: Any) -> None:
 
 
 def _collect_pre_llm_call_context(
-    agent: Any,
-    *,
-    effective_task_id: str,
-    turn_id: str,
-    original_user_message: Any,
-    messages: List[Any],
-    conversation_history: Optional[List[Any]],
+    agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
+    messages: List[Any], conversation_history: Optional[List[Any]],
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
@@ -688,8 +648,7 @@ def _collect_pre_llm_call_context(
         _ctx_parts: list[str] = []
         try:
             from tools.hook_output_spill import (
-                get_spill_config as _spill_cfg,
-                spill_if_oversized as _spill_if_oversized,
+                get_spill_config as _spill_cfg, spill_if_oversized as _spill_if_oversized
             )
             _spill_config_cached = _spill_cfg()
         except Exception:
@@ -705,9 +664,7 @@ def _collect_pre_llm_call_context(
             if _spill_if_oversized is not None:
                 try:
                     _piece = _spill_if_oversized(
-                        _piece,
-                        session_id=agent.session_id,
-                        source="plugin hook",
+                        _piece, session_id=agent.session_id, source="plugin hook",
                         config=_spill_config_cached,
                     )
                 except Exception as _spill_exc:
@@ -739,9 +696,7 @@ def _merge_gateway_notes(
         append_notes_to_multimodal_content(_gw_turn_content, _gateway_notes)
         return plugin_user_context
     return (
-        plugin_user_context + "\n\n" + _gateway_notes
-        if plugin_user_context
-        else _gateway_notes
+        plugin_user_context + "\n\n" + _gateway_notes if plugin_user_context else _gateway_notes
     )
 
 
@@ -752,9 +707,7 @@ def _bind_interrupt_scope(agent: Any, ra) -> None:
     ra()._set_interrupt(False, agent._execution_thread_id)
     if agent._interrupt_requested:
         ra()._set_interrupt(
-            True,
-            agent._execution_thread_id,
-            reason=getattr(agent, "_tool_interrupt_reason", None),
+            True, agent._execution_thread_id, reason=getattr(agent, "_tool_interrupt_reason", None)
         )
     else:
         agent._interrupt_message = None
@@ -792,13 +745,8 @@ def _memory_turn_start_and_prefetch(agent: Any, original_user_message: Any) -> s
 
 
 def _stamp_api_content_sidecar(
-    agent: Any,
-    messages: List[Any],
-    current_turn_user_idx: int,
-    ext_prefetch_cache: str,
-    plugin_user_context: str,
-    *,
-    preflight_compressed: bool,
+    agent: Any, messages: List[Any], current_turn_user_idx: int, ext_prefetch_cache: str,
+    plugin_user_context: str, *, preflight_compressed: bool,
 ) -> None:
     """api_content sidecar — persist what you send. Injected context lives only in the
     API copy; stamp the exact sent bytes on the live dict so replay reproduces the
@@ -818,9 +766,7 @@ def _stamp_api_content_sidecar(
         if _db is not None:
             try:
                 _db.set_latest_user_api_content(
-                    agent.session_id,
-                    _turn_user_msg.get("content"),
-                    _api_content,
+                    agent.session_id, _turn_user_msg.get("content"), _api_content
                 )
             except Exception:
                 logger.warning(
@@ -832,9 +778,7 @@ def _stamp_api_content_sidecar(
 
 
 def _persist_turn_start(
-    agent: Any,
-    messages: List[Any],
-    conversation_history: Optional[List[Any]],
+    agent: Any, messages: List[Any], conversation_history: Optional[List[Any]],
     pending_cli_message: Any,
 ) -> None:
     """Crash-resilience: persist the inbound user turn once, with final api_content,
@@ -857,26 +801,13 @@ def _persist_turn_start(
 
 
 def build_turn_context(
-    agent,
-    user_message: Any,
-    system_message: Optional[str],
-    conversation_history: Optional[List[Dict[str, Any]]],
-    task_id: Optional[str],
-    stream_callback,
-    persist_user_message: Optional[Any],
-    persist_user_timestamp: Optional[float] = None,
-    persist_user_platform_id: Optional[str] = None,
-    *,
-    persist_user_display_kind: Optional[str] = None,
-    persist_user_display_metadata: Optional[Dict[str, Any]] = None,
-    restore_or_build_system_prompt,
-    install_safe_stdio,
-    sanitize_surrogates,
-    summarize_user_message_for_log,
-    set_session_context,
-    set_current_write_origin,
-    ra,
-    moa_active: bool = False,
+    agent, user_message: Any, system_message: Optional[str],
+    conversation_history: Optional[List[Dict[str, Any]]], task_id: Optional[str], stream_callback,
+    persist_user_message: Optional[Any], persist_user_timestamp: Optional[float]=None,
+    persist_user_platform_id: Optional[str]=None, *, persist_user_display_kind: Optional[str]=None,
+    persist_user_display_metadata: Optional[Dict[str, Any]]=None, restore_or_build_system_prompt,
+    install_safe_stdio, sanitize_surrogates, summarize_user_message_for_log, set_session_context,
+    set_current_write_origin, ra, moa_active: bool=False,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
 
@@ -973,13 +904,9 @@ def build_turn_context(
 
     # ── Idle compaction + preflight compression (or the uncompressed guard) ──
     compaction = run_turn_start_compaction(
-        agent,
-        messages=messages,
-        system_message=system_message,
-        active_system_prompt=active_system_prompt,
-        conversation_history=conversation_history,
-        current_turn_user_idx=current_turn_user_idx,
-        user_message=user_message,
+        agent, messages=messages, system_message=system_message,
+        active_system_prompt=active_system_prompt, conversation_history=conversation_history,
+        current_turn_user_idx=current_turn_user_idx, user_message=user_message,
         effective_task_id=effective_task_id,
     )
     messages = compaction.messages
@@ -988,11 +915,8 @@ def build_turn_context(
     current_turn_user_idx = compaction.current_turn_user_idx
 
     plugin_user_context = _collect_pre_llm_call_context(
-        agent,
-        effective_task_id=effective_task_id,
-        turn_id=turn_id,
-        original_user_message=original_user_message,
-        messages=messages,
+        agent, effective_task_id=effective_task_id, turn_id=turn_id,
+        original_user_message=original_user_message, messages=messages,
         conversation_history=conversation_history,
     )
     plugin_user_context = _merge_gateway_notes(
@@ -1021,31 +945,19 @@ def build_turn_context(
     _maybe_title_session_at_turn_start(agent, messages)
 
     return TurnContext(
-        user_message=user_message,
-        original_user_message=original_user_message,
-        messages=messages,
-        conversation_history=conversation_history,
-        active_system_prompt=active_system_prompt,
-        effective_task_id=effective_task_id,
-        turn_id=turn_id,
-        current_turn_user_idx=current_turn_user_idx,
-        should_review_memory=should_review_memory,
-        plugin_user_context=plugin_user_context,
-        ext_prefetch_cache=ext_prefetch_cache,
+        user_message=user_message, original_user_message=original_user_message, messages=messages,
+        conversation_history=conversation_history, active_system_prompt=active_system_prompt,
+        effective_task_id=effective_task_id, turn_id=turn_id,
+        current_turn_user_idx=current_turn_user_idx, should_review_memory=should_review_memory,
+        plugin_user_context=plugin_user_context, ext_prefetch_cache=ext_prefetch_cache,
         preflight_compression_blocked=compaction.blocked,
     )
 
 
 
 def build_api_messages(
-    agent: Any,
-    messages: List[Dict[str, Any]],
-    *,
-    current_turn_user_idx: Any,
-    ext_prefetch_cache: Any,
-    plugin_user_context: Any,
-    moa_config: Any,
-    active_system_prompt: Any,
+    agent: Any, messages: List[Dict[str, Any]], *, current_turn_user_idx: Any,
+    ext_prefetch_cache: Any, plugin_user_context: Any, moa_config: Any, active_system_prompt: Any,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Build the wire copy of ``messages`` for one API call plus the effective system
     message. Returns ``(api_messages, effective_system)``.

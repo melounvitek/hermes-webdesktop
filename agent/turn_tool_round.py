@@ -39,22 +39,10 @@ class ToolRoundVerdict:
 
 
 def run_tool_round(
-    agent: Any,
-    *,
-    assistant_message: Any,
-    finish_reason: Any,
-    messages: Any,
-    conversation_history: Any,
-    api_call_count: Any,
-    effective_task_id: Any,
-    user_message: Any,
-    system_message: Any,
-    active_system_prompt: Any,
-    compression_attempts: Any,
-    max_compression_attempts: Any,
-    final_response: Any,
-    failed: Any,
-    _turn_exit_reason: Any,
+    agent: Any, *, assistant_message: Any, finish_reason: Any, messages: Any,
+    conversation_history: Any, api_call_count: Any, effective_task_id: Any, user_message: Any,
+    system_message: Any, active_system_prompt: Any, compression_attempts: Any,
+    max_compression_attempts: Any, final_response: Any, failed: Any, _turn_exit_reason: Any,
     truncated_tool_call_retries: Any,
 ) -> ToolRoundVerdict:
     """Execute one tool round in the exact original order. Persist-before-execute is a
@@ -67,16 +55,10 @@ def run_tool_round(
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> ToolRoundVerdict:
         return ToolRoundVerdict(
-            action=action,
-            messages=messages,
-            conversation_history=conversation_history,
-            active_system_prompt=active_system_prompt,
-            compression_attempts=compression_attempts,
-            final_response=final_response,
-            failed=failed,
-            _turn_exit_reason=_turn_exit_reason,
-            truncated_tool_call_retries=truncated_tool_call_retries,
-            result=result,
+            action=action, messages=messages, conversation_history=conversation_history,
+            active_system_prompt=active_system_prompt, compression_attempts=compression_attempts,
+            final_response=final_response, failed=failed, _turn_exit_reason=_turn_exit_reason,
+            truncated_tool_call_retries=truncated_tool_call_retries, result=result,
         )
 
     if not agent.quiet_mode:
@@ -89,12 +71,8 @@ def run_tool_round(
             logging.debug("Tool call: %s with args: %s...", tc.function.name, args_preview)
 
     _tvv = validate_tool_calls(
-        agent,
-        assistant_message,
-        finish_reason,
-        messages=messages,
-        conversation_history=conversation_history,
-        api_call_count=api_call_count,
+        agent, assistant_message, finish_reason, messages=messages,
+        conversation_history=conversation_history, api_call_count=api_call_count,
         effective_task_id=effective_task_id,
     )
     _mixed_invalid_batch = _tvv.mixed_invalid_batch
@@ -122,10 +100,7 @@ def run_tool_round(
         ]
 
     _st = stage_tool_call_message(
-        agent,
-        assistant_message=assistant_message,
-        finish_reason=finish_reason,
-        messages=messages,
+        agent, assistant_message=assistant_message, finish_reason=finish_reason, messages=messages
     )
     assistant_msg = _st.assistant_msg
     duplicate_previous_interim = _st.duplicate_previous_interim
@@ -144,8 +119,7 @@ def run_tool_round(
                 ),
             })
         assistant_message.tool_calls = [
-            tc for tc in assistant_message.tool_calls
-            if tc.function.name in agent.valid_tool_names
+            tc for tc in assistant_message.tool_calls if tc.function.name in agent.valid_tool_names
         ]
 
     _tool_turn_persisted = None
@@ -237,17 +211,11 @@ def run_tool_round(
         agent.iteration_budget.refund()
 
     _ptc = compress_after_tool_results(
-        agent,
-        messages=messages,
-        system_message=system_message,
-        user_message=user_message,
-        active_system_prompt=active_system_prompt,
-        conversation_history=conversation_history,
+        agent, messages=messages, system_message=system_message, user_message=user_message,
+        active_system_prompt=active_system_prompt, conversation_history=conversation_history,
         compression_attempts=compression_attempts,
-        max_compression_attempts=max_compression_attempts,
-        effective_task_id=effective_task_id,
-        final_response=final_response,
-        turn_exit_reason=_turn_exit_reason,
+        max_compression_attempts=max_compression_attempts, effective_task_id=effective_task_id,
+        final_response=final_response, turn_exit_reason=_turn_exit_reason,
     )
     messages = _ptc.messages
     active_system_prompt = _ptc.active_system_prompt
@@ -281,11 +249,7 @@ class StagedToolCallMessage:
 
 
 def stage_tool_call_message(
-    agent: Any,
-    *,
-    assistant_message: Any,
-    finish_reason: Any,
-    messages: Any,
+    agent: Any, *, assistant_message: Any, finish_reason: Any, messages: Any
 ) -> StagedToolCallMessage:
     """Build the assistant tool-call row and update the per-turn fallback/mute state: drop a bare
     bracketed marker beside a call (#78148), classify housekeeping-only rounds, keep visible
@@ -311,12 +275,10 @@ def stage_tool_call_message(
     # protocol scaffolding; persisting it lets the post-tool fallback replay
     # it forever (#78148).
     if (
-        assistant_message.tool_calls
-        and _STALE_MARKER_RE.fullmatch(turn_content.strip())
+        assistant_message.tool_calls and _STALE_MARKER_RE.fullmatch(turn_content.strip())
     ):
         logger.warning(
-            "Discarding bare tool-call marker from assistant content: %s",
-            turn_content,
+            "Discarding bare tool-call marker from assistant content: %s", turn_content
         )
         turn_content = ""
         assistant_msg["content"] = ""
@@ -327,8 +289,7 @@ def stage_tool_call_message(
         "memory", "todo_list", "skill_manage", "session_search",
     })
     _all_housekeeping = all(
-        tc.function.name in _HOUSEKEEPING_TOOLS
-        for tc in assistant_message.tool_calls
+        tc.function.name in _HOUSEKEEPING_TOOLS for tc in assistant_message.tool_calls
     )
 
     # Substantive tools clear any older fallback so a two-turn-old
@@ -359,9 +320,7 @@ def stage_tool_call_message(
     # (tool-call path — same rationale as the final-response path).
     _had_prefill = False
     while (
-        messages
-        and isinstance(messages[-1], dict)
-        and messages[-1].get("_thinking_prefill")
+        messages and isinstance(messages[-1], dict) and messages[-1].get("_thinking_prefill")
     ):
         messages.pop()
         _had_prefill = True

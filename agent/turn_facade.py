@@ -20,18 +20,12 @@ class TurnFacadeMixin:
     """run_conversation()/chat() (see module docstring)."""
 
     def run_conversation(
-        self,
-        user_message: Any,
-        system_message: str = None,
-        conversation_history: List[Dict[str, Any]] = None,
-        task_id: str = None,
-        stream_callback: Optional[callable] = None,
-        persist_user_message: Optional[Any] = None,
-        persist_user_timestamp: Optional[float] = None,
-        persist_user_display_kind: Optional[str] = None,
-        persist_user_display_metadata: Optional[Dict[str, Any]] = None,
-        persist_user_platform_id: Optional[str] = None,
-        moa_config: Optional[dict[str, Any]] = None,
+        self, user_message: Any, system_message: str=None,
+        conversation_history: List[Dict[str, Any]]=None, task_id: str=None,
+        stream_callback: Optional[callable]=None, persist_user_message: Optional[Any]=None,
+        persist_user_timestamp: Optional[float]=None, persist_user_display_kind: Optional[str]=None,
+        persist_user_display_metadata: Optional[Dict[str, Any]]=None,
+        persist_user_platform_id: Optional[str]=None, moa_config: Optional[dict[str, Any]]=None,
     ) -> Dict[str, Any]:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         # A review shares this session_id for cache parity: fence review startup or interrupt an admitted
@@ -45,9 +39,7 @@ class TurnFacadeMixin:
         from agent.auxiliary_client import scoped_runtime_main
         from agent.conversation_loop import run_conversation
         from agent.portal_tags import (
-            reset_affinity_scope,
-            reset_conversation_context,
-            set_affinity_scope,
+            reset_affinity_scope, reset_conversation_context, set_affinity_scope,
             set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
@@ -82,10 +74,7 @@ class TurnFacadeMixin:
             # note_turn_finished balances every exit.
             _review_queue.note_turn_started()
             admission = admit_durable_turn_lease(
-                self,
-                session_id=session_id,
-                relay_turn_id=relay_turn_id,
-                task_context=task_context,
+                self, session_id=session_id, relay_turn_id=relay_turn_id, task_context=task_context,
                 conversation_history=conversation_history,
             )
             if admission.early_result is not None:
@@ -98,8 +87,7 @@ class TurnFacadeMixin:
 
             relay_lease = relay_runtime.SESSION_COORDINATOR.acquire_conversation(
                 profile_key=relay_runtime.current_profile_key(),
-                session_id=task_context["session_id"],
-                platform=task_context["platform"],
+                session_id=task_context["session_id"], platform=task_context["platform"],
                 parent_session_id=relay_parent_session_id,
                 model=str(getattr(self, "model", None) or ""),
             )
@@ -129,18 +117,12 @@ class TurnFacadeMixin:
                     if lease is not None:
                         lease.start()
                     result = run_conversation(
-                        self,
-                        user_message,
-                        system_message,
-                        conversation_history,
-                        effective_task_id,
-                        stream_callback,
-                        persist_user_message,
+                        self, user_message, system_message, conversation_history, effective_task_id,
+                        stream_callback, persist_user_message,
                         persist_user_timestamp=persist_user_timestamp,
                         persist_user_display_kind=persist_user_display_kind,
                         persist_user_display_metadata=persist_user_display_metadata,
-                        persist_user_platform_id=persist_user_platform_id,
-                        moa_config=moa_config,
+                        persist_user_platform_id=persist_user_platform_id, moa_config=moa_config,
                     )
                 finally:
                     # Post-loop relay/task finalization must not receive a late refresh interrupt. The

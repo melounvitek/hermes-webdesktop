@@ -37,14 +37,8 @@ class ToolValidationVerdict:
 
 
 def validate_tool_calls(
-    agent: Any,
-    assistant_message: Any,
-    finish_reason: str,
-    *,
-    messages: List[Dict[str, Any]],
-    conversation_history: Any,
-    api_call_count: int,
-    effective_task_id: Any,
+    agent: Any, assistant_message: Any, finish_reason: str, *, messages: List[Dict[str, Any]],
+    conversation_history: Any, api_call_count: int, effective_task_id: Any,
 ) -> ToolValidationVerdict:
     """Validate ``assistant_message.tool_calls`` in place (ids uniquified, names
     repaired, dict/empty args normalized to JSON strings). Strikes for invalid names
@@ -79,16 +73,14 @@ def validate_tool_calls(
     # ones; voiding the turn discards real work. Strikes advance only when a
     # turn has NO valid call, so a degenerate model still halts at 3.
     _mixed_invalid_batch = bool(invalid_tool_calls) and any(
-        tc.function.name in agent.valid_tool_names
-        for tc in assistant_message.tool_calls
+        tc.function.name in agent.valid_tool_names for tc in assistant_message.tool_calls
     )
     if _mixed_invalid_batch:
         agent._invalid_tool_retries = 0
         invalid_name = invalid_tool_calls[0]
         invalid_preview = invalid_name[:80] + "..." if len(invalid_name) > 80 else invalid_name
         _n_valid = sum(
-            1 for tc in assistant_message.tool_calls
-            if tc.function.name in agent.valid_tool_names
+            1 for tc in assistant_message.tool_calls if tc.function.name in agent.valid_tool_names
         )
         agent._buffer_vprint(
             f"⚠️  Unknown tool '{invalid_preview}' in batch — erroring that call, "
@@ -163,8 +155,7 @@ def validate_tool_calls(
             json.loads(args)
         except json.JSONDecodeError as e:
             if (
-                _mixed_invalid_batch
-                and tc.function.name not in agent.valid_tool_names
+                _mixed_invalid_batch and tc.function.name not in agent.valid_tool_names
             ):
                 # This call never executes (invalid-name error result
                 # below); don't let its broken args trigger the whole-turn

@@ -38,22 +38,15 @@ class BedrockTransport(ProviderTransport):
         return convert_tools_to_converse(tools)
 
     def build_kwargs(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **params,
+        self, model: str, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None, **params,
     ) -> Dict[str, Any]:
         """Build converse() kwargs; params: max_tokens (4096), temperature, guardrail_config, region ('us-east-1')."""
         from agent.bedrock_adapter import build_converse_kwargs
 
         kwargs = build_converse_kwargs(
-            model=model,
-            messages=messages,
-            tools=tools,
-            max_tokens=params.get("max_tokens", 4096),
-            temperature=params.get("temperature"),
-            guardrail_config=params.get("guardrail_config"),
+            model=model, messages=messages, tools=tools, max_tokens=params.get("max_tokens", 4096),
+            temperature=params.get("temperature"), guardrail_config=params.get("guardrail_config"),
         )
         # Sentinel keys for dispatch — agent pops these before the boto3 call
         kwargs["__bedrock_converse__"] = True
@@ -82,12 +75,10 @@ class BedrockTransport(ProviderTransport):
             provider_data["bedrock_content_blocks"] = msg.bedrock_content_blocks
 
         return NormalizedResponse(
-            content=msg.content,
-            tool_calls=tool_calls,
+            content=msg.content, tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             reasoning=getattr(msg, "reasoning", None) or getattr(msg, "reasoning_content", None),
-            usage=usage,
-            provider_data=provider_data or None,
+            usage=usage, provider_data=provider_data or None,
         )
 
     def validate_response(self, response: Any) -> bool:

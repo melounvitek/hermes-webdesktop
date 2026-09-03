@@ -84,19 +84,11 @@ class VideoGenProvider(CatalogProviderBase):
 
     @abc.abstractmethod
     def generate(
-        self,
-        prompt: str,
-        *,
-        model: Optional[str] = None,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
-        duration: Optional[int] = None,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        resolution: str = DEFAULT_RESOLUTION,
-        negative_prompt: Optional[str] = None,
-        audio: Optional[bool] = None,
-        seed: Optional[int] = None,
-        **kwargs: Any,
+        self, prompt: str, *, model: Optional[str] = None, image_url: Optional[str] = None,
+        reference_image_urls: Optional[List[str]] = None, duration: Optional[int] = None,
+        aspect_ratio: str = DEFAULT_ASPECT_RATIO, resolution: str = DEFAULT_RESOLUTION,
+        negative_prompt: Optional[str] = None, audio: Optional[bool] = None,
+        seed: Optional[int] = None, **kwargs: Any,
     ) -> Dict[str, Any]:
         """Generate a video from a prompt, or animate ``image_url`` when given.
 
@@ -112,40 +104,23 @@ class VideoGenProvider(CatalogProviderBase):
 # ---------------------------------------------------------------------------
 
 
-def save_b64_video(
-    b64_data: str,
-    *,
-    prefix: str = "video",
-    extension: str = "mp4",
-) -> Path:
+def save_b64_video(b64_data: str,*, prefix: str="video", extension: str="mp4") -> Path:
     """Decode base64 video data into ``$HERMES_HOME/cache/videos/``; return the path."""
     return provider_media.save_b64("videos", b64_data, prefix=prefix, extension=extension)
 
 
-def save_bytes_video(
-    raw: bytes,
-    *,
-    prefix: str = "video",
-    extension: str = "mp4",
-) -> Path:
+def save_bytes_video(raw: bytes,*, prefix: str="video", extension: str="mp4") -> Path:
     """Write raw video bytes (e.g. an HTTP download body) to the cache."""
     return provider_media.save_bytes("videos", raw, prefix=prefix, extension=extension)
 
 
 _URL_VIDEO_CONTENT_TYPES = {
-    "video/mp4": "mp4",
-    "video/webm": "webm",
-    "video/quicktime": "mov",
-    "video/x-matroska": "mkv",
+    "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov", "video/x-matroska": "mkv"
 }
 
 
 def save_url_video(
-    url: str,
-    *,
-    prefix: str = "video",
-    timeout: float = 180.0,
-    max_bytes: int = 200 * 1024 * 1024,
+    url: str, *, prefix: str = "video", timeout: float = 180.0, max_bytes: int = 200 * 1024 * 1024
 ) -> Path:
     """Download an (often ephemeral) video URL into ``$HERMES_HOME/cache/videos/``.
 
@@ -161,15 +136,8 @@ def save_url_video(
 
 
 def success_response(
-    *,
-    video: str,
-    model: str,
-    prompt: str,
-    modality: str = "text",
-    aspect_ratio: str = "",
-    duration: int = 0,
-    provider: str,
-    extra: Optional[Dict[str, Any]] = None,
+    *, video: str, model: str, prompt: str, modality: str = "text", aspect_ratio: str = "",
+    duration: int = 0, provider: str, extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Uniform success dict; ``extra`` keys are added without overriding standard ones."""
     payload: Dict[str, Any] = {
@@ -189,13 +157,8 @@ def success_response(
 
 
 def error_response(
-    *,
-    error: str,
-    error_type: str = "provider_error",
-    provider: str = "",
-    model: str = "",
-    prompt: str = "",
-    aspect_ratio: str = "",
+    *, error: str, error_type: str = "provider_error", provider: str = "", model: str = "",
+    prompt: str = "", aspect_ratio: str = "",
 ) -> Dict[str, Any]:
     """Build a uniform error response dict."""
     return {
@@ -277,19 +240,11 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
         return override or self._default_base_url
 
     def generate(
-        self,
-        prompt: str,
-        *,
-        model: Optional[str] = None,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
-        duration: Optional[int] = None,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        resolution: str = DEFAULT_RESOLUTION,
-        negative_prompt: Optional[str] = None,
-        audio: Optional[bool] = None,
-        seed: Optional[int] = None,
-        **kwargs: Any,
+        self, prompt: str, *, model: Optional[str] = None, image_url: Optional[str] = None,
+        reference_image_urls: Optional[List[str]] = None, duration: Optional[int] = None,
+        aspect_ratio: str = DEFAULT_ASPECT_RATIO, resolution: str = DEFAULT_RESOLUTION,
+        negative_prompt: Optional[str] = None, audio: Optional[bool] = None,
+        seed: Optional[int] = None, **kwargs: Any,
     ) -> Dict[str, Any]:
         if not prompt or not prompt.strip():
             return error_response(
@@ -297,8 +252,7 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
             )
         if not self._api_key():
             return error_response(
-                error=f"{self._env_key} is not set",
-                error_type="missing_credentials",
+                error=f"{self._env_key} is not set", error_type="missing_credentials",
                 provider=self.name,
             )
         try:
@@ -306,16 +260,14 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
         except ImportError:
             return error_response(
                 error="openai Python package not installed (pip install openai)",
-                error_type="missing_dependency",
-                provider=self.name,
+                error_type="missing_dependency", provider=self.name,
             )
 
         model_id = model or self.default_model()
         if not model_id:
             return error_response(
                 error=f"no {self.name} video model available (live catalog empty?)",
-                error_type="no_model",
-                provider=self.name,
+                error_type="no_model", provider=self.name,
             )
 
         # Fields ``videos.create`` doesn't name natively ride in ``extra_body``.
@@ -344,12 +296,8 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
             except Exception as exc:  # noqa: BLE001 - surface any SDK/API/timeout failure uniformly
                 logger.debug("%s video generation failed", self.name, exc_info=True)
                 return error_response(
-                    error=f"{self.name} video generation failed: {exc}",
-                    error_type="api_error",
-                    provider=self.name,
-                    model=model_id,
-                    prompt=prompt,
-                    aspect_ratio=aspect_ratio,
+                    error=f"{self.name} video generation failed: {exc}", error_type="api_error",
+                    provider=self.name, model=model_id, prompt=prompt, aspect_ratio=aspect_ratio,
                 )
 
             # DeepInfra reports "succeeded", OpenAI/Sora "completed" — accept both.
@@ -359,10 +307,7 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
                 job_error = getattr(video, "error", None)
                 return error_response(
                     error=str(job_error) if job_error else f"video job ended with status={status!r}",
-                    error_type="job_failed",
-                    provider=self.name,
-                    model=model_id,
-                    prompt=prompt,
+                    error_type="job_failed", provider=self.name, model=model_id, prompt=prompt,
                     aspect_ratio=aspect_ratio,
                 )
 
@@ -389,21 +334,14 @@ class OpenAICompatibleVideoGenProvider(VideoGenProvider):
                 else:
                     return error_response(
                         error=f"{self.name} video job succeeded but no output could be retrieved: {exc}",
-                        error_type="empty_response",
-                        provider=self.name,
-                        model=model_id,
-                        prompt=prompt,
-                        aspect_ratio=aspect_ratio,
+                        error_type="empty_response", provider=self.name, model=model_id,
+                        prompt=prompt, aspect_ratio=aspect_ratio,
                     )
 
             return success_response(
-                video=video_ref,
-                model=model_id,
-                prompt=prompt,
-                modality="image" if image_url else "text",
-                aspect_ratio=aspect_ratio,
-                duration=duration or 0,
-                provider=self.name,
+                video=video_ref, model=model_id, prompt=prompt,
+                modality="image" if image_url else "text", aspect_ratio=aspect_ratio,
+                duration=duration or 0, provider=self.name,
             )
         finally:
             close = getattr(client, "close", None)
