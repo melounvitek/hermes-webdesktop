@@ -1,11 +1,8 @@
-"""Sudo password plumbing and shell-command rewrites for the terminal tool: the per-scope
-interactive password cache, the /dev/tty prompt, the quote-aware shell scanner behind the
-real-sudo rewrite (``sudo -S -p ''``) and the compound-background brace-group rewrite, and
-the NOPASSWD probe.
-
-Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
-so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
-"""
+"""Sudo password plumbing and shell-command rewrites for the terminal tool: per-scope
+password cache, /dev/tty prompt, the quote-aware shell scanner behind the real-sudo rewrite
+(``sudo -S -p ''``) and the compound-background brace-group rewrite, and the NOPASSWD probe.
+Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there so
+``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before."""
 
 import logging
 import os
@@ -69,14 +66,11 @@ def _reset_cached_sudo_passwords() -> None:
 
 
 def _in_delegated_child_context() -> bool:
-    """True while running inside a delegate_task child.
-
-    Subagents run on parent-process worker threads and inherit process-wide
-    ``HERMES_INTERACTIVE=1``, which does NOT mean this context can reach the user: a raw
-    ``/dev/tty`` sudo prompt from a child races the TUI for the tty and blocks the child for
-    the full timeout. Children must always be headless for sudo prompting. The ContextVar is
-    set by ``delegated_child_context()`` and propagates via ``copy_context``.
-    """
+    """True while running inside a delegate_task child. Subagents run on parent-process worker
+    threads and inherit process-wide ``HERMES_INTERACTIVE=1``, which does NOT mean they can reach
+    the user: a raw ``/dev/tty`` sudo prompt from a child races the TUI for the tty and blocks the
+    child for the full timeout, so children are always headless for sudo prompting. The ContextVar
+    is set by ``delegated_child_context()`` and propagates via ``copy_context``."""
     try:
         from agent.delegation_context import is_delegated_child_context
         return is_delegated_child_context()
@@ -180,12 +174,9 @@ def _read_hidden_password(result: dict) -> None:
 
 
 def _prompt_for_sudo_password(timeout_seconds: int = 45) -> str:
-    """Prompt for a sudo password; "" on skip (empty Enter), timeout, or error.
-
-    Prefers the CLI-registered callback (prompt_toolkit-integrated); otherwise reads
-    /dev/tty (msvcrt on Windows) with echo disabled. Time spent waiting on the human is
-    excluded from tool deadlines via ``human_wait_window``.
-    """
+    """Prompt for a sudo password; "" on skip (empty Enter), timeout, or error. Prefers the
+    CLI-registered callback (prompt_toolkit-integrated); otherwise reads /dev/tty (msvcrt on
+    Windows) with echo disabled. Human wait time is excluded from tool deadlines (``human_wait_window``)."""
     from tools.terminal_tool import _get_sudo_password_callback
     _sudo_cb = _get_sudo_password_callback()
     if _sudo_cb is not None:
@@ -250,9 +241,8 @@ def _looks_like_env_assignment(token: str) -> bool:
     return bool(re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name))
 
 
-# One shell word: single-quoted run (unterminated ok), double-quoted run with backslash
-# escapes (unterminated ok), a backslash escape (a trailing lone `\` is a plain char), or
-# any char other than whitespace and the metacharacters `;|&()`.
+# One shell word: single-/double-quoted runs (unterminated ok; backslash escapes inside double
+# quotes), a backslash escape (a trailing lone `\` is a plain char), or any non-`;|&()`/space char.
 _SHELL_WORD_RE = re.compile(r"""(?:'[^']*'?|"(?:\\.|[^"])*"?|\\.|[^\s;|&()])*""", re.DOTALL)
 
 
@@ -312,12 +302,9 @@ def _scan_shell(command: str, background: bool = False) -> Iterator[tuple[str, i
 
 
 def _rewrite_real_sudo_invocations(command: str) -> tuple[str, int]:
-    """Rewrite only real unquoted sudo command words, not plain text mentions.
-
-    A word is a sudo invocation only at a command-start position (see ``_scan_shell``);
-    comments there are copied through verbatim. Returns the rewritten command and the
-    number of sudo invocations rewritten.
-    """
+    """Rewrite only real unquoted sudo command words (at a command-start position, see
+    ``_scan_shell``), not plain text mentions; comments are copied through verbatim.
+    Returns the rewritten command and the number of sudo invocations rewritten."""
     out: list[str] = []
     sudo_count = 0
     for kind, start, end, at_start in _scan_shell(command):
@@ -335,12 +322,9 @@ def _count_real_sudo_invocations(command: str) -> int:
 
 
 def _sudo_nopasswd_works() -> bool:
-    """True when local sudo currently works without prompting.
-
-    Local backend only — Docker/SSH/Modal must not inherit host sudo state. Re-probes every
-    call (no cache) so an expired sudo timestamp can't make a later command silently block
-    waiting for a password.
-    """
+    """True when local sudo currently works without prompting. Local backend only — Docker/SSH/
+    Modal must not inherit host sudo state. Re-probes every call (no cache) so an expired sudo
+    timestamp can't make a later command silently block waiting for a password."""
     from tools.terminal_tool import _tenv
     if (_tenv("TERMINAL_ENV", "local").strip().lower() or "local") != "local":
         return False
@@ -355,23 +339,17 @@ def _sudo_nopasswd_works() -> bool:
 
 
 def _rewrite_compound_background(command: str) -> str:
-    """Wrap `A && B &` (or `A || B &`) to `A && { B & }` at depth 0.
-
-    Bash binds `&&` tighter than `&`, so `A && B &` backgrounds a subshell that runs B in the
-    foreground and waits for it; a long-running B leaves that subshell stuck in ``wait4``
-    forever, and its open stdout pipe can keep the terminal tool from returning. The brace
-    group keeps `&&`'s skip-B-on-failure semantics without a fork: bash backgrounds B as a
-    simple command and exits immediately, orphaning B normally.
-
-    Redirects (``&>``, ``2>&1``), quoted strings, comments and ``(...)``/``{ ... }`` group
-    bodies never count as the backgrounding ``&`` (see ``_scan_shell``); tracking brace depth
-    also makes the rewrite idempotent. `(...)` subshells have the same bug class but are not
-    the common agent pattern; left for a follow-up. Simple ``cmd &`` is left alone — it
-    doesn't have the subshell-wait bug.
-    """
-    # Position just after the most recent `&&` / `||` at depth 0 in the current statement;
-    # -1 when no chain operator is active.
-    chain_end = -1
+    """Wrap `A && B &` (or `A || B &`) to `A && { B & }` at depth 0. Bash binds `&&` tighter
+    than `&`, so `A && B &` backgrounds a subshell that runs B in the foreground and waits for
+    it; a long-running B leaves that subshell stuck in ``wait4`` forever, and its open stdout
+    pipe can keep the terminal tool from returning. The brace group keeps `&&`'s
+    skip-B-on-failure semantics without a fork: bash backgrounds B as a simple command and
+    exits immediately, orphaning B normally. Redirects (``&>``, ``2>&1``), quoted strings,
+    comments and ``(...)``/``{ ... }`` bodies never count as the backgrounding ``&`` (see
+    ``_scan_shell``); tracking brace depth also makes the rewrite idempotent. `(...)` subshells
+    have the same bug class but are not the common agent pattern; left for a follow-up.
+    Simple ``cmd &`` is left alone — it doesn't have the subshell-wait bug."""
+    chain_end = -1  # just after the last depth-0 `&&`/`||` of this statement; -1 = none active
     rewrites: list[tuple[int, int]] = []  # (chain_op_end, amp_pos)
     for kind, start, end, _ in _scan_shell(command, background=True):
         text = command[start:end]
@@ -406,18 +384,15 @@ def _rewrite_compound_background(command: str) -> str:
 
 
 def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None]:
-    """Rewrite bare ``sudo`` to ``sudo -S -p ''`` when a password is available.
-
-    Shared by every execution environment. Returns ``(command, sudo_stdin)``: ``sudo_stdin``
-    is one password line per sudo invocation that the caller must PREPEND to the process
-    stdin (sudo -S consumes exactly one line and passes the rest through, so it's safe
-    alongside the caller's own stdin_data). Backends that can't pipe stdin (modal, daytona,
-    vercel_sandbox) embed the password in the command string themselves. With no password
-    available the command is returned unchanged and ``sudo_stdin`` is None, so it fails
-    gracefully with "sudo: a password is required". Password sources, in order: configured
-    SUDO_PASSWORD, the session cache, then an interactive prompt (45s timeout, cached on
-    success) when a UI is reachable.
-    """
+    """Rewrite bare ``sudo`` to ``sudo -S -p ''`` when a password is available (shared by every
+    execution environment). Returns ``(command, sudo_stdin)``: ``sudo_stdin`` is one password
+    line per sudo invocation that the caller must PREPEND to the process stdin (sudo -S consumes
+    exactly one line and passes the rest through, so it's safe alongside the caller's own
+    stdin_data). Backends that can't pipe stdin (modal, daytona, vercel_sandbox) embed the
+    password in the command string themselves. With no password available the command is
+    returned unchanged and ``sudo_stdin`` is None, so it fails gracefully with "sudo: a password
+    is required". Password sources, in order: configured SUDO_PASSWORD, the session cache, then
+    an interactive prompt (45s timeout, cached on success) when a UI is reachable."""
     from tools.terminal_tool import _get_sudo_password_callback, _prompt_for_sudo_password, _sudo_nopasswd_works
     if command is None:
         return None, None
@@ -435,15 +410,13 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     has_configured_password = _configured_password is not None
     sudo_password = _configured_password if has_configured_password else _get_cached_sudo_password()
 
-    # sudoers NOPASSWD hosts must not be forced through the prompt or the -S password pipe
-    # (local backend only; re-probed every call).
+    # sudoers NOPASSWD hosts must not be forced through the prompt or the -S pipe (local only).
     if not has_configured_password and not sudo_password and _sudo_nopasswd_works():
         return command, None
 
-    # delegate_task children inherit HERMES_INTERACTIVE=1 (and possibly a stale
-    # thread-local callback on a recycled worker) but have no user on the other side —
-    # they always behave as headless; configured password, session cache and the
-    # NOPASSWD probe still apply.
+    # delegate_task children inherit HERMES_INTERACTIVE=1 (and possibly a stale thread-local
+    # callback on a recycled worker) but have no user on the other side — always headless;
+    # configured password, session cache and the NOPASSWD probe still apply.
     should_prompt_for_sudo = (
         env_var_enabled("HERMES_INTERACTIVE") or _get_sudo_password_callback() is not None
     ) and not _in_delegated_child_context()
@@ -453,7 +426,6 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
             _set_cached_sudo_password(sudo_password)
 
     if has_configured_password or sudo_password:
-        # Trailing newline is required: sudo -S reads one line per invocation. Compound
-        # commands (`sudo a && sudo b`) need one password line each.
+        # sudo -S reads one line per invocation: compound `sudo a && sudo b` needs one line each.
         return transformed, (sudo_password + "\n") * sudo_count
     return command, None
