@@ -121,8 +121,7 @@ class SimplexAdapter(BasePlatformAdapter):
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         logger.info(
             "SimpleX adapter initialized: url=%s auto_accept=%s groups=%s",
-            self.ws_url, self.auto_accept, "enabled" if self.group_allow_from else "disabled",
-        )
+            self.ws_url, self.auto_accept, "enabled" if self.group_allow_from else "disabled")
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to the simplex-chat daemon and start the WebSocket listener."""
@@ -372,8 +371,7 @@ class SimplexAdapter(BasePlatformAdapter):
 
         source = self.build_source(
             chat_id=chat_id, chat_name=chat_name, chat_type="group" if is_group else "dm",
-            user_id=sender_id, user_name=sender_name or sender_id,
-        )
+            user_id=sender_id, user_name=sender_name or sender_id)
         msg_type = MessageType.TEXT
         if media_types:
             if any(mt.startswith("audio/") for mt in media_types):
@@ -389,8 +387,7 @@ class SimplexAdapter(BasePlatformAdapter):
             timestamp = datetime.now(tz=timezone.utc)
         msg_event = MessageEvent(
             source=source, text=text or "", message_type=msg_type, media_urls=media_urls,
-            media_types=media_types, timestamp=timestamp, raw_message=chat_item,
-        )
+            media_types=media_types, timestamp=timestamp, raw_message=chat_item)
         logger.debug("SimpleX: message from %s in %s: %s", _redact_id(sender_id), chat_id[:20], (text or "")[:50])
         if msg_type == MessageType.TEXT and text:  # batch rapid-fire text into one combined message
             self._enqueue_text_event(msg_event)
@@ -564,8 +561,7 @@ class SimplexAdapter(BasePlatformAdapter):
         return png_path, thumb_uri
 
     async def send_image(
-        self, chat_id: str, image_url: str, caption: Optional[str] = None, **kwargs
-    ) -> SendResult:
+        self, chat_id: str, image_url: str, caption: Optional[str] = None, **kwargs) -> SendResult:
         """Send an image. Supports ``file://`` URLs and ``http(s)://`` URLs."""
         if image_url.startswith("file://"):
             file_path = unquote(image_url[7:])
@@ -584,22 +580,19 @@ class SimplexAdapter(BasePlatformAdapter):
 
     async def send_image_file(
         self, chat_id: str, image_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, **kwargs,
-    ) -> SendResult:
+        reply_to: Optional[str] = None, **kwargs) -> SendResult:
         """Send a local image file via SimpleX."""
         return await self.send_image(chat_id, f"file://{image_path}", caption=caption, **kwargs)
 
     async def send_video(
         self, chat_id: str, video_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, **kwargs,
-    ) -> SendResult:
+        reply_to: Optional[str] = None, **kwargs) -> SendResult:
         """Send a video file via SimpleX (as a file attachment)."""
         return await self.send_document(chat_id, video_path, caption=caption)
 
     async def send_document(
         self, chat_id: str, file_path: str, caption: Optional[str] = None,
-        filename: Optional[str] = None, **kwargs,
-    ) -> SendResult:
+        filename: Optional[str] = None, **kwargs) -> SendResult:
         """Send a document/file attachment."""
         if not Path(file_path).exists():
             return SendResult(success=False, error="File not found")
@@ -608,8 +601,7 @@ class SimplexAdapter(BasePlatformAdapter):
 
     async def send_voice(
         self, chat_id: str, audio_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, duration: int = 0, **kwargs,
-    ) -> SendResult:
+        reply_to: Optional[str] = None, duration: int = 0, **kwargs) -> SendResult:
         """Send an audio file as an inline SimpleX voice note (``msgContent.type == "voice"``)."""
         if not Path(audio_path).exists():
             return SendResult(success=False, error="Voice file not found")
@@ -688,8 +680,7 @@ async def _standalone_send(
     try:
         payload = {
             "corrId": f"{_CORR_PREFIX}snd-{int(time.time() * 1000)}",
-            "cmd": _send_cmd(chat_id, [{"msgContent": {"type": "text", "text": message}}]),
-        }
+            "cmd": _send_cmd(chat_id, [{"msgContent": {"type": "text", "text": message}}])}
         async with _wsclient.connect(ws_url, open_timeout=10, close_timeout=5) as ws:
             await ws.send(json.dumps(payload))
             await asyncio.sleep(0.5)  # let the daemon process the command before closing
@@ -703,8 +694,7 @@ def interactive_setup() -> None:
     print(
         "\nSimpleX Chat setup\n------------------\nRequirements:\n"
         "  1. simplex-chat daemon running (e.g. `simplex-chat -p 5225`).\n"
-        "  2. Python package `websockets` installed (`pip install websockets`).\n"
-    )
+        "  2. Python package `websockets` installed (`pip install websockets`).\n")
     try:
         from hermes_cli.config import get_env_value, save_env_value
     except ImportError:
@@ -760,6 +750,4 @@ def register(ctx) -> None:
             "hard message length limit, but keep responses conversational. "
             "You can attach native images, voice notes, and arbitrary "
             "files; the adapter handles MEDIA:<path> tags by sending them "
-            "as inline voice notes (audio extensions) or documents."
-        ),
-    )
+            "as inline voice notes (audio extensions) or documents."))
