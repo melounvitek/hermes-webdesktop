@@ -28,32 +28,22 @@ _TERMINAL_BLOCKED_PARAMS = {"background", "pty", "notify", "notify_on_complete",
 def _default_dispatch(task_id):
     from model_tools import handle_function_call
 
-    def dispatch(tool_name, tool_args):
-        return handle_function_call(tool_name, tool_args, task_id=task_id)
-
-    return dispatch
+    return lambda tool_name, tool_args: handle_function_call(tool_name, tool_args, task_id=task_id)
 
 
 def _rpc_token_ok(request: dict, rpc_token: str) -> bool:
-    """Constant-time token check; an empty server token fails closed."""
-    # Compare as bytes: compare_digest raises TypeError on a str with
-    # non-ASCII characters, and the token comes from script-supplied JSON.
+    """Constant-time token check; an empty server token fails closed.
+
+    Compared as bytes: compare_digest raises TypeError on a non-ASCII str, and
+    the token comes from script-supplied JSON."""
     return bool(rpc_token) and secrets.compare_digest(
         str(request.get("token") or "").encode(), rpc_token.encode()
     )
 
 
-def _handle_rpc_request(
-    request: dict,
-    *,
-    allowed_tools: frozenset,
-    tool_call_counter: list,
-    max_tool_calls: int,
-    dispatch,
-    tool_call_log: list,
-    call_start: float,
-    where: str,
-) -> str:
+def _handle_rpc_request(request: dict, *, allowed_tools: frozenset, tool_call_counter: list,
+                        max_tool_calls: int, dispatch, tool_call_log: list, call_start: float,
+                        where: str) -> str:
     """Enforce allow-list + budget, then dispatch one authenticated request.
 
     Only a dispatched call consumes budget and is logged; refusals are free.
@@ -62,16 +52,11 @@ def _handle_rpc_request(
     tool_args = request.get("args", {})
 
     if tool_name not in allowed_tools:
-        available = ", ".join(sorted(allowed_tools))
-        return tool_error(
-            f"Tool '{tool_name}' is not available in execute_code. "
-            f"Available: {available}"
-        )
+        return tool_error(f"Tool '{tool_name}' is not available in execute_code. "
+                          f"Available: {', '.join(sorted(allowed_tools))}")
     if tool_call_counter[0] >= max_tool_calls:
-        return tool_error(
-            f"Tool call limit reached ({max_tool_calls}). "
-            "No more tool calls allowed in this execution."
-        )
+        return tool_error(f"Tool call limit reached ({max_tool_calls}). "
+                          "No more tool calls allowed in this execution.")
 
     if tool_name == "terminal" and isinstance(tool_args, dict):
         for param in _TERMINAL_BLOCKED_PARAMS:
@@ -86,28 +71,18 @@ def _handle_rpc_request(
         result = tool_error(str(exc))
 
     tool_call_counter[0] += 1
-    tool_call_log.append({
-        "tool": tool_name,
-        "args_preview": str(tool_args)[:80],
-        "duration": round(time.monotonic() - call_start, 2),
-    })
+    tool_call_log.append({"tool": tool_name, "args_preview": str(tool_args)[:80],
+                          "duration": round(time.monotonic() - call_start, 2)})
     return result
 
 
-def _rpc_server_loop(
-    server_sock: socket.socket,
-    task_id: str,
-    tool_call_log: list,
-    tool_call_counter: list,   # mutable [int] so the thread can increment
-    max_tool_calls: int,
-    allowed_tools: frozenset,
-    stop_event: threading.Event,
-    rpc_token: str,
-    dispatch=None,
-):
+def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: list,
+                     tool_call_counter: list, max_tool_calls: int, allowed_tools: frozenset,
+                     stop_event: threading.Event, rpc_token: str, dispatch=None):
     """Accept one client and serve newline-delimited JSON requests until it
     disconnects, idles 300s, or the call limit is reached.
 
+    ``tool_call_counter`` is a mutable ``[int]`` so the thread can increment it.
     ``dispatch`` overrides how an allowed, budgeted call runs: per-call
     sandboxes use the default (the thread already carries the cell's context),
     while session kernels pass a dispatcher that rebinds each call to the
@@ -155,14 +130,9 @@ def _rpc_server_loop(
                         resp = tool_error("Unauthorized RPC request")
                     else:
                         resp = _handle_rpc_request(
-                            request,
-                            allowed_tools=allowed_tools,
-                            tool_call_counter=tool_call_counter,
-                            max_tool_calls=max_tool_calls,
-                            dispatch=dispatch,
-                            tool_call_log=tool_call_log,
-                            call_start=call_start,
-                            where="sandbox",
+                            request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+                            max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
+                            call_start=call_start, where="sandbox",
                         )
                 conn.sendall((resp + "\n").encode())
 
@@ -178,17 +148,9 @@ def _rpc_server_loop(
                 logger.debug("RPC conn close error: %s", e)
 
 
-def _rpc_poll_loop(
-    env,
-    rpc_dir: str,
-    task_id: str,
-    tool_call_log: list,
-    tool_call_counter: list,
-    max_tool_calls: int,
-    allowed_tools: frozenset,
-    stop_event: threading.Event,
-    rpc_token: str,
-):
+def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_call_counter: list,
+                   max_tool_calls: int, allowed_tools: frozenset, stop_event: threading.Event,
+                   rpc_token: str):
     """Poll the remote filesystem for request files and answer them.
 
     Runs in a background thread; each ``env.execute()`` is an independent
@@ -201,22 +163,16 @@ def _rpc_poll_loop(
     quoted_rpc_dir = shlex.quote(rpc_dir)
     while not stop_event.is_set():
         try:
-            ls_result = env.execute(
-                f"ls -1 {quoted_rpc_dir}/req_* 2>/dev/null || true",
-                cwd="/",
-                timeout=10,
-            )
+            ls_result = env.execute(f"ls -1 {quoted_rpc_dir}/req_* 2>/dev/null || true", cwd="/", timeout=10)
             output = ls_result.get("output", "").strip()
             if not output:
                 stop_event.wait(poll_interval)
                 continue
 
-            req_files = sorted([
-                f.strip() for f in output.split("\n")
-                if f.strip()
-                and not f.strip().endswith(".tmp")
-                and "/req_" in f.strip()
-            ])
+            req_files = sorted(
+                f for f in (line.strip() for line in output.split("\n"))
+                if f and not f.endswith(".tmp") and "/req_" in f
+            )
 
             for req_file in req_files:
                 if stop_event.is_set():
@@ -237,28 +193,19 @@ def _rpc_poll_loop(
                     continue
 
                 tool_result = _handle_rpc_request(
-                    request,
-                    allowed_tools=allowed_tools,
-                    tool_call_counter=tool_call_counter,
-                    max_tool_calls=max_tool_calls,
-                    dispatch=dispatch,
-                    tool_call_log=tool_call_log,
-                    call_start=call_start,
-                    where="remote sandbox",
+                    request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+                    max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
+                    call_start=call_start, where="remote sandbox",
                 )
 
                 # Write the response atomically (tmp + rename) via echo piping —
                 # Modal doesn't reliably deliver stdin_data to chained commands.
-                res_file = f"{rpc_dir}/res_{request.get('seq', 0):06d}"
-                quoted_res_file = shlex.quote(res_file)
-                encoded_result = base64.b64encode(
-                    tool_result.encode("utf-8")
-                ).decode("ascii")
+                quoted_res_file = shlex.quote(f"{rpc_dir}/res_{request.get('seq', 0):06d}")
+                encoded_result = base64.b64encode(tool_result.encode("utf-8")).decode("ascii")
                 env.execute(
                     f"echo '{encoded_result}' | base64 -d > {quoted_res_file}.tmp"
                     f" && mv {quoted_res_file}.tmp {quoted_res_file}",
-                    cwd="/",
-                    timeout=60,
+                    cwd="/", timeout=60,
                 )
                 env.execute(f"rm -f {quoted_req_file}", cwd="/", timeout=5)
 

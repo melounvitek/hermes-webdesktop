@@ -2,29 +2,25 @@
 
 Remote backends offer one primitive — ``env.execute(cmd)``, run-to-completion
 — so the three things the local kernel gets from owning a child are rebuilt:
-
-1. **A process outliving one env.execute():** the runner starts detached
-   (``nohup ... &``) with its PID recorded; each cell first probes ``kill -0``.
-2. **A conversation channel:** a file-based CELL protocol in the kernel dir
-   (``cell_req_NNNNNN.json`` / ``cell_res_NNNNNN.json``), sibling to the
-   file-based TOOL-RPC protocol (req_/res_) reused unchanged — the host-side
-   ``_rpc_poll_loop`` starts per cell with the calling thread's context, which
-   is what gives per-cell tool authority.
-3. **Death detection:** a failed liveness probe (transport drop, container
-   restart, OOM-killed runner) reads as *kernel died: state lost*; the next
-   call respawns and says so — never a hung poll, every wait is bounded by
-   the cell timeout.
+a detached runner (``nohup ... &``, PID recorded, ``kill -0`` probed per cell);
+a file-based CELL protocol in the kernel dir (``cell_req_NNNNNN.json`` /
+``cell_res_NNNNNN.json``), sibling to the unchanged file-based TOOL-RPC protocol
+(req_/res_) whose host-side ``_rpc_poll_loop`` starts per cell with the calling
+thread's context (= per-cell tool authority); and death detection — a failed
+liveness probe reads as *kernel died: state lost* and the next call respawns,
+never a hung poll (every wait is bounded by the cell timeout).
 
 Same invariants as local: owner = approval session key with the ``::child::``
-qualifier (one resolver in tools.code_kernel, cannot drift), same generated
-tool stubs, same output post-processing in the caller. ``reset=true`` kills
-and respawns. Spawn failure fails OPEN to the per-call path with a note.
+qualifier (one resolver in tools.code_kernel), same generated tool stubs, same
+output post-processing in the caller. ``reset=true`` kills and respawns. Spawn
+failure fails OPEN to the per-call path with a note.
 """
 from __future__ import annotations
 
 import atexit
 import json
 import logging
+import secrets
 import shlex
 import threading
 import time
@@ -101,6 +97,12 @@ if __name__ == "__main__":
 '''
 
 
+def _sh(env, cmd: str, timeout: int = 15) -> str:
+    """Run *cmd* on the remote from ``/`` and return its output text."""
+    result = env.execute(cmd, cwd="/", timeout=timeout)
+    return (result.get("output", "") if isinstance(result, dict) else "") or ""
+
+
 @dataclass
 class RemoteKernel:
     """Host-side record of one detached remote kernel process."""
@@ -111,7 +113,6 @@ class RemoteKernel:
     pid: str
     rpc_token: str
     owner: str
-    created: float = field(default_factory=time.monotonic)
     last_used: float = field(default_factory=time.monotonic)
     execution_count: int = 0
     cell_seq: int = 0
@@ -119,50 +120,37 @@ class RemoteKernel:
     def sh(self, cmd: str, timeout: int = 15) -> str:
         return _sh(self.env, cmd, timeout)
 
+    def is_alive(self) -> bool:
+        """Bounded liveness probe: kill -0 through the transport. Any transport
+        failure counts as dead — a dropped ssh connection and a dead runner are
+        indistinguishable from here, and both have the same correct answer (respawn)."""
+        try:
+            return "ALIVE" in self.sh(f"kill -0 {shlex.quote(self.pid)} 2>/dev/null && echo ALIVE")
+        except Exception:
+            return False
 
-def _sh(env, cmd: str, timeout: int = 15) -> str:
-    """Run *cmd* on the remote from ``/`` and return its output text."""
-    result = env.execute(cmd, cwd="/", timeout=timeout)
-    return (result.get("output", "") if isinstance(result, dict) else "") or ""
+    def kill(self) -> None:
+        """Best-effort kill of the runner and its subprocesses, then rm -rf."""
+        q_pid = shlex.quote(self.pid)
+        for cmd, failure in (
+            # Kill the runner's children if the shell gave it a group, then the PID itself.
+            (f"pkill -TERM -P {q_pid} 2>/dev/null; kill {q_pid} 2>/dev/null; true",
+             "remote kernel kill failed (transport?)"),
+            (f"rm -rf {shlex.quote(self.kernel_dir)}", "remote kernel dir cleanup failed"),
+        ):
+            try:
+                self.sh(cmd)
+            except Exception:
+                logger.debug(failure, exc_info=True)
 
 
 def _kernel_key(owner: str, env_type: str, task_env_id: str) -> Tuple:
     return (owner, "remote", env_type, task_env_id)
 
 
-def _is_alive(kernel: RemoteKernel) -> bool:
-    """Bounded liveness probe: kill -0 through the transport.
-
-    Any transport failure counts as dead — the caller respawns. A dropped ssh
-    connection and a dead runner are indistinguishable from here, and both
-    have the same correct answer.
-    """
-    try:
-        return "ALIVE" in kernel.sh(f"kill -0 {shlex.quote(kernel.pid)} 2>/dev/null && echo ALIVE")
-    except Exception:
-        return False
-
-
-def _kill(kernel: RemoteKernel) -> None:
-    """Best-effort kill of the runner and its subprocesses, then rm -rf."""
-    q_pid = shlex.quote(kernel.pid)
-    steps = (
-        # Kill the runner's children if the shell gave it a group, then the PID itself.
-        (f"pkill -TERM -P {q_pid} 2>/dev/null; kill {q_pid} 2>/dev/null; true",
-         "remote kernel kill failed (transport?)"),
-        (f"rm -rf {shlex.quote(kernel.kernel_dir)}", "remote kernel dir cleanup failed"),
-    )
-    for cmd, failure in steps:
-        try:
-            kernel.sh(cmd)
-        except Exception:
-            logger.debug(failure, exc_info=True)
-
-
 # Registry + lock shared-shape with code_kernel; teardown runs outside the lock.
-_REGISTRY = KernelRegistry(lambda kernel: _kill(kernel))
+_REGISTRY = KernelRegistry(lambda kernel: kernel.kill())
 _REMOTE_KERNELS: Dict[Tuple, RemoteKernel] = _REGISTRY.kernels
-_REMOTE_KERNELS_LOCK = _REGISTRY.lock
 
 
 def shutdown_all_remote_kernels() -> None:
@@ -181,25 +169,19 @@ atexit.register(shutdown_all_remote_kernels)
 
 def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
                          sandbox_tools: frozenset, *, idle_exit: int) -> Optional[RemoteKernel]:
-    """Start a detached kernel runner on the remote. None on failure."""
+    """Start a detached kernel runner on the remote. None on failure (dir removed)."""
     from tools.code_execution_tool import (
         MAX_STDOUT_BYTES, _ship_file_to_remote, _env_temp_dir, generate_hermes_tools_module,
     )
-    import secrets as _secrets
 
     kernel_dir = f"{_env_temp_dir(env)}/hermes_rkernel_{uuid.uuid4().hex[:12]}"
     q_dir = shlex.quote(kernel_dir)
-
-    def sh(cmd: str, timeout: int = 15) -> str:
-        return _sh(env, cmd, timeout)
-
-    def start() -> Optional[RemoteKernel]:
-        sh(f"mkdir -p {q_dir}/cells {q_dir}/rpc")
-
-        rpc_token = _secrets.token_urlsafe(32)
-        runner_src = REMOTE_KERNEL_RUNNER_SOURCE.format(
-            cell_source=RUNNER_CELL_SOURCE, capture_limit=MAX_STDOUT_BYTES, idle_exit=idle_exit)
-        _ship_file_to_remote(env, f"{kernel_dir}/kernel_runner.py", runner_src)
+    kernel = None
+    try:
+        _sh(env, f"mkdir -p {q_dir}/cells {q_dir}/rpc")
+        rpc_token = secrets.token_urlsafe(32)
+        _ship_file_to_remote(env, f"{kernel_dir}/kernel_runner.py", REMOTE_KERNEL_RUNNER_SOURCE.format(
+            cell_source=RUNNER_CELL_SOURCE, capture_limit=MAX_STDOUT_BYTES, idle_exit=idle_exit))
         _ship_file_to_remote(env, f"{kernel_dir}/hermes_tools.py",
                              generate_hermes_tools_module(list(sandbox_tools), transport="file"))
 
@@ -209,34 +191,30 @@ def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
             f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
             f"PYTHONDONTWRITEBYTECODE=1 PYTHONPATH={q_dir}"
         )
-        started = sh(f"cd {q_dir} && nohup env {env_prefix} python3 kernel_runner.py "
-                     f"> {q_dir}/runner.log 2>&1 & echo PID:$!", timeout=20)
+        started = _sh(env, f"cd {q_dir} && nohup env {env_prefix} python3 kernel_runner.py "
+                           f"> {q_dir}/runner.log 2>&1 & echo PID:$!", timeout=20)
         pid = next((line.strip()[4:].strip() for line in started.splitlines()
                     if line.strip().startswith("PID:")), "")
         if not pid.isdigit():
             logger.warning("remote kernel spawn returned no PID: %r", started)
-            return None
-        kernel = RemoteKernel(env=env, env_type=env_type, kernel_dir=kernel_dir,
-                              pid=pid, rpc_token=rpc_token, owner=owner)
-        if not _is_alive(kernel):
-            # Died instantly (missing python3 was pre-checked by the caller,
-            # so this is unexpected) — surface the runner log.
-            try:
-                logger.warning("remote kernel died at spawn: %s",
-                               sh(f"cat {q_dir}/runner.log", timeout=10)[:500])
-            except Exception:
-                pass
-            return None
-        return kernel
-
-    kernel = None
-    try:
-        kernel = start()
+        else:
+            candidate = RemoteKernel(env=env, env_type=env_type, kernel_dir=kernel_dir,
+                                     pid=pid, rpc_token=rpc_token, owner=owner)
+            if candidate.is_alive():
+                kernel = candidate
+            else:
+                # Died instantly (missing python3 was pre-checked by the caller,
+                # so this is unexpected) — surface the runner log.
+                try:
+                    logger.warning("remote kernel died at spawn: %s",
+                                   _sh(env, f"cat {q_dir}/runner.log", timeout=10)[:500])
+                except Exception:
+                    pass
     except Exception:
         logger.warning("remote kernel spawn failed", exc_info=True)
     if kernel is None:
         try:
-            sh(f"rm -rf {q_dir}")
+            _sh(env, f"rm -rf {q_dir}")
         except Exception:
             pass
     return kernel
@@ -249,25 +227,24 @@ def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
     key = _kernel_key(owner, env_type, task_env_id)
     state_lost = state_reset = False
 
-    with _REMOTE_KERNELS_LOCK:
+    with _REGISTRY.lock:
         kernel = _REMOTE_KERNELS.get(key)
 
     if kernel is not None and reset:
         _REGISTRY.discard(key, kernel)
         kernel, state_reset = None, True
-    if kernel is not None and not _is_alive(kernel):
+    if kernel is not None and not kernel.is_alive():
         # Transport drop, container restart, self-reaped on idle, OOM — all
-        # the same answer: report the loss, respawn fresh (_kill is then only
+        # the same answer: report the loss, respawn fresh (kill is then only
         # best-effort dir cleanup; the process is already gone).
         _REGISTRY.discard(key, kernel)
         kernel, state_lost = None, True
 
     reused = kernel is not None
     if kernel is None:
-        kernel = _spawn_remote_kernel(env, env_type, owner, task_env_id, sandbox_tools,
-                                      idle_exit=idle_exit)
+        kernel = _spawn_remote_kernel(env, env_type, owner, task_env_id, sandbox_tools, idle_exit=idle_exit)
         if kernel is not None:
-            with _REMOTE_KERNELS_LOCK:
+            with _REGISTRY.lock:
                 _REMOTE_KERNELS[key] = kernel
     return kernel, reused, state_reset, state_lost
 
@@ -279,26 +256,25 @@ def _run_remote_cell(kernel: RemoteKernel, code: str, timeout: int) -> Tuple[str
     kernel.cell_seq += 1
     seq = f"{kernel.cell_seq:06d}"
     q_cells = shlex.quote(f"{kernel.kernel_dir}/cells")
-    res_name = f"cell_res_{seq}.json"
-    request = json.dumps({"id": seq, "code": code}, ensure_ascii=False)
-    _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json.tmp", request)
+    q_res = shlex.quote(f"cell_res_{seq}.json")
+    _ship_file_to_remote(kernel.env, f"{kernel.kernel_dir}/cells/cell_req_{seq}.json.tmp",
+                         json.dumps({"id": seq, "code": code}, ensure_ascii=False))
     kernel.sh(f"mv {q_cells}/cell_req_{seq}.json.tmp {q_cells}/cell_req_{seq}.json", timeout=10)
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
-            body = kernel.sh(f"cat {q_cells}/{shlex.quote(res_name)} 2>/dev/null", timeout=20).strip()
+            body = kernel.sh(f"cat {q_cells}/{q_res} 2>/dev/null", timeout=20).strip()
         except Exception:
             # One flaky round-trip is not kernel death; liveness decides.
-            time.sleep(_CELL_POLL_INTERVAL)
-            continue
+            body = ""
         if body:
             try:
                 payload = json.loads(body)
                 status = payload.get("status", "error")
             except ValueError:
                 payload, status = {}, "protocol-error"
-            kernel.sh(f"rm -f {q_cells}/{shlex.quote(res_name)}", timeout=10)
+            kernel.sh(f"rm -f {q_cells}/{q_res}", timeout=10)
             return status, payload
         time.sleep(_CELL_POLL_INTERVAL)
     return "timeout", {}
