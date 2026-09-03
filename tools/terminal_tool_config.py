@@ -1,6 +1,6 @@
 """Terminal backend configuration: scope-aware TERMINAL_* reads, env-var parsing,
-container-cwd sanity checks, plugin-backend classification and the resolved
-config dict (_get_env_config).
+container-cwd sanity checks, plugin-backend classification, and the ``_quiet``
+best-effort block shared by the terminal_tool_* modules.
 
 Split out of ``tools/terminal_tool.py``; every public/patched name is re-imported there,
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
@@ -9,19 +9,29 @@ so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before
 import logging
 import json
 import os
+from contextlib import contextmanager
 from typing import Any
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.terminal_tool")
 
 
+@contextmanager
+def _quiet(label: str, *args, exc=Exception, level: int = logging.DEBUG):
+    """Best-effort block: swallow *exc*, log *label* (``%``-formatted with *args*)
+    at *level* with the traceback. For janitor/advisory work that must never
+    take the terminal tool down."""
+    try:
+        yield
+    except exc:
+        logger.log(level, label, *args, exc_info=True)
+
+
 def _parse_env_var(name: str, default: str, converter: Any = int, type_label: str = "integer"):
     """Parse an env var with *converter*, raising a clear ValueError on bad
     values (e.g. TERMINAL_TIMEOUT=5m) instead of an opaque crash. TERMINAL_*
     names are read scope-aware via :func:`_tenv`."""
-    raw = os.getenv(name, default)
-    if name.startswith("TERMINAL_"):
-        raw = _tenv(name, default)
+    raw = _tenv(name, default) if name.startswith("TERMINAL_") else os.getenv(name, default)
     try:
         return converter(raw)
     except (ValueError, json.JSONDecodeError):
@@ -46,20 +56,27 @@ def _safe_getcwd() -> str:
 _HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
 
 _CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "vercel_sandbox"})
+_BUILTIN_BACKENDS = _CONTAINER_BACKENDS | {"local", "ssh", "managed_modal"}
+
+
+def _plugin_registry_lookup(env_type: str, fn_name: str, default, *args):
+    """Call ``agent.terminal_env_registry.<fn_name>(env_type, *args)`` for a
+    plugin backend. Fail-soft: *default* for built-in/empty backends, when the
+    registry is unavailable, or when the provider raises — a misbehaving plugin
+    must never take the terminal tool down."""
+    if not env_type or env_type in _BUILTIN_BACKENDS:
+        return default
+    try:
+        import agent.terminal_env_registry as reg
+
+        return getattr(reg, fn_name)(env_type, *args)
+    except Exception:
+        return default
 
 
 def _plugin_env_flag(env_type: str, attr: str, default=False):
-    """Classification flag of a plugin-registered backend. Fail-soft: *default*
-    when the registry is unavailable, the backend unknown, or the provider
-    raises — a misbehaving plugin must never take the terminal tool down."""
-    if not env_type or env_type in _CONTAINER_BACKENDS or env_type in {"local", "ssh", "managed_modal"}:
-        return default
-    try:
-        from agent.terminal_env_registry import provider_flag
-
-        return provider_flag(env_type, attr, default)
-    except Exception:
-        return default
+    """Classification flag of a plugin-registered backend (fail-soft, see above)."""
+    return _plugin_registry_lookup(env_type, "provider_flag", default, attr, default)
 
 
 def _is_container_backend(env_type: str) -> bool:
@@ -69,14 +86,7 @@ def _is_container_backend(env_type: str) -> bool:
 
 def _get_plugin_env_provider(env_type: str):
     """Return the registered plugin provider for *env_type*, or None."""
-    if not env_type or env_type in _CONTAINER_BACKENDS or env_type in {"local", "ssh", "managed_modal"}:
-        return None
-    try:
-        from agent.terminal_env_registry import get_provider
-
-        return get_provider(env_type)
-    except Exception:
-        return None
+    return _plugin_registry_lookup(env_type, "get_provider", None)
 
 
 def _is_unusable_container_cwd(cwd: str) -> bool:
@@ -84,9 +94,7 @@ def _is_unusable_container_cwd(cwd: str) -> bool:
     workdir: ``docker run -w`` needs an absolute in-sandbox path, otherwise the
     container fails to start (exit 125). Windows drive paths aren't ``isabs``
     on POSIX, so they're caught by the prefix check."""
-    if not cwd:
-        return False
-    return cwd.startswith(_HOST_CWD_PREFIXES) or not os.path.isabs(cwd)
+    return bool(cwd) and (cwd.startswith(_HOST_CWD_PREFIXES) or not os.path.isabs(cwd))
 
 
 def _tenv(name: str, default: str = "") -> str:

@@ -38,9 +38,7 @@ def _is_safe_workdir_char(ch: str) -> bool:
 def _validate_workdir(workdir: str) -> str | None:
     """Error message if *workdir* has a disallowed character, else None.
     Allowlist rather than deny-list so novel metacharacters can't slip through."""
-    if not workdir:
-        return None
-    for ch in workdir:
+    for ch in workdir or "":
         if not _is_safe_workdir_char(ch):
             return (
                 f"Blocked: workdir contains disallowed character {repr(ch)}. "
@@ -59,6 +57,11 @@ def _safe_command_preview(command: Any, limit: int = 200) -> str:
         return repr(command)[:limit]
     except Exception:
         return f"<{type(command).__name__}>"
+
+
+def _blocked_json(error: str, status: str) -> str:
+    """The guard result envelope: exit_code 1 + *error* + *status*."""
+    return json.dumps({"output": "", "exit_code": 1, "error": error, "status": status}, ensure_ascii=False)
 
 
 _SHELL_LEVEL_BACKGROUND_RE = re.compile(
@@ -80,19 +83,41 @@ def _strip_quotes(command: str) -> str:
     result = strip_inert_heredoc_bodies(command)
     result = re.sub(r"'[^']*'", "''", result)
     result = re.sub(r'"(?:[^"\\]|\\.)*"', '""', result)
-    result = re.sub(r"`[^`]*`", "``", result)
-    return result
+    return re.sub(r"`[^`]*`", "``", result)
 
 
-_LONG_LIVED_FOREGROUND_PATTERNS = (
-    re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b", re.IGNORECASE),
-    re.compile(r"\bdocker\s+compose\s+up\b", re.IGNORECASE),
-    re.compile(r"\bnext\s+dev\b", re.IGNORECASE),
-    re.compile(r"\bvite(?:\s|$)", re.IGNORECASE),
-    re.compile(r"\bnodemon\b", re.IGNORECASE),
-    re.compile(r"\buvicorn\b", re.IGNORECASE),
-    re.compile(r"\bgunicorn\b", re.IGNORECASE),
-    re.compile(r"\bpython(?:3)?\s+-m\s+http\.server\b", re.IGNORECASE),
+_LONG_LIVED_FOREGROUND_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b",
+    r"\bdocker\s+compose\s+up\b",
+    r"\bnext\s+dev\b",
+    r"\bvite(?:\s|$)",
+    r"\bnodemon\b",
+    r"\buvicorn\b",
+    r"\bgunicorn\b",
+    r"\bpython(?:3)?\s+-m\s+http\.server\b",
+))
+
+# Ordered (predicate on the unquoted command, guidance) — first hit wins.
+_FOREGROUND_GUIDANCE = (
+    (
+        _SHELL_LEVEL_BACKGROUND_RE.search,
+        "Foreground command uses shell-level background wrappers (nohup/disown/setsid). "
+        "Re-send WITHOUT the wrapper as terminal(command=\"<cmd>\", background=true, "
+        "notify_on_complete=true) so Hermes tracks the process, then run readiness "
+        "checks and tests in separate commands.",
+    ),
+    (
+        lambda s: _INLINE_BACKGROUND_AMP_RE.search(s) or _TRAILING_BACKGROUND_AMP_RE.search(s),
+        "Foreground command uses '&' backgrounding. Re-send WITHOUT the '&' as "
+        "terminal(command=\"<cmd>\", background=true) — add notify_on_complete=true "
+        "for bounded jobs — then run health checks and tests in follow-up terminal calls.",
+    ),
+    (
+        lambda s: any(p.search(s) for p in _LONG_LIVED_FOREGROUND_PATTERNS),
+        "This foreground command appears to start a long-lived server/watch process. "
+        "Run it with background=true, verify readiness (health endpoint/log signal), "
+        "then execute tests in a separate command.",
+    ),
 )
 
 
@@ -112,32 +137,41 @@ def _foreground_background_guidance(command: str) -> str | None:
     backgrounding (it should be a managed background session), else None."""
     if _looks_like_help_or_version_command(command):
         return None
-
     unquoted = _strip_quotes(command)
+    return next((msg for hit, msg in _FOREGROUND_GUIDANCE if hit(unquoted)), None)
 
-    if _SHELL_LEVEL_BACKGROUND_RE.search(unquoted):
-        return (
-            "Foreground command uses shell-level background wrappers (nohup/disown/setsid). "
-            "Re-send WITHOUT the wrapper as terminal(command=\"<cmd>\", background=true, "
-            "notify_on_complete=true) so Hermes tracks the process, then run readiness "
-            "checks and tests in separate commands."
-        )
 
-    if _INLINE_BACKGROUND_AMP_RE.search(unquoted) or _TRAILING_BACKGROUND_AMP_RE.search(unquoted):
-        return (
-            "Foreground command uses '&' backgrounding. Re-send WITHOUT the '&' as "
-            "terminal(command=\"<cmd>\", background=true) — add notify_on_complete=true "
-            "for bounded jobs — then run health checks and tests in follow-up terminal calls."
-        )
-
-    for pattern in _LONG_LIVED_FOREGROUND_PATTERNS:
-        if pattern.search(unquoted):
-            return (
-                "This foreground command appears to start a long-lived server/watch process. "
-                "Run it with background=true, verify readiness (health endpoint/log signal), "
-                "then execute tests in a separate command."
-            )
-
+def _read_script_for_guard(env: Any, guard_cwd: str, script_path: str, max_bytes: int) -> Optional[str]:
+    """Best-effort script read: host filesystem first, then a bounded
+    ``env.execute('head -c ... < path')`` for remote backends. Binary content
+    (NUL byte) is not a script: feeding it to the guard tokenizes machine code
+    into bogus paths and crashes the scanner, so it yields None."""
+    if env is None:
+        return None
+    try:
+        local_path = Path(script_path).expanduser()
+        if not local_path.is_absolute():
+            local_path = Path(guard_cwd) / local_path
+        if local_path.is_file():
+            metadata = local_path.stat()
+            if stat.S_ISREG(metadata.st_mode) and metadata.st_size <= max_bytes:
+                data = local_path.read_bytes()
+                if len(data) <= max_bytes:
+                    return None if b"\x00" in data else data.decode("utf-8", errors="replace")
+    except Exception:
+        pass
+    # Remote backend: bound the read at the source with `head -c` so an
+    # oversized binary never crosses the wire (an unbounded `cat` once
+    # pinned the gateway's tool thread for 30+ min on a shlex scan). One
+    # byte over budget is enough for lifecycle_guard to fail closed. The
+    # `< path` redirect keeps leading-dash paths out of argv.
+    try:
+        result = env.execute(f"head -c {max_bytes + 1} < {shlex.quote(script_path)}")
+        if result.get("returncode", -1) == 0:
+            output = result.get("output", "")
+            return None if output and "\x00" in output else output
+    except Exception:
+        pass
     return None
 
 
@@ -174,85 +208,32 @@ def gateway_lifecycle_block(
         contains_launchctl_submit_command,
     )
     if contains_launchctl_submit_command(command):
-        return json.dumps({
-            "output": "",
-            "exit_code": 1,
-            "error": (
-                "Blocked: launchctl submit/bootstrap registers a persistent "
-                "KeepAlive job and is unsafe from inside the gateway process. "
-                "Use Hermes cron for one-shot delayed work, or install an "
-                "explicit LaunchAgent from a separate shell."
-            ),
-            "status": "error",
-        }, ensure_ascii=False)
+        return _blocked_json(
+            "Blocked: launchctl submit/bootstrap registers a persistent "
+            "KeepAlive job and is unsafe from inside the gateway process. "
+            "Use Hermes cron for one-shot delayed work, or install an "
+            "explicit LaunchAgent from a separate shell.",
+            "error",
+        )
     guard_cwd_base = get_session_cwd(session_key)
     if guard_cwd_base is None:
         guard_cwd_base = getattr(env, "cwd", None) or cwd
     guard_cwd = _resolve_command_cwd(
-        workdir=workdir,
-        default_cwd=guard_cwd_base,
-        session_key=session_key,
-        env_type=env_type,
+        workdir=workdir, default_cwd=guard_cwd_base, session_key=session_key, env_type=env_type,
     )
-
-    def _read_script_in_env(script_path: str) -> Optional[str]:
-        """Best-effort script read: host filesystem first, then a bounded
-        ``env.execute('head -c ... < path')`` for remote backends."""
-        if env is None:
-            return None
-        try:
-            local_path = Path(script_path).expanduser()
-            if not local_path.is_absolute():
-                local_path = Path(guard_cwd) / local_path
-            if local_path.is_file():
-                metadata = local_path.stat()
-                if stat.S_ISREG(metadata.st_mode) and metadata.st_size <= _MAX_REFERENCED_SCRIPT_BYTES:
-                    data = local_path.read_bytes()
-                    if len(data) <= _MAX_REFERENCED_SCRIPT_BYTES:
-                        if b"\x00" in data:
-                            # Binary, not a script: feeding it to the guard
-                            # tokenizes machine code into bogus paths and
-                            # crashes the scanner. Nothing to scan.
-                            return None
-                        return data.decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        # Remote backend: bound the read at the source with `head -c` so an
-        # oversized binary never crosses the wire (an unbounded `cat` once
-        # pinned the gateway's tool thread for 30+ min on a shlex scan). One
-        # byte over budget is enough for lifecycle_guard to fail closed. The
-        # `< path` redirect keeps leading-dash paths out of argv.
-        try:
-            result = env.execute(
-                f"head -c {_MAX_REFERENCED_SCRIPT_BYTES + 1} "
-                f"< {shlex.quote(script_path)}"
-            )
-            if result.get("returncode", -1) == 0:
-                output = result.get("output", "")
-                if output and "\x00" in output:  # binary, see above
-                    return None
-                return output
-        except Exception:
-            pass
-        return None
-
     if contains_gateway_lifecycle_command_or_referenced_script(
         command,
         cwd=guard_cwd,
-        read_remote_script=_read_script_in_env,
+        read_remote_script=lambda p: _read_script_for_guard(env, guard_cwd, p, _MAX_REFERENCED_SCRIPT_BYTES),
     ):
-        return json.dumps({
-            "output": "",
-            "exit_code": 1,
-            "error": (
-                "Blocked: command or referenced script cannot restart, stop, or "
-                "uninstall the gateway from inside the gateway process. The gateway would "
-                "kill this command before it could complete (SIGTERM propagates "
-                "to child processes). Run `hermes gateway restart` from a "
-                "separate shell outside the running gateway."
-            ),
-            "status": "error",
-        }, ensure_ascii=False)
+        return _blocked_json(
+            "Blocked: command or referenced script cannot restart, stop, or "
+            "uninstall the gateway from inside the gateway process. The gateway would "
+            "kill this command before it could complete (SIGTERM propagates "
+            "to child processes). Run `hermes gateway restart` from a "
+            "separate shell outside the running gateway.",
+            "error",
+        )
     return None
 
 
@@ -276,21 +257,9 @@ def self_repo_block(
 
     if not guard_active():
         return None
-    guard_cwd = _resolve_command_cwd(
-        workdir=workdir,
-        default_cwd=cwd,
-        session_key=session_key,
-    )
+    guard_cwd = _resolve_command_cwd(workdir=workdir, default_cwd=cwd, session_key=session_key)
     hit, msg = detect_self_repo_git_mutation(command, guard_cwd)
     if not hit:
         return None
-    logger.warning(
-        "Blocked self-repo git mutation (command: %s)",
-        _safe_command_preview(command),
-    )
-    return json.dumps({
-        "output": "",
-        "exit_code": 1,
-        "error": msg,
-        "status": "blocked",
-    }, ensure_ascii=False)
+    logger.warning("Blocked self-repo git mutation (command: %s)", _safe_command_preview(command))
+    return _blocked_json(msg, "blocked")
