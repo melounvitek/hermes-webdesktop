@@ -1,11 +1,9 @@
 """Backend git operations for the desktop coding rail + review pane.
 
-The desktop's git affordances run as Electron-local git; on a *remote* gateway
-those would hit the wrong filesystem, so this module mirrors them over the
-dashboard's authenticated REST surface (same pattern as ``/api/fs``). Everything
-shells out to system ``git`` (and ``gh`` for PRs). Reads degrade to ``None`` /
-empty on a non-repo; mutations raise so the renderer can toast. Callers pass an
-already path-hardened ``cwd``.
+Mirrors the desktop's Electron-local git ops over the dashboard's authenticated
+REST surface so a *remote* gateway acts on the right filesystem. Shells out to
+system ``git`` (and ``gh`` for PRs). Reads degrade to ``None``/empty on a
+non-repo; mutations raise so the renderer can toast. ``cwd`` is already hardened.
 """
 
 from __future__ import annotations
@@ -29,11 +27,9 @@ _TRUNK_BRANCHES = ("main", "master")
 
 
 def _run(argv: list[str], cwd: str, timeout: int, env: dict) -> subprocess.CompletedProcess | None:
-    """Non-interactive subprocess (stdin nulled, prompts disabled): these calls
-    serve authenticated REST requests, so a credential prompt from
-    ``fetch``/``push``/``pull`` could never be answered — it would hang the
-    request until the timeout. Failing fast surfaces the real auth error in
-    the toast instead. None when the process could not run at all."""
+    """Non-interactive subprocess (stdin nulled, prompts disabled): a credential prompt from
+    ``fetch``/``push`` could never be answered from a REST request, so fail fast and surface
+    the real auth error in the toast. None when the process could not run at all."""
     try:
         return subprocess.run(
             argv, cwd=cwd, capture_output=True, text=True, encoding='utf-8',
@@ -44,8 +40,7 @@ def _run(argv: list[str], cwd: str, timeout: int, env: dict) -> subprocess.Compl
 
 
 def _git(cwd: str, args: list[str], *, timeout: int = _GIT_TIMEOUT) -> tuple[int, str, str]:
-    """Run ``git`` in ``cwd``. Returns (returncode, stdout, stderr); never raises
-    on a non-zero exit (callers decide what an error means)."""
+    """(returncode, stdout, stderr) of ``git`` in ``cwd``; never raises on non-zero exit."""
     proc = _run(["git", *harden_git_argv(args)], cwd, timeout, noninteractive_git_env())
     if proc is None:
         return 1, "", "git invocation failed"
@@ -72,12 +67,22 @@ def _is_dir(cwd: str) -> bool:
         return False
 
 
+def _status_z(cwd: str, *extra: str) -> tuple[int, str]:
+    """(returncode, raw) of ``git status --porcelain=v2 -z``."""
+    code, raw, _ = _git(cwd, ["status", "--porcelain=v2", *extra, "-z"])
+    return code, raw
+
+
+def _origin_head(cwd: str) -> str:
+    """Short name of origin's default branch (``main``), or "" without a remote."""
+    return _git_out(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).strip()
+
+
 # ── shared helpers ───────────────────────────────────────────────────────────
 
 
 def resolve_rename_path(raw: str) -> str:
-    """``old => new`` (and ``dir/{old => new}/f``) → the NEW path, so a row
-    addresses the real file for diff/stage."""
+    """``old => new`` (and ``dir/{old => new}/f``) → the NEW path, so a row addresses the real file."""
     path = str(raw or "").strip()
     if " => " not in path:
         return path
@@ -104,8 +109,7 @@ def _numstat(cwd: str, args: list[str]) -> dict[str, tuple[int, int]]:
 
 
 def _untracked_insertions(cwd: str, rel: str) -> int:
-    """Line count of an untracked file (newlines + a final unterminated line),
-    so the review tree can show +N for new files. Binary / oversized → 0."""
+    """Line count of an untracked file (+N for new files in the review tree). Binary/oversized → 0."""
     try:
         target = Path(cwd) / rel
         st = target.stat()
@@ -144,16 +148,20 @@ def _default_branch_name(cwd: str) -> str | None:
         return head.split("/", 1)[-1]
     for ref in ("refs/heads/main", "refs/heads/master",
                 "refs/remotes/origin/main", "refs/remotes/origin/master"):
-        if _git(cwd, ["rev-parse", "--verify", "--quiet", ref])[0] == 0:
+        if _ref_exists(cwd, ref):
             return ref.split("/")[-1]
     return None
+
+
+def _ref_exists(cwd: str, ref: str) -> bool:
+    return _git(cwd, ["rev-parse", "--verify", "--quiet", ref])[0] == 0
 
 
 # ── porcelain v2 status parsing ──────────────────────────────────────────────
 
 
 def _walk_entries(raw: str):
-    """Yield (tag, xy, path) per changed file from ``git status --porcelain=v2 -z``,
+    """Yield (tag, xy, path) per changed file from porcelain-v2 ``-z`` output,
     skipping branch headers and rename/copy origin-path records."""
     records = raw.split("\0")
     i = 0
@@ -200,7 +208,7 @@ def repo_status(cwd: str) -> dict | None:
     if not _is_dir(cwd):
         return None
 
-    code, raw, _ = _git(cwd, ["status", "--porcelain=v2", "--branch", "-z"])
+    code, raw = _status_z(cwd, "--branch")
     if code != 0:
         return None
 
@@ -221,8 +229,8 @@ def repo_status(cwd: str) -> dict | None:
 
     files = [_classify(tag, xy, path) for tag, xy, path in _walk_entries(raw)]
 
-    # +/- vs HEAD (tracked), then fold in untracked insertions — `git diff HEAD`
-    # ignores them, so a new-file-only turn would otherwise read +0 (bounded scan).
+    # +/- vs HEAD, then fold in untracked insertions (`git diff HEAD` ignores them,
+    # so a new-file-only turn would read +0); bounded scan.
     counts = _numstat(cwd, ["HEAD"]).values()
     added = sum(a for a, _ in counts)
     removed = sum(r for _, r in counts)
@@ -231,8 +239,7 @@ def repo_status(cwd: str) -> dict | None:
     return {
         "branch": branch, "defaultBranch": _default_branch_name(cwd), "detached": detached,
         "ahead": ahead, "behind": behind,
-        "staged": sum(f["staged"] for f in files), "unstaged": sum(f["unstaged"] for f in files),
-        "untracked": sum(f["untracked"] for f in files), "conflicted": sum(f["conflicted"] for f in files),
+        **{flag: sum(f[flag] for f in files) for flag in ("staged", "unstaged", "untracked", "conflicted")},
         "changed": len(files), "added": added, "removed": removed, "files": files[:200],
     }
 
@@ -240,15 +247,22 @@ def repo_status(cwd: str) -> dict | None:
 # ── review pane ──────────────────────────────────────────────────────────────
 
 
+def _review_result(cwd: str, files: list[dict], base: str | None) -> dict:
+    files.sort(key=lambda f: f["path"])
+    _fill_untracked_counts(cwd, files)
+    return {"files": files, "base": base}
+
+
 def review_list(cwd: str, scope: str, base_ref: str | None) -> dict:
     """Changed files for a scope. Mirrors the Electron reviewList shapes."""
+    empty = {"files": [], "base": None}
     if not _is_dir(cwd):
-        return {"files": [], "base": None}
+        return empty
 
     if scope in ("branch", "lastTurn"):
         base = _branch_base(cwd) if scope == "branch" else base_ref
         if not base:
-            return {"files": [], "base": None}
+            return empty
         rng = f"{base}...HEAD" if scope == "branch" else base
         files = [
             {"path": path, "added": a, "removed": r, "status": "M", "staged": False}
@@ -256,31 +270,31 @@ def review_list(cwd: str, scope: str, base_ref: str | None) -> dict:
         ]
         if scope == "lastTurn":
             seen = {f["path"] for f in files}
-            _, raw, _ = _git(cwd, ["status", "--porcelain=v2", "-z"])
+            _, raw = _status_z(cwd)
             files += [
                 {"path": path, "added": 0, "removed": 0, "status": "?", "staged": False}
                 for tag, _xy, path in _walk_entries(raw)
                 if tag == "?" and path not in seen
             ]
-        files.sort(key=lambda f: f["path"])
-        _fill_untracked_counts(cwd, files)
-        return {"files": files, "base": base}
+        return _review_result(cwd, files, base)
 
-    code, raw, _ = _git(cwd, ["status", "--porcelain=v2", "-z"])
+    code, raw = _status_z(cwd)
     if code != 0:
-        return {"files": [], "base": None}
+        return empty
     staged = _numstat(cwd, ["--cached"])
     unstaged = _numstat(cwd, [])
-
     files = []
     for tag, xy, path in _walk_entries(raw):
         sa, sr = staged.get(path, (0, 0))
         ua, ur = unstaged.get(path, (0, 0))
         files.append({"path": path, "added": sa + ua, "removed": sr + ur,
                       "status": _status_letter(tag, xy), "staged": _entry_staged(tag, xy)})
-    files.sort(key=lambda f: f["path"])
-    _fill_untracked_counts(cwd, files)
-    return {"files": files, "base": None}
+    return _review_result(cwd, files, None)
+
+
+def _all_add_diff(cwd: str, file_path: str) -> str:
+    """Synthesized all-add diff for an untracked file (``--no-index`` exits non-zero by design)."""
+    return _git(cwd, ["diff", "--no-index", "--", os.devnull, file_path])[1]
 
 
 def review_diff(cwd: str, file_path: str, scope: str, base_ref: str | None, staged: bool) -> str:
@@ -294,11 +308,7 @@ def review_diff(cwd: str, file_path: str, scope: str, base_ref: str | None, stag
     if staged:
         return _git_out(cwd, ["diff", "--cached", "--", file_path])
     worktree = _git_out(cwd, ["diff", "--", file_path])
-    if worktree.strip():
-        return worktree
-    # Untracked: synthesize an all-add diff (exits non-zero by design).
-    _, out, _ = _git(cwd, ["diff", "--no-index", "--", os.devnull, file_path])
-    return out
+    return worktree if worktree.strip() else _all_add_diff(cwd, file_path)
 
 
 def file_diff_vs_head(cwd: str, file_path: str) -> str:
@@ -310,10 +320,7 @@ def file_diff_vs_head(cwd: str, file_path: str) -> str:
     if head.strip():
         return head
     status = _git_out(cwd, ["status", "--porcelain", "--", file_path])
-    if not status.strip().startswith("??"):
-        return ""
-    _, out, _ = _git(cwd, ["diff", "--no-index", "--", os.devnull, file_path])
-    return out
+    return _all_add_diff(cwd, file_path) if status.strip().startswith("??") else ""
 
 
 def review_stage(cwd: str, file_path: str | None) -> dict:
@@ -322,7 +329,7 @@ def review_stage(cwd: str, file_path: str | None) -> dict:
 
 
 def review_unstage(cwd: str, file_path: str | None) -> dict:
-    _git_ok(cwd, ["reset", "-q", "HEAD", "--", file_path] if file_path else ["reset", "-q", "HEAD"])
+    _git_ok(cwd, ["reset", "-q", "HEAD", *(["--", file_path] if file_path else [])])
     return {"ok": True}
 
 
@@ -341,7 +348,7 @@ def review_rev_parse(cwd: str, ref: str | None) -> str | None:
 
 def review_commit(cwd: str, message: str, push: bool) -> dict:
     """Commit the working tree; stage everything first when nothing is staged."""
-    _, raw, _ = _git(cwd, ["status", "--porcelain=v2", "-z"])
+    _, raw = _status_z(cwd)
     if not any(_entry_staged(tag, xy) for tag, xy, _ in _walk_entries(raw)):
         _git_ok(cwd, ["add", "-A"])
     _git_ok(cwd, ["commit", "-m", message])
@@ -369,7 +376,7 @@ def review_commit_context(cwd: str) -> dict:
     """Diff of what WILL commit + recent subjects, for drafting a commit message."""
     if not _is_dir(cwd):
         return {"diff": "", "recent": ""}
-    code, raw, _ = _git(cwd, ["status", "--porcelain=v2", "-z"])
+    code, raw = _status_z(cwd)
     if code != 0:
         return {"diff": "", "recent": ""}
     entries = list(_walk_entries(raw))
@@ -397,8 +404,7 @@ def review_commit_context(cwd: str) -> dict:
 def _gh(cwd: str, args: list[str]) -> tuple[bool, str]:
     if not shutil.which("gh"):
         return False, ""
-    # GH_PROMPT_DISABLED is gh's own documented kill-switch for interactive
-    # prompts (same non-interactive contract as _git).
+    # GH_PROMPT_DISABLED: gh's documented kill-switch for interactive prompts.
     env = noninteractive_git_env()
     env["GH_PROMPT_DISABLED"] = "1"
     proc = _run(["gh", *args], cwd, _GH_TIMEOUT, env)
@@ -409,26 +415,22 @@ def _gh(cwd: str, args: list[str]) -> tuple[bool, str]:
 
 def review_ship_info(cwd: str) -> dict:
     """gh availability/auth + this branch's PR. ghReady false when gh missing/unauthed."""
-    if not _is_dir(cwd):
-        return {"ghReady": False, "pr": None}
-    auth_ok, _ = _gh(cwd, ["auth", "status"])
-    if not auth_ok:
+    if not _is_dir(cwd) or not _gh(cwd, ["auth", "status"])[0]:
         return {"ghReady": False, "pr": None}
     view_ok, out = _gh(cwd, ["pr", "view", "--json", "url,state,number"])
-    if not view_ok:
-        return {"ghReady": True, "pr": None}
-    try:
-        pr = json.loads(out)
-    except json.JSONDecodeError:
-        pr = None
+    pr = None
+    if view_ok:
+        try:
+            pr = json.loads(out)
+        except json.JSONDecodeError:
+            pass
     if pr and pr.get("url"):
         return {"ghReady": True, "pr": {"url": pr["url"], "state": pr.get("state"), "number": pr.get("number")}}
     return {"ghReady": True, "pr": None}
 
 
-# GraphQL asks per branch, so the answer can't be crowded out the way a
-# `gh pr list` page can. Aliases let one request carry many branches; 50 keeps
-# the document well inside GitHub's node budget.
+# GraphQL asks per branch so the answer can't be crowded out like a `gh pr list`
+# page. Aliases carry many branches per request; 50 stays inside GitHub's node budget.
 _PR_QUERY_BRANCH_CHUNK = 50
 _PR_QUERY_BRANCH_CAP = 300
 _PR_NODE_FIELDS = "number state isDraft isCrossRepository title url headRefName"
@@ -441,9 +443,8 @@ def _pr_query(owner: str, name: str, branches: list[str], numbers: list[int]) ->
         f"{{ nodes {{ {_PR_NODE_FIELDS} }} }}"
         for i, branch in enumerate(branches)
     ]
-    # A PR recovered from a transcript is known by number, and asking for it
-    # directly also tells us its branch — so it lands in the same by-branch map
-    # as everything else.
+    # A PR recovered from a transcript is known by number; asking directly also
+    # yields its branch, so it lands in the same by-branch map.
     fields += [f"n{i}: pullRequest(number: {n}) {{ {_PR_NODE_FIELDS} }}" for i, n in enumerate(numbers)]
     return (f"query {{ repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{\n"
             + "\n".join(fields) + "\n} }")
@@ -456,9 +457,8 @@ def _pr_payload(pr: dict) -> dict:
 
 
 def review_pr_list(cwd: str, branches: list[str], numbers: list[int] = None) -> dict:
-    """The PRs on the given branches (plus any asked for by number). Asks GitHub
-    about the branches we actually have sessions on rather than listing the
-    repo's newest PRs and hoping ours are in the page."""
+    """PRs on the given branches (plus any asked for by number) — queried per branch
+    rather than paging the repo's newest PRs and hoping ours are in the page."""
     if not _is_dir(cwd):
         return {"ghReady": False, "prs": []}
     wanted = list(dict.fromkeys(str(b) for b in (branches or []) if b))[:_PR_QUERY_BRANCH_CAP]
@@ -487,16 +487,14 @@ def review_pr_list(cwd: str, branches: list[str], numbers: list[int] = None) -> 
             if not field:
                 continue
             if key.startswith("n"):
-                # Asked for by number, so it's ours by construction — a fork PR
-                # can't be recovered from our own transcript.
-                if field.get("headRefName"):
-                    prs.append(_pr_payload(field))
-                continue
-            # Fork PRs share our branch namespace: a contributor's `main` is how
-            # a session sitting on trunk ends up badged with a stranger's closed
-            # PR. Only this repo's own branches describe our sessions.
-            nodes = field.get("nodes") or []
-            pr = next((n for n in nodes if n and not n.get("isCrossRepository")), None)
+                # Asked for by number → ours by construction (a fork PR can't
+                # come from our own transcript).
+                pr = field
+            else:
+                # Fork PRs share our branch namespace (a contributor's `main` would
+                # badge a trunk session with a stranger's PR); only own-repo branches count.
+                nodes = field.get("nodes") or []
+                pr = next((n for n in nodes if n and not n.get("isCrossRepository")), None)
             if pr and pr.get("headRefName"):
                 prs.append(_pr_payload(pr))
     return {"ghReady": True, "prs": prs}
@@ -518,12 +516,13 @@ def review_create_pr(cwd: str) -> dict:
 # ── worktrees & branches ─────────────────────────────────────────────────────
 
 
-def _parse_worktrees(out: str) -> list[dict]:
+def worktree_list(cwd: str) -> list[dict]:
     """``git worktree list --porcelain`` -> one dict per tree (main tree first)."""
     trees: list[dict] = []
-    for line in out.split("\n"):
+    for line in _git_out(cwd, ["worktree", "list", "--porcelain"]).split("\n"):
         if line.startswith("worktree "):
-            trees.append({"path": line[9:].strip(), "branch": None, "detached": False, "locked": False})
+            trees.append({"path": line[9:].strip(), "branch": None, "isMain": not trees,
+                          "detached": False, "locked": False})
         elif not trees:
             continue
         elif line.startswith("branch "):
@@ -535,28 +534,21 @@ def _parse_worktrees(out: str) -> list[dict]:
     return trees
 
 
-def worktree_list(cwd: str) -> list[dict]:
-    out = _git_out(cwd, ["worktree", "list", "--porcelain"])
-    return [
-        {"path": t["path"], "branch": t["branch"], "isMain": i == 0,
-         "detached": t["detached"], "locked": t["locked"]}
-        for i, t in enumerate(_parse_worktrees(out))
-    ] if out else []
-
-
 def _main_root(cwd: str) -> str:
     trees = worktree_list(cwd)
     return trees[0]["path"] if trees else cwd
 
 
+_BRANCH_SANITIZERS = (
+    (r"\s+", "-"), (r"[^\w./-]", ""), (r"-{2,}", "-"), (r"/{2,}", "/"), (r"\.{2,}", "."), (r"^[-./]+|[-./]+$", ""),
+)
+
+
 def _sanitize_branch(name: str) -> str:
     value = str(name or "")
-    value = re.sub(r"\s+", "-", value)
-    value = re.sub(r"[^\w./-]", "", value)
-    value = re.sub(r"-{2,}", "-", value)
-    value = re.sub(r"/{2,}", "/", value)
-    value = re.sub(r"\.{2,}", ".", value)
-    return re.sub(r"^[-./]+|[-./]+$", "", value)
+    for pattern, repl in _BRANCH_SANITIZERS:
+        value = re.sub(pattern, repl, value)
+    return value
 
 
 def _slugify(name: str) -> str:
@@ -566,17 +558,14 @@ def _slugify(name: str) -> str:
 
 
 def _default_branch(cwd: str) -> str:
-    remote = _git_out(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]
-                      ).strip().replace("origin/", "", 1)
+    remote = _origin_head(cwd).replace("origin/", "", 1)
     if remote:
         return remote
     configured = _git_out(cwd, ["config", "--get", "init.defaultBranch"]).strip()
     if configured:
         return configured
-    for branch in _TRUNK_BRANCHES:
-        if _git_out(cwd, ["show-ref", "--verify", f"refs/heads/{branch}"]).strip():
-            return branch
-    return ""
+    return next((b for b in _TRUNK_BRANCHES
+                 if _git_out(cwd, ["show-ref", "--verify", f"refs/heads/{b}"]).strip()), "")
 
 
 def _ensure_repo(cwd: str) -> None:
@@ -586,7 +575,7 @@ def _ensure_repo(cwd: str) -> None:
         _git_ok(cwd, ["init"])
         needs_root = True
     else:
-        needs_root = _git(cwd, ["rev-parse", "--verify", "HEAD"])[0] != 0
+        needs_root = not _ref_exists(cwd, "HEAD")
     if needs_root:
         _git_ok(cwd, ["-c", "user.email=hermes@localhost", "-c", "user.name=Hermes",
                       "commit", "--allow-empty", "-m", "Initial commit"])
@@ -602,12 +591,9 @@ def _unique_dir(base: str) -> str:
 
 
 def _remote_of_ref(cwd: str, name: str) -> str:
-    """The remote a ref belongs to ("origin" for "origin/main"), or "" when the
-    name is not a remote-tracking ref in this repo. Asks git rather than
-    assuming the remote is called "origin" (mirrors the Electron op)."""
-    if "/" not in name:
-        return ""
-    if _git(cwd, ["show-ref", "--verify", "--quiet", f"refs/remotes/{name}"])[0] != 0:
+    """The remote a ref belongs to ("origin" for "origin/main"), or "" when ``name`` is not a
+    remote-tracking ref here. Asks git rather than assuming "origin" (mirrors the Electron op)."""
+    if "/" not in name or _git(cwd, ["show-ref", "--verify", "--quiet", f"refs/remotes/{name}"])[0] != 0:
         return ""
     return name.split("/", 1)[0]
 
@@ -621,12 +607,9 @@ def worktree_add(cwd: str, options: dict) -> dict:
     if options.get("existingBranch"):
         if not requested:
             raise RuntimeError("Branch name is required.")
-        # "origin/feature" is a remote-tracking ref, not a branch git can check
-        # out — `git worktree add <dir> origin/feature` detaches HEAD. Create a
-        # local branch with the same short name that tracks the remote ref,
-        # like `git switch feature` does for a branch on exactly one remote
-        # (parity with the Electron op: the desktop's convert-a-branch flow
-        # must behave identically through a remote gateway).
+        # "origin/feature" is a remote-tracking ref — `git worktree add <dir>
+        # origin/feature` detaches HEAD. Create a local branch of the same short
+        # name tracking it, like `git switch feature` does (Electron-op parity).
         remote = _remote_of_ref(root, requested)
         existing = requested.split("/", 1)[1] if remote else requested
         if not remote and existing == _default_branch(root):
@@ -634,13 +617,12 @@ def worktree_add(cwd: str, options: dict) -> dict:
             return {"path": root, "branch": existing, "repoRoot": root}
         target = _unique_dir(os.path.join(root, ".worktrees", _slugify(existing)))
         if remote:
-            # Best-effort freshness: the remote-tracking ref is stale if the
-            # user did not fetch recently. On failure (offline, branch gone)
-            # the last known ref is still there to branch from.
+            # Best-effort freshness; on failure (offline, branch gone) the last
+            # known ref is still there to branch from.
             _git(root, ["fetch", remote, existing])
             _git_ok(root, ["worktree", "add", "--track", "-b", existing, target, requested])
-            return {"path": target, "branch": existing, "repoRoot": root}
-        _git_ok(root, ["worktree", "add", target, existing])
+        else:
+            _git_ok(root, ["worktree", "add", target, existing])
         return {"path": target, "branch": existing, "repoRoot": root}
 
     slug = _slugify(options.get("name") or f"work-{os.urandom(4).hex()}")
@@ -649,17 +631,13 @@ def worktree_add(cwd: str, options: dict) -> dict:
     args = ["worktree", "add", "-b", branch, target]
     if options.get("base"):
         base = str(options["base"])
-        # Remote-tracking branches may be stale or missing; fetch just that
-        # branch so the local ref is up to date before branching. Ignore fetch
-        # failures (offline / no remote) — git will use whatever local ref
-        # exists, or raise a clear error below if the ref is entirely missing.
+        # Fetch just that branch so a stale remote-tracking ref is fresh; fetch
+        # failures (offline / no remote) are ignored — git uses the local ref or
+        # raises a clear error below if it is entirely missing.
         if base.startswith("origin/"):
-            remote_branch = base[len("origin/"):]
-            _git(root, ["fetch", "origin", remote_branch])
-            # Branching off a remote-tracking ref auto-sets up tracking (the
-            # new branch silently wired to origin's upstream). The user wants a
-            # standalone local branch — like `git checkout origin/main && git
-            # checkout -b new` — so suppress it (parity with the Electron op).
+            _git(root, ["fetch", "origin", base[len("origin/"):]])
+            # Branching off a remote-tracking ref auto-wires upstream tracking;
+            # the user wants a standalone local branch (Electron-op parity).
             args.append("--no-track")
         args.append(base)
     code, _, err = _git(root, args)
@@ -683,10 +661,8 @@ def _ref_names(cwd: str, *patterns: str, fmt: str = "%(refname:short)") -> list[
 
 
 def branch_list(cwd: str) -> list[dict]:
-    """Branches for the convert-a-branch picker: local heads first, then the
-    remote-tracking refs that have no local head yet (a teammate's branch is
-    reachable without a manual checkout). Parity with the Electron op — a
-    remote gateway serves this mirror for the same desktop UI."""
+    """Branches for the convert-a-branch picker: local heads first, then remote-tracking
+    refs with no local head yet (a teammate's branch without a manual checkout)."""
     locals_ = _ref_names(cwd, "refs/heads")
     if not locals_:
         return []
@@ -696,12 +672,9 @@ def branch_list(cwd: str) -> list[dict]:
     remotes = [
         name
         for name in _ref_names(cwd, "refs/remotes")
-        # "origin/HEAD" is a symbolic alias for the remote's default branch —
-        # not a branch, and a duplicate row in the list.
-        if not name.endswith("/HEAD")
-        # A remote branch tracked locally is reachable via its local head; a
-        # second row is noise, and checking out the remote ref detaches HEAD.
-        and name.split("/", 1)[-1] not in local_set
+        # "origin/HEAD" is a symbolic alias, not a branch; a remote branch tracked
+        # locally is reachable via its head (checking out the remote ref detaches).
+        if not name.endswith("/HEAD") and name.split("/", 1)[-1] not in local_set
     ]
     return [
         *({"name": name, "checkedOut": name in path_by_branch, "isDefault": bool(trunk and name == trunk),
@@ -729,10 +702,9 @@ def base_branch_list(cwd: str) -> list[dict]:
                        fmt="%(refname:short)\t%(committerdate:iso)")
     if not lines:
         return []
-    # origin/HEAD when a remote exists; otherwise the local default
-    # (main/master/init.defaultBranch) so a no-remote repo still flags its trunk.
-    default = (_git_out(cwd, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]).strip()
-               or _default_branch(cwd))
+    # origin/HEAD when a remote exists; else the local default so a no-remote
+    # repo still flags its trunk.
+    default = _origin_head(cwd) or _default_branch(cwd)
     return [
         {"name": name, "isRemote": name.startswith("origin/"),
          "isDefault": bool(default and name == default)}

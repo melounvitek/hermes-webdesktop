@@ -1,10 +1,6 @@
-"""Shared plumbing for the extracted dashboard routers.
-
-Everything here is a thin wrapper over the late-binding seam in
-:mod:`hermes_cli.web_deps`: web_server still owns the helpers and state, and
-every access resolves at call time so ``monkeypatch.setattr(web_server, ...)``
-stays authoritative.
-"""
+"""Shared plumbing for the extracted dashboard routers — thin wrappers over the
+late-binding seam in :mod:`hermes_cli.web_deps` (web_server owns helpers/state;
+every access resolves at call time so ``monkeypatch.setattr(web_server, ...)`` wins)."""
 
 from __future__ import annotations
 
@@ -51,11 +47,9 @@ async def scoped_to_thread(profile: Optional[str], fn: Callable[[], Any]) -> Any
 def http_failure(log_msg: str, status: int, prefix: Optional[str] = None, *, detail: Optional[str] = None):
     """Map unexpected exceptions to an ``HTTPException``.
 
-    ``HTTPException`` passes through untouched; anything else is logged with
-    ``log_msg`` (full traceback) first, then re-raised as
-    ``HTTPException(status, f"{prefix}: {exc}")`` or — when ``detail`` is
-    given instead — ``HTTPException(status, detail)`` (fixed message, the
-    exception text is only in the log).
+    ``HTTPException`` passes through; anything else is logged with ``log_msg`` (traceback),
+    then re-raised as ``HTTPException(status, f"{prefix}: {exc}")`` — or ``detail`` when given
+    (fixed message, exception text only in the log).
     """
     try:
         yield
