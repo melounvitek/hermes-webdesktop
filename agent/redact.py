@@ -13,37 +13,22 @@ import threading
 from urllib.parse import unquote_plus
 
 # Shared with agent/file_safety's read-block list so the two defenses can't
-# drift: if file_tools blocks a read and the agent falls back to ``cat``, the
-# terminal redactor still catches it. Both compare ``basename.lower()``.
+# drift: a blocked file_tools read that falls back to ``cat`` is still caught.
 from agent.file_safety import _BLOCKED_PROJECT_ENV_BASENAMES as _ENV_FILE_BASENAMES
 
 logger = logging.getLogger(__name__)
 
 # Sensitive query-string parameter names (case-insensitive exact match). Catches
-# tokens whose values match no vendor prefix regex (opaque tokens, OAuth codes).
+# opaque tokens / OAuth codes / pre-signed signatures with no vendor prefix.
 _SENSITIVE_QUERY_PARAMS = frozenset({
-    "access_token",
-    "refresh_token",
-    "id_token",
-    "token",
-    "api_key",
-    "apikey",
-    "client_secret",
-    "password",
-    "auth",
-    "jwt",
-    "session",
-    "secret",
-    "key",
-    "code",           # OAuth authorization codes
-    "signature",      # pre-signed URL signatures
-    "x-amz-signature",
+    "access_token", "refresh_token", "id_token", "token", "api_key", "apikey",
+    "client_secret", "password", "auth", "jwt", "session", "secret", "key",
+    "code", "signature", "x-amz-signature",
 })
 
 # Snapshot at import time so runtime env mutations (e.g. an LLM-generated
 # `export HERMES_REDACT_SECRETS=false`) cannot disable redaction mid-session.
-# ON by default; opt out via `security.redact_secrets: false` (bridged to this
-# env var by hermes_cli/main.py, gateway/run.py, cli.py — which log a warning).
+# ON by default; `security.redact_secrets: false` bridges to this env var.
 _REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "true", "yes", "on"}
 
 # Known API key prefixes -- match the prefix + contiguous token chars.
@@ -109,46 +94,37 @@ _PREFIX_PATTERNS = [
     r"pk-lf-[A-Za-z0-9\-]{8,}",         # Langfuse public key (sk-lf- already covered by sk- pattern)
 ]
 
-# ENV assignment: KEY=value where KEY carries a secret-like name.
-# Uppercase keys tolerate spaces around "=" and allow the keyword embedded
-# anywhere (``MYTOKEN=…``) — an all-caps key is almost never prose. Bare
-# ``KEY``/``PASS``/``PW`` suffixes are included (``FAL_KEY=``, ``DB_PW=``); the
-# post-match validator _key_has_secret_keyword rejects ``KEYBOARD=``/``PASSAGE=``.
+# ENV assignment: KEY=value where KEY carries a secret-like name. Uppercase keys
+# tolerate spaces around "=" and allow the keyword embedded anywhere
+# (``MYTOKEN=…``) — an all-caps key is almost never prose. Bare ``KEY``/``PASS``/
+# ``PW`` suffixes are included; _key_has_secret_keyword rejects ``KEYBOARD=``.
 _SECRET_ENV_NAMES = r"(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PW|CREDENTIAL|AUTH)"
-_ENV_ASSIGN_RE = re.compile(
-    rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2",
-)
-# Lowercase env names: only underscore-boundary forms (``openai_key=``,
-# ``db_pw=``) — NOT bare ``password=``/``token=``, which appear in prose, URLs,
-# and form bodies. The lookbehind anchors each attempt to the start of an
-# identifier run; without it re.sub retries the greedy prefix at every byte of
-# a long opaque payload (quadratic while holding the GIL).
+_ENV_ASSIGN_RE = re.compile(rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2")
+# Lowercase env names: only underscore-boundary forms (``openai_key=``) — NOT
+# bare ``password=``/``token=``, which appear in prose, URLs, and form bodies.
+# The lookbehind anchors each attempt to the start of an identifier run; without
+# it re.sub retries the greedy prefix at every byte of a long opaque payload.
 _ENV_ASSIGN_LOWER_RE = re.compile(
     rf"(?<![a-z0-9_])([a-z0-9_]+(?:_|^)(?:key|pass|pw|token|secret|password|passwd|credential|auth)(?=[^a-z0-9_]|$))\s*=\s*(['\"]?)(\S+)\2",
     re.IGNORECASE,
 )
 
 # Lowercase / dotted / hyphenated config-file keys (``spring.datasource.password=x``,
-# ``app.api.key=xyz``, line-start ``password=x``), which _ENV_ASSIGN_RE never
-# matched. Three carve-outs keep these out of prose, code, and URLs:
-#   1. The value stops at whitespace AND ``&`` so form-urlencoded bodies are
-#      handled pair-by-pair by _redact_form_body, not swallowed greedily.
+# line-start ``password=x``). Carve-outs keeping these out of prose/code/URLs:
+#   1. Values stop at whitespace AND ``&`` so form-urlencoded bodies are handled
+#      pair-by-pair by _redact_form_body.
 #   2. _CFG_DOTTED_RE requires a NAMESPACED (dotted) key — never a prose word.
 #   3. _CFG_ANCHORED_RE matches a bare secret-word key only at line start
-#      (optionally after ``export``), so mid-sentence ``password=foo`` is left alone.
+#      (optionally after ``export``); mid-sentence ``password=foo`` is left alone.
 # The ``://`` URL guard lives at the call site.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
 _CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
-# Linear pre-gate for the _CFG_*_RE subs: text with no secret keyword can never
-# match either pattern, so the backtrack-heavy subs are skipped exactly.
+# Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
 _CFG_SECRET_WORD_RE = re.compile(_SECRET_CFG_NAMES, re.IGNORECASE)
 
 # Programmatic env lookups (``os.getenv(...)``, ``process.env.X``, ``$ENV{X}``)
-# as the VALUE of a KEY=... match are code snippets naming a variable, not a
-# leaked secret — skip redaction.
-_ENV_LOOKUP_VALUE_RE = re.compile(
-    r"^(?:os\.(?:getenv|environ)|process\.env|\$ENV\{)"
-)
+# as the VALUE of a KEY=... match name a variable; they are not a leaked secret.
+_ENV_LOOKUP_VALUE_RE = re.compile(r"^(?:os\.(?:getenv|environ)|process\.env|\$ENV\{)")
 # Namespaced (dotted) key: the secret word may sit anywhere in a dotted path.
 # NOTE(perf): possessive quantifiers replace the nested ``(?:[...]+\.)+`` (which
 # backtracked exponentially on long dotted runs). The ``*`` runs bordering
@@ -175,25 +151,23 @@ _CFG_ANCHORED_RE = re.compile(
 # Bare ``auth`` is excluded so ``Authorization:``/``author:`` don't match (the
 # former is masked by _AUTH_HEADER_RE); ``auth_token`` still matches via
 # ``token``. Quoted values defer to _JSON_FIELD_RE via the lookahead.
-_YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
 # NOTE(perf): possessive quantifiers wherever the successor is disjoint; the
 # leading ``[A-Za-z0-9_.\-]*`` stays backtrackable (see _CFG_DOTTED_RE note).
+_YAML_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential)"
 _YAML_ASSIGN_RE = re.compile(
     rf"(^[ \t]*+[A-Za-z0-9_.\-]*{_YAML_CFG_NAMES}[A-Za-z0-9_.\-]*+)(:[ \t]*+)(?!['\"])([^\s&]++)",
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Word-boundary validation for the mixed/lowercase key patterns above.
-# Their key classes allow arbitrary affixes around the keyword so real names
-# (``client_secret``, ``clientSecret``, ``s3.secret-key``) match — which also
-# matched prose words that merely CONTAIN a keyword (``Secretary:``,
-# ``tokenizer:``, ``author=``) and mangled legitimate browser/log/CLI output.
+# Word-boundary validation for the mixed/lowercase key patterns above. Their
+# key classes allow arbitrary affixes so real names (``client_secret``,
+# ``clientSecret``, ``s3.secret-key``) match — which also matched prose words
+# that merely CONTAIN a keyword (``Secretary:``, ``tokenizer:``, ``author=``).
 # A keyword only counts at a word boundary within the key: at the key's edge,
 # next to a non-letter, or at a camelCase transition (``clientSecret``,
 # ``APIToken``). A trailing plural ``s`` is part of the keyword (``secrets:``).
 # Common concatenations keep matching via explicit alternatives (``authtoken``,
-# ``authkey``, ``secretkey``, ``apikey``); ``secretary``/``tokenizer``/
-# ``authored``/``credentialing`` no longer do.
+# ``authkey``, ``secretkey``, ``apikey``).
 _KEY_KEYWORD_RE = re.compile(
     r"(?:api|auth|access|refresh|session|secret)[ _.\\-]?(?:key|token)"
     r"|token|secret|passwd|password|pass|pw|credential|auth|key",
@@ -216,10 +190,8 @@ def _is_word_start(s: str, i: int) -> bool:
     if i == 0:
         return True
     prev, cur = s[i - 1], s[i]
-    if not prev.isalpha():
+    if not prev.isalpha() or (cur.isupper() and prev.islower()):  # camelCase: clientSecret
         return True
-    if cur.isupper() and prev.islower():
-        return True  # camelCase: clientSecret
     # Acronym run ending (APIToken): 'T' starts a word when followed by lowercase.
     return cur.isupper() and prev.isupper() and i + 1 < len(s) and s[i + 1].islower()
 
@@ -229,10 +201,8 @@ def _is_word_end(s: str, j: int, *, allow_plural: bool = True) -> bool:
     if j >= len(s):
         return True
     cur = s[j]
-    if not cur.isalpha():
+    if not cur.isalpha() or (cur.isupper() and s[j - 1].islower()):  # camelCase: secretKey
         return True
-    if cur.isupper() and s[j - 1].islower():
-        return True  # camelCase continuation: secretKey
     if allow_plural and cur in "sS":
         return _is_word_end(s, j + 1, allow_plural=False)
     return False
@@ -247,17 +217,12 @@ def _has_word_bounded_keyword(key: str, keyword_re: "re.Pattern[str]") -> bool:
 
 
 def _key_has_secret_keyword(key: str) -> bool:
-    """Post-match validator for the _CFG_*/_YAML_/_ENV_ASSIGN_RE key group.
-
-    Rejects prose words that merely embed a keyword (``secretary``, ``tokenizer``,
-    ``authored``). All-caps keys get the same word-bounded test: ``API_KEY`` /
-    ``DB_PW`` count, ``KEYBOARD`` / ``PASSAGE`` do not.
-    """
+    """Post-match key validator: ``API_KEY``/``DB_PW`` count, ``KEYBOARD``/``secretary`` do not."""
     return _has_word_bounded_keyword(key, _KEY_KEYWORD_RE)
 
 
 def _key_has_strong_secret_keyword(key: str) -> bool:
-    """Return whether ``key`` names an unambiguously credential-bearing field."""
+    """Whether ``key`` names an unambiguously credential-bearing field."""
     return _has_word_bounded_keyword(key, _STRONG_KEY_KEYWORD_RE)
 
 
@@ -276,15 +241,11 @@ def _looks_like_opaque_credential(value: str) -> bool:
         return True
     if len(value) < 12:
         return False
-    classes = sum(
-        bool(re.search(pattern, value))
-        for pattern in (r"[a-z]", r"[A-Z]", r"[0-9]")
-    )
-    return classes >= 2
+    return sum(bool(re.search(p, value)) for p in (r"[a-z]", r"[A-Z]", r"[0-9]")) >= 2
 
 
 def _assignment_value_requires_redaction(key: str, value: str) -> bool:
-    """Apply value-aware gating to key-name-only assignment matches."""
+    """Value-aware gate for key-name-only assignment matches."""
     return _key_has_strong_secret_keyword(key) or _looks_like_opaque_credential(value)
 
 
@@ -304,47 +265,30 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
 
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
 _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
-_JSON_FIELD_RE = re.compile(
-    rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"',
-    re.IGNORECASE,
-)
+_JSON_FIELD_RE = re.compile(rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"', re.IGNORECASE)
 
 # Authorization headers — any scheme (Bearer, Basic, Token, Digest, …) plus the
 # bare-credential form, and Proxy-Authorization; header name and scheme word are
 # preserved. The credential class excludes quotes: a token flush against a
 # closing quote must not pull it into the mask, or value corruption becomes
-# SYNTAX corruption (unterminated quote → shell EOF / SyntaxError). Real
-# credentials never contain ``"`` or ``'``.
-_AUTH_HEADER_RE = re.compile(
-    r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)",
-    re.IGNORECASE,
-)
+# SYNTAX corruption (unterminated quote → shell EOF / SyntaxError).
+_AUTH_HEADER_RE = re.compile(r"((?:Proxy-)?Authorization:\s*)([A-Za-z][\w.+-]*\s+)?([^\s\"']+)", re.IGNORECASE)
 
 # API-key style auth headers carrying a single opaque value (no scheme word);
 # values without a vendor prefix (custom/local backends) would otherwise leak
 # when a request or curl command is echoed into tool output / transcripts.
-_SECRET_HEADER_NAMES = (
-    r"(?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token)"
-)
-_SECRET_HEADER_RE = re.compile(
-    rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)",
-    re.IGNORECASE,
-)
+_SECRET_HEADER_NAMES = r"(?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token)"
+_SECRET_HEADER_RE = re.compile(rf"({_SECRET_HEADER_NAMES}\s*:\s*)(\S+)", re.IGNORECASE)
 
 # Telegram bot tokens: bot<digits>:<token> or <digits>:<token>, token >= 30 chars.
-_TELEGRAM_RE = re.compile(
-    r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})",
-)
+_TELEGRAM_RE = re.compile(r"(bot)?(\d{8,}):([-A-Za-z0-9_]{30,})")
 
 # Private key blocks: -----BEGIN RSA PRIVATE KEY----- ... -----END RSA PRIVATE KEY-----
-_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----"
-)
+_PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----")
 
 # Database connection strings: protocol://user:PASSWORD@host. The userinfo and
-# password groups forbid whitespace so a match can never span a line break — a
-# greedy ``[^@]+`` scanned past a code line to the next stray ``@`` (e.g. a
-# decorator) and corrupted tool output for any source with a DSN f-string.
+# password groups forbid whitespace so a match can never span a line break (a
+# greedy ``[^@]+`` once ran to a decorator's ``@`` on the next code line).
 _DB_CONNSTR_RE = re.compile(
     r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s]+:)([^@\s]+)(@)",
     re.IGNORECASE,
@@ -354,11 +298,11 @@ _DB_CONNSTR_RE = re.compile(
 # ``git remote set-url https://PASSWORD@github.com/...`` shape) — a single
 # opaque credential in userinfo with NO ``user:pass`` colon. Unambiguously a
 # secret: round-trip URLs (OAuth callbacks, magic links, pre-signed shares)
-# carry tokens in the QUERY STRING, never bare userinfo. The ``user:pass@`` form
-# deliberately passes through (token class forbids ``:``); DB schemes are
-# handled by _DB_CONNSTR_RE. False-positive guards: 8+ char floor skips short
-# usernames (git, admin, deploy); the class forbids ``/`` so an ``@`` in a path
-# or query (``?q=user@example.com``) is never treated as userinfo.
+# carry tokens in the QUERY STRING, never bare userinfo. ``user:pass@`` passes
+# through (token class forbids ``:``); DB schemes belong to _DB_CONNSTR_RE.
+# Guards: 8+ char floor skips short usernames (git, admin, deploy); the class
+# forbids ``/`` so an ``@`` in a path or query (``?q=user@example.com``) is
+# never treated as userinfo.
 _URL_BARE_TOKEN_RE = re.compile(
     r"((?:https?|wss?|git|ssh|ftp|ftps|sftp)://)"  # scheme
     r"([^\s:@/]{8,})"                               # bare token (no colon/slash/@), 8+ chars
@@ -368,73 +312,49 @@ _URL_BARE_TOKEN_RE = re.compile(
 
 # JWT tokens: header.payload[.signature] — always start with "eyJ" (base64 "{").
 # Matches 1-part (header only), 2-part, and full 3-part JWTs.
-_JWT_RE = re.compile(
-    r"eyJ[A-Za-z0-9_-]{10,}"           # Header (always starts with eyJ)
-    r"(?:\.[A-Za-z0-9_=-]{4,}){0,2}"   # Optional payload and/or signature
-)
+_JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_=-]{4,}){0,2}")
 
-# E.164 phone numbers: +<country><number>, 7-15 digits.
-# Negative lookahead prevents matching hex strings or identifiers.
+# E.164 phone numbers: +<country><number>, 7-15 digits. The negative lookahead
+# prevents matching hex strings or identifiers.
 _SIGNAL_PHONE_RE = re.compile(r"(\+[1-9]\d{6,14})(?![A-Za-z0-9])")
 
-# URLs containing query strings — `scheme://...?...[# or end]` (CDP-URL path).
-_URL_WITH_QUERY_RE = re.compile(
-    r"(https?|wss?|ftp)://"          # scheme
-    r"([^\s/?#]+)"                    # authority (may include userinfo)
-    r"([^\s?#]*)"                     # path
-    r"\?([^\s#]+)"                    # query (required)
-    r"(#\S*)?",                       # optional fragment
-)
+# URLs containing query strings — `scheme://authority path ?query [#fragment]` (CDP-URL path).
+_URL_WITH_QUERY_RE = re.compile(r"(https?|wss?|ftp)://([^\s/?#]+)([^\s?#]*)\?([^\s#]+)(#\S*)?")
 
 # URLs containing userinfo — `scheme://user:password@host` for ANY web scheme
 # (DB protocols are covered by _DB_CONNSTR_RE). CDP-URL path.
-_URL_USERINFO_RE = re.compile(
-    r"(https?|wss?|ftp)://([^/\s:@]+):([^/\s@]+)@",
-)
+_URL_USERINFO_RE = re.compile(r"(https?|wss?|ftp)://([^/\s:@]+):([^/\s@]+)@")
 
 # Strict provider-egress URL redaction accepts more URL-reference forms than
 # the display/log helpers above. Parameter delimiters stay in capture groups so
 # the original query/fragment layout is preserved byte-for-byte; the key is
 # decoded separately for classification. Values stop at ``&``/``;`` (both valid).
-_STRICT_URL_PARAM_RE = re.compile(
-    r"([?#&;])([A-Za-z0-9_.~+%\-]+)=([^#&;\s\"'<>]*)"
-)
+_STRICT_URL_PARAM_RE = re.compile(r"([?#&;])([A-Za-z0-9_.~+%\-]+)=([^#&;\s\"'<>]*)")
 
 # Userinfo in absolute (``scheme://user:pass@host``) and network-path
 # (``//user:pass@host``) references; the authority stops at path/query/fragment
 # delimiters so an ``@`` elsewhere is ignored. Anchored on the mandatory ``//``
 # rather than an optional scheme prefix: the scheme sits outside the match
-# either way, and the old optional-scheme prefix backtracked O(n²) on long
+# either way, and an optional-scheme prefix backtracked O(n²) on long
 # alphanumeric runs (~55s per sub() on a 320KB compaction payload).
-# Output-equivalence was fuzz-verified.
-_STRICT_URL_USERINFO_RE = re.compile(
-    r"(//)([^/\s?#@]+)@"
-)
+_STRICT_URL_USERINFO_RE = re.compile(r"(//)([^/\s?#@]+)@")
 
 # Form-urlencoded body detection: conservative — only applies when the entire
 # text looks like a query string (k=v&k=v pattern with no newlines).
-_FORM_BODY_RE = re.compile(
-    r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$"
-)
+_FORM_BODY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*(?:&[A-Za-z_][A-Za-z0-9_.-]*=[^&\s]*)+$")
 
 # Control / zero-width characters that can split a token body (``sk-abc\x1bdef``,
 # ``ghp_abc\n123``) and escape the contiguous prefix regexes.
-_CONTROL_CHARS_RE = re.compile(
-    r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060\ufeff]"
-)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060\ufeff]")
 
 # Union of every _PREFIX_PATTERNS body class — a control-stripped match may only
 # span original chars that are token-body or control chars. ``=`` is deliberately
 # excluded: a KEY=value separator must never let a match span unrelated text.
-_TOKEN_BODY_CHARS = frozenset(
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-."
-)
+_TOKEN_BODY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.")
 
 
 def _compile_prefix_matcher(patterns: list) -> "re.Pattern[str]":
-    return re.compile(
-        r"(?<![A-Za-z0-9_-])(" + "|".join(patterns) + r")(?![A-Za-z0-9_-])"
-    )
+    return re.compile(r"(?<![A-Za-z0-9_-])(" + "|".join(patterns) + r")(?![A-Za-z0-9_-])")
 
 
 _PREFIX_RE = _compile_prefix_matcher(_PREFIX_PATTERNS)
@@ -455,14 +375,12 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
     out = list(text)
     matches = []
     for m in _PREFIX_RE.finditer(stripped):
-        body = m.group(1)
         start_orig = orig_idx[m.start(1)]
         end_orig = orig_idx[m.end(1) - 1] + 1
         span = text[start_orig:end_orig]
         # A fragment that already matches on its own AND a span crossing a LINE
-        # boundary: do NOT join. A complete token at end-of-line followed by a
-        # word line (``ghp_<tok>\nbutton``) would otherwise mask ``button``; the
-        # self-matching fragment is handled by the ordinary prefix pass. For
+        # boundary: do NOT join (``ghp_<tok>\nbutton`` would mask ``button``; the
+        # self-matching fragment is handled by the ordinary prefix pass). For
         # non-newline controls (ESC, ZWSP) the join proceeds even when a fragment
         # self-matches — those bytes never legitimately sit between a token and
         # prose, and skipping would leak the tail of ``sk-<head>\x1b<tail>``.
@@ -470,10 +388,9 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
             continue
         # Reject spans containing a non-token char (``sk_abc…\nTAVILY_API_KEY=``
         # matched across lines) and matches running into a ``KEY=`` name.
-        if (all(c in _TOKEN_BODY_CHARS or _CONTROL_CHARS_RE.match(c)
-                for c in span)
+        if (all(c in _TOKEN_BODY_CHARS or _CONTROL_CHARS_RE.match(c) for c in span)
                 and (end_orig >= len(text) or text[end_orig] != "=")):
-            matches.append((start_orig, end_orig, mask_fn(body)))
+            matches.append((start_orig, end_orig, mask_fn(m.group(1))))
     for start_orig, end_orig, replacement in reversed(matches):
         out[start_orig:end_orig] = list(replacement)
     return "".join(out)
@@ -482,9 +399,7 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
 # Display-mask strip for mask_secret: EVERY control char incl. \n/\t, C1, DEL,
 # and zero-width/format chars — a masked secret must never emit multiline,
 # tabbed, or invisible bytes into config/status/dump display output.
-_DISPLAY_CONTROL_RE = re.compile(
-    r"[\x00-\x1f\x7f\x80-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064]"
-)
+_DISPLAY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f\x80-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064]")
 
 
 def mask_secret(
@@ -496,11 +411,10 @@ def mask_secret(
     placeholder: str = "***",
     empty: str = "",
 ) -> str:
-    """Mask a secret for display, preserving ``head`` and ``tail`` characters.
+    """Mask a secret for display (``hermes config`` / ``status`` / ``dump``).
 
-    Canonical display-time helper (``hermes config`` / ``status`` / ``dump``).
-    Values shorter than ``floor`` return ``placeholder``; falsy input returns
-    ``empty`` (override for e.g. a dimmed "(not set)").
+    Values shorter than ``floor`` (after control-byte stripping) return
+    ``placeholder``; falsy input returns ``empty``.
 
     >>> mask_secret("sk-proj-abcdef1234567890")
     'sk-p...7890'
@@ -509,8 +423,6 @@ def mask_secret(
     """
     if not value:
         return empty
-    # Strip control bytes before slicing so the visible head/tail can't carry
-    # them and the floor check sees the displayable length.
     value = _DISPLAY_CONTROL_RE.sub("", value)
     if not value:
         return empty
@@ -520,8 +432,7 @@ def mask_secret(
 
 
 def _mask_token(token: str) -> str:
-    """Mask a log token — conservative 18-char floor, preserves 6 prefix / 4 suffix."""
-    # Empty input: historically this returned "***" rather than "". Preserve.
+    """Mask a log token — 18-char floor, preserves 6 prefix / 4 suffix; empty → ``***``."""
     if not token:
         return "***"
     return mask_secret(token, head=6, tail=4, floor=18)
@@ -533,39 +444,26 @@ def _redact_query_string(query: str) -> str:
         return query
     parts = []
     for pair in query.split("&"):
-        if "=" not in pair:
-            parts.append(pair)
-            continue
-        key, _, value = pair.partition("=")
-        if key.lower() in _SENSITIVE_QUERY_PARAMS:
-            parts.append(f"{key}=***")
-        else:
-            parts.append(pair)
+        key, sep, _value = pair.partition("=")
+        parts.append(f"{key}=***" if sep and key.lower() in _SENSITIVE_QUERY_PARAMS else pair)
     return "&".join(parts)
 
 
 def _redact_url_query_params(text: str) -> str:
     """Redact sensitive query params in every URL found in ``text``."""
-    def _sub(m: re.Match) -> str:
-        scheme = m.group(1)
-        authority = m.group(2)
-        path = m.group(3)
-        query = _redact_query_string(m.group(4))
-        fragment = m.group(5) or ""
-        return f"{scheme}://{authority}{path}?{query}{fragment}"
-    return _URL_WITH_QUERY_RE.sub(_sub, text)
-
-
-def _redact_url_userinfo(text: str) -> str:
-    """Mask the password in ``user:password@`` of HTTP/WS/FTP URLs."""
-    return _URL_USERINFO_RE.sub(
-        lambda m: f"{m.group(1)}://{m.group(2)}:***@",
+    return _URL_WITH_QUERY_RE.sub(
+        lambda m: f"{m.group(1)}://{m.group(2)}{m.group(3)}?{_redact_query_string(m.group(4))}{m.group(5) or ''}",
         text,
     )
 
 
+def _redact_url_userinfo(text: str) -> str:
+    """Mask the password in ``user:password@`` of HTTP/WS/FTP URLs."""
+    return _URL_USERINFO_RE.sub(lambda m: f"{m.group(1)}://{m.group(2)}:***@", text)
+
+
 def _canonical_url_param_name(name: str) -> str:
-    """Decode a URL parameter name for bounded, case-insensitive matching."""
+    """Decode a URL parameter name (up to 3 unquote rounds) for case-insensitive matching."""
     decoded = name
     for _ in range(3):
         next_value = unquote_plus(decoded)
@@ -589,8 +487,7 @@ def _redact_strict_url_credentials(text: str) -> str:
     def _redact_userinfo(match: re.Match) -> str:
         userinfo = match.group(2)
         if ":" in userinfo:
-            username, _, _password = userinfo.partition(":")
-            return f"{match.group(1)}{username}:***@"
+            return f"{match.group(1)}{userinfo.partition(':')[0]}:***@"
         return f"{match.group(1)}***@"
 
     text = _STRICT_URL_PARAM_RE.sub(_redact_param, text)
@@ -602,24 +499,17 @@ def redact_cdp_url(value: object) -> str:
 
     ``redact_sensitive_text`` deliberately passes web-URL query params and
     ``user:pass@`` through (OAuth callbacks, magic links the agent must follow).
-    CDP discovery endpoints are NOT such a workflow — their tokens are pure
-    credentials — so this opts INTO both URL redactors. Single source of truth
-    for CDP URLs passed directly to a log/error; error-text helpers that embed
-    the URL delegate here (``tools.browser_supervisor._redact_cdp_error_text``).
+    CDP discovery tokens are pure credentials, so this opts INTO both URL
+    redactors. Single source of truth for CDP URLs passed to a log/error.
     """
     text = redact_sensitive_text("" if value is None else str(value))
     if not text:
         return text
-    text = _redact_url_query_params(text)
-    text = _redact_url_userinfo(text)
-    return text
+    return _redact_url_userinfo(_redact_url_query_params(text))
 
 
 def _redact_form_body(text: str) -> str:
-    """Redact sensitive values when the ENTIRE text is a clean ``k=v&k=v`` body.
-
-    Conservative on purpose; embedded query strings are handled elsewhere.
-    """
+    """Redact sensitive values when the ENTIRE text is a clean ``k=v&k=v`` body."""
     if not text or "\n" in text or "&" not in text:
         return text
     if not _FORM_BODY_RE.match(text.strip()):
@@ -637,20 +527,15 @@ def _mask_token_nonreusable(token: str) -> str:
     """
     if not token:
         return "«redacted-secret»"
-    label = ""
-    for sub in _PREFIX_SUBSTRINGS:
-        if token.startswith(sub):
-            label = sub
-            break
+    label = next((sub for sub in _PREFIX_SUBSTRINGS if token.startswith(sub)), "")
     return f"«redacted:{label}…»" if label else "«redacted-secret»"
 
 
 def _redact_assignments(text: str) -> str:
     """ENV / config / JSON / YAML assignment passes (skipped for code files).
 
-    Every pass skips URL-bearing text where noted: web-URL query params are
-    intentionally passed through (see the note in redact_sensitive_text) and
-    the lowercase/config regexes would otherwise match ``token=``/``key=`` params.
+    Passes that would match ``token=``/``key=`` URL params skip ``://`` text:
+    web-URL query params are intentionally passed through (see redact_sensitive_text).
     """
     if "=" in text:
         def _redact_env(m):
@@ -659,19 +544,16 @@ def _redact_assignments(text: str) -> str:
                 return m.group(0)
             return f"{name}={quote}{_mask_token(value)}{quote}"
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
-        # Lowercase env names (``openai_key=…``); the uppercase regex is
-        # all-caps-only so it never matches URL params, this one would.
+        # Lowercase env names; unlike the all-caps regex this one would match URL params.
         if "://" not in text:
             text = _ENV_ASSIGN_LOWER_RE.sub(_redact_env, text)
         # Lowercase/dotted config keys. The keyword pre-gate is exact (every
         # _CFG_*_RE match needs a secret keyword) and matters: _CFG_DOTTED_RE
-        # backtracks quadratically on long unbroken [A-Za-z0-9_.\-] runs
-        # (base64/hex blobs in compaction payloads).
+        # backtracks quadratically on long unbroken [A-Za-z0-9_.\-] runs.
         if "://" not in text and _CFG_SECRET_WORD_RE.search(text):
             text = _CFG_DOTTED_RE.sub(_redact_env, text)
             text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
-    # JSON fields: "apiKey": "***"
     if ":" in text and '"' in text:
         def _redact_json(m):
             key, value = m.group(1), m.group(2)
@@ -680,8 +562,8 @@ def _redact_assignments(text: str) -> str:
             return f'{key}: "{_mask_token(value)}"'
         text = _JSON_FIELD_RE.sub(_redact_json, text)
 
-    # Unquoted YAML / colon config: password: ***  (after JSON so quoted values
-    # are handled there; _YAML_ASSIGN_RE's lookahead skips quotes).
+    # Unquoted YAML / colon config, after JSON so quoted values are handled
+    # there (_YAML_ASSIGN_RE's lookahead skips quotes).
     if ":" in text and "://" not in text:
         def _redact_yaml(m):
             key, sep, value = m.group(1), m.group(2), m.group(3)
@@ -707,10 +589,7 @@ def _redact_url_credentials(text: str, code_file: bool) -> str:
     text = _DB_CONNSTR_RE.sub(_redact_db, text)
     # ``scheme://TOKEN@host`` — only the colon-less bare-token form; ``user:pass@``
     # and query-string tokens pass through (see the web-URL note below).
-    return _URL_BARE_TOKEN_RE.sub(
-        lambda m: f"{m.group(1)}{_mask_token(m.group(2))}{m.group(3)}",
-        text,
-    )
+    return _URL_BARE_TOKEN_RE.sub(lambda m: f"{m.group(1)}{_mask_token(m.group(2))}{m.group(3)}", text)
 
 
 def _redact_phone(m):
@@ -721,9 +600,7 @@ def _redact_phone(m):
 
 
 def _redact_telegram(m):
-    prefix = m.group(1) or ""
-    digits = m.group(2)
-    return f"{prefix}{digits}:***"
+    return f"{m.group(1) or ''}{m.group(2)}:***"
 
 
 def redact_sensitive_text(
@@ -749,24 +626,20 @@ def redact_sensitive_text(
     source code (``MAX_TOKENS=***`` constants, ``"apiKey": "test"`` fixtures).
     Prefix patterns, auth headers, private keys, DSNs, JWTs are still redacted.
 
-    ``file_read=True``: for file CONTENT returned to the agent. Secrets are still
-    redacted, but prefix-matched credentials become a non-reusable sentinel
-    (``«redacted:ghp_…»``) instead of a head/tail mask that looks like a real
-    truncated key (an agent wrote one back into config.yaml → dead credential →
-    401). Implies ``code_file=True``.
+    ``file_read=True``: for file CONTENT returned to the agent. Prefix-matched
+    credentials become a non-reusable sentinel (``«redacted:ghp_…»``) instead of
+    a head/tail mask that looks like a real truncated key (an agent wrote one
+    back into config.yaml → dead credential → 401). Implies ``code_file=True``.
 
-    Performance: every regex is gated behind a cheap substring pre-check
-    (``"=" in text``, ``"://" in text``, ``"eyJ" in text``, …) — conservative
-    (false positives just run the regex), never false-negative because every
-    regex requires the gated substring.
+    Performance: every regex is gated behind a cheap substring pre-check —
+    conservative (false positives just run the regex), never false-negative
+    because every regex requires the gated substring.
     """
     if text is None:
         return None
     if not isinstance(text, str):
         text = str(text)
-    if not text:
-        return text
-    if not (force or _REDACT_ENABLED):
+    if not text or not (force or _REDACT_ENABLED):
         return text
 
     if file_read:
@@ -782,21 +655,16 @@ def redact_sensitive_text(
     if not code_file:
         text = _redact_assignments(text)
 
-    # Authorization headers — case-insensitive regex, so "uthorization" is the
-    # cheapest substring gate covering every casing without a casefold().
+    # Case-insensitive regex, so "uthorization" is the cheapest substring gate
+    # covering every casing without a casefold().
     if "uthorization" in text or "UTHORIZATION" in text:
         text = _AUTH_HEADER_RE.sub(
-            lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)),
-            text,
+            lambda m: m.group(1) + (m.group(2) or "") + _mask_token(m.group(3)), text,
         )
 
-    # API-key style headers (x-api-key, api-key, …) and Telegram bot tokens —
-    # both require ":"; the regexes are the precise filters.
+    # API-key style headers and Telegram bot tokens both require ":".
     if ":" in text:
-        text = _SECRET_HEADER_RE.sub(
-            lambda m: m.group(1) + _mask_token(m.group(2)),
-            text,
-        )
+        text = _SECRET_HEADER_RE.sub(lambda m: m.group(1) + _mask_token(m.group(2)), text)
         text = _TELEGRAM_RE.sub(_redact_telegram, text)
 
     if "BEGIN" in text and "-----" in text:
@@ -805,17 +673,15 @@ def redact_sensitive_text(
     if "://" in text:
         text = _redact_url_credentials(text, code_file)
 
-    # JWT tokens (eyJ... — base64-encoded JSON headers)
     if "eyJ" in text:
         text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
 
-    # NOTE: Web-URL redaction (query params + ``user:pass@`` userinfo) is
-    # intentionally OFF by default: magic-link checkouts, OAuth callbacks, and
-    # pre-signed share URLs carry opaque tokens in query strings, and masking
-    # them by name breaks those skills mid-flow. Known credential shapes inside
-    # URLs are still caught by _PREFIX_RE / _JWT_RE, DSN passwords by
-    # _DB_CONNSTR_RE, and colon-less ``scheme://TOKEN@host`` by _URL_BARE_TOKEN_RE
-    # (a bare userinfo credential is never a round-trip workflow token).
+    # Web-URL redaction (query params + ``user:pass@`` userinfo) is OFF by
+    # default: magic-link checkouts, OAuth callbacks, and pre-signed share URLs
+    # carry opaque tokens in query strings, and masking them by name breaks
+    # those skills mid-flow. Known credential shapes inside URLs are still
+    # caught by _PREFIX_RE / _JWT_RE, DSN passwords by _DB_CONNSTR_RE, and
+    # colon-less ``scheme://TOKEN@host`` by _URL_BARE_TOKEN_RE.
     if redact_url_credentials:
         text = _redact_strict_url_credentials(text)
 
@@ -832,9 +698,8 @@ def redact_sensitive_text(
 
 # Commands whose stdout is an env-var dump (KEY=value lines), NOT source code.
 # Terminal redaction runs the ENV-assignment pass (code_file=False) for these so
-# opaque tokens with no vendor prefix (``MY_SERVICE_TOKEN=abc123…``) are still
-# masked; everything else uses code_file=True to avoid mangling source/config
-# dumps (``MAX_TOKENS=100``, ``postgresql://{user}`` templates).
+# opaque tokens with no vendor prefix are still masked; everything else uses
+# code_file=True to avoid mangling source/config dumps (``MAX_TOKENS=100``).
 _ENV_DUMP_COMMANDS = frozenset({"env", "printenv", "set", "export", "declare"})
 
 # Commands that read file contents to stdout. A ``.env`` target is a credential
@@ -857,8 +722,7 @@ def _command_reads_env_file(command: str | None) -> bool:
         return False
     for seg in re.split(r"[|;&]+", command):
         # Plain split() rather than shlex: shlex treats backslashes as escapes
-        # and mangles Windows paths (``C:\Users\...\.env``); only the command
-        # name and filename matter here.
+        # and mangles Windows paths (``C:\Users\...\.env``).
         tokens = seg.strip().split()
         if not tokens or tokens[0] not in _FILE_READ_COMMANDS:
             continue
@@ -866,8 +730,7 @@ def _command_reads_env_file(command: str | None) -> bool:
             if arg.startswith("-"):
                 continue
             # Strip quotes split() leaves attached, then any / or \ path prefix.
-            arg = arg.strip("\"'")
-            basename = arg.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+            basename = arg.strip("\"'").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
             if basename.lower() in _ENV_FILE_BASENAMES:
                 return True
     return False
@@ -895,11 +758,8 @@ def is_env_dump_command(command: str | None) -> bool:
     return False
 
 
-def redact_terminal_output(
-    output: str, command: str | None = None, *, force: bool = False
-) -> str:
-    """Redact secrets from terminal/process stdout — the single policy for ALL
-    terminal-output surfaces (foreground ``terminal`` and background ``process``).
+def redact_terminal_output(output: str, command: str | None = None, *, force: bool = False) -> str:
+    """Redact terminal/process stdout — the single policy for ALL terminal-output surfaces.
 
     ``code_file`` is False (ENV-assignment pass runs) only when ``command`` is an
     env dump or reads a ``.env`` file; otherwise True to avoid false positives
@@ -912,11 +772,10 @@ def redact_terminal_output(
     return redact_sensitive_text(output, force=force, code_file=code_file)
 
 
-# ---------------------------------------------------------------------------
-# Prefix pre-screen — derived from _PREFIX_PATTERNS at load time so a new
-# prefix can't silently break the gate. No false negatives: every pattern has
-# its literal prefix as a substring of any match.
-# ---------------------------------------------------------------------------
+# --- Prefix pre-screen ------------------------------------------------------
+# Derived from _PREFIX_PATTERNS at load time so a new prefix can't silently
+# break the gate. No false negatives: every pattern has its literal prefix as a
+# substring of any match.
 
 def _extract_literal_prefix(pattern: str) -> str:
     """Leading literal chars of a regex (up to the first metacharacter)."""
@@ -981,8 +840,7 @@ def _has_nested_unbounded_repeat(pattern: str) -> bool:
         if pattern[j] == "{":
             k = pattern.find("}", j)
             body = pattern[j + 1:k] if k != -1 else ""
-            # {m,} is open-ended; {m} and {m,n} are bounded.
-            return body[:-1].isdigit() and body.endswith(",")
+            return body[:-1].isdigit() and body.endswith(",")  # {m,} is open-ended
         return False
 
     # Per-depth flag: does the group at this depth contain an unbounded repeat?
@@ -1010,9 +868,7 @@ def _has_nested_unbounded_repeat(pattern: str) -> bool:
     return False
 
 
-_PREFIX_SUBSTRINGS = tuple(
-    _extract_literal_prefix(p) for p in _PREFIX_PATTERNS
-)
+_PREFIX_SUBSTRINGS = tuple(_extract_literal_prefix(p) for p in _PREFIX_PATTERNS)
 
 
 def _has_known_prefix_substring(text: str) -> bool:
@@ -1020,15 +876,12 @@ def _has_known_prefix_substring(text: str) -> bool:
     return any(p in text for p in _PREFIX_SUBSTRINGS)
 
 
-# ---------------------------------------------------------------------------
-# Plugin-registered redaction patterns
-# ---------------------------------------------------------------------------
-# Lets plugins add their provider's token format instead of a core PR. ADDITIVE-
-# ONLY by design: a plugin can extend what gets masked but has no API to remove
-# or weaken a built-in, so it can only over-redact, never expose. The operator's
-# global opt-out applies to plugin patterns exactly as to built-ins.
+# --- Plugin-registered redaction patterns -----------------------------------
+# ADDITIVE-ONLY by design: a plugin can extend what gets masked but has no API
+# to remove or weaken a built-in, so it can only over-redact, never expose. The
+# operator's global opt-out applies to plugin patterns exactly as to built-ins.
 # Keyed by registration source ("plugin:my-plugin") so plugin unload has a clean
-# seam to drop ONE plugin's patterns; unload is a host-owned lifecycle concern.
+# seam to drop ONE plugin's patterns.
 _PLUGIN_PREFIX_PATTERNS: dict = {}
 _registry_lock = threading.Lock()
 
@@ -1053,26 +906,16 @@ def _rebuild_prefix_matcher() -> None:
 # Structural validators for register_redaction_patterns, in check order:
 # (predicate -> reject when True, warning message with (source, pattern) args).
 _PATTERN_REJECT_RULES = (
-    (
-        _has_top_level_alternation,
-        "%s: skipping redaction pattern %r — top-level alternation "
-        "escapes the literal-prefix guarantee (in 'ab|.*' the "
-        "prefix binds only the first branch); wrap alternation in "
-        "a group after the prefix, e.g. 'ab(?:x|y)'",
-    ),
-    (
-        _has_nested_unbounded_repeat,
-        "%s: skipping redaction pattern %r — nested unbounded "
-        "quantifiers (e.g. '(a+)+') can backtrack catastrophically, "
-        "and registered patterns run on every log line and tool "
-        "output",
-    ),
-    (
-        lambda pattern: len(_extract_literal_prefix(pattern)) < 2,
-        "%s: skipping redaction pattern %r — must start with at "
-        "least 2 literal characters (needed for the pre-screen "
-        "substring gate)",
-    ),
+    (_has_top_level_alternation,
+     "%s: skipping redaction pattern %r — top-level alternation escapes the literal-prefix "
+     "guarantee (in 'ab|.*' the prefix binds only the first branch); wrap alternation in "
+     "a group after the prefix, e.g. 'ab(?:x|y)'"),
+    (_has_nested_unbounded_repeat,
+     "%s: skipping redaction pattern %r — nested unbounded quantifiers (e.g. '(a+)+') can "
+     "backtrack catastrophically, and registered patterns run on every log line and tool output"),
+    (lambda pattern: len(_extract_literal_prefix(pattern)) < 2,
+     "%s: skipping redaction pattern %r — must start with at least 2 literal characters "
+     "(needed for the pre-screen substring gate)"),
 )
 
 
@@ -1097,18 +940,11 @@ def register_redaction_patterns(patterns, source: str = "plugin") -> int:
         try:
             re.compile(pattern)
         except re.error as exc:
-            logger.warning(
-                "%s: skipping invalid redaction pattern %r (%s)",
-                source, pattern, exc,
-            )
+            logger.warning("%s: skipping invalid redaction pattern %r (%s)", source, pattern, exc)
             continue
-        rejected = False
-        for reject, message in _PATTERN_REJECT_RULES:
-            if reject(pattern):
-                logger.warning(message, source, pattern)
-                rejected = True
-                break
+        rejected = next((message for reject, message in _PATTERN_REJECT_RULES if reject(pattern)), None)
         if rejected:
+            logger.warning(rejected, source, pattern)
             continue
         if pattern in _PREFIX_PATTERNS or pattern in _plugin_patterns() or pattern in accepted:
             logger.debug("%s: redaction pattern %r already registered", source, pattern)
@@ -1119,9 +955,7 @@ def register_redaction_patterns(patterns, source: str = "plugin") -> int:
         with _registry_lock:
             _PLUGIN_PREFIX_PATTERNS.setdefault(source, []).extend(accepted)
             _rebuild_prefix_matcher()
-        logger.info(
-            "%s: registered %d redaction pattern(s)", source, len(accepted)
-        )
+        logger.info("%s: registered %d redaction pattern(s)", source, len(accepted))
     return len(accepted)
 
 
