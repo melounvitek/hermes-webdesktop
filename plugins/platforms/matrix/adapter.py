@@ -1046,7 +1046,7 @@ class MatrixAdapter(BasePlatformAdapter):
                         all_devices = (getattr(dev_resp, "device_keys", {}) or {}).get(str(client.mxid)) or {}
                         if len(all_devices) == 1:
                             client.device_id = next(iter(all_devices))
-                        elif len(all_devices) == 0:
+                        elif not all_devices:
                             logger.warning(
                                 "Matrix: no devices found for %s — key verification will be skipped", client.mxid)
                     except Exception as exc:
@@ -1205,18 +1205,8 @@ class MatrixAdapter(BasePlatformAdapter):
         try:
             sync_data = await client.sync(timeout=10000, full_state=True)
             if isinstance(sync_data, dict):
-                self._last_sync_ts = time.time()
                 self._joined_rooms.clear()
-                self._joined_rooms.update(sync_data.get("rooms", {}).get("join", {}).keys())
-                self._invalidate_room_identities()
-                nb = sync_data.get("next_batch")  # incremental syncs resume from here
-                if nb:
-                    await client.sync_store.put_next_batch(nb)
-                logger.info("Matrix: initial sync complete, joined %d rooms", len(self._joined_rooms))
-                await self._refresh_dm_cache()
-                # Dispatch so the OlmMachine sees to-device key shares queued while offline.
-                await self._dispatch_sync_logged(sync_data, "initial sync event dispatch error")
-                self._schedule_pending_invite_joins(sync_data)
+                await self._absorb_sync(client, sync_data, initial=True)
             else:
                 logger.warning("Matrix: initial sync returned unexpected type %s", type(sync_data).__name__)
         except Exception as exc:
@@ -1489,9 +1479,7 @@ class MatrixAdapter(BasePlatformAdapter):
         for idx, (image_url, alt_text) in enumerate(images, start=1):
             if human_delay > 0 and idx > 1:
                 await asyncio.sleep(human_delay)
-            caption = alt_text or None
-            if total > 1 and caption:
-                caption = f"{caption} ({idx}/{total})"
+            caption = f"{alt_text} ({idx}/{total})" if alt_text and total > 1 else (alt_text or None)
             if image_url.startswith("file://"):
                 result = await self.send_image_file(
                     chat_id=chat_id, image_path=_unquote(image_url[7:]), caption=caption, metadata=metadata)
@@ -1512,14 +1500,11 @@ class MatrixAdapter(BasePlatformAdapter):
         """Upload audio as an MSC3245 voice message. Voice bubbles need Ogg/Opus but callers pass any
         format (e.g. TTS output), so transcode here — best-effort: without ffmpeg the original is sent."""
         converted_path: Optional[str] = None
-        send_path = audio_path
         if not str(audio_path).lower().endswith((".ogg", ".oga", ".opus")):
             converted_path = await asyncio.to_thread(_matrix_transcode_voice_to_ogg, audio_path)
-            if converted_path:
-                send_path = converted_path
         try:
             return await self._send_local_file(
-                chat_id, send_path, "m.audio", caption, reply_to,
+                chat_id, converted_path or audio_path, "m.audio", caption, reply_to,
                 # keep the caller's basename (the temp transcode file has a generated name)
                 file_name=(Path(audio_path).with_suffix(".ogg").name if converted_path else None),
                 metadata=metadata, is_voice=True)
@@ -1567,28 +1552,26 @@ class MatrixAdapter(BasePlatformAdapter):
         """Send a reaction-based exec approval prompt for Matrix."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
-        scope_choices = ""
         if smart_denied:
             scope_choices = "Smart DENY: owner override applies to this one operation only.\n"
         else:
-            if allow_session:
-                scope_choices += "Reply `!approve session` to approve this pattern for the session, "
-            if allow_permanent:
-                scope_choices += "`!approve always` to approve permanently, "
-        reaction_legend_parts = ["✅ = approve once"]
+            scope_choices = (
+                ("Reply `!approve session` to approve this pattern for the session, " if allow_session else "")
+                + ("`!approve always` to approve permanently, " if allow_permanent else ""))
+        legend = ["✅ = approve once"]
+        reactions = ["✅"]
         if allow_session:
-            reaction_legend_parts.append("🌀 = approve for this session")
+            legend.append("🌀 = approve for this session")
+            reactions.append("🌀")
             if allow_permanent:
-                reaction_legend_parts.append("♾️ = approve always")
-        reaction_legend_parts.append("❎ = deny")
+                legend.append("♾️ = approve always")
+                reactions.append("♾️")
+        legend.append("❎ = deny")
+        reactions.append("❌")
         text = (
             f"{self._format_exec_approval(command, description)}\n\n"
             f"{scope_choices}Reply `!approve` to execute once, or `!deny` to cancel.\n\n"
-            "You can also click the reaction to approve:\n" + "\n".join(reaction_legend_parts))
-        if not allow_session:
-            reactions = ("✅", "❌")
-        else:
-            reactions = ("✅", "🌀", "❌") if not allow_permanent else ("✅", "🌀", "♾️", "❌")
+            "You can also click the reaction to approve:\n" + "\n".join(legend))
 
         def _make(message_id, requester, expires_at):
             old_event = self._approval_prompt_by_session.get(session_key)
@@ -1599,7 +1582,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 session_key=session_key, chat_id=chat_id, message_id=message_id, requester_user_id=requester,
                 expires_at=expires_at)
         return await self._send_reaction_prompt(
-            chat_id, text, metadata, _make, self._approval_prompts_by_event, reactions, "approval")
+            chat_id, text, metadata, _make, self._approval_prompts_by_event, tuple(reactions), "approval")
 
     async def send_model_picker(
         self, chat_id: str, providers: list, current_model: str, current_provider: str, session_key: str,
@@ -1686,9 +1669,7 @@ class MatrixAdapter(BasePlatformAdapter):
         msg_content: Dict[str, Any] = {
             "msgtype": msgtype, "body": caption or filename, "info": {"mimetype": content_type, "size": len(data)}}
         if encrypted_file is not None:
-            file_payload = encrypted_file.serialize()
-            file_payload["url"] = str(mxc_url)
-            msg_content["file"] = file_payload
+            msg_content["file"] = {**encrypted_file.serialize(), "url": str(mxc_url)}
         else:
             msg_content["url"] = str(mxc_url)
         if is_voice:  # MSC3245 native voice flag + MSC1767 audio metadata
@@ -1744,13 +1725,12 @@ class MatrixAdapter(BasePlatformAdapter):
         if file_size > self._max_media_bytes:
             return self._media_too_large(file_size)
         fname = file_name or p.name
-        ct = mimetypes.guess_type(fname)[0] or "application/octet-stream"
-        data = p.read_bytes()
         # ffprobe/ffmpeg probing is blocking (subprocess timeouts up to 15s) —
         # run it off the event loop so voice uploads never stall the adapter.
         voice_metadata = await asyncio.to_thread(_matrix_voice_metadata_for_file, p) if is_voice else None
         return await self._upload_and_send(
-            room_id, data, fname, ct, msgtype, caption, reply_to, metadata, is_voice, voice_metadata)
+            room_id, p.read_bytes(), fname, mimetypes.guess_type(fname)[0] or "application/octet-stream", msgtype,
+            caption, reply_to, metadata, is_voice, voice_metadata)
 
     async def _sync_loop(self) -> None:
         """Continuously sync with the homeserver."""
@@ -1762,23 +1742,11 @@ class MatrixAdapter(BasePlatformAdapter):
                 sync_data = await asyncio.wait_for(client.sync(since=next_batch, timeout=30000), timeout=45.0)
                 # Auth failures (M_UNKNOWN_TOKEN) arrive as SyncError objects, not exceptions.
                 _sync_msg = getattr(sync_data, "message", None)
-                if _sync_msg and isinstance(_sync_msg, str):
-                    _lower = _sync_msg.lower()
-                    if "m_unknown_token" in _lower or "unknown_token" in _lower:
-                        logger.error("Matrix: permanent auth error from sync: %s — stopping", _sync_msg)
-                        return
+                if isinstance(_sync_msg, str) and "unknown_token" in _sync_msg.lower():
+                    logger.error("Matrix: permanent auth error from sync: %s — stopping", _sync_msg)
+                    return
                 if isinstance(sync_data, dict):
-                    self._last_sync_ts = time.time()
-                    rooms_join = sync_data.get("rooms", {}).get("join", {})
-                    if rooms_join:
-                        self._joined_rooms.update(rooms_join.keys())
-                        self._invalidate_room_identities()
-                    nb = sync_data.get("next_batch")
-                    if nb:
-                        next_batch = nb
-                        await client.sync_store.put_next_batch(nb)
-                    await self._dispatch_sync_logged(sync_data, "sync event dispatch error")
-                    self._schedule_pending_invite_joins(sync_data)
+                    next_batch = await self._absorb_sync(client, sync_data) or next_batch
                     await asyncio.sleep(0)  # let fresh invite joins start before the next sync
             except asyncio.CancelledError:
                 return
@@ -1792,11 +1760,27 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.warning("Matrix: sync error: %s — retrying in 5s", exc)
                 await asyncio.sleep(5)
 
-    async def _dispatch_sync_logged(self, sync_data: Dict[str, Any], what: str) -> None:
+    async def _absorb_sync(self, client: Any, sync_data: Dict[str, Any], *, initial: bool = False) -> Optional[str]:
+        """Apply one sync response: joined rooms, next_batch, event dispatch, pending invites. Returns next_batch.
+        The initial (full-state) sync also seeds the DM cache and dispatches so the OlmMachine sees
+        to-device key shares queued while offline."""
+        self._last_sync_ts = time.time()
+        rooms_join = sync_data.get("rooms", {}).get("join", {})
+        if rooms_join or initial:
+            self._joined_rooms.update(rooms_join.keys())
+            self._invalidate_room_identities()
+        nb = sync_data.get("next_batch")  # incremental syncs resume from here
+        if nb:
+            await client.sync_store.put_next_batch(nb)
+        if initial:
+            logger.info("Matrix: initial sync complete, joined %d rooms", len(self._joined_rooms))
+            await self._refresh_dm_cache()
         try:
             await self._dispatch_sync(sync_data)
         except Exception as exc:
-            logger.warning("Matrix: %s: %s", what, exc)
+            logger.warning("Matrix: %s: %s", "initial sync event dispatch error" if initial else "sync event dispatch error", exc)
+        self._schedule_pending_invite_joins(sync_data)
+        return nb
 
     async def _dispatch_sync(self, sync_data: Dict[str, Any]) -> None:
         """Dispatch a sync response through the mautrix event machinery."""
@@ -2466,17 +2450,23 @@ class MatrixAdapter(BasePlatformAdapter):
             logger.debug("Matrix: read receipt failed: %s", exc)
             return False
 
-    async def redact_message(self, room_id: str, event_id: str, reason: str = "") -> bool:
-        """Redact (delete) a message or event from a room."""
+    async def _client_op(self, coro_factory, ok_msg: tuple, err_msg: str, *, level: str = "warning") -> bool:
+        """Run one client call when connected: log *ok_msg* and return True, or log the error and return False."""
         if not self._client:
             return False
         try:
-            await self._client.redact(RoomID(room_id), EventID(event_id), reason=reason or None)
-            logger.info("Matrix: redacted %s in %s", event_id, room_id)
+            await coro_factory()
+            getattr(logger, "debug" if level == "debug" else "info")(*ok_msg)
             return True
         except Exception as exc:
-            logger.warning("Matrix: redact error: %s", exc)
+            getattr(logger, level)(err_msg, exc)
             return False
+
+    async def redact_message(self, room_id: str, event_id: str, reason: str = "") -> bool:
+        """Redact (delete) a message or event from a room."""
+        return await self._client_op(
+            lambda: self._client.redact(RoomID(room_id), EventID(event_id), reason=reason or None),
+            ("Matrix: redacted %s in %s", event_id, room_id), "Matrix: redact error: %s")
 
     async def create_room(
         self, name: str = "", topic: str = "", invite: Optional[list] = None, is_direct: bool = False,
@@ -2504,15 +2494,9 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def invite_user(self, room_id: str, user_id: str) -> bool:
         """Invite a user to a room."""
-        if not self._client:
-            return False
-        try:
-            await self._client.invite_user(RoomID(room_id), UserID(user_id))
-            logger.info("Matrix: invited %s to %s", user_id, room_id)
-            return True
-        except Exception as exc:
-            logger.warning("Matrix: invite error: %s", exc)
-            return False
+        return await self._client_op(
+            lambda: self._client.invite_user(RoomID(room_id), UserID(user_id)),
+            ("Matrix: invited %s to %s", user_id, room_id), "Matrix: invite error: %s")
 
     _VALID_PRESENCE_STATES = frozenset(("online", "offline", "unavailable"))
 
@@ -2523,16 +2507,11 @@ class MatrixAdapter(BasePlatformAdapter):
         if state not in self._VALID_PRESENCE_STATES:
             logger.warning("Matrix: invalid presence state %r", state)
             return False
-        try:
-            presence_map = {
-                "online": PresenceState.ONLINE, "offline": PresenceState.OFFLINE,
-                "unavailable": PresenceState.UNAVAILABLE}
-            await self._client.set_presence(presence=presence_map[state], status=status_msg or None)
-            logger.debug("Matrix: presence set to %s", state)
-            return True
-        except Exception as exc:
-            logger.debug("Matrix: set_presence failed: %s", exc)
-            return False
+        presence_map = {
+            "online": PresenceState.ONLINE, "offline": PresenceState.OFFLINE, "unavailable": PresenceState.UNAVAILABLE}
+        return await self._client_op(
+            lambda: self._client.set_presence(presence=presence_map[state], status=status_msg or None),
+            ("Matrix: presence set to %s", state), "Matrix: set_presence failed: %s", level="debug")
 
     @staticmethod
     def _state_event_value(event: Any, key: str) -> Optional[str]:
