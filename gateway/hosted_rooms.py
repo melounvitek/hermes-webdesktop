@@ -57,7 +57,9 @@ _EVENT_KINDS_BY_ACTOR = {
     "system": frozenset({
         "authority.claimed", "authority.lost", "room.created", "room.disbanded",
         "room.members_changed", "room.renamed"})}
-_ACTOR_FIELDS = frozenset({"kind", "id", "display_name", "profile", "connection_id"})
+_OPTIONAL_ACTOR_FIELDS = (
+    ("display_name", MAX_ACTOR_LABEL_CHARS), ("profile", MAX_ACTOR_ID_CHARS), ("connection_id", MAX_ACTOR_ID_CHARS))
+_ACTOR_FIELDS = frozenset({"kind", "id", *(field for field, _ in _OPTIONAL_ACTOR_FIELDS)})
 
 # --- schema -----------------------------------------------------------------
 
@@ -232,22 +234,23 @@ _actor_json = partial(_canonical_json, label="actor", max_bytes=4 * 1024)
 _payload_json = partial(_canonical_json, label="payload", max_bytes=MAX_EVENT_JSON_BYTES)
 
 
+_bounded_int = partial(bounded_int, error=HostedRoomError)
+
+
 def _actor_id(value: Any, label: str) -> str:
     return _validate_identifier(value, label=label, max_chars=MAX_ACTOR_ID_CHARS)
 
 
 def _require_positive_int(value: Any, label: str) -> int:
-    return bounded_int(
-        value, error=HostedRoomError, message=f"{label} must be a positive integer", low=1)
+    return _bounded_int(value, message=f"{label} must be a positive integer", low=1)
 
 
 def _bounded_limit(value: Any, maximum: int) -> int:
-    message = f"limit must be between 1 and {maximum}"
-    return bounded_int(value, error=HostedRoomError, message=message, low=1, high=maximum)
+    return _bounded_int(value, message=f"limit must be between 1 and {maximum}", low=1, high=maximum)
 
 
 def _non_negative(value: Any, label: str) -> int:
-    return bounded_int(value, error=HostedRoomError, message=f"{label} must be a non-negative integer")
+    return _bounded_int(value, message=f"{label} must be a non-negative integer")
 
 
 def _system_actor_json(actor_id: str) -> str:
@@ -275,11 +278,9 @@ def _validate_members(value: Any) -> tuple[list[dict[str, Any]], str]:
         raise HostedRoomError("members must be a list")
     if len(value) > MAX_MEMBERS:
         raise HostedRoomError("too many room members")
-    members: list[dict[str, Any]] = []
-    for member in value:
-        if not isinstance(member, dict):
-            raise HostedRoomError("each room member must be an object")
-        members.append(dict(member))
+    if not all(isinstance(member, dict) for member in value):
+        raise HostedRoomError("each room member must be an object")
+    members = [dict(member) for member in value]
     return members, _canonical_json(members, label="members", max_bytes=MAX_MEMBERS_JSON_BYTES)
 
 
@@ -309,18 +310,6 @@ _validate_event_kind = partial(
     invalid="invalid event kind")
 
 
-def _optional_actor_field(actor: dict[str, Any], field: str, max_chars: int) -> str:
-    value = actor.get(field)
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise HostedRoomError(f"actor.{field} must be a string")
-    value = value.strip()
-    if len(value) > max_chars:
-        raise HostedRoomError(f"actor.{field} is too long")
-    return value
-
-
 def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
     if not isinstance(value, dict):
         raise HostedRoomError("actor must be an object")
@@ -333,10 +322,15 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
     if kind not in _EVENT_KINDS_BY_ACTOR[actor_kind]:
         raise HostedRoomError(f"actor kind '{actor_kind}' cannot append '{kind}'")
     actor = {"kind": actor_kind, "id": _actor_id(value.get("id"), "actor.id")}
-    for field, max_chars in (
-        ("display_name", MAX_ACTOR_LABEL_CHARS), ("profile", MAX_ACTOR_ID_CHARS), ("connection_id", MAX_ACTOR_ID_CHARS)
-    ):
-        field_value = _optional_actor_field(value, field, max_chars)
+    for field, max_chars in _OPTIONAL_ACTOR_FIELDS:
+        field_value = value.get(field)
+        if field_value is None:
+            continue
+        if not isinstance(field_value, str):
+            raise HostedRoomError(f"actor.{field} must be a string")
+        field_value = field_value.strip()
+        if len(field_value) > max_chars:
+            raise HostedRoomError(f"actor.{field} is too long")
         if field_value:
             actor[field] = field_value
     return actor, _actor_json(actor)
