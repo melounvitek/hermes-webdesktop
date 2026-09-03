@@ -18,21 +18,11 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from hermes_cli.dashboard_auth import list_session_providers
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
-from hermes_cli.dashboard_auth.base import (
-    DashboardAuthProvider,
-    ProviderError,
-    RefreshExpiredError,
-)
+from hermes_cli.dashboard_auth.base import ProviderError, RefreshExpiredError
 from hermes_cli.dashboard_auth.cookies import (
-    clear_session_cookies,
-    clear_sso_attempt_cookie,
-    detect_https,
-    read_session_cookies,
-    read_session_provider,
-    read_sso_attempt_cookie,
-    set_session_cookies,
-    set_session_provider_cookie,
-    set_sso_attempt_cookie,
+    clear_session_cookies, clear_sso_attempt_cookie, detect_https, read_session_cookies,
+    read_session_provider, read_sso_attempt_cookie, set_session_cookies,
+    set_session_provider_cookie, set_sso_attempt_cookie,
 )
 from hermes_cli.dashboard_auth.prefix import prefix_from_request
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
@@ -41,6 +31,7 @@ from hermes_cli.dashboard_auth.request_utils import (
     client_ip as _client_ip,
     extract_bearer as _extract_bearer,
     is_safe_next_path,
+    scan_session_providers,
     unreachable_response,
 )
 
@@ -75,23 +66,9 @@ def _path_is_public(path: str) -> bool:
     exactly so ``/api/status`` never exposes ``/api/status/extension``;
     :data:`_GATE_PUBLIC_PREFIXES` is prefix-matched.
     """
-    if path in PUBLIC_API_PATHS:
-        return True
-    return any(path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES)
-
-
-def _ordered_session_providers(
-    provider_hint: str | None,
-) -> list[DashboardAuthProvider]:
-    """Session providers with the hinted one first (stable sort).
-
-    The hint is a routing preference, not authoritative: a stale/unknown hint
-    (provider renamed or removed) leaves the normal registration order intact.
-    """
-    providers = list_session_providers()
-    if provider_hint:
-        providers.sort(key=lambda provider: provider.name != provider_hint)
-    return providers
+    return path in PUBLIC_API_PATHS or any(
+        path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES
+    )
 
 
 def _safe_next_target(request: Request) -> str:
@@ -120,19 +97,10 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
     next_param = _safe_next_target(request)
     prefix = prefix_from_request(request)
     login_url = f"{prefix}/login?next={next_param}" if next_param else f"{prefix}/login"
-
     if request.url.path.startswith("/api/"):
-        error_code = (
-            "session_expired" if reason == "invalid_or_expired_session"
-            else "unauthenticated"
-        )
+        error_code = "session_expired" if reason == "invalid_or_expired_session" else "unauthenticated"
         return JSONResponse(
-            {
-                "error": error_code,
-                "detail": "Unauthorized",
-                "reason": reason,
-                "login_url": login_url,
-            },
+            {"error": error_code, "detail": "Unauthorized", "reason": reason, "login_url": login_url},
             status_code=401,
         )
     return RedirectResponse(url=login_url, status_code=302)
@@ -151,94 +119,57 @@ def _auto_sso_response(request: Request) -> Response | None:
     """
     if request.url.path.startswith("/api/"):
         return None
-
     if read_sso_attempt_cookie(request):
         resp = _unauth_response(request, reason="no_cookie")
         clear_sso_attempt_cookie(resp, prefix=prefix_from_request(request))
         return resp
-
     providers = list_session_providers()
-    if len(providers) != 1:
+    if len(providers) != 1 or getattr(providers[0], "supports_password", False):
         return None
     provider = providers[0]
-    if getattr(provider, "supports_password", False):
-        return None
-
     prefix = prefix_from_request(request)
     next_param = _safe_next_target(request)
     auth_login = f"{prefix}/auth/login?provider={quote(provider.name, safe='')}"
     if next_param:
         auth_login = f"{auth_login}&next={next_param}"
-
     resp = RedirectResponse(url=auth_login, status_code=302)
     set_sso_attempt_cookie(resp, use_https=detect_https(request), prefix=prefix)
-    audit_log(
-        AuditEvent.LOGIN_START,
-        provider=provider.name, reason="auto_sso", ip=_client_ip(request),
-    )
+    audit_log(AuditEvent.LOGIN_START, provider=provider.name, reason="auto_sso", ip=_client_ip(request))
     return resp
 
 
 def _verify_access_token(
-    request: Request, *, access_token: str, provider_hint: str | None = None,
-    audit: bool = True,
+    request: Request, *, access_token: str, provider_hint: str | None = None, audit: bool = True,
 ):
     """Run ``verify_session`` across the provider stack; Session or ``None``.
 
-    A provider that does not recognise the token returns ``None`` and the
-    next is tried. A ``ProviderError`` (IDP/JWKS unreachable) must NOT abort
-    the chain — the token may belong to a different, reachable provider. If
-    no provider verifies AND at least one was unreachable, raises
-    ``ProviderError(name)`` so the caller returns 503 instead of forcing a
-    re-login through a possibly-unreachable refresh.
+    ``audit=False`` is the native-app bearer path (no cookie, no server-side
+    refresh — the desktop rotates via ``/auth/native/refresh``); same
+    503-on-outage semantics via :func:`scan_session_providers`.
     """
-    unreachable_provider: str | None = None
-    for provider in _ordered_session_providers(provider_hint):
-        try:
-            session = provider.verify_session(access_token=access_token)
-        except ProviderError as e:
-            _log.warning(
-                "dashboard-auth: provider %r unreachable during %s: %s",
-                provider.name, "verify" if audit else "bearer verify", e,
+    def _audit_unreachable(provider):
+        if audit:
+            audit_log(
+                AuditEvent.SESSION_VERIFY_FAILURE, provider=provider.name,
+                reason="provider_unreachable", ip=_client_ip(request),
             )
-            if audit:
-                audit_log(
-                    AuditEvent.SESSION_VERIFY_FAILURE,
-                    provider=provider.name,
-                    reason="provider_unreachable",
-                    ip=_client_ip(request),
-                )
-            if unreachable_provider is None:
-                unreachable_provider = provider.name
-            continue
-        if session is not None:
-            return session
-    if unreachable_provider is not None:
-        raise ProviderError(unreachable_provider)
-    return None
 
-
-def _verify_bearer(request: Request, *, access_token: str):
-    """Verify a native-app bearer token (no cookie, no server-side refresh —
-    the desktop rotates via ``/auth/native/refresh``). Same 503-on-outage
-    semantics as the cookie path.
-    """
-    return _verify_access_token(request, access_token=access_token, audit=False)
+    return scan_session_providers(
+        provider_hint, lambda p: p.verify_session(access_token=access_token),
+        phase="verify" if audit else "bearer verify", log=_log, on_unreachable=_audit_unreachable,
+    )
 
 
 async def gated_auth_middleware(
-    request: Request,
-    call_next: Callable[[Request], Awaitable[Response]],
+    request: Request, call_next: Callable[[Request], Awaitable[Response]],
 ) -> Response:
     """Engaged only when ``app.state.auth_required is True``."""
     if not getattr(request.app.state, "auth_required", False):
         return await call_next(request)
-
     # Already authenticated by the token-auth seam (service caller on a
     # registered token route): not a cookie session, must not bounce to /login.
     if getattr(request.state, "token_authenticated", False):
         return await call_next(request)
-
     if _path_is_public(request.url.path):
         return await call_next(request)
 
@@ -249,7 +180,7 @@ async def gated_auth_middleware(
     bearer = _extract_bearer(request)
     if bearer:
         try:
-            bearer_session = _verify_bearer(request, access_token=bearer)
+            bearer_session = _verify_access_token(request, access_token=bearer, audit=False)
         except ProviderError as e:
             return unreachable_response(str(e))
         if bearer_session is not None:
@@ -262,9 +193,7 @@ async def gated_auth_middleware(
     if not at and not _rt:
         # No session at all: try the silent portal bounce before /login.
         auto = _auto_sso_response(request)
-        if auto is not None:
-            return auto
-        return _unauth_response(request, reason="no_cookie")
+        return auto if auto is not None else _unauth_response(request, reason="no_cookie")
 
     # An absent AT with a present RT is the COMMON expiry case (the AT cookie's
     # Max-Age tracks the token TTL, so the browser evicts it first) — skip
@@ -272,9 +201,7 @@ async def gated_auth_middleware(
     session = None
     if at:
         try:
-            session = _verify_access_token(
-                request, access_token=at, provider_hint=provider_hint,
-            )
+            session = _verify_access_token(request, access_token=at, provider_hint=provider_hint)
         except ProviderError as e:
             return unreachable_response(str(e))
 
@@ -282,9 +209,7 @@ async def gated_auth_middleware(
         # Rotate via the refresh token before forcing re-login. On success the
         # rotated cookies are re-set and the request served transparently.
         try:
-            refreshed = _attempt_refresh(
-                request, refresh_token=_rt, provider_hint=provider_hint,
-            )
+            refreshed = _attempt_refresh(request, refresh_token=_rt, provider_hint=provider_hint)
         except ProviderError as e:
             # Uncertain (provider unreachable), not rejected: keep the cookies.
             return unreachable_response(str(e))
@@ -295,27 +220,19 @@ async def gated_auth_middleware(
             # Writing the ROTATED RT back is mandatory: Portal runs reuse
             # detection, so replaying the stale RT would revoke the session.
             set_session_cookies(
-                response,
-                access_token=new_session.access_token,
+                response, access_token=new_session.access_token,
                 refresh_token=new_session.refresh_token,
                 access_token_expires_in=_expires_in_seconds(new_session),
-                use_https=detect_https(request),
-                prefix=prefix_from_request(request),
+                use_https=detect_https(request), prefix=prefix_from_request(request),
                 provider=refreshing_provider,
             )
             audit_log(
-                AuditEvent.REFRESH_SUCCESS,
-                provider=refreshing_provider,
-                user_id=new_session.user_id,
-                ip=_client_ip(request),
+                AuditEvent.REFRESH_SUCCESS, provider=refreshing_provider,
+                user_id=new_session.user_id, ip=_client_ip(request),
             )
             return response
 
-        audit_log(
-            AuditEvent.SESSION_VERIFY_FAILURE,
-            reason="no_provider_recognises",
-            ip=_client_ip(request),
-        )
+        audit_log(AuditEvent.SESSION_VERIFY_FAILURE, reason="no_provider_recognises", ip=_client_ip(request))
         response = _unauth_response(request, reason="invalid_or_expired_session")
         # Refresh failed (or no RT): clear the dead cookies under the active
         # prefix so the deletion Path matches the set Path.
@@ -326,9 +243,7 @@ async def gated_auth_middleware(
     response = await call_next(request)
     if not provider_hint and session.provider:
         set_session_provider_cookie(
-            response,
-            provider=session.provider,
-            use_https=detect_https(request),
+            response, provider=session.provider, use_https=detect_https(request),
             prefix=prefix_from_request(request),
         )
     return response
@@ -344,34 +259,17 @@ def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | No
     """
     if not refresh_token:
         return None
-    unavailable_provider: str | None = None
-    for provider in _ordered_session_providers(provider_hint):
-        try:
-            new_session = provider.refresh_session(refresh_token=refresh_token)
-        except RefreshExpiredError:
-            audit_log(
-                AuditEvent.REFRESH_FAILURE,
-                provider=provider.name,
-                reason="refresh_expired",
-                ip=_client_ip(request),
-            )
-            continue
-        except ProviderError as e:
-            _log.warning(
-                "dashboard-auth: provider %r unreachable during refresh: %s",
-                provider.name, e,
-            )
-            audit_log(
-                AuditEvent.REFRESH_FAILURE,
-                provider=provider.name,
-                reason="provider_unreachable",
-                ip=_client_ip(request),
-            )
-            if unavailable_provider is None:
-                unavailable_provider = provider.name
-            continue
-        if new_session is not None:
-            return new_session, provider.name
-    if unavailable_provider is not None:
-        raise ProviderError(unavailable_provider)
-    return None
+
+    def _audit_failure(reason):
+        return lambda provider: audit_log(
+            AuditEvent.REFRESH_FAILURE, provider=provider.name, reason=reason, ip=_client_ip(request),
+        )
+
+    def _refresh(provider):
+        new_session = provider.refresh_session(refresh_token=refresh_token)
+        return None if new_session is None else (new_session, provider.name)
+
+    return scan_session_providers(
+        provider_hint, _refresh, phase="refresh", log=_log, swallow=(RefreshExpiredError,),
+        on_swallow=_audit_failure("refresh_expired"), on_unreachable=_audit_failure("provider_unreachable"),
+    )
