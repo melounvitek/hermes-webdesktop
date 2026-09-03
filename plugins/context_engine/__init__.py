@@ -40,9 +40,7 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:  # noq
     mod = _loader.load_plugin_module(
         f"plugins.context_engine.{name}", engine_dir,
         parents=("plugins", "plugins.context_engine"), logger=logger)
-    if mod is None:
-        return None
-    return _loader.instance_from_module(
+    return mod and _loader.instance_from_module(
         mod, collector=_EngineCollector(engine_name=name), collected_attr="engine",
         base_cls=ContextEngine, name=name, logger=logger)
 
