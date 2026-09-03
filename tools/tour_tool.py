@@ -42,7 +42,6 @@ def tour_tool(action: str = "", surface: Optional[str] = None, selector: Optiona
                 return tool_error(f"steps[{i}] must be an object.")
             if not (step.get("selector") or step.get("title") or step.get("text")):
                 return tool_error(f"steps[{i}] needs a selector and/or title/text.")
-
     fields = {"action": verb, "surface": where, "selector": selector, "title": title,
               "text": text, "side": side, "steps": steps, "step_index": step_index}
     try:

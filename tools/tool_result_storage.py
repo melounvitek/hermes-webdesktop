@@ -50,7 +50,7 @@ def cleanup_spillover_cache(max_age_hours: int = SPILLOVER_MAX_AGE_HOURS) -> int
                 f.unlink()
                 removed += 1
         except OSError:
-            continue
+            pass
     return removed
 
 
@@ -62,8 +62,7 @@ def _prune_spillover_once() -> None:
             return
         _spillover_pruned_once = True
     try:
-        removed = cleanup_spillover_cache()
-        if removed:
+        if removed := cleanup_spillover_cache():
             logger.debug("Pruned %d expired spillover file(s)", removed)
     except Exception as exc:
         logger.debug("Spillover prune failed: %s", exc)
@@ -149,11 +148,8 @@ def generate_preview(content: str, max_chars: int = DEFAULT_PREVIEW_SIZE_CHARS) 
     """Truncate at last newline within max_chars. Returns (preview, has_more)."""
     if len(content) <= max_chars:
         return content, False
-    truncated = content[:max_chars]
-    last_nl = truncated.rfind("\n")
-    if last_nl > max_chars // 2:
-        truncated = truncated[:last_nl + 1]
-    return truncated, True
+    last_nl = content.rfind("\n", 0, max_chars)
+    return content[:last_nl + 1 if last_nl > max_chars // 2 else max_chars], True
 
 
 def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
@@ -189,9 +185,8 @@ _PERSISTED_PATH_RE = re.compile(r"^Full output saved to: (.+)$", re.MULTILINE)
 def extract_persisted_path(content: str) -> str | None:
     """File path from a <persisted-output> block, or None (lets the result-reference stubbing
     guard in agent/tool_guardrails.py carry the spillover path instead of leaving it dangling)."""
-    if not isinstance(content, str) or PERSISTED_OUTPUT_TAG not in content:
-        return None
-    match = _PERSISTED_PATH_RE.search(content)
+    match = (_PERSISTED_PATH_RE.search(content)
+             if isinstance(content, str) and PERSISTED_OUTPUT_TAG in content else None)
     return match.group(1).strip() if match else None
 
 
@@ -215,23 +210,21 @@ def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, en
 
     # Always persist host-side first: cache/spillover is the single canonical home.
     host_path = _write_to_spillover(content, filename)
-    if _is_host_side_env(env):
-        if host_path is not None:
-            return _persisted(host_path)
-    else:
+    host_side = _is_host_side_env(env)
+    if host_side and host_path is not None:
+        return _persisted(host_path)
+    if not host_side:
         # Remote backend: reference the mounted/synced path when the sandbox can actually read
         # it, else write into the sandbox temp dir (containers without the spillover mount).
-        if host_path is not None:
-            visible = _sandbox_visible_spillover_path(host_path, env)
-            if visible is not None:
-                return _persisted(visible, f" [host: {host_path}]")
+        visible = _sandbox_visible_spillover_path(host_path, env) if host_path else None
+        if visible is not None:
+            return _persisted(visible, f" [host: {host_path}]")
         remote_path = f"{_resolve_storage_dir(env)}/{filename}"
         try:
             if _write_to_sandbox(content, remote_path, env):
                 return _persisted(remote_path)
         except Exception as exc:
             logger.warning("Sandbox write failed for %s: %s", tool_use_id, exc)
-
     logger.info("Inline-truncating large tool result: %s (%d chars, no sandbox write)",
                 tool_name, len(content))
     return (f"{preview}\n\n[Truncated: tool response was {len(content):,} chars. "
@@ -242,17 +235,13 @@ def enforce_turn_budget(tool_messages: list[dict], env=None,
                         config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
     """Layer 3: persist the largest non-persisted results first until the turn's aggregate is
     under budget. Mutates the list in-place and returns it."""
-    candidates = []
-    total_size = 0
-    for i, msg in enumerate(tool_messages):
-        size = len(msg.get("content", ""))
-        total_size += size
-        if PERSISTED_OUTPUT_TAG not in msg.get("content", ""):
-            candidates.append((i, size))
+    sizes = [len(msg.get("content", "")) for msg in tool_messages]
+    total_size = sum(sizes)
+    candidates = [(i, size) for i, size in enumerate(sizes)
+                  if PERSISTED_OUTPUT_TAG not in tool_messages[i].get("content", "")]
     if total_size <= config.turn_budget:
         return tool_messages
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    for idx, size in candidates:
+    for idx, size in sorted(candidates, key=lambda x: x[1], reverse=True):
         if total_size <= config.turn_budget:
             break
         content = tool_messages[idx]["content"]

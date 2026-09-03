@@ -155,11 +155,9 @@ def prefers_gateway(config_section: str) -> bool:
     try:
         from hermes_cli.config import load_config
         section = (load_config() or {}).get(config_section)
-        if isinstance(section, dict):
-            return is_truthy_value(section.get("use_gateway"), default=False)
+        return isinstance(section, dict) and is_truthy_value(section.get("use_gateway"))
     except Exception:
-        pass
-    return False
+        return False
 
 
 # Provider value the managed "Nous Subscription" picker rows write for every category;
@@ -179,9 +177,9 @@ def _raw_section(section: str) -> Dict[str, Any] | None:
         from hermes_cli.config import read_raw_config_readonly
         cfg = read_raw_config_readonly() or {}
         raw = cfg.get(section) if isinstance(cfg, dict) else None
+        return raw if isinstance(raw, dict) else None
     except Exception:
         return None
-    return raw if isinstance(raw, dict) else None
 
 
 def read_selection(section: str) -> str | None:
@@ -194,7 +192,7 @@ def read_selection(section: str) -> str | None:
     raw = _raw_section(section)
     if raw is None:
         return None
-    if "use_gateway" in raw and is_truthy_value(raw.get("use_gateway"), default=False):
+    if is_truthy_value(raw.get("use_gateway")):
         return NOUS_MANAGED_PROVIDER
     for key in _SELECTION_NAME_KEYS.get(section, _DEFAULT_NAME_KEYS):
         value = raw.get(key)

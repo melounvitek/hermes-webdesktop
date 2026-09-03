@@ -59,12 +59,10 @@ def _validation_path(error: Any) -> str:
     """Format a jsonschema error path as a compact argument path."""
     path = "arguments"
     for part in getattr(error, "absolute_path", ()):
-        if isinstance(part, int):
-            path += f"[{part}]"
-        elif isinstance(part, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part):
+        if isinstance(part, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", part):
             path += f".{part}"
         else:
-            path += f"[{json.dumps(part, ensure_ascii=False)}]"
+            path += f"[{part if isinstance(part, int) else json.dumps(part, ensure_ascii=False)}]"
     return path
 
 
