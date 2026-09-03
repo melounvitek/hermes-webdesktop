@@ -109,14 +109,11 @@ def _rpc_server_loop(server_sock: socket.socket, task_id: str, tool_call_log: li
                 except (json.JSONDecodeError, UnicodeDecodeError) as exc:
                     resp = tool_error(f"Invalid RPC request: {exc}")
                 else:
-                    if not _rpc_token_ok(request, rpc_token):
-                        resp = tool_error("Unauthorized RPC request")
-                    else:
-                        resp = _handle_rpc_request(
-                            request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
-                            max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
-                            call_start=call_start, where="sandbox",
-                        )
+                    resp = _handle_rpc_request(
+                        request, allowed_tools=allowed_tools, tool_call_counter=tool_call_counter,
+                        max_tool_calls=max_tool_calls, dispatch=dispatch, tool_call_log=tool_call_log,
+                        call_start=call_start, where="sandbox",
+                    ) if _rpc_token_ok(request, rpc_token) else tool_error("Unauthorized RPC request")
                 conn.sendall((resp + "\n").encode())
     except socket.timeout:
         logger.debug("RPC listener socket timeout")
@@ -146,10 +143,8 @@ def _rpc_poll_loop(env, rpc_dir: str, task_id: str, tool_call_log: list, tool_ca
             if not output:
                 stop_event.wait(poll_interval)
                 continue
-            req_files = sorted(
-                f for f in (line.strip() for line in output.split("\n"))
-                if f and not f.endswith(".tmp") and "/req_" in f
-            )
+            req_files = sorted(f for f in (line.strip() for line in output.split("\n"))
+                               if f and not f.endswith(".tmp") and "/req_" in f)
             for req_file in req_files:
                 if stop_event.is_set():
                     break

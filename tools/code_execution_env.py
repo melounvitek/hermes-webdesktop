@@ -22,14 +22,12 @@ _IS_WINDOWS = platform.system() == "Windows"
 # The broad "HERMES_" prefix is deliberately NOT safe — it leaked config vars
 # without a secret substring (HERMES_BASE_URL, HERMES_KANBAN_DB, *_WEBHOOK).
 # HERMES_RPC_SOCKET / HERMES_RPC_DIR / TZ / HOME are injected after scrubbing.
-_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM",
-                      "TMPDIR", "TMP", "TEMP", "SHELL", "LOGNAME",
-                      "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
+_SAFE_ENV_PREFIXES = ("PATH", "HOME", "USER", "LANG", "LC_", "TERM", "TMPDIR", "TMP", "TEMP", "SHELL",
+                      "LOGNAME", "XDG_", "PYTHONPATH", "VIRTUAL_ENV", "CONDA")
 # "PASS" is intentionally absent: it false-positives on BYPASS_CACHE /
 # COMPASS_DIR / PASSENGER_HOST while PASSWORD/PASSWD already cover credentials.
-_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL",
-                      "PASSWD", "AUTH", "DSN", "WEBHOOK",
-                      "CREDS", "BEARER", "APIKEY")
+_SECRET_SUBSTRINGS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "PASSWD", "AUTH", "DSN",
+                      "WEBHOOK", "CREDS", "BEARER", "APIKEY")
 
 # Non-secret runtime-location flags that repo-root modules a sandbox script
 # imports may read at import time. HERMES_DELEGATED_CHILD_CONTEXT must ride
@@ -212,17 +210,14 @@ def _uses_hermes_python_environment(python_path: str) -> bool:
 
 
 def _resolve_child_python(mode: str) -> str:
-    """Interpreter for the child: ``sys.executable`` in strict mode; in project
-    mode the active VIRTUAL_ENV/CONDA_PREFIX python if it exists and passes the
-    3.8+ probe, else ``sys.executable``."""
+    """Child interpreter: ``sys.executable`` in strict mode; in project mode the active
+    VIRTUAL_ENV/CONDA_PREFIX python if it exists and passes the 3.8+ probe, else ``sys.executable``."""
     if mode != "project":
         return sys.executable
     subdir, exe_names = ("Scripts", ("python.exe", "python3.exe")) if _IS_WINDOWS else ("bin", ("python", "python3"))
     for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
         root = os.environ.get(var, "").strip()
-        if not root:
-            continue
-        for exe in exe_names:
+        for exe in exe_names if root else ():
             candidate = os.path.join(root, subdir, exe)
             if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
                 continue
@@ -257,11 +252,7 @@ def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
             return session_cwd
     from agent.runtime_cwd import scope_terminal_cwd
     raw = scope_terminal_cwd().strip()
-    if raw:
-        expanded = os.path.expanduser(raw)
-        if os.path.isdir(expanded):
-            return expanded
-    here = os.getcwd()
-    if os.path.isdir(here):
-        return here
+    for candidate in (os.path.expanduser(raw) if raw else "", os.getcwd()):
+        if candidate and os.path.isdir(candidate):
+            return candidate
     return staging_dir

@@ -28,8 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from tools.thread_context import propagate_context_to_thread
 from tools.registry import registry, tool_error
 
-# Env/interpreter resolution and RPC servers live in sibling modules; re-exported
-# here so `from tools.code_execution_tool import X` / patch() targets keep working.
+# Sibling-module symbols re-exported so `from tools.code_execution_tool import X` / patch() keep working.
 from tools.code_execution_env import (  # noqa: F401
     _SAFE_ENV_PREFIXES, _SECRET_SUBSTRINGS, _HERMES_CHILD_ALLOWED, _WINDOWS_ESSENTIAL_ENV_VARS,
     _scrub_child_env, _build_child_env, _PROBE_CACHE_MAX, _usable_python_cache, _python_prefix_cache,
@@ -53,51 +52,34 @@ DEFAULT_TIMEOUT = 300        # 5 minutes
 DEFAULT_MAX_TOOL_CALLS = 50
 MAX_STDOUT_BYTES = 50_000    # 50 KB
 MAX_STDERR_BYTES = 10_000    # 10 KB
-# Hard ceiling on the spilled file, mirroring web_tools' MAX_STORED_TEXT_CHARS
-# rationale: a runaway print loop must not write unbounded bytes to disk.
+# Hard ceiling on the spilled file (as web_tools' MAX_STORED_TEXT_CHARS): a runaway print loop must not fill the disk.
 MAX_SPILLED_STDOUT_BYTES = 5_000_000
 
 
 def _truncate_stdout_text(stdout_text: str) -> Tuple[str, Dict[str, Any]]:
-    """Cap stdout by bytes (40% head / 60% tail) with explicit truncation metadata.
-
-    Byte counts ride alongside the textual marker because a client layer can miss
-    or re-truncate the marker. The omitted middle is spilled to cache/exec and the
-    result carries the path (recover-don't-rerun, as web_extract's cache/web).
-    """
+    """Cap stdout by bytes (40% head / 60% tail) with explicit truncation metadata: byte counts
+    ride alongside the textual marker because a client layer can miss or re-truncate it. The
+    omitted middle is spilled to cache/exec and the result carries the path (recover-don't-rerun)."""
     stdout_bytes = stdout_text.encode("utf-8", errors="replace")
     total = len(stdout_bytes)
+    captured = min(total, MAX_STDOUT_BYTES)
+    metadata: Dict[str, Any] = {"stdout_truncated": total > captured, "stdout_bytes_captured": captured,
+                                "stdout_bytes_total": total, "stdout_bytes_omitted": total - captured}
     if total <= MAX_STDOUT_BYTES:
-        return stdout_bytes.decode("utf-8", errors="replace"), {
-            "stdout_truncated": False, "stdout_bytes_captured": total,
-            "stdout_bytes_total": total, "stdout_bytes_omitted": 0,
-        }
+        return stdout_bytes.decode("utf-8", errors="replace"), metadata
     head_bytes = int(MAX_STDOUT_BYTES * 0.4)
-    omitted = total - MAX_STDOUT_BYTES
-    text = (
-        stdout_bytes[:head_bytes].decode("utf-8", errors="replace")
-        + f"\n\n... [OUTPUT TRUNCATED - {omitted:,} bytes omitted "
-        f"out of {total:,} total] ...\n\n"
-        + stdout_bytes[head_bytes - MAX_STDOUT_BYTES:].decode("utf-8", errors="replace")
-    )
-    metadata: Dict[str, Any] = {
-        "stdout_truncated": True, "stdout_bytes_captured": MAX_STDOUT_BYTES,
-        "stdout_bytes_total": total, "stdout_bytes_omitted": omitted,
-        "warning": (
-            "execute_code stdout was truncated; the script did run, but only "
-            "the captured head/tail output is included. Re-run only with "
-            "narrower output if the omitted data is required."
-        ),
-    }
+    text = (stdout_bytes[:head_bytes].decode("utf-8", errors="replace")
+            + f"\n\n... [OUTPUT TRUNCATED - {total - captured:,} bytes omitted out of {total:,} total] ...\n\n"
+            + stdout_bytes[head_bytes - MAX_STDOUT_BYTES:].decode("utf-8", errors="replace"))
+    metadata["warning"] = ("execute_code stdout was truncated; the script did run, but only "
+                           "the captured head/tail output is included. Re-run only with "
+                           "narrower output if the omitted data is required.")
     spill_path = _spill_full_stdout(stdout_text)
     if spill_path:
         metadata["stdout_spill_path"] = spill_path
-        metadata["warning"] = (
-            "execute_code stdout was truncated (head/tail shown); the "
-            f"script did run. FULL output saved to {spill_path} — page it "
-            f'with read_file(path="{spill_path}", offset=...) instead of '
-            "re-running."
-        )
+        metadata["warning"] = ("execute_code stdout was truncated (head/tail shown); the "
+                               f"script did run. FULL output saved to {spill_path} — page it "
+                               f'with read_file(path="{spill_path}", offset=...) instead of re-running.')
     return text, metadata
 
 
@@ -133,52 +115,34 @@ def check_sandbox_requirements() -> bool:
     except Exception:
         logger.debug("Could not resolve terminal config for execute_code availability", exc_info=True)
         return False
-    if config.get("env_type") == "vercel_sandbox":
-        return _check_vercel_sandbox_requirements(config)
-    return True
+    return config.get("env_type") != "vercel_sandbox" or _check_vercel_sandbox_requirements(config)
 
 
-# ---------------------------------------------------------------------------
-# hermes_tools.py code generator
-# ---------------------------------------------------------------------------
+# ---- hermes_tools.py code generator ----
 
 # Per-tool stub templates: (signature, docstring, args_dict_expr — the JSON payload sent over RPC).
 _TOOL_STUBS = {
-    "web_search": (
-        "query: str, limit: int = 5",
+    "web_search": ("query: str, limit: int = 5",
         '"""Search the web. Returns dict with data.web list of {url, title, description}."""',
-        '{"query": query, "limit": limit}',
-    ),
-    "web_extract": (
-        "urls: list, char_limit: int = None",
+        '{"query": query, "limit": limit}'),
+    "web_extract": ("urls: list, char_limit: int = None",
         '"""Extract content from URLs (no LLM summarization). Returns dict with results list of {url, title, content, error}. Pages over char_limit (default 15000) are head+tail truncated with the full text stored on disk; the content footer gives the path. content is markdown."""',
-        '{"urls": urls, "char_limit": char_limit}',
-    ),
-    "read_file": (
-        "path: str, offset: int = 1, limit: int = 2000",
+        '{"urls": urls, "char_limit": char_limit}'),
+    "read_file": ("path: str, offset: int = 1, limit: int = 2000",
         '"""Read a file (1-indexed lines). Returns dict with "content" and "total_lines"."""',
-        '{"path": path, "offset": offset, "limit": limit}',
-    ),
-    "write_file": (
-        "path: str, content: str, cross_profile: bool = False",
+        '{"path": path, "offset": offset, "limit": limit}'),
+    "write_file": ("path: str, content: str, cross_profile: bool = False",
         '"""Write content to a file (always overwrites). Returns dict with status."""',
-        '{"path": path, "content": content, "cross_profile": cross_profile}',
-    ),
-    "search_files": (
-        'pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0',
+        '{"path": path, "content": content, "cross_profile": cross_profile}'),
+    "search_files": ('pattern: str, target: str = "content", path: str = ".", file_glob: str = None, limit: int = 50, offset: int = 0, output_mode: str = "content", context: int = 0',
         '"""Search file contents (target="content") or find files by name (target="files"). Returns dict with "matches"."""',
-        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context}',
-    ),
-    "patch": (
-        'path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False',
+        '{"pattern": pattern, "target": target, "path": path, "file_glob": file_glob, "limit": limit, "offset": offset, "output_mode": output_mode, "context": context}'),
+    "patch": ('path: str = None, old_string: str = None, new_string: str = None, replace_all: bool = False, mode: str = "replace", patch: str = None, cross_profile: bool = False',
         '"""Targeted find-and-replace (mode="replace") or V4A multi-file patches (mode="patch"). Returns dict with status."""',
-        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}',
-    ),
-    "terminal": (
-        "command: str, timeout: int = None, workdir: str = None",
+        '{"path": path, "old_string": old_string, "new_string": new_string, "replace_all": replace_all, "mode": mode, "patch": patch, "cross_profile": cross_profile}'),
+    "terminal": ("command: str, timeout: int = None, workdir: str = None",
         '"""Run a shell command (foreground only). Returns dict with "output" and "exit_code"."""',
-        '{"command": command, "timeout": timeout, "workdir": workdir}',
-    ),
+        '{"command": command, "timeout": timeout, "workdir": workdir}'),
 }
 
 
@@ -433,9 +397,14 @@ def _call(tool_name, args):
 '''
 
 
-# ---------------------------------------------------------------------------
-# Remote execution support (file-based RPC via terminal backend)
-# ---------------------------------------------------------------------------
+# ---- Remote execution support (file-based RPC via terminal backend) ----
+
+# execute_code's container_config keys (a subset of terminal_tool's; the create path fills the rest).
+_CONTAINER_CONFIG_DEFAULTS = (
+    ("container_cpu", 1), ("container_memory", 5120), ("container_disk", 51200), ("container_persistent", True),
+    ("vercel_runtime", ""), ("docker_volumes", []), ("docker_run_as_host_user", False), ("docker_network", True),
+)
+
 
 def _get_or_create_env(task_id: str):
     """``(env, env_type)`` — the environment the terminal/file tools share for *task_id*, created on
@@ -467,16 +436,7 @@ def _get_or_create_env(task_id: str):
         overrides = _task_env_overrides.get(effective_task_id, {})
         container_config = None
         if _is_container_backend(env_type):
-            container_config = {
-                "container_cpu": config.get("container_cpu", 1),
-                "container_memory": config.get("container_memory", 5120),
-                "container_disk": config.get("container_disk", 51200),
-                "container_persistent": config.get("container_persistent", True),
-                "vercel_runtime": config.get("vercel_runtime", ""),
-                "docker_volumes": config.get("docker_volumes", []),
-                "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
-                "docker_network": config.get("docker_network", True),
-            }
+            container_config = {key: config.get(key, default) for key, default in _CONTAINER_CONFIG_DEFAULTS}
         logger.info("Creating new %s environment for execute_code task %s...",
                      env_type, effective_task_id[:8])
         env = _create_environment(
@@ -609,10 +569,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
     sandbox_dir = f"{_env_temp_dir(env)}/hermes_exec_{uuid.uuid4().hex[:12]}"
     quoted_sandbox_dir = shlex.quote(sandbox_dir)
     quoted_rpc_dir = shlex.quote(f"{sandbox_dir}/rpc")
-    tool_call_log: list = []
-    tool_call_counter = [0]
-    stop_event = threading.Event()
-    rpc_thread = None
+    tool_call_counter, stop_event, rpc_thread = [0], threading.Event(), None
     try:
         env.execute(f"mkdir -p {quoted_rpc_dir}", cwd="/", timeout=10)
         rpc_token = secrets.token_urlsafe(32)
@@ -622,15 +579,12 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         # Wrapped so the thread inherits the turn's approval context + callbacks
         # (tools.thread_context) — else sandbox RPC tool calls lose approval routing.
         rpc_thread = threading.Thread(
-            target=propagate_context_to_thread(_rpc_poll_loop),
-            args=(env, f"{sandbox_dir}/rpc", effective_task_id, tool_call_log, tool_call_counter,
-                  max_tool_calls, sandbox_tools, stop_event, rpc_token),
-            daemon=True,
-        )
+            target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
+            args=(env, f"{sandbox_dir}/rpc", effective_task_id, [], tool_call_counter,
+                  max_tool_calls, sandbox_tools, stop_event, rpc_token))
         rpc_thread.start()
-        env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} "
-                      f"HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
-                      f"PYTHONDONTWRITEBYTECODE=1")
+        env_prefix = (f"HERMES_RPC_DIR={quoted_rpc_dir} HERMES_RPC_TOKEN={shlex.quote(rpc_token)} "
+                      "PYTHONDONTWRITEBYTECODE=1")
         tz = os.getenv("HERMES_TIMEZONE", "").strip()
         if tz:
             env_prefix += f" TZ={shlex.quote(tz)}"
@@ -671,21 +625,15 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
     (tools/code_kernel_remote.py) first, else the per-call script ship — the fail-open route when
     a kernel cannot be spawned and the only route for hosts that cannot sustain a background process."""
     _cfg = _load_config()
-    timeout = _cfg.get("timeout", DEFAULT_TIMEOUT)
-    max_tool_calls = _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
-    sandbox_tools = _sandbox_tools_for(enabled_tools)
-    effective_task_id = task_id or "default"
+    timeout, max_tool_calls = _cfg.get("timeout", DEFAULT_TIMEOUT), _cfg.get("max_tool_calls", DEFAULT_MAX_TOOL_CALLS)
+    sandbox_tools, effective_task_id = _sandbox_tools_for(enabled_tools), task_id or "default"
     env, env_type = _get_or_create_env(effective_task_id)
     exec_start = time.monotonic()
     try:
         py_check = env.execute("command -v python3 >/dev/null 2>&1 && echo OK", cwd="/", timeout=15)
         if "OK" not in py_check.get("output", ""):
-            return json.dumps({
-                "status": "error",
-                "error": (f"Python 3 is not available in the {env_type} terminal "
-                          "environment. Install Python to use execute_code with remote backends."),
-                "tool_calls_made": 0, "duration_seconds": 0,
-            })
+            return _error_result(f"Python 3 is not available in the {env_type} terminal "
+                                 "environment. Install Python to use execute_code with remote backends.")
         # Session-kernel path: one persistent kernel per owner on the
         # run-to-completion transport. Spawn failure falls OPEN to the per-call
         # path below so a degraded remote host never blocks execution.
@@ -709,9 +657,7 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
                                 timeout=timeout, max_tool_calls=max_tool_calls, exec_start=exec_start)
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
+# ---- Main entry point ----
 
 
 def execute_code(
@@ -721,33 +667,24 @@ def execute_code(
     reset: bool = False,
 ) -> str:
     """Run Python in the session's persistent kernel (local) or on the remote terminal backend,
-    with RPC access to a subset of Hermes tools; returns the JSON result string.
-
-    "Sandbox" means the security envelope (env scrubbing, tool whitelist + call budget, output
-    redaction), not an isolation jail: default `project` mode runs in the session's cwd with the
-    project venv. ``enabled_tools`` ∩ SANDBOX_ALLOWED_TOOLS; ``reset`` kills the existing kernel
-    first (ignored on per-call paths).
-    """
+    with RPC access to a subset of Hermes tools; returns the JSON result string. "Sandbox" means
+    the security envelope (env scrubbing, tool whitelist + call budget, output redaction), not an
+    isolation jail: default `project` mode runs in the session's cwd with the project venv.
+    ``enabled_tools`` ∩ SANDBOX_ALLOWED_TOOLS; ``reset`` kills the existing kernel first."""
     if not SANDBOX_AVAILABLE:
-        return tool_error(
-            "execute_code sandbox is unavailable in this environment. "
-            "Use normal tool calls (terminal, read_file, write_file, ...) instead."
-        )
+        return tool_error("execute_code sandbox is unavailable in this environment. "
+                          "Use normal tool calls (terminal, read_file, write_file, ...) instead.")
     # Fail closed under a terminal-policy refusal scope: the routed profile's terminal
     # policy is unresolved, so refuse rather than inherit the launch process's ambient policy.
     try:
         from tools.terminal_scope import enforce_no_refusal
         enforce_no_refusal()
     except Exception as refusal:
-        return tool_error(
-            f"execute_code refused: {refusal} "
-            "(profile terminal policy unresolved; fix the profile's config.yaml / .env and retry)"
-        )
+        return tool_error(f"execute_code refused: {refusal} "
+                          "(profile terminal policy unresolved; fix the profile's config.yaml / .env and retry)")
     if not code or not code.strip():
-        return tool_error(
-            "No code provided. execute_code requires a non-empty 'code' "
-            "parameter containing Python source. To run shell commands, use terminal(command=...) instead."
-        )
+        return tool_error("No code provided. execute_code requires a non-empty 'code' "
+                          "parameter containing Python source. To run shell commands, use terminal(command=...) instead.")
     # Hard-block gateway-lifecycle commands (mirrors the terminal_tool guard — otherwise
     # `os.system("launchctl bootout ...")` here bypasses it and SIGTERMs the gateway mid-task).
     # Gated on PID-file ownership, not the inherited env marker.
@@ -801,8 +738,8 @@ def _kill_process_group(proc, escalate: bool = False):
     import signal as _signal
     def _tree_signal(sig) -> None:
         try:
-            from agent.deadline import kill_process_tree as _deadline_kill_tree
-            _deadline_kill_tree(proc.pid, sig=sig)
+            from agent.deadline import kill_process_tree
+            kill_process_tree(proc.pid, sig=sig)
         except Exception as e:
             logger.debug("Could not terminate process tree: %s", e, exc_info=True)
             try:
@@ -828,9 +765,7 @@ def _load_config() -> dict:
         return {}
 
 
-# ---------------------------------------------------------------------------
-# Execution mode resolution (strict vs project)
-# ---------------------------------------------------------------------------
+# ---- Execution mode resolution (strict vs project) ----
 
 # Canonical code_execution.mode values (referenced by tests and the config layer). Session
 # kernels are the only local execution model; a leftover kernel_mode config key is ignored.
@@ -851,32 +786,23 @@ def _get_execution_mode() -> str:
     return DEFAULT_EXECUTION_MODE
 
 
-# ---------------------------------------------------------------------------
-# OpenAI Function-Calling Schema
-# ---------------------------------------------------------------------------
+# ---- OpenAI Function-Calling Schema ----
 
 # Per-tool documentation lines for the execute_code description, in canonical display order.
 _TOOL_DOC_LINES = [
-    ("web_search",
-     "  web_search(query: str, limit: int = 5) -> dict\n"
+    ("web_search", "  web_search(query: str, limit: int = 5) -> dict\n"
      "    Returns {\"data\": {\"web\": [{\"url\", \"title\", \"description\"}, ...]}}"),
-    ("web_extract",
-     "  web_extract(urls: list[str], char_limit: int = None) -> dict\n"
+    ("web_extract", "  web_extract(urls: list[str], char_limit: int = None) -> dict\n"
      "    Returns {\"results\": [{\"url\", \"title\", \"content\", \"error\"}, ...]} where content is markdown.\n"
      "    No LLM summarization. Pages over char_limit (default 15000) are head+tail truncated; full text stored on disk (path in the content footer)."),
-    ("read_file",
-     "  read_file(path: str, offset: int = 1, limit: int = 2000) -> dict\n"
+    ("read_file", "  read_file(path: str, offset: int = 1, limit: int = 2000) -> dict\n"
      "    Lines are 1-indexed. Returns {\"content\": \"...\", \"total_lines\": N}"),
-    ("write_file",
-     "  write_file(path: str, content: str) -> dict\n    Always overwrites the entire file."),
-    ("search_files",
-     "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50) -> dict\n"
+    ("write_file", "  write_file(path: str, content: str) -> dict\n    Always overwrites the entire file."),
+    ("search_files", "  search_files(pattern: str, target=\"content\", path=\".\", file_glob=None, limit=50) -> dict\n"
      "    target: \"content\" (search inside files) or \"files\" (find files by name). Returns {\"matches\": [...]}"),
-    ("patch",
-     "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict\n"
+    ("patch", "  patch(path: str, old_string: str, new_string: str, replace_all: bool = False) -> dict\n"
      "    Replaces old_string with new_string in the file."),
-    ("terminal",
-     "  terminal(command: str, timeout=None, workdir=None) -> dict\n"
+    ("terminal", "  terminal(command: str, timeout=None, workdir=None) -> dict\n"
      "    Foreground only (no background/pty). Returns {\"output\": \"...\", \"exit_code\": N}"),
 ]
 
@@ -891,8 +817,7 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         mode = _get_execution_mode()
     tool_lines = "\n".join(doc for name, doc in _TOOL_DOC_LINES if name in enabled_sandbox_tools)
     import_examples = [n for n in ("web_search", "terminal") if n in enabled_sandbox_tools]
-    if not import_examples:
-        import_examples = sorted(enabled_sandbox_tools)[:2]
+    import_examples = import_examples or sorted(enabled_sandbox_tools)[:2]
     import_str = ", ".join(import_examples) + ", ..." if import_examples else "..."
     if mode == "strict":
         cwd_note = (
@@ -933,20 +858,12 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         "parameters": {
             "type": "object",
             "properties": {
-                "code": {
-                    "type": "string",
-                    "description": (
-                        "Python code to execute. Import tools with "
-                        f"`from hermes_tools import {import_str}` "
-                        "and print your final result to stdout."
-                    ),
-                },
-                "reset": {
-                    "type": "boolean",
-                    "description": (
-                        "Discard the kernel's persistent state and start fresh before running this code."
-                    ),
-                },
+                "code": {"type": "string", "description": (
+                    "Python code to execute. Import tools with "
+                    f"`from hermes_tools import {import_str}` "
+                    "and print your final result to stdout.")},
+                "reset": {"type": "boolean", "description": (
+                    "Discard the kernel's persistent state and start fresh before running this code.")},
             },
             "required": ["code"],
         },
@@ -962,17 +879,13 @@ def _execute_code_handler(args: dict, **kwargs) -> str:
     actionable error before dispatching to ``execute_code``."""
     if "code" not in args and "command" in args:
         logger.warning("execute_code received 'command' instead of the required 'code' argument")
-        return tool_error(
-            "execute_code received a 'command' parameter, but it requires "
-            "Python source in 'code'. Use terminal(command=...) for shell "
-            "commands; for Python, retry as execute_code(code=...)."
-        )
+        return tool_error("execute_code received a 'command' parameter, but it requires "
+                          "Python source in 'code'. Use terminal(command=...) for shell "
+                          "commands; for Python, retry as execute_code(code=...).")
     code = args.get("code", "")
     if code is not None and not isinstance(code, str):
-        return tool_error(
-            f"execute_code received a {type(code).__name__} in 'code', but it "
-            "requires Python source as a string. Retry as execute_code(code=\"...\")."
-        )
+        return tool_error(f"execute_code received a {type(code).__name__} in 'code', but it "
+                          "requires Python source as a string. Retry as execute_code(code=\"...\").")
     return execute_code(code=code or "", task_id=kwargs.get("task_id"),
                         enabled_tools=kwargs.get("enabled_tools"), reset=bool(args.get("reset", False)))
 

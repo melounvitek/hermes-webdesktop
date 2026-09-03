@@ -30,6 +30,7 @@ import tempfile
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -201,11 +202,10 @@ class _BoundedBuffer:
         self.total = 0
 
     def append(self, data: bytes, cap: int) -> None:
-        if self.total >= cap:
-            return
-        keep = data[: cap - self.total]
-        self.chunks.append(keep)
-        self.total += len(keep)
+        keep = data[: max(0, cap - self.total)]
+        if keep:
+            self.chunks.append(keep)
+            self.total += len(keep)
 
     def drain(self) -> str:
         chunks, self.chunks, self.total = self.chunks, [], 0
@@ -216,9 +216,7 @@ class SessionKernel:
     """One live kernel process plus its RPC server and reader threads."""
 
     def __init__(self, key: Tuple):
-        self.key = key
-        self.owner: str = key[0]
-        self.lock = threading.Lock()
+        self.key, self.owner, self.lock = key, key[0], threading.Lock()
         self.proc: Optional[subprocess.Popen] = None
         self.tmpdir = self.rpc_token = self.sentinel = ""
         self.sock_path: Optional[str] = None
@@ -228,8 +226,7 @@ class SessionKernel:
         self.tool_call_counter: List[int] = [0]
         self.response_q: "queue.Queue[dict]" = queue.Queue()
         self.raw, self.stderr = _BoundedBuffer(), _BoundedBuffer()
-        self.execution_count = 0
-        self.last_used: float = time.monotonic()
+        self.execution_count, self.last_used = 0, time.monotonic()
         self.cell_authority: Optional[CellAuthority] = None
 
     def alive(self) -> bool:
@@ -259,8 +256,7 @@ class KernelRegistry:
 
     def __init__(self, teardown: Callable[[Any], None]):
         self.kernels: Dict[Tuple, Any] = {}
-        self.lock = threading.Lock()
-        self._teardown = teardown
+        self.lock, self._teardown = threading.Lock(), teardown
 
     def shutdown(self, owner: Optional[str] = None) -> None:
         """Tear down every kernel, or every kernel one owner (key[0]) holds."""
@@ -295,8 +291,7 @@ def _lifecycle_limits() -> Tuple[int, int]:
             return max(1, int(config.get(key, default)))
         except (TypeError, ValueError):
             return default
-    return (limit("max_session_kernels", DEFAULT_MAX_SESSION_KERNELS),
-            limit("kernel_idle_timeout", DEFAULT_KERNEL_IDLE_TIMEOUT))
+    return limit("max_session_kernels", DEFAULT_MAX_SESSION_KERNELS), limit("kernel_idle_timeout", DEFAULT_KERNEL_IDLE_TIMEOUT)
 
 
 def _resolve_owner(task_id: str) -> str:
@@ -418,10 +413,7 @@ def _stdout_reader(kernel: SessionKernel) -> None:
 def _stderr_reader(kernel: SessionKernel) -> None:
     from tools.code_execution_tool import MAX_STDERR_BYTES
     assert kernel.proc is not None and kernel.proc.stderr is not None
-    while True:
-        chunk = kernel.proc.stderr.read1(4096)
-        if not chunk:
-            return
+    while chunk := kernel.proc.stderr.read1(4096):
         kernel.stderr.append(chunk, MAX_STDERR_BYTES)
 
 
@@ -435,11 +427,10 @@ def _bind_rpc_socket(kernel: SessionKernel) -> str:
         rpc_endpoint = f"tcp://{host}:{port}"
     else:
         sock_tmpdir = "/tmp" if sys.platform == "darwin" else tempfile.gettempdir()
-        kernel.sock_path = os.path.join(sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
+        rpc_endpoint = kernel.sock_path = os.path.join(sock_tmpdir, f"hermes_rpc_{uuid.uuid4().hex}.sock")
         server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server_sock.bind(kernel.sock_path)
         os.chmod(kernel.sock_path, 0o600)
-        rpc_endpoint = kernel.sock_path
     server_sock.listen(1)
     kernel.server_sock = server_sock
     return rpc_endpoint
@@ -454,8 +445,7 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     rpc_endpoint = _bind_rpc_socket(kernel)
     for name, src in (("hermes_tools.py", generate_hermes_tools_module(list(sandbox_tools))),
                       ("hermes_kernel_runner.py", KERNEL_RUNNER_SOURCE)):
-        with open(os.path.join(kernel.tmpdir, name), "w", encoding="utf-8") as f:
-            f.write(src)
+        Path(kernel.tmpdir, name).write_text(src, encoding="utf-8")
     child_env = _build_child_env(rpc_endpoint=rpc_endpoint, rpc_token=kernel.rpc_token,
                                  tmpdir=kernel.tmpdir, child_python=child_python)
     child_env["HERMES_KERNEL_SENTINEL"] = kernel.sentinel
@@ -466,9 +456,8 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     kernel.proc = subprocess.Popen(
         [child_python, os.path.join(kernel.tmpdir, "hermes_kernel_runner.py")],
         # Strict mode passes an empty cwd: the kernel's staging dir plays the per-call tmpdir's role.
-        cwd=child_cwd or kernel.tmpdir, env=child_env,
+        cwd=child_cwd or kernel.tmpdir, env=child_env, start_new_session=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
-        start_new_session=True,
         creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
     )
     # Deliberately NOT propagate_context_to_thread: that would freeze the spawning cell's
@@ -537,9 +526,8 @@ def _cell_result(kernel: SessionKernel, key: Tuple, status: str, payload: Dict[s
     duration = round(time.monotonic() - exec_start, 2)
     kernel.execution_count = int(payload.get("execution_count", kernel.execution_count + 1))
     stderr_raw = kernel.stderr.drain()
-    stdout_text = clean(str(payload.get("stdout", "")) + kernel.raw.drain())
+    stdout_text, stdout_metadata = _truncate_stdout_text(clean(str(payload.get("stdout", "")) + kernel.raw.drain()))
     cell_stderr = clean(str(payload.get("stderr", "")) + stderr_raw)
-    stdout_text, stdout_metadata = _truncate_stdout_text(stdout_text)
     cell_status = payload.get("status", "")
     result: Dict[str, Any] = {
         "status": status, "output": stdout_text, "exit_code": 0,
@@ -609,9 +597,7 @@ def execute_in_session_kernel(
             assert kernel.proc is not None and kernel.proc.stdin is not None
             # Per-cell tool budget: the RPC loop enforces counter < max; reset without restarting.
             kernel.tool_call_counter[0] = 0
-            # Anything raw that leaked between cells belongs to no cell.
-            kernel.raw.drain()
-            kernel.stderr.drain()
+            kernel.raw.drain(), kernel.stderr.drain()  # raw output leaked between cells belongs to no cell
             kernel.cell_authority = authority
             kernel.proc.stdin.write((json.dumps({"id": uuid.uuid4().hex, "code": code}) + "\n").encode("utf-8"))
             kernel.proc.stdin.flush()
@@ -623,13 +609,11 @@ def execute_in_session_kernel(
             )
             return json.dumps(result, ensure_ascii=False)
         except Exception as exc:  # pragma: no cover - defensive parity with per-call
+            from tools.code_execution_tool import _error_result
             logger.error("session kernel failed: %s: %s", type(exc).__name__, exc, exc_info=True)
             _REGISTRY.discard(key, kernel)
-            return json.dumps({
-                "status": "error", "error": str(exc),
-                "tool_calls_made": kernel.tool_call_counter[0],
-                "duration_seconds": round(time.monotonic() - exec_start, 2),
-            }, ensure_ascii=False)
+            return _error_result(str(exc), tool_calls_made=kernel.tool_call_counter[0],
+                                 duration=round(time.monotonic() - exec_start, 2))
         finally:
             # The cell has settled on every path: its tool authority retires with it, so
             # nothing the cell left running can dispatch under it.
