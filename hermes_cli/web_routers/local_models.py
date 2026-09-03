@@ -199,7 +199,10 @@ def download_file(url: str, dest: Path, job: Dict[str, Any], *,
     progress_lock = threading.Lock()
 
     def pump(r, f) -> None:
-        for chunk in iter(lambda: r.read(_CHUNK), b""):
+        while True:
+            chunk = r.read(_CHUNK)
+            if not chunk:
+                break
             f.write(chunk)
             with progress_lock:
                 file_done[0] += len(chunk)
