@@ -477,6 +477,49 @@ def _decode_menu_key(stdscr, key: int) -> str:
 # An on_action reducer returns this to keep looping (state changed, menu not resolved).
 _KEEP = object()
 
+# Sentinel from ``_route_key``: the key was consumed by the search prompt; redraw, no action.
+_CONSUMED = object()
+
+
+def _init_colors(curses, extra_color_pairs: bool) -> None:
+    curses.curs_set(0)
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)
+        if extra_color_pairs:
+            curses.init_pair(3, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
+
+
+def _route_key(curses, stdscr, key: int, search: _SearchState, use_search: bool):
+    """Turn a raw key into a ``NAV_*`` action, honoring an active ``/`` search prompt.
+
+    Returns ``(action, changed)``; ``action`` may be ``_CONSUMED`` (redraw only) or
+    ``NAV_SELECT`` for Enter inside the prompt; ``changed`` means the query changed.
+    """
+    if use_search and search.active and key == 27:
+        # Enhanced keys (Ghostty/Kitty) also start with ESC: decode the full sequence before
+        # treating a genuine Escape as "stop search".
+        action = _decode_menu_key(stdscr, key)
+        if action == NAV_CANCEL:
+            search.active = False
+            search.query = ""
+            return _CONSUMED, True
+        return (_CONSUMED if action == NAV_NONE else action), False
+    if use_search and search.active:
+        # Active search consumes query-editing keys; nav keys fall through.
+        handled, confirm, changed = _handle_active_search_key(curses, key, search)
+        if confirm:
+            return NAV_SELECT, changed
+        if handled:
+            return _CONSUMED, changed
+        return _decode_menu_key(stdscr, key), changed
+    if use_search and key == ord("/"):
+        search.active = True
+        return _CONSUMED, False
+    return _decode_menu_key(stdscr, key), False
+
 
 def _run_curses_menu(
     *,
@@ -548,14 +591,7 @@ def _run_curses_menu(
             return True
 
         def _draw(stdscr):
-            curses.curs_set(0)
-            if curses.has_colors():
-                curses.start_color()
-                curses.use_default_colors()
-                curses.init_pair(1, curses.COLOR_GREEN, -1)
-                curses.init_pair(2, curses.COLOR_YELLOW, -1)
-                if extra_color_pairs:
-                    curses.init_pair(3, 8 if curses.COLORS > 8 else curses.COLOR_WHITE, -1)
+            _init_colors(curses, extra_color_pairs)
             cursor = initial_cursor
             scroll_offset = 0
             search = _SearchState()
@@ -583,38 +619,14 @@ def _run_curses_menu(
                     draw_footer(stdscr, max_y, max_x)
                 stdscr.refresh()
 
-                key = stdscr.getch()
-                if use_search and search.active and key == 27:
-                    # Enhanced keys (Ghostty/Kitty) also start with ESC: decode the full
-                    # sequence before treating a genuine Escape as "stop search".
-                    action = _decode_menu_key(stdscr, key)
-                    if action == NAV_CANCEL:
-                        search.active = False
-                        search.query = ""
-                        scroll_offset = 0
-                        continue
-                    if action == NAV_NONE:
-                        continue
-                elif use_search and search.active:
-                    # Active search consumes query-editing keys; nav keys fall through.
-                    handled, confirm, changed = _handle_active_search_key(curses, key, search)
-                    if changed:
-                        scroll_offset = 0
+                action, changed = _route_key(curses, stdscr, stdscr.getch(), search, use_search)
+                if changed:
+                    scroll_offset = 0
+                    if search.active:  # Esc-clear resets scroll only; the loop re-reconciles
                         cursor, cursor_pos = _reconcile_cursor(
                             _filter_indices(search_labels, search.query), cursor)
-                    if confirm:
-                        if filtered and _resolve(on_action(NAV_SELECT, cursor)):
-                            return
-                        continue
-                    if handled:
-                        continue
-                    action = _decode_menu_key(stdscr, key)
-                elif use_search and key == ord("/"):
-                    search.active = True
+                if action is _CONSUMED:
                     continue
-                else:
-                    action = _decode_menu_key(stdscr, key)
-
                 if action == NAV_UP:
                     cursor = _move_filtered_cursor(filtered, cursor, cursor_pos, -1)
                 elif action == NAV_DOWN:
