@@ -1,17 +1,11 @@
-"""Symlink-safe creation helpers for spill/cache files.
-
-Spill files live in predictable directories under ``~/.hermes``; a plain
-``open(path, "w")`` there would follow a pre-planted symlink and let a local
-process redirect the write onto ``~/.bashrc``, ``authorized_keys``, etc. Every
-helper refuses symlinks by construction: new files use ``O_CREAT | O_EXCL``
-(fails on ANY existing path, including a dangling link); overwrites ``lstat`` +
-``unlink`` the existing path first (removes the link, never its target), then
-create exclusively, so the pair can't be raced. ``private=True`` (default)
-forces ``0o700`` dirs / ``0o600`` files for spills that may hold pre-redaction
-secrets; ``private=False`` keeps umask perms for cache dirs bind-mounted into
-remote backends (``credential_files._CACHE_DIRS``) where a non-root container
-UID must read them. Disk failures are the caller's concern: helpers raise ``OSError``.
-"""
+"""Symlink-safe creation helpers for spill/cache files under ``~/.hermes``, where a
+plain ``open(path, "w")`` would follow a pre-planted symlink onto ``~/.bashrc`` etc.
+New files use ``O_CREAT | O_EXCL`` (fails on ANY existing path, even a dangling
+link); overwrites ``lstat`` + ``unlink`` first (removes the link, never its target)
+then create exclusively, so the pair can't be raced. ``private=True`` (default) =
+``0o700`` dirs / ``0o600`` files for spills that may hold pre-redaction secrets;
+``private=False`` keeps umask perms for cache dirs bind-mounted into remote backends
+(``credential_files._CACHE_DIRS``). Disk failures raise ``OSError`` to the caller."""
 
 from __future__ import annotations
 
@@ -20,11 +14,7 @@ import stat
 from pathlib import Path
 from typing import IO
 
-__all__ = [
-    "ensure_spill_dir",
-    "open_exclusive",
-    "write_text_exclusive",
-]
+__all__ = ["ensure_spill_dir", "open_exclusive", "write_text_exclusive"]
 
 # O_NOFOLLOW is POSIX-only; on Windows O_EXCL alone already refuses every
 # pre-existing path.
@@ -51,8 +41,7 @@ def open_exclusive(
     private: bool = True,
     overwrite: bool = False,
     encoding: str = "utf-8",
-    errors: str = "strict",
-) -> IO[str]:
+    errors: str = "strict") -> IO[str]:
     """Open ``path`` for writing via exclusive create; never follows a link.
     ``overwrite=True`` first unlinks an existing path (``lstat``-checked, so only
     the link itself is removed and directories are refused), then creates
@@ -83,8 +72,7 @@ def write_text_exclusive(
     private: bool = True,
     overwrite: bool = False,
     encoding: str = "utf-8",
-    errors: str = "strict",
-) -> None:
+    errors: str = "strict") -> None:
     """``Path.write_text`` equivalent that refuses to follow symlinks."""
     with open_exclusive(
         path, private=private, overwrite=overwrite, encoding=encoding, errors=errors

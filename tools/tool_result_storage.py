@@ -1,15 +1,11 @@
 """Tool result persistence -- preserves large outputs instead of truncating.
 
-Three layers against context-window overflow: (1) per-tool output caps inside
-each tool; (2) ``maybe_persist_tool_result`` — output over the tool's threshold
-is persisted and replaced in-context by a preview + path. The canonical home is
-ALWAYS host-side ``$HERMES_HOME/cache/spillover/{tool_use_id}.txt`` (works for
-MCP-only/cron/gateway sessions that never ran a terminal); remote backends see
-the translated in-sandbox path (``cache/spillover`` is in the auto-mounted cache
-list), probed for readability, else a copy written into the sandbox temp dir.
-(3) ``enforce_turn_budget`` — spills the largest results of a turn until the
-aggregate fits.
-"""
+Layers against context overflow: (1) per-tool caps inside each tool; (2)
+``maybe_persist_tool_result`` — output over the tool's threshold is persisted and
+replaced by a preview + path. Canonical home is ALWAYS host-side
+``$HERMES_HOME/cache/spillover/{id}.txt`` (works for sessions that never ran a
+terminal); remote backends get the translated in-sandbox path (probed for
+readability) else a copy in the sandbox temp dir. (3) ``enforce_turn_budget``."""
 
 import hashlib
 import logging
@@ -19,11 +15,7 @@ import shlex
 import threading
 import time
 
-from tools.budget_config import (
-    DEFAULT_PREVIEW_SIZE_CHARS,
-    BudgetConfig,
-    DEFAULT_BUDGET,
-)
+from tools.budget_config import DEFAULT_PREVIEW_SIZE_CHARS, BudgetConfig, DEFAULT_BUDGET
 
 logger = logging.getLogger(__name__)
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
@@ -187,11 +179,7 @@ def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
 
 
 def _build_persisted_message(
-    preview: str,
-    has_more: bool,
-    original_size: int,
-    file_path: str,
-) -> str:
+    preview: str, has_more: bool, original_size: int, file_path: str) -> str:
     """Build the <persisted-output> replacement block."""
     size_kb = original_size / 1024
     size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.1f} KB"
@@ -205,8 +193,7 @@ def _build_persisted_message(
         "remote API; the full result is already on disk.\n\n"
         f"Preview (first {len(preview)} chars):\n"
         + preview + ("\n..." if has_more else "")
-        + f"\n{PERSISTED_OUTPUT_CLOSING_TAG}"
-    )
+        + f"\n{PERSISTED_OUTPUT_CLOSING_TAG}")
 
 
 _PERSISTED_PATH_RE = re.compile(r"^Full output saved to: (.+)$", re.MULTILINE)
@@ -228,8 +215,7 @@ def maybe_persist_tool_result(
     tool_use_id: str,
     env=None,
     config: BudgetConfig = DEFAULT_BUDGET,
-    threshold: int | float | None = None,
-) -> str:
+    threshold: int | float | None = None) -> str:
     """Layer 2: persist an oversized result, return preview + path.
     ``threshold`` overrides ``config.resolve_threshold(tool_name)``. Falls back
     to inline truncation when no write location succeeds."""
@@ -243,8 +229,7 @@ def maybe_persist_tool_result(
     def _persisted(path: str, host_suffix: str = "") -> str:
         logger.info(
             "Persisted large tool result: %s (%s, %d chars -> %s%s)",
-            tool_name, tool_use_id, len(content), path, host_suffix,
-        )
+            tool_name, tool_use_id, len(content), path, host_suffix)
         return _build_persisted_message(preview, has_more, len(content), path)
 
     # Always persist host-side first: cache/spillover is the single canonical home.
@@ -269,20 +254,15 @@ def maybe_persist_tool_result(
 
     logger.info(
         "Inline-truncating large tool result: %s (%d chars, no sandbox write)",
-        tool_name, len(content),
-    )
+        tool_name, len(content))
     return (
         f"{preview}\n\n"
         f"[Truncated: tool response was {len(content):,} chars. "
-        f"Full output could not be saved to sandbox.]"
-    )
+        f"Full output could not be saved to sandbox.]")
 
 
 def enforce_turn_budget(
-    tool_messages: list[dict],
-    env=None,
-    config: BudgetConfig = DEFAULT_BUDGET,
-) -> list[dict]:
+    tool_messages: list[dict], env=None, config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
     """Layer 3: persist the largest non-persisted results first until the turn's
     aggregate is under budget. Mutates the list in-place and returns it."""
     candidates = []
@@ -303,10 +283,10 @@ def enforce_turn_budget(
         tool_use_id = tool_messages[idx].get("tool_call_id", f"budget_{idx}")
         replacement = maybe_persist_tool_result(
             content=content, tool_name=_BUDGET_TOOL_NAME, tool_use_id=tool_use_id,
-            env=env, config=config, threshold=0,
-        )
+            env=env, config=config, threshold=0)
         if replacement != content:
             total_size += len(replacement) - size
             tool_messages[idx]["content"] = replacement
-            logger.info("Budget enforcement: persisted tool result %s (%d chars)", tool_use_id, size)
+            logger.info("Budget enforcement: persisted tool result %s (%d chars)",
+                        tool_use_id, size)
     return tool_messages

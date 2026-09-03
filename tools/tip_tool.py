@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Point at something in the Hermes desktop GUI and say one line about it.
-
-The quiet sibling of ``tour``: same ``data-tour`` handles and discovery call,
-but an arrow bubble with no scrim/spotlight/paging. Fire-and-forget — a tip is
-not a question, so blocking the turn on a round-trip would stall the reply.
-
-Lives in ``desktop_ui`` (GUI sessions only) and withdraws itself when the user
-turns tips off, so the model is never offered a tool whose call would fail.
-"""
+"""Point at something in the Hermes desktop GUI and say one line about it — the quiet
+sibling of ``tour`` (same ``data-tour`` handles) with no scrim/spotlight/paging.
+Fire-and-forget: a tip is not a question, so blocking on a round-trip would stall the
+reply. Lives in ``desktop_ui`` and withdraws itself when the user turns tips off."""
 
 import json
 

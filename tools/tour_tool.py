@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI.
-
-Generic, no baked-in tours: the agent discovers targets (``action="targets"``),
-then highlights by CSS selector one step at a time (``show``) or hands over a
-step list the user pages with Next/Prev (``start``). Round-trips through the
-gateway blocking-prompt bridge (``tour.request``/``tour.respond``) so the agent
-learns whether the selector matched. Lives in ``desktop_ui`` and withdraws itself
-when the user turns tours off: a tour takes the whole screen, so "off" must mean
-the model is never told the tool exists rather than offered a call that fails.
-"""
+"""Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI. Generic:
+the agent discovers targets (``action="targets"``), then highlights one step at a
+time (``show``) or hands over a step list the user pages (``start``). Round-trips
+through the gateway blocking-prompt bridge (``tour.request``/``tour.respond``) so the
+agent learns whether the selector matched. Lives in ``desktop_ui`` and withdraws
+itself when tours are off: a tour takes the whole screen, so "off" must mean the
+model is never told the tool exists rather than offered a call that fails."""
 
 import json
 from typing import Callable, Optional

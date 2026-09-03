@@ -24,9 +24,9 @@ def _schema_for_local_validation(node: Any) -> Any:
         return node
     # Literal keywords hold instance data, not schemas: copy byte-for-byte.
     normalized = {
-        key: copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS else _schema_for_local_validation(value)
-        for key, value in node.items() if key != "nullable"
-    }
+        key: (copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS
+              else _schema_for_local_validation(value))
+        for key, value in node.items() if key != "nullable"}
     if node.get("nullable") is not True:
         return normalized
     schema_type = normalized.get("type")
@@ -56,8 +56,7 @@ def _schema_has_external_ref(node: Any) -> bool:
     return any(
         _schema_has_external_ref(value)
         for key, value in node.items()
-        if key not in _SCHEMA_LITERAL_KEYS
-    )
+        if key not in _SCHEMA_LITERAL_KEYS)
 
 
 def _validation_path(error: Any) -> str:
@@ -76,8 +75,7 @@ def _validation_path(error: Any) -> str:
 def _validation_error(message: str, *, path: str, constraint: str, parameters: Any) -> str:
     return tool_error(
         message, path=path, constraint=constraint, parameters=parameters,
-        hint="Retry tool_call with 'arguments' matching the parameters schema above.",
-    )
+        hint="Retry tool_call with 'arguments' matching the parameters schema above.")
 
 
 def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str]:
@@ -106,8 +104,7 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
                 return _validation_error(
                     f"tool_call to '{name}' is missing required argument(s): "
                     f"{', '.join(missing)}. The tool was NOT invoked.",
-                    path="arguments", constraint="required", parameters=params,
-                )
+                    path="arguments", constraint="required", parameters=params)
 
         validation_schema = _schema_for_local_validation(params)
         if _schema_has_external_ref(validation_schema):
@@ -143,8 +140,7 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
         return _validation_error(
             f"tool_call to '{name}' failed argument validation at {path} "
             f"({constraint}): {detail}. The tool was NOT invoked.",
-            path=path, constraint=constraint, parameters=params,
-        )
+            path=path, constraint=constraint, parameters=params)
     except Exception:  # pragma: no cover — never block dispatch on validator bugs
         logger.debug("validate_deferred_call_args failed for %s", name, exc_info=True)
         return None
