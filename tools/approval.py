@@ -73,8 +73,7 @@ logger = logging.getLogger(__name__)
 _YOLO_MODE_FROZEN: bool = is_truthy_value(os.getenv("HERMES_YOLO_MODE", ""))
 
 
-# ========================================================================= Per-session approval state (thread-safe)
-# =========================================================================
+# --- Per-session approval state (thread-safe) -----------------------------------------------------------------------
 
 _lock = threading.Lock()
 _pending: dict[str, dict] = {}
@@ -82,13 +81,12 @@ _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
 _permanent_approved: set = set()
 
-# ========================================================================= Consecutive-denial circuit breaker for
-# smart approvals ========================================================================= Each retry of a
-# smart-denied command burns another guardian LLM call. After ``approvals.denial_breaker_threshold`` consecutive
-# guardian DENY verdicts in one session (default 3; 0 disables) the deny message escalates to a hard-stop instruction;
-# any approval resets the tally. Only TOOL RESULT text changes — no history surgery, no interrupts — so it is
-# prompt-cache-invariant. Capped so short-lived session keys cannot grow it without bound; oldest (least recently
-# denied) entries are evicted.
+# --- Consecutive-denial circuit breaker for smart approvals ---------------------------------------------------------
+# Each retry of a smart-denied command burns another guardian LLM call. After ``approvals.denial_breaker_threshold``
+# consecutive guardian DENY verdicts in one session (default 3; 0 disables) the deny message escalates to a hard-stop
+# instruction; any approval resets the tally. Only TOOL RESULT text changes — no history surgery, no interrupts — so
+# it is prompt-cache-invariant. Capped so short-lived session keys cannot grow it without bound; oldest (least
+# recently denied) entries are evicted.
 _denial_tally: dict[str, int] = {}
 _DENIAL_TALLY_MAX_SESSIONS = 256
 
@@ -136,8 +134,7 @@ def _denial_breaker_addendum(session_key: str) -> str:
         "operation. Report the blocked operation to the user and either ask them to run it manually or use /approve."
     )
 
-# ========================================================================= Gateway approval queue (the blocking wait
-# loop lives in approval_gateway_wait) =========================================================================
+# --- Gateway approval queue (the blocking wait loop lives in approval_gateway_wait) ---------------------------------
 
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
@@ -349,8 +346,7 @@ def _persist_choice(session_key: str, choice: str, warnings: list[tuple]) -> Non
             save_permanent_allowlist(_permanent_approved)
 
 
-# ========================================================================= Config persistence for permanent allowlist
-# =========================================================================
+# --- Config persistence for permanent allowlist ---------------------------------------------------------------------
 
 def load_permanent_allowlist() -> set:
     """Load ``command_allowlist`` from config and sync it into the approval state
@@ -378,8 +374,7 @@ def save_permanent_allowlist(patterns: set):
         logger.warning("Could not save allowlist: %s", e)
 
 
-# ========================================================================= Bypass check (yolo / mode=off)
-# =========================================================================
+# --- Bypass check (yolo / mode=off) ---------------------------------------------------------------------------------
 
 def is_approval_bypass_active_for_session(session_key: str) -> bool:
     """Canonical three-source bypass check: process ``--yolo`` (frozen at import), the
@@ -393,8 +388,7 @@ def is_approval_bypass_active() -> bool:
     return is_approval_bypass_active_for_session(get_current_session_key(default=""))
 
 
-# ========================================================================= Result builders shared by the gates
-# =========================================================================
+# --- Result builders shared by the gates ----------------------------------------------------------------------------
 
 def _approved() -> dict:
     return {"approved": True, "message": None}
@@ -459,8 +453,7 @@ def _pending_result(spec, session_key: str, *, command: str, description: str,
     return result
 
 
-# ========================================================================= Unattended contexts (nobody present to
-# answer a prompt) =========================================================================
+# --- Unattended contexts (nobody present to answer a prompt) --------------------------------------------------------
 
 @dataclass(frozen=True)
 class _Unattended:
@@ -559,11 +552,11 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
     return None
 
 
-# ========================================================================= Human-decision engine shared by the three
-# gates ========================================================================= Every flagged action reaches a human
-# the same way — selected plugin transport → gateway round-trip → pending fallback → CLI prompt → persist — so the
-# consent contract (silence is not consent, deny is a hard halt, a smart-DENY override is one operation) cannot drift
-# between gates. Only wording and a few policy knobs differ per flavor; they live in _GateSpec.
+# --- Human-decision engine shared by the three gates ----------------------------------------------------------------
+# Every flagged action reaches a human the same way — selected plugin transport → gateway round-trip → pending
+# fallback → CLI prompt → persist — so the consent contract (silence is not consent, deny is a hard halt, a smart-DENY
+# override is one operation) cannot drift between gates. Only wording and a few policy knobs differ per flavor; they
+# live in _GateSpec.
 
 @dataclass(frozen=True)
 class _GateSpec:
@@ -975,8 +968,7 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
     )
 
 
-# ========================================================================= Combined pre-exec guard (tirith +
-# dangerous command detection) =========================================================================
+# --- Combined pre-exec guard (tirith + dangerous command detection) -------------------------------------------------
 
 def _format_tirith_description(tirith_result: dict) -> str:
     """Human-readable severity/title/description summary of tirith findings."""
