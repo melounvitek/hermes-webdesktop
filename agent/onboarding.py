@@ -30,46 +30,39 @@ _BUSY_INPUT_HINTS_GATEWAY = {
         "immediately, or `/busy status` to check. This notice won't appear again."
     ),
     "steer": (
-        "💡 First-time tip — I steered your message into the current run; "
-        "it will arrive after the next tool call instead of interrupting. "
-        "Send `/busy interrupt` or `/busy queue` to change this, or "
-        "`/busy status` to check. This notice won't appear again."
+        "💡 First-time tip — I steered your message into the current run; it will arrive after the next tool "
+        "call instead of interrupting. Send `/busy interrupt` or `/busy queue` to change this, or `/busy "
+        "status` to check. This notice won't appear again."
     ),
     "redirect": (
-        "💡 First-time tip — I redirected the current run using your message. "
-        "Completed work stays in context, and `/stop` still cancels the task. "
-        "Send `/busy queue` to wait for a separate turn, or `/busy status` "
-        "to check. This notice won't appear again."
+        "💡 First-time tip — I redirected the current run using your message. Completed work stays in "
+        "context, and `/stop` still cancels the task. Send `/busy queue` to wait for a separate turn, or "
+        "`/busy status` to check. This notice won't appear again."
     ),
 }
 _BUSY_INPUT_HINT_GATEWAY_DEFAULT = (
-    "💡 First-time tip — I just interrupted my current task to answer you. "
-    "Send `/busy queue` to queue follow-ups for after the current task instead, "
-    "`/busy steer` to inject them mid-run without interrupting, or "
-    "`/busy status` to check. This notice won't appear again."
+    "💡 First-time tip — I just interrupted my current task to answer you. Send `/busy queue` to queue "
+    "follow-ups for after the current task instead, `/busy steer` to inject them mid-run without "
+    "interrupting, or `/busy status` to check. This notice won't appear again."
 )
 
 _BUSY_INPUT_HINTS_CLI = {
     "queue": (
-        "(tip) Your message was queued for the next turn. "
-        "Use /busy interrupt to make Enter stop the current run instead, "
-        "or /busy steer to inject mid-run. This tip only shows once."
+        "(tip) Your message was queued for the next turn. Use /busy interrupt to make Enter stop the current "
+        "run instead, or /busy steer to inject mid-run. This tip only shows once."
     ),
     "steer": (
-        "(tip) Your message was steered into the current run; it arrives "
-        "after the next tool call. Use /busy interrupt or /busy queue to "
-        "change this. This tip only shows once."
+        "(tip) Your message was steered into the current run; it arrives after the next tool call. Use /busy "
+        "interrupt or /busy queue to change this. This tip only shows once."
     ),
     "redirect": (
-        "(tip) Your correction redirected the current run without discarding "
-        "completed work. Use /stop to cancel or /busy queue to wait for a "
-        "separate turn. This tip only shows once."
+        "(tip) Your correction redirected the current run without discarding completed work. Use /stop to "
+        "cancel or /busy queue to wait for a separate turn. This tip only shows once."
     ),
 }
 _BUSY_INPUT_HINT_CLI_DEFAULT = (
-    "(tip) Your message interrupted the current run. "
-    "Use /busy queue to queue messages for the next turn instead, "
-    "or /busy steer to inject mid-run. This tip only shows once."
+    "(tip) Your message interrupted the current run. Use /busy queue to queue messages for the next turn "
+    "instead, or /busy steer to inject mid-run. This tip only shows once."
 )
 
 
@@ -85,9 +78,8 @@ def busy_input_hint_cli(mode: str) -> str:
 
 def tool_progress_hint_gateway() -> str:
     return (
-        "💡 First-time tip — that tool took a while and I'm streaming every step. "
-        "If the progress messages feel noisy, send `/verbose` to cycle modes "
-        "(all → new → off). This notice won't appear again."
+        "💡 First-time tip — that tool took a while and I'm streaming every step. If the progress messages "
+        "feel noisy, send `/verbose` to cycle modes (all → new → off). This notice won't appear again."
     )
 
 
@@ -103,9 +95,8 @@ def openclaw_residue_hint_cli() -> str:
     return (
         "A legacy OpenClaw directory was detected at ~/.openclaw/.\n"
         "To port your config, memory, and skills over to Hermes, run `hermes claw migrate`.\n"
-        "If you've already migrated and want to archive the old directory, "
-        "run `hermes claw cleanup` (renames it to ~/.openclaw.pre-migration — "
-        "OpenClaw will stop working after this).\n"
+        "If you've already migrated and want to archive the old directory, run `hermes claw cleanup` "
+        "(renames it to ~/.openclaw.pre-migration — OpenClaw will stop working after this).\n"
         "This tip only shows once."
     )
 

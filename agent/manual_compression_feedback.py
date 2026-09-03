@@ -21,9 +21,8 @@ def describe_compression_lock_skip(lock_signal: Any) -> str:
             f"(holder: {lock_signal}). Please wait for it to finish."
         )
     return (
-        "⏳ Compression skipped: could not acquire this session's "
-        "compression lock. Another compression may still be running, or "
-        "the lock check failed — try again shortly."
+        "⏳ Compression skipped: could not acquire this session's compression lock. Another compression may "
+        "still be running, or the lock check failed — try again shortly."
     )
 
 

@@ -27,15 +27,14 @@ def _truncate(text: str, limit: int) -> str:
 
 
 _COMMIT_INSTRUCTIONS = (
-    "You write git commit messages. Given a diff of staged changes, write ONE "
-    "concise Conventional Commits message describing what the change does and why.\n"
+    "You write git commit messages. Given a diff of staged changes, write ONE concise Conventional Commits "
+    "message describing what the change does and why.\n"
     "Rules:\n"
-    "- Subject line: type(scope): summary — imperative mood, lower-case, no "
-    "trailing period, ≤ 72 characters. Types: feat, fix, refactor, perf, docs, "
-    "test, build, chore, style, ci.\n"
+    "- Subject line: type(scope): summary — imperative mood, lower-case, no trailing period, ≤ 72 "
+    "characters. Types: feat, fix, refactor, perf, docs, test, build, chore, style, ci.\n"
     "- Omit the scope if it isn't obvious.\n"
-    "- Add a short body (wrapped at ~72 cols) ONLY when the change needs "
-    "explanation; skip it for small/obvious changes.\n"
+    "- Add a short body (wrapped at ~72 cols) ONLY when the change needs explanation; skip it for "
+    "small/obvious changes.\n"
     "- Describe the actual change, never restate the diff line-by-line.\n"
     "- Return ONLY the commit message text — no quotes, no markdown fences, no preamble."
 )
