@@ -237,6 +237,13 @@ def _persist_branch(db, new_key: str, parent_key: str, title: str, history: list
     db.create_session(new_key, source=source, model=_resolve_model(), model_config={"_branched_from": parent_key},
                       parent_session_id=parent_key, cwd=cwd, profile_name=profile_name)
     try:
+        # Compensation guard (#93959 review): if the transcript copy or title write fails AFTER the row
+        # committed, the durable-but-empty row would defeat the lazy first-prompt fallback
+        # (_ensure_session_db_row is INSERT OR IGNORE — the row exists, so the seed never lands and the
+        # renderer fail-latches on a "transcript-less" session again). Roll back just this child so the seed
+        # path can retry cleanly on first submit.
+        # Copy the whole parent history in bounded-chunk transactions — a branch seed can be hundreds of
+        # rows, and per-row transactions were the write-amplification pattern removed in #23254.
         db.append_messages_batch(
             new_key, [{"role": msg.get("role", "user"), "content": msg.get("content"),
                        **{field: msg.get(field) for field in copy_fields}} for msg in history], chunk_rows=500)
@@ -323,6 +330,18 @@ def _(rid, params: dict) -> dict:
             "transport": current_transport() or _stdio_transport}
         _register_session_cwd(_sessions[sid])
     # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded branch children.
+    # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop launch (and every "New agent" /
+    # draft) opens a session here just to paint the composer, so eagerly creating a row left an "Untitled"
+    # empty session behind for every launch the user never typed into. The row is now created lazily on the
+    # first prompt (see _ensure_session_db_row + prompt.submit), and the AIAgent's own INSERT-OR-IGNORE
+    # persists it on the first turn too. EXCEPTION — seeded branch children (#93959): a desktop branch
+    # carries parent_session_id AND a seeded transcript, which is explicit user intent, not an abandoned
+    # draft. The row MUST exist immediately: the renderer's post-create resume re-fetches the child through
+    # REST + defer_history hydration, both of which read the DB — an unpersisted child 404s, the fail-latch
+    # then refuses to bind a "transcript-less" session, and the user sees an infinite spinner whose
+    # optimistic row vanishes on restart. Persisting up front also means a restart keeps the branch (both
+    # reports lost it) and the title lands in the parent's lineage instead of falling back to a
+    # message-preview name. Title mirrors the TUI /branch naming.
     if parent_session_id and history:
         _seed_branch_row(_sessions[sid], key, parent_session_id, history, source, profile_home)
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
@@ -351,6 +370,12 @@ def _session_list_by_title(rid, db, title_lookup: str) -> dict:
         # A Bot Chat archived by the ws-orphan reaper / agent_close is an accident (the desktop would mint
         # replacements forever): resurrect recoverable reasons only. Re-fetch by ID — title is not UNIQUE.
         if title_lookup == BOT_CHAT_TITLE and db.unarchive_recoverable_session(row["id"]):
+            # The canonical Bot Chat is identity-scoped: an archive stamped by the ws-orphan reaper or older
+            # agent cleanup (ws_orphan_reap / agent_close) is an accident, not user intent, and hiding the
+            # row here makes the desktop mint transient replacements forever (#92687). Resurrect it — same
+            # recoverable-reason set as stale-route recovery. Deliberate archives (no/explicit end_reason)
+            # still hide. Re-fetch by ID: title has no DB-level UNIQUE, so a title re-query could grab a
+            # different (still-archived) duplicate row.
             row = db.get_session(row["id"])
     if not row or row.get("archived") or _denied_source(row):
         return _ok(rid, {"sessions": []})
@@ -500,6 +525,10 @@ def _resume_live_unpersisted(ctx: _Resume, live_sid: str, live: dict) -> dict:
         _release_db(ctx.db)
     live["last_active"] = time.time()
     if (transport := current_transport()) is not None:
+        # This resume reattaches the live record. A lazy session (no state.db row yet — every fresh Bot
+        # Chat) that was sentinel-parked by a WS drop MUST be rebound here, or it keeps the drop sentinel
+        # and the armed orphan-reap Timer fires against a client that is attached right now — the
+        # unpersisted sibling of the storm-killer paths (#91276).
         with live.setdefault("history_lock", threading.Lock()):
             live["transport"] = transport
             live.setdefault("viewers", {})[transport] = time.time()
@@ -515,6 +544,14 @@ def _resume_adopt_stranded(ctx: _Resume) -> None:
     """Adopt a lineage stranded in the DEFAULT store (older builds ran a profile bot's turns on the focused
     tile's backend; unadopted it 4001s forever). Exact-id ONLY — bot titles collide; never a retired donor."""
     try:
+        # Stranded-session adoption (#93296 follow-up): before session RPCs routed by their TARGET session,
+        # a profile bot's turns executed on the focused tile's backend — usually default — so its canonical
+        # session accumulated in the DEFAULT profile's state.db. Now that routing is correct, this
+        # profile-scoped resume is the first place the fix and the stranded data collide: the id exists in
+        # the default store but not here, and without adoption the same chat 4001s forever (the fix made it
+        # unreachable instead of misrouted). Adopt the full lineage from the default store into this
+        # profile's db, then retry the lookup. Only profile-scoped resumes reach here (owns_db); unknown ids
+        # in the default store still 4007 exactly as before.
         default_db = _get_db()
         donor_row = default_db.get_session(ctx.target) if default_db is not None else None
         if not donor_row or donor_row.get("archived"):
@@ -1128,6 +1165,9 @@ def _(rid, params: dict) -> dict:
     payload = {"enabled": True, **_pet_sprite_payload(pet, scale=scale)}
     # Send-once for the multi-MB sheet: same revision → metadata only.
     if (known := str(params.get("knownRevision", "") or "")) and known == payload.get("spritesheetRevision"):
+        # Send-once semantics for the multi-MB spritesheet (#54730): a caller that already holds the sheet
+        # passes the revision it has, and an unchanged sheet comes back as metadata only
+        # (spritesheetUnchanged).
         payload.pop("spritesheetBase64", None)
         payload["spritesheetUnchanged"] = True
     return _ok(rid, payload)
@@ -1598,6 +1638,9 @@ def _(rid, params: dict, session: dict) -> dict:
                 # include_row_ids: the durable row id is how clients address a persisted turn (reactions,
                 # truncation targets); _history_to_messages forwards it.
                 with contextlib.suppress(Exception):
+                    # The projection in _history_to_messages only forwards row_id when the row carries a
+                    # stamp, so an unstamped read here silently strips the one durable address clients can
+                    # use. See #87059.
                     history = db.get_messages_as_conversation(
                         session["session_key"], include_ancestors=True, include_row_ids=True)
     return _ok(rid, {"count": len(history), "messages": _history_to_messages(history)})
@@ -1917,6 +1960,10 @@ def _apply_correction(rid, session: dict, verb: str, text: str, accepted_status:
     if accepted:
         with session["history_lock"]:
             _record_inflight_correction(session, text)
+            # #84417: steer does not cancel the live original, but a server queue self-copy of that original
+            # must still not re-fire after settle (same class as redirect).
+            # #84417: purge server-queue self-duplicates of the live original so post-turn drain cannot
+            # restart the pre-correction prompt.
             _drop_queued_duplicates_of_inflight_user(session)
             session["last_active"] = time.time()
     return _ok(rid, {"status": accepted_status if accepted else "rejected", "text": text})
