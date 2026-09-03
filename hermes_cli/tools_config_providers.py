@@ -906,46 +906,54 @@ def _show_portal_hint(provider: dict, config: dict, managed_feature, force_fresh
     return False
 
 
+def _prompt_secret(
+    key: str, label: str, url: str, default_val: str, *, reconfigure: bool, url_label: str, strip: bool = False,
+) -> bool:
+    """One env-var prompt; True unless the new-enable flow skipped the key.
+
+    Reconfigure mode shows the current value and re-prompts ("Enter to keep current"); the new-enable flow
+    prompts with ``default_val`` visible when one exists, else as a password, and ``strip`` decides whether
+    whitespace is trimmed (and whitespace-only counts as skipped).
+    """
+    if reconfigure:
+        existing = get_env_value(key)
+        if existing:
+            _print_info(f"  {key}: configured ({existing[:8]}...)")
+    if url:
+        _print_info(f"  {url_label}: {url}")
+    if reconfigure:
+        value = _prompt(f"    {label} (Enter to keep current)", password=not default_val)
+        if value and value.strip():
+            save_env_value(key, value.strip())
+            _print_success("    Updated")
+        else:
+            _print_info("    Kept current")
+        return True
+    value = _prompt(f"    {label}", default_val) if default_val else _prompt(f"    {label}", password=True)
+    if strip:
+        value = (value or "").strip()
+    if value:
+        save_env_value(key, value)
+        _print_success("    Saved")
+        return True
+    _print_warning("    Skipped")
+    return False
+
+
 def _prompt_env_vars(env_vars: list, *, reconfigure: bool) -> bool:
     """Prompt for a provider's env vars; True when every key ended up configured.
 
-    Reconfigure mode re-prompts every key ("Enter to keep current") and always returns True; the new-enable
-    flow keeps already-set keys without asking and reports False on any skipped key.
+    Reconfigure mode re-prompts every key and always returns True; the new-enable flow keeps already-set
+    keys without asking and reports False on any skipped key.
     """
     all_configured = True
     for var in env_vars:
-        existing = get_env_value(var["key"])
-        if reconfigure:
-            if existing:
-                _print_info(f"  {var['key']}: configured ({existing[:8]}...)")
-            url = var.get("url", "")
-            if url:
-                _print_info(f"  Get yours at: {url}")
-            default_val = var.get("default", "")
-            value = _prompt(f"    {var.get('prompt', var['key'])} (Enter to keep current)", password=not default_val)
-            if value and value.strip():
-                save_env_value(var["key"], value.strip())
-                _print_success("    Updated")
-            else:
-                _print_info("    Kept current")
-            continue
-        if existing:
+        if not reconfigure and get_env_value(var["key"]):
             _print_success(f"  {var['key']}: already configured")
             continue
-        url = var.get("url", "")
-        if url:
-            _print_info(f"  Get yours at: {url}")
-        default_val = var.get("default", "")
-        if default_val:
-            value = _prompt(f"    {var.get('prompt', var['key'])}", default_val)
-        else:
-            value = _prompt(f"    {var.get('prompt', var['key'])}", password=True)
-        if value:
-            save_env_value(var["key"], value)
-            _print_success("    Saved")
-        else:
-            _print_warning("    Skipped")
-            all_configured = False
+        ok = _prompt_secret(var["key"], var.get("prompt", var["key"]), var.get("url", ""), var.get("default", ""),
+                            reconfigure=reconfigure, url_label="Get yours at")
+        all_configured = all_configured and ok
     return all_configured
 
 
@@ -1141,18 +1149,4 @@ def _configure_simple_requirements(ts_key: str, *, reconfigure: bool = False):
         print(color(f"  {ts_label} requires configuration:", Colors.YELLOW))
 
     for var, url in requirements:
-        if reconfigure:
-            existing = get_env_value(var)
-            if existing:
-                _print_info(f"  {var}: configured ({existing[:8]}...)")
-        if url:
-            _print_info(f"  Get key at: {url}")
-        suffix = " (Enter to keep current)" if reconfigure else ""
-        value = _prompt(f"    {var}{suffix}", password=True)
-        if value and value.strip():
-            save_env_value(var, value.strip())
-            _print_success("    Updated" if reconfigure else "    Saved")
-        elif reconfigure:
-            _print_info("    Kept current")
-        else:
-            _print_warning("    Skipped")
+        _prompt_secret(var, var, url, "", reconfigure=reconfigure, url_label="Get key at", strip=True)
