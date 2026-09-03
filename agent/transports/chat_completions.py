@@ -176,6 +176,14 @@ def _model_consumes_thought_signature(model: Any) -> bool:
     return "gemini" in m or "gemma" in m
 
 
+def _attr_or_model_extra(obj: Any, name: str) -> Any:
+    """``obj.<name>``, else the same key from pydantic ``model_extra`` (some SDKs park fields there)."""
+    value = getattr(obj, name, None)
+    if value is None and hasattr(obj, "model_extra"):
+        value = (obj.model_extra if isinstance(obj.model_extra, dict) else {}).get(name)
+    return value
+
+
 def _dump_extra_content(extra: Any) -> Any:
     """Plain-dict form of a pydantic ``extra_content``; older pydantic lacks ``warnings=``, so retry without it."""
     if hasattr(extra, "model_dump"):
@@ -457,41 +465,13 @@ class ChatCompletionsTransport(ProviderTransport):
         finish_reason = (str(_fr) if isinstance(_fr, int) else _fr) or "stop"  # Poolside returns int finish_reason
 
         tool_calls = None
-        message_tool_calls = getattr(msg, "tool_calls", None)
-        if message_tool_calls:
-            tool_calls = []
-            _alias_map = self._last_wire_aliases
-            for tc in message_tool_calls:
-                tc_function = getattr(tc, "function", None)
-                function_name = getattr(tc_function, "name", None)
-                # Match Relay's codec: skip absent function/name, keep an explicit blank name.
-                if tc_function is None or function_name is None:
-                    continue
-                # Reverse only aliases THIS request emitted; a real ``hermes_tool_search`` tool stays itself.
-                if _alias_map is None:
-                    if function_name == _XAI_TOOL_SEARCH_ALIAS:
-                        function_name = "tool_search"
-                elif function_name in _alias_map:
-                    function_name = _alias_map[function_name]
-                function_arguments = getattr(tc_function, "arguments", None)
-                extra = getattr(tc, "extra_content", None)
-                if extra is None and hasattr(tc, "model_extra"):
-                    extra = (tc.model_extra if isinstance(tc.model_extra, dict) else {}).get("extra_content")
-                tool_calls.append(ToolCall(
-                    id=getattr(tc, "id", None), name=function_name,
-                    arguments=function_arguments if function_arguments is not None else "{}",
-                    provider_data=None if extra is None else {"extra_content": _dump_extra_content(extra)},
-                ))
+        if getattr(msg, "tool_calls", None):
+            tool_calls = [tc for tc in (self._normalize_tool_call(tc) for tc in msg.tool_calls) if tc is not None]
 
         usage = Usage.from_openai(response.usage) if hasattr(response, "usage") and response.usage else None
 
         # Fields some SDKs park in pydantic ``model_extra`` rather than as attributes.
-        model_extra = getattr(msg, "model_extra", None) or {}
-        model_extra = model_extra if isinstance(model_extra, dict) else {}
-        reasoning_content = getattr(msg, "reasoning_content", None)
-        if reasoning_content is None:
-            reasoning_content = model_extra.get("reasoning_content")
-
+        reasoning_content = _attr_or_model_extra(msg, "reasoning_content")
         provider_data: dict[str, Any] = {}
         if reasoning_content is not None:
             provider_data["reasoning_content"] = reasoning_content
@@ -501,9 +481,7 @@ class ChatCompletionsTransport(ProviderTransport):
         # OpenAI structured refusal (``message.refusal`` set, ``content`` empty); without
         # promotion the loop retries a deterministic refusal as an empty response.
         content = getattr(msg, "content", None)
-        refusal = getattr(msg, "refusal", None)
-        if refusal is None:
-            refusal = model_extra.get("refusal")
+        refusal = _attr_or_model_extra(msg, "refusal")
         if isinstance(refusal, str) and refusal.strip():
             provider_data["refusal"] = refusal
             # Terminal ``content_filter`` only when the refusal is the sole payload.
@@ -515,6 +493,25 @@ class ChatCompletionsTransport(ProviderTransport):
         return NormalizedResponse(
             content=content, tool_calls=tool_calls, finish_reason=finish_reason,
             reasoning=getattr(msg, "reasoning", None), usage=usage, provider_data=provider_data or None,
+        )
+
+    def _normalize_tool_call(self, tc: Any) -> ToolCall | None:
+        """One SDK tool call -> ToolCall; None when it lacks a function/name (matches Relay's codec)."""
+        tc_function = getattr(tc, "function", None)
+        name = getattr(tc_function, "name", None)
+        if tc_function is None or name is None:
+            return None
+        # Reverse only aliases THIS request emitted; a real ``hermes_tool_search`` tool stays itself.
+        alias_map = self._last_wire_aliases
+        if alias_map is None:
+            name = "tool_search" if name == _XAI_TOOL_SEARCH_ALIAS else name
+        else:
+            name = alias_map.get(name, name)
+        arguments = getattr(tc_function, "arguments", None)
+        extra = _attr_or_model_extra(tc, "extra_content")
+        return ToolCall(
+            id=getattr(tc, "id", None), name=name, arguments="{}" if arguments is None else arguments,
+            provider_data=None if extra is None else {"extra_content": _dump_extra_content(extra)},
         )
 
     def validate_response(self, response: Any) -> bool:

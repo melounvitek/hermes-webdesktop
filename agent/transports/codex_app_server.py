@@ -1,10 +1,8 @@
-"""Codex app-server JSON-RPC client.
+"""Codex app-server JSON-RPC client (newline-delimited JSON-RPC 2.0 over stdio, codex 0.125+).
 
-Newline-delimited JSON-RPC 2.0 over stdio to ``codex app-server`` (codex 0.125+):
 ``initialize`` handshake, then ``thread/start`` + ``turn/start`` with streaming
 ``item/*`` notifications until ``turn/completed``. Wire-level speaker only —
 projection, approvals and transcript handling live in sibling modules.
-Opt-in runtime gated behind ``model.openai_runtime == "codex_app_server"``.
 """
 
 from __future__ import annotations
@@ -39,10 +37,9 @@ class CodexAppServerError(RuntimeError):
 class CodexAppServerClient:
     """Minimal synchronous JSON-RPC 2.0 client for ``codex app-server`` over stdio.
 
-    The caller drives request/response pairs; one reader thread routes replies
-    to pending queues and notifications / server requests to bounded queues;
-    another captures stderr. Intentionally NOT async: AIAgent.run_conversation()
-    is synchronous and cancellation goes through ``turn/interrupt``.
+    One reader thread routes replies to pending queues and notifications / server
+    requests to queues; another captures stderr. Deliberately NOT async:
+    AIAgent.run_conversation() is synchronous and cancels via ``turn/interrupt``.
     """
 
     def __init__(
@@ -50,32 +47,29 @@ class CodexAppServerClient:
         extra_args: Optional[list[str]] = None, env: Optional[dict[str, str]] = None,
     ) -> None:
         self._codex_bin = codex_bin
-        # codex needs LLM provider creds (inherit_credentials=True) but must not
-        # receive Tier-1 Hermes secrets (gateway/GitHub/infra tokens) — #29157.
+        # codex needs LLM provider creds but must not receive Tier-1 Hermes secrets (gateway/GitHub/infra tokens).
         spawn_env = hermes_subprocess_env(inherit_credentials=True)
         if env:
             spawn_env.update(env)
         if codex_home:
             spawn_env["CODEX_HOME"] = codex_home
 
-        app_server_args = list(extra_args or [])
+        cmd = [codex_bin, "app-server", *(extra_args or [])]
         # Kanban workers must write handoff/status to the board DB outside the
         # workspace: keep the sandbox on, add the Kanban root as writable.
         if spawn_env.get("HERMES_KANBAN_TASK"):
             kanban_db = spawn_env.get("HERMES_KANBAN_DB")
             default_root = os.path.join(spawn_env.get("HERMES_HOME", os.path.expanduser("~/.hermes")), "kanban")
             kanban_root = os.path.dirname(kanban_db) if kanban_db else spawn_env.get("HERMES_KANBAN_ROOT", default_root)
-            app_server_args.extend([
+            cmd += [
                 "-c", 'sandbox_mode="workspace-write"',
                 "-c", f'sandbox_workspace_write.writable_roots=["{kanban_root}"]',
                 "-c", "sandbox_workspace_write.network_access=false",
-            ])
-
-        cmd = [codex_bin, "app-server"] + app_server_args
+            ]
         # Codex emits tracing to stderr; default WARN keeps it quiet for users.
         spawn_env.setdefault("RUST_LOG", "warn")
 
-        # Hide the console flash on Windows (#56747); stdio pipes stay intact.
+        # Hide the console flash on Windows; stdio pipes stay intact.
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         self._proc = subprocess.Popen(

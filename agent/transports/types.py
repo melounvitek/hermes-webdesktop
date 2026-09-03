@@ -54,11 +54,7 @@ class Usage:
     @classmethod
     def from_openai(cls, u: Any) -> Usage:
         """Build from an OpenAI-shaped usage object, treating missing/None counts as 0."""
-        return cls(
-            prompt_tokens=getattr(u, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(u, "completion_tokens", 0) or 0,
-            total_tokens=getattr(u, "total_tokens", 0) or 0,
-        )
+        return cls(**{k: getattr(u, k, 0) or 0 for k in ("prompt_tokens", "completion_tokens", "total_tokens")})
 
 
 @dataclass

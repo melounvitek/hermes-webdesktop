@@ -107,16 +107,11 @@ def _coerce_turn_input_text(user_input: Any) -> str:
         if not isinstance(item, dict):
             if item.strip() if isinstance(item, str) else item is not None:
                 parts.append(str(item))
-            continue
-        item_type = item.get("type")
-        if item_type in {"text", "input_text"}:
-            text = item.get("text") or item.get("content") or ""
-            if text:
-                parts.append(str(text))
-        elif item_type in {"image", "image_url", "input_image"}:
+        elif item.get("type") in {"text", "input_text"}:
+            parts.append(str(item.get("text") or item.get("content") or ""))
+        elif item.get("type") in {"image", "image_url", "input_image"}:
             parts.append("[image attached]")
-    text = "\n\n".join(p for p in parts if p).strip()
-    return text or "What do you see in this image?"
+    return "\n\n".join(p for p in parts if p).strip() or "What do you see in this image?"
 
 
 # Substrings in codex stderr / JSON-RPC errors signalling expired OAuth creds.
@@ -576,7 +571,17 @@ class CodexAppServerSession:
         "mcpServer/elicitation/request": _respond_elicitation,
     }
 
-    def _run_approval_callback(self, command: str, description: str, log_label: str) -> str:
+    def _run_approval_callback(self, auto_approve: bool, prompt: Callable[[], tuple[str, str]], log_label: str) -> str:
+        """Protocol routing only: auto-approve, fail-closed without a callback, else ask via ``prompt()``.
+
+        Approval mode/timeout resolution lives upstream (codex_runtime.py derives the
+        auto flags; the callback runs the shared gate). Do not re-read config here.
+        """
+        if auto_approve:
+            return "accept"
+        if self._approval_callback is None:
+            return "decline"
+        command, description = prompt()
         try:
             choice = self._approval_callback(command, description, allow_permanent=False)
             return _approval_choice_to_codex_decision(choice)
@@ -585,35 +590,28 @@ class CodexAppServerSession:
             return "decline"
 
     def _decide_exec_approval(self, params: dict) -> str:
-        """Decide a Codex exec approval — protocol routing only.
+        def prompt() -> tuple[str, str]:
+            # ``cwd`` is Optional on codex's side; fall back so the prompt is never empty.
+            description = f"Codex requests exec in {params.get('cwd') or self._cwd or '<unknown>'}"
+            if params.get("reason"):
+                description += f" — {params['reason']}"
+            return params.get("command") or "", description
 
-        Approval mode/timeout resolution lives upstream (codex_runtime.py derives
-        ``auto_approve_exec``; the callback runs the shared gate). Do not re-read config here.
-        """
-        if self._routing.auto_approve_exec:
-            return "accept"
-        if self._approval_callback is None:
-            return "decline"  # fail-closed when no callback wired
-        # ``cwd`` is Optional on codex's side; fall back so the prompt is never empty.
-        description = f"Codex requests exec in {params.get('cwd') or self._cwd or '<unknown>'}"
-        if params.get("reason"):
-            description += f" — {params['reason']}"
-        return self._run_approval_callback(params.get("command") or "", description, "exec request")
+        return self._run_approval_callback(self._routing.auto_approve_exec, prompt, "exec request")
 
     def _decide_apply_patch_approval(self, params: dict) -> str:
-        """Decide a Codex apply_patch approval request (routing only; see _decide_exec_approval)."""
-        if self._routing.auto_approve_apply_patch:
-            return "accept"
-        if self._approval_callback is None:
-            return "decline"
-        # Params carry reason + grantRoot only; the changeset comes from _track_pending_file_change.
-        reason = params.get("reason")
-        grant_root = params.get("grantRoot")
-        change_summary = self._pending_file_changes.get(params.get("itemId") or "") or None
-        description_parts = [p for p in (reason, change_summary, grant_root and f"grants write to {grant_root}") if p]
-        description = "; ".join(description_parts) if description_parts else "Codex requests to apply a patch"
-        detail = change_summary or reason
-        return self._run_approval_callback(f"apply_patch: {detail}" if detail else "apply_patch", description, "apply_patch")
+        def prompt() -> tuple[str, str]:
+            # Params carry reason + grantRoot only; the changeset comes from _track_pending_file_change.
+            reason, grant_root = params.get("reason"), params.get("grantRoot")
+            change_summary = self._pending_file_changes.get(params.get("itemId") or "") or None
+            parts = [p for p in (reason, change_summary, grant_root and f"grants write to {grant_root}") if p]
+            detail = change_summary or reason
+            return (
+                f"apply_patch: {detail}" if detail else "apply_patch",
+                "; ".join(parts) if parts else "Codex requests to apply a patch",
+            )
+
+        return self._run_approval_callback(self._routing.auto_approve_apply_patch, prompt, "apply_patch")
 
     def _track_pending_file_change(self, note: dict) -> None:
         """Track fileChange items (item/started -> item/completed) so the apply_patch prompt can show the changeset."""

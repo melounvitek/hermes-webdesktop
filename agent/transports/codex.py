@@ -109,17 +109,16 @@ def _alias_reserved_tools(
     taken = {name_of(tool) for tool in response_tools if isinstance(tool, dict) and name_of(tool)}
     for tool in response_tools:
         name = name_of(tool) if isinstance(tool, dict) else None
-        if name in reserved_names:
-            base = alias = f"{_RESERVED_TOOL_ALIAS_PREFIX}{name}"
-            suffix = 2
-            while alias in taken:
-                alias = f"{base}_{suffix}"
-                suffix += 1
-            taken.add(alias)
-            alias_map[alias] = name
-            rewritten.append(rename(tool, alias))
-        else:
+        if name not in reserved_names:
             rewritten.append(tool)
+            continue
+        base = alias = f"{_RESERVED_TOOL_ALIAS_PREFIX}{name}"
+        suffix = 2
+        while alias in taken:
+            alias, suffix = f"{base}_{suffix}", suffix + 1
+        taken.add(alias)
+        alias_map[alias] = name
+        rewritten.append(rename(tool, alias))
     return rewritten, alias_map
 
 
@@ -338,6 +337,35 @@ def _coerce_timeout(timeout: Any) -> Optional[float]:
     return None
 
 
+def _reasoning_fields(
+    model: str, params: dict[str, Any], *, effort: Any, enabled: bool, replay_encrypted_reasoning: bool,
+    is_xai_responses: bool, is_github_responses: bool,
+) -> dict[str, Any]:
+    """``reasoning`` / ``include`` request fields for the endpoint family.
+
+    xAI 400s on ``reasoning.effort`` outside its allowlist; GitHub Models takes a
+    verbatim ``github_reasoning_extra`` and never ``include``.
+    """
+    include = ["reasoning.encrypted_content"] if replay_encrypted_reasoning else []
+    fields: dict[str, Any] = {}
+    if enabled and is_xai_responses:
+        from agent.model_metadata import grok_supports_reasoning_effort
+
+        fields["include"] = include
+        if grok_supports_reasoning_effort(model):
+            fields["reasoning"] = {"effort": effort}
+    elif enabled:
+        if is_github_responses:
+            if params.get("github_reasoning_extra") is not None:
+                fields["reasoning"] = params["github_reasoning_extra"]
+        else:
+            fields["reasoning"] = {"effort": effort, "summary": "auto"}
+            fields["include"] = include
+    elif not is_github_responses and not is_xai_responses:
+        fields["include"] = []
+    return fields
+
+
 class ResponsesApiTransport(ProviderTransport):
     """Transport for api_mode='codex_responses'."""
 
@@ -451,24 +479,11 @@ class ResponsesApiTransport(ProviderTransport):
         if cache_retention:
             kwargs.setdefault("prompt_cache_retention", cache_retention)
 
-        include = ["reasoning.encrypted_content"] if replay_encrypted_reasoning else []
-        if reasoning_enabled and is_xai_responses:
-            from agent.model_metadata import grok_supports_reasoning_effort
-
-            kwargs["include"] = include
-            # xAI 400s on ``reasoning.effort`` for models outside the allowlist.
-            if grok_supports_reasoning_effort(model):
-                kwargs["reasoning"] = {"effort": reasoning_effort}
-        elif reasoning_enabled:
-            if is_github_responses:
-                if params.get("github_reasoning_extra") is not None:
-                    kwargs["reasoning"] = params["github_reasoning_extra"]
-            else:
-                kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
-                kwargs["include"] = include
-        elif not is_github_responses and not is_xai_responses:
-            kwargs["include"] = []
-
+        kwargs.update(_reasoning_fields(
+            model, params, effort=reasoning_effort, enabled=reasoning_enabled,
+            replay_encrypted_reasoning=replay_encrypted_reasoning,
+            is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
+        ))
         if params.get("request_overrides"):
             kwargs.update(params["request_overrides"])
 
@@ -491,12 +506,11 @@ class ResponsesApiTransport(ProviderTransport):
         if is_codex_backend:
             # SDK kwarg -> HTTP headers. ``session_id`` = raw physical id (transcript
             # identity); ``x-client-request-id`` mirrors the body cache key so both agree.
-            final_cache_key = kwargs.get("prompt_cache_key") or _bounded_prompt_cache_key(_cache_scope)
-            headers = {}
-            if session_id:
-                headers["session_id"] = str(session_id)
-            if final_cache_key:
-                headers["x-client-request-id"] = final_cache_key
+            headers = {
+                "session_id": str(session_id) if session_id else None,
+                "x-client-request-id": kwargs.get("prompt_cache_key") or _bounded_prompt_cache_key(_cache_scope),
+            }
+            headers = {k: v for k, v in headers.items() if v}
             if headers:
                 _merge_extra_headers(kwargs, **headers)
         elif params.get("max_tokens") is not None:
