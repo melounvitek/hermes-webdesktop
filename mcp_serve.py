@@ -77,7 +77,7 @@ def _close_quietly(db, what: str) -> None:
 
 
 def _get_session_db():
-    """Get a SessionDB instance for reading message transcripts."""
+    """SessionDB instance for reading message transcripts, or None."""
     try:
         from hermes_state import get_shared_session_db
         return get_shared_session_db()
@@ -112,6 +112,13 @@ def _load_sessions_index() -> dict:
     return _load_sessions_index_from_db() or _load_sessions_index_from_json()
 
 
+def _iso(ts) -> str:
+    try:
+        return datetime.fromtimestamp(float(ts)).isoformat() if ts else ""
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
 def _row_to_index_entry(row: dict) -> dict:
     """Convert a state.db gateway session row to the sessions.json entry shape."""
     origin = {}
@@ -125,12 +132,6 @@ def _row_to_index_entry(row: dict) -> dict:
     if not origin:  # pre-origin_json rows: synthesize the minimal origin from columns
         origin = {k: row.get(k) for k in ("chat_id", "chat_type", "thread_id", "user_id")}
         origin["platform"] = row.get("source", "")
-
-    def _iso(ts) -> str:
-        try:
-            return datetime.fromtimestamp(float(ts)).isoformat() if ts else ""
-        except (TypeError, ValueError, OSError):
-            return ""
 
     input_tokens = int(row.get("input_tokens") or 0)
     output_tokens = int(row.get("output_tokens") or 0)
@@ -156,10 +157,7 @@ def _load_sessions_index_from_db() -> dict:
         lister = getattr(db, "list_gateway_sessions", None)
         if not callable(lister):
             return {}
-        return {
-            row["session_key"]: _row_to_index_entry(row)
-            for row in lister(active_only=True) if row.get("session_key")
-        }
+        return {row["session_key"]: _row_to_index_entry(row) for row in lister(active_only=True) if row.get("session_key")}
     except Exception as e:
         logger.debug("Failed to load gateway sessions from state.db: %s", e)
         return {}
@@ -302,9 +300,9 @@ class EventBridge:
         logger.debug("EventBridge started")
 
     def stop(self):
-        """Stop the background polling thread."""
+        """Stop the background polling thread and wake any waiters."""
         self._running = False
-        self._new_event.set()  # Wake any waiters
+        self._new_event.set()
         if self._thread:
             self._thread.join(timeout=5)
         logger.debug("EventBridge stopped")
@@ -364,12 +362,11 @@ class EventBridge:
 
     def _establish_baseline(self) -> None:
         db = _get_session_db()
-        if not db:
-            return
-        try:
-            self._establish_baseline_with_db(db)
-        finally:
-            _close_quietly(db, "baseline")
+        if db:
+            try:
+                self._establish_baseline_with_db(db)
+            finally:
+                _close_quietly(db, "baseline")
 
     def _establish_baseline_with_db(self, db) -> None:
         """Record per-session latest timestamps and the state.db mtime WITHOUT
@@ -385,10 +382,9 @@ class EventBridge:
             if not session_id:
                 continue
             try:
-                messages = db.get_messages(session_id)
+                latest = _latest_ts(db.get_messages(session_id))
             except Exception:
                 continue
-            latest = _latest_ts(messages)
             if latest > 0.0:
                 self._last_poll_timestamps[session_key] = latest
 
@@ -418,8 +414,7 @@ class EventBridge:
         """
         db_mtime = _read_state_db_mtime()
         if db_mtime == self._state_db_mtime:
-            return  # Nothing changed since last poll — skip entirely
-
+            return
         self._state_db_mtime = db_mtime
         # Refresh the index on every change tick: one indexed query, never lags messages.
         self._cached_sessions_index = _load_sessions_index()
