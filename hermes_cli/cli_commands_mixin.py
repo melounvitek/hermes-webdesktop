@@ -1249,7 +1249,6 @@ class CLICommandsMixin:
                         "  This CLI is no longer waiting. Avoid continuing this session here;",
                         "  if nothing arrives, retry /handoff once the state settles.")
             _time.sleep(0.5)
-
         try:  # pending timed out: CAS-clear so the user can retry
             self._session_db.fail_handoff(
                 self.session_id, "timed out waiting for gateway", only_states=("pending",))
@@ -2533,13 +2532,12 @@ class CLICommandsMixin:
         self._focus_view_enabled = bool(target)
         self._focus_hidden_lines = 0
         _save(FOCUS_CONFIG_KEY, bool(target))
-        state = (f"{_Colors.GREEN}enabled{_Colors.RESET}" if target
-                 else f"{_Colors.DIM}disabled{_Colors.RESET}")
         message = format_focus_toggle_message(bool(target), restore_mode)
         # Re-colour just the enabled/disabled word so the line matches siblings.
         for word in ("enabled", "disabled"):
             if word in message:
-                message = message.replace(word, state, 1)
+                colour = _Colors.GREEN if target else _Colors.DIM
+                message = message.replace(word, f"{colour}{word}{_Colors.RESET}", 1)
                 break
         _cp(f"  {message}")
 
@@ -2600,9 +2598,8 @@ class CLICommandsMixin:
         if new_state is None:
             return _cp(f"  Usage: {usage}")
         if _save(config_key, new_state):
-            state = (f"{_Colors.GREEN}ON{_Colors.RESET}" if new_state
-                     else f"{_Colors.DIM}OFF{_Colors.RESET}")
-            _cp(f"  {label}: {state}")
+            colour = _Colors.GREEN if new_state else _Colors.DIM
+            _cp(f"  {label}: {colour}{'ON' if new_state else 'OFF'}{_Colors.RESET}")
         else:
             _cp(f"  Failed to save {failed} setting to config.yaml")
         return new_state
@@ -2651,7 +2648,6 @@ class CLICommandsMixin:
                        _dim_line("Usage: /reasoning <none|minimal|low|medium|high|xhigh|max|ultra"
                           "|show|hide|full|clamp> [--global]"))
         arg, explicit_global = _split_scope_flags(raw)
-
         toggle = _REASONING_TOGGLES.get(arg)
         if toggle is not None:  # display show/hide or full/clamp recap toggle
             attr, value, headline, note = toggle
