@@ -17,7 +17,7 @@ import weakref
 from typing import Any, Dict, List, Optional
 
 
-from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb  # noqa: F401  (used via _await_child)
+from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb  # noqa: F401  (used via _ChildRun.await_child)
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
@@ -26,10 +26,8 @@ logger = logging.getLogger(__name__)
 # moved name is re-imported so ``tools.delegate_tool.<name>`` keeps resolving for
 # callers and patching tests. Mutable flag globals live only in their owning module.
 from tools.delegate_tool_child_run import (  # noqa: F401
-    _WorktreeReporter, _append_missed_steer, _append_sibling_write_reminder, _attach_child, _finish_failed_entry,
-    _await_child, _build_result_entry, _cleanup_child_run, _dump_subagent_timeout_diagnostic,
-    _emit_child_complete, _fabricated_entry, _lease_child_credential, _make_text_relay,
-    _merge_late_steer, _register_child, _seed_child_workspace, _start_heartbeat,
+    _ChildRun, _append_missed_steer, _attach_child, _build_result_entry, _dump_subagent_timeout_diagnostic,
+    _fabricated_entry, _lease_child_credential, _merge_late_steer, _register_child, _start_heartbeat,
     _validate_child_output_schema,
 )
 from tools.delegate_tool_config import (  # noqa: F401
@@ -270,13 +268,8 @@ def _run_single_child(
                     (completed=False with no failure fields), never for errors.
       truncated   == (exit_reason == "max_iterations").
     """
-    child_start = time.monotonic()
-    # Set when a timed-out Future still owns the child: closing it from this
-    # thread before the worker settles races the conversation's finally path.
-    _child_close_deferred = False
     child_progress_cb = getattr(child, "tool_progress_callback", None)
     child_pool, leased_cred_id = _lease_child_credential(child)
-
     # Heartbeat keeps the parent's _last_activity_ts moving so the gateway
     # inactivity timeout doesn't fire while the child works; it stops itself
     # once the child looks stale (see _HEARTBEAT_STALE_CYCLES_*).
@@ -287,53 +280,41 @@ def _run_single_child(
         child, parent_agent, goal, owner_session_id=owner_session_id, owner_transport=owner_transport,
         owner_session_record=owner_session_record,
     )
-    worktree = _WorktreeReporter()
-
+    run = _ChildRun(child, parent_agent, task_index, goal, _subagent_id, child_progress_cb)
+    # Set when a timed-out Future still owns the child: closing it from this
+    # thread before the worker settles races the conversation's finally path.
+    _child_close_deferred = False
     try:
         heartbeat[1].start()
         _safe_progress(child_progress_cb, "subagent.start", preview=goal)
+        run.seed_workspace()
+        result, failure_entry, _child_close_deferred = run.await_child()
+        if failure_entry is not None:
+            return failure_entry
 
-        ws = _seed_child_workspace(child, parent_agent, goal, task_index, _subagent_id, worktree)
-        goal = ws.goal
-        _relay_child_text = _make_text_relay(child_progress_cb)
-        result, failure = _await_child(
-            child, goal, ws, _relay_child_text, task_index=task_index, subagent_id=_subagent_id,
-            child_start=child_start, child_progress_cb=child_progress_cb, worktree=worktree,
-        )
-        if failure is not None:
-            _child_close_deferred = failure.close_deferred
-            return failure.entry
-
-        schema = _validate_child_output_schema(child, result, task_index, ws.child_task_id, _relay_child_text)
+        schema = _validate_child_output_schema(child, result, task_index, run.child_task_id, run.relay_text)
         _merge_late_steer(result, _subagent_id, child)
-
         # Flush any remaining batched progress to gateway
         if child_progress_cb and hasattr(child_progress_cb, "_flush"):
             with _quiet("Progress callback flush failed: %s"):
                 child_progress_cb._flush()
 
-        duration = round(time.monotonic() - child_start, 2)
+        duration = run.elapsed()
         entry = _build_result_entry(child, result, task_index, duration, schema)
-        _append_sibling_write_reminder(entry, ws)
-        _emit_child_complete(child, result, entry, ws, duration, child_progress_cb)
-        worktree.attach(entry)
-        return entry
-
+        run.append_sibling_write_reminder(entry)
+        run.emit_complete(result, entry, duration)
+        return run.attach_worktree(entry)
     except Exception as exc:
         # Close steer acceptance before any completion callback (see _merge_late_steer).
-        _late_pending_steer = (_close_subagent_steering(_subagent_id, child) if _subagent_id else None)
-        duration = round(time.monotonic() - child_start, 2)
+        _late_pending_steer = run.close_steering()
         logging.exception(f"[subagent-{task_index}] failed")
-        return _finish_failed_entry(
-            _fabricated_entry(task_index, "error", str(exc), child, duration), _late_pending_steer, child_progress_cb,
-            worktree, preview=str(exc), summary=str(exc), status="failed",
+        # Entry status "error" (contract), progress event status "failed" (UI vocabulary).
+        return run.finish_failed(
+            _fabricated_entry(task_index, "error", str(exc), child, run.elapsed()), _late_pending_steer,
+            preview=str(exc), summary=str(exc), status="failed",
         )
-
     finally:
-        _cleanup_child_run(
-            child, parent_agent, subagent_id=_subagent_id, heartbeat=heartbeat, child_pool=child_pool,
-            leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred,
-        )
+        run.cleanup(heartbeat=heartbeat, child_pool=child_pool, leased_cred_id=leased_cred_id, close_deferred=_child_close_deferred)
 
 
 def _build_children(
