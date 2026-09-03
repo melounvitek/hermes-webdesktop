@@ -337,30 +337,24 @@ class MattermostAdapter(BasePlatformAdapter):
             logger.warning("Mattermost: blocked unsafe URL (SSRF protection)")
             return await fallback()
         import aiohttp
-        file_data, ct = None, "application/octet-stream"
-        for attempt in range(3):
+        for attempt in range(3):  # retry 5xx/429 and network errors twice with linear backoff
             try:
                 async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if (resp.status >= 500 or resp.status == 429) and attempt < 2:
                         logger.debug("Mattermost download retry %d/2 for %s (status %d)",
                                      attempt + 1, url[:80], resp.status)
-                        await asyncio.sleep(1.5 * (attempt + 1))
-                        continue
-                    if resp.status >= 400:
+                    elif resp.status >= 400:
                         return await fallback()
-                    file_data = await resp.read()
-                    ct = resp.content_type or "application/octet-stream"
-                    break
+                    else:
+                        file_data, ct = await resp.read(), resp.content_type or "application/octet-stream"
+                        break
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                if attempt < 2:
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                    continue
-                logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
-                return await fallback()
+                if attempt == 2:
+                    logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
+                    return await fallback()
+            await asyncio.sleep(1.5 * (attempt + 1))
         file_id = await self._upload_file(chat_id, file_data, _url_filename(url, f"{kind}.png"), ct)
-        if not file_id:
-            return await fallback()
-        return await self._post_with_file(chat_id, file_id, caption, reply_to, metadata)
+        return await self._post_with_file(chat_id, file_id, caption, reply_to, metadata) if file_id else await fallback()
 
     async def _send_local_file(
         self, chat_id: str, file_path: str, caption: Optional[str], reply_to: Optional[str],
@@ -396,8 +390,7 @@ class MattermostAdapter(BasePlatformAdapter):
                 if resp.status >= 400:
                     logger.warning("Mattermost: failed to download image (HTTP %d): %s", resp.status, image_url[:80])
                     return None
-                file_data = await resp.read()
-                ct = resp.content_type or "image/png"
+                file_data, ct = await resp.read(), resp.content_type or "image/png"
         except Exception as dl_err:
             logger.warning("Mattermost: download failed for %s: %s", image_url[:80], dl_err)
             return None
@@ -419,10 +412,7 @@ class MattermostAdapter(BasePlatformAdapter):
                     if alt_text:
                         caption_parts.append(alt_text)
                     loaded = await self._load_batch_image(image_url, len(file_ids))
-                    if loaded is None:
-                        continue
-                    fid = await self._upload_file(chat_id, *loaded)
-                    if fid:
+                    if loaded is not None and (fid := await self._upload_file(chat_id, *loaded)):
                         file_ids.append(fid)
                 if not file_ids:
                     continue
@@ -481,14 +471,15 @@ class MattermostAdapter(BasePlatformAdapter):
         async for raw_msg in self._ws:
             if self._closing:
                 return
-            if raw_msg.type in {raw_msg.type.TEXT, raw_msg.type.BINARY}:
+            kind = raw_msg.type
+            if kind in {kind.TEXT, kind.BINARY}:
                 try:
                     event = json.loads(raw_msg.data)
                 except (json.JSONDecodeError, TypeError):
                     continue
                 await self._handle_ws_event(event)
-            elif raw_msg.type in {raw_msg.type.ERROR, raw_msg.type.CLOSE, raw_msg.type.CLOSING, raw_msg.type.CLOSED}:
-                logger.info("Mattermost: WebSocket closed (%s)", raw_msg.type)
+            elif kind in {kind.ERROR, kind.CLOSE, kind.CLOSING, kind.CLOSED}:
+                logger.info("Mattermost: WebSocket closed (%s)", kind)
                 break
 
     def _extra_or_env(self, key: str, env: str, default: str = "") -> Any:
@@ -570,11 +561,14 @@ class MattermostAdapter(BasePlatformAdapter):
             thread_id = post_id
         if message_text[:1].isspace() and message_text.lstrip().startswith("/"):
             message_text = message_text.lstrip()
-        msg_type = MessageType.COMMAND if message_text.startswith("/") else MessageType.TEXT
         media_urls, media_types = await self._download_attachments(post.get("file_ids") or [])
-        if media_types and msg_type == MessageType.TEXT:
+        if message_text.startswith("/"):
+            msg_type = MessageType.COMMAND
+        elif media_types:
             msg_type = next((mt for prefix, mt in _MEDIA_MSG_TYPES if any(m.startswith(prefix) for m in media_types)),
                             MessageType.DOCUMENT)
+        else:
+            msg_type = MessageType.TEXT
         source = self.build_source(
             chat_id=channel_id, chat_type=_CHANNEL_TYPE_MAP.get(data.get("channel_type", "O"), "channel"),
             user_id=sender_id, user_name=data.get("sender_name", "").lstrip("@") or sender_id,
@@ -604,15 +598,12 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
     base_url, token = base_url.rstrip("/"), token.strip()
     if not base_url or not token:
         return {"error": "Mattermost standalone send: MATTERMOST_URL and MATTERMOST_TOKEN must both be set"}
-
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     upload_headers = {"Authorization": f"Bearer {token}"}
-
+    headers = {**upload_headers, "Content-Type": "application/json"}
     try:
         # One ClientSession (with proxy) covers the optional uploads + final post.
         from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
         _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(resolve_proxy_url(platform_env_var="MATTERMOST_PROXY"))
-
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60), **_sess_kw) as session:
             file_ids: List[str] = []
             for media in media_files or []:
@@ -623,15 +614,13 @@ async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Op
                 form.add_field("channel_id", chat_id)  # required so the server can attribute the upload
                 with open(file_path, "rb") as fh:
                     form.add_field("files", fh.read(), filename=os.path.basename(file_path))
-                async with session.post(
-                    f"{base_url}/api/v4/files", data=form, headers=upload_headers, **_req_kw
-                ) as upload_resp:
+                async with session.post(f"{base_url}/api/v4/files", data=form, headers=upload_headers,
+                                        **_req_kw) as upload_resp:
                     if upload_resp.status not in {200, 201}:
                         body = await upload_resp.text()
                         return {"error": f"Mattermost file upload failed ({upload_resp.status}): {body[:400]}"}
                     upload_data = await upload_resp.json()
                     file_ids.extend(info["id"] for info in upload_data.get("file_infos", []) if info.get("id"))
-
             payload: Dict[str, Any] = {"channel_id": chat_id, "message": message}
             if thread_id:
                 payload["root_id"] = thread_id
@@ -739,22 +728,12 @@ def _is_connected(config) -> bool:
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
-        name="mattermost",
-        label="Mattermost",
-        adapter_factory=MattermostAdapter,
-        check_fn=check_mattermost_requirements,
-        validate_config=validate_mattermost_config,
-        is_connected=_is_connected,
-        required_env=["MATTERMOST_URL", "MATTERMOST_TOKEN"],
-        install_hint="pip install aiohttp",
-        setup_fn=interactive_setup,
-        # YAML→env bridge for require_mention / free_response_channels / allowed_channels.
-        apply_yaml_config_fn=_apply_yaml_config,
-        allowed_users_env="MATTERMOST_ALLOWED_USERS",
-        allow_all_env="MATTERMOST_ALLOW_ALL_USERS",
+        name="mattermost", label="Mattermost", adapter_factory=MattermostAdapter,
+        check_fn=check_mattermost_requirements, validate_config=validate_mattermost_config,
+        is_connected=_is_connected, required_env=["MATTERMOST_URL", "MATTERMOST_TOKEN"],
+        install_hint="pip install aiohttp", setup_fn=interactive_setup,
+        apply_yaml_config_fn=_apply_yaml_config,  # YAML→env bridge (see _YAML_BRIDGE)
+        allowed_users_env="MATTERMOST_ALLOWED_USERS", allow_all_env="MATTERMOST_ALLOW_ALL_USERS",
         cron_deliver_env_var="MATTERMOST_HOME_CHANNEL",
-        # Out-of-process cron delivery; without it `deliver=mattermost` fails with "No live adapter".
-        standalone_sender_fn=_standalone_send,
-        max_message_length=MAX_POST_LENGTH,
-        emoji="💬",
-        allow_update_command=True)
+        standalone_sender_fn=_standalone_send,  # out-of-process cron; without it `deliver=mattermost` fails
+        max_message_length=MAX_POST_LENGTH, emoji="💬", allow_update_command=True)
