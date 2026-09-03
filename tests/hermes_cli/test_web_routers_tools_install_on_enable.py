@@ -49,6 +49,7 @@ class TestToggleToolsetInstallOnEnable:
         self, monkeypatch
     ):
         import hermes_cli.tools_config as tools_config
+        import hermes_cli.tools_config_post_setup as tools_config_post_setup
 
         calls = self._spawn_recorder(monkeypatch)
         # Binary missing → the cua_driver predicate reports unsatisfied.
@@ -56,7 +57,7 @@ class TestToggleToolsetInstallOnEnable:
             tools_config, "_resolved_cua_driver_cmd", lambda: None
         )
         monkeypatch.setattr(
-            tools_config, "_cua_driver_install_ready", lambda: False
+            tools_config_post_setup, "_cua_driver_install_ready", lambda: False
         )
 
         resp = self.client.put(
@@ -75,13 +76,14 @@ class TestToggleToolsetInstallOnEnable:
         self, monkeypatch
     ):
         import hermes_cli.tools_config as tools_config
+        import hermes_cli.tools_config_post_setup as tools_config_post_setup
 
         calls = self._spawn_recorder(monkeypatch)
         monkeypatch.setattr(
             tools_config, "_resolved_cua_driver_cmd", lambda: "/usr/bin/cua-driver"
         )
         monkeypatch.setattr(
-            tools_config, "_cua_driver_install_ready", lambda: True
+            tools_config_post_setup, "_cua_driver_install_ready", lambda: True
         )
 
         resp = self.client.put(
@@ -93,13 +95,14 @@ class TestToggleToolsetInstallOnEnable:
 
     def test_disable_never_spawns_install(self, monkeypatch):
         import hermes_cli.tools_config as tools_config
+        import hermes_cli.tools_config_post_setup as tools_config_post_setup
 
         calls = self._spawn_recorder(monkeypatch)
         monkeypatch.setattr(
             tools_config, "_resolved_cua_driver_cmd", lambda: None
         )
         monkeypatch.setattr(
-            tools_config, "_cua_driver_install_ready", lambda: False
+            tools_config_post_setup, "_cua_driver_install_ready", lambda: False
         )
 
         resp = self.client.put(
@@ -111,13 +114,14 @@ class TestToggleToolsetInstallOnEnable:
 
     def test_spawn_failure_does_not_fail_the_toggle(self, monkeypatch):
         import hermes_cli.tools_config as tools_config
+        import hermes_cli.tools_config_post_setup as tools_config_post_setup
         import hermes_cli.web_server as web_server
 
         monkeypatch.setattr(
             tools_config, "_resolved_cua_driver_cmd", lambda: None
         )
         monkeypatch.setattr(
-            tools_config, "_cua_driver_install_ready", lambda: False
+            tools_config_post_setup, "_cua_driver_install_ready", lambda: False
         )
 
         def _boom(subcommand, name, **kwargs):

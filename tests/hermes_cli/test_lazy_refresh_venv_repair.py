@@ -135,10 +135,10 @@ def test_refresh_uses_pre_rebuild_snapshot_when_provided(monkeypatch):
 
 
 def test_capture_active_tool_dependencies_uses_tools_status_probes(monkeypatch):
-    from hermes_cli import tools_config
+    from hermes_cli import tools_config_post_setup
 
     monkeypatch.setattr(
-        tools_config,
+        tools_config_post_setup,
         "_module_installed",
         lambda module: module in {"langfuse", "ddgs"},
     )
