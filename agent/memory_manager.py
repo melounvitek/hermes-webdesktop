@@ -4,14 +4,6 @@ Single integration point (run_agent.py) that fans out to registered providers.
 The builtin provider is always allowed; only ONE external plugin provider may be
 registered at a time — a second is rejected with a warning to prevent tool
 schema bloat and conflicting memory backends.
-
-Usage in run_agent.py:
-    self._memory_manager = MemoryManager()
-    self._memory_manager.add_provider(plugin_provider)          # at most one external
-    prompt_parts.append(self._memory_manager.build_system_prompt())
-    context = self._memory_manager.prefetch_all(user_message)   # pre-turn
-    self._memory_manager.sync_all(user_msg, assistant_response) # post-turn
-    self._memory_manager.queue_prefetch_all(user_msg)
 """
 
 from __future__ import annotations
@@ -36,13 +28,11 @@ logger = logging.getLogger(__name__)
 # historical best-effort contract (API v1).
 _LEGACY_PRE_COMPRESS_API_VERSION = 1
 
-# How long shutdown_all() waits for in-flight background sync/prefetch work to
-# drain before abandoning it. Worker threads are daemon, so a wedged provider
-# never blocks interpreter exit — it dies with the process past this window.
+# How long shutdown_all() waits for in-flight background work to drain before
+# abandoning it. Workers are daemon threads, so a wedged provider never blocks
+# interpreter exit.
 _SYNC_DRAIN_TIMEOUT_S = 5.0
 _EXTERNAL_PREFETCH_TIMEOUT_S = 8.0
-
-_VAR_KEYWORD = inspect.Parameter.VAR_KEYWORD
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +48,7 @@ def _signature_params(fn: Callable[..., Any]):
 
 
 def _has_var_kwargs(params) -> bool:
-    return any(p.kind is _VAR_KEYWORD for p in params.values())
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def _accepts_require_checkpoint(fn: Callable[..., Any]) -> bool:
@@ -85,10 +75,9 @@ def _accepts_require_checkpoint(fn: Callable[..., Any]) -> bool:
 def _ctx_bound(fn: Callable[[], Any]) -> Callable[[], Any]:
     """Bind ``fn`` to the CALLER's contextvars for execution on another thread.
 
-    Profile isolation in multi-profile processes (gateway multiplexer, dashboard,
-    cron) is a ContextVar-scoped HERMES_HOME override; worker threads start with
-    empty contexts, so an unbound provider resolving config paths or secrets
-    from a worker would silently land on the default profile.
+    Profile isolation is a ContextVar-scoped HERMES_HOME override; worker threads
+    start with empty contexts, so an unbound provider resolving config paths or
+    secrets from a worker would silently land on the default profile.
     """
     return partial(contextvars.copy_context().run, fn)
 
@@ -100,12 +89,10 @@ def _ctx_bound(fn: Callable[[], Any]) -> Callable[[], Any]:
 def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
     """Return a bare function-tool dict with a resolvable top-level ``name``, else None.
 
-    Providers should return ``{"name", "description", "parameters"}`` which callers
-    wrap as ``{"type": "function", "function": schema}``. Some return the already
-    wrapped OpenAI form; wrapping that twice yields a ``function`` with no ``name``
-    and strict providers (e.g. DeepSeek) reject the ENTIRE request (HTTP 400),
-    disabling every tool. Both shapes are normalized here so callers can skip
-    nameless entries with a warning instead of poisoning the request.
+    Providers should return ``{"name", "description", "parameters"}``; some return
+    the already wrapped OpenAI form. Wrapping that twice yields a ``function`` with
+    no ``name`` and strict providers (e.g. DeepSeek) reject the ENTIRE request,
+    so both shapes are normalized and nameless entries can be skipped.
     """
     if not isinstance(schema, dict):
         return None
@@ -248,9 +235,8 @@ class StreamingContextScrubber:
     The one-shot ``sanitize_context`` regex needs both tags in one string, so a
     span opened in one delta and closed in a later one would leak to the UI.
     This state machine holds back partial-tag tails between ``feed()`` calls and
-    drops everything inside a span (including the system-note line). Create a
-    fresh scrubber (or ``reset()``) per top-level response; call ``flush()`` at
-    end of stream.
+    drops everything inside a span. Create a fresh scrubber (or ``reset()``) per
+    top-level response; call ``flush()`` at end of stream.
     """
 
     _OPEN_TAG = "<memory-context>"
@@ -279,7 +265,7 @@ class StreamingContextScrubber:
                     # Hold back a potential partial close tag; drop the rest.
                     held = self._max_partial_suffix(buf, self._CLOSE_TAG)
                     self._buf = buf[-held:] if held else ""
-                    return "".join(out)
+                    break
                 buf = buf[idx + len(self._CLOSE_TAG):]
                 self._in_span = False
             else:
@@ -292,7 +278,7 @@ class StreamingContextScrubber:
                     self._append_visible(out, buf[:-held] if held else buf)
                     if held:
                         self._buf = buf[-held:]
-                    return "".join(out)
+                    break
                 if idx > 0:
                     self._append_visible(out, buf[:idx])
                 buf = buf[idx + len(self._OPEN_TAG):]
@@ -307,12 +293,9 @@ class StreamingContextScrubber:
         memory context is worse than a truncated answer. Otherwise the held tail
         was not a real tag and is emitted verbatim.
         """
-        if self._in_span:
-            self._buf = ""
-            self._in_span = False
-            return ""
-        tail = self._buf
+        tail = "" if self._in_span else self._buf
         self._buf = ""
+        self._in_span = False
         return tail
 
     @staticmethod
@@ -333,21 +316,16 @@ class StreamingContextScrubber:
             idx = buf_lower.find(self._OPEN_TAG, search_start)
             if idx == -1:
                 return -1
-            if self._is_block_boundary(buf, idx) and self._has_block_opener_suffix(buf, idx):
+            after_idx = idx + len(self._OPEN_TAG)
+            if self._is_block_boundary(buf, idx) and after_idx < len(buf) and buf[after_idx] in "\r\n":
                 return idx
             search_start = idx + 1
 
     def _max_pending_open_suffix(self, buf: str) -> int:
         """Hold a complete boundary tag at the buffer end until the following char confirms it."""
-        if not buf.lower().endswith(self._OPEN_TAG):
-            return 0
-        if not self._is_block_boundary(buf, len(buf) - len(self._OPEN_TAG)):
-            return 0
-        return len(self._OPEN_TAG)
-
-    def _has_block_opener_suffix(self, buf: str, idx: int) -> bool:
-        after_idx = idx + len(self._OPEN_TAG)
-        return after_idx < len(buf) and buf[after_idx] in "\r\n"
+        if buf.lower().endswith(self._OPEN_TAG) and self._is_block_boundary(buf, len(buf) - len(self._OPEN_TAG)):
+            return len(self._OPEN_TAG)
+        return 0
 
     def _is_block_boundary(self, buf: str, idx: int) -> bool:
         if idx == 0:
@@ -477,18 +455,15 @@ class MemoryManager:
 
         # Core tool names are reserved: built-ins always win at agent init, so a
         # shadowing provider tool would linger in ``_tool_to_provider`` and
-        # hijack dispatch. Reject it at the door, like the TTS/browser/search
-        # provider registries do.
+        # hijack dispatch. Reject it at the door.
         from toolsets import _HERMES_CORE_TOOLS
-
-        _core_tool_names = set(_HERMES_CORE_TOOLS)
 
         for raw_schema in provider.get_tool_schemas():
             schema = normalize_tool_schema(raw_schema)
             if schema is None:
                 continue
             tool_name = schema["name"]
-            if tool_name in _core_tool_names:
+            if tool_name in _HERMES_CORE_TOOLS:
                 logger.warning(
                     "Memory provider '%s' tool '%s' shadows a reserved core "
                     "tool name; registration ignored. Core tools always win — "
@@ -540,9 +515,7 @@ class MemoryManager:
 
         A /skill or /bundle turn expands into a model-facing message embedding the
         whole skill body; feeding that to providers pollutes stores/embeddings with
-        prompt scaffolding. Recover just the user's instruction once, for the whole
-        fan-out. Non-skill text passes through; a bare invocation (no instruction)
-        yields None since there is nothing worth remembering.
+        prompt scaffolding. A bare invocation (no instruction) yields None.
         """
         return extract_user_instruction_from_skill_message(text)
 
@@ -638,13 +611,9 @@ class MemoryManager:
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn (see ``sync_all``)."""
         providers = list(self._providers)
-        if not providers:
-            return
-
-        clean_query = self._strip_skill_scaffolding(query)
+        clean_query = self._strip_skill_scaffolding(query) if providers else None
         if not clean_query:
             return
-
         self._submit_background(
             lambda: self._each_provider(
                 "queue_prefetch failed (non-fatal)",
@@ -674,15 +643,11 @@ class MemoryManager:
 
         Never inline: a provider's ``sync_turn`` may block on a network/daemon
         call for minutes, which kept ``run_conversation`` open after the user saw
-        the response, so every interface showed the agent "running" and follow-up
-        messages triggered interrupts. The single worker also serializes writes so
-        turn N lands before turn N+1 without provider-side ordering logic.
+        the response. The single worker also serializes writes so turn N lands
+        before turn N+1 without provider-side ordering logic.
         """
         providers = list(self._providers)
-        if not providers:
-            return
-
-        clean_user_content = self._strip_skill_scaffolding(user_content)
+        clean_user_content = self._strip_skill_scaffolding(user_content) if providers else None
         if not clean_user_content:
             return
 
@@ -797,7 +762,6 @@ class MemoryManager:
         """
         from toolsets import _HERMES_CORE_TOOLS
 
-        _core_tool_names = set(_HERMES_CORE_TOOLS)
         schemas: List[Dict[str, Any]] = []
         seen = set()
 
@@ -812,7 +776,7 @@ class MemoryManager:
                     )
                     continue
                 name = schema["name"]
-                if name not in _core_tool_names and name not in seen:
+                if name not in _HERMES_CORE_TOOLS and name not in seen:
                     schemas.append(schema)
                     seen.add(name)
 
@@ -872,11 +836,10 @@ class MemoryManager:
         """Queue old-session extraction + provider rebinding as ONE serialized task.
 
         ``on_session_end`` (LLM-bound extraction, seconds) must run strictly
-        BEFORE ``on_session_switch`` rebinds provider-internal session state;
-        an ad-hoc thread raced the inline switch and misattributed transcripts
-        to the new session. One task on the single FIFO worker gives both an
-        immediate return and ordering against every other provider write. If
-        the executor is unavailable, ``_submit_background`` runs it inline.
+        BEFORE ``on_session_switch`` rebinds provider-internal session state; an
+        ad-hoc thread raced the inline switch and misattributed transcripts. One
+        task on the single FIFO worker gives both an immediate return and
+        ordering against every other provider write.
         """
         if not self._providers:
             return
@@ -910,10 +873,9 @@ class MemoryManager:
     ) -> None:
         """Notify providers that ``AIAgent.session_id`` rotated without teardown.
 
-        Fires on ``/resume``, ``/branch``, ``/reset``, ``/new`` and compression;
-        providers refresh cached per-session state so later writes land in the
-        right record. ``rewound=True`` (``/undo``) means the id is unchanged but
-        the transcript was truncated.
+        Fires on ``/resume``, ``/branch``, ``/reset``, ``/new`` and compression.
+        ``rewound=True`` (``/undo``) means the id is unchanged but the transcript
+        was truncated.
         """
         if not new_session_id:
             return
@@ -1074,8 +1036,7 @@ class MemoryManager:
     ) -> None:
         """Mirror a built-in memory tool call to external providers.
 
-        Single entry point the agent loop calls after the ``memory`` tool runs:
-        gates on a committed write, expands single-op and batched ``operations``
+        Gates on a committed write, expands single-op and batched ``operations``
         shapes, keeps only mutating actions, and forwards ``old_text`` plus the
         per-op provenance from ``build_metadata`` (the loop knows session/task/
         tool-call identity the manager does not).

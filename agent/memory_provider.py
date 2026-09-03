@@ -1,11 +1,9 @@
 """Abstract base class for pluggable memory providers.
 
-Memory providers give the agent persistent recall across sessions. Plugins
-ship in ``plugins/memory/<name>/`` and are activated via ``memory.provider``;
-MemoryManager allows only ONE external provider at a time (tool-schema bloat,
-conflicting backends). Lifecycle is driven by MemoryManager: initialize ->
-system_prompt_block / prefetch / sync_turn per turn -> tool dispatch ->
-shutdown, plus the optional ``on_*`` hooks below.
+Plugins ship in ``plugins/memory/<name>/`` and are activated via ``memory.provider``;
+MemoryManager allows only ONE external provider at a time. Lifecycle is driven by
+MemoryManager: initialize -> system_prompt_block / prefetch / sync_turn per turn ->
+tool dispatch -> shutdown, plus the optional ``on_*`` hooks below.
 """
 
 from __future__ import annotations
@@ -96,8 +94,7 @@ class MemoryProvider(ABC):
 
     def unavailable_reason(self) -> str:
         """Short user-facing hint for the "provider unavailable" warning (e.g.
-        which package to install) — ``initialize()`` never runs when unavailable,
-        so this is the only place such a diagnostic can surface."""
+        which package to install); ``initialize()`` never runs when unavailable."""
         return ""
 
     def system_prompt_block(self) -> str:
@@ -167,13 +164,11 @@ class MemoryProvider(ABC):
         """session_id reassigned mid-process (/resume, /branch, /reset, /new,
         gateway equivalents, context compression) without a provider teardown.
 
-        Update or reset any per-session state cached in ``initialize()`` so
-        later writes land in the right record. ``parent_session_id`` carries
-        lineage for /branch, compression and /resume ("" when none). ``reset``
-        is True only for a genuinely new conversation (/reset, /new) — flush
-        per-session buffers; False when the logical conversation continues
-        under a new id. ``rewound``: same id but the transcript was truncated,
-        so invalidate per-turn document state.
+        Update or reset per-session state cached in ``initialize()`` so later
+        writes land in the right record. ``parent_session_id`` carries lineage
+        ("" when none). ``reset`` is True only for a genuinely new conversation
+        (/reset, /new) — flush per-session buffers. ``rewound``: same id but the
+        transcript was truncated, so invalidate per-turn document state.
         """
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
@@ -191,9 +186,9 @@ class MemoryProvider(ABC):
 
         Each field: ``key``, ``description``, optional ``secret`` (goes to .env),
         ``required``, ``default``, ``choices``, ``type`` (text | integer |
-        number | boolean), ``minimum`` / ``maximum`` / ``step`` (numeric,
-        Dashboard rendering), ``url`` (where to get the credential), ``env_var``
-        (explicit secret env var; default auto-generated).
+        number | boolean), ``minimum`` / ``maximum`` / ``step`` (numeric),
+        ``url`` (where to get the credential), ``env_var`` (explicit secret env
+        var; default auto-generated).
         """
         return []
 
@@ -216,7 +211,7 @@ class MemoryProvider(ABC):
 
     def backup_paths(self) -> List[str]:
         """Absolute paths of provider state OUTSIDE HERMES_HOME (e.g. ``~/.honcho``)
-        so ``hermes backup`` can capture them under ``_external/`` and
-        ``hermes import`` restore them; paths outside the home dir are skipped.
-        MUST work without ``initialize()`` or network — resolve from config/env."""
+        so ``hermes backup``/``hermes import`` can capture and restore them; paths
+        outside the home dir are skipped. MUST work without ``initialize()`` or
+        network — resolve from config/env."""
         return []

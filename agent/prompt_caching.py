@@ -39,6 +39,13 @@ def envelope_tool_part_cache_markers_supported(
     return not _is_litellm_route((provider or "").strip().lower(), base_url or "")
 
 
+def _text_part(text: str, cache_marker: dict | None = None) -> dict:
+    part: dict = {"type": "text", "text": text}
+    if cache_marker is not None:
+        part["cache_control"] = cache_marker
+    return part
+
+
 def _apply_cache_marker(
     msg: dict,
     cache_marker: dict,
@@ -68,30 +75,22 @@ def _apply_cache_marker(
         return
 
     if isinstance(content, str):
-        if role == "user":
-            stable_prefix = find_stable_prefix(content)
-            if stable_prefix is not None:
-                suffix = content[len(stable_prefix):]
-                if suffix.strip():
-                    # Builder-declared boundary: the scaffold carries the
-                    # breakpoint and the volatile tail rides unmarked, so a
-                    # changed ticket ID/timestamp no longer invalidates the
-                    # skill body. Request-local only — the stored message
-                    # stays a plain string.
-                    msg["content"] = [
-                        {"type": "text", "text": stable_prefix, "cache_control": cache_marker},
-                        {"type": "text", "text": suffix},
-                    ]
-                    return
-        msg["content"] = [
-            {"type": "text", "text": content, "cache_control": cache_marker}
-        ]
+        stable_prefix = find_stable_prefix(content) if role == "user" else None
+        if stable_prefix is not None and content[len(stable_prefix):].strip():
+            # Builder-declared boundary: the scaffold carries the breakpoint and
+            # the volatile tail rides unmarked, so a changed ticket ID/timestamp
+            # no longer invalidates the skill body. Request-local only — the
+            # stored message stays a plain string.
+            msg["content"] = [
+                _text_part(stable_prefix, cache_marker),
+                _text_part(content[len(stable_prefix):]),
+            ]
+        else:
+            msg["content"] = [_text_part(content, cache_marker)]
         return
 
-    if isinstance(content, list) and content:
-        last = content[-1]
-        if isinstance(last, dict):
-            last["cache_control"] = cache_marker
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        content[-1]["cache_control"] = cache_marker
 
 
 def _can_carry_marker(
@@ -111,13 +110,11 @@ def _can_carry_marker(
     if msg.get("role") == "tool" and not tool_part_markers:
         return False
     content = msg.get("content")
-    if content is None or content == "":
-        return False
     if isinstance(content, list):
         # Mirrors _apply_cache_marker (marks only the LAST part): a list whose
         # last element isn't a dict cannot receive a marker.
         return bool(content) and isinstance(content[-1], dict)
-    return isinstance(content, str)
+    return isinstance(content, str) and content != ""
 
 
 def _build_marker(ttl: str) -> Dict[str, str]:
@@ -141,11 +138,10 @@ ALIBABA_FAMILY_PROVIDERS = frozenset({
 })
 
 # 1h-tier ALLOW-list: only routes wire-measured to retain a 1h marker (delayed
-# read past 5 minutes with no intervening call — an intervening read renews the
-# window and masks expiry). Other opencode routes stay clamped because they are
-# UNMEASURED, not known-bad. Note opencode-go labels every write
-# `ephemeral_5m_input_tokens` regardless of requested ttl; that label is not
-# evidence of the retention window.
+# read past 5 minutes with no intervening call). Other opencode routes stay
+# clamped because they are UNMEASURED, not known-bad. opencode-go labels every
+# write `ephemeral_5m_input_tokens` regardless of requested ttl; that label is
+# not evidence of the retention window.
 MEASURED_1H_PROVIDERS = frozenset({
     "opencode-go",
 })
@@ -181,20 +177,19 @@ def effective_cache_ttl(
     """Clamp a requested cache TTL to what the destination route supports.
 
     Qwen/Alibaba routes document a five-minute window and drop the ``1h``
-    tier, so a configured ``1h`` regresses to ``5m`` there instead of creating
-    a false 1h-cache expectation — except on ``MEASURED_1H_PROVIDERS``, which
-    keep ``1h`` minus any ``NO_1H_TIER_MODELS`` model. The measured-route check
-    runs BEFORE the generic Qwen clamp, which would otherwise swallow every
-    Qwen model on it. ``None`` resolves to ``5m``.
+    tier, so a configured ``1h`` regresses to ``5m`` there — except on
+    ``MEASURED_1H_PROVIDERS``, which keep ``1h`` minus any ``NO_1H_TIER_MODELS``
+    model. The measured-route check runs BEFORE the generic Qwen clamp, which
+    would otherwise swallow every Qwen model on it. ``None`` resolves to ``5m``.
     """
     if ttl != "1h":
         return ttl or "5m"
-    if (provider or "").lower() in MEASURED_1H_PROVIDERS:
-        # Checked BEFORE the generic Qwen clamp (which would swallow every Qwen
-        # model on this route); the per-model denial stays nested so an
-        # opencode-go observation cannot reclamp the same model on another route.
+    provider_lower = (provider or "").lower()
+    if provider_lower in MEASURED_1H_PROVIDERS:
+        # The per-model denial stays nested so an opencode-go observation
+        # cannot reclamp the same model on another route.
         return "5m" if _flat_model(model) in NO_1H_TIER_MODELS else "1h"
-    if is_qwen_model(model) or (provider or "").lower() in ALIBABA_FAMILY_PROVIDERS:
+    if is_qwen_model(model) or provider_lower in ALIBABA_FAMILY_PROVIDERS:
         return "5m"
     return "1h"
 
@@ -229,21 +224,21 @@ def _apply_system_cache_markers(
     ):
         suffix = content[len(static_system_prefix):]
         if suffix.strip():
-            suffix_part: dict = {"type": "text", "text": suffix}
-            if mark_suffix:
-                suffix_part["cache_control"] = cache_marker
             message["content"] = [
-                {"type": "text", "text": static_system_prefix, "cache_control": cache_marker},
-                suffix_part,
+                _text_part(static_system_prefix, cache_marker),
+                _text_part(suffix, cache_marker if mark_suffix else None),
             ]
             return 2 if mark_suffix else 1
-        _apply_cache_marker(message, cache_marker, native_anthropic=native_anthropic)
-        return 1
-
-    if not fallback_to_whole:
+    elif not fallback_to_whole:
         return 0
     _apply_cache_marker(message, cache_marker, native_anthropic=native_anthropic)
     return 1
+
+
+def _has_part_marker(content: Any) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(part, dict) and "cache_control" in part for part in content
+    )
 
 
 def strip_anthropic_cache_control(
@@ -283,7 +278,7 @@ def strip_anthropic_cache_control(
             and "cache_control" in content[0]
             and "cache_control" not in content[1]
         )
-        if any(isinstance(part, dict) and "cache_control" in part for part in content):
+        if _has_part_marker(content):
             content = [
                 {k: v for k, v in part.items() if k != "cache_control"}
                 if isinstance(part, dict) and "cache_control" in part
@@ -318,18 +313,15 @@ def strip_anthropic_tool_cache_control(tools: List[Dict[str, Any]] | None) -> Li
 
 def _count_cache_markers(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> int:
     """Count the wire-visible cache markers in a request-local plan."""
-    count = sum(
-        1
-        for message in messages
-        if isinstance(message, dict) and "cache_control" in message
-    )
-    count += sum(
-        1
-        for message in messages
-        if isinstance(message, dict) and isinstance(message.get("content"), list)
-        for part in message["content"]
-        if isinstance(part, dict) and "cache_control" in part
-    )
+    count = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        count += "cache_control" in message
+        if isinstance(message.get("content"), list):
+            count += sum(
+                1 for part in message["content"] if isinstance(part, dict) and "cache_control" in part
+            )
     return count + sum(
         1 for tool in tools if isinstance(tool, dict) and "cache_control" in tool
     )
@@ -339,6 +331,16 @@ def _completed_transaction_endpoint_indexes(
     messages: List[Dict[str, Any]], *, native_anthropic: bool,
 ) -> List[int]:
     """Select legal ends of completed tool runs and ordinary turns."""
+
+    def _tool_run_end(start: int) -> int:
+        end = start
+        while end < len(messages):
+            result = messages[end]
+            if not isinstance(result, dict) or result.get("role") != "tool":
+                break
+            end += 1
+        return end
+
     endpoints: List[int] = []
     index = 0
     while index < len(messages):
@@ -346,37 +348,21 @@ def _completed_transaction_endpoint_indexes(
         if not isinstance(message, dict) or message.get("role") == "system":
             index += 1
             continue
+        role = message.get("role")
 
-        if message.get("role") == "assistant" and message.get("tool_calls"):
-            result_start = index + 1
-            result_end = result_start
-            while result_end < len(messages):
-                result = messages[result_end]
-                if not isinstance(result, dict) or result.get("role") != "tool":
-                    break
-                result_end += 1
-            if result_end > result_start:
-                endpoint = result_end - 1
-                if _can_carry_marker(messages[endpoint], native_anthropic):
-                    endpoints.append(endpoint)
+        if role == "assistant" and message.get("tool_calls"):
+            result_end = _tool_run_end(index + 1)
+            if result_end > index + 1 and _can_carry_marker(messages[result_end - 1], native_anthropic):
+                endpoints.append(result_end - 1)
             index = result_end
             continue
 
-        if message.get("role") == "tool":
-            while index < len(messages):
-                result = messages[index]
-                if not isinstance(result, dict) or result.get("role") != "tool":
-                    break
-                index += 1
+        if role == "tool":
+            index = _tool_run_end(index)
             continue
 
-        if message.get("role") == "user" and index + 1 < len(messages):
-            index += 1
-            continue
-
-        if (
-            message.get("role") == "assistant"
-            and message.get("content") in (None, "")
+        if (role == "user" and index + 1 < len(messages)) or (
+            role == "assistant" and message.get("content") in (None, "")
         ):
             index += 1
             continue
@@ -470,14 +456,7 @@ def apply_anthropic_cache_control(
     marker = _build_marker(cache_ttl)
 
     for i, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        has_marker = "cache_control" in msg or (
-            isinstance(content, list)
-            and any(isinstance(part, dict) and "cache_control" in part for part in content)
-        )
-        if has_marker:
+        if isinstance(msg, dict) and ("cache_control" in msg or _has_part_marker(msg.get("content"))):
             messages[i] = strip_anthropic_cache_control([dict(msg)])[0]
 
     breakpoints_used = 0

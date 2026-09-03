@@ -1,9 +1,9 @@
 """Message and tool-payload sanitization helpers.
 
-Pure functions (extracted from ``run_agent.py``) that walk OpenAI-format message
-lists and structured payloads, repairing or stripping characters that would
-crash ``json.dumps`` in the OpenAI SDK or be rejected upstream. Stateless except
-for documented in-place mutation; ``run_agent`` re-exports them for old imports.
+Pure functions that walk OpenAI-format message lists and structured payloads,
+repairing or stripping characters that would crash ``json.dumps`` in the OpenAI
+SDK or be rejected upstream. Stateless except for documented in-place mutation;
+``run_agent`` re-exports them for old imports.
 """
 
 from __future__ import annotations
@@ -150,22 +150,16 @@ def _escape_invalid_chars_in_json_strings(raw: str) -> str:
     n = len(raw)
     while i < n:
         ch = raw[i]
-        if in_string:
-            if ch == "\\" and i + 1 < n:
-                out.append(ch)
-                out.append(raw[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                in_string = False
-                out.append(ch)
-            elif ord(ch) < 0x20:
-                out.append(f"\\u{ord(ch):04x}")
-            else:
-                out.append(ch)
+        if in_string and ch == "\\" and i + 1 < n:
+            out.append(raw[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+        elif in_string and ord(ch) < 0x20:
+            out.append(f"\\u{ord(ch):04x}")
         else:
-            if ch == '"':
-                in_string = True
             out.append(ch)
         i += 1
     return "".join(out)
@@ -175,6 +169,14 @@ def _escape_invalid_chars_in_json_strings(raw: str) -> str:
 # copy of content that can hold real user data (e.g. a truncated write_file's
 # streamed file content). Bound it here rather than at a short preview.
 _FULL_ARGS_LOG_BOUND = 100_000
+
+
+def _loads_ok(text: str) -> bool:
+    try:
+        json.loads(text)
+        return True
+    except json.JSONDecodeError:
+        return False
 
 
 def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
@@ -209,47 +211,34 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     # Passes 1-3: strip trailing commas, close unclosed structures, then trim
     # excess closers (bounded).
     fixed = re.sub(r',\s*([}\]])', r'\1', raw_stripped)
-    open_curly = fixed.count('{') - fixed.count('}')
-    open_bracket = fixed.count('[') - fixed.count(']')
-    if open_curly > 0:
-        fixed += '}' * open_curly
-    if open_bracket > 0:
-        fixed += ']' * open_bracket
+    fixed += '}' * max(0, fixed.count('{') - fixed.count('}'))
+    fixed += ']' * max(0, fixed.count('[') - fixed.count(']'))
     for _ in range(50):
-        try:
-            json.loads(fixed)
+        if _loads_ok(fixed):
             break
-        except json.JSONDecodeError:
-            if (fixed.endswith('}') and fixed.count('}') > fixed.count('{')) or (
-                fixed.endswith(']') and fixed.count(']') > fixed.count('[')
-            ):
-                fixed = fixed[:-1]
-            else:
-                break
+        if (fixed.endswith('}') and fixed.count('}') > fixed.count('{')) or (
+            fixed.endswith(']') and fixed.count(']') > fixed.count('[')
+        ):
+            fixed = fixed[:-1]
+        else:
+            break
 
-    try:
-        json.loads(fixed)
+    if _loads_ok(fixed):
         logger.warning(
             "Repaired malformed tool_call arguments for %s: %s → %s",
             tool_name, raw_stripped[:80], fixed[:80],
         )
         return fixed
-    except json.JSONDecodeError:
-        pass
 
     # Pass 4: escape control chars inside strings (strict=False alone fails
     # when other malformations are present too), then retry.
-    try:
-        escaped = _escape_invalid_chars_in_json_strings(fixed)
-        if escaped != fixed:
-            json.loads(escaped)
-            logger.warning(
-                "Repaired control-char-laced tool_call arguments for %s: %s → %s",
-                tool_name, raw_stripped[:80], escaped[:80],
-            )
-            return escaped
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
+    escaped = _escape_invalid_chars_in_json_strings(fixed)
+    if escaped != fixed and _loads_ok(escaped):
+        logger.warning(
+            "Repaired control-char-laced tool_call arguments for %s: %s → %s",
+            tool_name, raw_stripped[:80], escaped[:80],
+        )
+        return escaped
 
     logger.warning(
         "Unrepairable tool_call arguments for %s — "
@@ -265,9 +254,7 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None) 
     A transcript ending on a raw ``tool`` message makes the next user message
     land as ``tool → user`` — a role-alternation violation strict providers
     (Gemini, Claude) answer by hallucinating a continuation and dropping prior
-    context. ``finalize_turn`` covers the happy interrupt path; the retry/backoff
-    early-returns in ``conversation_loop`` need this shared helper. Mutates in
-    place; returns True if a closing turn was appended.
+    context. Mutates in place; returns True if a closing turn was appended.
     """
     if not messages:
         return False
@@ -287,12 +274,11 @@ def close_interrupted_tool_sequence(messages: list, final_response: Any = None) 
 def serialized_messages_bytes(messages: list) -> int:
     """Exact serialized byte size of the ``messages`` payload (HTTP 413 recovery).
 
-    A 413 is a BYTE-size error, but the token estimator deliberately prices an
-    image at a flat per-image cost, so it cannot score recovery from an
-    image-dominated 413 (compaction frees megabytes while the estimate barely
-    moves → "no progress"). This measures what the provider actually rejected,
-    identically before and after each pass. Non-serializable values fall back to
-    ``str()`` so a malformed message can never crash recovery.
+    A 413 is a BYTE-size error, but the token estimator prices an image at a
+    flat per-image cost, so it cannot score recovery from an image-dominated
+    413. This measures what the provider actually rejected, identically before
+    and after each pass. Non-serializable values fall back to ``str()`` so a
+    malformed message can never crash recovery.
     """
     if not isinstance(messages, list) or not messages:
         return 0
@@ -306,18 +292,18 @@ def serialized_messages_bytes(messages: list) -> int:
         return sum(len(str(m)) for m in messages)
 
 
+_IMAGE_PART_TYPES = {"image_url", "image", "input_image"}
+
+
 def _strip_images_from_messages(messages: list) -> bool:
     """Remove image content parts from all messages in-place (server rejected images).
 
     Preserves alternation invariants: ``tool`` messages and assistant messages
     carrying ``tool_calls`` whose content was entirely images are replaced with a
     placeholder, NOT deleted (deleting orphans the paired ``tool_call_id`` →
-    HTTP 400); other now-empty messages (synthetic image-only attachment turns)
-    are dropped. Any rewritten message also loses its ``api_content`` sidecar —
-    it carries the exact bytes previously sent, i.e. the images being removed,
-    and would be substituted back on the wire next turn.
-
-    Returns True if any image parts were removed.
+    HTTP 400); other now-empty messages are dropped. Any rewritten message also
+    loses its ``api_content`` sidecar — it carries the exact bytes previously
+    sent, i.e. the images being removed. Returns True if any image parts were removed.
     """
     from agent.turn_context import drop_stale_api_content
 
@@ -329,13 +315,12 @@ def _strip_images_from_messages(messages: list) -> bool:
         content = msg.get("content")
         if not isinstance(content, list):
             continue
-        new_parts = []
-        for part in content:
-            if isinstance(part, dict) and part.get("type") in {"image_url", "image", "input_image"}:
-                found = True
-            else:
-                new_parts.append(part)
+        new_parts = [
+            part for part in content
+            if not (isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES)
+        ]
         if len(new_parts) < len(content):
+            found = True
             if new_parts:
                 msg["content"] = new_parts
             elif msg.get("role") == "tool" or msg.get("tool_calls"):
@@ -368,8 +353,7 @@ _IMAGE_REJECTION_PHRASES = (
     "model does not support image",
     # DashScope-style gateways reject non-text blocks with this generic body.
     "unexpected item type in content",
-    # ChatGPT-account Codex backend rejects data:image URLs in input_image
-    # ("Invalid 'input[N].content[K].image_url'. Expected a valid URL ...");
+    # ChatGPT-account Codex backend rejects data:image URLs in input_image;
     # keyed on the field-path apostrophe so other URL errors don't false-trip.
     "image_url'. expected",
     # ChatGPT-account Codex wording for corrupt/unsupported native image payloads.
@@ -380,8 +364,7 @@ _IMAGE_REJECTION_PHRASES = (
     # OpenRouter HTTP 404 when no upstream endpoint accepts image input (passes
     # the 4xx gate; without this the gateway queue wedges behind the stuck turn).
     "no endpoints found that support image input",
-    # Kimi/Moonshot et al. reject truncated/corrupt image bytes baked into
-    # immutable history ("prepare image failed ... failed to decode image").
+    # Kimi/Moonshot et al. reject truncated/corrupt image bytes baked into history.
     "failed to decode image",
 )
 
@@ -426,8 +409,8 @@ __all__ = [
 # coalescing, and duplicate-id repair.
 #
 # NOT consolidated on purpose: agent/transports/codex_event_projector's
-# _deterministic_call_id maps codex app-server ITEM ids (`codex_<type>_<item_id>`),
-# not chat tool-call content; merging would change ids and invalidate caches.
+# _deterministic_call_id maps codex app-server ITEM ids, not chat tool-call
+# content; merging would change ids and invalidate caches.
 #
 # HARD INVARIANT: everything here stays deterministic (never uuid4) and
 # byte-identical for existing inputs — these ids feed prompt-cache prefixes.
@@ -455,17 +438,12 @@ def _expand_tool_id_variants(values: tuple[Any, ...]) -> frozenset[str]:
     """
     variants: set[str] = set()
     for raw in values:
-        if not isinstance(raw, str):
-            continue
-        value = raw.strip()
+        value = raw.strip() if isinstance(raw, str) else ""
         if not value:
             continue
         variants.add(value)
         if "|" in value:
-            for part in value.split("|"):
-                part = part.strip()
-                if part:
-                    variants.add(part)
+            variants.update(p for p in (part.strip() for part in value.split("|")) if p)
     return frozenset(variants)
 
 
@@ -489,9 +467,7 @@ def coalesce_tool_call_id(tc: Any) -> str:
     Returns ``""`` when neither is set.
     """
     for raw in (_tc_field(tc, "call_id"), _tc_field(tc, "id")):
-        if not isinstance(raw, str):
-            continue
-        value = raw.strip()
+        value = raw.strip() if isinstance(raw, str) else ""
         if value:
             return value.split("|", 1)[0].strip() or value
     return ""
@@ -501,20 +477,18 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
     """Ensure every tool call in one assistant turn has a distinct id.
 
     Some providers reuse one id across calls in a batch; the pre-API sanitizer
-    then keeps only the first call/result pair per id (the later result silently
-    vanishes) and strict providers reject duplicates outright. First occurrence
-    keeps its id; later collisions get a deterministic ``<id>_d<n>`` suffix
-    (never uuid4 — cache-prefix stability). Mutates entries in place (SDK models
-    / SimpleNamespace / dicts) and returns the same list. Blank ids are left for
-    the deterministic fallback in ``build_assistant_message``.
+    then keeps only the first call/result pair per id and strict providers
+    reject duplicates outright. First occurrence keeps its id; later collisions
+    get a deterministic ``<id>_d<n>`` suffix (never uuid4 — cache-prefix
+    stability). Mutates entries in place (SDK models / SimpleNamespace / dicts)
+    and returns the same list. Blank ids are left for the deterministic fallback
+    in ``build_assistant_message``.
     """
     seen: set = set()
     for tc in tool_calls or []:
         # Same coalescing rule as coalesce_tool_call_id, tolerant of non-string ids.
         raw = _tc_field(tc, "call_id") or _tc_field(tc, "id") or ""
         raw = raw.strip() if isinstance(raw, str) else ""
-        if not raw:
-            continue
         # Composite Responses ids ("call_x|fc_y") collide on the call half —
         # that's the pairing key providers enforce per turn.
         cid = raw.split("|", 1)[0]
@@ -524,10 +498,9 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
             seen.add(cid)
             continue
         n = 2
-        new_id = f"{cid}_d{n}"
-        while new_id in seen:
+        while f"{cid}_d{n}" in seen:
             n += 1
-            new_id = f"{cid}_d{n}"
+        new_id = f"{cid}_d{n}"
         seen.add(new_id)
 
         def _renamed(value):
@@ -539,10 +512,7 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
 
         try:
             if isinstance(tc, dict):
-                if tc.get("id"):
-                    tc["id"] = _renamed(tc["id"])
-                else:
-                    tc["id"] = new_id
+                tc["id"] = _renamed(tc["id"]) if tc.get("id") else new_id
                 if tc.get("call_id"):
                     tc["call_id"] = new_id
             else:
@@ -605,13 +575,13 @@ def matches_reasoning_echo_family(
     from utils import base_url_host_matches
 
     _, raw_providers, lowered_providers, model_subs, hosts = _REASONING_ECHO_RULE_BY_FAMILY[family]
-    provider_lower = (provider or "").lower()
     model_lower = (model or "").lower()
-    if provider in raw_providers or provider_lower in lowered_providers:
-        return True
-    if any(sub in model_lower for sub in model_subs):
-        return True
-    return any(base_url_host_matches(base_url, host) for host in hosts)
+    return (
+        provider in raw_providers
+        or (provider or "").lower() in lowered_providers
+        or any(sub in model_lower for sub in model_subs)
+        or any(base_url_host_matches(base_url, host) for host in hosts)
+    )
 
 
 def reasoning_echo_family(provider: Any, model: Any, base_url: Any) -> "str | None":
@@ -639,10 +609,8 @@ def stale_thinking_reaches_wire(
     can look over-threshold to preflight yet fully tail-protected to the walk —
     an infinite ineffective compaction loop.
     * ``codex_responses``: the Responses input builder never reads the text keys
-      (continuity rides the encrypted ``codex_reasoning_items`` sidecar, already
-      charged by both estimators) → False.
-    * echo-back families: ``apply_reasoning_content_policy`` replays stored
-      ``reasoning_content`` verbatim on every assistant turn → True.
+      (continuity rides the encrypted ``codex_reasoning_items`` sidecar) → False.
+    * echo-back families: stored ``reasoning_content`` is replayed verbatim → True.
     * everything else: stripped or one-space-padded at send time → False.
     """
     if (api_mode or "") == "codex_responses":
@@ -664,50 +632,33 @@ def apply_reasoning_content_policy(
     # 1. Explicit reasoning_content set. Require-side: preserve verbatim,
     # upgrading legacy "" placeholders to " " (DeepSeek V4 400s on ""). Strict
     # side: strip entirely — a reasoning primary pads history with " ", then a
-    # fallback to Mistral/Cerebras/Groq replays the pad and 422s. This covers
-    # the rebuild path; reapply_reasoning_echo covers already-built api_messages.
+    # fallback to Mistral/Cerebras/Groq replays the pad and 422s.
     existing = source_msg.get("reasoning_content")
     if isinstance(existing, str):
         if not needs_thinking_pad:
             api_msg.pop("reasoning_content", None)
-        elif existing == "":
-            api_msg["reasoning_content"] = " "
         else:
-            api_msg["reasoning_content"] = existing
+            api_msg["reasoning_content"] = existing or " "
         return
 
-    # 2. Cross-provider poisoned history: tool_calls + 'reasoning' but no
-    # 'reasoning_content' key means the reasoning text came from ANOTHER
-    # provider (DeepSeek's own build pins reasoning_content for tool-call
-    # turns). Pad with " " to satisfy the API without leaking foreign CoT.
     normalized_reasoning = source_msg.get("reasoning")
-    if (
-        needs_thinking_pad
-        and source_msg.get("tool_calls")
-        and isinstance(normalized_reasoning, str)
-        and normalized_reasoning
-    ):
-        api_msg["reasoning_content"] = " "
-        return
-
-    # 3. Healthy session: promote internal 'reasoning' → 'reasoning_content'
-    # (must precede the unconditional pad so real reasoning isn't overwritten),
-    # but only for echo-back providers — strict ones reject the field.
-    if isinstance(normalized_reasoning, str) and normalized_reasoning:
-        if needs_thinking_pad:
+    has_reasoning = isinstance(normalized_reasoning, str) and bool(normalized_reasoning)
+    if needs_thinking_pad:
+        # 2. Cross-provider poisoned history: tool_calls + 'reasoning' but no
+        # 'reasoning_content' key means the reasoning text came from ANOTHER
+        # provider (DeepSeek's own build pins reasoning_content for tool-call
+        # turns). Pad with " " to satisfy the API without leaking foreign CoT.
+        # 3. Healthy session: promote internal 'reasoning' → 'reasoning_content'.
+        # 4. No reasoning at all: every assistant turn still needs the field;
+        # " " (not "") because DeepSeek V4 rejects empty string.
+        if has_reasoning and not source_msg.get("tool_calls"):
             api_msg["reasoning_content"] = normalized_reasoning
         else:
-            api_msg.pop("reasoning_content", None)
+            api_msg["reasoning_content"] = " "
         return
 
-    # 4. Require-side with no reasoning at all: every assistant turn needs the
-    # field; " " (not "") because DeepSeek V4 rejects empty string.
-    if needs_thinking_pad:
-        api_msg["reasoning_content"] = " "
-        return
-
-    # 5. reasoning_content present but not a string (e.g. None after
-    # compaction) — never pass null to the API.
+    # 5. Strict side: never carry the field (incl. a non-string value such as
+    # None after compaction — never pass null to the API).
     api_msg.pop("reasoning_content", None)
 
 

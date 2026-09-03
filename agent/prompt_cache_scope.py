@@ -1,30 +1,21 @@
 """Rotation-stable logical cache scope for prompt_cache_key derivation.
 
-Legacy compression rotation (``compression.in_place: false``) mints a new
-physical ``session_id`` mid-conversation, which moved the conversation into a
-fresh cache bucket each time. ``resolve_prompt_cache_scope()`` instead maps
-the physical id to the ROOT of its compression lineage via
-``SessionDB.get_compression_lineage()`` — NOT ``get_conversation_root`` /
-``_conversation_root_id`` (the Portal-attribution walk), which follows
-``parent_session_id`` blindly and would collapse /branch children and delegate
-trees into one id. The two resolvers are intentionally different.
+Legacy compression rotation mints a new physical ``session_id`` mid-conversation,
+which moved the conversation into a fresh cache bucket each time.
+``resolve_prompt_cache_scope()`` maps the physical id to the ROOT of its compression
+lineage via ``SessionDB.get_compression_lineage()`` — NOT ``get_conversation_root``
+(the Portal-attribution walk), which follows ``parent_session_id`` blindly and would
+collapse /branch children and delegate trees into one id.
 
 Scope boundaries: rotation children walk back to the original segment; ``/new``
 starts a fresh scope; ``/branch`` children, delegate subagents, and tool-tagged
 children are explicit fork children with their own isolated scope; cron fires
-keep their physical id (the per-fire timestamp is stripped later).
-
-Hosts that mint one physical id per RESPONSE (Studio group chat, ``/v1/responses``
-with client-managed history) carry no lineage, so the walk returns the physical
-id and the scope moves every reply. Hermes must not infer the conversation from
-id SYNTAX (that collides client-supplied ids); the host declares it via
-``gateway_session_key`` (``X-Hermes-Session-Key`` / ``build_session_key``),
-consumed by ``declared_conversation_scope()``, which wins over the lineage walk.
-The declared key is hashed to ``gwk_<sha256[:24]>`` because it embeds
-platform/chat/user identifiers and leaves the process as a provider routing key.
-
-Resolution is memoized per (agent, session_id, db-present): the lineage walk
-runs once per transcript segment, never per API call.
+keep their physical id. Hosts that mint one physical id per RESPONSE (Studio group
+chat, ``/v1/responses`` with client-managed history) carry no lineage, so they
+declare the conversation via ``gateway_session_key`` (``X-Hermes-Session-Key``),
+consumed by ``declared_conversation_scope()``, which wins over the lineage walk and
+is hashed to ``gwk_<sha256[:24]>`` because it embeds platform/chat/user identifiers.
+Resolution is memoized per (agent, session_id, db-present).
 """
 
 import hashlib
@@ -38,10 +29,7 @@ _DECLARED_SCOPE_PREFIX = "gwk_"
 
 
 def _lineage_root(session_id: str, session_db: Any) -> Optional[str]:
-    """Compression-lineage root of *session_id*, or None.
-
-    Tolerates non-list results from test doubles / partially built agents.
-    """
+    """Compression-lineage root of *session_id*, or None (tolerates test-double results)."""
     if session_db is None:
         return None
     try:
@@ -66,8 +54,7 @@ def _agent_source(
     lands, use the SAME resolver persistence uses
     (``run_agent._session_source_for_agent``), not ``agent.platform``: they
     diverge under ``HERMES_SESSION_SOURCE``, and the declared scope is memoized
-    immediately, so both sides of a ``/new`` would otherwise miss the boundary
-    recorded under the override and hash the same scope.
+    immediately, so both sides of a ``/new`` would otherwise hash the same scope.
     """
     if row_source is None and session_id and session_db is not None:
         try:
@@ -105,9 +92,7 @@ def _conversation_generation(session_key: str, source: str, session_db: Any) -> 
     if not callable(reader):
         return ""
     generation = reader(session_key, source)
-    if generation is None:
-        return ""
-    return str(int(generation))
+    return "" if generation is None else str(int(generation))
 
 
 def declared_conversation_scope(agent: Any) -> Optional[str]:
@@ -173,9 +158,7 @@ def resolve_prompt_cache_scope(agent: Any) -> str:
     memo = getattr(agent, _MEMO_ATTR, None)
     if isinstance(memo, tuple) and len(memo) == 2 and memo[0] == key:
         return memo[1]
-    root = declared_conversation_scope(agent) or (
-        _lineage_root(sid, db) if db is not None else None
-    )
+    root = declared_conversation_scope(agent) or _lineage_root(sid, db)
     scope = root or sid
     # Memoize on success, with no DB, or when the agent never persists a row
     # (background-review forks hold a DB handle but set _persist_disabled).

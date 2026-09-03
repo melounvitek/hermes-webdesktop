@@ -1,24 +1,12 @@
 """Native OpenAI Responses server-side compaction — gpt-5.6 on direct OpenAI routes only.
 
-Including ``context_management=[{"type": "compaction", "compact_threshold": N}]``
-in a ``/v1/responses`` request makes the server summarize older context into an
-opaque ``compaction`` item (``encrypted_content``, sealed to the issuing
-endpoint) once the input crosses N tokens; replaying that item stands in for
-the pruned history. Docs: https://developers.openai.com/api/docs/guides/compaction
-
-Support is deliberately narrow (live-verified):
-* gpt-5.6 family only — gpt-5.1/5.2 fail server-side (HTTP 500 blocking, a
-  permanent stall streaming) with no structured "unsupported" rejection, so an
-  explicit model-family check is the only safe gate.
-* Direct OpenAI routes only (api.openai.com or the ChatGPT Codex backend) —
-  other Responses surfaces would 400 on the field and cannot mint/decrypt the blob.
-
-Hermes' local compressor stays armed as fallback owner: the native threshold is
-clamped below the local trigger so the server compacts first, and captured
-compaction items ride the existing ``codex_reasoning_items`` sidecar (persistence,
-replay, cross-issuer stamping, kill switch). This module stays free of
-transport/adapter imports so transport, adapter, and loop share the gate
-without cycles; ``context_compressor`` and ``message_content`` sit below it.
+``context_management=[{"type": "compaction", "compact_threshold": N}]`` makes the server
+summarize older context into an opaque ``compaction`` item (sealed to the issuing
+endpoint) once the input crosses N tokens. Support is deliberately narrow (live-verified):
+gpt-5.6 family only (5.1/5.2 fail server-side with no structured rejection) on direct
+OpenAI routes (api.openai.com or the ChatGPT Codex backend). Hermes' local compressor stays
+armed as fallback: the native threshold is clamped below the local trigger, and captured
+compaction items ride the existing ``codex_reasoning_items`` sidecar. No transport imports.
 """
 
 from __future__ import annotations
@@ -81,6 +69,17 @@ def is_direct_openai_route(
     return hostname == "api.openai.com"
 
 
+def _positive_int(value: Any, *, reject: tuple = (bool,)) -> Optional[int]:
+    """``int(value)`` when it is a positive integer-like (never a bool), else None."""
+    if value is None or isinstance(value, reject):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 def resolve_compact_threshold(
     configured_threshold: Any,
     local_trigger_tokens: Any = None,
@@ -92,15 +91,7 @@ def resolve_compact_threshold(
     explicit positive integer is absolute unless it must be clamped so native
     compaction fires first. Booleans are never thresholds.
     """
-    local = None
-    try:
-        if local_trigger_tokens is not None and not isinstance(local_trigger_tokens, bool):
-            local = int(local_trigger_tokens)
-    except (TypeError, ValueError):
-        local = None
-    if local is not None and local <= 0:
-        local = None
-
+    local = _positive_int(local_trigger_tokens)
     upper = None
     if local is not None:
         if local > LOCAL_TRIGGER_SAFETY_MARGIN:
@@ -108,15 +99,8 @@ def resolve_compact_threshold(
         else:
             upper = max(1_024, int(local * 0.8))
 
-    try:
-        configured = (
-            None
-            if isinstance(configured_threshold, (bool, float))
-            else int(configured_threshold)
-        )
-    except (TypeError, ValueError):
-        configured = None
-    if configured is None or configured <= 0:
+    configured = _positive_int(configured_threshold, reject=(bool, float))
+    if configured is None:
         return upper if upper is not None else DEFAULT_COMPACT_THRESHOLD
     if upper is None:
         return configured
@@ -215,15 +199,16 @@ def _extract_item_text(item: Any) -> Optional[str]:
         parts = []
         for part in content:
             if isinstance(part, str):
-                if part.strip():
-                    parts.append(part.strip())
+                candidates = (part,)
             elif isinstance(part, dict):
-                part_text = part.get("text") or part.get("input_text") or part.get("output_text")
-                if isinstance(part_text, str) and part_text.strip():
-                    parts.append(part_text.strip())
                 part_meta = part.get("metadata")
-                if isinstance(part_meta, dict) and isinstance(part_meta.get("text"), str) and part_meta["text"].strip():
-                    parts.append(part_meta["text"].strip())
+                candidates = (
+                    part.get("text") or part.get("input_text") or part.get("output_text"),
+                    part_meta.get("text") if isinstance(part_meta, dict) else None,
+                )
+            else:
+                continue
+            parts.extend(c.strip() for c in candidates if isinstance(c, str) and c.strip())
         text = " ".join(parts)
         return text if text.strip() else None
 
@@ -241,15 +226,13 @@ def _has_retainable_image_content(item: Any) -> bool:
     content = item.get("content")
     if not isinstance(content, list):
         return False
-    for part in content:
-        if not isinstance(part, dict):
-            continue
-        if str(part.get("type") or "").strip().lower() != "input_image":
-            continue
-        image_url = part.get("image_url")
-        if isinstance(image_url, str) and image_url.strip():
-            return True
-    return False
+    return any(
+        isinstance(part, dict)
+        and str(part.get("type") or "").strip().lower() == "input_image"
+        and isinstance(part.get("image_url"), str)
+        and part["image_url"].strip()
+        for part in content
+    )
 
 
 # Canonical provenance check (metadata marker, then canonical prefix classifier).
@@ -257,6 +240,10 @@ def _has_retainable_image_content(item: Any) -> bool:
 # ad-hoc headings — either could promote ordinary or adversarial content to
 # durable retained history.
 _is_summary_item = is_compaction_summary_message
+
+
+def _is_compaction_item(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("type") == "compaction"
 
 
 def prune_pre_checkpoint_items(
@@ -297,17 +284,13 @@ def prune_pre_checkpoint_items(
 
     last_cp = None
     for i, item in enumerate(items):
-        if isinstance(item, dict) and item.get("type") == "compaction":
+        if _is_compaction_item(item):
             last_cp = i
     if last_cp is None:
         return items
 
     first_cp = last_cp
-    while (
-        first_cp > 0
-        and isinstance(items[first_cp - 1], dict)
-        and items[first_cp - 1].get("type") == "compaction"
-    ):
+    while first_cp > 0 and _is_compaction_item(items[first_cp - 1]):
         first_cp -= 1
 
     pre = items[:first_cp]
@@ -362,17 +345,14 @@ def prune_pre_checkpoint_items(
             continue
 
         text = _extract_item_text(item)
-        has_retainable_image = is_user and _has_retainable_image_content(item)
-        if text is None and not has_retainable_image:
-            continue
         if text is None:
+            if not (is_user and _has_retainable_image_content(item)):
+                continue
             text = ""
 
         if is_summary:
             _retain_summary(text, item)
-        elif is_user:
-            if user_remaining <= 0:
-                continue
+        elif user_remaining > 0:
             cost = _approx_tokens(text)
             if cost <= user_remaining:
                 retained_reversed.append(item)
@@ -428,10 +408,7 @@ def has_compaction_checkpoint(items: Any) -> bool:
     reasoning, and exists in exactly one place: anything that rewrites or
     discards the sidecar must ask this first or lose the compacted history.
     """
-    return any(
-        isinstance(item, dict) and item.get("type") == "compaction"
-        for item in (items if isinstance(items, list) else ())
-    )
+    return isinstance(items, list) and any(_is_compaction_item(item) for item in items)
 
 
 def merge_interim_reasoning_items(
@@ -445,9 +422,7 @@ def merge_interim_reasoning_items(
     win, but prior checkpoints are prepended unless the newer payload has its own.
     """
     kept_checkpoints = [
-        item
-        for item in (prior_items if isinstance(prior_items, list) else [])
-        if isinstance(item, dict) and item.get("type") == "compaction"
+        item for item in (prior_items if isinstance(prior_items, list) else []) if _is_compaction_item(item)
     ]
     new_list = list(new_items) if isinstance(new_items, list) else []
     if has_compaction_checkpoint(new_list) or not kept_checkpoints:
