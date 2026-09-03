@@ -65,8 +65,7 @@ class CLITerminalMixin:
             pass
         logger.warning(
             "Terminal I/O broken%s — freezing UI paints to avoid redraw storm (#81521)",
-            f" ({reason})" if reason else "",
-        )
+            f" ({reason})" if reason else "")
 
     def _app_invalidate(self, app, where: str, *, swallow: bool) -> None:
         """``app.invalidate()``: EIO freezes paints, other OSErrors re-raise, and any
@@ -83,17 +82,13 @@ class CLITerminalMixin:
                 raise
 
     def _invalidate(self, min_interval: float = 0.25) -> None:
-        """Throttled UI repaint for high-frequency background updates.
+        """Throttled UI repaint for high-frequency background updates (spinner frames,
+        streaming flushes): the throttle prevents blinking on slow/SSH links and the
+        resize-recovery guard keeps footer chrome out of scrollback mid-SIGWINCH.
 
-        For spinner frames, streaming token flushes and other repaints that fire many
-        times per second: the throttle prevents blinking on slow/SSH links, and the
-        resize-recovery guard avoids stamping footer/status-bar chrome into scrollback
-        while a SIGWINCH reflow is in flight.
-
-        Do NOT use for user-blocking modal prompts (approval / clarify / sudo): those
-        must paint immediately via ``_paint_now``. Sent through this throttle, an
-        unrelated repaint within the 250ms window — or an in-flight resize — silently
-        drops the modal's entry paint, so it never renders and times out unseen (#41098).
+        NOT for user-blocking modals (approval / clarify / sudo) — use ``_paint_now``: a
+        throttled or resize-gated entry paint is silently dropped, so the prompt never
+        renders and times out unseen (#41098).
         """
         if getattr(self, "_terminal_io_broken", False):
             return
@@ -139,14 +134,10 @@ class CLITerminalMixin:
         self._app_invalidate(app, "force_full_redraw", swallow=True)
 
     def _schedule_focus_regain_redraw(self, min_interval: float = 1.0) -> None:
-        """Repaint after a terminal focus-in report (``CSI I``), rate-limited.
-
-        Terminals with focus tracking (Ghostty, iTerm2, xterm, muxes toggling DECSET
-        1004) emit ``\\x1b[I`` when the Hermes tab becomes visible again; emulators may
-        coalesce hidden-tab output, so on regain the incremental diff stacks on stale
-        content (#60920 focus-regain variant, #25337). Self-gating — terminals without
-        focus tracking never emit it. Rate-limited so a burst (rapid Alt+Tab, pane hops)
-        repaints at most once per ``min_interval`` seconds.
+        """Repaint after a terminal focus-in report (``CSI I``), at most once per
+        ``min_interval`` (rapid Alt+Tab / pane-hop bursts). Emulators with focus tracking
+        (DECSET 1004) may coalesce hidden-tab output, so on regain the incremental diff
+        stacks on stale content (#60920, #25337); terminals without it never emit ``CSI I``.
         """
         now = time.monotonic()
         if now - getattr(self, "_last_focus_regain_redraw", 0.0) < min_interval:
@@ -172,18 +163,12 @@ class CLITerminalMixin:
         return bool(raw)
 
     def _recover_terminal_after_interrupt(self) -> None:
-        """Recover the terminal after an interrupted agent turn (#33271).
-
-        An in-flight ``CSI 6n`` cursor query may answer (``ESC[<row>;<col>R``) after the
-        input parser tore down: the reply leaks as literal text and the VT100 parser can
-        stall mid-escape, so the terminal looks frozen. ``flush_stdin()`` drains stray
-        bytes (no-op on non-TTY), then ``_force_full_redraw()`` repaints cleanly; each
-        step self-guards so one failing never blocks the other. A dead PTY (EIO) skips
-        the redraw — painting a broken fd is the #81521 redraw storm.
-
-        Do NOT clear output history here: the interruption marker is printed under
-        ``_suspend_output_history`` in chat(), so the replay reproduces the response
-        without duplicating the marker (#60920).
+        """Recover the terminal after an interrupted agent turn (#33271): an in-flight
+        ``CSI 6n`` reply arriving after the input parser tore down leaks as literal text
+        and can stall the VT100 parser mid-escape. Drain stdin, then full redraw; each step
+        self-guards. A dead PTY (EIO) skips the redraw (#81521 redraw storm). Never clear
+        output history here — the interruption marker is printed under
+        ``_suspend_output_history``, so replay already excludes it (#60920).
         """
         if getattr(self, "_terminal_io_broken", False):
             return
@@ -222,30 +207,20 @@ class CLITerminalMixin:
     def _recover_after_resize(self, app, original_on_resize) -> None:
         """Recover a resized classic CLI without desynchronizing cursor state.
 
-        Unlike ``_force_full_redraw`` this never clears scrollback: the startup banner
-        lives there and ``_replay_output_history`` cannot reconstruct it. prompt_toolkit's
-        own resize path runs with its renderer cursor cache intact — its
-        ``Application._on_resize()`` erases via the cached cursor position, and resetting
-        the renderer first loses the origin and strands stale prompt glyphs.
-
-        ``_status_bar_suppressed_after_resize`` hides the dynamic status bar / input rules
-        while the reflow settles: on column shrink the terminal reflows already-painted
-        rows into scrollback before prompt_toolkit erases them, so a fresh bar looks
-        duplicated (#19280, #22976). Suppression alone cannot erase an already-reflowed
-        OLD bar (``renderer.erase()`` does ``cursor_up(_cursor_pos.y)`` with the y cached
-        at the OLD width, undershooting the reflowed rows), so on an OBSERVED width
-        change we wipe the viewport (CSI 2J — banner-safe; 3J only when
-        ``display.cli_rebuild_scrollback_on_redraw``) and replay the transcript before
-        delegating. Same-width SIGWINCH (tmux attach, GNOME tab bar, focus signals) and
-        the first signal without a baseline are left untouched: a 2J+replay against
-        preserved scrollback duplicates everything in ``_OUTPUT_HISTORY`` (#65293);
-        ``_install_resize_recovery`` seeds the baseline so an initial maximize still
-        counts. The stale-previous_screen crash on tmux attach is handled by
-        ``_hermes_call_output_screen_diff``'s retry (#83874).
-
-        Suppression is transient: a debounced timer clears it and repaints once the
-        reflow settles, so the bar returns during idle (previously it stayed hidden
-        until the next submitted input). The next-submit clear remains as a fast path.
+        Never clears scrollback (the startup banner lives there and replay cannot rebuild
+        it) and never resets the renderer before prompt_toolkit's own ``_on_resize``,
+        which erases via the cached cursor position. The status bar / input rules are
+        suppressed while the reflow settles: on column shrink the terminal reflows
+        already-painted rows into scrollback first, so a fresh bar looks duplicated
+        (#19280, #22976). Suppression cannot erase the already-reflowed OLD bar
+        (``renderer.erase()`` uses ``_cursor_pos.y`` cached at the OLD width), so on an
+        OBSERVED width change we wipe the viewport (CSI 2J, banner-safe; 3J only via
+        ``display.cli_rebuild_scrollback_on_redraw``) and replay the transcript first.
+        Same-width SIGWINCH (tmux attach, GNOME tab bar, focus) and the first signal
+        without a seeded baseline are left alone — 2J+replay against preserved scrollback
+        duplicates ``_OUTPUT_HISTORY`` (#65293). tmux-attach's stale previous_screen is
+        handled by ``_hermes_call_output_screen_diff`` (#83874). Suppression is cleared by
+        a debounced timer so the bar returns during idle; next-submit stays a fast path.
         """
         from cli import _replay_output_history
         self._status_bar_suppressed_after_resize = True
@@ -258,8 +233,7 @@ class CLITerminalMixin:
         if width_changed:
             try:
                 self._clear_prompt_toolkit_screen(
-                    app, rebuild_scrollback=self._redraw_rebuilds_scrollback()
-                )
+                    app, rebuild_scrollback=self._redraw_rebuilds_scrollback())
                 _replay_output_history()
             except Exception:
                 pass
@@ -298,10 +272,8 @@ class CLITerminalMixin:
                     app.invalidate()
                 except Exception:
                     pass
-
             self._restart_debounce_timer(
-                "_status_bar_unsuppress_timer", delay, lambda _t: _run_on_app_loop(app, _clear)
-            )
+                "_status_bar_unsuppress_timer", delay, lambda _t: _run_on_app_loop(app, _clear))
         except Exception:
             # Fail open: never leave the bar stuck hidden.
             self._status_bar_suppressed_after_resize = False
@@ -322,9 +294,7 @@ class CLITerminalMixin:
                         self._resize_recovery_timer = None
                         self._resize_recovery_pending = False
                     self._recover_after_resize(app, original_on_resize)
-
                 _run_on_app_loop(app, _run_recovery)
-
             with lock:
                 self._resize_recovery_pending = True
                 self._restart_debounce_timer("_resize_recovery_timer", delay, _timer_fired)
@@ -334,38 +304,29 @@ class CLITerminalMixin:
 
     def _install_resize_recovery(self, app) -> None:
         """Route ``app._on_resize`` through the debounced ghost-clearing recovery
-        (#5474/#49120) and seed the width baseline for width-change detection.
-
-        The seed keeps the session's FIRST SIGWINCH honest (#65293): without it a benign
-        signal is indistinguishable from a real resize. It reads ``app.output`` directly,
-        NOT ``_get_tui_terminal_width``: before ``app.run()`` ``get_app()`` is the
-        DummyApplication whose DummyOutput reports a hardcoded 80 columns, and seeding
-        that fake width would make the first real signal look like a change.
-        ``app.output`` is what the running resize handler measures, so both are comparable.
+        (#5474/#49120) and seed the width baseline so the FIRST SIGWINCH can tell a benign
+        signal from a real resize (#65293). Reads ``app.output`` directly, NOT
+        ``_get_tui_terminal_width``: before ``app.run()`` the DummyApplication's output
+        reports a hardcoded 80 columns, which would make the first real signal look like a
+        width change. ``app.output`` is what the running resize handler measures.
         """
         width = None
-        try:
-            width = app.output.get_size().columns
-        except Exception:
-            width = None
-        if not width or width <= 0:
+        for probe in (lambda: app.output.get_size().columns,
+                      lambda: shutil.get_terminal_size((80, 24)).columns):
             try:
-                width = shutil.get_terminal_size((80, 24)).columns
+                width = probe()
             except Exception:
                 width = None
+            if width and width > 0:
+                break
         self._last_resize_width = width
         original_on_resize = app._on_resize
-
-        def _resize_clear_ghosts():
-            self._schedule_resize_recovery(app, original_on_resize)
-
-        app._on_resize = _resize_clear_ghosts
+        app._on_resize = lambda: self._schedule_resize_recovery(app, original_on_resize)
 
     def _try_attach_clipboard_image(self) -> bool:
         """Save a clipboard image to ~/.hermes/images/ and attach it; True if attached."""
         from cli import datetime
         from hermes_cli.clipboard import save_clipboard_image
-
         self._image_counter += 1
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         img_path = get_hermes_home() / "images" / f"clip_{ts}_{self._image_counter}.png"
@@ -393,14 +354,12 @@ class CLITerminalMixin:
         """Best-effort reset when leaked mouse reports indicate mode drift."""
         from cli import (
             CLI_CONFIG, _DIM, _RST, _TERMINAL_INPUT_MODE_RESET_SEQ,
-            _cli_multiline_shortcuts_enabled, _cprint, _enable_extended_enter_keys, logger,
-        )
+            _cli_multiline_shortcuts_enabled, _cprint, _enable_extended_enter_keys, logger)
         now = time.monotonic()
         # Rate-limit to avoid thrashing if a terminal floods reports.
         if now - self._last_input_mode_recovery < 0.5:
             return
         self._last_input_mode_recovery = now
-
         app = getattr(self, "_app", None)
         output = getattr(app, "output", None) if app else None
         try:
@@ -415,24 +374,19 @@ class CLITerminalMixin:
                 _enable_extended_enter_keys(output)
         except Exception:
             pass
-
         logger.warning("Recovered terminal input modes after leak: %s", reason)
         if not self._input_mode_recovery_notice_shown:
             self._input_mode_recovery_notice_shown = True
             _cprint(
                 f"  {_DIM}Recovered terminal input modes after leaked mouse reports. "
-                f"If this repeats, run /new or restart this tab.{_RST}"
-            )
+                f"If this repeats, run /new or restart this tab.{_RST}")
 
     def _check_termios_drift(self) -> None:
-        """Watchdog: heal the tty if it drifted back to cooked mode.
-
-        See ``_heal_cooked_mode_drift``: a lost ``run_in_terminal`` cooked→raw restore
-        leaves the tty line-buffering while prompt_toolkit believes it owns raw mode —
-        the CLI looks dead but the process is healthy. Called from ``process_loop``'s
-        idle branch so it self-heals within ~1s of idling. Skipped while a
-        ``run_in_terminal`` window legitimately holds cooked mode, while the agent is
-        running (approval/sudo prompts manipulate the tty), and on Windows (no termios).
+        """Idle watchdog: heal a tty that drifted back to cooked mode (a lost
+        ``run_in_terminal`` cooked→raw restore leaves it line-buffering while prompt_toolkit
+        believes it owns raw mode — CLI looks dead, process is healthy). Skipped while
+        ``run_in_terminal`` legitimately holds cooked mode, while the agent runs
+        (approval/sudo prompts touch the tty), and on Windows (no termios).
         """
         from cli import _DIM, _RST, _cprint, _heal_cooked_mode_drift, logger
         if os.name == "nt":
@@ -455,8 +409,7 @@ class CLITerminalMixin:
         if _heal_cooked_mode_drift(fd):
             logger.warning(
                 "Healed cooked-mode termios drift on stdin — a "
-                "run_in_terminal cooked→raw restore was lost."
-            )
+                "run_in_terminal cooked→raw restore was lost.")
             try:
                 self._invalidate()  # so the prompt is visibly alive again
             except Exception:
@@ -465,5 +418,4 @@ class CLITerminalMixin:
                 self._termios_drift_notice_shown = True
                 _cprint(
                     f"  {_DIM}Recovered terminal from cooked-mode drift "
-                    f"(input should respond normally again).{_RST}"
-                )
+                    f"(input should respond normally again).{_RST}")

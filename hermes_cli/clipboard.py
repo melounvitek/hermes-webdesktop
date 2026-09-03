@@ -177,8 +177,7 @@ _PS_IMAGE_STRATEGIES = (
         "if ($null -eq $img) { exit 1 }"
         "$ms = New-Object System.IO.MemoryStream;"
         "$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);"
-        "[System.Convert]::ToBase64String($ms.ToArray())",
-    ),
+        "[System.Convert]::ToBase64String($ms.ToArray())"),
     (  # Get-Clipboard -Format Image (System.Drawing.Image or WPF BitmapSource)
         "try { "
         "$img = Get-Clipboard -Format Image -ErrorAction Stop;"
@@ -199,8 +198,7 @@ _PS_IMAGE_STRATEGIES = (
         "$enc.Save($ms)"
         "} else { exit 2 }"
         "[System.Convert]::ToBase64String($ms.ToArray())"
-        "} catch { exit 1 }",
-    ),
+        "} catch { exit 1 }"),
     (  # copied image *file* (Explorer file drop)
         _PS_FILEDROP_HIT
         + "if ($null -ne $hit) { 'True' } else { 'False' }"
@@ -322,7 +320,6 @@ def _convert_to_png(path: Path) -> bool:
         pass
     except Exception as e:
         logger.debug("Pillow BMP→PNG conversion failed: %s", e)
-
     tmp = path.with_suffix(".bmp")
     try:
         path.rename(tmp)

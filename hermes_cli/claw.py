@@ -115,8 +115,7 @@ def _detect_openclaw_processes() -> list[str]:
             ps_cmd = (
                 'Get-CimInstance Win32_Process -Filter "Name = \'node.exe\'" | '
                 'Where-Object { $_.CommandLine -match "openclaw|clawd" } | '
-                'Select-Object -First 1 ProcessId'
-            )
+                'Select-Object -First 1 ProcessId')
             result = bounded_probe_run(["powershell", "-NoProfile", "-Command", ps_cmd], timeout=5)
             pid = (result.stdout or "").strip() if result is not None else ""
             if pid:
@@ -124,7 +123,6 @@ def _detect_openclaw_processes() -> list[str]:
         except Exception:
             pass
         return found
-
     result = _posix_probe(["systemctl", "--user", "is-active", "openclaw-gateway.service"], 5)
     if result is not None and result.stdout.strip() == "active":
         found.append("systemd service: openclaw-gateway.service")
@@ -160,7 +158,6 @@ def _warn_if_openclaw_running(auto_yes: bool) -> None:
 def _warn_if_gateway_running(auto_yes: bool) -> None:
     """Warn if a Hermes gateway has connected platforms (token conflicts, e.g. Telegram 409)."""
     from gateway.status import get_running_pid, read_runtime_status
-
     platforms = ((read_runtime_status() or {}).get("platforms") or {}) if get_running_pid() else {}
     connected = [name for name, info in platforms.items()
                  if isinstance(info, dict) and info.get("state") == "connected"]
@@ -299,8 +296,7 @@ def _load_migrator(script_path: Path, opts: SimpleNamespace) -> Optional[Callabl
         source_root=opts.source_dir.resolve(), target_root=opts.hermes_home.resolve(),
         execute=execute, workspace_target=ws_target, overwrite=opts.overwrite,
         migrate_secrets=opts.migrate_secrets, output_dir=None, selected_options=selected,
-        preset_name=opts.preset, skill_conflict_mode=opts.skill_conflict,
-    ).migrate()
+        preset_name=opts.preset, skill_conflict_mode=opts.skill_conflict).migrate()
 
 
 def _preview_migration(run_migrator: Callable[[bool], dict], opts: SimpleNamespace) -> bool:
@@ -387,8 +383,7 @@ def _cmd_cleanup(args):
          "Stop OpenClaw first: systemctl --user stop openclaw-gateway.service"),
         "Proceed anyway?",
         declined="Aborted. Stop OpenClaw first, then re-run: hermes claw cleanup",
-        non_tty=("Non-interactive session — aborting. Stop OpenClaw and re-run.",),
-    ):
+        non_tty=("Non-interactive session — aborting. Stop OpenClaw and re-run.",)):
         return
     total_archived = 0
     for source_dir in dirs_to_check:
@@ -406,7 +401,6 @@ def _cmd_cleanup(args):
             except OSError as e:
                 print_error(f"Could not archive: {e}")
                 print_info(f"Try manually: mv {source_dir} {source_dir}.pre-migration")
-
     print()
     n = len(dirs_to_check) if dry_run else total_archived
     word = "directory" if n == 1 else "directories"
@@ -495,8 +489,7 @@ def _print_migration_report(report: dict, dry_run: bool):
             print()
             for line in (
                 "  ⚠ API keys were NOT migrated (secrets migration is disabled by default).",
-                "  Your OPENROUTER_API_KEY and other provider keys must be added manually.",
-            ):
+                "  Your OPENROUTER_API_KEY and other provider keys must be added manually."):
                 print(color(line, Colors.YELLOW))
             _info("", "To migrate API keys, re-run with:",
                   "  hermes claw migrate --migrate-secrets", "", "Or add your key manually:",
