@@ -19,7 +19,7 @@ from typing import Any, Mapping
 
 from gateway.hosted_rooms_common import (
     DbPath, bounded_int, canonical_json, clock as _now, compact_json, connect, identifier, open_sqlite, table_columns,
-    table_exists, transaction)
+    table_exists, transaction, utf8_len)
 
 PROTOCOL_VERSION = 2
 MAX_ROOM_ID_CHARS = 128
@@ -522,7 +522,7 @@ def _prepare_event(
     conn: sqlite3.Connection, room: sqlite3.Row, event_id: str, kind: str, actor_json: str, payload_json: str, *,
     allow_control: bool = False) -> int:
     """Size one pending event and enforce per-room and gateway capacity; returns its bytes."""
-    additional_bytes = len((event_id + kind + actor_json + payload_json).encode("utf-8"))
+    additional_bytes = utf8_len(event_id, kind, actor_json, payload_json)
     count_reserve, byte_reserve = (CONTROL_EVENT_COUNT_RESERVE, CONTROL_EVENT_BYTE_RESERVE) if allow_control else (0, 0)
     gateway_byte_limit = MAX_GATEWAY_EVENT_BYTES + byte_reserve
     if int(room["next_seq"]) - 1 >= MAX_EVENTS_PER_ROOM + count_reserve:
@@ -1110,8 +1110,7 @@ def disband_room(
     with _transaction(db_path, immediate=True) as conn:
         room = conn.execute("""SELECT authority_gateway_id, authority_epoch, next_seq, event_bytes, disbanded_at
                 FROM hosted_rooms WHERE room_id=?""", (room_id,)).fetchone()
-        replay = _disband_replay(conn, room_id, room)
-        if replay is not None:
+        if (replay := _disband_replay(conn, room_id, room)) is not None:
             return replay
         _require_authority(room, expected_gateway_id, expected_epoch, "stale hosted room authority")
         disband_bytes = _insert_event(
@@ -1169,19 +1168,16 @@ def read_events(
         cursor = page_events[-1]["seq"] if page_events else since_seq
         return {"events": page_events, "cursor": cursor, "latest_seq": latest_seq, "has_more": cursor < latest_seq,
                 "authority": authority}
-    def page_bytes(page: dict[str, Any]) -> int:
-        return len(json.dumps(page, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
-    page = build_page(events)
-    if events and page_bytes(page) > MAX_LOG_PAGE_BYTES:
+    def fits(page_events: list[dict[str, Any]]) -> bool:
+        page_json = json.dumps(build_page(page_events), ensure_ascii=False, separators=(",", ":"))
+        return utf8_len(page_json) <= MAX_LOG_PAGE_BYTES
+    if events and not fits(events):
         # Binary-search the largest prefix whose serialized page fits the budget.
         low, high = 1, len(events)
         while low < high:
             middle = (low + high + 1) // 2
-            if page_bytes(build_page(events[:middle])) <= MAX_LOG_PAGE_BYTES:
-                low = middle
-            else:
-                high = middle - 1
-        page = build_page(events[:low])
-        if page_bytes(page) > MAX_LOG_PAGE_BYTES:
+            low, high = (middle, high) if fits(events[:middle]) else (low, middle - 1)
+        events = events[:low]
+        if not fits(events):
             raise HostedRoomError("hosted room event exceeds replay page limit")
-    return page
+    return build_page(events)
