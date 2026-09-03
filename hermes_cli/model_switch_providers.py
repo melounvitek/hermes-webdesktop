@@ -930,19 +930,14 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
         prefix = _display_prefix(raw_name)
         provider_key = str(entry.get("provider_key") or "").strip()
         group_key = (api_url, cred_identity, api_mode, tuple(sorted(entry_extra_headers.items())), prefix.lower())
-        if group_key not in groups:
-            display_name = prefix or raw_name
-            groups[group_key] = {
-                "slug": custom_provider_slug(display_name, provider_key), "name": display_name,
-                "api_url": api_url, "api_key": api_key, "models": [], "has_explicit_models": False,
-                "discover_models": discover, "api_mode": api_mode, "extra_headers": entry_extra_headers,
-                "aliases": set()}
-        else:
-            if api_key and not groups[group_key].get("api_key"):
-                groups[group_key]["api_key"] = api_key
-            if not discover:  # one opt-out pins the whole grouped row
-                groups[group_key]["discover_models"] = False
-        grp = groups[group_key]
+        display_name = prefix or raw_name
+        grp = groups.setdefault(group_key, {
+            "slug": custom_provider_slug(display_name, provider_key), "name": display_name,
+            "api_url": api_url, "api_key": "", "models": [], "has_explicit_models": False,
+            "discover_models": True, "api_mode": api_mode, "extra_headers": entry_extra_headers,
+            "aliases": set()})
+        grp["api_key"] = grp["api_key"] or api_key  # first member with a key wins
+        grp["discover_models"] = grp["discover_models"] and discover  # one opt-out pins the whole row
         grp["aliases"].update(custom_provider_aliases(raw_name, provider_key))
         # ``model:`` is only the active selection; every configured model lives under ``models:``.
         _absorb_entry_models(grp, entry, (entry.get("model") or "").strip())
