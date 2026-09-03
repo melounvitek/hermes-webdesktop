@@ -1,15 +1,12 @@
-"""Ramp Router (router.com) provider profile: Responses-only LLM gateway.
+"""Ramp Router (router.com) provider profile: Responses-only LLM gateway (verified live).
 
-Wire notes (verified live): the Responses API is the native wire (``api_mode=
-"codex_responses"`` + the ``api.router.com`` host mandate in ``hermes_cli/providers.py``);
-the catalog is account-scoped so there are no ``fallback_models`` (picker uses
-``fetch_models()``); Router 400s on ``reasoning.effort`` levels outside a model's
-published vocabulary and on any reasoning field for non-reasoning models, so the
-efforts map from ``GET /v1/models`` is cached (memory + disk mirror, background
-warmer; never HTTP on the request hot path) and fed to the codex transport's clamp.
+``api_mode="codex_responses"`` + the ``api.router.com`` host mandate in ``hermes_cli/providers.py``
+keep every path on the native wire. The catalog is account-scoped, so no ``fallback_models``
+(picker uses ``fetch_models()``). Router 400s on ``reasoning.effort`` levels outside a model's
+published vocabulary and on any reasoning field for non-reasoning models, so the efforts map
+from ``GET /v1/models`` is cached (memory + disk mirror, background warmer; never HTTP on the
+request hot path) and fed to the codex transport's clamp via ``supported_reasoning_efforts``.
 """
-
-from __future__ import annotations
 
 import json
 import logging
@@ -92,10 +89,8 @@ def _parse_efforts(items: Any) -> Optional[dict[str, list[str]]]:
         unknown = [level for level in levels if level not in EFFORT_LADDER]
         if unknown:
             logger.info(
-                "router: model %s publishes unrecognized reasoning effort "
-                "level(s) %s; ignoring them (update agent/reasoning_effort "
-                "EFFORT_LADDER to adopt new vendor tiers)",
-                mid, unknown,
+                "router: model %s publishes unrecognized reasoning effort level(s) %s; ignoring them "
+                "(update agent/reasoning_effort EFFORT_LADDER to adopt new vendor tiers)", mid, unknown,
             )
             levels = [level for level in levels if level in EFFORT_LADDER]
         if levels:
@@ -106,7 +101,6 @@ def _parse_efforts(items: Any) -> Optional[dict[str, list[str]]]:
 def _disk_path() -> Optional[Path]:
     try:
         from hermes_constants import get_hermes_home
-
         return get_hermes_home() / "cache" / "router_catalog.json"
     except Exception:
         return None
@@ -190,9 +184,7 @@ def _efforts_cache_only() -> Optional[dict[str, list[str]]]:
     if parsed is None:
         return None
     with _efforts_lock:
-        if _efforts_cache is None:
-            _efforts_cache = parsed
-        cached = _efforts_cache
+        _efforts_cache = cached = _efforts_cache if _efforts_cache is not None else parsed
     if age >= _DISK_TTL_SECONDS:
         _warm_efforts_async()
     return cached
@@ -218,7 +210,6 @@ def _warm_efforts_async() -> None:
         items = _fetch_catalog_items()
         if items is not None:
             _seed_efforts(items)
-
     try:
         threading.Thread(target=_refresh, name="router-caps-warm", daemon=True).start()
     except Exception as exc:
@@ -237,8 +228,7 @@ class RouterProfile(ProviderProfile):
         if items is None:
             return None
         _seed_efforts(items)
-        ids = list(dict.fromkeys(str(i["id"]) for i in items if isinstance(i, dict) and i.get("id")))
-        return ids or None
+        return list(dict.fromkeys(str(i["id"]) for i in items if isinstance(i, dict) and i.get("id"))) or None
 
     def supported_reasoning_efforts(self, model: Optional[str]) -> Optional[tuple[str, ...]]:
         """Catalog-declared effort vocabulary (cache-only; cold cache -> None + warm)."""
@@ -249,7 +239,7 @@ class RouterProfile(ProviderProfile):
         if efforts_by_id is None:
             _warm_efforts_async()
             return None
-        return None if mid not in efforts_by_id else tuple(efforts_by_id[mid])
+        return tuple(efforts_by_id[mid]) if mid in efforts_by_id else None
 
 
 router = RouterProfile(

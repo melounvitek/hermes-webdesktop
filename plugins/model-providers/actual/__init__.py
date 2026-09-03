@@ -1,7 +1,5 @@
 """Actual Computer provider profile."""
 
-from __future__ import annotations
-
 import os
 
 from providers import register_provider

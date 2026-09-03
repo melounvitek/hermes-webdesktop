@@ -63,8 +63,7 @@ class OpenRouterProfile(ProviderProfile):
             return cfg
         if clamped and clamped != effort:
             logger.debug(
-                "openrouter: clamped reasoning effort %r → %r for %s "
-                "(catalog supported_efforts=%s)",
+                "openrouter: clamped reasoning effort %r → %r for %s (catalog supported_efforts=%s)",
                 effort, clamped, model, caps.get("supported_efforts"),
             )
             cfg = {**cfg, "effort": clamped}
@@ -109,13 +108,8 @@ class OpenRouterProfile(ProviderProfile):
         return body
 
     def build_api_kwargs_extras(
-        self,
-        *,
-        reasoning_config: dict | None = None,
-        supports_reasoning: bool = False,
-        model: str | None = None,
-        session_id: str | None = None,
-        **context: Any,
+        self, *, reasoning_config: dict | None = None, supports_reasoning: bool = False,
+        model: str | None = None, session_id: str | None = None, **context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Pass reasoning_config as extra_body.reasoning; pin Grok's cache via x-grok-conv-id."""
         extra_body: dict[str, Any] = {}

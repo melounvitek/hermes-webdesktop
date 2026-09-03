@@ -2,8 +2,6 @@
 ``commandcode-anthropic`` (anthropic_messages, Bearer auth — see
 ``agent/anthropic_adapter.py``). Same key and base URL for both."""
 
-from __future__ import annotations
-
 import json
 import logging
 import urllib.request

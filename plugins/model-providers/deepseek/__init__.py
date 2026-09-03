@@ -8,8 +8,6 @@ Retired ``deepseek-chat``/``deepseek-reasoner`` IDs are remapped in
 ``hermes_cli.model_normalize`` before reaching here.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from agent.reasoning_effort import DEEPSEEK_V4_EFFORTS, DEEPSEEK_V4_OVERRIDES, clamp_effort

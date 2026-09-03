@@ -4,8 +4,6 @@ GLM-4.5+ defaults to thinking ON, so ``reasoning_config`` is translated to
 ``extra_body.thinking``; GLM-5.2/5.3 also take a native ``reasoning_effort``.
 """
 
-from __future__ import annotations
-
 import re
 from typing import Any
 

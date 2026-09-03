@@ -4,8 +4,6 @@ Both route api_mode per model in core; these profiles carry the
 chat_completions reasoning translations (GLM-5.2, Kimi K2, DeepSeek, Ox Alpha).
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from agent import reasoning_effort as re_

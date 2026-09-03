@@ -6,8 +6,6 @@ top-level ``reasoning_effort`` kwarg — not ``extra_body.reasoning``, whose
 emission is gated by a core host allowlist a third-party plugin must not edit.
 """
 
-from __future__ import annotations
-
 import os
 from typing import Any
 

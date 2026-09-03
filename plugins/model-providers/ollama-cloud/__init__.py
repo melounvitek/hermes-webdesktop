@@ -5,8 +5,6 @@ high|max (``max`` is undocumented but real — ~2.5x more thinking tokens on
 DeepSeek V4); Hermes' ``xhigh`` maps to ``max``.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from agent.reasoning_effort import OLLAMA_CLOUD_EFFORTS, OLLAMA_CLOUD_OVERRIDES, clamp_effort
