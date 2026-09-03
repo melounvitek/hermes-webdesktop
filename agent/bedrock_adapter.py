@@ -251,9 +251,8 @@ def _boto3_chain_has_credentials() -> bool:
     with suppress(Exception):
         import botocore.session
         credentials = botocore.session.get_session().get_credentials()
-        if credentials is not None:
-            resolved = credentials.get_frozen_credentials()
-            return bool(resolved and resolved.access_key)
+        resolved = credentials.get_frozen_credentials() if credentials is not None else None
+        return bool(resolved and resolved.access_key)
     return False
 
 
@@ -279,9 +278,7 @@ def resolve_bedrock_region(env: Optional[Dict[str, str]] = None) -> str:
         return explicit
     with suppress(Exception):
         import botocore.session
-        region = botocore.session.get_session().get_config_variable("region")
-        if region:
-            return region
+        return botocore.session.get_session().get_config_variable("region") or "us-east-1"
     return "us-east-1"
 
 
@@ -659,9 +656,9 @@ class _ResponseParts:
             reasoning_content="\n\n".join(self.reasoning_parts) if self.reasoning_parts else None,
             bedrock_content_blocks=ordered_blocks or None,
         )
-        cache_read_tokens = usage_data.get("cacheReadInputTokens", 0)
-        cache_write_tokens = usage_data.get("cacheWriteInputTokens", 0)
-        output_tokens = usage_data.get("outputTokens", 0)
+        cache_read_tokens, cache_write_tokens, output_tokens = (
+            usage_data.get(k, 0) for k in ("cacheReadInputTokens", "cacheWriteInputTokens", "outputTokens")
+        )
         prompt_tokens = usage_data.get("inputTokens", 0) + cache_read_tokens + cache_write_tokens
         usage = SimpleNamespace(
             prompt_tokens=prompt_tokens, completion_tokens=output_tokens, total_tokens=prompt_tokens + output_tokens,
@@ -994,10 +991,7 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
     authoritative source ("prompt is too long: 1300032 tokens > 1000000 maximum"); length
     validation runs before inference so the probe costs nothing. An accepted tier is
     returned as a safe lower bound; None (no creds / network / unparseable) → static table."""
-    try:
-        from agent.model_metadata import parse_context_limit_from_error
-    except ImportError:  # pragma: no cover — same package
-        return None
+    from agent.model_metadata import parse_context_limit_from_error
     try:
         client = _get_bedrock_runtime_client(region)
     except Exception as exc:  # boto3 missing / credential resolution failure
