@@ -125,9 +125,7 @@ def _parent_is_live(proc) -> bool:
     return parent is not None and parent.is_running() and parent.create_time() <= proc.create_time()
 
 
-def _detect_venv_python_processes(
-    *, exclude_pids: set[int] | None = None
-) -> list[tuple[int, str, str]]:
+def _detect_venv_python_processes(*, exclude_pids: set[int] | None = None) -> list[tuple[int, str, str]]:
     """Live processes running from the project venv's interpreter as ``(pid, name, cmdline)``; never raises.
 
     The hermes.exe shim guard misses the Desktop backend and anything off ``venv\\Scripts\\python(w).exe``;
@@ -155,8 +153,7 @@ def _detect_venv_python_processes(
             info = proc.info
         except Exception:
             continue
-        pid = info.get("pid")
-        exe = info.get("exe")
+        pid, exe = info.get("pid"), info.get("exe")
         if not exe or pid is None or int(pid) in skip:
             continue
         try:
@@ -167,45 +164,31 @@ def _detect_venv_python_processes(
         is_holder = exe_norm.startswith(venv_prefix)
         name = str(info.get("name") or Path(exe).name)
         name_low = name.lower()
-
-        if not is_holder and not (
-            name_low.startswith(("python", "pypy"))
-            or name_low in {"uv.exe", "uvx.exe", "hermes.exe"}
-        ):
+        if not is_holder and not (name_low.startswith(("python", "pypy")) or name_low in {"uv.exe", "uvx.exe", "hermes.exe"}):
             continue
-
         cmdline_raw = _cmdline_or_empty(proc)
         cmdline_low = cmdline_raw.lower()
         # Fallback: uv/base-interpreter trampolines have an exe OUTSIDE the venv yet hold
         # its .pyd files — match cmdline (venv path, or `-m hermes_cli.main` + root/cwd).
-        if not is_holder and venv_prefix in cmdline_low:
-            is_holder = True
+        if not is_holder:
+            is_holder = venv_prefix in cmdline_low
         if not is_holder and "hermes_cli.main" in cmdline_low:
             try:
                 cwd_low = str(proc.cwd() or "").lower().rstrip(os.sep) + os.sep
             except Exception:
                 cwd_low = os.sep
-            if root_prefix in cmdline_low or cwd_low.startswith(root_prefix):
-                is_holder = True
-        if not is_holder:
-            continue
-        # FULL cmdline: callers parse it (pausable-gateway exemption looks for `gateway run`);
-        # truncating here misreported autostarted gateways as blockers. Truncate at display time.
-        matches.append((int(pid), name, cmdline_raw))
+            is_holder = root_prefix in cmdline_low or cwd_low.startswith(root_prefix)
+        if is_holder:
+            # FULL cmdline: callers parse it (pausable-gateway exemption looks for `gateway run`);
+            # truncating here misreported autostarted gateways as blockers. Truncate at display time.
+            matches.append((int(pid), name, cmdline_raw))
     return matches
 
 
-_HOLDER_VALUE_FLAGS_FALLBACK = frozenset(
-    {
-        "--profile", "-p", "--config",
-        "--model", "-m", "--provider", "--reasoning",
-        "--toolsets", "-t", "--skills", "-s",
-        "--continue", "-c", "--resume", "-r",
-        "--oneshot", "-z", "--in", "--usage-file",
-    }
-)
-
-
+_HOLDER_VALUE_FLAGS_FALLBACK = frozenset({
+    "--profile", "-p", "--config", "--model", "-m", "--provider", "--reasoning", "--toolsets", "-t",
+    "--skills", "-s", "--continue", "-c", "--resume", "-r", "--oneshot", "-z", "--in", "--usage-file",
+})
 _holder_value_flags_cache: frozenset | None = None
 
 
@@ -246,16 +229,13 @@ def _hermes_holder_subcommand(cmdline: str) -> str | None:
     except Exception:
         tokens = cmdline.split()
 
-    entry_idx: int | None = None
-    for i, token in enumerate(tokens):
+    def _is_entry(i: int, token: str) -> bool:
         low = token.lower().strip('"')
         if low.endswith("hermes_cli.main") and i > 0 and tokens[i - 1] == "-m":
-            entry_idx = i
-            break
-        base = low.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
-        if base in ("hermes", "hermes.exe"):
-            entry_idx = i
-            break
+            return True
+        return low.rsplit("\\", 1)[-1].rsplit("/", 1)[-1] in ("hermes", "hermes.exe")
+
+    entry_idx = next((i for i, token in enumerate(tokens) if _is_entry(i, token)), None)
     if entry_idx is None:
         return None
 
@@ -264,13 +244,11 @@ def _hermes_holder_subcommand(cmdline: str) -> str | None:
     while i < len(tokens):
         token = tokens[i]
         if token in value_flags or token.split("=", 1)[0] in value_flags:
-            # --flag value consumes two tokens; --flag=value consumes one.
-            i += 1 if "=" in token else 2
-            continue
-        if token.startswith("-"):
+            i += 1 if "=" in token else 2  # --flag value consumes two tokens; --flag=value one.
+        elif token.startswith("-"):
             i += 1
-            continue
-        return token.lower()
+        else:
+            return token.lower()
     return None
 
 
@@ -287,8 +265,7 @@ def _format_venv_python_holders_message(matches: list[tuple[int, str, str]]) -> 
         "gateway": "  ← gateway",
     }
     for pid, name, cmdline in matches[:6]:
-        sub = _hermes_holder_subcommand(cmdline)
-        hint = hint_by_subcommand.get(sub or "", "")
+        hint = hint_by_subcommand.get(_hermes_holder_subcommand(cmdline) or "", "")
         lines.append(f"  PID {pid}  {name}  {cmdline[:120]}{hint}")
     if len(matches) > 6:
         lines.append(f"  ... and {len(matches) - 6} more")
@@ -319,27 +296,19 @@ def _venv_launcher_ancestors(pids: list[int]) -> list[int]:
     skip = _self_and_non_gateway_ancestor_pids(psutil)
     found: list[int] = []
     for pid in pids:
-        try:
+        with suppress(Exception):
             parent = psutil.Process(int(pid)).parent()
-        except Exception:
-            continue
-        if parent is None:
-            continue
-        ppid = int(parent.pid)
-        if ppid in skip or ppid in found or ppid in set(pids):
-            continue
-        try:
-            exe = (parent.exe() or "").lower()
-        except Exception:
-            continue
-        if exe.startswith(venv_prefix):
-            found.append(ppid)
+            if parent is None:
+                continue
+            ppid = int(parent.pid)
+            if ppid in skip or ppid in found or ppid in set(pids):
+                continue
+            if (parent.exe() or "").lower().startswith(venv_prefix):
+                found.append(ppid)
     return found
 
 
-def _leftover_pausable_gateway_pids(
-    matches: list[tuple[int, str, str]],
-) -> list[int] | None:
+def _leftover_pausable_gateway_pids(matches: list[tuple[int, str, str]]) -> list[int] | None:
     """PIDs from *matches* when EVERY remaining venv holder is a pausable gateway, else ``None`` (keep refusing).
 
     A gateway respawned inside the pause->guard window (or via an unmapped spawn path) still holds ``.pyd`` files.
@@ -361,16 +330,13 @@ def _leftover_pausable_gateway_pids(
     return pids
 
 
-def _refuse_gateway_ancestor_tree_kill(
-    pids: list[int], *, gateway_mode: bool
-) -> bool:
+def _refuse_gateway_ancestor_tree_kill(pids: list[int], *, gateway_mode: bool) -> bool:
     """Refuse a plain Windows update that would tree-kill its own ancestry (a chat agent's ``hermes update`` is
     a gateway child; ``taskkill /T /F`` kills the updater first). ``--gateway`` is exempt (detached delivery).
     Refuse only when a nominated gateway is positively an ancestor; unknown ancestry keeps existing recovery.
     """
     if gateway_mode or not pids:
         return False
-
     try:
         from hermes_cli.gateway import _is_pid_ancestor_of_current_process
 
@@ -378,10 +344,8 @@ def _refuse_gateway_ancestor_tree_kill(
     except Exception as exc:
         logger.debug("Could not inspect gateway ancestry before tree-kill: %s", exc)
         return False
-
     if not ancestors:
         return False
-
     rendered = ", ".join(str(pid) for pid in ancestors)
     print(
         "✗ Refusing to stop the gateway process tree because this updater "
@@ -435,16 +399,15 @@ def _serve_relaunch_commands(entries: list[dict]) -> list[list[str]]:
         port = entry.get("port")
         if not isinstance(port, int) or port <= 0:
             continue
-        cmd = [hermes]
         profile = str(entry.get("profile") or "")
-        if profile and profile != "default":
-            cmd += ["--profile", profile]
-        cmd.append(str(entry.get("purpose")))
         host = str(entry.get("host") or "")
-        if host:
-            cmd += ["--host", host]
-        cmd += ["--port", str(port)]
-        commands.append(cmd)
+        commands.append(
+            [hermes]
+            + (["--profile", profile] if profile and profile != "default" else [])
+            + [str(entry.get("purpose"))]
+            + (["--host", host] if host else [])
+            + ["--port", str(port)]
+        )
     return commands
 
 
@@ -470,8 +433,7 @@ def _relaunch_stopped_serves(token: dict) -> None:
         print("  ⚠ Some stopped backends could not be relaunched automatically; "
               "restart them manually (hermes serve --host <ip> --port <port>).")
     _record_update_step(
-        "serve_relaunch",
-        not failed and not skipped,
+        "serve_relaunch", not failed and not skipped,
         f"relaunched={len(commands) - len(failed)} failed={len(failed)} skipped={skipped}",
     )
 
@@ -493,9 +455,7 @@ def _live_argv_low(psutil, pid, cmdline: str) -> str | None:
     return argv.lower()
 
 
-def _orphaned_desktop_backend_pids(
-    matches: list[tuple[int, str, str]],
-) -> list[tuple[int, int]] | None:
+def _orphaned_desktop_backend_pids(matches: list[tuple[int, str, str]]) -> list[tuple[int, int]] | None:
     """``(pid, start_time)`` roots from *matches* when every remaining holder is an ORPHANED backend, else ``None``.
 
     Killing a Desktop-owned ``serve`` is futile (the app respawns it), but a straggler whose Desktop is gone
@@ -550,19 +510,16 @@ def _orphaned_desktop_backend_pids(
         if not root_set:
             return None
         try:
-            ancestors = {int(a.pid) for a in psutil.Process(pid).parents()}
+            if not root_set & {int(a.pid) for a in psutil.Process(pid).parents()}:
+                return None
         except psutil.NoSuchProcess:
             continue  # exited already
         except Exception:
             return None
-        if not (ancestors & root_set):
-            return None
     return roots
 
 
-def _ledger_reapable_backend_pids(
-    matches: list[tuple[int, str, str]],
-) -> list[int]:
+def _ledger_reapable_backend_pids(matches: list[tuple[int, str, str]]) -> list[int]:
     """PIDs the spawn ledger positively identifies as orphaned backends; never raises.
 
     Strongest rung (no PPID/cmdline inference): qualifies when ``(pid, create_time)`` matches a live ledger entry
@@ -570,11 +527,7 @@ def _ledger_reapable_backend_pids(
     provably dead. Safe in ANY context. Unlisted holders fall to later rungs and never disqualify identified ones.
     """
     try:
-        from hermes_cli.process_identity import (
-            REAPABLE_PURPOSES,
-            ledger_entries,
-            spawner_is_dead,
-        )
+        from hermes_cli.process_identity import REAPABLE_PURPOSES, ledger_entries, spawner_is_dead
 
         entries = ledger_entries()
     except Exception:
@@ -589,9 +542,7 @@ def _ledger_reapable_backend_pids(
     ]
 
 
-def _handoff_reapable_backend_pids(
-    matches: list[tuple[int, str, str]],
-) -> list[int] | None:
+def _handoff_reapable_backend_pids(matches: list[tuple[int, str, str]]) -> list[int] | None:
     """Backend PIDs safe to tree-reap during a GUI-updater hand-off, INCLUDING ones with a live parent; never raises.
 
     The orphan-only rung bails on ANY live parent (mid-teardown Electron, launcher->worker chain) and hung a
@@ -637,11 +588,8 @@ def _stop_process_trees(
                 logger.debug("Skipping taskkill of non-Hermes or changed PID %s", pid)
                 continue
             subprocess.run(
-                ["taskkill", "/PID", str(pid), "/T", "/F"],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
+                ["taskkill", "/PID", str(pid), "/T", "/F"], check=False,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                 creationflags=windows_hide_flags(),
             )
         except Exception as exc:
@@ -655,9 +603,7 @@ def _looks_like_desktop_control_plane(cmdline: str) -> bool:
     parser-derived classifier, never substring (``kanban --preserve-cache``, ``-m dashboard chat``).
     Undeterminable subcommand is NOT a control plane.
     """
-    if "hermes_cli.main" not in (cmdline or "").lower():
-        return False
-    return _hermes_holder_subcommand(cmdline) in ("serve", "dashboard")
+    return "hermes_cli.main" in (cmdline or "").lower() and _hermes_holder_subcommand(cmdline) in ("serve", "dashboard")
 
 
 def _desktop_owns_gateway_lifecycle() -> bool:
@@ -670,11 +616,8 @@ def _desktop_owns_gateway_lifecycle() -> bool:
     with _best_effort('Desktop-lifecycle ledger probe failed: %s'):
         from hermes_cli.process_identity import ledger_entries, spawner_is_dead
 
-        for entry in ledger_entries():
-            if entry.get("purpose") not in ("serve", "dashboard"):
-                continue
-            if spawner_is_dead(entry) is False:
-                return True
+        if any(e.get("purpose") in ("serve", "dashboard") and spawner_is_dead(e) is False for e in ledger_entries()):
+            return True
 
     psutil = _psutil()
     try:
@@ -697,13 +640,8 @@ def _desktop_owns_gateway_lifecycle() -> bool:
 def _sc_exe(verb: str, name: str, service, settled_status: str) -> None:
     """``sc.exe <verb> <name>``; a non-zero exit is only an error when SCM doesn't already report *settled_status*."""
     result = subprocess.run(
-        ["sc.exe", verb, name],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=10,
-        check=False,
+        ["sc.exe", verb, name], capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=10, check=False,
     )
     if result.returncode != 0 and service.status() != settled_status:
         detail = (result.stderr or result.stdout).strip()
@@ -717,9 +655,7 @@ def _process_create_time(psutil, pid: int, label: str, when: str) -> float:
         raise RuntimeError(f"Windows {label} process identity is unavailable {when}") from exc
 
 
-def _verify_service_identities(
-    psutil, name: str, service, expected_service_identity, expected_gateway_identity
-) -> None:
+def _verify_service_identities(psutil, name: str, service, expected_service_identity, expected_gateway_identity) -> None:
     """Refuse to stop *name* unless SCM state, service/gateway process identities and ancestry all still match."""
     if expected_service_identity is not None:
         try:
@@ -731,15 +667,11 @@ def _verify_service_identities(
             raise RuntimeError(f"Windows service {name} is not stably running before stop: {current_status}")
         if current_service_pid != int(expected_service_identity[0]):
             raise RuntimeError(f"Windows service {name} SCM process identity changed before stop")
-    for label, identity in (
-        ("service", expected_service_identity),
-        ("gateway", expected_gateway_identity),
-    ):
+    for label, identity in (("service", expected_service_identity), ("gateway", expected_gateway_identity)):
         if identity is None:
             continue
         pid, create_time = identity
-        current = _process_create_time(psutil, pid, label, "before stop")
-        if abs(current - float(create_time)) > 0.001:
+        if abs(_process_create_time(psutil, pid, label, "before stop") - float(create_time)) > 0.001:
             raise RuntimeError(f"Windows {label} process identity changed before stop")
     if expected_service_identity is not None and expected_gateway_identity is not None:
         service_pid = int(expected_service_identity[0])
@@ -753,8 +685,7 @@ def _verify_service_identities(
 
 
 def _stop_windows_gateway_service(
-    name: str,
-    *,
+    name: str, *,
     expected_processes: tuple[tuple[int, float], ...] = (),
     expected_service_identity: tuple[int, float] | None = None,
     expected_gateway_identity: tuple[int, float] | None = None,
