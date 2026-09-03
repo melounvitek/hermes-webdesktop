@@ -1,36 +1,11 @@
 """BasicAuthProvider — username/password dashboard auth (no OAuth IDP).
 
-Same ``DashboardAuthProvider`` framework as the OAuth providers, but login is
-a credential form (``supports_password = True`` + ``complete_password_login``);
-everything downstream (cookies, verify, refresh, ws-tickets, logout) is shared.
-No IDP and no database: sessions are stateless HMAC-signed tokens this provider
-mints and verifies — zero infrastructure for a single-box dashboard.
-
-Configuration (env wins over config.yaml when set non-empty)::
-
-    dashboard:
-      basic_auth:
-        username: admin               # required
-        password_hash: "scrypt$..."   # preferred — see hash_password()
-        password: "s3cret"            # OR plaintext, hashed in-memory at load
-        secret: "<32+ random bytes, base64 or hex>"  # optional signing key
-        session_ttl_seconds: 43200    # optional access-token lifetime (12h)
-
-    HERMES_DASHBOARD_BASIC_AUTH_USERNAME
-    HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH   # preferred
-    HERMES_DASHBOARD_BASIC_AUTH_PASSWORD        # plaintext fallback
-    HERMES_DASHBOARD_BASIC_AUTH_SECRET
-    HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS
-
-Without ``secret`` a random per-process key is generated: sessions then don't
-survive a restart or span multiple worker processes.
-
-Passwords use stdlib :func:`hashlib.scrypt` (no third-party dependency).
-``complete_password_login`` is constant-time and always performs a hash even
-for an unknown username, so the endpoint is not a username-enumeration timing oracle.
-
-``LAST_SKIP_REASON`` is read by the gate's fail-closed branch when the plugin
-loads but declines to register.
+Login is a credential form (``supports_password`` + ``complete_password_login``); cookies,
+verify, refresh, ws-tickets and logout are the shared framework. Sessions are stateless
+HMAC-signed tokens (no IDP, no database); passwords use stdlib scrypt and login always hashes
+even for an unknown username (no username-enumeration timing oracle). Config: ``dashboard.
+basic_auth.{username,password_hash|password,secret,session_ttl_seconds}`` or the
+``HERMES_DASHBOARD_BASIC_AUTH_*`` env vars (env wins when non-empty; see ``_settings``).
 """
 
 from __future__ import annotations
@@ -46,15 +21,11 @@ import time
 from typing import Optional
 
 from hermes_cli.dashboard_auth import (
-    DashboardAuthProvider,
-    InvalidCredentialsError,
-    LoginStart,
-    RefreshExpiredError,
-    Session,
-)
-from plugins.dashboard_auth._shared import load_config_section, resolve_env_or_cfg
+    DashboardAuthProvider, InvalidCredentialsError, LoginStart, RefreshExpiredError, Session)
+from plugins.dashboard_auth._shared import SkipRegistration, load_config_section, register_provider, resolve_env_or_cfg
 
 logger = logging.getLogger(__name__)
+_TAG = "dashboard-auth-basic"
 
 # The middleware transparently refreshes via the 30-day refresh token when the
 # access token lapses, so the TTL controls refresh frequency, not login length.
@@ -78,18 +49,14 @@ LAST_SKIP_REASON: str = ""
 # ---- Password hashing (stdlib scrypt) ----
 
 def hash_password(password: str) -> str:
-    """Return a ``scrypt$n$r$p$<salt_b64>$<dk_b64>`` hash string.
-
-    Public so operators can precompute ``password_hash`` for config.yaml (the
-    plaintext then never sits at rest):
-    ``python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('pw'))"``.
-    """
+    """Return a ``scrypt$n$r$p$<salt_b64>$<dk_b64>`` hash string. Public so operators can
+    precompute ``password_hash`` for config.yaml (the plaintext then never sits at rest):
+    ``python -c "from plugins.dashboard_auth.basic import hash_password; print(hash_password('pw'))"``."""
     salt = secrets.token_bytes(_SCRYPT_SALT_BYTES)
     dk = hashlib.scrypt(
-        password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P,
-        dklen=_SCRYPT_DKLEN, maxmem=0,
-    )
-    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+        password.encode("utf-8"), salt=salt, n=_SCRYPT_N, r=_SCRYPT_R, p=_SCRYPT_P, dklen=_SCRYPT_DKLEN, maxmem=0)
+    salt_b64, dk_b64 = base64.b64encode(salt).decode(), base64.b64encode(dk).decode()
+    return f"scrypt${_SCRYPT_N}${_SCRYPT_R}${_SCRYPT_P}${salt_b64}${dk_b64}"
 
 
 def _verify_password(password: str, encoded: str) -> bool:
@@ -104,10 +71,7 @@ def _verify_password(password: str, encoded: str) -> bool:
     except (ValueError, TypeError):
         return False
     try:
-        actual = hashlib.scrypt(
-            password.encode("utf-8"), salt=salt, n=n, r=r, p=p,
-            dklen=len(expected), maxmem=0,
-        )
+        actual = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=n, r=r, p=p, dklen=len(expected), maxmem=0)
     except (ValueError, MemoryError):
         return False
     return hmac.compare_digest(actual, expected)
@@ -154,14 +118,7 @@ class BasicAuthProvider(DashboardAuthProvider):
     display_name = "Username & Password"
     supports_password = True
 
-    def __init__(
-        self,
-        *,
-        username: str,
-        password_hash: str,
-        secret: bytes,
-        ttl_seconds: int = _DEFAULT_TTL_SECONDS,
-    ) -> None:
+    def __init__(self, *, username: str, password_hash: str, secret: bytes, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> None:
         if not username:
             raise ValueError("username must be non-empty")
         if not password_hash:
@@ -178,25 +135,19 @@ class BasicAuthProvider(DashboardAuthProvider):
     def start_login(self, *, redirect_uri: str) -> LoginStart:
         raise NotImplementedError(
             "BasicAuthProvider is password-only; there is no OAuth redirect flow. "
-            "The login page POSTs to /auth/password-login instead."
-        )
+            "The login page POSTs to /auth/password-login instead.")
 
-    def complete_login(
-        self, *, code: str, state: str, code_verifier: str, redirect_uri: str
-    ) -> Session:
+    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
         raise NotImplementedError("BasicAuthProvider is password-only; use complete_password_login.")
 
     # ---- password login ----------------------------------------------------
 
     def complete_password_login(self, *, username: str, password: str) -> Session:
-        # Always run a scrypt verify (real hash if the username matches, else
-        # the dummy) and compare the username with compare_digest too, so
-        # neither the username nor its length leaks via timing.
-        username_ok = hmac.compare_digest(
-            username.encode("utf-8"), self._username.encode("utf-8")
-        )
-        target_hash = self._password_hash if username_ok else _DUMMY_HASH
-        password_ok = _verify_password(password, target_hash)
+        # Always run a scrypt verify (real hash if the username matches, else the dummy)
+        # and compare the username with compare_digest too, so neither the username nor
+        # its length leaks via timing.
+        username_ok = hmac.compare_digest(username.encode("utf-8"), self._username.encode("utf-8"))
+        password_ok = _verify_password(password, self._password_hash if username_ok else _DUMMY_HASH)
         if not (username_ok and password_ok):
             raise InvalidCredentialsError("invalid username or password")
         return self._mint_session(self._username)
@@ -207,8 +158,7 @@ class BasicAuthProvider(DashboardAuthProvider):
         payload = _unsign(access_token, self._secret, "access")
         if payload is None:
             return None
-        user_id = str(payload.get("sub", ""))
-        return self._session(user_id, int(payload["exp"]), access_token, "")
+        return self._session(str(payload.get("sub", "")), int(payload["exp"]), access_token, "")
 
     def refresh_session(self, *, refresh_token: str) -> Session:
         if not refresh_token:
@@ -219,8 +169,7 @@ class BasicAuthProvider(DashboardAuthProvider):
         return self._mint_session(str(payload.get("sub", self._username)))
 
     def revoke_session(self, *, refresh_token: str) -> None:
-        # Stateless tokens — nothing to revoke server-side; the session
-        # expires within its TTL. Must not raise.
+        # Stateless tokens — nothing to revoke server-side; the session expires within its TTL. Must not raise.
         return None
 
     # ---- internals ---------------------------------------------------------
@@ -231,36 +180,31 @@ class BasicAuthProvider(DashboardAuthProvider):
         return self._session(
             user_id, exp,
             _sign({"sub": user_id, "kind": "access", "exp": exp}, self._secret),
-            _sign({"sub": user_id, "kind": "refresh", "exp": now + _REFRESH_TTL_SECONDS}, self._secret),
-        )
+            _sign({"sub": user_id, "kind": "refresh", "exp": now + _REFRESH_TTL_SECONDS}, self._secret))
 
     def _session(self, user_id: str, exp: int, access_token: str, refresh_token: str) -> Session:
         return Session(
             user_id=user_id, email="", display_name=user_id, org_id="", provider=self.name,
-            expires_at=exp, access_token=access_token, refresh_token=refresh_token,
-        )
+            expires_at=exp, access_token=access_token, refresh_token=refresh_token)
 
 
 # ---- Plugin entry point ----
 
 def _load_config_basic_auth_section() -> dict:
-    return load_config_section(logger, "dashboard-auth-basic", "dashboard", "basic_auth")
+    return load_config_section(logger, _TAG, "dashboard", "basic_auth")
 
 
 def _resolve_secret(cfg_section: dict) -> bytes:
-    """Resolve the token-signing secret (base64, hex, or raw text).
-
-    When unset, generates a random per-process secret (sessions then don't
-    survive a restart or span multiple workers — logged at INFO).
-    """
+    """Resolve the token-signing secret (base64, hex, or raw text). When unset, generates
+    a random per-process secret (sessions then don't survive a restart or span multiple
+    workers — logged at INFO)."""
     raw = resolve_env_or_cfg("HERMES_DASHBOARD_BASIC_AUTH_SECRET", cfg_section.get("secret"))
     if not raw:
         logger.info(
             "dashboard-auth-basic: no 'secret' configured; generating a random "
             "per-process signing key. Sessions will not survive a restart or span "
             "multiple workers. Set dashboard.basic_auth.secret (or "
-            "HERMES_DASHBOARD_BASIC_AUTH_SECRET) for stable sessions."
-        )
+            "HERMES_DASHBOARD_BASIC_AUTH_SECRET) for stable sessions.")
         return secrets.token_bytes(32)
     for decoder in (base64.b64decode, bytes.fromhex):
         try:
@@ -272,12 +216,8 @@ def _resolve_secret(cfg_section: dict) -> bytes:
     return raw.encode("utf-8")
 
 
-def register(ctx) -> None:
-    """Register ``BasicAuthProvider`` when username + (password or
-    password_hash) are configured; a no-op for OAuth / ``--insecure`` setups."""
-    global LAST_SKIP_REASON
-    LAST_SKIP_REASON = ""
-
+def _settings() -> dict:
+    """Resolve BasicAuthProvider kwargs from env/config; raises ``SkipRegistration``."""
     section = _load_config_basic_auth_section()
 
     def setting(env_name: str, cfg_key: str) -> str:
@@ -287,58 +227,43 @@ def register(ctx) -> None:
     password_hash = setting("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH", "password_hash")
     plaintext = setting("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "password")
     ttl_raw = setting("HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS", "session_ttl_seconds")
-
     if not username:
-        LAST_SKIP_REASON = (
+        raise SkipRegistration(
             "dashboard.basic_auth.username is not set (and HERMES_DASHBOARD_BASIC_AUTH_USERNAME "
             "is empty). Set a username and a password (or password_hash) under "
             "dashboard.basic_auth in config.yaml to enable username/password dashboard "
-            "login, or use the OAuth provider, or pass --insecure to skip the auth gate."
-        )
-        logger.debug("dashboard-auth-basic: %s", LAST_SKIP_REASON)
-        return
-
+            "login, or use the OAuth provider, or pass --insecure to skip the auth gate.")
     if not password_hash and not plaintext:
-        LAST_SKIP_REASON = (
+        raise SkipRegistration(
             "dashboard.basic_auth.username is set but neither password_hash nor password "
             "is configured. Provide one of them (password_hash is preferred — compute it "
-            "with plugins.dashboard_auth.basic.hash_password)."
-        )
-        logger.warning("dashboard-auth-basic: %s", LAST_SKIP_REASON)
-        return
-
-    # Precedence: env password (hashed in-memory) overrides any config
-    # password_hash so operators can rotate without editing config; a config
-    # password_hash wins over a config-only plaintext password (preferred at-rest form).
+            "with plugins.dashboard_auth.basic.hash_password).",
+            level="warning")
+    # Precedence: env password (hashed in-memory) overrides any config password_hash so
+    # operators can rotate without editing config; a config password_hash wins over a
+    # config-only plaintext password (preferred at-rest form).
     plaintext_from_env = os.environ.get("HERMES_DASHBOARD_BASIC_AUTH_PASSWORD", "").strip()
     if plaintext_from_env:
         password_hash = hash_password(plaintext_from_env)
-        logger.info(
-            "dashboard-auth-basic: hashed env-supplied password in-memory "
-            "(overrides any config password_hash)."
-        )
+        logger.info("dashboard-auth-basic: hashed env-supplied password in-memory (overrides any config password_hash).")
     elif not password_hash:
         password_hash = hash_password(plaintext)
         logger.info(
             "dashboard-auth-basic: hashed plaintext password in-memory. "
             "For production, precompute dashboard.basic_auth.password_hash "
-            "and remove the plaintext password from config."
-        )
-
+            "and remove the plaintext password from config.")
     try:
         ttl = int(ttl_raw) if ttl_raw else _DEFAULT_TTL_SECONDS
     except ValueError:
         ttl = _DEFAULT_TTL_SECONDS
+    return {"username": username, "password_hash": password_hash, "secret": _resolve_secret(section), "ttl_seconds": ttl}
 
-    try:
-        provider = BasicAuthProvider(
-            username=username, password_hash=password_hash,
-            secret=_resolve_secret(section), ttl_seconds=ttl,
-        )
-    except ValueError as exc:
-        LAST_SKIP_REASON = f"BasicAuthProvider construction failed: {exc}"
-        logger.warning("dashboard-auth-basic: %s", LAST_SKIP_REASON)
-        return
 
-    ctx.register_dashboard_auth_provider(provider)
-    logger.info("dashboard-auth-basic: registered password provider (username=%s)", username)
+def register(ctx) -> None:
+    """Register ``BasicAuthProvider`` when username + (password or
+    password_hash) are configured; a no-op for OAuth / ``--insecure`` setups."""
+    global LAST_SKIP_REASON
+    LAST_SKIP_REASON = ""
+    kwargs, LAST_SKIP_REASON = register_provider(ctx, logger, _TAG, BasicAuthProvider, _settings)
+    if kwargs is not None:
+        logger.info("dashboard-auth-basic: registered password provider (username=%s)", kwargs["username"])

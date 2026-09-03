@@ -1,33 +1,11 @@
 """DrainSecretProvider — shared-bearer-secret auth for the drain-control endpoint.
 
-Uses the non-interactive token capability of the ``DashboardAuthProvider``
-ABC (``supports_token`` / ``verify_token`` + the route-agnostic ``token_auth``
-middleware seam). ``nous-account-service`` (NAS) provisions a **per-agent
-unique** shared secret into each deployed agent's environment; this provider
-verifies an inbound ``Authorization`` bearer against it with a constant-time
-compare and vouches for the caller as the ``drain-control`` principal. No
-login, cookie, session or refresh — the interactive ABC methods raise
-``NotImplementedError``. A real auth plugin (not an ad-hoc header check on the
-route) so the credential lives inside the dashboard auth framework.
-
-Security properties:
-* Per-agent unique secret — a leak's blast radius is one agent.
-* Fail-CLOSED entropy gate at registration: a weak/short/low-entropy secret is
-  never silently accepted (>= 43 url-safe-base64 chars ~= 256 bits, enough
-  distinct characters, Shannon entropy floor).
-* ``hmac.compare_digest`` on the request path — not a timing oracle.
-
-Configuration — the secret is a CREDENTIAL, so it is env-only (provisioned by
-NAS at deploy time); behavioural knobs live in config.yaml::
-
-    HERMES_DASHBOARD_DRAIN_SECRET   # per-agent shared secret (>=43 url-safe-b64 chars)
-
-    dashboard:
-      drain_auth:
-        scope: drain            # capability label attached to the principal
-        min_secret_chars: 43    # entropy bar (default 43 ~= 256 bits)
-
-When the env var is unset the plugin is a no-op (records a skip reason).
+Non-interactive token capability of the ``DashboardAuthProvider`` ABC (``verify_token`` +
+the ``token_auth`` middleware seam): ``nous-account-service`` provisions a per-agent unique
+secret (``HERMES_DASHBOARD_DRAIN_SECRET``, env-only — it is a credential); an inbound bearer
+is compared constant-time and vouched for as the ``drain-control`` principal. Fail-CLOSED
+entropy gate at registration (length, distinct chars, Shannon bits); interactive ABC methods
+raise. Knobs ``scope`` / ``min_secret_chars`` live under ``dashboard.drain_auth``.
 """
 from __future__ import annotations
 
@@ -38,15 +16,11 @@ import os
 from collections import Counter
 from typing import Optional
 
-from hermes_cli.dashboard_auth import (
-    DashboardAuthProvider,
-    LoginStart,
-    Session,
-    TokenPrincipal,
-)
-from plugins.dashboard_auth._shared import load_config_section
+from hermes_cli.dashboard_auth import DashboardAuthProvider, LoginStart, Session, TokenPrincipal
+from plugins.dashboard_auth._shared import SkipRegistration, load_config_section, register_provider
 
 logger = logging.getLogger(__name__)
+_TAG = "dashboard-auth-drain"
 
 # token_urlsafe(32) produces exactly 43 chars, so a correctly-provisioned
 # secret clears the default bar exactly.
@@ -71,34 +45,23 @@ def _shannon_bits(value: str) -> float:
     return per_char * n
 
 
-def assess_secret_strength(
-    secret: str, *, min_chars: int = _DEFAULT_MIN_SECRET_CHARS
-) -> Optional[str]:
-    """Return a human-readable rejection reason if ``secret`` is too weak, else ``None``.
-
-    Checks, in order: length >= ``min_chars``, distinct chars >=
-    ``_MIN_DISTINCT_CHARS``, Shannon entropy >= ``_MIN_SHANNON_BITS``.
-    """
+def assess_secret_strength(secret: str, *, min_chars: int = _DEFAULT_MIN_SECRET_CHARS) -> Optional[str]:
+    """Human-readable rejection reason if ``secret`` is too weak, else ``None``. Checks, in
+    order: length >= ``min_chars``, distinct chars >= ``_MIN_DISTINCT_CHARS``, Shannon
+    entropy >= ``_MIN_SHANNON_BITS``."""
     if not secret:
         return "secret is empty"
     if len(secret) < min_chars:
         return (
             f"secret too short: {len(secret)} chars (need >= {min_chars}; "
             "use a >=256-bit value, e.g. `python -c \"import secrets; "
-            "print(secrets.token_urlsafe(32))\"`)"
-        )
+            "print(secrets.token_urlsafe(32))\"`)")
     distinct = len(set(secret))
     if distinct < _MIN_DISTINCT_CHARS:
-        return (
-            f"secret has only {distinct} distinct characters (need >= "
-            f"{_MIN_DISTINCT_CHARS}); looks structured/low-entropy"
-        )
+        return f"secret has only {distinct} distinct characters (need >= {_MIN_DISTINCT_CHARS}); looks structured/low-entropy"
     bits = _shannon_bits(secret)
     if bits < _MIN_SHANNON_BITS:
-        return (
-            f"secret entropy too low: {bits:.0f} bits (need >= "
-            f"{_MIN_SHANNON_BITS:.0f}); looks structured/repeated"
-        )
+        return f"secret entropy too low: {bits:.0f} bits (need >= {_MIN_SHANNON_BITS:.0f}); looks structured/repeated"
     return None
 
 
@@ -131,18 +94,14 @@ class DrainSecretProvider(DashboardAuthProvider):
     # ---- interactive methods: unsupported (service credential only) --------
 
     def start_login(self, *, redirect_uri: str) -> LoginStart:
-        raise NotImplementedError(
-            "DrainSecretProvider is a non-interactive service credential; there is no login flow."
-        )
+        raise NotImplementedError("DrainSecretProvider is a non-interactive service credential; there is no login flow.")
 
-    def complete_login(
-        self, *, code: str, state: str, code_verifier: str, redirect_uri: str
-    ) -> Session:
+    def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
         raise NotImplementedError("DrainSecretProvider is a non-interactive service credential.")
 
     def verify_session(self, *, access_token: str) -> Optional[Session]:
-        # Never mints a Session, so never recognises a cookie. Return None
-        # (don't raise) so it stacks harmlessly in the cookie-verify loop.
+        # Never mints a Session, so never recognises a cookie. Return None (don't raise)
+        # so it stacks harmlessly in the cookie-verify loop.
         return None
 
     def refresh_session(self, *, refresh_token: str) -> Session:
@@ -155,64 +114,48 @@ class DrainSecretProvider(DashboardAuthProvider):
 # ---- Plugin entry point ----
 
 def _load_config_drain_auth_section() -> dict:
-    return load_config_section(logger, "dashboard-auth-drain", "dashboard", "drain_auth")
+    return load_config_section(logger, _TAG, "dashboard", "drain_auth")
 
 
-def register(ctx) -> None:
-    """Register ``DrainSecretProvider`` when a strong secret is set.
-
-    No-op (records a skip reason) when ``HERMES_DASHBOARD_DRAIN_SECRET`` is
-    unset or fails the entropy gate. On success also registers the drain
-    route as token-authable via the generic seam.
-    """
-    global LAST_SKIP_REASON
-    LAST_SKIP_REASON = ""
-
+def _settings() -> dict:
+    """Resolve DrainSecretProvider kwargs from env/config; raises ``SkipRegistration``."""
     secret = os.environ.get("HERMES_DASHBOARD_DRAIN_SECRET", "").strip()
     if not secret:
-        LAST_SKIP_REASON = (
+        raise SkipRegistration(
             "HERMES_DASHBOARD_DRAIN_SECRET is not set. Set a per-agent >=256-bit secret "
             "(e.g. `python -c \"import secrets; print(secrets.token_urlsafe(32))\"`) to enable "
-            "NAS-driven drain coordination; leave it unset to disable the drain endpoint."
-        )
-        logger.debug("dashboard-auth-drain: %s", LAST_SKIP_REASON)
-        return
-
+            "NAS-driven drain coordination; leave it unset to disable the drain endpoint.")
     section = _load_config_drain_auth_section()
     scope = str(section.get("scope", "drain") or "drain").strip() or "drain"
     try:
         min_chars = int(section.get("min_secret_chars", _DEFAULT_MIN_SECRET_CHARS))
     except (TypeError, ValueError):
         min_chars = _DEFAULT_MIN_SECRET_CHARS
-
     reason = assess_secret_strength(secret, min_chars=min_chars)
     if reason is not None:
-        LAST_SKIP_REASON = (
-            f"HERMES_DASHBOARD_DRAIN_SECRET rejected — {reason}. "
-            "The drain endpoint stays disabled (fail-closed)."
-        )
-        logger.warning("dashboard-auth-drain: %s", LAST_SKIP_REASON)
+        raise SkipRegistration(
+            f"HERMES_DASHBOARD_DRAIN_SECRET rejected — {reason}. The drain endpoint stays disabled (fail-closed).",
+            level="warning")
+    return {"secret": secret, "scope": scope}
+
+
+def register(ctx) -> None:
+    """Register ``DrainSecretProvider`` when a strong secret is set; no-op (records a skip
+    reason) when ``HERMES_DASHBOARD_DRAIN_SECRET`` is unset or fails the entropy gate. On
+    success also registers the drain route as token-authable via the generic seam."""
+    global LAST_SKIP_REASON
+    LAST_SKIP_REASON = ""
+    kwargs, LAST_SKIP_REASON = register_provider(ctx, logger, _TAG, DrainSecretProvider, _settings)
+    if kwargs is None:
         return
-
-    try:
-        provider = DrainSecretProvider(secret=secret, scope=scope)
-    except ValueError as exc:
-        LAST_SKIP_REASON = f"DrainSecretProvider construction failed: {exc}"
-        logger.warning("dashboard-auth-drain: %s", LAST_SKIP_REASON)
-        return
-
-    ctx.register_dashboard_auth_provider(provider)
-
-    # Opt the drain endpoint into the token-auth seam so the interactive
-    # cookie gate doesn't bounce NAS's bearer call.
+    # Opt the drain endpoint into the token-auth seam so the interactive cookie gate
+    # doesn't bounce NAS's bearer call.
     try:
         from hermes_cli.dashboard_auth.token_auth import register_token_route
 
         register_token_route(DRAIN_ROUTE_PATH)
     except Exception as exc:  # noqa: BLE001 — seam import must not crash plugin load
         logger.warning("dashboard-auth-drain: could not register token route %s: %s", DRAIN_ROUTE_PATH, exc)
-
     logger.info(
         "dashboard-auth-drain: registered drain service-credential provider (scope=%s, route=%s)",
-        scope, DRAIN_ROUTE_PATH,
-    )
+        kwargs["scope"], DRAIN_ROUTE_PATH)
