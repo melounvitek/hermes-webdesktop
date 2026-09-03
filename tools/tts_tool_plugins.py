@@ -12,11 +12,8 @@ import logging
 from typing import Any, Dict, Optional
 
 from tools.tts_command_provider import (
-    BUILTIN_TTS_PROVIDERS,
-    DEFAULT_COMMAND_TTS_OUTPUT_FORMAT,
-    _get_named_provider_config,
-    _is_command_provider_config,
-)
+    BUILTIN_TTS_PROVIDERS, DEFAULT_COMMAND_TTS_OUTPUT_FORMAT, _get_named_provider_config,
+    _is_command_provider_config)
 
 logger = logging.getLogger("tools.tts_tool")
 
@@ -66,12 +63,10 @@ def _dispatch_to_plugin_provider(text: str, output_path: str, provider: str, tts
     fmt = cfg.get("output_format", DEFAULT_COMMAND_TTS_OUTPUT_FORMAT)
     logger.info("Generating speech with plugin TTS provider '%s'...", key)
     written = plugin_provider.synthesize(
-        text, output_path,
-        voice=voice if isinstance(voice, str) and voice else None,
+        text, output_path, voice=voice if isinstance(voice, str) and voice else None,
         model=model if isinstance(model, str) and model else None,
         speed=float(speed) if isinstance(speed, (int, float)) else None,
-        format=str(fmt).lower() if fmt else "mp3",
-    )
+        format=str(fmt).lower() if fmt else "mp3")
     # Contract: returns the (possibly rewritten) output path; tolerate None.
     return written if isinstance(written, str) and written else output_path
 

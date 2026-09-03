@@ -53,11 +53,9 @@ from tools.tts_command_provider import (  # noqa: F401 — historical names re-e
     _is_command_tts_voice_compatible, _iter_command_providers, _resolve_command_provider_config,
     command_env_passthrough as _command_provider_env_passthrough,
     render_command_template as _render_command_tts_template,
-    run_command_provider as _run_command_tts, shell_quote_context as _shell_quote_context,
-)
+    run_command_provider as _run_command_tts, shell_quote_context as _shell_quote_context)
 from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by tests, resolved via tts_tool_openai._origin()
-    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, resolve_openai_audio_api_key,
-)
+    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, resolve_openai_audio_api_key)
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
     FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH, _resolve_max_text_length,
     AudioDeliveryProfile, _build_audio_delivery_files, _concat_audio_files, _convert_to_opus,
@@ -70,28 +68,23 @@ from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exp
     TTS_RESPONSE_BODY_LIMIT_BYTES, _XAI_FIRST_SENTENCE_RE, _XAI_INLINE_SPEECH_TAGS,
     _XAI_WRAPPING_SPEECH_TAGS, _apply_xai_auto_speech_tags, _elevenlabs_environment_kwargs,
     _generate_edge_tts, _generate_elevenlabs, _generate_gemini_tts, _generate_minimax_tts,
-    _generate_mistral_tts, _generate_xai_tts, _resolve_minimax_tts_runtime,
-)
+    _generate_mistral_tts, _generate_xai_tts, _resolve_minimax_tts_runtime)
 from tools.tts_tool_local import (  # noqa: F401 — historical names re-exported
     DEFAULT_PIPER_VOICE, _LOCAL_TTS_MODEL_CACHES, _TTS_MODEL_CACHE_MAX, _generate_kittentts,
     _generate_neutts, _generate_piper_tts, _kittentts_model_cache, _piper_voice_cache,
-    _resolve_piper_voice_path, _tts_cache_get_or_load,
-)
+    _resolve_piper_voice_path, _tts_cache_get_or_load)
 from tools.tts_tool_speaker import stream_tts_to_speaker  # noqa: F401 — historical name re-exported
 from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
 from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-exported
     _dispatch_to_plugin_provider, _plugin_provider_is_available,
-    _plugin_provider_is_voice_compatible,
-)
+    _plugin_provider_is_voice_compatible)
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
     DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_VOICE, MANAGED_OPENAI_TTS_MODELS,
     _generate_deepinfra_tts, _generate_openai_tts, _has_openai_audio_backend,
-    _resolve_openai_audio_client_config,
-)
+    _resolve_openai_audio_client_config)
 from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exported
     _local_tts_warmers, _reset_tts_leases_for_tests, acquire_tts_lease, release_tts_lease,
-    release_tts_provider, tts_lease_holders, warm_tts_provider,
-)
+    release_tts_provider, tts_lease_holders, warm_tts_provider)
 
 
 # --- Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.) ---
@@ -219,8 +212,7 @@ _BUILTIN_DISPATCH: Dict[str, tuple] = {
     "piper": (lambda: _importable(_import_piper), "Piper (local)", "_generate_piper_tts",
               "Piper provider selected but 'piper-tts' package not installed. "
               "Run 'hermes tools' and select Piper under TTS, or install manually: "
-              "pip install piper-tts"),
-}
+              "pip install piper-tts")}
 
 
 def _error_json(message: str) -> str:
@@ -251,8 +243,7 @@ def _select_builtin_engine(provider: str) -> tuple:
         return "neutts", None
     return provider, _error_json(
         "No TTS provider available. Install edge-tts (pip install edge-tts) "
-        "or set up NeuTTS for local synthesis."
-    )
+        "or set up NeuTTS for local synthesis.")
 
 
 def _synthesize_builtin(engine: str, text: str, file_str: str, tts_config: Dict[str, Any], instructions: Optional[str]) -> None:
@@ -326,8 +317,7 @@ def _resolve_output_base(
             return None, _error_json(
                 f"output_path contains '..' traversal component: {output_path}. "
                 "Use an absolute path or one relative to the current directory "
-                "without '..'."
-            )
+                "without '..'.")
         file_path = Path(output_path).expanduser()
         if command_provider_config is not None:
             file_path = _configured_command_tts_output_path(file_path, command_provider_config)
@@ -335,8 +325,7 @@ def _resolve_output_base(
         if is_write_denied(str(file_path)) or is_write_approval_required(str(file_path)):
             return None, _error_json(
                 f"output_path targets a protected credential or system path: "
-                f"{file_path}. Choose a normal audio output location."
-            )
+                f"{file_path}. Choose a normal audio output location.")
     else:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_dir = Path(_default_output_dir())
@@ -441,8 +430,7 @@ def _synthesize_chunks(chunks: List[str], base_path: Path, generated_artifacts: 
 
 def text_to_speech_tool(
     text: str, output_path: Optional[str] = None, speed: Optional[float] = None,
-    instructions: Optional[str] = None, provider: Optional[str] = None,
-) -> str:
+    instructions: Optional[str] = None, provider: Optional[str] = None) -> str:
     """Convert text to speech with long-form chunking; returns the JSON result envelope.
 
     Text is normalized, split into provider-safe chunks (never silently truncated), synthesized
@@ -482,13 +470,11 @@ def text_to_speech_tool(
         encoded_paths, chunk_results = _synthesize_chunks(
             chunks, base_path, generated_artifacts, provider=provider, tts_config=tts_config,
             command_provider_config=command_provider_config, want_opus=want_opus,
-            instructions=instructions,
-        )
+            instructions=instructions)
         voice_compatible = bool(chunk_results) and all(bool(r.get("voice_compatible")) for r in chunk_results)
         delivery_base = base_path.with_suffix(Path(encoded_paths[0]).suffix)
         final_paths, combined_chunks = _build_audio_delivery_files(
-            encoded_paths, str(delivery_base), delivery_profile, voice_compatible=voice_compatible,
-        )
+            encoded_paths, str(delivery_base), delivery_profile, voice_compatible=voice_compatible)
         for path in final_paths:
             logger.info("TTS audio saved: %s (%s bytes, provider: %s)", path, f"{os.path.getsize(path):,}", provider)
         return json.dumps({
@@ -499,8 +485,7 @@ def text_to_speech_tool(
             "combined_chunks": bool(combined_chunks),
             "delivery_profile": {
                 "platform": delivery_profile.platform, "max_file_bytes": delivery_profile.max_file_bytes,
-                "target_file_bytes": delivery_profile.target_file_bytes,
-            },
+                "target_file_bytes": delivery_profile.target_file_bytes},
         }, ensure_ascii=False)
     except _ChunkFailed as exc:
         return tool_error(str(exc), success=False)
@@ -547,8 +532,7 @@ _BUILTIN_REQUIREMENTS: Dict[str, Callable[[], bool]] = {
     "mistral": lambda: _importable(_import_mistral_client) and bool(_resolve_provider_key("MISTRAL_API_KEY", "mistral")),
     "neutts": lambda: _check_neutts_available(),
     "kittentts": lambda: _check_kittentts_available(),
-    "piper": lambda: _check_piper_available(),
-}
+    "piper": lambda: _check_piper_available()}
 
 
 def check_tts_requirements() -> bool:
@@ -616,5 +600,4 @@ registry.register(
         text=args.get("text", ""),
         **{k: args.get(k) for k in ("output_path", "speed", "instructions", "provider")}),
     check_fn=check_tts_requirements,
-    emoji="🔊",
-)
+    emoji="🔊")

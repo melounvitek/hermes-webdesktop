@@ -15,8 +15,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 
 from tools.tool_backend_helpers import (
-    NOUS_MANAGED_PROVIDER, nous_tool_gateway_unavailable_message, selection_error,
-)
+    NOUS_MANAGED_PROVIDER, nous_tool_gateway_unavailable_message, selection_error)
 from tools.tts_tool_delivery import _origin, _section
 from tools.tts_tool_providers import _tts_response_format_from_path
 
@@ -53,8 +52,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
         if route is None:
             raise ValueError(selection_error(
                 "tts", NOUS_MANAGED_PROVIDER,
-                "the Nous Tool Gateway is not available (not entitled or unreachable)",
-            ))
+                "the Nous Tool Gateway is not available (not entitled or unreachable)"))
         return route
 
     direct_api_key = openai_cfg.get("api_key") or origin.resolve_openai_audio_api_key()
@@ -87,8 +85,7 @@ def _has_openai_audio_backend() -> bool:
 def _generate_openai_tts(
     text: str, output_path: str, tts_config: Dict[str, Any], *, api_key: Optional[str] = None,
     base_url: Optional[str] = None, model: Optional[str] = None, voice: Optional[str] = None,
-    speed: Optional[float] = None, instructions: Optional[str] = None,
-) -> str:
+    speed: Optional[float] = None, instructions: Optional[str] = None) -> str:
     """Generate audio via the OpenAI ``audio.speech.create`` SDK shape.
 
     Explicit kwargs let OpenAI-compatible backends (DeepInfra) supply credentials/model/voice
@@ -122,8 +119,7 @@ def _generate_openai_tts(
             "TTS: managed OpenAI audio gateway does not support model %r; "
             "falling back to %s. Set VOICE_TOOLS_OPENAI_KEY or OPENAI_API_KEY "
             "to use %r directly.",
-            model, DEFAULT_OPENAI_MODEL, model,
-        )
+            model, DEFAULT_OPENAI_MODEL, model)
         model = DEFAULT_OPENAI_MODEL
 
     OpenAIClient = _origin()._import_openai_client()
@@ -134,8 +130,7 @@ def _generate_openai_tts(
             "voice": voice,
             "input": text,
             "response_format": _tts_response_format_from_path(output_path),
-            "extra_headers": {"x-idempotency-key": str(uuid.uuid4())},
-        }
+            "extra_headers": {"x-idempotency-key": str(uuid.uuid4())}}
         if speed != 1.0:
             create_kwargs["speed"] = max(0.25, min(4.0, speed))
         if instructions:
@@ -169,11 +164,9 @@ def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, A
             raise ValueError(
                 "No DeepInfra TTS model available. Pin one in config.yaml "
                 "under tts.deepinfra.model, or check connectivity to "
-                "api.deepinfra.com so the live catalog can be fetched."
-            )
+                "api.deepinfra.com so the live catalog can be fetched.")
         model = candidates[0]
     return _origin()._generate_openai_tts(
         text, output_path, tts_config, api_key=api_key, base_url=deepinfra_base_url(di_config),
         model=model, voice=di_config.get("voice", DEFAULT_DEEPINFRA_TTS_VOICE),
-        speed=float(di_config.get("speed", tts_config.get("speed", 1.0))),
-    )
+        speed=float(di_config.get("speed", tts_config.get("speed", 1.0))))

@@ -24,11 +24,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.tts_command_provider import (
-    BUILTIN_TTS_PROVIDERS,
-    DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
-    _get_named_provider_config,
-    _is_command_provider_config,
-)
+    BUILTIN_TTS_PROVIDERS, DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH, _get_named_provider_config,
+    _is_command_provider_config)
 
 logger = logging.getLogger("tools.tts_tool")
 
@@ -73,8 +70,7 @@ ELEVENLABS_MODEL_MAX_TEXT_LENGTH: Dict[str, int] = {
     "eleven_english_sts_v2": 10000,
     "eleven_english_sts_v1": 10000,
     "eleven_flash_v2": 30000,
-    "eleven_flash_v2_5": 40000,
-}
+    "eleven_flash_v2_5": 40000}
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -122,8 +118,7 @@ GEMINI_TTS_SAMPLE_WIDTH = 2
 # ffmpeg args producing the Ogg/Opus voice-bubble encoding Telegram & co expect.
 _OPUS_VOICE_ARGS = [
     "-acodec", "libopus", "-ac", "1", "-b:a", "48k", "-vbr", "on",
-    "-application", "voip", "-compression_level", "10",
-]
+    "-application", "voip", "-compression_level", "10"]
 
 
 # --- Text chunking and delivery profiles ---
@@ -145,13 +140,11 @@ class AudioDeliveryProfile:
 _PLATFORM_AUDIO_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "discord": {"max_file_bytes": 10 * 1024 * 1024, "safety_ratio": 0.85},
     "telegram": {"max_file_bytes": 50 * 1024 * 1024, "safety_ratio": 0.85},
-    "default": {"max_file_bytes": 10 * 1024 * 1024, "safety_ratio": 0.85},
-}
+    "default": {"max_file_bytes": 10 * 1024 * 1024, "safety_ratio": 0.85}}
 
 
 def _resolve_audio_delivery_profile(
-    platform: Optional[str], tts_config: Optional[Dict[str, Any]] = None,
-) -> AudioDeliveryProfile:
+    platform: Optional[str], tts_config: Optional[Dict[str, Any]] = None) -> AudioDeliveryProfile:
     """Resolve upload constraints, including optional ``tts.delivery_profiles`` overrides."""
     key = (platform or "default").lower().strip() or "default"
     defaults = dict(_PLATFORM_AUDIO_DEFAULTS.get(key) or _PLATFORM_AUDIO_DEFAULTS["default"])
@@ -283,11 +276,8 @@ def _finalize_wav_output(wav_path: str, output_path: str) -> str:
 
 
 def _wrap_pcm_as_wav(
-    pcm_bytes: bytes,
-    sample_rate: int = GEMINI_TTS_SAMPLE_RATE,
-    channels: int = GEMINI_TTS_CHANNELS,
-    sample_width: int = GEMINI_TTS_SAMPLE_WIDTH,
-) -> bytes:
+    pcm_bytes: bytes, sample_rate: int = GEMINI_TTS_SAMPLE_RATE,
+    channels: int = GEMINI_TTS_CHANNELS, sample_width: int = GEMINI_TTS_SAMPLE_WIDTH) -> bytes:
     """Wrap raw signed-little-endian PCM (e.g. Gemini's L16) with a minimal WAV RIFF header."""
     byte_rate = sample_rate * channels * sample_width
     block_align = channels * sample_width
@@ -402,8 +392,7 @@ def _repair_ogg_container(file_str: str) -> str:
         os.replace(file_str, honest)
         logger.warning(
             "Could not transcode %s to Ogg/Opus — renamed to %s so the "
-            "file is delivered with its real format", file_str, honest,
-        )
+            "file is delivered with its real format", file_str, honest)
         return honest
     except OSError:
         return file_str
@@ -473,8 +462,7 @@ def _build_audio_delivery_files(
         if size > profile.max_file_bytes:
             raise ValueError(
                 f"Final-encoded TTS chunk exceeds {profile.platform} delivery "
-                f"limit ({size} > {profile.max_file_bytes} bytes): {path}"
-            )
+                f"limit ({size} > {profile.max_file_bytes} bytes): {path}")
 
     base = Path(output_path)
     scratch_outputs: List[str] = []

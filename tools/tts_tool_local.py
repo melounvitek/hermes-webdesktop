@@ -69,8 +69,7 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
         "--ref-audio", neutts_config.get("ref_audio", "") or str(_NEUTTS_SAMPLES / "jo.wav"),
         "--ref-text", neutts_config.get("ref_text", "") or str(_NEUTTS_SAMPLES / "jo.txt"),
         "--model", neutts_config.get("model", "neuphonic/neutts-air-q4-gguf"),
-        "--device", neutts_config.get("device", "cpu"),
-    ]
+        "--device", neutts_config.get("device", "cpu")]
     result = _run_helper(cmd, 120)
     if result.returncode != 0:
         # The synth script reports success lines as "OK:" on stderr too.
@@ -115,8 +114,7 @@ def _resolve_piper_voice_path(voice: str, download_dir: Path) -> str:
         raise RuntimeError(
             f"Piper voice download completed but {cached} is missing — "
             f"check voice name (see: https://github.com/OHF-Voice/piper1-gpl/"
-            f"blob/main/docs/VOICES.md)"
-        )
+            f"blob/main/docs/VOICES.md)")
     return str(cached)
 
 
@@ -169,8 +167,7 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
                 noise_w_scale=float(piper_config.get("noise_w_scale", 0.8)),
                 volume=float(piper_config.get("volume", 1.0)),
                 normalize_audio=bool(piper_config.get("normalize_audio", True)),
-                speaker_id=speaker_id,
-            )
+                speaker_id=speaker_id)
         except ImportError:
             logger.warning("[Piper] SynthesisConfig not available in this piper-tts version — advanced knobs ignored")
 

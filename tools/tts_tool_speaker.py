@@ -240,8 +240,7 @@ class _StreamerPlayback:
         if self._reinit_count >= self._MAX_REINIT:
             logger.warning(
                 "TTS: PortAudio reinit exhausted after %d attempts, falling back to tempfile for remaining sentences",
-                self._MAX_REINIT,
-            )
+                self._MAX_REINIT)
             self._current_stream = None
             return False
         self._reinit_count += 1
@@ -303,8 +302,7 @@ class _StreamerPlayback:
 
 def stream_tts_to_speaker(
     text_queue: queue.Queue, stop_event: threading.Event, tts_done_event: threading.Event,
-    display_callback: Optional[Callable[[str], None]] = None, provider: Optional[str] = None,
-):
+    display_callback: Optional[Callable[[str], None]] = None, provider: Optional[str] = None):
     """Consume text deltas from *text_queue*, cut into sentences, speak each the moment it's ready.
 
     A registered streaming provider plays chunked PCM; every other provider is spoken
