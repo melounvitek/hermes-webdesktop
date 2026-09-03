@@ -15,32 +15,25 @@ from typing import Literal, Sequence
 
 log = logging.getLogger(__name__)
 
-# Only this desired state triggers automatic restart. Everything else (startup_failed,
-# starting, stopped, missing) registers the slot down and waits for explicit user action —
-# avoiding the crash-loop where a broken gateway keeps restarting across `docker restart`.
-# Older installs only have gateway_state; newer lifecycle commands persist desired_state
-# separately so a transient runtime state does not erase the operator's durable intent.
+# Only this desired state auto-restarts; everything else (startup_failed, starting, stopped,
+# missing) registers the slot down and waits for the user — avoiding the crash-loop where a
+# broken gateway keeps restarting across `docker restart`. Older installs only have
+# gateway_state; newer lifecycle commands persist desired_state separately so a transient
+# runtime state does not erase the operator's durable intent.
 _AUTOSTART_STATES = frozenset({"running"})
 
-# Transient runtime sub-states of a RUNNING gateway — reached only while up and serving, so
-# NOT an operator stop and NOT a failed boot:
-#   - `draining`  — drain watcher / scale-to-zero go-dormant path, in-flight quiesce begun.
-#   - `degraded`  — came up with some platforms queued for retry, then fell through to the
-#                   normal running state; the reconnect watcher takes it from there.
-# When a gateway is hard-killed *in one of these states* (container/VM recreate SIGTERMs it
-# before `_stop_impl` persists a terminal state), the marker left in gateway_state.json is
-# the transient sub-state. With no `desired_state` to fall back to, treating it literally
-# would leave the gateway DOWN on every subsequent boot (observed: a relay-opted-in staging
-# instance stranded at `draining`; `degraded` is the same wedge class). Map them to `running`
-# — mirrors gateway/run.py persisting `running` (not mid-shutdown `draining`) on unexpected
-# signal, extended to the case where the gateway died before persisting anything.
-# `starting` / `startup_failed` are deliberately NOT included: those mean the gateway died
-# mid-boot or failed to come up, and auto-restarting would reintroduce the crash-loop.
+# Transient sub-states of a RUNNING gateway (`draining`: in-flight quiesce; `degraded`: up
+# with some platforms queued for reconnect) — NOT an operator stop, NOT a failed boot. When a
+# gateway is hard-killed in one of them (container recreate SIGTERMs it before `_stop_impl`
+# persists a terminal state) and there is no `desired_state`, reading the marker literally
+# would leave the gateway DOWN on every later boot (observed: staging instance stranded at
+# `draining`). Map them to `running`, mirroring gateway/run.py's unexpected-signal handling.
+# `starting` / `startup_failed` are deliberately excluded: auto-restarting a gateway that died
+# mid-boot reintroduces the crash-loop.
 _TRANSIENT_RUNNING_STATES = frozenset({"draining", "degraded"})
 
-# Stale runtime files swept before recreating service slots: they hold container-namespaced
-# state (PIDs, process tables) that's garbage post-restart — a numerically-equal PID in the
-# new container is a different process.
+# Swept before recreating slots: container-namespaced state (PIDs, process tables) is garbage
+# post-restart — a numerically-equal PID in the new container is a different process.
 _STALE_RUNTIME_FILES = ("gateway.pid", "processes.json")
 
 ReconcileActionLabel = Literal["started", "registered", "skipped"]
@@ -52,9 +45,8 @@ class ReconcileAction:
     profile: str
     prior_state: str | None
     action: ReconcileActionLabel
-    # How the previous gateway life ended: "clean" (exit path ran), "unclean" (sentinel still
-    # says running — SIGKILL/OOM/VM death), or "unknown" (no sentinel / never ran). Container
-    # boot is the one place that can stamp "the previous life ended violently" into a
+    # "clean" (exit path ran) / "unclean" (sentinel still says running — SIGKILL/OOM/VM death)
+    # / "unknown". Boot is the one place that can stamp a violent previous death into a
     # durable, volume-persisted log line (gateway.lifecycle_ledger).
     prior_exit: str = "unknown"
 
@@ -74,17 +66,14 @@ def reconcile_profile_gateways(
     """Recreate s6 service registrations for every persistent profile.
 
     Always registers a ``gateway-default`` slot for the root profile (the implicit profile at
-    the top of ``$HERMES_HOME``, not under ``profiles/``): the dispatcher in
-    ``hermes_cli.gateway`` maps an empty profile suffix to it, so it is what
-    ``hermes gateway start`` (no ``-p``) targets.
+    the top of ``$HERMES_HOME``): ``hermes_cli.gateway`` maps an empty profile suffix to it,
+    so it is what ``hermes gateway start`` (no ``-p``) targets.
     """
     actions: list[ReconcileAction] = []
 
-    # A multiplexing root/default gateway owns inbound platform connections for every
-    # profile. Named slots must still be registered (explicit lifecycle management stays
-    # available), but booting them from their persisted run intent would create additional
-    # multiplex owners. The runtime resolver gives a recognized environment override
-    # precedence over config.yaml and otherwise preserves the configured value.
+    # A multiplexing root gateway owns inbound platform connections for every profile: named
+    # slots are still registered (lifecycle management stays available) but must not boot
+    # from their persisted run intent, or they would become additional multiplex owners.
     from gateway.config import load_gateway_config
     from utils import is_truthy_value
     try:
@@ -94,10 +83,9 @@ def reconcile_profile_gateways(
                     "GATEWAY_MULTIPLEX_PROFILES override if set.", exc_info=True)
         multiplex_profiles = is_truthy_value(os.environ.get("GATEWAY_MULTIPLEX_PROFILES"))
 
-    # Default profile — always register, even if nothing has ever populated the root profile
-    # dir; auto-up only when the prior state was "running" (same rule as named profiles). A
-    # legacy `gateway run` container with no state yet seeds that intent as `running` so the
-    # s6 reconciler preserves the pre-s6 behavior.
+    # Default profile — always registered; auto-up only when the prior state was "running"
+    # (same rule as named profiles). A legacy `gateway run` container with no state yet seeds
+    # that intent as `running` so the pre-s6 behavior is preserved.
     legacy_default_state = _maybe_migrate_legacy_gateway_run_state(
         hermes_home, container_argv=container_argv, dry_run=dry_run)
     default_prior_state = legacy_default_state or _read_desired_state(hermes_home)
@@ -110,9 +98,8 @@ def reconcile_profile_gateways(
     profiles_root = hermes_home / "profiles"
     if profiles_root.is_dir():
         for entry in sorted(profiles_root.iterdir()):
-            # SOUL.md is always seeded by `hermes profile create` (config.yaml is not — that
-            # comes later via `hermes setup`): the "real profile" marker so stray dirs
-            # (backups, manual mkdir) aren't picked up.
+            # SOUL.md is always seeded by `hermes profile create` (config.yaml comes later via
+            # `hermes setup`): the "real profile" marker that skips stray dirs (backups, mkdir).
             if not entry.is_dir() or not (entry / "SOUL.md").exists():
                 continue
             # "default" is reserved for the root profile (above); skip a stray
@@ -141,9 +128,8 @@ def _maybe_migrate_legacy_gateway_run_state(
 ) -> str | None:
     """Seed root gateway_state for pre-s6 `gateway run` containers.
 
-    The tini image let Docker users run the gateway as the container command. After the s6
-    migration profile gateways are restored from persisted gateway_state.json, so a legacy
-    container with no state file would register the default service down and never start.
+    The tini image let users run the gateway as the container command; post-s6, gateways are
+    restored from gateway_state.json, so such a container would register down and never start.
     """
     state_file = hermes_home / "gateway_state.json"
     if state_file.exists():
@@ -173,11 +159,10 @@ def _cmdline_argv(cmdline: Path) -> tuple[str, ...]:
 
 
 def _read_container_argv() -> tuple[str, ...]:
-    """Best-effort read of the container's main program argv.
+    """Best-effort read of the container's main program argv (the one holding ``main-wrapper.sh``).
 
-    s6-overlay v2: PID 1 is ``/init`` and its argv holds ``main-wrapper.sh``. v3: PID 1 is
-    ``s6-svscan`` and the real command lives on another PID, so after the PID 1 fast path we
-    scan ``/proc/*/cmdline`` for a process whose argv contains ``main-wrapper.sh``.
+    s6-overlay v2: PID 1 is ``/init``. v3: PID 1 is ``s6-svscan`` and the real command lives on
+    another PID, so after the PID 1 fast path we scan ``/proc/*/cmdline``.
     """
     def _cmdlines():
         yield Path("/proc/1/cmdline")
@@ -201,9 +186,8 @@ def _read_container_argv() -> tuple[str, ...]:
 def _strip_container_argv_prefix(argv: Sequence[str]) -> list[str]:
     """Strip the s6/wrapper prefix off the container argv, leaving the hermes args.
 
-    Drop everything through the ``main-wrapper.sh`` token rather than peel leading tokens
-    positionally (which broke on the s6 v2→v3 launcher-shape change): the wrapper path is the
-    stable boundary the image owns, and the subcommand always follows it.
+    Drops everything through the ``main-wrapper.sh`` token — the stable boundary the image
+    owns — rather than peeling tokens positionally (which broke on the s6 v2→v3 bump).
     """
     args = list(argv)
 
@@ -239,12 +223,10 @@ def _is_dashboard_container(argv: Sequence[str]) -> bool:
 
 
 def _read_desired_state(profile_dir: Path) -> str | None:
-    """Persisted gateway desired state for reconciliation.
+    """Persisted gateway desired state: ``desired_state`` (operator intent), else ``gateway_state``.
 
-    Newer state files carry ``desired_state`` (operator intent from s6 lifecycle commands);
-    older ones only ``gateway_state``, kept as a fallback so existing profiles preserve their
-    behavior until the next explicit start/stop. Missing/unparseable files count as "no
-    desired state" so a corrupt file can't bork the whole reconciliation.
+    The older key is a fallback so existing profiles keep their behavior until the next explicit
+    start/stop. Missing/unparseable files count as "no state" so a corrupt file can't bork boot.
     """
     state_file = profile_dir / "gateway_state.json"
     if not state_file.exists():
@@ -286,11 +268,10 @@ def _write_exec(path: Path, content: str) -> None:
 def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
     """Recreate the s6 service slot for one profile.
 
-    Mirrors ``S6ServiceManager.register_profile_gateway`` but sets start state via the
-    ``down`` marker directly: cont-init.d runs as root before s6-svscan scans the dynamic
-    scandir, so the manager's ``s6-svscanctl -a`` would fail with no control socket. Built in
-    a sibling temp dir and ``Path.replace``d into place so an interrupted write never leaves
-    a half-populated dir.
+    Mirrors ``S6ServiceManager.register_profile_gateway`` but sets start state via the ``down``
+    marker: cont-init.d runs before s6-svscan scans the scandir, so ``s6-svscanctl -a`` has no
+    control socket yet. Built in a sibling temp dir and ``Path.replace``d into place so an
+    interrupted write never leaves a half-populated dir.
     """
     import shutil
 
@@ -300,10 +281,9 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
 
     validate_profile_name(profile)
     service_dir = scandir / f"gateway-{profile}"
-    # Dot-prefix the staging dir so s6-svscan skips it while half-built. A non-dotted staging
-    # name is supervised AS ROOT by any concurrent ``s6-svscanctl -a`` rescan the moment it
-    # has a valid ``type``/``run``, creating a root-owned ``supervise/`` that makes
-    # ``_seed_supervise_skeleton`` EACCES (see ``S6ServiceManager.register_profile_gateway``).
+    # Dot-prefix the staging dir so s6-svscan skips it while half-built: a non-dotted name is
+    # supervised AS ROOT by any concurrent rescan the moment it has ``type``/``run``, creating
+    # a root-owned ``supervise/`` that makes ``_seed_supervise_skeleton`` EACCES.
     tmp_dir = service_dir.with_name("." + service_dir.name + ".tmp")
 
     if tmp_dir.exists():
@@ -313,9 +293,8 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
     try:
         (tmp_dir / "type").write_text("longrun\n", encoding="utf-8")
 
-        # Reuse the manager's script rendering — single source of truth so both registration
-        # paths stay consistent. extra_env is empty here; per-profile env comes from the
-        # profile's config.yaml (which the gateway itself loads).
+        # Reuse the manager's script rendering so both registration paths stay consistent.
+        # extra_env is empty: per-profile env comes from the profile's config.yaml.
         _write_exec(tmp_dir / "run", S6ServiceManager._render_run_script(profile, extra_env={}))
         _write_exec(tmp_dir / "finish", S6ServiceManager._render_finish_script())
 
@@ -323,18 +302,16 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
         (tmp_dir / "log").mkdir()
         _write_exec(tmp_dir / "log" / "run", S6ServiceManager._render_log_run(profile))
 
-        # A `down` file tells s6-supervise NOT to start the service when s6-svscan picks it
-        # up; the user brings it up with `hermes -p <profile> gateway start` (→ `s6-svc -u`).
+        # `down` tells s6-supervise NOT to start on pickup; `hermes -p <profile> gateway start`
+        # brings it up (→ `s6-svc -u`).
         if not start:
             (tmp_dir / "down").touch()
 
-        # Pre-create supervise/ with hermes ownership BEFORE publishing: the s6-supervise
-        # spawned on pickup will EEXIST our dirs/FIFOs and inherit that ownership, so runtime
-        # s6-svc / s6-svstat / s6-svwait calls (dispatched as the hermes user) won't EACCES.
+        # Pre-create supervise/ with hermes ownership BEFORE publishing: s6-supervise will EEXIST
+        # our dirs/FIFOs and inherit it, so runtime s6-svc calls as the hermes user won't EACCES.
         _seed_supervise_skeleton(tmp_dir)
 
-        # Publish atomically: Path.replace silently replaces an existing target on POSIX, so a
-        # previous reconcile pass's slot is overwritten in one operation.
+        # Publish atomically (Path.replace overwrites a previous pass's slot in one operation).
         if service_dir.exists():
             shutil.rmtree(service_dir)
         tmp_dir.replace(service_dir)
@@ -343,18 +320,16 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
         raise
 
 
-# 256 KiB soft cap on container-boot.log, rotated to .1 when crossed (~3000 lines at ~80 B
-# each — about a year of daily reboots on a 5-profile container). Tuned for grep-ability
-# more than space (the persistent volume has GB).
+# 256 KiB soft cap on container-boot.log (~3000 lines ≈ a year of daily reboots on a
+# 5-profile container), rotated to .1 when crossed. Tuned for grep-ability, not space.
 _LOG_ROTATE_BYTES = 256 * 1024
 
 
 def _write_reconcile_log(hermes_home: Path, actions: list[ReconcileAction]) -> None:
-    """Append one line per profile to $HERMES_HOME/logs/container-boot.log.
+    """Append one line per profile to $HERMES_HOME/logs/container-boot.log (rotated to ``.1``).
 
-    A separate file (vs. agent.log) lets operators debugging "why didn't my profile come back
-    up" grep for "profile=foo" without unrelated activity. Rotated to ``.1`` (replacing any
-    previous rotation) before appending once it exceeds ``_LOG_ROTATE_BYTES``.
+    A separate file (vs. agent.log) lets operators grep "profile=foo" when debugging "why
+    didn't my profile come back up".
     """
     import time
     log_dir = hermes_home / "logs"
@@ -379,11 +354,10 @@ def _write_reconcile_log(hermes_home: Path, actions: list[ReconcileAction]) -> N
 
 def main() -> int:
     """Entry point invoked from /etc/cont-init.d/02-reconcile-profiles."""
-    # A dashboard-only container never supervises per-profile gateways, and reconciling here
-    # is actively harmful: when gateway and dashboard containers share a bind-mounted
-    # HERMES_HOME, both race to flock() the same s6-log lock files under
-    # logs/gateways/<profile>/lock → "Resource busy" restart storm. The role is detected from
-    # PID 1 argv, not an operator flag — a flag can be forgotten in a hand-written manifest.
+    # A dashboard-only container never supervises gateways, and reconciling here is harmful:
+    # with a shared bind-mounted HERMES_HOME both containers race to flock() the same s6-log
+    # lock files → "Resource busy" restart storm. Detected from PID 1 argv, not an operator
+    # flag — a flag can be forgotten in a hand-written manifest.
     if _is_dashboard_container(_read_container_argv()):
         print("reconcile: skipping (dashboard container — does not need per-profile gateways)")
         return 0

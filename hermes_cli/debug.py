@@ -56,11 +56,8 @@ def _pending_file() -> Path:
 
 
 def _load_pending() -> list[dict]:
-    path = _pending_file()
-    if not path.exists():
-        return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_pending_file().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     if not isinstance(data, list):
@@ -265,10 +262,8 @@ def _missing_log_note(log_name: str) -> str:
     reason = _CLIENT_SIDE_LOGS.get(log_name)
     if reason is None:
         return "(file not found)"
-
     primary = _primary_log_path(log_name)
-    where = f" — expected at {primary}" if primary else ""
-    return f"(not on this host: {reason}{where})"
+    return f"(not on this host: {reason}{f' — expected at {primary}' if primary else ''})"
 
 
 def _resolve_log_path(log_name: str) -> Optional[Path]:
@@ -460,14 +455,12 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
     """
     dump_text = _capture_dump()
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
-
     report = collect_debug_report(log_lines=log_lines, dump_text=dump_text,
                                   log_snapshots=log_snapshots)
     banner = _REDACTION_BANNER if redact else ""
     bundle: dict[str, str] = {"report": banner + report}
     for name in _FULL_LOGS:
-        full = log_snapshots[name].full_text
-        if full:
+        if full := log_snapshots[name].full_text:
             bundle[f"{name}.log"] = banner + dump_text + f"\n\n--- full {name}.log ---\n" + full
     return bundle
 
@@ -506,35 +499,24 @@ def build_debug_share(
     Blocking network I/O — callers inside an event loop must run it in a worker thread.
     """
     _best_effort_sweep_expired_pastes()
-
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
-
     if redact:
         logger.info(
             "hermes debug share: applied force-mode redaction to log snapshots before upload"
         )
-
     report = bundle["report"]
-
-    urls: dict[str, str] = {}
     failures: list[str] = []
-
-    # Summary report is required — raises on failure so callers can fall back.
-    urls["Report"] = upload_to_pastebin(report, expiry_days=expiry)
-
-    # Full logs are optional — failures are collected, not raised.
-    for name in _FULL_LOGS:
-        label = f"{name}.log"
-        content = bundle.get(label)
-        if not content:
+    # Summary report is required — raises on failure so callers can fall back; full logs are
+    # optional — failures are collected, not raised.
+    urls = {"Report": upload_to_pastebin(report, expiry_days=expiry)}
+    for label, content in bundle.items():
+        if label == "report":
             continue
         try:
             urls[label] = upload_to_pastebin(content, expiry_days=expiry)
         except Exception as exc:
             failures.append(f"{label}: {exc}")
-
     _schedule_auto_delete(list(urls.values()))
-
     return DebugShareResult(urls=urls, failures=failures, redacted=redact,
                             auto_delete_seconds=_AUTO_DELETE_SECONDS, report=report)
 
@@ -544,21 +526,18 @@ def _confirm_upload(args) -> bool:
     if bool(getattr(args, "yes", False)):
         return True
     if not sys.stdin.isatty():
-        print(
-            "ERROR: Non-interactive mode requires --yes to confirm upload.\n"
-            "       This prevents accidental exposure of personal data.\n"
-            "       Use --local to view the report without uploading.",
-            file=sys.stderr,
-        )
+        print("ERROR: Non-interactive mode requires --yes to confirm upload.\n"
+              "       This prevents accidental exposure of personal data.\n"
+              "       Use --local to view the report without uploading.", file=sys.stderr)
         sys.exit(1)
     try:
         answer = input("Upload debug report? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         answer = ""
-    if answer not in ("y", "yes"):
-        print("Aborted.")
-        return False
-    return True
+    if answer in ("y", "yes"):
+        return True
+    print("Aborted.")
+    return False
 
 
 def run_debug_share(args):
@@ -574,11 +553,9 @@ def run_debug_share(args):
         print("Collecting debug report...")
         bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
         print(bundle["report"])
-        for name in _FULL_LOGS:
-            body = bundle.get(f"{name}.log")
-            if body:
-                print(f"\n\n{'=' * 60}\nFULL {name}.log\n{'=' * 60}\n")
-                print(body)
+        for label, body in bundle.items():
+            if label != "report":
+                print(f"\n\n{'=' * 60}\nFULL {label}\n{'=' * 60}\n\n{body}")
         return
 
     if getattr(args, "nous", False):
@@ -589,7 +566,6 @@ def run_debug_share(args):
     if not _confirm_upload(args):
         return
     print("Collecting debug report...\nUploading...")
-
     try:
         result = build_debug_share(log_lines=log_lines, expiry=expiry, redact=redact)
     except RuntimeError as exc:
@@ -633,15 +609,12 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
         print("⚠️  --no-redact is set: secrets in your logs will NOT be redacted before upload.\n")
     print("Collecting debug report...")
     _best_effort_sweep_expired_pastes()
-
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
     if redact:
         logger.info("hermes debug share --nous: applied force-mode redaction before upload")
-    blob = build_nous_bundle(bundle, redact=redact)
-
     print("Uploading to Nous diagnostics storage...")
     try:
-        res = share_to_nous(blob)
+        res = share_to_nous(build_nous_bundle(bundle, redact=redact))
     except Exception as exc:
         print(
             f"\nNous upload failed: {exc}\n"

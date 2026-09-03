@@ -24,10 +24,9 @@ from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
-# OAuth device code flow — VS Code's GitHub App client ID. The opencode OAuth App ID
-# (Ov23li8tweQw6odWQebz) produces gho_* tokens that cannot be exchanged for Copilot API JWTs
-# (404 on /copilot_internal/v2/token); VS Code's produces ghu_* tokens that support exchange,
-# required for internal-only models and enterprise endpoints. Tested on Individual + Enterprise.
+# OAuth device code flow — VS Code's GitHub App client ID: it mints ghu_* tokens that can be
+# exchanged for Copilot API JWTs (required for internal-only models and enterprise endpoints).
+# The opencode App ID (Ov23li8tweQw6odWQebz) mints gho_* tokens that 404 on exchange.
 COPILOT_OAUTH_CLIENT_ID = "Iv1.b507a08c87ecfe98"
 # ghp_ classic PATs are rejected by the Copilot API (gho_ / github_pat_ / ghu_ work).
 _CLASSIC_PAT_PREFIX = "ghp_"
@@ -66,13 +65,13 @@ def resolve_copilot_token() -> tuple[str, str]:
     any_env_var_set = False
     for env_var in COPILOT_ENV_VARS:
         val = os.getenv(env_var, "").strip()
-        if val:
-            any_env_var_set = True
-            valid, msg = validate_copilot_token(val)
-            if not valid:
-                logger.warning("Token from %s is not supported: %s", env_var, msg)
-                continue
+        if not val:
+            continue
+        any_env_var_set = True
+        valid, msg = validate_copilot_token(val)
+        if valid:
             return val, env_var
+        logger.warning("Token from %s is not supported: %s", env_var, msg)
 
     # Fall back to gh auth token ONLY when no Copilot env var was explicitly set: an exported
     # GITHUB_TOKEN (even an unsupported classic PAT) means the user intends *that* token, not
@@ -97,20 +96,18 @@ def resolve_copilot_token() -> tuple[str, str]:
 def _gh_cli_candidates() -> list[str]:
     """Candidate ``gh`` binary paths, including common Homebrew installs."""
     candidates: list[str] = [c for c in (shutil.which("gh"),) if c]
-    for candidate in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh",
-                      str(Path.home() / ".local" / "bin" / "gh")):
-        if (candidate not in candidates and os.path.isfile(candidate)
-                and os.access(candidate, os.X_OK)):
-            candidates.append(candidate)
+    candidates += [
+        c for c in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh", str(Path.home() / ".local/bin/gh"))
+        if c not in candidates and os.path.isfile(c) and os.access(c, os.X_OK)
+    ]
     return candidates
 
 
-# ``gh auth token`` result cache. When gh has no credential store for this HOME (fresh
-# profile, desktop-spawned backend, CI) the probe can block for its full 5s timeout on
-# keyring / D-Bus prompts. Provider inventory builds (``/api/model/options``, ``hermes tools``)
-# probe Copilot auth several times per request, so an uncached miss turned one settings-page
-# load into a 4×5s stall exceeding the Desktop renderer's 15s IPC budget. Successes and
-# failures are both cached; a short TTL keeps a fresh ``gh auth login`` discoverable.
+# ``gh auth token`` result cache. With no credential store for this HOME (fresh profile, CI)
+# the probe blocks for its full 5s timeout on keyring / D-Bus prompts, and provider inventory
+# builds probe Copilot auth several times per request — an uncached miss made one settings
+# page a 4×5s stall past the Desktop renderer's 15s IPC budget. Misses are cached too; a short
+# TTL keeps a fresh ``gh auth login`` discoverable.
 _GH_CLI_TOKEN_CACHE_TTL_SECONDS = 300.0
 _gh_cli_token_cache: tuple[float, Optional[str]] | None = None
 
@@ -207,7 +204,8 @@ def copilot_device_code_login(
         print("  ✗ GitHub did not return a device code.")
         return None
 
-    print(f"\n  Open this URL in your browser: {verification_uri}\n  Enter this code: {user_code}\n")
+    print(f"\n  Open this URL in your browser: {verification_uri}\n"
+          f"  Enter this code: {user_code}\n")
     print("  Waiting for authorization...", end="", flush=True)
 
     deadline = time.monotonic() + timeout_seconds
@@ -243,7 +241,8 @@ def copilot_device_code_login(
             print(".", end="", flush=True)
             continue
         if error:
-            print("\n" + _DEVICE_CODE_TERMINAL_ERRORS.get(error, f"  ✗ Authorization failed: {error}"))
+            print("\n" + _DEVICE_CODE_TERMINAL_ERRORS.get(error,
+                                                       f"  ✗ Authorization failed: {error}"))
             return None
 
     print("\n  ✗ Timed out waiting for authorization.")
@@ -262,27 +261,24 @@ _TOKEN_EXCHANGE_URL = "https://api.github.com/copilot_internal/v2/token"
 _EDITOR_VERSION = "vscode/1.104.1"
 _EXCHANGE_USER_AGENT = "GitHubCopilotChat/0.26.7"
 
-# Transient-failure hardening. Gateway startup often races network readiness (launchd
-# relaunch, DHCP/VPN settling); a single-shot exchange that fails there silently degrades to
-# the RAW GitHub token, which the Copilot server routes to the "copilot-language-server"
-# integrator whose model allowlist omits enterprise-only models → HTTP 400 on every turn
-# until the next restart. Retry a few times, and persist the last good exchanged JWT so a
-# restart during a blip reuses the still-valid ~30-min token instead of degrading.
+# Transient-failure hardening. Gateway startup races network readiness (launchd relaunch,
+# DHCP/VPN settling); a single-shot exchange failing there silently degrades to the RAW GitHub
+# token, which Copilot routes to the "copilot-language-server" integrator whose allowlist omits
+# enterprise-only models → HTTP 400 every turn until restart. Retry, and persist the last good
+# JWT so a restart during a blip reuses the still-valid ~30-min token.
 _EXCHANGE_MAX_ATTEMPTS = 3
 _EXCHANGE_BACKOFF_BASE_SECONDS = 1.5  # sleeps ~1.5s, ~3.0s between attempts
 _JWT_DISK_FILENAME = ".copilot_jwt.json"
 _JWT_DISK_MAX_BYTES = 1_048_576  # 1 MiB cap on the persisted JWT store read
 
-# Negative cache for failed exchanges: raw-token fingerprint -> epoch until which attempts
-# raise immediately (success clears the entry). Without it every load_pool("copilot") re-ran
-# the full exchange, and on a permanently-rejected token (403: not Copilot-entitled, expired
-# grant, org policy) the retry backoff burned ~4.5s of sleep on EVERY provider-discovery pass
-# (/model picker, delegation child spawns, web dashboard).
+# Negative cache: fingerprint -> epoch until which attempts raise immediately (success clears
+# it). Without it a permanently-rejected token (403: not entitled, expired grant, org policy)
+# burned ~4.5s of retry backoff on EVERY provider-discovery pass (/model picker, delegation
+# spawns, dashboard).
 _exchange_failure_cache: dict[str, float] = {}
-# Single-flight guard per token fingerprint: concurrent callers (the dashboard polls
-# /api/credentials/pool every few seconds, each poll off-loop) wait on the ONE in-flight
-# exchange and then hit the positive/negative cache, instead of each spawning their own hung
-# resolver thread during a DNS outage.
+# Single-flight guard per fingerprint: concurrent callers (dashboard polls /api/credentials/
+# pool every few seconds) wait on the ONE in-flight exchange and then hit the cache, instead
+# of each spawning its own hung resolver thread during a DNS outage.
 _exchange_locks: dict[str, threading.Lock] = {}
 _exchange_locks_guard = threading.Lock()
 
@@ -349,7 +345,7 @@ def _jwt_disk_path() -> Optional[Path]:
 
 
 def _with_jwt_store(verb: str, op):
-    """Run ``op(path, store_or_None)`` against the disk store; any failure is logged, never raised."""
+    """Run ``op(path, store_or_None)`` against the disk store; failures are logged, never raised."""
     path = _jwt_disk_path()
     if not path:
         return None
@@ -409,10 +405,9 @@ def _save_jwt_to_disk(fp: str, api_token: str, expires_at: float, base_url: Opti
     _with_jwt_store("persist", _save)
 
 
-# Hard wall-clock cap for the token-exchange HTTP call. urllib's ``timeout`` only bounds
-# socket operations AFTER DNS resolution succeeds; getaddrinfo blocks in C and ignores it,
-# so on a networkless Windows host the resolver can hang for many minutes (observed: a
-# 17-minute event-loop stall that took the whole backend down).
+# Hard wall-clock cap for the exchange call: urllib's ``timeout`` only bounds socket ops AFTER
+# DNS succeeds; getaddrinfo blocks in C and ignores it, so a networkless Windows host can hang
+# for many minutes (observed: a 17-minute event-loop stall that took the backend down).
 _DNS_GRACE_SECONDS = 5.0
 
 
