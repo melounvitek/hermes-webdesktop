@@ -36,9 +36,8 @@ _API_CLIENT = f"hermes-agent/{_HERMES_VERSION}"  # client context per Gemini's p
 
 DEFAULT_GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
-# Published max output-token ceiling shared by every current Gemini text model.
-# Used when the caller passes max_tokens=None: unlike OpenAI-compat endpoints,
-# Gemini's native API applies a low internal default and truncates output.
+# Published max output-token ceiling shared by every current Gemini text model; used
+# for max_tokens=None because the native API's low internal default truncates output.
 GEMINI_DEFAULT_MAX_OUTPUT_TOKENS = 65535
 
 _FREE_TIER_GUIDANCE = (
@@ -55,14 +54,13 @@ _STANDARD_KEY_GUIDANCE = (
     "generativelanguage.googleapis.com). Then update GEMINI_API_KEY / GOOGLE_API_KEY in ~/.hermes/.env and "
     "restart your session. Details: https://ai.google.dev/gemini-api/docs/api-key"
 )
-# Stands in for a model turn that never arrived (stream failure / interrupt /
-# quota fallback) when a human user text turn directly follows a tool-result
-# turn, keeping the request alternation-valid while the user's message stays a
-# turn of its own (mirrors gemini-cli's placeholder repair).
+# Stands in for a model turn that never arrived (stream failure / interrupt / quota
+# fallback) when a human user text turn directly follows a tool-result turn, keeping
+# the request alternation-valid while the user's message stays a turn of its own
+# (mirrors gemini-cli's placeholder repair).
 _INTERRUPTED_RESPONSE_PLACEHOLDER = "[The previous response was interrupted before it completed.]"
-# Cross-provider tool_calls (e.g. fallback from xAI/Anthropic) carry no Gemini
-# thoughtSignature; without this sentinel Gemini 3 thinking models reject
-# replayed history with 400 INVALID_ARGUMENT.
+# Cross-provider tool_calls (e.g. fallback from xAI/Anthropic) carry no Gemini thoughtSignature;
+# without this sentinel Gemini 3 thinking models reject replayed history with 400 INVALID_ARGUMENT.
 _SKIP_SIGNATURE = "skip_thought_signature_validator"
 _TOOL_CHOICE_MODES = {"auto": "AUTO", "required": "ANY", "none": "NONE"}
 _FINISH_REASON_MAP = {
@@ -231,13 +229,11 @@ def _translate_tool_call_to_gemini(tool_call: Dict[str, Any], include_ids: bool 
 
 
 def _looks_like_json_schema(node: Any) -> bool:
-    """True if a parsed value contains a JSON-Schema ``$ref`` pointer (``#/...``).
-
-    Gemini 3 resolves ``$ref``/``$defs`` inside functionResponse.response and
-    rejects unknown pointers with HTTP 400, so a tool result that is itself a
-    JSON Schema (e.g. ``tool_describe`` output) must be forwarded as opaque
-    text. False positives only lose the structured shape, never the content.
-    """
+    """True if a parsed value contains a JSON-Schema ``$ref`` pointer (``#/...``): Gemini 3
+    resolves ``$ref``/``$defs`` inside functionResponse.response and rejects unknown
+    pointers with HTTP 400, so a tool result that is itself a JSON Schema (e.g.
+    ``tool_describe`` output) must be forwarded as opaque text. False positives only
+    lose the structured shape, never the content."""
     if isinstance(node, dict):
         return any(
             (key == "$ref" and isinstance(value, str) and value.startswith("#/")) or _looks_like_json_schema(value)
@@ -251,9 +247,8 @@ def _translate_tool_result_to_gemini(
     *, is_gemini3: bool = False,
 ) -> Dict[str, Any]:
     tool_call_id = str(message.get("tool_call_id") or "")
-    # functionResponse.name must echo the matching functionCall.name, so the
-    # call-id mapping beats the result's own name (which may be an unwrapped
-    # internal name, e.g. an MCP tool via `tool_call`).
+    # functionResponse.name must echo the matching functionCall.name, so the call-id
+    # mapping beats the result's own name (may be an unwrapped MCP name via `tool_call`).
     name = str((tool_name_by_call_id or {}).get(tool_call_id) or message.get("name") or tool_call_id or "tool")
     raw_content = message.get("content")
     content = _coerce_content_to_text(raw_content)
@@ -307,15 +302,13 @@ def _build_gemini_contents(
         if parts:
             contents.append({"role": "model" if role == "assistant" else "user", "parts": parts})
 
-    # Alternation contract for generateContent:
-    # 1) Adjacent same-role contents merge (else HTTP 400 "multiturn requests
-    #    [must] alternate").
-    # 2) Exception: never fuse a human user text turn into a preceding user
-    #    content that only carries functionResponse parts (or vice versa) —
-    #    Gemini 3 accepts the fold but reads the text as a continuation of the
-    #    tool result and returns an empty candidate. Parallel tool results
-    #    (functionResponse + functionResponse) still merge.
-    # 3) The split pair stays API-valid via an interposed placeholder model turn.
+    # Alternation contract for generateContent: 1) adjacent same-role contents merge
+    # (else HTTP 400 "multiturn requests [must] alternate"); 2) EXCEPT never fuse a
+    # human user text turn into a preceding user content that only carries
+    # functionResponse parts (or vice versa) — Gemini 3 accepts the fold but reads
+    # the text as a continuation of the tool result and returns an empty candidate
+    # (parallel functionResponse + functionResponse still merge); 3) the split pair
+    # stays API-valid via an interposed placeholder model turn.
     merged: List[Dict[str, Any]] = []
     for content in contents:
         prev = merged[-1] if merged else None
@@ -377,9 +370,9 @@ def _normalize_thinking_config(config: Any) -> Optional[Dict[str, Any]]:
 
 
 def _thinking_requests_output_headroom(thinking_config: Any) -> bool:
-    """True when Gemini will spend output tokens on thinking (thought tokens bill
-    against ``maxOutputTokens``; a global 4096/16384 cap can be consumed entirely
-    by high thinking, leaving ``finishReason=MAX_TOKENS`` with no answer)."""
+    """True when Gemini will spend output tokens on thinking: thought tokens bill against
+    ``maxOutputTokens``, so a global 4096/16384 cap can be consumed entirely by high
+    thinking, leaving ``finishReason=MAX_TOKENS`` with no answer."""
     normalized = _normalize_thinking_config(thinking_config)
     if not normalized:
         return False
@@ -390,9 +383,9 @@ def _thinking_requests_output_headroom(thinking_config: Any) -> bool:
 
 
 def _effective_gemini_max_output_tokens(max_tokens: Optional[int], thinking_config: Any) -> int:
-    """Native ``maxOutputTokens``: an omitted/invalid cap becomes the published
-    ceiling (Gemini truncates on its low internal default); an explicit cap is
-    raised to the ceiling when thinking is enabled so thoughts don't starve the answer."""
+    """Native ``maxOutputTokens``: an omitted/invalid cap becomes the published ceiling
+    (Gemini truncates on its low internal default); an explicit cap is raised to the
+    ceiling when thinking is enabled so thoughts don't starve the answer."""
     try:
         requested = int(max_tokens)
     except (TypeError, ValueError):
@@ -605,8 +598,7 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
         finish_chunk = _make_stream_chunk(
             model=model, finish_reason="tool_calls" if tool_call_indices else _map_gemini_finish_reason(finish_reason_raw)
         )
-        # usageMetadata rides on the finish chunk so the streaming loop records
-        # token counts like the non-streaming path does.
+        # usageMetadata rides on the finish chunk so the streaming loop records token counts.
         if usage_meta := event.get("usageMetadata") or {}:
             finish_chunk.usage = _usage_from_metadata(usage_meta)
         chunks.append(finish_chunk)
@@ -644,12 +636,11 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
         f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
         else f"Gemini returned HTTP {status}: {body_text[:500]}"
     )
-    # Users who bypassed the setup wizard (raw GOOGLE_API_KEY in .env) still
-    # need to learn that the free tier cannot sustain an agent session.
+    # Users who bypassed the setup wizard (raw GOOGLE_API_KEY in .env) still need to learn
+    # the free tier cannot sustain an agent session.
     if status == 429 and is_free_tier_quota_error(err_message or body_text):
         message += _FREE_TIER_GUIDANCE
-    # Legacy "Standard" key rejection: Google's raw 401 misleadingly asks for
-    # OAuth; append the actual fix (mint a new Gemini API key in AI Studio).
+    # Legacy "Standard" key rejection: Google's raw 401 misleadingly asks for OAuth; append the real fix.
     if is_standard_key_auth_error(status, err_message or body_text, reason):
         message += _STANDARD_KEY_GUIDANCE
     return GeminiAPIError(
@@ -663,9 +654,8 @@ class GeminiNativeClient:
     """Minimal OpenAI-SDK-compatible facade (``client.chat.completions.create(**kwargs)``)
     over Gemini's native REST API."""
 
-    # Declared for agent/auxiliary_client.py: already a complete client, so it
-    # is never re-dispatched through a wire adapter. (No HERMES_SKIP_ASYNC_WRAP
-    # — the async path has a real conversion, AsyncGeminiNativeClient.)
+    # Declared for agent/auxiliary_client.py: already a complete client, never re-dispatched through
+    # a wire adapter. (No HERMES_SKIP_ASYNC_WRAP — the async path has a real conversion, AsyncGeminiNativeClient.)
     HERMES_SKIP_TRANSPORT_WRAP = True
 
     def __init__(
@@ -755,8 +745,7 @@ class AsyncGeminiNativeClient:
         self._sync = sync_client
         self.api_key, self.base_url = sync_client.api_key, sync_client.base_url
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
-        # The auxiliary cache evicts entries by leaf client; GeminiNativeClient
-        # is itself the leaf (no OpenAI client beneath it).
+        # The auxiliary cache evicts entries by leaf client; GeminiNativeClient is itself the leaf.
         self._real_client = sync_client
 
     async def _create_chat_completion(self, **kwargs: Any) -> Any:

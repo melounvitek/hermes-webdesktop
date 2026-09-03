@@ -33,17 +33,15 @@ ACP_MARKER_BASE_URL = "acp://copilot"
 logger = logging.getLogger(__name__)
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
-# Stderr fingerprint of the deprecated `gh copilot` extension. Require BOTH the
-# product name AND a deprecation marker: the NEW `@github/copilot` CLI (repo
-# github/copilot-cli) legitimately mentions "copilot-cli" in its own banners.
+# Stderr fingerprint of the deprecated `gh copilot` extension. Require BOTH the product name
+# AND a deprecation marker: the NEW `@github/copilot` CLI legitimately mentions "copilot-cli".
 _DEPRECATION_REQUIRED = ("gh-copilot",)
 _DEPRECATION_MARKERS = ("has been deprecated", "no commands will be executed")
 
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant", "tool": "Tool", "context": "Context"}
 
-# Probe verdicts per binary path so the ~50ms --help cost is paid once per
-# process. Only definitive True/False is cached; an inconclusive probe is not,
-# so a CLI installed mid-session is picked up.
+# Probe verdicts per binary path (~50ms --help paid once per process). Only definitive
+# True/False is cached, so a CLI installed mid-session is picked up.
 _ACP_PROBE_CACHE: dict[str, bool] = {}
 
 _PROMPT_PREAMBLE = (
@@ -126,8 +124,8 @@ def _resolve_home_dir() -> str:
 
 
 def _build_subprocess_env() -> dict[str, str]:
-    # Copilot ACP drives a model and legitimately needs LLM provider credentials;
-    # the central helper still strips Tier-1 secrets (bot tokens, GitHub auth, infra).
+    # Copilot ACP drives a model and needs LLM provider credentials; the central helper still
+    # strips Tier-1 secrets (bot tokens, GitHub auth, infra).
     env = hermes_subprocess_env(inherit_credentials=True)
     env["HOME"] = _resolve_home_dir()
     from hermes_constants import apply_subprocess_home_env
@@ -186,10 +184,9 @@ def _format_messages_as_prompt(
     messages: list[dict[str, Any]], model: str | None = None, tools: list[dict[str, Any]] | None = None,
     tool_choice: Any = None,
 ) -> str:
-    # Deliberately no "requested model" line: the model is applied for real via ACP
-    # session/set_model; a prompt-text mention makes a substituted backend model
-    # FALSELY self-identify as the requested one. Identity comes from the backend.
-    # Copilot has no tools of its own that collide with Hermes', so forward the whole toolset.
+    # Deliberately no "requested model" line: the model is applied for real via ACP session/set_model;
+    # a prompt-text mention makes a substituted backend model FALSELY self-identify as the requested
+    # one. Copilot has no tools of its own that collide with Hermes', so forward the whole toolset.
     sections: list[str] = [*_PROMPT_PREAMBLE, *_render_tool_bridge_sections(tools, tool_choice)]
     transcript: list[str] = []
     for message in messages:
@@ -267,8 +264,8 @@ def _fs_write_text_file(params: dict[str, Any], cwd: str) -> Any:
     path = _ensure_path_within_cwd(str(params.get("path") or ""), cwd)
     if denied := get_write_denied_error(str(path)):
         raise PermissionError(denied)
-    # Approval-gated paths (e.g. ~/.ssh/config) are only soft-gated for interactive
-    # tools, but the ACP shim has no human channel to confirm — fail closed.
+    # Approval-gated paths (e.g. ~/.ssh/config) are soft-gated for interactive tools; the ACP
+    # shim has no human channel to confirm — fail closed.
     if is_write_approval_required(str(path)):
         raise PermissionError(f"Write denied: '{path}' requires interactive approval and cannot be written through the ACP file bridge.")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,9 +279,8 @@ _FS_HANDLERS = {"fs/read_text_file": _fs_read_text_file, "fs/write_text_file": _
 class CopilotACPClient:
     """Minimal OpenAI-client-compatible facade for Copilot ACP."""
 
-    # Declared for agent/auxiliary_client.py: this shim drives an ACP subprocess
-    # over stdio, so it is already a complete client (never re-dispatch it
-    # through a wire adapter) and is safe to use from async code as-is.
+    # Declared for agent/auxiliary_client.py: this shim drives an ACP subprocess over stdio, so it is
+    # already a complete client (never re-dispatch through a wire adapter) and async-safe as-is.
     HERMES_SKIP_TRANSPORT_WRAP = True
     HERMES_SKIP_ASYNC_WRAP = True
 
@@ -338,9 +334,8 @@ class CopilotACPClient:
         return _completion_to_stream_chunks(completion) if stream else completion
 
     def _spawn(self) -> subprocess.Popen[str]:
-        # Fast-fail when the CLI rejects --acp: without the probe the parent waits
-        # the full child timeout for stdout that never arrives. ``None`` falls
-        # through to the spawn, which raises the established start error.
+        # Fast-fail when the CLI rejects --acp (else the parent waits the full child timeout for
+        # stdout that never arrives). ``None`` falls through to the spawn's established start error.
         if _acp_supported(self._acp_command, self._acp_args) is False:
             preview = " ".join(self._acp_args[:3]) if self._acp_args else "(none)"
             raise RuntimeError(
@@ -373,9 +368,8 @@ class CopilotACPClient:
         return proc
 
     def _run_prompt(self, prompt_text: str, *, timeout_seconds: float, model: str | None = None) -> tuple[str, str]:
-        # The CLI's `--model` spawn flag is deliberately NOT used: `copilot --acp`
-        # validates it (unknown id aborts the spawn) but ignores it for the session.
-        # The model is applied after session/new via ACP-native model selection.
+        # The CLI's `--model` spawn flag is deliberately NOT used: `copilot --acp` validates it (unknown id
+        # aborts the spawn) but ignores it for the session; the model is applied after session/new instead.
         requested_model = str(model or "").strip()
         proc = self._spawn()
         inbox: queue.Queue[dict[str, Any]] = queue.Queue()
@@ -428,8 +422,7 @@ class CopilotACPClient:
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
                 raise RuntimeError("Copilot ACP did not return a sessionId.")
-            # Prefer the stable ACP v1 session-config API (category="model" select
-            # option + session/set_config_option); session/set_model is the fallback.
+            # Stable ACP v1 session-config API first; session/set_model is the fallback.
             if requested_model and requested_model != "copilot-acp":
                 try:
                     selection = _model_selection_request(session, requested_model)
