@@ -100,7 +100,6 @@ def _warn_config_parse_failure(
     if key in _CONFIG_PARSE_WARNED:
         return
     _CONFIG_PARSE_WARNED.add(key)
-
     backup_path = _backup_corrupt_config(config_path)
     msg = f"Failed to parse {config_path}: {exc}. " + _PARSE_FAILURE_FALLBACK_MSG.get(
         fallback, _PARSE_FAILURE_DEFAULTS_MSG)
@@ -119,16 +118,11 @@ def get_active_config_parse_failure() -> Optional[str]:
     (mtime_ns + size) to the file that failed to parse; else None."""
     try:
         path = get_config_path()
-        recorded = _CONFIG_PARSE_FAILURES.get(str(path))
-        if not recorded:
-            return None
-        mtime_ns, size, err = recorded
+        mtime_ns, size, err = _CONFIG_PARSE_FAILURES[str(path)]
         st = path.stat()
-        if st.st_mtime_ns == mtime_ns and st.st_size == size:
-            return err
+        return err if (st.st_mtime_ns, st.st_size) == (mtime_ns, size) else None
     except Exception:
         return None
-    return None
 
 
 _IS_WINDOWS = platform.system() == "Windows"
@@ -252,9 +246,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "HERMES_COPILOT_ACP_ARGS", "COPILOT_CLI_PATH", "COPILOT_ACP_BASE_URL"})
 
 
-# =============================================================================
-# Managed mode (NixOS declarative config)
-# =============================================================================
+# ---- Managed mode (NixOS declarative config) ----
 
 _MANAGED_TRUE_VALUES = ("true", "1", "yes")
 _NIX_MANAGED_SYSTEMS = {"nixos", "home-manager"}
@@ -273,14 +265,12 @@ def get_managed_system() -> Optional[str]:
     Signals: HERMES_MANAGED env var (systemd service) or a ``.managed`` marker file in
     HERMES_HOME (NixOS activation script — interactive shells don't see the service env)."""
     marker = os.getenv("HERMES_MANAGED", "").strip().lower() or None
-    if marker is None:
-        managed_marker = get_hermes_home() / ".managed"
-        if managed_marker.exists():
-            try:
-                marker = managed_marker.read_text(encoding="utf-8", errors="replace").strip().lower()
-            except OSError:
-                marker = ""
-
+    managed_marker = get_hermes_home() / ".managed"
+    if marker is None and managed_marker.exists():
+        try:
+            marker = managed_marker.read_text(encoding="utf-8", errors="replace").strip().lower()
+        except OSError:
+            marker = ""
     if marker is None or marker in _IGNORED_MANAGED_VALUES:
         return None
     if marker == "" or marker in _MANAGED_TRUE_VALUES:
@@ -476,9 +466,7 @@ def get_container_exec_info() -> Optional[dict]:
         "hermes_bin": info.get("hermes_bin", "/data/current-package/bin/hermes")}
 
 
-# =============================================================================
-# Config paths / HERMES_HOME skeleton
-# =============================================================================
+# ---- Config paths / HERMES_HOME skeleton ----
 
 def get_config_path() -> Path:
     """Get the main config file path."""
@@ -662,9 +650,7 @@ def ensure_hermes_home():
     _HERMES_HOME_ENSURED.add(key)
 
 
-# =============================================================================
-# Config loading/saving
-# =============================================================================
+# ---- Config loading/saving ----
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: E402,F401
 from hermes_cli.config_providers import (  # noqa: E402,F401  (re-exported; callers/tests use hermes_cli.config.<name>)
@@ -685,9 +671,7 @@ from hermes_cli.personality import (  # noqa: E402,F401
     render_personality_prompt,
     resolve_ephemeral_system_prompt as resolve_ephemeral_system_prompt_from_config)
 
-# =============================================================================
-# Config Migration System
-# =============================================================================
+# ---- Config Migration System ----
 
 # Env vars introduced per config version; migration only mentions vars new since the user's
 # previous version.
@@ -927,7 +911,6 @@ def _format_config_get_value(value, *, as_json: bool) -> str:
 
 def get_missing_config_fields() -> List[Dict[str, Any]]:
     """Check which config fields are missing or outdated (recursive)."""
-    config = load_config()
     missing = []
 
     def _check(defaults: dict, current: dict, prefix: str = ""):
@@ -936,14 +919,12 @@ def get_missing_config_fields() -> List[Dict[str, Any]]:
                 continue
             full_key = key if not prefix else f"{prefix}.{key}"
             if key not in current:
-                missing.append({
-                    "key": full_key,
-                    "default": default_value,
-                    "description": f"New config option: {full_key}"})
+                missing.append({"key": full_key, "default": default_value,
+                                "description": f"New config option: {full_key}"})
             elif isinstance(default_value, dict) and isinstance(current.get(key), dict):
                 _check(default_value, current[key], full_key)
 
-    _check(DEFAULT_CONFIG, config)
+    _check(DEFAULT_CONFIG, load_config())
     return missing
 
 
@@ -1001,9 +982,7 @@ def check_config_version() -> Tuple[int, int]:
     return _coerce_config_version(config.get("_config_version")), latest
 
 
-# =============================================================================
-# Config structure validation
-# =============================================================================
+# ---- Config structure validation ----
 
 # DEFAULT_CONFIG is the single source of truth for documented roots; the set is derived so new
 # defaults are accepted automatically. These optional/legacy roots are valid on disk but
@@ -1352,9 +1331,7 @@ def _disable_suspicious_mcp_servers(results: Dict[str, Any], quiet: bool) -> Non
         return
     mcp_touched = False
     for server_name, entry in raw_mcp_servers.items():
-        if not isinstance(entry, dict):
-            continue
-        issues = validate_mcp_server_entry(server_name, entry)
+        issues = validate_mcp_server_entry(server_name, entry) if isinstance(entry, dict) else None
         if not issues:
             continue
         entry["enabled"] = False
@@ -1377,10 +1354,8 @@ def _warn_invalid_platform_toolsets(results: Dict[str, Any], quiet: bool) -> Non
         from hermes_cli.toolset_validation import validate_platform_toolsets
         from hermes_cli.toolset_scope import toolset_allowed_for_platform
 
-        ts_warnings = validate_platform_toolsets(
-            read_raw_config().get("platform_toolsets"), validate_toolset,
-            toolset_allowed_for_platform)
-        for w in ts_warnings:
+        for w in validate_platform_toolsets(
+                read_raw_config().get("platform_toolsets"), validate_toolset, toolset_allowed_for_platform):
             results["warnings"].append(w)
             if not quiet:
                 print(f"  ⚠ {w}")
@@ -1438,7 +1413,7 @@ def _offer_skill_config_vars(missing_skill_config: List[Dict[str, Any]], results
     for var in missing_skill_config:
         default = var.get("default", "")
         default_hint = f" (default: {default})" if default else ""
-        value = line_input(f"  {var['prompt']}{default_hint}: ").strip() or (str(default) if default else "")
+        value = line_input(f"  {var['prompt']}{default_hint}: ").strip() or str(default or "")
         if value:
             _set_nested(config, f"{SKILL_CONFIG_PREFIX}.{var['key']}", value)
             results["config_added"].append(var["key"])
@@ -1643,8 +1618,7 @@ def _explicit_config_paths(config: Dict[str, Any]) -> Set[Tuple[str, ...]]:
         if isinstance(value, dict):
             for key, child in value.items():
                 _walk(child, path + (key,))
-            return
-        if path:
+        elif path:
             paths.add(path)
 
     _walk(config, ())
@@ -1663,27 +1637,13 @@ def _strip_default_values(
     def _strip(value: Any, default: Any, path: Tuple[str, ...]) -> Any:
         if path in preserve_keys:
             return copy.deepcopy(value)
-
         if isinstance(value, dict) and value:
             default_dict = default if isinstance(default, dict) else {}
-            stripped: Dict[str, Any] = {}
-            for key, child in value.items():
-                stripped_child = _strip(child, default_dict.get(key), path + (key,))
-                if stripped_child is not None:
-                    stripped[key] = stripped_child
-            return stripped or None
+            stripped = {k: _strip(v, default_dict.get(k), path + (k,)) for k, v in value.items()}
+            return {k: v for k, v in stripped.items() if v is not None} or None
+        return None if value == default else copy.deepcopy(value)
 
-        if value == default:
-            return None
-
-        return copy.deepcopy(value)
-
-    result: Dict[str, Any] = {}
-    for key, value in config.items():
-        stripped = _strip(value, defaults.get(key), (key,))
-        if stripped is not None:
-            result[key] = stripped
-    return result
+    return _strip(config, defaults, ()) or {}
 
 
 def split_model_config_default(raw_default: Any) -> tuple[str, str]:
@@ -2062,20 +2022,15 @@ def _load_config_cache_sig(config_path: Path) -> Tuple[Optional[Tuple[int, int]]
         user_sig: Optional[Tuple[int, int]] = (st.st_mtime_ns, st.st_size)
     except FileNotFoundError:
         user_sig = None
-
     managed_dir = managed_scope.get_managed_dir()
-    managed_cfg_path = (managed_dir / "config.yaml") if managed_dir else None
     try:
-        mst = managed_cfg_path.stat() if managed_cfg_path else None
+        mst = (managed_dir / "config.yaml").stat() if managed_dir else None
         managed_sig = (mst.st_mtime_ns, mst.st_size) if mst else (0, 0)
     except OSError:
         managed_sig = (0, 0)
-
-    if user_sig is not None:
-        return user_sig, (*user_sig, *managed_sig)
-    if managed_sig != (0, 0):
-        return None, (0, 0, *managed_sig)
-    return None, None
+    if user_sig is None and managed_sig == (0, 0):
+        return None, None
+    return user_sig, (*(user_sig or (0, 0)), *managed_sig)
 
 
 def _last_known_good_fallback(config_path: Path, path_key: str, cache_sig, exc: Exception) -> Optional[Dict[str, Any]]:
@@ -2234,14 +2189,13 @@ def _strip_managed_keys_for_save(config: Dict[str, Any]) -> Dict[str, Any]:
 def _commented_sections_for_save(normalized: Dict[str, Any]) -> Optional[str]:
     """Commented-out example blocks for features that are off/unconfigured."""
     parts = []
-    sec = normalized.get("security", {})
-    if not sec or sec.get("redact_secrets") is None:
+    if (normalized.get("security") or {}).get("redact_secrets") is None:
         parts.append(_SECURITY_COMMENT)
     fb = normalized.get("fallback_model", {})
     fb_entries = fb if isinstance(fb, list) else [fb]
     if not any(isinstance(e, dict) and e.get("provider") and e.get("model") for e in fb_entries):
         parts.append(_FALLBACK_COMMENT)
-    return "".join(parts) if parts else None
+    return "".join(parts) or None
 
 
 def save_config(
@@ -2276,10 +2230,8 @@ def save_config(
                 _LAST_EXPANDED_CONFIG_BY_PATH.get(str(config_path)))
 
         if strip_defaults:
-            effective_preserve_keys: Set[Tuple[str, ...]] = {("_config_version",)}
-            if _raw_for_paths:
-                effective_preserve_keys.update(_explicit_config_paths(_raw_for_paths))
-            effective_preserve_keys.update(preserve_keys or ())
+            # ``_strip_default_values`` always preserves ``_config_version`` itself.
+            effective_preserve_keys = _explicit_config_paths(_raw_for_paths) | set(preserve_keys or ())
             normalized = _strip_default_values(normalized, DEFAULT_CONFIG, preserve_keys=effective_preserve_keys)
 
         atomic_yaml_write(config_path, normalized, extra_content=_commented_sections_for_save(normalized))
@@ -2324,25 +2276,18 @@ def load_env() -> Dict[str, str]:
         cache_key = (str(env_path), None, None)
     except Exception:
         cache_key = None
-
     if cache_key is not None and _env_cache is not None and _env_cache[0] == cache_key:
         return dict(_env_cache[1])
 
     env_vars: Dict[str, str] = {}
-
-    if env_path.exists():
-        for line in _read_env_lines(env_path):
-            line = line.strip()
-            if line and not line.startswith('#') and '=' in line:
-                # Bash-compatible ``export KEY=...`` parses as ``KEY``.
-                if line.startswith('export '):
-                    line = line[7:]
-                key, _, value = line.partition('=')
-                env_vars[key.strip()] = _parse_env_value(value)
-
+    for line in _read_env_lines(env_path) if env_path.exists() else ():
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            # Bash-compatible ``export KEY=...`` parses as ``KEY``.
+            key, _, value = line.removeprefix('export ').partition('=')
+            env_vars[key.strip()] = _parse_env_value(value)
     if cache_key is not None:
         _env_cache = (cache_key, dict(env_vars))
-
     return env_vars
 
 
@@ -2360,10 +2305,8 @@ def _sanitize_env_lines(lines: list) -> list:
     for line in lines:
         raw = line.rstrip("\r\n")
         stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            sanitized.append(raw + "\n")  # preserve blank lines and comments verbatim
-        else:
-            sanitized.append(stripped + "\n")
+        # Blank lines and comments are preserved verbatim.
+        sanitized.append((raw if not stripped or stripped.startswith("#") else stripped) + "\n")
     return sanitized
 
 
@@ -2372,14 +2315,11 @@ def sanitize_env_file() -> int:
     env_path = get_env_path()
     if not env_path.exists():
         return 0
-
     with open(env_path, encoding="utf-8-sig", errors="replace") as f:
         original_lines = f.readlines()
-
     sanitized = _sanitize_env_lines(original_lines)
     if sanitized == original_lines:
         return 0
-
     fixes = abs(len(sanitized) - len(original_lines)) or sum(
         1 for a, b in zip(original_lines, sanitized) if a != b)
     _write_env_lines(env_path, sanitized, preserve_mode=False)
@@ -2565,7 +2505,6 @@ def remove_env_value(key: str) -> bool:
     found = len(new_lines) < len(lines)
     if found:
         _write_env_lines(env_path, new_lines, preserve_mode=True)
-
     _publish_env_value(key, None)
     invalidate_env_cache()
     return found
@@ -2608,14 +2547,13 @@ def reload_env() -> int:
     Removes deleted vars only when known to Hermes (OPTIONAL_ENV_VARS and _EXTRA_ENV_KEYS) so
     unrelated environment is never clobbered."""
     env_vars = load_env()
-    known_keys = set(OPTIONAL_ENV_VARS.keys()) | _EXTRA_ENV_KEYS
     count = 0
     for key, value in env_vars.items():
         if os.environ.get(key) != value:
             os.environ[key] = value
             count += 1
-    for key in known_keys:
-        if key not in env_vars and key in os.environ:
+    for key in (set(OPTIONAL_ENV_VARS) | _EXTRA_ENV_KEYS) - set(env_vars):
+        if key in os.environ:
             del os.environ[key]
             count += 1
     return count
@@ -2629,7 +2567,6 @@ def _scoped_environ_get(key: str) -> Optional[str]:
         from agent.secret_scope import UnscopedSecretError, get_secret as _get_secret
     except Exception:
         return os.environ.get(key)
-
     try:
         return _get_secret(key)
     except UnscopedSecretError:
@@ -2650,9 +2587,7 @@ def get_env_value_prefer_dotenv(key: str) -> Optional[str]:
     return load_env().get(key) or _scoped_environ_get(key)
 
 
-# =============================================================================
-# Config display
-# =============================================================================
+# ---- Config display ----
 
 def redact_key(key: str) -> str:
     """Redact an API key for display."""
@@ -2676,13 +2611,11 @@ def redact_config_value(value: Any, _depth: int = 0) -> Any:
     if _depth > 20:  # bound recursion for pathological/cyclic configs
         return value
     if isinstance(value, dict):
-        out = {}
-        for k, v in value.items():
-            if isinstance(k, str) and k.lower() in _SECRET_CONFIG_KEYS and isinstance(v, str) and v:
-                out[k] = mask_secret(v)
-            else:
-                out[k] = redact_config_value(v, _depth + 1)
-        return out
+        return {
+            k: mask_secret(v)
+            if isinstance(k, str) and k.lower() in _SECRET_CONFIG_KEYS and isinstance(v, str) and v
+            else redact_config_value(v, _depth + 1)
+            for k, v in value.items()}
     if isinstance(value, list):
         return [redact_config_value(v, _depth + 1) for v in value]
     return value
@@ -2730,12 +2663,11 @@ def _show_model_section(config: Dict[str, Any]) -> None:
     # gateway bridge already overrode os.environ.
     try:
         env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
-        if env_ghost is not None and str(env_ghost).strip() != str(cfg_max_turns).strip():
-            print(color(
-                f"                ⚠ .env has stale HERMES_MAX_ITERATIONS={env_ghost} "
-                f"(run 'hermes doctor --fix' to remove)", Colors.YELLOW))
     except Exception:
-        pass
+        env_ghost = None
+    if env_ghost is not None and str(env_ghost).strip() != str(cfg_max_turns).strip():
+        print(color(f"                ⚠ .env has stale HERMES_MAX_ITERATIONS={env_ghost} "
+                    f"(run 'hermes doctor --fix' to remove)", Colors.YELLOW))
 
 
 def _show_display_section(config: Dict[str, Any]) -> None:
@@ -2743,7 +2675,6 @@ def _show_display_section(config: Dict[str, Any]) -> None:
     display = config.get('display', {})
     try:
         from hermes_cli.personality import active_personality_name
-
         active_personality = active_personality_name(config) or 'none'
     except Exception:
         active_personality = display.get('personality') or 'none'
@@ -2829,14 +2760,15 @@ def _show_skill_settings() -> None:
     try:
         from agent.skill_utils import discover_all_skill_config_vars, resolve_skill_config_values
         skill_vars = discover_all_skill_config_vars()
-        if skill_vars:
-            resolved = resolve_skill_config_values(skill_vars)
-            _section("Skill Settings")
-            for var in skill_vars:
-                value = resolved.get(var["key"], "")
-                display_val = str(value) if value else color("(not set)", Colors.DIM)
-                skill_tag = color(f"[{var.get('skill', '')}]", Colors.DIM)
-                print(f"  {var['key']:<20s} {display_val}  {skill_tag}")
+        if not skill_vars:
+            return
+        resolved = resolve_skill_config_values(skill_vars)
+        _section("Skill Settings")
+        for var in skill_vars:
+            value = resolved.get(var["key"], "")
+            display_val = str(value) if value else color("(not set)", Colors.DIM)
+            skill_tag = color(f"[{var.get('skill', '')}]", Colors.DIM)
+            print(f"  {var['key']:<20s} {display_val}  {skill_tag}")
     except Exception:
         pass
 
@@ -2913,9 +2845,7 @@ def edit_config():
     subprocess.run([editor, str(config_path)])
 
 
-# =============================================================================
-# Cron model-drift guard helpers
-# =============================================================================
+# ---- Cron model-drift guard helpers ----
 
 _CRON_DRIFT_AXIS_BY_KEY = {
     "model": "model", "model.default": "model", "model.model": "model", "model.name": "model",
@@ -3494,9 +3424,7 @@ def unset_config_value(key: str):
     print(f"✓ Unset {key} from {config_path}")
 
 
-# =============================================================================
-# Command handler
-# =============================================================================
+# ---- Command handler ----
 
 def _usage_exit(usage: str, examples: List[str], extra: Optional[List[str]] = None) -> None:
     print(usage)
@@ -3594,16 +3522,13 @@ def _cmd_config_migrate(args):
 
     print()
     results = migrate_config(interactive=True, quiet=False)
-
     print()
     if results["env_added"] or results["config_added"]:
         print(color("✓ Configuration updated!", Colors.GREEN))
-
     if results["warnings"]:
         print()
         for warning in results["warnings"]:
             print(color(f"  ⚠️  {warning}", Colors.YELLOW))
-
     print()
 
 
@@ -3673,9 +3598,7 @@ def config_command(args):
     sys.exit(1)
 
 
-# =============================================================================
-# OPTIONAL_ENV_VARS injection from provider profiles and platform plugins (once, at import)
-# =============================================================================
+# ---- OPTIONAL_ENV_VARS injection from provider profiles and platform plugins (once, at import) ----
 
 def _inject_profile_env_vars() -> None:
     """Expose env_vars of every ``auth_type="api_key"`` provider in providers/ via OPTIONAL_ENV_VARS
