@@ -7,11 +7,7 @@ import json
 from typing import Any, Dict, Optional
 
 from hermes_cli.config import load_config
-from plugins.video_gen.xai import (
-    has_xai_video_credentials,
-    run_xai_video_edit,
-    run_xai_video_extend,
-)
+from plugins.video_gen.xai import has_xai_video_credentials, run_xai_video_edit, run_xai_video_extend
 from tools.registry import registry, tool_error
 
 
@@ -29,14 +25,11 @@ def _check_xai_video_requirements() -> bool:
 
 
 def _clean_string(value: Any) -> Optional[str]:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _coerce_int(value: Any) -> Optional[int]:
-    # bool is rejected (unlike video_generation_tool._coerce_int) so
-    # duration=true never becomes 1.
+    # bool is rejected (unlike video_generation_tool._coerce_int) so duration=true never becomes 1.
     if value is None or isinstance(value, bool):
         return None
     try:
@@ -48,9 +41,7 @@ def _coerce_int(value: Any) -> Optional[int]:
 def _normalize_public_video_url(video_url: Any) -> Optional[str]:
     """Require a public HTTPS MP4 URL (``http``/``https`` only)."""
     cleaned = _clean_string(video_url)
-    if cleaned and cleaned.lower().startswith(("http://", "https://")):
-        return cleaned
-    return None
+    return cleaned if cleaned and cleaned.lower().startswith(("http://", "https://")) else None
 
 
 _VIDEO_URL_PARAM = {
@@ -60,10 +51,7 @@ _VIDEO_URL_PARAM = {
         "`public_url` from a prior xAI Imagine result."
     ),
 }
-_MODEL_PARAM = {
-    "type": "string",
-    "description": "Optional xAI Imagine model override.",
-}
+_MODEL_PARAM = {"type": "string", "description": "Optional xAI Imagine model override."}
 
 
 def _xai_video_schema(name: str, verb: str, noun: str, prompt_verb: str, extra: Dict[str, Any]) -> Dict[str, Any]:
@@ -111,8 +99,6 @@ XAI_VIDEO_EXTEND_SCHEMA: Dict[str, Any] = _xai_video_schema(
 def _run_xai_video_tool(args: Dict[str, Any], op: str, run, **extra: Any) -> str:
     prompt = _clean_string(args.get("prompt"))
     video_url = _normalize_public_video_url(args.get("video_url"))
-    model = _clean_string(args.get("model"))
-
     if not prompt:
         return tool_error(f"prompt is required for xAI video {op}")
     if not video_url:
@@ -131,6 +117,7 @@ def _run_xai_video_tool(args: Dict[str, Any], op: str, run, **extra: Any) -> str
             "provider": "xai",
         })
 
+    model = _clean_string(args.get("model"))
     return json.dumps(run(prompt=prompt, video_url=video_url, model=model, **extra))
 
 
@@ -139,9 +126,8 @@ def _handle_xai_video_edit(args: Dict[str, Any], **_kw: Any) -> str:
 
 
 def _handle_xai_video_extend(args: Dict[str, Any], **_kw: Any) -> str:
-    return _run_xai_video_tool(
-        args, "extend", run_xai_video_extend, duration=_coerce_int(args.get("duration")),
-    )
+    duration = _coerce_int(args.get("duration"))
+    return _run_xai_video_tool(args, "extend", run_xai_video_extend, duration=duration)
 
 
 for _name, _schema, _handler in (
@@ -149,12 +135,6 @@ for _name, _schema, _handler in (
     ("xai_video_extend", XAI_VIDEO_EXTEND_SCHEMA, _handle_xai_video_extend),
 ):
     registry.register(
-        name=_name,
-        toolset="video_gen",
-        schema=_schema,
-        handler=_handler,
-        check_fn=_check_xai_video_requirements,
-        requires_env=[],
-        is_async=False,
-        emoji="video",
+        name=_name, toolset="video_gen", schema=_schema, handler=_handler,
+        check_fn=_check_xai_video_requirements, requires_env=[], is_async=False, emoji="video",
     )
