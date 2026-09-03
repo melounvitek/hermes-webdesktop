@@ -141,10 +141,6 @@ def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message}}
 
 
-def _permission_denied(message_id: Any) -> dict[str, Any]:
-    return _jsonrpc_result(message_id, {"outcome": {"outcome": "cancelled"}})
-
-
 def _enabled_ids(entries: Any, key: str) -> set[str]:
     """Ids of ``entries`` (dicts) whose ``_meta.copilotEnablement`` is not ``disabled``."""
     return {
@@ -369,19 +365,18 @@ class CopilotACPClient:
         inbox: queue.Queue[dict[str, Any]] = queue.Queue()
         stderr_tail: deque[str] = deque(maxlen=40)
 
-        def _stdout_reader() -> None:
-            for line in proc.stdout:
-                try:
-                    inbox.put(json.loads(line))
-                except Exception:
-                    inbox.put({"raw": line.rstrip("\n")})
+        def _decode(line: str) -> dict[str, Any]:
+            try:
+                return json.loads(line)
+            except Exception:
+                return {"raw": line.rstrip("\n")}
 
-        def _stderr_reader() -> None:
-            for line in proc.stderr or ():
-                stderr_tail.append(line.rstrip("\n"))
+        def _pump(stream, sink) -> None:
+            for line in stream or ():
+                sink(line)
 
-        threading.Thread(target=_stdout_reader, daemon=True).start()
-        threading.Thread(target=_stderr_reader, daemon=True).start()
+        threading.Thread(target=_pump, args=(proc.stdout, lambda line: inbox.put(_decode(line))), daemon=True).start()
+        threading.Thread(target=_pump, args=(proc.stderr, lambda line: stderr_tail.append(line.rstrip("\n"))), daemon=True).start()
         request_ids = iter(range(1, 1 << 62))
 
         def _request(method: str, params: dict[str, Any], *, text_parts: list[str] | None = None, reasoning_parts: list[str] | None = None) -> Any:
@@ -416,18 +411,15 @@ class CopilotACPClient:
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
                 raise RuntimeError("Copilot ACP did not return a sessionId.")
-            # Stable ACP v1 session-config API first; session/set_model is the fallback.
             if requested_model and requested_model != "copilot-acp":
                 try:
-                    selection = _model_selection_request(session, requested_model)
-                    if selection is not None:
+                    if (selection := _model_selection_request(session, requested_model)) is not None:
                         _request(*selection)
                     else:
                         logger.warning("Copilot ACP does not offer model %r; using the session default.", requested_model)
                 except Exception as exc:
                     logger.warning(
-                        "Copilot ACP model selection for %r failed; continuing with the session default: %s",
-                        requested_model, exc,
+                        "Copilot ACP model selection for %r failed; continuing with the session default: %s", requested_model, exc
                     )
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
@@ -462,7 +454,7 @@ class CopilotACPClient:
 
         message_id = msg.get("id")
         if method == "session/request_permission":
-            response = _permission_denied(message_id)
+            response = _jsonrpc_result(message_id, {"outcome": {"outcome": "cancelled"}})
         elif method in _FS_HANDLERS:
             try:
                 response = _jsonrpc_result(message_id, _FS_HANDLERS[method](msg.get("params") or {}, cwd))

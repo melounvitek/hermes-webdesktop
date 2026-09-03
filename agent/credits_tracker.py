@@ -290,26 +290,19 @@ def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Opt
                 _version_warning_emitted = True
                 logger.warning("credits header version %d unsupported, ignoring — update Hermes", version_val)
             return None
-        fields: dict[str, Any] = {}
-        for name, key, kind, *default in _HEADER_FIELDS:
-            val = _parse_field(kind, lowered.get(key), *default)
-            if val is _SENTINEL:
-                return None
-            fields[name] = val
+        fields: dict[str, Any] = {
+            name: _parse_field(kind, lowered.get(key), *default) for name, key, kind, *default in _HEADER_FIELDS
+        }
         # tool_pool_micros is OPTIONAL: absent → 0; present-but-invalid → miss.
         tp_raw = lowered.get("x-nous-tool-pool-micros")
         fields["tool_pool_micros"] = 0 if tp_raw is None else _parse_field("micros", tp_raw)
-        if fields["tool_pool_micros"] is _SENTINEL:
-            return None
         lim_micros_raw = lowered.get("x-nous-credits-subscription-limit-micros")
         lim_usd_raw = lowered.get("x-nous-credits-subscription-limit-usd")
         if lim_micros_raw is not None and lim_usd_raw is not None:
-            lm = _parse_field("micros", lim_micros_raw)
-            if lm is _SENTINEL or not _validate_usd(lim_usd_raw):
-                return None
-            fields["subscription_limit_micros"], fields["subscription_limit_usd"] = lm, lim_usd_raw
+            fields["subscription_limit_micros"] = _parse_field("micros", lim_micros_raw)
+            fields["subscription_limit_usd"] = _parse_field("usd", lim_usd_raw)
         denominator_kind = lowered.get("x-nous-credits-denominator-kind", "none")
-        if denominator_kind not in _VALID_DENOMINATOR_KINDS:
+        if _SENTINEL in fields.values() or denominator_kind not in _VALID_DENOMINATOR_KINDS:
             return None
         return CreditsState(
             version=version_val, denominator_kind=denominator_kind,
@@ -361,10 +354,8 @@ def dev_fixture_credits_state() -> Optional[CreditsState]:
     """Fixture CreditsState for HERMES_DEV_CREDITS_FIXTURE, or None (unknown name / unset).
     Prod-leak guard: applies ONLY when HERMES_DEV_CREDITS is also on, so a stray
     fixture env var can never surface fabricated balances on a real account."""
-    if not is_truthy_value(os.environ.get("HERMES_DEV_CREDITS")):
-        return None
     name = os.environ.get("HERMES_DEV_CREDITS_FIXTURE", "").strip()
-    if not name:
+    if not name or not is_truthy_value(os.environ.get("HERMES_DEV_CREDITS")):
         return None
     if os.path.sep in name or "/" in name:  # looks like a path → read the name from the file
         try:
@@ -372,12 +363,10 @@ def dev_fixture_credits_state() -> Optional[CreditsState]:
                 name = fh.read().strip()
         except OSError:
             return None
-    spec = _DEV_FIXTURES.get(name.lower())
-    if not spec:
+    if not (spec := _DEV_FIXTURES.get(name.lower())):
         return None
-    # Stamp what the REAL parser always guarantees so a fixture is field-identical
-    # to a parse_credits_headers() result (differential test): version 1, and a
-    # valid purchased_usd (a zero-top-up account still carries "0.00").
+    # Stamp what the REAL parser always guarantees so a fixture is field-identical to a
+    # parse_credits_headers() result: version 1 and a valid purchased_usd (zero top-up = "0.00").
     return CreditsState(**{"version": 1, "purchased_usd": "0.00", **spec}, from_header=True, captured_at=time.time())
 
 
@@ -418,11 +407,9 @@ def _hydrate_seed_state(agent, state) -> None:
         agent._credits_session_start_micros = state.remaining_micros
     latch = getattr(agent, "_credits_latch", None)
     if isinstance(latch, dict) and state.used_fraction is not None:
-        # Prime ONLY seen_below_90. Never prime seen_grant_unspent: a seed
-        # observing grant-spent is a steady state; priming revives the nag.
+        # Prime ONLY seen_below_90 — priming seen_grant_unspent would revive the nag (grant-spent is a steady state).
         latch["seen_below_90"] = True
-    emit = getattr(agent, "_emit_credits_notices", None)
-    if callable(emit):
+    if callable(emit := getattr(agent, "_emit_credits_notices", None)):
         emit()
 
 

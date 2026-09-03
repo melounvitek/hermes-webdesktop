@@ -194,9 +194,10 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
         text = _text_of(item)
         if text or isinstance(item, str):
             parts.append({"text": text})
-        elif isinstance(item, dict) and item.get("type") == "image_url":
-            if image := _inline_data_part((item.get("image_url") or {}).get("url") or ""):
-                parts.append(image)
+        elif isinstance(item, dict) and item.get("type") == "image_url" and (
+            image := _inline_data_part((item.get("image_url") or {}).get("url") or "")
+        ):
+            parts.append(image)
     return parts
 
 
