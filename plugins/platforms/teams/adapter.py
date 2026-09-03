@@ -169,11 +169,9 @@ def _env_enablement() -> dict | None:
     port = coerce_port(os.getenv("TEAMS_PORT", "").strip(), None)
     if port is not None:
         seed["port"] = port
-    service_url = os.getenv("TEAMS_SERVICE_URL", "").strip()
-    if service_url:
+    if service_url := os.getenv("TEAMS_SERVICE_URL", "").strip():
         seed["service_url"] = service_url
-    home = os.getenv("TEAMS_HOME_CHANNEL", "").strip()
-    if home:
+    if home := os.getenv("TEAMS_HOME_CHANNEL", "").strip():
         seed["home_channel"] = {"chat_id": home, "name": os.getenv("TEAMS_HOME_CHANNEL_NAME", "Home")}
     return seed
 
@@ -470,12 +468,8 @@ class TeamsAdapter(BasePlatformAdapter):
             user_id=str(user_id),
             user_name=getattr(from_account, "name", None) or "",
             guild_id=getattr(conv, "tenant_id", None) or self._tenant_id)
-        media: list = []  # (path, media_type, kind)
-        for att in getattr(activity, "attachments", None) or []:
-            cached = await self._cache_attachment(att)
-            if cached:
-                media.append(cached)
-        media_kinds = [kind for _, _, kind in media]
+        media: list = [m for m in [await self._cache_attachment(a) for a in getattr(activity, "attachments", None) or []] if m]
+        media_kinds = [kind for _, _, kind in media]  # media items are (path, media_type, kind)
         msg_type = next((t for kind, t in _MEDIA_KIND_PRECEDENCE if kind in media_kinds), MessageType.TEXT)
         await self.handle_message(MessageEvent(
             text=text, source=source, message_type=msg_type, message_id=msg_id,

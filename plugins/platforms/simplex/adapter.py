@@ -247,8 +247,7 @@ class SimplexAdapter(BasePlatformAdapter):
     async def _on_rcv_file_descr_ready(self, resp: dict) -> None:
         """XFTP files fire this before newChatItems; start the download now, the chat item arrives later."""
         rcv_file = resp.get("rcvFileTransfer", {}) or {}
-        file_id = rcv_file.get("fileId") if isinstance(rcv_file, dict) else None
-        if file_id is not None:
+        if (file_id := rcv_file.get("fileId") if isinstance(rcv_file, dict) else None) is not None:
             logger.debug("SimpleX: rcvFileDescrReady for fileId=%s — sending /freceive", file_id)
             await self._send_fire_and_forget(f"/freceive {file_id}")
 
@@ -610,14 +609,11 @@ def _env_enablement() -> Optional[dict]:
     if not ws_url:
         return None
     seed: dict = {"ws_url": ws_url}
-    auto_accept = _get_scoped_secret("SIMPLEX_AUTO_ACCEPT", "").strip().lower()
-    if auto_accept:
+    if auto_accept := _get_scoped_secret("SIMPLEX_AUTO_ACCEPT", "").strip().lower():
         seed["auto_accept"] = auto_accept not in {"0", "false", "no"}
-    group_allowed = _get_scoped_secret("SIMPLEX_GROUP_ALLOWED", "").strip()
-    if group_allowed:
+    if group_allowed := _get_scoped_secret("SIMPLEX_GROUP_ALLOWED", "").strip():
         seed["group_allowed"] = group_allowed
-    home = _get_scoped_secret("SIMPLEX_HOME_CHANNEL", "").strip()
-    if home:
+    if home := _get_scoped_secret("SIMPLEX_HOME_CHANNEL", "").strip():
         seed["home_channel"] = {"chat_id": home, "name": _get_scoped_secret("SIMPLEX_HOME_CHANNEL_NAME", "").strip() or home}
     return seed
 

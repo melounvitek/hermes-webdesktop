@@ -342,6 +342,7 @@ _OUTBOUND_MEDIA = {
 _INBOUND_MEDIA_EXT = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": ".bin"}
 _INBOUND_AV_CACHERS = {"audio": cache_audio_from_bytes, "video": cache_video_from_bytes}
 _LIFECYCLE_EVENTS = frozenset({"follow", "unfollow", "join", "leave"})
+_ENV_SEED_KEYS = (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel"))
 
 
 class LineAdapter(BasePlatformAdapter):
@@ -868,9 +869,7 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     if os.getenv("LINE_PORT"):
         with contextlib.suppress(ValueError):
             seeded["port"] = int(os.environ["LINE_PORT"])
-    for env, key in (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel")):
-        if os.getenv(env):
-            seeded[key] = os.environ[env]
+    seeded.update({key: os.environ[env] for env, key in _ENV_SEED_KEYS if os.getenv(env)})
     return seeded
 
 
