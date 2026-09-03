@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Advisory NVIDIA SkillEvaluator Tier 1 scan for skill installs — runs alongside (never instead of)
-``tools/skills_guard.py``, the enforcement layer. Contract: warn, don't block (PII findings are shown, the
-install continues — the upstream PII scanner false-positives on ``git@github.com`` / ``op://``); prompt only
-for secrets-class criticals (``--force`` / non-interactive proceed with a loud warning); never break installs
-(missing/crashing/timed-out/unparseable scanner = no-op). Toggle: ``skills.tier1_advisory`` (default on).
-Binary: ``uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.1.0"``."""
+"""Advisory NVIDIA SkillEvaluator Tier 1 scan for skill installs — alongside (never instead of) skills_guard,
+the enforcement layer. Contract: warn, don't block (the upstream PII scanner false-positives on
+``git@github.com`` / ``op://``); prompt only for secrets-class criticals (``--force`` / non-interactive proceed
+with a loud warning); a missing/crashing/timed-out/unparseable scanner is a no-op. Toggle
+``skills.tier1_advisory`` (default on). Binary: ``uv tool install --python 3.13
+"skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git@v0.1.0"``."""
 
 from __future__ import annotations
 
@@ -68,19 +68,13 @@ class Tier1Report:
         return [f for f in self.findings if f.is_secrets_class]
 
 
-def scanner_available() -> bool:
-    return shutil.which(SCANNER_BIN) is not None
-
-
 def tier1_advisory_enabled() -> bool:
     """``skills.tier1_advisory`` (default True; safe because the scan is a no-op without the binary)."""
     try:
         from hermes_cli.config import load_config
         skills_cfg = load_config().get("skills") or {}
         value = skills_cfg.get("tier1_advisory", True) if isinstance(skills_cfg, dict) else True
-        if isinstance(value, str):
-            return value.strip().lower() not in ("false", "0", "no", "off")
-        return bool(value)
+        return value.strip().lower() not in ("false", "0", "no", "off") if isinstance(value, str) else bool(value)
     except Exception:
         return True
 
@@ -97,42 +91,36 @@ def _parse_report(report: dict) -> Tier1Report:
             incomplete.append(validator)
         elif not res.get("passed", True):
             any_complete_failed = True
-        for f in res.get("findings", []) or []:
-            if not isinstance(f, dict):
-                continue
-            findings.append(Tier1Finding(
-                check=str(f.get("check_name", "")), validator=validator,
-                severity=str(f.get("severity", "info")).lower(), message=str(f.get("message", ""))[:200],
-                file=str(f.get("file_path", "")), line=int(f.get("line_number") or 0),
-                suggestion=str(f.get("suggestion", ""))[:200]))
+        findings.extend(Tier1Finding(
+            check=str(f.get("check_name", "")), validator=validator, severity=str(f.get("severity", "info")).lower(),
+            message=str(f.get("message", ""))[:200], file=str(f.get("file_path", "")),
+            line=int(f.get("line_number") or 0), suggestion=str(f.get("suggestion", ""))[:200])
+            for f in res.get("findings", []) or [] if isinstance(f, dict))
     return Tier1Report(available=True, passed=not any_complete_failed and not findings, findings=findings,
                        incomplete_checks=incomplete)
 
 
 def run_tier1_scan(skill_dir: Path, timeout: int = SCAN_TIMEOUT_SECONDS) -> Tier1Report:
     """Run SkillEvaluator Tier 1 over one skill dir; any failure returns ``available=False``, never raises."""
-    if not scanner_available():
+    if shutil.which(SCANNER_BIN) is None:
         return Tier1Report(available=False, error="scanner not on PATH")
+    unavailable = lambda why: Tier1Report(available=False, error=why)  # noqa: E731
     with tempfile.TemporaryDirectory(prefix="se-tier1-") as outdir:
         try:
-            subprocess.run(
-                [SCANNER_BIN, "validate", str(skill_dir), "--checks", TIER1_CHECKS, "--no-dedup",
-                 "-r", "json", "-o", outdir],
-                capture_output=True, text=True, timeout=timeout)
+            subprocess.run([SCANNER_BIN, "validate", str(skill_dir), "--checks", TIER1_CHECKS, "--no-dedup",
+                            "-r", "json", "-o", outdir], capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
-            return Tier1Report(available=False, error=f"scan timed out after {timeout}s")
+            return unavailable(f"scan timed out after {timeout}s")
         except OSError as exc:
-            return Tier1Report(available=False, error=f"scanner failed to launch: {exc}")
+            return unavailable(f"scanner failed to launch: {exc}")
         reports = sorted(Path(outdir).glob("skillevaluator-output-*.json"))
         if not reports:
-            return Tier1Report(available=False, error="scanner produced no JSON report")
+            return unavailable("scanner produced no JSON report")
         try:
             parsed = json.loads(reports[-1].read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError) as exc:
-            return Tier1Report(available=False, error=f"unparseable report: {exc}")
-        if not isinstance(parsed, dict):
-            return Tier1Report(available=False, error="unexpected report shape")
-        return _parse_report(parsed)
+            return unavailable(f"unparseable report: {exc}")
+        return _parse_report(parsed) if isinstance(parsed, dict) else unavailable("unexpected report shape")
 
 
 def format_tier1_report(report: Tier1Report, limit: int = 10) -> str:
@@ -144,13 +132,11 @@ def format_tier1_report(report: Tier1Report, limit: int = 10) -> str:
         lines.append("SkillEvaluator Tier 1: no findings from completed checks." if report.incomplete_checks
                      else "SkillEvaluator Tier 1: no findings.")
     else:
-        lines.append(
-            f"SkillEvaluator Tier 1 (advisory): "
-            f"{len(report.findings)} finding(s) — informational, verify before relying on this skill.")
+        lines.append(f"SkillEvaluator Tier 1 (advisory): {len(report.findings)} finding(s) — informational, "
+                     "verify before relying on this skill.")
         shown = report.secrets_findings + report.advisory_findings
-        for f in shown[:limit]:
-            tag = "SECRETS" if f.is_secrets_class else f.severity.upper()
-            lines.append(f"  [{tag}] {f.location()} — {f.message}")
+        lines.extend(f"  [{'SECRETS' if f.is_secrets_class else f.severity.upper()}] {f.location()} — {f.message}"
+                     for f in shown[:limit])
         if len(shown) > limit:
             lines.append(f"  … and {len(shown) - limit} more")
     if report.incomplete_checks:

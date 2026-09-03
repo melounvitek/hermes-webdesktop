@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Skills Guard — regex static scan of externally-sourced skills plus a trust-aware install policy.
 
-Trust: builtin (ships with Hermes, never scanned), trusted (openai/anthropics/... repos: caution allowed),
-community (any findings block unless --force). ``scan_skill(path, source)`` -> ``should_allow_install`` ->
-``format_scan_report``. Known limitation: language write APIs (open(..., 'w'), Path.write_text, shutil.copy*,
-fs.writeFileSync) aimed at agent-config files surface only the low *_ref finding — static regexes cannot tie
-the call to a dynamically built destination; any future coverage belongs as a fourth "mechanical" tier next
-to agent_config_mod_shell."""
+Trust: builtin (never scanned), trusted (openai/anthropics/... repos: caution allowed), community (any
+findings block unless --force). ``scan_skill`` -> ``should_allow_install`` -> ``format_scan_report``.
+Known gap: language write APIs (open(..., 'w'), Path.write_text, shutil.copy*, fs.writeFileSync) aimed at
+agent-config files surface only the low *_ref finding — static regexes cannot tie the call to a dynamic
+destination; future coverage belongs as a fourth "mechanical" tier next to agent_config_mod_shell."""
 
 import re
 import fnmatch
@@ -40,7 +39,7 @@ VERDICT_INDEX = {"safe": 0, "caution": 1, "dangerous": 2}
 class Finding:
     pattern_id: str
     severity: str       # "critical" | "high" | "medium" | "low"
-    category: str       # "exfiltration" | "injection" | "destructive" | "persistence" | "network" | "obfuscation"
+    category: str       # "exfiltration" | "injection" | "destructive" | "persistence" | "network" | ...
     file: str
     line: int
     match: str
@@ -390,9 +389,9 @@ def _unicode_char_name(char: str) -> str:
 
 
 def _compute_docstring_lines(lines: list) -> set:
-    """1-indexed line numbers inside (or on the boundary of) triple-quoted strings: opening, interior, closing and
-    self-contained one-line docstrings all count, so ``os.environ`` in prose is not scored. Heuristic (ignores a
-    triple quote inside a string literal) but covers the common false-positive shapes."""
+    """1-indexed lines inside or on the boundary of triple-quoted strings (opening, interior, closing, and
+    one-line docstrings), so ``os.environ`` in prose is not scored. Heuristic: a triple quote inside a string
+    literal is miscounted, but the common false-positive shapes are covered."""
     doc_lines: set = set()
     in_docstring = False
     for i, line in enumerate(lines):
@@ -405,17 +404,16 @@ def _compute_docstring_lines(lines: list) -> set:
 
 
 def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
-    """Scan one file for threat patterns and invisible unicode. *rel_path* is the display path (defaults
-    to the file name). Regex findings dedupe per pattern per line; invisible chars yield one per line."""
+    """Threat-pattern + invisible-unicode scan of one file; *rel_path* is the display path (default: file
+    name). Regex findings dedupe per pattern per line; invisible chars yield one per line."""
     rel_path = rel_path or file_path.name
     if file_path.suffix.lower() not in SCANNABLE_EXTENSIONS and file_path.name != "SKILL.md":
         return []
     try:
-        content = file_path.read_text(encoding='utf-8')
+        lines = file_path.read_text(encoding='utf-8').split('\n')
     except (UnicodeDecodeError, OSError):
         return []
     findings = []
-    lines = content.split('\n')
     docstring_lines = _compute_docstring_lines(lines)  # so code patterns don't fire on prose
     for pattern, pid, severity, category, description in _COMPILED_THREAT_PATTERNS:
         for i, line in enumerate(lines, start=1):
@@ -424,91 +422,79 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
                 findings.append(Finding(pid, severity, category, rel_path, i,
                                         text if len(text) <= 120 else text[:117] + "...", description))
     for i, line in enumerate(lines, start=1):
-        char = next((c for c in INVISIBLE_CHARS if c in line), None)
-        if char is not None:
-            char_name = _unicode_char_name(char)
-            findings.append(Finding(
-                "invisible_unicode", "high", "injection", rel_path, i, f"U+{ord(char):04X} ({char_name})",
-                f"invisible unicode character {char_name} (possible text hiding/injection)"))
+        if (char := next((c for c in INVISIBLE_CHARS if c in line), None)) is not None:
+            name = _unicode_char_name(char)
+            findings.append(Finding("invisible_unicode", "high", "injection", rel_path, i,
+                                    f"U+{ord(char):04X} ({name})",
+                                    f"invisible unicode character {name} (possible text hiding/injection)"))
     return findings
 
 
 def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
-    """Structural checks + pattern scan of every text file in a skill dir (or a single file). A `.skillignore` /
-    `.clawhubignore` (gitignore-style) excludes dev/docs artifacts from BOTH passes; the ignore file itself is
+    """Structural checks + pattern scan of every text file in a skill dir (or a single file). A gitignore-style
+    `.skillignore` / `.clawhubignore` excludes dev/docs artifacts from BOTH passes; the ignore file itself is
     always excluded and `SKILL.md` can never be un-ignored. *source* (e.g. "openai/skills") sets the trust level."""
-    skill_name = skill_path.name
-    trust_level = _resolve_trust_level(source)
-    all_findings: List[Finding] = []
+    name, trust = skill_path.name, _resolve_trust_level(source)
+    findings: List[Finding] = []
     if skill_path.is_dir():
         ignore = _load_skill_ignore(skill_path)
-        all_findings.extend(_check_structure(skill_path, ignore=ignore))
+        findings.extend(_check_structure(skill_path, ignore=ignore))
         for f in skill_path.rglob("*"):
             rel = str(f.relative_to(skill_path))
             if f.is_file() and not ignore(rel):
-                all_findings.extend(scan_file(f, rel))
+                findings.extend(scan_file(f, rel))
     elif skill_path.is_file():
-        all_findings.extend(scan_file(skill_path, skill_path.name))
-    verdict = _determine_verdict(all_findings)
-    return ScanResult(
-        skill_name=skill_name, source=source, trust_level=trust_level, verdict=verdict, findings=all_findings,
-        scanned_at=datetime.now(timezone.utc).isoformat(),
-        summary=_build_summary(skill_name, source, trust_level, verdict, all_findings),
-    )
+        findings.extend(scan_file(skill_path, skill_path.name))
+    verdict = _determine_verdict(findings)
+    return ScanResult(name, source, trust, verdict, findings, datetime.now(timezone.utc).isoformat(),
+                      _build_summary(name, source, trust, verdict, findings))
 
 
 def _content_digest(skill_path: Path) -> str:
-    """Canonical SHA-256 over (POSIX relative path, file bytes), ORDERED by the rel-path STRING: sorting Paths is
-    case-insensitive on Windows and diverged from ``tools.skills_hub.bundle_content_hash`` (plain-string sort), so
-    every installed skill reported ``update_available`` forever. String order keeps both sides byte-symmetric."""
+    """Canonical SHA-256 over (POSIX relative path, file bytes) ORDERED by the rel-path STRING — Path sorting is
+    case-insensitive on Windows and diverged from ``skills_hub.bundle_content_hash`` (every installed skill then
+    reported ``update_available`` forever). String order keeps both sides byte-symmetric."""
     h = hashlib.sha256()
     if not skill_path.is_dir():
         h.update(skill_path.read_bytes())
         return h.hexdigest()
-    entries = sorted((p.relative_to(skill_path).as_posix(), p) for p in skill_path.rglob("*") if p.is_file())
-    for rel, file_path in entries:
+    for rel, p in sorted((p.relative_to(skill_path).as_posix(), p) for p in skill_path.rglob("*") if p.is_file()):
         h.update(rel.encode("utf-8") + b"\x00")
-        h.update(file_path.read_bytes())
+        h.update(p.read_bytes())
     return h.hexdigest()
 
 
-def full_content_hash(skill_path: Path) -> str:
-    """Full canonical digest used to bind scanner attestations."""
-    return f"sha256:{_content_digest(skill_path)}"
-
-
 def content_hash(skill_path: Path) -> str:
-    """Short integrity hash. Paths are mixed in so swapping two files' contents changes it. MUST stay
-    symmetric with ``tools.skills_hub.bundle_content_hash`` (disk vs in-memory bundle) — change both at once."""
+    """Short integrity hash (paths mixed in, so swapping two files' contents changes it). MUST stay symmetric
+    with ``tools.skills_hub.bundle_content_hash`` — change both at once."""
     return f"sha256:{_content_digest(skill_path)[:16]}"
 
 
 def scan_skill_cached(
     skill_path: Path, source: str = "community", *, source_url: str = "", cache_dir: Path | None = None,
 ) -> Tuple[ScanResult, dict]:
-    """Return a scan plus attestation, caching only exact current content."""
-    bundle_hash = full_content_hash(skill_path)
+    """Scan plus attestation dict; the cache (keyed by content digest + source identity) only serves exact
+    current content under the current scanner version."""
+    digest = _content_digest(skill_path)
     cache_root = cache_dir or skill_path.parent / ".scan-cache"
     source_identity = hashlib.sha256(f"{source}\0{source_url}".encode("utf-8")).hexdigest()[:16]
-    cache_file = cache_root / f"{bundle_hash.split(':', 1)[1]}-{source_identity}.json"
-    try:
+    cache_file = cache_root / f"{digest}-{source_identity}.json"
+    expected = {"bundle_hash": f"sha256:{digest}", "scanner_version": SCANNER_VERSION, "source": source,
+                "source_url": source_url}
+    cached = None
+    with suppress(OSError, json.JSONDecodeError):
         cached = json.loads(cache_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        cached = None
-    expected = {"bundle_hash": bundle_hash, "scanner_version": SCANNER_VERSION, "source": source, "source_url": source_url}
     if isinstance(cached, dict) and all(cached.get(k) == v for k, v in expected.items()):
-        result = ScanResult(
-            skill_name=skill_path.name, source=source, trust_level=cached["trust_level"], verdict=cached["verdict"],
-            findings=[Finding(**item) for item in cached.get("findings", [])],
-            scanned_at=cached["scanned_at"], summary=cached.get("summary", ""))
+        result = ScanResult(skill_path.name, source, cached["trust_level"], cached["verdict"],
+                            [Finding(**item) for item in cached.get("findings", [])], cached["scanned_at"],
+                            cached.get("summary", ""))
         provenance = {**cached, "fresh": False}
     else:
         result = scan_skill(skill_path, source=source)
         findings = [asdict(item) for item in result.findings]
-        provenance = {
-            **expected, "verdict": result.verdict, "trust_level": result.trust_level, "findings": findings,
-            "rules": sorted({item["pattern_id"] for item in findings}),
-            "scanned_at": result.scanned_at, "summary": result.summary, "fresh": True}
+        provenance = {**expected, "verdict": result.verdict, "trust_level": result.trust_level, "findings": findings,
+                      "rules": sorted({item["pattern_id"] for item in findings}), "scanned_at": result.scanned_at,
+                      "summary": result.summary, "fresh": True}
         with suppress(OSError):
             cache_root.mkdir(parents=True, exist_ok=True)
             cache_file.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
@@ -517,8 +503,8 @@ def scan_skill_cached(
 
 
 def should_allow_install(result: ScanResult, force: bool = False) -> Tuple[bool, str]:
-    """Decide install from verdict + trust; ``(allowed, reason)``. *force* overrides every block except a
-    dangerous verdict on community/trusted sources. ``allowed`` is None when policy says "ask"."""
+    """``(allowed, reason)`` from verdict + trust; *force* overrides every block except a dangerous verdict on
+    community/trusted sources. ``allowed`` is None when policy says "ask"."""
     policy = INSTALL_POLICY.get(result.trust_level, INSTALL_POLICY["community"])
     decision = policy[VERDICT_INDEX.get(result.verdict, 2)]
     n = len(result.findings)
@@ -540,10 +526,10 @@ def format_scan_report(result: ScanResult) -> str:
     """Compact multi-line report for CLI/chat display; findings sorted critical → low."""
     lines = [f"Scan: {result.skill_name} ({result.source}/{result.trust_level})  Verdict: {result.verdict.upper()}"]
     if result.findings:
-        severity_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-        for f in sorted(result.findings, key=lambda f: severity_order.get(f.severity, 4)):
-            loc = f"{f.file}:{f.line}".ljust(30)
-            lines.append(f"  {f.severity.upper().ljust(8)} {f.category.ljust(14)} {loc} \"{f.match[:60]}\"")
+        order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        for f in sorted(result.findings, key=lambda f: order.get(f.severity, 4)):
+            lines.append(f"  {f.severity.upper().ljust(8)} {f.category.ljust(14)} "
+                         f"{f'{f.file}:{f.line}'.ljust(30)} \"{f.match[:60]}\"")
         lines.append("")
     allowed, reason = should_allow_install(result)
     status = "ALLOWED" if allowed is True else "NEEDS CONFIRMATION" if allowed is None else "BLOCKED"
@@ -552,18 +538,16 @@ def format_scan_report(result: ScanResult) -> str:
 
 
 def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
-    """Structural anomalies: file count, total size, binary/executable files, symlinks escaping the skill
-    dir, oversized files. *ignore(rel_path) -> bool* excludes paths from every count and finding."""
-    if ignore is None:
-        ignore = lambda _rel: False  # noqa: E731
+    """Structural anomalies (counts, sizes, binaries, stray executables, escaping symlinks); *ignore(rel) -> bool*
+    excludes paths from every count and finding."""
     findings = []
 
-    def add(pid: str, severity: str, category: str, rel: str, match: str, description: str) -> None:
-        findings.append(Finding(pid, severity, category, rel, 0, match, description))
+    def add(pid, sev, cat, rel, match, desc):
+        findings.append(Finding(pid, sev, cat, rel, 0, match, desc))
     file_count = total_size = 0
     for f in skill_dir.rglob("*"):
         rel = str(f.relative_to(skill_dir))
-        if not (f.is_file() or f.is_symlink()) or ignore(rel):
+        if not (f.is_file() or f.is_symlink()) or (ignore is not None and ignore(rel)):
             continue
         file_count += 1
         if f.is_symlink():
@@ -612,37 +596,31 @@ def _load_skill_ignore(skill_dir: Path):
     ``SKILL.md`` never."""
     patterns: List[str] = []
     for ig in (skill_dir / name for name in _SKILL_IGNORE_FILENAMES):
-        try:
+        with suppress(UnicodeDecodeError, OSError):
             if ig.is_file():
                 lines = (raw.strip() for raw in ig.read_text(encoding="utf-8").splitlines())
                 patterns.extend(line for line in lines if line and not line.startswith("#"))
-        except (UnicodeDecodeError, OSError):
-            continue
 
     def ignore(rel: str) -> bool:
         rel_posix = Path(rel).as_posix()
-        base = rel_posix.split("/")[-1]
+        segs = rel_posix.split("/")
+        base = segs[-1]
         if base in _NEVER_IGNORABLE:
             return False
         if base in _ALWAYS_IGNORED_NAMES:
             return True
         for pat in patterns:
             anchored = pat.startswith("/")
-            p = pat.lstrip("/")
-            is_dir = p.endswith("/")
-            p = p.rstrip("/")
+            p = pat.strip("/")
             if not p:
                 continue
             below = rel_posix.startswith(p + "/")
-            if is_dir:  # the dir itself or anything under it; unanchored also as an inner path component
+            if pat.endswith("/"):  # the dir itself or anything under it; unanchored also as an inner path component
                 if rel_posix == p or below or (not anchored and ("/" + p + "/") in ("/" + rel_posix + "/")):
                     return True
-                continue
-            if fnmatch.fnmatch(rel_posix, p):
-                return True
             # Unanchored: also the basename, any path segment, or a prefix dir (`docs` ignores docs/plans/x.md).
-            if not anchored and (fnmatch.fnmatch(base, p) or below
-                                 or ("/" not in p and any(fnmatch.fnmatch(seg, p) for seg in rel_posix.split("/")))):
+            elif fnmatch.fnmatch(rel_posix, p) or (not anchored and (fnmatch.fnmatch(base, p) or below or (
+                    "/" not in p and any(fnmatch.fnmatch(seg, p) for seg in segs)))):
                 return True
         return False
 
@@ -653,18 +631,14 @@ _SOURCE_PREFIX_ALIASES = ("skills-sh/", "skills.sh/", "skils-sh/", "skils.sh/")
 
 
 def _resolve_trust_level(source: str) -> str:
-    """Map a source identifier to a trust level. "official" is provenance, not a user-controlled GitHub
-    id like "official/<repo>". Trusted repos match exactly or as a skill path inside the repo — never a
-    sibling repo sharing the prefix."""
-    prefix = next((p for p in _SOURCE_PREFIX_ALIASES if source.startswith(p)), "")
-    normalized_source = source[len(prefix):]
-    if normalized_source == "agent-created":
+    """Source id -> trust level. "official" is provenance, not a user-controlled GitHub id like "official/<repo>";
+    trusted repos match exactly or as a skill path inside the repo — never a sibling sharing the prefix."""
+    src = source[len(next((p for p in _SOURCE_PREFIX_ALIASES if source.startswith(p)), "")):]
+    if src == "agent-created":
         return "agent-created"
-    if normalized_source == "official":
+    if src == "official":
         return "builtin"
-    if any(normalized_source == t or normalized_source.startswith(f"{t}/") for t in TRUSTED_REPOS):
-        return "trusted"
-    return "community"
+    return "trusted" if any(src == t or src.startswith(f"{t}/") for t in TRUSTED_REPOS) else "community"
 
 
 def _determine_verdict(findings: List[Finding]) -> str:

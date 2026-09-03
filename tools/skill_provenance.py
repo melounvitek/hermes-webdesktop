@@ -1,17 +1,9 @@
-"""Skill write-origin provenance: a ContextVar separating agent-sediment skill writes from foreground
-user-directed writes. The curator only curates skills the background self-improvement review fork created;
-skills a user asked for belong to the user. run_agent.py binds the origin before each tool loop (mirroring
-AIAgent._memory_write_origin) so handlers such as skill_manage create can check it::
-
-    token = set_current_write_origin("background_review")
-    try:
-        ...  # tool runs here
-    finally:
-        reset_current_write_origin(token)
-"""
+"""Skill write-origin provenance: a ContextVar separating background-review skill writes from foreground
+user-directed writes (the curator only curates skills the self-improvement review fork created; skills a user
+asked for belong to the user). run_agent.py binds the origin before each tool loop, mirroring
+AIAgent._memory_write_origin: ``token = set_current_write_origin(...)`` / ``reset_current_write_origin(token)``."""
 
 import contextvars
-
 
 _write_origin: contextvars.ContextVar[str] = contextvars.ContextVar("skill_write_origin", default="foreground")
 
