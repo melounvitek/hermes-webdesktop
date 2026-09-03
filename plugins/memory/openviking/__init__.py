@@ -1878,10 +1878,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 return resolved
         return str(getattr(active, "_user", "") or getattr(self, "_user", "") or "default").strip() or "default"
 
-    def _session_start_uris(self, user: Optional[str] = None) -> tuple:
-        user = user or self._user_space()
-        return tuple(_user_scoped_uri(user, suffix) for suffix in _SESSION_START_SUFFIXES)
-
     def _read_session_start_memory_parts(self, *, client: Optional[_VikingClient] = None, deadline: float, request_timeout: float) -> Dict[str, Any]:
         """{profile, preferences, entities, uris}; profile is None when the profile read failed
         for any reason other than absence (404/410), and {} without a client."""
@@ -1897,7 +1893,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             user = self._user_space(active_client, timeout=self._remaining_recall_timeout(deadline, request_timeout))
         except Exception:
             return empty
-        uris = self._session_start_uris(user)
+        uris = tuple(_user_scoped_uri(user, suffix) for suffix in _SESSION_START_SUFFIXES)
         try:
             profile = self._extract_text_content(budgeted_get("/api/v1/content/read", {"uri": uris[0]}))
         except Exception as e:
@@ -2024,20 +2020,17 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return f"abstract:{category}:{abstract}"
         return f"uri:{uri}"
 
-    @staticmethod
-    def _query_tokens(query: str) -> List[str]:
-        tokens = ["".join(ch for ch in raw if ch.isalnum()) for raw in query.lower().replace("_", " ").split()]
-        return [token for token in tokens if len(token) >= 2][:8]
-
-    @classmethod
-    def _recall_rank(cls, item: Dict[str, Any], query_tokens: List[str]) -> float:
-        text = f"{item.get('uri', '')} {cls._recall_abstract(item)}".lower()
-        overlap_boost = min(0.2, sum(1 for token in query_tokens if token in text) * 0.05)
-        leaf_boost = 0.12 if item.get("level") == 2 else 0.0
-        return cls._clamp_score(item.get("score")) + leaf_boost + overlap_boost
-
     @classmethod
     def _select_recall_candidates(cls, items: List[Dict[str, Any]], query: str, *, limit: int, score_threshold: float) -> List[Dict[str, Any]]:
+        """Threshold + dedupe (uri, then abstract key), ranked by score + L2 leaf boost + query-token overlap."""
+        tokens = ["".join(ch for ch in raw if ch.isalnum()) for raw in query.lower().replace("_", " ").split()]
+        tokens = [token for token in tokens if len(token) >= 2][:8]
+
+        def rank(item: Dict[str, Any]) -> float:
+            text = f"{item.get('uri', '')} {cls._recall_abstract(item)}".lower()
+            overlap_boost = min(0.2, sum(1 for token in tokens if token in text) * 0.05)
+            return cls._clamp_score(item.get("score")) + (0.12 if item.get("level") == 2 else 0.0) + overlap_boost
+
         seen_uri, seen_key = set(), set()
         filtered: List[Dict[str, Any]] = []
         for item in items:
@@ -2050,8 +2043,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             seen_uri.add(uri)
             seen_key.add(key)
             filtered.append(item)
-        tokens = cls._query_tokens(query)
-        filtered.sort(key=lambda item: cls._recall_rank(item, tokens), reverse=True)
+        filtered.sort(key=rank, reverse=True)
         return filtered[:limit]
 
     def _resolve_recall_content(self, client: _VikingClient, item: Dict[str, Any], *, prefer_abstract: bool,
@@ -2304,32 +2296,25 @@ class OpenVikingMemoryProvider(MemoryProvider):
         with self._committed_session_lock:
             return sid in self._committed_session_ids
 
-    def _mark_session_committed(self, sid: str) -> None:
+    def _mark_session_committed(self, sid: str, committed: bool = True) -> None:
+        """Latch (or, with ``committed=False``, re-arm) the per-sid commit guard. Re-arming is
+        for in-place compression: it keeps the same live id, which would otherwise reject every later commit."""
         with self._committed_session_lock:
-            self._committed_session_ids.add(sid)
+            (self._committed_session_ids.add if committed else self._committed_session_ids.discard)(sid)
 
-    def _clear_session_committed(self, sid: str) -> None:
-        """Re-arm the commit guard for a still-live session (in-place compression keeps the
-        same id; the per-sid latch would otherwise reject every later commit for it)."""
-        with self._committed_session_lock:
-            self._committed_session_ids.discard(sid)
-
-    def _state_path(self, relative_dir: Path, name: str, suffix: str) -> Optional[Path]:
+    def _state_path(self, kind: str, name: str) -> Optional[Path]:
+        """Marker/lock file under HERMES_HOME: ``pending`` -> pending_sessions/<sid>.json,
+        ``lock`` -> runs/<run_id>.lock; an empty run id maps to the legacy recovery lock."""
         name = str(name or "").strip()
-        if not name or not self._hermes_home:
+        if not self._hermes_home:
             return None
-        return Path(self._hermes_home) / relative_dir / f"{quote(name, safe='')}{suffix}"
-
-    def _pending_session_marker_path(self, sid: str) -> Optional[Path]:
-        return self._state_path(_PENDING_SESSIONS_RELATIVE_DIR, sid, ".json")
-
-    def _run_lock_path_for(self, run_id: str) -> Optional[Path]:
-        return self._state_path(_RUN_LOCKS_RELATIVE_DIR, run_id, ".lock")
-
-    def _recovery_lock_path_for(self, owner_run_id: str) -> Optional[Path]:
-        if str(owner_run_id or "").strip():
-            return self._run_lock_path_for(owner_run_id)
-        return Path(self._hermes_home) / _RUN_LOCKS_RELATIVE_DIR / _LEGACY_RECOVERY_LOCK_FILENAME if self._hermes_home else None
+        if kind == "lock" and not name:
+            return Path(self._hermes_home) / _RUN_LOCKS_RELATIVE_DIR / _LEGACY_RECOVERY_LOCK_FILENAME
+        if not name:
+            return None
+        if kind == "pending":
+            return Path(self._hermes_home) / _PENDING_SESSIONS_RELATIVE_DIR / f"{quote(name, safe='')}.json"
+        return Path(self._hermes_home) / _RUN_LOCKS_RELATIVE_DIR / f"{quote(name, safe='')}.lock"
 
     @staticmethod
     def _flock_open(path: Path):
@@ -2359,7 +2344,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 logger.debug("Could not %s OpenViking %s %s: %s", verb, label, path, e)
 
     def _acquire_run_lock(self) -> None:
-        path = None if self._run_lock_path is not None else self._run_lock_path_for(self._run_id)
+        path = None if self._run_lock_path is not None else self._state_path("lock", self._run_id)
         if path is None:
             return
         if fcntl is None:
@@ -2384,7 +2369,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         owner_run_id = str(owner_run_id or "").strip()
         if owner_run_id == self._run_id:
             return False, None
-        path = self._recovery_lock_path_for(owner_run_id)
+        path = self._state_path("lock", owner_run_id)
         if path is None:
             return False, None
         if fcntl is None:
@@ -2401,15 +2386,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 logger.debug("Skipping OpenViking pending-session recovery for owner %s; could not check run lock %s: %s", owner_run_id, path, e)
             return False, None
 
-    def _release_owner_run_claim(self, owner_run_id: str, lock_file: Optional[Any]) -> None:
-        owner_run_id = str(owner_run_id or "").strip()
-        path = None if owner_run_id == self._run_id else self._recovery_lock_path_for(owner_run_id)
-        self._flock_close(lock_file, path, "owner run lock")
-
     def _mark_session_pending(self, sid: str) -> None:
         if not sid or self._has_committed_session(sid) or sid in self._pending_marked_sids:
             return
-        path = self._pending_session_marker_path(sid)
+        path = self._state_path("pending", sid)
         if path is None:
             return
         if self._run_lock_path is None:
@@ -2424,7 +2404,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def _clear_pending_session(self, sid: str) -> None:
         self._pending_marked_sids.discard(sid)
-        path = self._pending_session_marker_path(sid)
+        path = self._state_path("pending", sid)
         if path is None:
             return
         try:
@@ -2454,17 +2434,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 sessions.append((sid, owner_run_id))
         return sessions
 
-    def _claim_deferred_sid(self, sid: str) -> bool:
+    def _claim_deferred_sid(self, sid: str, *, release: bool = False) -> bool:
         """Dedupe: one finalizer per sid at a time; never claim after shutdown began."""
         with self._deferred_commit_lock:
+            if release:
+                self._deferred_commit_sids.discard(sid)
+                return True
             if self._shutting_down or sid in self._deferred_commit_sids:
                 return False
             self._deferred_commit_sids.add(sid)
             return True
-
-    def _release_deferred_sid(self, sid: str) -> None:
-        with self._deferred_commit_lock:
-            self._deferred_commit_sids.discard(sid)
 
     def _recover_pending_sessions(self) -> None:
         """Commit sessions left pending by dead runs, one thread per former owner."""
@@ -2490,9 +2469,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
                             elif not self._shutting_down:
                                 self._commit_session(pending_sid, 0, context="during startup recovery", clear_missing=True)
                         finally:
-                            self._release_deferred_sid(pending_sid)
+                            self._claim_deferred_sid(pending_sid, release=True)
                 finally:
-                    self._release_owner_run_claim(owner, lock_file)
+                    self._flock_close(lock_file, None if owner == self._run_id else self._state_path("lock", owner), "owner run lock")
 
             self._spawn_deferred_commit(f"openviking-recover-owner-{owner_run_id or 'legacy'}", _recover_owner)
 
@@ -2535,7 +2514,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 if not self._shutting_down and self._session_needs_commit(sid, turn_count):
                     self._commit_session(sid, turn_count, context=context)
             finally:
-                self._release_deferred_sid(sid)
+                self._claim_deferred_sid(sid, release=True)
 
         self._spawn_deferred_commit(f"openviking-finalize-{sid}", _finalize)
 
@@ -2593,7 +2572,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 # In-place compression keeps the same (still live) sid, which compress_context()
                 # just committed and latched. Re-arm so later commits aren't rejected. Rotation
                 # mode is untouched: the old id stays latched to dedupe its async finalizer.
-                self._clear_session_committed(old_session_id)
+                self._mark_session_committed(old_session_id, committed=False)
 
         if not rotate:
             logger.debug("OpenViking on_session_switch skipped rotation: session=%s rewound=%s", old_session_id, rewound)
