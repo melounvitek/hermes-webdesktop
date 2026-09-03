@@ -1,11 +1,8 @@
 """Live compression: config hot-reload onto a running agent, pending model switch apply, /compress
-(CompressionLockHeld when a turn holds the lock), session-key sync after compress.
-
-Bodies are rebound onto server.py's globals (method_ctx.bind_module) and reference them bare.
-"""
+(CompressionLockHeld when a turn holds the lock), session-key sync after compress. Bodies are rebound
+onto server.py's globals (method_ctx.bind_module) and reference them bare."""
 
 from __future__ import annotations
-
 
 import contextlib
 
@@ -14,15 +11,13 @@ from .method_ctx import bind_module
 
 def _tui_compression_config_signature(cfg: dict | None) -> tuple:
     """Stable snapshot of compression/context keys that must apply next turn: the messaging-gateway
-    cache-busting extract (same key set as messaging) plus ``idle_compact_after_seconds`` and
-    ``tail_mode`` (affect live TUI sessions, not in the gateway tuple)."""
+    cache-busting extract plus ``idle_compact_after_seconds``/``tail_mode`` (live-TUI-only keys)."""
     from gateway.run import GatewayRunner
 
     keys = GatewayRunner._extract_cache_busting_config(cfg)
     picked = {k: v for k, v in keys.items() if k.startswith("compression.") or k == "model.context_length"}
     compression = cfg.get("compression") if isinstance(cfg, dict) and isinstance(cfg.get("compression"), dict) else {}
-    for extra in ("idle_compact_after_seconds", "tail_mode"):
-        picked[f"compression.{extra}"] = compression.get(extra)
+    picked.update({f"compression.{k}": compression.get(k) for k in ("idle_compact_after_seconds", "tail_mode")})
     return tuple(sorted(picked.items()))
 
 
@@ -31,7 +26,6 @@ def _compressor_ctor_default(name: str, fallback: Any) -> Any:
     construction path's derivation instead of a hardcoded copy that could drift."""
     try:
         import inspect
-
         from agent.context_compressor import ContextCompressor
 
         default = inspect.signature(ContextCompressor.__init__).parameters[name].default
@@ -52,13 +46,11 @@ def _derived_default_threshold_percent(agent: Any, compression: dict) -> float:
         from agent.agent_init import _resolve_compression_threshold
         from agent.auxiliary_client import _compression_threshold_for_model, _is_codex_gpt54_or_gpt55, _is_codex_spark
 
-        model = getattr(agent, "model", "") or ""
-        provider = getattr(agent, "provider", "") or ""
+        model, provider = getattr(agent, "model", "") or "", getattr(agent, "provider", "") or ""
         autoraise_enabled = str(compression.get("codex_gpt55_autoraise", True)).lower() in {"true", "1", "yes"}
-        model_cthresh = _compression_threshold_for_model(model, provider, allow_codex_gpt55_autoraise=autoraise_enabled)
         pct, _notice = _resolve_compression_threshold(
-            pct, model_cthresh, model=model,
-            is_codex_autoraise=_is_codex_gpt54_or_gpt55(model, provider) or _is_codex_spark(model, provider),
+            pct, _compression_threshold_for_model(model, provider, allow_codex_gpt55_autoraise=autoraise_enabled),
+            model=model, is_codex_autoraise=_is_codex_gpt54_or_gpt55(model, provider) or _is_codex_spark(model, provider),
         )
     except Exception:
         pass
@@ -76,15 +68,11 @@ _COMPRESSION_INT_KEYS = (
 
 
 def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
-    """Update a live session's compressor from current config.yaml, preserving the agent object, session
-    identity, history and callbacks. Recomputes the trigger from the ratio threshold, then applies
-    ``compression.threshold_tokens`` so raising/lowering/clearing the cap lands next preflight.
-
-    Every adopted key has UNSET semantics: a removed key restores the normalized default (or the
-    model-derived value) through the construction path's own derivation (ctor signature defaults, Codex
-    autoraise, deferred context-length re-inference). Acting only on PRESENT keys would leave stale
-    values active forever.
-    """
+    """Update a live session's compressor in place from current config.yaml (agent object, session
+    identity, history and callbacks preserved). Every adopted key has UNSET semantics: a removed key
+    restores the normalized default (or model-derived value) through the construction path's own
+    derivation (ctor signature defaults, Codex autoraise, deferred context-length re-inference) —
+    acting only on PRESENT keys would leave stale values active forever."""
     cfg = cfg if isinstance(cfg, dict) else {}
     compression = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
@@ -184,12 +172,9 @@ def _sync_agent_compression_with_config(sid: str, session: dict) -> None:
 
 
 def _apply_pending_model_switch(sid: str, session: dict) -> None:
-    """Apply a model switch queued (``session["pending_model_switch"]``) while a turn was running.
-
-    Runs on the TURN thread at turn start — nothing in flight — so the in-place swap (client rebuild)
-    is safe. A failed switch keeps the current model and never blocks the turn, matching
-    ``_sync_agent_model_with_config``.
-    """
+    """Apply a model switch queued (``session["pending_model_switch"]``) while a turn was running. Runs on
+    the TURN thread at turn start — nothing in flight — so the in-place swap (client rebuild) is safe. A
+    failed switch keeps the current model and never blocks the turn."""
     pending = session.pop("pending_model_switch", None)
     if not pending or session.get("agent") is None:
         return
@@ -218,13 +203,10 @@ def _compress_session_history(
     before_messages: list | None = None, history_version: int | None = None,
 ) -> tuple[int, dict]:
     """Single choke point for all manual-compress routes (session.compress RPC, command.dispatch
-    /compress|/compact, slash-exec mirror).
-
-    ``focus_topic`` is the RAW argument string after ``/compress``, parsed HERE (not per-route) with
-    :func:`parse_partial_compress_args` so boundary forms (``here [N]``, ``up to here``, ``--keep N``)
-    trigger a partial compress on EVERY route — otherwise "/compress here 3" would run a FULL compress
-    focused on the literal text "here 3". Mirrors cli.py ``_manual_compress`` / gateway slash_commands.
-    """
+    /compress|/compact, slash-exec mirror). ``focus_topic`` is the RAW argument string after
+    ``/compress``, parsed HERE (not per-route) so boundary forms (``here [N]``, ``up to here``,
+    ``--keep N``) trigger a partial compress on EVERY route — otherwise "/compress here 3" would run a
+    FULL compress focused on the literal text "here 3"."""
     from agent.conversation_compression import finalize_context_engine_compression_notification
     from agent.model_metadata import estimate_request_tokens_rough
     from hermes_cli.partial_compress import (
@@ -287,14 +269,11 @@ def _compress_session_history(
 def _sync_session_key_after_compress(
     sid: str, session: dict, *, clear_pending_title: bool = True, restart_slash_worker: bool = True
 ) -> None:
-    """Re-anchor the gateway-side ``session_key`` when _compress_context rotates ``agent.session_id``
-    to a SessionDB continuation; otherwise approval routing, slash worker init, DB title/history
-    lookups and yolo state keep targeting the ended parent.
-
-    clear_pending_title: True for manual /compress (title belongs to the old session); False for
-    post-turn auto-compression so pending_title applies to the continuation.
-    restart_slash_worker: True unless the caller manages the worker (it holds the stale key).
-    """
+    """Re-anchor the gateway-side ``session_key`` when _compress_context rotates ``agent.session_id`` to
+    a SessionDB continuation; otherwise approval routing, slash worker init, DB title/history lookups
+    and yolo state keep targeting the ended parent. ``clear_pending_title``: True for manual /compress
+    (title belongs to the old session), False for post-turn auto-compression. ``restart_slash_worker``:
+    False only when the caller manages the worker (it holds the stale key)."""
     agent = session.get("agent")
     new_session_id = getattr(agent, "session_id", None) or ""
     old_key = session.get("session_key", "") or ""

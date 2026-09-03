@@ -38,10 +38,9 @@ def _session_home(session: dict) -> Path:
 
 
 def _retire_turn_marker(session: dict, *keys: str) -> None:
-    """Drop the crash marker for a turn whose outcome is about to reach the client. Called right before
-    the terminal frame, not at turn-thread end: post-turn work (titles, memory sync, goal hooks) outlives
-    the client's answer, and quitting in that window would leave a marker that re-runs a finished turn
-    on next launch. Extra ``keys`` cover a session_key that compression rotated mid-turn."""
+    """Drop the crash marker right before the terminal frame (not at turn-thread end: post-turn work
+    outlives the client's answer, and quitting in that window would leave a marker that re-runs a
+    finished turn). Extra ``keys`` cover a session_key that compression rotated mid-turn."""
     home = _session_home(session)
     for key in dict.fromkeys((*keys, str(session.get("session_key") or ""))):
         if key:
@@ -68,10 +67,9 @@ def _ac_release_turn(session: dict, *, unschedule: bool = False) -> None:
 
 
 def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> dict | None:
-    """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths, once the
-    live record is registered). Returns a descriptor for the resume payload when scheduled, else None.
-    The turn runs on a background thread after the deferred agent build via the normal
-    _run_prompt_submit path, so the client that just resumed streams it live."""
+    """Kick off a continuation turn for a crash-interrupted session (session.resume cold paths). Returns a
+    descriptor for the resume payload when scheduled, else None. The turn runs on a background thread
+    after the deferred agent build via _run_prompt_submit, so the client that just resumed streams it."""
     # Hosted room turns are recovered by their durable task/lease state machine; generic auto-continue
     # would bypass its execution generation and duplicate work.
     if session.get("source") == "bot_room":
@@ -137,11 +135,9 @@ def _ac_inflight_original(session: dict) -> str:
 
 
 def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[str] | None = None) -> None:
-    """Stash a message to run as the very next turn once the live one ends. Text-only arrivals share a
-    slot and merge losslessly (like the consecutive-user merge in ``repair_message_sequence``);
-    image-bearing ones stay separate envelopes so attachment ownership/chronology survive.
-    ``transport`` is pinned so the drained turn streams back to its sender even if the session
-    transport is rebound."""
+    """Queue a message for the next turn. Text-only arrivals share a slot and merge losslessly (like the
+    consecutive-user merge in ``repair_message_sequence``); image-bearing ones stay separate envelopes so
+    attachment chronology survives. ``transport`` is pinned so the drained turn streams to its sender."""
     image_paths = list(image_paths or [])
     # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}"
     # and re-fire the original after a correction settles.
@@ -168,10 +164,9 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
 
 
 def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict | None:
-    """Drop (``None``) or rewrite a queue envelope that re-carries the live user text: text-only
-    self-duplicates are dropped; a merged slot ``"{original}\\n\\n{later}"`` is rewritten to ``later`` so
-    the correction survives without re-firing the original. Image-bearing envelopes are left alone
-    (chronology is load-bearing)."""
+    """Drop (``None``) a text-only self-duplicate of the live user text, or rewrite a merged slot
+    ``"{original}\\n\\n{later}"`` to ``later`` so the correction survives without re-firing the original.
+    Image-bearing envelopes are left alone (chronology is load-bearing)."""
     if not isinstance(entry, dict):
         return None
     text = entry.get("text")
@@ -190,10 +185,8 @@ def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict |
 
 
 def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
-    """Remove server-queue copies of the live turn's original user text. A mid-turn ``prompt.submit`` of
-    the same text can be queued while redirect is unavailable (build window, tool boundary); after a
-    later redirect it must not drain and restart the original as a fresh turn. Unrelated follow-ups
-    stay."""
+    """Remove server-queue copies of the live turn's original user text: a mid-turn ``prompt.submit`` of
+    the same text queued while redirect was unavailable must not drain and restart the original."""
     original = _ac_inflight_original(session)
     if not original:
         return
@@ -213,10 +206,9 @@ def _ac_set_queue(session: dict, entries: list) -> None:
 
 
 def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
-    """Interrupt a busy turn on a worker thread, never under ``history_lock``: some providers can't apply
-    ``interrupt()`` until a blocking tool/network call returns, and doing it inline stalled
-    ``session.resume`` and the queued prompt. At most one interrupt worker per session so repeated
-    steering can't leak threads."""
+    """Interrupt a busy turn on a worker thread, never under ``history_lock`` (some providers can't apply
+    ``interrupt()`` until a blocking call returns; inline it stalled ``session.resume``). At most one
+    interrupt worker per session so repeated steering can't leak threads."""
     use_agent = agent is not None and hasattr(agent, "interrupt")
     if not use_agent and not _session_uses_compute_host(session):
         return
@@ -257,12 +249,11 @@ def _ac_try_correction(rid, session: dict, agent: Any, method: str, plain_text: 
 
 
 def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False) -> dict | None:
-    """Apply ``display.busy_input_mode`` to a prompt that lands mid-turn instead of rejecting it with
-    ``session busy`` (rejection made clients busy-retry and silently drop sends when teardown outlived
-    their deadline). Modes: ``interrupt`` (default) → redirect the live turn, falling back to hard
-    interrupt + queue for older agents; ``queue`` → queue only; ``steer`` → inject after the current
-    atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run after" message must
-    NEVER become a live-turn correction, even when the drain loses the settle race."""
+    """Apply ``display.busy_input_mode`` to a prompt that lands mid-turn instead of rejecting it (rejection
+    made clients busy-retry and silently drop sends). ``interrupt`` (default) → redirect the live turn,
+    falling back to hard interrupt + queue for older agents; ``queue`` → queue only; ``steer`` → inject
+    after the current atomic action. ``queued=True`` (client queue drain) forces queue mode: a "run
+    after" message must NEVER become a live-turn correction, even if the drain loses the settle race."""
     mode = "queue" if queued else _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
@@ -303,9 +294,8 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
 
 
 def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
-    """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched:
-    the caller skips lower-priority follow-ups this cycle (the user's message wins). Claim-under-lock
-    like the goal-continuation re-fire."""
+    """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the
+    caller skips lower-priority follow-ups this cycle (the user's message wins)."""
     with session["history_lock"]:
         if session.get("_closing"):
             return False
@@ -389,11 +379,9 @@ def _emit_terminal_turn_error(
     sid: str, session: dict, error: Any, error_surface: Optional[dict] = None, *, retire_marker: bool = True
 ) -> None:
     """Close a failed turn with the same ``status: "error"`` ``message.complete`` frame as
-    ``_run_prompt_submit``'s returned-error path, retaining the turn via ``_fail_inflight_turn`` so a
-    client that missed the frame recovers it from ``session.resume``'s ``inflight``. Callers that know
-    the failing layer pass ``error_surface``; exception callers leave it None and it is classified here
-    ({layer, code, retryable} so the desktop can say "Provider error" / "Gateway error"; advisory,
-    never raises)."""
+    ``_run_prompt_submit``'s returned-error path, retaining the turn (``_fail_inflight_turn``) so a client
+    that missed the frame recovers it from ``session.resume``'s ``inflight``. ``error_surface`` ({layer,
+    code, retryable}) is classified here from an exception when the caller doesn't know the layer."""
     agent = session.get("agent")
     if error_surface is None and isinstance(error, BaseException):
         try:
