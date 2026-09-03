@@ -130,8 +130,7 @@ def _row_to_index_entry(row: dict) -> dict:
         except (TypeError, ValueError):
             pass
     if not origin:  # pre-origin_json rows: synthesize the minimal origin from columns
-        origin = {k: row.get(k) for k in ("chat_id", "chat_type", "thread_id", "user_id")}
-        origin["platform"] = row.get("source", "")
+        origin = {"platform": row.get("source", ""), **{k: row.get(k) for k in ("chat_id", "chat_type", "thread_id", "user_id")}}
 
     input_tokens = int(row.get("input_tokens") or 0)
     output_tokens = int(row.get("output_tokens") or 0)

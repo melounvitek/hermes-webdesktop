@@ -308,7 +308,7 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[st
     """
     toolset = TOOLSETS.get(name)
     if not include_registry:
-        return {**toolset, "tools": list(toolset["tools"]), "includes": list(toolset["includes"])} if toolset else None
+        return {**toolset, "tools": list(toolset.get("tools", [])), "includes": list(toolset.get("includes", []))} if toolset else None
 
     registry = _registry()
     if registry is None:
@@ -373,7 +373,10 @@ def _plugin_platform_bundle(name: str) -> List[str]:
     except Exception:
         return []
     tools = set(_HERMES_CORE_TOOLS)
-    tools.update(e.name for e in _registry_call("get_all_entries", ()) if e.toolset == platform_name)
+    try:
+        tools.update(e.name for e in _registry_call("get_all_entries", ()) if e.toolset == platform_name)
+    except Exception:
+        pass
     return list(tools)
 
 
