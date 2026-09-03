@@ -16,8 +16,7 @@ from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
 from tools.mcp_tool_content import (
     _MCP_HARD_RESULT_CAP_CHARS, _cache_mcp_audio_block, _cache_mcp_image_block,
-    _render_mcp_resource_block, _strip_reserved_meta_keys, _truncate_mcp_text_result,
-)
+    _render_mcp_resource_block, _strip_reserved_meta_keys, _truncate_mcp_text_result)
 from tools.mcp_tool_errors import _is_session_expired_error
 
 logger = logging.getLogger("tools.mcp_tool")

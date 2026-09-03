@@ -246,8 +246,7 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
         new_servers = {
             k: v for k, v in servers.items()
             if k not in _core._servers and k not in connecting and k not in _core._lazy_server_configs
-            and _enabled(v) and not _core._connect_cooldown_active(k)
-        }
+            and _enabled(v) and not _core._connect_cooldown_active(k)}
         stale_cached = [_core._servers[k] for k in servers
                         if k in _core._servers and getattr(_core._servers[k], "session", None) is None]
         _core._server_connecting.update(new_servers)

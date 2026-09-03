@@ -25,9 +25,7 @@ _MCP_INJECTION_PATTERNS = [
         (r"(curl|wget|fetch)\s+https?://", "network command in description"),
         (r"base64\.(b64decode|decodebytes)", "base64 decode reference"),
         (r"exec\s*\(|eval\s*\(", "code execution reference"),
-        (r"import\s+(subprocess|os|shutil|socket)", "dangerous import reference"),
-    )
-]
+        (r"import\s+(subprocess|os|shutil|socket)", "dangerous import reference"))]
 
 
 def _scan_mcp_description(server_name: str, tool_name: str, description: str) -> List[str]:
@@ -126,13 +124,11 @@ def sanitize_mcp_name_component(value: str) -> str:
 # double underscore disambiguates the server/tool boundary even when either contains
 # underscores, and matches the Anthropic-OAuth wire form.
 MCP_TOOL_NAME_PREFIX = "mcp__"
-_MCP_NAME_DELIM = "__"
 
 
 def mcp_prefixed_tool_name(server_name: str, tool_name: str) -> str:
     """Registry/wire name: ``mcp__<sanitizedServer>__<sanitizedTool>``."""
-    safe_server, safe_tool = sanitize_mcp_name_component(server_name), sanitize_mcp_name_component(tool_name)
-    return f"{MCP_TOOL_NAME_PREFIX}{safe_server}{_MCP_NAME_DELIM}{safe_tool}"
+    return f"{MCP_TOOL_NAME_PREFIX}{sanitize_mcp_name_component(server_name)}__{sanitize_mcp_name_component(tool_name)}"
 
 
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
@@ -160,10 +156,8 @@ _UTILITY_TOOL_SPECS = (
              "type": "object",
              "description": "Optional arguments to pass to the prompt",
              "properties": {},
-             "additionalProperties": True,
-         },
-     }, ["name"]),
-)
+             "additionalProperties": True},
+     }, ["name"]))
 
 
 def _build_utility_schemas(server_name: str) -> List[dict]:
@@ -177,10 +171,8 @@ def _build_utility_schemas(server_name: str) -> List[dict]:
             "schema": {
                 "name": mcp_prefixed_tool_name(server_name, handler_key),
                 "description": description.format(server=server_name),
-                "parameters": parameters,
-            },
-            "handler_key": handler_key,
-        })
+                "parameters": parameters},
+            "handler_key": handler_key})
     return out
 
 
@@ -207,15 +199,10 @@ def matches_name_filter(tool_name: str, patterns: set[str]) -> bool:
     return any(fnmatch.fnmatchcase(tool_name, p) for p in patterns if "*" in p or "?" in p or "[" in p)
 
 
-# Utility handler -> ClientSession method it needs (legacy gate when no initialize_result
-# was captured).
-_UTILITY_CAPABILITY_METHODS = {key: key for key, *_ in _UTILITY_TOOL_SPECS}
-
 # Utility handler -> capability key that must be non-None on the server's ``initialize``
 # response for the handler to be registered. Without this gate a tools-only server got all
 # four stubs and every call returned JSON-RPC -32601, making the model conclude the server
 # was broken.
 _UTILITY_CAPABILITY_ATTRS = {
     "list_resources": "resources", "read_resource": "resources",
-    "list_prompts": "prompts", "get_prompt": "prompts",
-}
+    "list_prompts": "prompts", "get_prompt": "prompts"}

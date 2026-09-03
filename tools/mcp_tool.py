@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """MCP (Model Context Protocol) client: connects to the ``mcp_servers`` configured in
-~/.hermes/config.yaml over stdio, Streamable HTTP or SSE, discovers their tools and
-registers them into the hermes tool registry. The ``mcp`` package is optional; without
-it this module is a no-op.
+~/.hermes/config.yaml (stdio, Streamable HTTP or SSE), discovers their tools and registers them
+into the hermes tool registry. The ``mcp`` package is optional (no-op without it).
 
-Architecture: one background event loop (``_mcp_loop``) in a daemon thread; each server
-is a long-lived Task on it (``MCPServerTask``) so the transport's anyio cancel scopes are
-entered and exited in the same Task. Tool calls are scheduled onto the loop via
-``run_coroutine_threadsafe``; every mutation of ``_servers`` / loop handles holds ``_lock``.
-This module keeps the SDK loader, the ``MCPServerTask`` shell and all shared module state;
-the ``mcp_tool_*`` siblings read it back through ``tools.mcp_tool`` at call time (never by
-value) and every one of their names is re-exported here so ``from tools.mcp_tool import X``
-and ``mock.patch("tools.mcp_tool.X")`` keep working.
-"""
+One background event loop (``_mcp_loop``) in a daemon thread runs each server as a long-lived
+Task (``MCPServerTask``) so the transport's anyio cancel scopes enter and exit in one Task; every
+``_servers``/loop mutation holds ``_lock``. This module keeps the SDK loader, ``MCPServerTask`` and
+all shared state; the ``mcp_tool_*`` siblings read it back through ``tools.mcp_tool`` at call
+time and every name they define is re-exported here so ``patch("tools.mcp_tool.X")`` works."""
 
 import asyncio
 import contextvars
@@ -30,52 +25,42 @@ logger = logging.getLogger(__name__)
 
 from tools.mcp_tool_common import (  # noqa: F401
     _DEFAULT_TOOL_TIMEOUT, _env_ref_name, _exc_str, _get_lifecycle_seconds, _jittered,
-    _parse_boolish, _resolve_tool_timeout, _safe_numeric, _sanitize_error, mcp_field,
-)
+    _parse_boolish, _resolve_tool_timeout, _safe_numeric, _sanitize_error, mcp_field)
 from tools.mcp_tool_schema import (  # noqa: F401
     MCP_TOOL_NAME_PREFIX, _build_utility_schemas, _convert_mcp_schema, _normalize_mcp_input_schema,
-    _scan_mcp_description, matches_name_filter, mcp_prefixed_tool_name, sanitize_mcp_name_component,
-)
+    _scan_mcp_description, matches_name_filter, mcp_prefixed_tool_name, sanitize_mcp_name_component)
 from tools.mcp_tool_content import (  # noqa: F401
     _MCP_HARD_RESULT_CAP_CHARS, _MCP_RESOURCE_MAX_B64_CHARS, _MCP_RESOURCE_MAX_BYTES,
     _cache_mcp_audio_block, _cache_mcp_image_block, _is_reserved_mcp_meta_key,
     _mcp_image_extension_for_mime_type, _mcp_resource_filename, _render_mcp_resource_block,
-    _truncate_mcp_text_result,
-)
+    _truncate_mcp_text_result)
 from tools.mcp_tool_errors import (  # noqa: F401
     InvalidMcpUrlError, NonMcpEndpointError, _EXC_TRAVERSAL_MAX_NODES,
     _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION, _classify_mcp_failure, _format_connect_error,
     _handshake_rejected_as_modern, _is_auth_error, _is_method_not_found_error,
     _is_session_expired_error, _make_redirect_header_stripper, _resolve_client_cert,
-    _resolve_identity_header, _unwrap_exception_group, _validate_remote_mcp_url,
-)
+    _resolve_identity_header, _unwrap_exception_group, _validate_remote_mcp_url)
 from tools.mcp_tool_config import (  # noqa: F401
     _ENV_VAR_PATTERN, _build_safe_env, _filter_suspicious_mcp_servers, _get_mcp_stderr_log,
     _interpolate_env_vars, _load_mcp_config, _resolve_stdio_command, _warn_hidden_whitespace,
-    _whitespace_warned, _workspace_folder, _wrap_command_with_watchdog, _write_stderr_log_header,
-)
+    _whitespace_warned, _workspace_folder, _wrap_command_with_watchdog, _write_stderr_log_header)
 from tools.mcp_tool_sampling import (  # noqa: F401
-    ElicitationHandler, SamplingHandler, _format_elicitation_schema_summary,
-)
+    ElicitationHandler, SamplingHandler, _format_elicitation_schema_summary)
 from tools.mcp_tool_handlers import (  # noqa: F401
     _handle_auth_error_and_retry, _handle_session_expired_and_retry, _make_check_fn,
     _make_get_prompt_handler, _make_list_prompts_handler, _make_list_resources_handler,
-    _make_read_resource_handler, _make_tool_handler,
-)
+    _make_read_resource_handler, _make_tool_handler)
 from tools.mcp_tool_registration import (  # noqa: F401
     _annotation_read_only_hint, _existing_tool_names, _forget_mcp_tool_server,
     _normalize_server_trust, _register_from_cache_sync, _register_server_tools,
-    _select_utility_schemas, _track_mcp_tool_server,
-)
+    _select_utility_schemas, _track_mcp_tool_server)
 from tools.mcp_tool_lifecycle import (  # noqa: F401
     _drain_and_stop_mcp_loop, _drain_mcp_loop_tasks, _filter_mcp_children,
     _kill_orphaned_mcp_children, _orphan_stdio_pid_servers, _orphan_stdio_pids,
-    _snapshot_child_pids, _stdio_pgids, _stdio_pids, _stop_mcp_loop_if_idle, shutdown_mcp_servers,
-)
+    _snapshot_child_pids, _stdio_pgids, _stdio_pids, _stop_mcp_loop_if_idle, shutdown_mcp_servers)
 from tools.mcp_tool_agent import (  # noqa: F401
     _reinject_post_build_tools, persist_agent_tool_names, refresh_agent_mcp_tools,
-    reprobe_tool_availability, restore_agent_tool_prefix,
-)
+    reprobe_tool_availability, restore_agent_tool_prefix)
 from tools.mcp_tool_transport import MCPServerTransportMixin
 from tools.mcp_tool_server_run import MCPServerRunMixin
 from tools.mcp_tool_health import MCPServerHealthMixin
@@ -83,15 +68,13 @@ from tools.mcp_tool_loop import (  # noqa: F401
     _running_loop, _LockCookie, _acquire_lock_on_fh, _try_acquire_mcp_discovery_lock,
     _mcp_loop_exception_handler, _wrap_with_home_override, _wrap_with_dashboard_oauth_flow,
     _run_on_mcp_loop, _signal_reconnect, reconnect_mcp_server, _wait_for_server_session_ready,
-    _signal_reconnect_and_wait, _ensure_mcp_loop, _stop_mcp_loop,
-)
+    _signal_reconnect_and_wait, _ensure_mcp_loop, _stop_mcp_loop)
 from tools.mcp_tool_discovery import (  # noqa: F401
     _record_connect_failure, _clear_connect_failure, _connect_cooldown_active, _connect_server,
     _request_lazy_reconnect, _resolve_server_lazy, _ensure_lazy_server_connected,
     _get_connected_server_for_call, _discover_and_register_server, register_mcp_servers,
     discover_mcp_tools, is_mcp_tool_parallel_safe, get_mcp_status, probe_mcp_server_tools,
-    has_registered_mcp_tools, get_registered_mcp_server_names,
-)
+    has_registered_mcp_tools, get_registered_mcp_server_names)
 
 
 # Wall-clock bound on the (fail-open) OSV malware preflight run off the loop before a
@@ -104,15 +87,9 @@ _OSV_MALWARE_CHECK_TIMEOUT_S = 12.0
 # Optional MCP SDK: availability probe now, symbol import on first use
 # ---------------------------------------------------------------------------
 
-_MCP_AVAILABLE = False
-_MCP_HTTP_AVAILABLE = False
-_MCP_NEW_HTTP = False
-_MCP_LEGACY_HTTP = False
-_MCP_SAMPLING_TYPES = False
-_MCP_NOTIFICATION_TYPES = False
-_MCP_ELICITATION_TYPES = False
-_MCP_MESSAGE_HANDLER_SUPPORTED = False
-_MCP_LOGGING_CALLBACK_SUPPORTED = False
+_MCP_AVAILABLE = _MCP_HTTP_AVAILABLE = _MCP_NEW_HTTP = _MCP_LEGACY_HTTP = False
+_MCP_SAMPLING_TYPES = _MCP_NOTIFICATION_TYPES = _MCP_ELICITATION_TYPES = False
+_MCP_MESSAGE_HANDLER_SUPPORTED = _MCP_LOGGING_CALLBACK_SUPPORTED = False
 sse_client = None
 # Fallback for SDKs that don't export LATEST_PROTOCOL_VERSION (Streamable HTTP arrived
 # with 2025-03-26, so this stays valid for the HTTP path).
@@ -144,15 +121,21 @@ _MCP_SDK_LAZY_SYMBOLS = frozenset({
     "CreateMessageResult", "CreateMessageResultWithTools", "ErrorData", "SamplingCapability",
     "SamplingToolsCapability", "TextContent", "ToolUseContent", "ElicitRequestParams",
     "ElicitResult", "ServerNotification", "ToolListChangedNotification",
-    "PromptListChangedNotification", "ResourceListChangedNotification",
-})
+    "PromptListChangedNotification", "ResourceListChangedNotification"})
 
-# Optional SDK type families: (module, names, debug message when absent). Each is gated
+# Optional SDK type families (module, names, debug message when absent) bound in this order to
+# _MCP_SAMPLING_TYPES / _MCP_ELICITATION_TYPES / _MCP_NOTIFICATION_TYPES. Each is gated
 # separately so an older SDK only loses that feature, not MCP.
-_SAMPLING_TYPE_NAMES = ("CreateMessageResult", "CreateMessageResultWithTools", "ErrorData",
-                        "SamplingCapability", "SamplingToolsCapability", "TextContent", "ToolUseContent")
-_NOTIFICATION_TYPE_NAMES = ("ServerNotification", "ToolListChangedNotification",
-                            "PromptListChangedNotification", "ResourceListChangedNotification")
+_OPTIONAL_TYPE_FAMILIES = (
+    ("mcp.types", ("CreateMessageResult", "CreateMessageResultWithTools", "ErrorData", "SamplingCapability",
+                   "SamplingToolsCapability", "TextContent", "ToolUseContent"),
+     "MCP sampling types not available -- sampling disabled"),
+    ("mcp.types", ("ElicitRequestParams", "ElicitResult"),
+     "MCP elicitation types not available -- elicitation disabled"),
+    ("mcp.types", ("ServerNotification", "ToolListChangedNotification", "PromptListChangedNotification",
+                   "ResourceListChangedNotification"),
+     "MCP notification types not available -- dynamic tool discovery disabled"),
+)
 
 
 def __getattr__(name: str):
@@ -186,10 +169,9 @@ def _ensure_mcp_sdk() -> bool:
     and pre-installed mock symbols (``ClientSession`` already set means no re-import, so
     mocks are never clobbered).
     """
-    global _MCP_SDK_IMPORT_ATTEMPTED, _MCP_AVAILABLE, _MCP_HTTP_AVAILABLE
-    global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES
-    global _MCP_MESSAGE_HANDLER_SUPPORTED, _MCP_LOGGING_CALLBACK_SUPPORTED
-    global _MCP_NEW_HTTP, _MCP_LEGACY_HTTP, LATEST_HANDSHAKE_VERSION, sse_client
+    global _MCP_SDK_IMPORT_ATTEMPTED, _MCP_AVAILABLE, _MCP_HTTP_AVAILABLE, _MCP_NEW_HTTP, _MCP_LEGACY_HTTP
+    global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES, sse_client
+    global _MCP_MESSAGE_HANDLER_SUPPORTED, _MCP_LOGGING_CALLBACK_SUPPORTED, LATEST_HANDSHAKE_VERSION
     global _JSONRPC_METHOD_NOT_FOUND
 
     if not _MCP_AVAILABLE:
@@ -215,14 +197,8 @@ def _ensure_mcp_sdk() -> bool:
             if not _import_sdk_names("mcp.client.sse", ("sse_client",),
                                      "mcp.client.sse.sse_client not available -- SSE transport disabled"):
                 sse_client = None
-            _MCP_SAMPLING_TYPES = _import_sdk_names(
-                "mcp.types", _SAMPLING_TYPE_NAMES, "MCP sampling types not available -- sampling disabled")
-            _MCP_ELICITATION_TYPES = _import_sdk_names(
-                "mcp.types", ("ElicitRequestParams", "ElicitResult"),
-                "MCP elicitation types not available -- elicitation disabled")
-            _MCP_NOTIFICATION_TYPES = _import_sdk_names(
-                "mcp.types", _NOTIFICATION_TYPE_NAMES,
-                "MCP notification types not available -- dynamic tool discovery disabled")
+            _MCP_SAMPLING_TYPES, _MCP_ELICITATION_TYPES, _MCP_NOTIFICATION_TYPES = [
+                _import_sdk_names(*family) for family in _OPTIONAL_TYPE_FAMILIES]
         else:
             logger.debug("mcp package not installed -- MCP tool support disabled")
 
@@ -287,8 +263,7 @@ def _client_session_accepts(kwarg: str) -> bool:
 _MCP_LOG_LEVEL_MAP = {
     "debug": logging.DEBUG, "info": logging.INFO, "notice": logging.INFO,
     "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.ERROR,
-    "alert": logging.ERROR, "emergency": logging.ERROR,
-}
+    "alert": logging.ERROR, "emergency": logging.ERROR}
 
 # ---------------------------------------------------------------------------
 # Reconnect / keepalive tuning
@@ -338,7 +313,9 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
         else:
             # mcp 2.0 takes params=PaginatedRequestParams, 1.x takes cursor=.
             try:
-                _params_cls = getattr(_mcp_types(), "PaginatedRequestParams", None)
+                import mcp.types as _types  # late: keeps the SDK import lazy
+
+                _params_cls = getattr(_types, "PaginatedRequestParams", None)
                 if _params_cls is not None:
                     result = await list_method(params=_params_cls(cursor=cursor))
                 else:
@@ -363,12 +340,6 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
     return items
 
 
-def _mcp_types():
-    """Late import of ``mcp.types`` (module keeps the SDK import lazy)."""
-    import mcp.types as _t
-    return _t
-
-
 # ---------------------------------------------------------------------------
 # Server task -- each MCP server lives in one long-lived asyncio Task
 # ---------------------------------------------------------------------------
@@ -387,8 +358,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         "_recycled_reason", "initialize_result", "_ping_unsupported", "_list_cache_meta",
         "_reconnect_retries", "_session_proven", "_was_parked", "_inflight_tasks", "_reconnecting",
         "_suspect_reason", "_teardown_race", "_permanent_grace_used", "_stdio_child_pids",
-        "_ever_connected",
-    )
+        "_ever_connected")
 
     def __init__(self, name: str):
         self.name = name
@@ -417,10 +387,9 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # True from park until the session proves healthy again; logs the revival once.
         self._was_parked: bool = False
         # In-flight RPC tasks, so a reconnect/shutdown teardown can fail them fast instead of
-        # orphaning them on a dying transport.
+        # orphaning them on a dying transport; _reconnecting is True while such a deliberate
+        # teardown runs, letting _track_inflight_rpc turn the cancel into a retryable error.
         self._inflight_tasks: set = set()
-        # True while a deliberate teardown fails in-flight calls; lets _track_inflight_rpc
-        # turn the cancel into a retryable error.
         self._reconnecting: bool = False
         # Latched by races (teardown-vs-keepalive, auth-lock corruption); verified lazily by
         # ensure_healthy() before the next call.
@@ -445,9 +414,7 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # elicitation/create on a separate task that does not inherit HERMES_SESSION_PLATFORM;
         # replaying this context in the elicitation callback routes the prompt correctly.
         self._pending_call_context: Optional[contextvars.Context] = None
-        now = time.monotonic()
-        self._lifecycle_started_at: float = now
-        self._last_tool_call_at: float = now
+        self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
         self._idle_timeout_seconds: Optional[float] = None
         self._max_lifetime_seconds: Optional[float] = None
         self._recycled_reason: Optional[str] = None

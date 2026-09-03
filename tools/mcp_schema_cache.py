@@ -34,8 +34,7 @@ def config_fingerprint(config: dict) -> str:
         "url": config.get("url"),
         "transport": config.get("transport"),
         "tools_include": sorted(tools_filter.get("include") or []),
-        "tools_exclude": sorted(tools_filter.get("exclude") or []),
-    }
+        "tools_exclude": sorted(tools_filter.get("exclude") or [])}
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 

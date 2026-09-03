@@ -71,8 +71,7 @@ def _jittered(seconds: float) -> float:
 
 # Credential patterns to strip from error messages.
 _CREDENTIAL_PATTERN = re.compile(
-    r"(?:"
-    r"ghp_[A-Za-z0-9_]{1,255}"           # GitHub PAT
+    r"(?:ghp_[A-Za-z0-9_]{1,255}"           # GitHub PAT
     r"|sk-[A-Za-z0-9_]{1,255}"           # OpenAI-style key
     r"|Bearer\s+\S+"                      # Bearer token
     r"|token=[^\s&,;\"']{1,255}"         # token=...
@@ -81,8 +80,7 @@ _CREDENTIAL_PATTERN = re.compile(
     r"|password=[^\s&,;\"']{1,255}"      # password=...
     r"|secret=[^\s&,;\"']{1,255}"        # secret=...
     r")",
-    re.IGNORECASE,
-)
+    re.IGNORECASE)
 
 
 def _env_ref_name(ref: str) -> str:

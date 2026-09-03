@@ -10,12 +10,9 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional
 from tools.mcp_tool_common import _parse_boolish, _core, _resolve_tool_timeout
 from tools.mcp_tool_handlers import (
     _make_check_fn, _make_get_prompt_handler, _make_list_prompts_handler,
-    _make_list_resources_handler, _make_read_resource_handler,
-)
+    _make_list_resources_handler, _make_read_resource_handler)
 from tools.mcp_tool_schema import (
-    _UTILITY_CAPABILITY_ATTRS, _UTILITY_CAPABILITY_METHODS, _build_utility_schemas,
-    _normalize_name_filter, matches_name_filter,
-)
+    _UTILITY_CAPABILITY_ATTRS, _build_utility_schemas, _normalize_name_filter, matches_name_filter)
 
 if TYPE_CHECKING:  # pragma: no cover
     from tools.mcp_tool import MCPServerTask
@@ -26,8 +23,7 @@ _UTILITY_ORIGIN_PREFIX = "generated utility "
 # Utility tool key -> handler factory; each takes (server_name, tool_timeout).
 _UTILITY_HANDLER_FACTORIES = {
     "list_resources": _make_list_resources_handler, "read_resource": _make_read_resource_handler,
-    "list_prompts": _make_list_prompts_handler, "get_prompt": _make_get_prompt_handler,
-}
+    "list_prompts": _make_list_prompts_handler, "get_prompt": _make_get_prompt_handler}
 
 
 def _normalize_server_trust(value: Any) -> str:
@@ -97,8 +93,8 @@ def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: d
             if getattr(advertised, family, None) is None:
                 return f"server does not advertise '{family}' capability"
             return None
-        method = _UTILITY_CAPABILITY_METHODS[handler_key]
-        return None if hasattr(server.session, method) else f"session lacks {method}"
+        # Legacy gate (no initialize_result): the ClientSession method shares the handler key.
+        return None if hasattr(server.session, handler_key) else f"session lacks {handler_key}"
 
     selected: List[dict] = []
     for entry in _build_utility_schemas(server_name):
@@ -315,8 +311,7 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
                     "description": t.description or "",
                     "inputSchema": schema_obj if isinstance(schema_obj, dict) else {},
                     # Persisted so the lazy path trust-gates identically next startup.
-                    "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},
-                })
+                    "annotations": {"readOnlyHint": _annotation_read_only_hint(t)}})
         utility_payload = [{"schema": e["schema"], "handler_key": e["handler_key"]}
                            for e in _select_utility_schemas(name, server, config)]
         cache_meta = getattr(server, "_list_cache_meta", None) or {}
