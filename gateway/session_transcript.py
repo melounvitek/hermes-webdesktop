@@ -66,9 +66,7 @@ class SessionTranscriptMixin:
             return session_id
 
     def _heal_compression_tip_locked(
-        self,
-        entry: "SessionEntry",
-        original_session_id: Optional[str],
+        self, entry: "SessionEntry", original_session_id: Optional[str],
         canonical_session_id: Optional[str],
     ) -> bool:
         """Rewrite *entry* to the compression continuation if stale. Lock held."""
@@ -466,10 +464,7 @@ class SessionTranscriptMixin:
             return False
 
     def rewrite_transcript(
-        self,
-        session_id: str,
-        messages: List[Dict[str, Any]],
-        active_only: bool = False,
+        self, session_id: str, messages: List[Dict[str, Any]], active_only: bool = False,
         reject_active_turn_lease: bool = False,
     ) -> bool:
         """Replace a session's transcript (/retry, /compress).
@@ -487,9 +482,7 @@ class SessionTranscriptMixin:
         with self._get_transcript_drain_lock():
             try:
                 db.replace_messages(
-                    session_id,
-                    messages,
-                    active_only=active_only,
+                    session_id, messages, active_only=active_only,
                     reject_active_turn_lease=reject_active_turn_lease,
                 )
             except Exception as e:
@@ -580,9 +573,7 @@ class SessionTranscriptMixin:
                 target_text = retryable_user_text(target_view.get("content"))
             try:
                 result = db.rewind_to_message(
-                    session_id,
-                    target_id,
-                    preserve_compaction_handoff=handoff is not None,
+                    session_id, target_id, preserve_compaction_handoff=handoff is not None,
                     expected_active_ids=expected_active_ids,
                     expected_target_content=target_view.get("content"),
                 )

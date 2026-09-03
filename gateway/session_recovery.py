@@ -162,23 +162,14 @@ class SessionRecoveryMixin:
         if had_activity is None:
             had_activity = bool(row.get("message_count") or 0) or last_activity is not None
         return SessionEntry(
-            session_key=session_key,
-            session_id=str(row["id"]),
-            created_at=created_at,
-            updated_at=updated_at,
-            origin=source,
-            display_name=source.chat_name,
-            platform=source.platform,
-            chat_type=source.chat_type,
+            session_key=session_key, session_id=str(row["id"]), created_at=created_at,
+            updated_at=updated_at, origin=source, display_name=source.chat_name,
+            platform=source.platform, chat_type=source.chat_type,
             reset_had_activity=bool(had_activity),
         )
 
     def _find_gateway_session_row(
-        self,
-        *,
-        session_key: str,
-        source: SessionSource,
-        allow_peer_fallback: bool,
+        self, *, session_key: str, source: SessionSource, allow_peer_fallback: bool,
         raise_on_lookup_error: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Query one durable gateway session row.
@@ -194,9 +185,7 @@ class SessionRecoveryMixin:
             return None
         try:
             return finder(
-                source=source.platform.value,
-                user_id=source.user_id,
-                session_key=session_key,
+                source=source.platform.value, user_id=source.user_id, session_key=session_key,
                 chat_id=source.chat_id if allow_peer_fallback else None,
                 chat_type=source.chat_type if allow_peer_fallback else None,
                 thread_id=source.thread_id,
@@ -208,11 +197,7 @@ class SessionRecoveryMixin:
             return None
 
     def _recover_session_from_db(
-        self,
-        *,
-        session_key: str,
-        source: SessionSource,
-        now: datetime,
+        self, *, session_key: str, source: SessionSource, now: datetime,
         raise_on_lookup_error: bool = False,
     ) -> Optional[SessionEntry]:
         """Rebuild a missing session-key mapping from durable state.db data.
@@ -222,9 +207,7 @@ class SessionRecoveryMixin:
         durably promoted to a reset boundary instead of resurrected.
         """
         entry, migrated_legacy = self._query_recoverable_row(
-            session_key=session_key,
-            source=source,
-            now=now,
+            session_key=session_key, source=source, now=now,
             raise_on_lookup_error=raise_on_lookup_error,
         )
         if entry is None:
@@ -274,17 +257,13 @@ class SessionRecoveryMixin:
         """
         legacy_key = self._legacy_slack_session_key(source)
         recovered = self._find_gateway_session_row(
-            session_key=session_key,
-            source=source,
-            allow_peer_fallback=legacy_key is None,
+            session_key=session_key, source=source, allow_peer_fallback=legacy_key is None,
             raise_on_lookup_error=raise_on_lookup_error,
         )
         migrated_legacy = False
         if not recovered and legacy_key and self._claim_legacy_slack_key(legacy_key):
             recovered = self._find_gateway_session_row(
-                session_key=legacy_key,
-                source=source,
-                allow_peer_fallback=False,
+                session_key=legacy_key, source=source, allow_peer_fallback=False,
                 raise_on_lookup_error=raise_on_lookup_error,
             )
             migrated_legacy = bool(recovered)
@@ -337,12 +316,8 @@ class SessionRecoveryMixin:
                 logger.debug("Gateway session DB reopen failed for %s: %s", session_key, exc)
 
     def _record_gateway_session_peer(
-        self,
-        session_id: str,
-        session_key: str,
-        source: Optional[SessionSource],
-        display_name: Optional[str] = None,
-        include_compression_ancestors: bool = False,
+        self, session_id: str, session_key: str, source: Optional[SessionSource],
+        display_name: Optional[str] = None, include_compression_ancestors: bool = False,
     ) -> None:
         """Persist the routing peer for an existing gateway session row."""
         db = self._db_for_key(session_key)
@@ -352,18 +327,12 @@ class SessionRecoveryMixin:
         if not callable(recorder):
             return
         peer = dict(
-            source=source.platform.value,
-            user_id=source.user_id,
-            session_key=session_key,
-            chat_id=source.chat_id,
-            chat_type=source.chat_type,
-            thread_id=source.thread_id,
+            source=source.platform.value, user_id=source.user_id, session_key=session_key,
+            chat_id=source.chat_id, chat_type=source.chat_type, thread_id=source.thread_id,
         )
         try:
             recorder(
-                session_id,
-                **peer,
-                display_name=display_name or source.chat_name,
+                session_id, **peer, display_name=display_name or source.chat_name,
                 origin_json=_origin_json(source),
                 include_compression_ancestors=include_compression_ancestors,
             )
@@ -412,15 +381,9 @@ class SessionRecoveryMixin:
             )
 
     def _finish_route_transition(
-        self,
-        session_key: str,
-        *,
-        end_session_id: Optional[str],
-        end_reason: str,
-        create_kwargs: Optional[Dict[str, Any]],
-        origin: Optional[SessionSource],
-        display_name: Optional[str],
-        during: str = "",
+        self, session_key: str, *, end_session_id: Optional[str], end_reason: str,
+        create_kwargs: Optional[Dict[str, Any]], origin: Optional[SessionSource],
+        display_name: Optional[str], during: str = "",
     ) -> None:
         """SQLite side of a routing transition, outside ``_lock``.
 

@@ -554,10 +554,7 @@ class SessionPersistenceMixin:
         self._persist_routing_data(data, generation)
 
     def _save_entry(
-        self,
-        session_key: str,
-        *,
-        entry_data: Optional[Dict[str, Any]] = None,
+        self, session_key: str, *, entry_data: Optional[Dict[str, Any]] = None,
         lock_held: bool = False,
     ) -> None:
         """Persist ONE routing entry via UPSERT — the per-turn fast path

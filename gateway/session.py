@@ -185,12 +185,10 @@ class SessionSource:
             if name != "chat_type"
         }
         return cls(
-            platform=Platform(data["platform"]),
-            chat_id=str(data["chat_id"]),
+            platform=Platform(data["platform"]), chat_id=str(data["chat_id"]),
             chat_type=data.get("chat_type", "dm"),
             scope_id=data.get("scope_id", data.get("guild_id")),
-            auto_thread_created=bool(data.get("auto_thread_created", False)),
-            **plain,
+            auto_thread_created=bool(data.get("auto_thread_created", False)), **plain,
         )
 
 
@@ -654,20 +652,14 @@ class SessionEntry:
         plain = {name: data.get(name, defaults[name]) for name in cls._PLAIN_FIELDS + cls._RESET_FIELDS}
         plain["expiry_finalized"] = data.get("expiry_finalized", data.get("memory_flushed", False))
         return cls(
-            session_key=session_key,
-            session_id=session_id,
+            session_key=session_key, session_id=session_id,
             created_at=datetime.fromisoformat(data["created_at"]),
-            updated_at=datetime.fromisoformat(data["updated_at"]),
-            origin=origin,
-            display_name=data.get("display_name"),
-            platform=platform,
-            chat_type=data.get("chat_type", "dm"),
-            metadata=dict(data.get("metadata") or {}),
+            updated_at=datetime.fromisoformat(data["updated_at"]), origin=origin,
+            display_name=data.get("display_name"), platform=platform,
+            chat_type=data.get("chat_type", "dm"), metadata=dict(data.get("metadata") or {}),
             last_resume_marked_at=_parse_iso(data.get("last_resume_marked_at")),
-            active_turn_token=active_turn_token,
-            active_turn_started_at=active_turn_started_at,
-            model_override=sanitize_model_override(data.get("model_override")),
-            **plain,
+            active_turn_token=active_turn_token, active_turn_started_at=active_turn_started_at,
+            model_override=sanitize_model_override(data.get("model_override")), **plain,
         )
 
 
@@ -697,9 +689,7 @@ def build_channel_continuity_note(entry: "SessionEntry", source: SessionSource) 
 
 
 def is_shared_multi_user_session(
-    source: SessionSource,
-    *,
-    group_sessions_per_user: bool = True,
+    source: SessionSource, *, group_sessions_per_user: bool = True,
     thread_sessions_per_user: bool = False,
 ) -> bool:
     """True when a non-DM session is shared across participants (mirrors the
@@ -733,10 +723,8 @@ def _canonical_participant(source: SessionSource) -> Optional[str]:
 
 
 def build_session_key(
-    source: SessionSource,
-    group_sessions_per_user: bool = True,
-    thread_sessions_per_user: bool = False,
-    profile: Optional[str] = None,
+    source: SessionSource, group_sessions_per_user: bool = True,
+    thread_sessions_per_user: bool = False, profile: Optional[str] = None,
 ) -> str:
     """Build a deterministic session key from a message source (single source of truth).
 
@@ -1048,12 +1036,9 @@ class SessionStore(
                 self._save_entries()
 
         self._finish_route_transition(
-            session_key,
-            end_session_id=decision.prev_session_id,
-            end_reason=decision.reset_reason or "session_reset",
-            create_kwargs=create_kwargs,
-            origin=source,
-            display_name=decision.entry.display_name,
+            session_key, end_session_id=decision.prev_session_id,
+            end_reason=decision.reset_reason or "session_reset", create_kwargs=create_kwargs,
+            origin=source, display_name=decision.entry.display_name,
         )
         return decision.entry
 
@@ -1065,12 +1050,8 @@ class SessionStore(
         return _RouteChecks(sid, canonical, is_stale, self._route_reset_reason(entry, source, now))
 
     def _apply_route_checks(
-        self,
-        session_key: str,
-        checks: Optional[_RouteChecks],
-        force_new: bool,
-        touch_activity: bool,
-        now: datetime,
+        self, session_key: str, checks: Optional[_RouteChecks], force_new: bool,
+        touch_activity: bool, now: datetime,
     ) -> _RouteDecision:
         """Apply stale/reset decisions to ``_entries`` under ``_lock``.
 
@@ -1144,30 +1125,18 @@ class SessionStore(
         decision.needs_save = True
 
     def _route_create(
-        self,
-        decision: _RouteDecision,
-        session_key: str,
-        source: SessionSource,
-        now: datetime,
-        force_new: bool,
-        observed: Optional[SessionEntry],
+        self, decision: _RouteDecision, session_key: str, source: SessionSource, now: datetime,
+        force_new: bool, observed: Optional[SessionEntry],
     ) -> Optional[Dict[str, Any]]:
         """Create a candidate outside the lock, publish it only if another worker
         has not already populated this routing key; returns ``create_session``
         kwargs when the candidate won."""
         session_id = _new_session_id(now)
         candidate = SessionEntry(
-            session_key=session_key,
-            session_id=session_id,
-            created_at=now,
-            updated_at=now,
-            origin=source,
-            display_name=source.chat_name,
-            platform=source.platform,
-            chat_type=source.chat_type,
-            was_auto_reset=decision.reset_reason is not None,
-            auto_reset_reason=decision.reset_reason,
-            reset_had_activity=decision.reset_had_activity,
+            session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
+            origin=source, display_name=source.chat_name, platform=source.platform,
+            chat_type=source.chat_type, was_auto_reset=decision.reset_reason is not None,
+            auto_reset_reason=decision.reset_reason, reset_had_activity=decision.reset_had_activity,
             prev_session_id=decision.prev_session_id,
         )
         with self._lock:
@@ -1179,11 +1148,8 @@ class SessionStore(
         if current is not candidate:
             return None
         return self._session_create_kwargs(
-            session_id=session_id,
-            session_key=session_key,
-            origin=source,
-            source_value=source.platform.value,
-            display_name=source.chat_name,
+            session_id=session_id, session_key=session_key, origin=source,
+            source_value=source.platform.value, display_name=source.chat_name,
             parent_session_id=decision.prev_session_id,
         )
 
@@ -1261,34 +1227,22 @@ class SessionStore(
                 is_fresh_reset=True,
             )
             db_create_kwargs = self._session_create_kwargs(
-                session_id=session_id,
-                session_key=session_key,
-                origin=old_entry.origin,
+                session_id=session_id, session_key=session_key, origin=old_entry.origin,
                 source_value=old_entry.platform.value if old_entry.platform else "unknown",
-                display_name=old_entry.display_name,
-                parent_session_id=old_entry.session_id,
+                display_name=old_entry.display_name, parent_session_id=old_entry.session_id,
             )
         self._finish_route_transition(
-            session_key,
-            end_session_id=old_entry.session_id,
-            end_reason="session_reset",
-            create_kwargs=db_create_kwargs,
-            origin=old_entry.origin,
-            display_name=new_entry.display_name,
-            during=" during reset",
+            session_key, end_session_id=old_entry.session_id, end_reason="session_reset",
+            create_kwargs=db_create_kwargs, origin=old_entry.origin,
+            display_name=new_entry.display_name, during=" during reset",
         )
         return new_entry
 
     def _replace_route_locked(self, session_key, old_entry, session_id, now, **fields) -> SessionEntry:
         """Publish a fresh entry (inheriting origin/platform/chat_type) and save. Lock held."""
         new_entry = SessionEntry(
-            session_key=session_key,
-            session_id=session_id,
-            created_at=now,
-            updated_at=now,
-            origin=old_entry.origin,
-            platform=old_entry.platform,
-            chat_type=old_entry.chat_type,
+            session_key=session_key, session_id=session_id, created_at=now, updated_at=now,
+            origin=old_entry.origin, platform=old_entry.platform, chat_type=old_entry.chat_type,
             **fields,
         )
         self._entries[session_key] = new_entry
@@ -1317,11 +1271,8 @@ class SessionStore(
         if self._db_for_key(session_key):
             self._reopen_session_row(session_key, target_session_id, log_prefix="Session DB reopen_session failed")
             self._record_gateway_session_peer(
-                target_session_id,
-                session_key,
-                new_entry.origin,
-                display_name=new_entry.display_name,
-                include_compression_ancestors=True,
+                target_session_id, session_key, new_entry.origin,
+                display_name=new_entry.display_name, include_compression_ancestors=True,
             )
         return new_entry
 
