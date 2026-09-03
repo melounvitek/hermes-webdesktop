@@ -1,10 +1,9 @@
 """Lock-safe inspection of SQLite database files.
 
-POSIX advisory locks are cancelled **process-wide** by ``close()`` on *any* file descriptor for
-that file, so a bare ``open(db_path, "rb") ... close()`` on a **live** database silently drops
-every lock SQLite holds on it from this process -- including the EXCLUSIVE lock a ``VACUUM`` is
-holding while it rewrites the whole file, and the RESERVED lock of an in-flight ``BEGIN IMMEDIATE``.
-This module tracks live connections so raw reads only happen when none exist.
+POSIX advisory locks are cancelled **process-wide** by ``close()`` on *any* fd for that file, so a
+bare ``open(db_path, "rb") ... close()`` on a live database drops every lock SQLite holds from this
+process (a VACUUM's EXCLUSIVE lock, an in-flight BEGIN IMMEDIATE's RESERVED lock). This module
+tracks live connections so raw reads happen only when none exist.
 """
 
 from __future__ import annotations
@@ -27,11 +26,8 @@ _live_connections: dict[str, int] = {}
 
 
 class UntrackableConnectionError(RuntimeError):
-    """A connection to a probe-able database could not be tracked.
-
-    Raised rather than silently returning an untracked connection: on these paths tracking is part
-    of the correctness contract, not an optimisation.
-    """
+    """A connection to a probe-able database could not be tracked. Raised rather than returning an
+    untracked connection: on these paths tracking is part of the correctness contract."""
 
 
 class LiveConnectionError(RuntimeError):
@@ -59,11 +55,8 @@ def _canonical_db_path(conn: sqlite3.Connection) -> Optional[str]:
 
 
 def track_connection(path: Path | str) -> None:
-    """Record that this process now holds a connection to *path*.
-
-    Prefer :func:`connect_tracked`; this exists for callers that manage their own connection
-    objects, and for tests.
-    """
+    """Record that this process holds a connection to *path* (prefer :func:`connect_tracked`; this
+    is for callers managing their own connection objects, and for tests)."""
     with _live_lock:
         _track_key(_key(path))
 
@@ -118,12 +111,9 @@ _tracked_factory_cache: dict[type, type] = {}
 
 
 def _tracking_factory(factory: type) -> type:
-    """Return *factory* augmented with untrack-on-close.
-
-    Callers legitimately pass their own ``Connection`` subclasses (tests simulate FTS5-less or
-    pragma-failing runtimes); refusing them or leaving them untracked would quietly unguard the
-    database, so the tracking ``close()`` is mixed into the caller's class instead.
-    """
+    """Return *factory* augmented with untrack-on-close. Callers legitimately pass their own
+    ``Connection`` subclasses (tests simulate FTS5-less or pragma-failing runtimes); leaving them
+    untracked would quietly unguard the database, so the tracking ``close()`` is mixed in."""
     if factory is sqlite3.Connection:
         return TrackedConnection
     if issubclass(factory, _TrackingMixin):
@@ -138,14 +128,10 @@ def _tracking_factory(factory: type) -> type:
 def connect_tracked(
     path: Path | str, *, tracking_path: Path | str | None = None, connect_fn=None, **kwargs,
 ) -> sqlite3.Connection:
-    """``sqlite3.connect`` that registers the connection for the lifetime of the fd.
-
-    Use for any connection to a database whose file might otherwise be byte-probed (``state.db``,
-    ``kanban.db``). The registration is released automatically on ``close()``.
-
-    The open and the registration happen together under ``_live_lock``, so a concurrent
-    :func:`read_header_bytes_preopen` cannot slip between them and cancel this connection's locks.
-    """
+    """``sqlite3.connect`` that registers the connection for the lifetime of the fd (released on
+    ``close()``). Use for any database that might be byte-probed (``state.db``, ``kanban.db``).
+    Open and registration happen together under ``_live_lock`` so a concurrent
+    :func:`read_header_bytes_preopen` cannot slip between them and cancel this connection's locks."""
     opener = connect_fn if connect_fn is not None else sqlite3.connect
     kwargs["factory"] = _tracking_factory(kwargs.get("factory", sqlite3.Connection))
 
@@ -201,13 +187,9 @@ def page_count_bytes(conn: sqlite3.Connection) -> Optional[int]:
 
 
 def file_length_matches_header(conn: sqlite3.Connection) -> Optional[bool]:
-    """Whether the file on disk is at least as long as the header claims ("torn extend" check).
-
-    Never opens the database file: the header side comes from ``PRAGMA page_count`` over *conn*,
-    the on-disk side from ``stat()``. In WAL mode a freshly committed page may still live in the
-    ``-wal`` file so the main file legitimately lags; callers must treat this as advisory unless
-    the database is in a rollback journal mode.
-    """
+    """Whether the file on disk is at least as long as the header claims ("torn extend" check),
+    without opening the file (PRAGMA over *conn* + ``stat()``). Advisory in WAL mode: a freshly
+    committed page may still live in ``-wal`` so the main file legitimately lags."""
     path_str = _canonical_db_path(conn)
     if path_str is None:
         return None
@@ -221,13 +203,10 @@ def file_length_matches_header(conn: sqlite3.Connection) -> Optional[bool]:
 
 
 def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: bool = False) -> Optional[bytes]:
-    """Read the first *length* bytes of *path* -- only when no connection is live.
-
-    This is the ONLY sanctioned byte-level read of a database file, restricted to first-open
-    validation (real SQLite database? zeroed? overwritten?). The registry check and the
-    ``open``/``read``/``close`` run together under ``_live_lock`` so a connection cannot be opened
-    between deciding "nothing is live" and closing this descriptor.
-    """
+    """Read the first *length* bytes of *path* -- only when no connection is live. The ONLY
+    sanctioned byte-level read of a database file, for first-open validation (real SQLite? zeroed?
+    overwritten?). Check and open/read/close run together under ``_live_lock`` so a connection
+    cannot be opened between deciding "nothing is live" and closing this descriptor."""
     with _live_lock:
         if not force and _key(path) in _live_connections:
             logger.debug(
@@ -244,12 +223,9 @@ def read_header_bytes_preopen(path: Path | str, *, length: int = 100, force: boo
 
 @contextlib.contextmanager
 def offline_file_access(path: Path | str, *, what: str = "read"):
-    """Hold the connection-lifecycle lock across a raw read of a database file.
-
-    Checking :func:`has_live_connection` and *then* doing raw I/O is a check/use race: a connection
-    opened in between would have its POSIX locks cancelled by the raw ``close()``. The lock is
-    held only for the raw I/O, never across caller work on an open connection.
-    """
+    """Hold the connection-lifecycle lock across a raw read of a database file: checking
+    :func:`has_live_connection` and *then* doing raw I/O is a check/use race (a connection opened
+    in between loses its POSIX locks to the raw ``close()``). Held only for the raw I/O."""
     with _live_lock:
         if _key(path) in _live_connections:
             raise LiveConnectionError(

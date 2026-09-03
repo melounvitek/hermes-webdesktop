@@ -69,8 +69,7 @@ _FOREIGN_TOKEN_PREFIXES = (
     (("xoxb-", "xoxp-"), "That's a Slack token, not a Meta WhatsApp access token. "
                          "Meta tokens start with 'EAA'."),
     (("ghp_", "gho_"), "That's a GitHub token, not a Meta WhatsApp access "
-                       "token. Meta tokens start with 'EAA'."),
-)
+                       "token. Meta tokens start with 'EAA'."))
 
 
 def _validate_app_secret(value: str) -> tuple[bool, Optional[str]]:
@@ -110,12 +109,8 @@ def _validate_access_token(value: str) -> tuple[bool, Optional[str]]:
 # --- Prompt helpers
 
 def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -> str:
-    """Read one line of input. Returns "" on EOF / Ctrl+C / empty input.
-
-    ``default`` is shown but NOT auto-applied on empty input: callers handle "kept existing"
-    explicitly so a real value is distinguishable from a display preview (masked secrets).
-    ``secret=True`` reads via ``getpass`` so credentials are not echoed or left in scrollback.
-    """
+    """Read one line; "" on EOF / Ctrl+C / empty. ``default`` is shown but NOT auto-applied so a
+    real value stays distinguishable from a masked preview; ``secret`` reads via ``getpass``."""
     try:
         suffix = f" [{default}]" if default else ""
         if secret and sys.stdin.isatty():
@@ -131,11 +126,8 @@ def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -
 def _prompt_validated(
     message: str, validator, *, current: Optional[str] = None, help_text: Optional[str] = None,
     secret: bool = False) -> Optional[str]:
-    """Repeat the prompt until the user enters a valid value or aborts.
-
-    Returns the validated value, or None if the user gave up (empty response after an error, or
-    Ctrl+C). ``current`` is shown as a default for re-runs of the wizard with existing config.
-    """
+    """Repeat the prompt until a valid value or the user gives up (None: empty answer, Ctrl+C).
+    ``current`` is shown as the default on wizard re-runs."""
     if help_text:
         for line in help_text.strip().splitlines():
             print(f"  {line}")
@@ -223,8 +215,7 @@ _CREDENTIAL_STEPS = (
      "If 'Show' doesn't appear, you may need Admin role on the app.\n"
      "It's a 32-character lowercase hex string.\n\n"
      "Without the App Secret, inbound webhook POSTs are refused\n"
-     "with HTTP 503 (we can't verify they actually came from Meta)."),
-)
+     "with HTTP 503 (we can't verify they actually came from Meta)."))
 
 # Optional step-4 IDs: (prompt label, env var, validator, help text).
 _OPTIONAL_ID_STEPS = (
@@ -236,8 +227,7 @@ _OPTIONAL_ID_STEPS = (
      "WhatsApp Business Account ID. Found in: App Dashboard →\n"
      "WhatsApp → API Setup, near the top — 'WhatsApp Business\n"
      "Account ID'. Numeric, ~15+ digits.\n"
-     "Not required for messaging — useful for analytics."),
-)
+     "Not required for messaging — useful for analytics."))
 
 
 def _credential_step(step) -> tuple[Optional[str], bool]:
@@ -263,11 +253,7 @@ def _credential_step(step) -> tuple[Optional[str], bool]:
 
 
 def run_whatsapp_cloud_setup() -> int:
-    """Interactive wizard for the WhatsApp Cloud API adapter.
-
-    Returns 0 on full success, 1 on user abort, 2 on partial completion (some fields written but the
-    user bailed before finishing).
-    """
+    """Interactive wizard for the WhatsApp Cloud API adapter. Returns 0 on success, 1 on abort."""
     from hermes_cli.config import get_env_value, save_env_value
     _lines(
         "", "⚕ WhatsApp Business Cloud API Setup", "=" * 50, "",

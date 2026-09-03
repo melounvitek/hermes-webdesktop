@@ -1,10 +1,6 @@
-"""Per-terminal session breadcrumbs for ``hermes -c`` / ``--continue``.
-
-Everything here is strictly best-effort: no function raises, and when no stable terminal identity
-can be derived (no tty and no known multiplexer env var) breadcrumbs are skipped entirely and ``-c``
-falls back to the existing latest-session behavior. Gated by ``session.terminal_continue`` in
-config.yaml (default true).
-"""
+"""Per-terminal session breadcrumbs for ``hermes -c`` / ``--continue``. Strictly best-effort: no
+function raises; without a stable terminal identity (no tty, no known multiplexer env var) ``-c``
+falls back to latest-session. Gated by ``session.terminal_continue`` (default true)."""
 
 from __future__ import annotations
 
@@ -78,11 +74,8 @@ def _prune_stale(directory: Path, now: float) -> None:
 
 
 def write_breadcrumb(session_id: str, cwd: Optional[str] = None) -> None:
-    """Record that this terminal's live session is ``session_id``.
-
-    Synchronous, best-effort, never raises. No-op when the feature is disabled, the session id is
-    empty, or no terminal identity exists.
-    """
+    """Record that this terminal's live session is ``session_id``. Never raises; no-op when the
+    feature is disabled, the session id is empty, or no terminal identity exists."""
     try:
         if not session_id or not is_enabled():
             return
@@ -120,12 +113,9 @@ def read_breadcrumb() -> Optional[dict]:
 
 
 def resolve_breadcrumb_session() -> Optional[str]:
-    """Resolve a bare ``-c`` for this terminal, or ``None`` to fall back.
-
-    Returns the breadcrumb's session id only when it still exists in the session DB, projected
-    forward through the compression chain so the resume lands on the live tip rather than a dead
-    compressed parent (same projection as ``main._resolve_session_by_name_or_id``).
-    """
+    """Resolve a bare ``-c`` for this terminal, or ``None`` to fall back. The breadcrumb's session
+    id counts only if it still exists in the DB, projected through the compression chain so the
+    resume lands on the live tip (same projection as ``main._resolve_session_by_name_or_id``)."""
     if not is_enabled():
         return None
     crumb = read_breadcrumb()

@@ -65,14 +65,12 @@ _API_KEYS: dict[str, str | tuple[str, ...]] = {
     "Browserbase": "BROWSERBASE_API_KEY",  # Optional — direct credentials only
     "FAL": "FAL_KEY",
     "ElevenLabs": "ELEVENLABS_API_KEY",
-    "GitHub": "GITHUB_TOKEN",
-}
+    "GitHub": "GITHUB_TOKEN"}
 
 # OAuth detail rows: (label, status key, formatter, gate) — see _oauth_block.
 _FILE_REFRESH_ROWS = (
     ("Auth file:", "auth_store", None, None),
-    ("Refreshed:", "last_refresh", _format_iso_timestamp, None), ("Error:", "error", None, False),
-)
+    ("Refreshed:", "last_refresh", _format_iso_timestamp, None), ("Error:", "error", None, False))
 
 _OAUTH_BLOCKS = (
     # (row name, auth getter, login hint, detail rows)
@@ -85,8 +83,7 @@ _OAUTH_BLOCKS = (
         ("Region:", "region", None, True),
         ("Access exp:", "expires_at", None, None),
         ("Error:", "error", None, False))),
-    ("xAI OAuth", "get_xai_oauth_auth_status", "hermes auth add xai-oauth", _FILE_REFRESH_ROWS),
-)
+    ("xAI OAuth", "get_xai_oauth_auth_status", "hermes auth add xai-oauth", _FILE_REFRESH_ROWS))
 
 _APIKEY_PROVIDERS = {
     "Z.AI / GLM":       ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
@@ -94,8 +91,7 @@ _APIKEY_PROVIDERS = {
     "StepFun Step Plan": ("STEPFUN_API_KEY",),
     "MiniMax":          ("MINIMAX_API_KEY",),
     "MiniMax (China)":  ("MINIMAX_CN_API_KEY",),
-    "DeepInfra":        ("DEEPINFRA_API_KEY",),
-}
+    "DeepInfra":        ("DEEPINFRA_API_KEY",)}
 
 
 def _render_api_keys(ctx):

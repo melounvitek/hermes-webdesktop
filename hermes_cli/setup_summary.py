@@ -17,16 +17,14 @@ _TTS_SUMMARY_ROWS = {
     "mistral": ("Mistral Voxtral", ("MISTRAL_API_KEY",)),
     "gemini": ("Google Gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
     "neutts": ("NeuTTS", "neutts", "run 'hermes setup tts'"),
-    "kittentts": ("KittenTTS", "kittentts", "run 'hermes setup tts'"),
-}
+    "kittentts": ("KittenTTS", "kittentts", "run 'hermes setup tts'")}
 _TTS_SUMMARY_DEFAULT = ("Edge TTS", ())
 _STT_SUMMARY_ROWS = {
     "openai": ("OpenAI", ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY")),
     "groq": ("Groq Whisper", ("GROQ_API_KEY",)),
     "elevenlabs": ("ElevenLabs Scribe", ("ELEVENLABS_API_KEY",)),
     "xai": ("xAI", ()),
-    "deepinfra": ("DeepInfra", ("DEEPINFRA_API_KEY",)),
-}
+    "deepinfra": ("DeepInfra", ("DEEPINFRA_API_KEY",))}
 _STT_SUMMARY_DEFAULT = ("Local Whisper", "faster_whisper", "run 'hermes tools' → Speech-to-Text")
 
 # Browser "missing" hint keyed by the configured provider; anything else gets the generic hint.
@@ -34,8 +32,7 @@ _BROWSER_MISSING_HINTS = {
     "Browserbase": "npm install -g agent-browser and set BROWSERBASE_API_KEY/BROWSERBASE_PROJECT_ID",
     "Browser Use": "npm install -g agent-browser and set BROWSER_USE_API_KEY",
     "Camofox": "CAMOFOX_URL",
-    "Local browser": "npm install -g agent-browser && agent-browser install --with-deps",
-}
+    "Local browser": "npm install -g agent-browser && agent-browser install --with-deps"}
 _BROWSER_MISSING_DEFAULT = "npm install -g agent-browser, set CAMOFOX_URL, or configure Browser Use or Browserbase"
 _WEB_MISSING = ("EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, TAVILY_API_KEY, "
                 "KEENABLE_API_KEY, or SEARXNG_URL")
@@ -50,17 +47,14 @@ _EDIT_WIZARD_ROWS = (
     ("hermes setup model", "    Change model/provider"),
     ("hermes setup terminal", " Change terminal backend"),
     ("hermes setup gateway", "  Configure messaging"),
-    ("hermes setup tools", "    Configure tool providers"),
-)
+    ("hermes setup tools", "    Configure tool providers"))
 _EDIT_CONFIG_ROWS = (
     ("hermes config", "         View current settings"),
     ("hermes config edit", "    Open config in your editor"),
-    ("hermes config set <key> <value>", ""),
-)
+    ("hermes config set <key> <value>", ""))
 _READY_ROWS = (
     ("hermes", "              Start chatting"), ("hermes gateway", "      Start messaging gateway"),
-    ("hermes doctor", "       Check for issues"),
-)
+    ("hermes doctor", "       Check for issues"))
 
 
 def _voice_provider_status(kind: str, provider: str, rows: dict, default: tuple) -> tuple:

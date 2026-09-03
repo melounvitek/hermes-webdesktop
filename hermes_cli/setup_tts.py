@@ -121,8 +121,7 @@ _TTS_PROVIDER_CHOICES = [
     ("mistral", "Mistral Voxtral TTS (multilingual, native Opus, needs API key)"),
     ("gemini", "Google Gemini TTS (30 prebuilt voices, prompt-controllable, needs API key)"),
     ("neutts", "NeuTTS (local on-device, free, ~300MB model download)"),
-    ("kittentts", "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)"),
-]
+    ("kittentts", "KittenTTS (local on-device, free, lightweight ~25-80MB ONNX)")]
 # Short label = menu label minus its parenthetical ("Edge TTS", "Mistral Voxtral TTS", ...).
 _TTS_PROVIDER_LABELS = {key: label.split(" (")[0] for key, label in _TTS_PROVIDER_CHOICES}
 # provider -> (env vars that satisfy it, env var to save, prompt, success line, pre-prompt hint)
@@ -147,8 +146,7 @@ _TTS_LOCAL_PROVIDERS = {
     "kittentts": ("kittentts", "KittenTTS",
                   ("KittenTTS is lightweight (~25-80MB, CPU-only, no API key required).",
                    "Voices: Jasper, Bella, Luna, Bruno, Rosie, Hugo, Kiki, Leo"),
-                  "Install KittenTTS now?", _install_kittentts_deps),
-}
+                  "Install KittenTTS now?", _install_kittentts_deps)}
 
 
 def _tts_api_key_step(selected: str) -> str:
