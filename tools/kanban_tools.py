@@ -114,10 +114,9 @@ def _kanban_handler(tool_name: str) -> Callable:
                 return fn(args, **kw)
             except _Reject as e:
                 return e.args[0]
-            except ValueError as e:
-                return tool_error(f"{tool_name}: {e}")
             except Exception as e:
-                logger.exception(f"{tool_name} failed")
+                if not isinstance(e, ValueError):
+                    logger.exception(f"{tool_name} failed")
                 return tool_error(f"{tool_name}: {e}")
         return wrapper
     return deco
@@ -152,11 +151,11 @@ def _require_task_id(args: dict) -> str:
 
 def _worker_run_id(task_id: str) -> Optional[int]:
     """This worker's dispatcher run id when it is scoped to task_id."""
-    if os.environ.get("HERMES_KANBAN_TASK") != task_id:
-        return None
     raw = os.environ.get("HERMES_KANBAN_RUN_ID")
+    if os.environ.get("HERMES_KANBAN_TASK") != task_id or not raw:
+        return None
     try:
-        return int(raw) if raw else None
+        return int(raw)
     except ValueError:
         return None
 
@@ -233,6 +232,10 @@ def _redact(value: Any) -> str:
     return redact_sensitive_text(str(value), force=True)
 
 
+def _redact_opt(value: Any) -> Any:
+    return _redact(value) if value else value
+
+
 def _redact_metadata(metadata: dict) -> Optional[dict]:
     """Redact via a JSON round-trip; None if the result can't be re-parsed."""
     try:
@@ -283,38 +286,34 @@ def _require_text(args: dict, name: str, message: Optional[str] = None) -> Any:
     return value
 
 
+_BOOL_WORDS = {"true": True, "1": True, "yes": True, "false": False, "0": False, "no": False}
+
+
 def _parse_bool_arg(args: dict, name: str) -> bool:
     value = args.get(name)
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in {"true", "1", "yes"}:
-        return True
-    if text in {"false", "0", "no"}:
-        return False
-    raise _Reject(f"{name} must be a boolean or 'true'/'false'")
+    if value is None or isinstance(value, bool):
+        return bool(value)
+    parsed = _BOOL_WORDS.get(str(value).strip().lower())
+    _check(parsed is not None, f"{name} must be a boolean or 'true'/'false'")
+    return parsed
 
 
 def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     return int(value) if value is not None else default
 
 
-_TASK_FIELDS = (
-    "id", "title", "body", "assignee", "status", "tenant", "priority", "workspace_kind",
-    "workspace_path", "created_by", "created_at", "started_at", "completed_at", "result",
-    "current_run_id", "model_override", "provider_override")
-_TASK_SUMMARY_FIELDS = (
-    "id", "title", "assignee", "status", "priority", "tenant", "workspace_kind", "workspace_path",
-    "project_id", "created_by", "created_at", "started_at", "completed_at", "current_run_id",
-    "model_override", "provider_override")
-_RUN_FIELDS = (
-    "id", "profile", "status", "outcome", "summary", "error", "metadata", "started_at", "ended_at")
+_TASK_FIELDS = tuple(
+    "id title body assignee status tenant priority workspace_kind workspace_path created_by "
+    "created_at started_at completed_at result current_run_id model_override "
+    "provider_override".split())
+_TASK_SUMMARY_FIELDS = tuple(
+    "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
+    "created_at started_at completed_at current_run_id model_override provider_override".split())
+_RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
 _COMMENT_FIELDS = ("author", "body", "created_at")
 _EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
-_ATTACHMENT_FIELDS = (
-    "id", "filename", "content_type", "size", "uploaded_by", "stored_path", "created_at")
+_ATTACHMENT_FIELDS = tuple(
+    "id filename content_type size uploaded_by stored_path created_at".split())
 
 
 def _fields(obj: Any, names: tuple[str, ...]) -> dict[str, Any]:
@@ -403,22 +402,19 @@ def heartbeat_current_worker_from_env() -> bool:
     heartbeated; ``HERMES_KANBAN_CLAIM_LOCK`` absent -> default claimer (local workers)."""
     global _auto_heartbeat_last_attempt
     tid = os.environ.get("HERMES_KANBAN_TASK")
-    if not tid:
-        return False
     now = time.monotonic()
-    if (now - _auto_heartbeat_last_attempt) < _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS:
+    if not tid or (now - _auto_heartbeat_last_attempt) < _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS:
         return False
     _auto_heartbeat_last_attempt = now
     try:
         with _board(None, quiet_close=True) as (kb, conn):
-            try:
-                kb.heartbeat_claim(conn, tid, claimer=os.environ.get("HERMES_KANBAN_CLAIM_LOCK"))
-            except Exception:
-                logger.debug("auto-heartbeat: heartbeat_claim failed", exc_info=True)
-            try:
-                kb.heartbeat_worker(conn, tid, note=None, expected_run_id=_worker_run_id(tid))
-            except Exception:
-                logger.debug("auto-heartbeat: heartbeat_worker failed", exc_info=True)
+            ops = (("heartbeat_claim", {"claimer": os.environ.get("HERMES_KANBAN_CLAIM_LOCK")}),
+                   ("heartbeat_worker", {"note": None, "expected_run_id": _worker_run_id(tid)}))
+            for op, kwargs in ops:
+                try:
+                    getattr(kb, op)(conn, tid, **kwargs)
+                except Exception:
+                    logger.debug("auto-heartbeat: %s failed", op, exc_info=True)
         return True
     except Exception:
         logger.debug("auto-heartbeat: bridge failed", exc_info=True)
@@ -436,15 +432,13 @@ _comment_watermark: dict[str, int] = {}
 def inject_new_comments_from_env(agent: Any) -> bool:
     """Steer new operator comments on the worker's task into ``agent``; True iff a
     steer was injected; never raises. Own comments (``HERMES_PROFILE``) are skipped."""
-    tid = os.environ.get("HERMES_KANBAN_TASK")
-    if not tid or agent is None or not hasattr(agent, "steer"):
-        return False
     global _comment_poll_last_attempt
+    tid = os.environ.get("HERMES_KANBAN_TASK")
     now = time.monotonic()
-    if (now - _comment_poll_last_attempt) < _COMMENT_POLL_MIN_INTERVAL_SECONDS:
+    if (not tid or agent is None or not hasattr(agent, "steer")
+            or (now - _comment_poll_last_attempt) < _COMMENT_POLL_MIN_INTERVAL_SECONDS):
         return False
     _comment_poll_last_attempt = now
-
     seen = _comment_watermark.get(tid)
     try:
         with _board(None, quiet_close=True) as (kb, conn):
@@ -452,27 +446,20 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
         return False
-
     if seen is None:
         _comment_watermark[tid] = max((c.id for c in rows), default=0)
-        return False
-    if not rows:
+    if seen is None or not rows:
         return False
     # Advance past everything read (including our own notes) so nothing is re-injected.
     _comment_watermark[tid] = max(c.id for c in rows)
-
     own = (os.environ.get("HERMES_PROFILE") or "").strip()
     fresh = [c for c in rows if (c.author or "").strip() != own and (c.body or "").strip()]
     if not fresh:
         return False
-
     lines = [f"- {c.author or 'operator'}: {c.body.strip()}" for c in fresh]
-    note = (
-        "New note"
-        + ("s" if len(fresh) > 1 else "")
-        + " on your kanban task from the operator (delivered mid-run). "
-        + "Take it into account for the work you're doing right now:\n"
-        + "\n".join(lines))
+    note = ("New note" + ("s" if len(fresh) > 1 else "")
+            + " on your kanban task from the operator (delivered mid-run). "
+            + "Take it into account for the work you're doing right now:\n" + "\n".join(lines))
     try:
         return bool(agent.steer(note))
     except Exception:
@@ -535,18 +522,12 @@ def _handle_list(args: dict, **kw) -> str:
 def _handle_complete(args: dict, **kw) -> str:
     """Mark the current task done with a structured handoff."""
     tid = _worker_guard("kanban_complete", args)
-    summary = args.get("summary")
+    summary = _redact_opt(args.get("summary"))
+    result = _redact_opt(args.get("result"))
     metadata = args.get("metadata")
-    result = args.get("result")
-    if summary:
-        summary = _redact(summary)
-    if result:
-        result = _redact(result)
     if isinstance(metadata, dict):
         # Keep the unredacted dict if the redacted JSON cannot be re-parsed.
-        redacted = _redact_metadata(metadata)
-        if redacted is not None:
-            metadata = redacted
+        metadata = _redact_metadata(metadata) or metadata
     created_cards = _coerce_str_list(
         args.get("created_cards"), "created_cards", "task ids", strip=True)
     artifacts = _coerce_str_list(args.get("artifacts"), "artifacts", "file paths", strip=True)
@@ -672,11 +653,10 @@ def _handle_comment(args: dict, **kw) -> str:
     _check(tid, "task_id is required (use the current task id if that's what "
                 "you mean — pulls from env but kept explicit here)")
     body = _redact(_require_text(args, "body"))
-    # Author comes from the worker's runtime identity, never caller args:
-    # comments are injected into future workers' system prompts as
-    # ``**{author}** (timestamp): {body}``, so an args["author"] override
-    # could forge a directive from a name like ``hermes-system``. Cross-task
-    # commenting stays unrestricted — it is the handoff channel between tasks.
+    # Author comes from the worker's runtime identity, never caller args: comments are
+    # injected into future workers' system prompts, so an args["author"] override could
+    # forge a directive from ``hermes-system``. Cross-task commenting stays unrestricted —
+    # it is the handoff channel between tasks.
     author = os.environ.get("HERMES_PROFILE") or "worker"
     with _board(args.get("board")) as (kb, conn):
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
@@ -722,7 +702,6 @@ def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[st
     from urllib.parse import urljoin, urlparse
     import httpx
     from tools.url_safety import is_safe_url
-
     current_url = url
     for _ in range(_MAX_ATTACH_URL_REDIRECTS + 1):
         scheme = (urlparse(current_url).scheme or "").lower()
@@ -756,7 +735,6 @@ def _download_url_with_cap(url: str, max_bytes: int) -> tuple[bytes, Optional[st
 def _handle_attach_url(args: dict, **kw) -> str:
     """Attach a file fetched server-side from an http(s) URL (shared size cap)."""
     from hermes_cli import kanban_db as kb
-
     tid = _worker_guard("kanban_attach_url", args)
     url = str(_require_text(args, "url")).strip()
     filename = args.get("filename") or args.get("title")
@@ -796,19 +774,16 @@ def _handle_create(args: dict, **kw) -> str:
     assignee = args.get("assignee")
     _check(assignee, "assignee is required — name the profile that should execute this "
                      "task (the dispatcher will only spawn tasks with an assignee)")
-    # Prefer the request-scoped api_server origin binding over HERMES_SESSION_ID:
-    # the env var is clobbered with a subagent's internal id whenever a child
-    # agent is constructed in-process, which would stamp — and later wake —
-    # the wrong session. NULL on CLI/dashboard paths that set neither.
+    # Prefer the request-scoped api_server origin binding over HERMES_SESSION_ID: the env
+    # var is clobbered with a subagent's internal id whenever a child agent is constructed
+    # in-process, which would stamp — and later wake — the wrong session.
     from tools.async_delegation import _current_origin_session_id
-
     session_id = (args.get("session_id") or _current_origin_session_id()
                   or os.environ.get("HERMES_SESSION_ID"))
-    # Workspace sharing is always explicit: omitted fields mean a fresh scratch
-    # workspace even for a dispatcher-spawned creator — reusing the parent's
-    # literal path would let a child mutate review evidence or race its
-    # checkout. Project identity is the one safe thing to inherit implicitly
-    # (the DB turns it into a fresh per-task worktree).
+    # Workspace sharing is always explicit: omitted fields mean a fresh scratch workspace
+    # even for a dispatcher-spawned creator (reusing the parent's path would let a child
+    # mutate review evidence or race its checkout). Project identity is the one safe thing
+    # to inherit implicitly (the DB turns it into a fresh per-task worktree).
     workspace_kind = args.get("workspace_kind")
     workspace_path = args.get("workspace_path")
     project_id = args.get("project") or args.get("project_id")
@@ -829,28 +804,18 @@ def _handle_create(args: dict, **kw) -> str:
                 project_id = self_task.project_id
                 project_source_task_id = self_task.id
         new_tid = kb.create_task(
-            conn,
-            title=str(title).strip(),
-            body=args.get("body"),
-            assignee=str(assignee),
-            parents=tuple(parents),
-            tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
+            conn, title=str(title).strip(), body=args.get("body"), assignee=str(assignee),
+            parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
             priority=_opt_int(args.get("priority"), 0),
             workspace_kind=str(workspace_kind if workspace_kind is not None else "scratch"),
-            workspace_path=workspace_path,
-            project_id=project_id,
-            project_source_task_id=project_source_task_id,
-            triage=triage,
+            workspace_path=workspace_path, project_id=project_id,
+            project_source_task_id=project_source_task_id, triage=triage,
             idempotency_key=args.get("idempotency_key"),
-            max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")),
-            skills=skills,
-            model_override=model_override,
-            provider_override=provider_override,
-            goal_mode=goal_mode,
-            goal_max_turns=_opt_int(args.get("goal_max_turns")),
+            max_runtime_seconds=_opt_int(args.get("max_runtime_seconds")), skills=skills,
+            model_override=model_override, provider_override=provider_override,
+            goal_mode=goal_mode, goal_max_turns=_opt_int(args.get("goal_max_turns")),
             initial_status=str(args.get("initial_status") or "running"),
-            created_by=os.environ.get("HERMES_PROFILE") or "worker",
-            session_id=session_id)
+            created_by=os.environ.get("HERMES_PROFILE") or "worker", session_id=session_id)
         new_task = kb.get_task(conn, new_tid)
         subscribed = _maybe_auto_subscribe(conn, new_tid)
         return _ok(
@@ -869,7 +834,6 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
     every CLI/ACP invocation and would auto-subscribe every CLI run.
     """
     from gateway.session_context import get_session_env
-
     platform = get_session_env("HERMES_SESSION_PLATFORM", "")
     chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
     if not platform or not chat_id:
@@ -894,10 +858,8 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         delivery_metadata["thread_id"] = thread_id
     if chat_type:
         delivery_metadata["chat_type"] = chat_type
-    if (
-        platform.lower() == "telegram"
-        and thread_id
-        and (chat_type or "").lower() in {"dm", "direct", "private"}):
+    if (platform.lower() == "telegram" and thread_id
+            and (chat_type or "").lower() in {"dm", "direct", "private"}):
         delivery_metadata["telegram_dm_topic_reply_fallback"] = True
         if str(thread_id) not in {"", "1"}:
             delivery_metadata["direct_messages_topic_id"] = str(thread_id)
@@ -923,7 +885,6 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             return False
     except Exception:
         pass  # unreadable config keeps the user-friendly default (True)
-
     target = None
     try:
         target = _resolve_notify_target()

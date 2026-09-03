@@ -128,8 +128,7 @@ class _BoundedOutputCollector:
             chunk = text[start:]
             self._tail.append(chunk)
             self._tail_chars += len(chunk)
-            while self._tail_chars > self._tail_limit:
-                excess = self._tail_chars - self._tail_limit
+            while (excess := self._tail_chars - self._tail_limit) > 0:
                 first = self._tail[0]
                 if len(first) <= excess:
                     self._tail.popleft()
@@ -154,9 +153,7 @@ class _BoundedOutputCollector:
             # the notice length; iterate to a fixed point (converges quickly).
             notice = ""
             for _ in range(4):
-                content_budget = max(0, available - len(notice))
-                head_chars = int(content_budget * 0.4)
-                omitted = max(0, self._total_chars - content_budget)
+                omitted = max(0, self._total_chars - max(0, available - len(notice)))
                 updated = (
                     f"\n\n... [OUTPUT TRUNCATED - {omitted:,} chars omitted "
                     f"out of {self._total_chars:,} total] ...\n\n")
@@ -211,14 +208,9 @@ def _finalize_wait_result(collector: _BoundedOutputCollector, rendered: str, ret
     return result
 
 
-# ---------------------------------------------------------------------------
-# Stdin / spawn helpers
-# ---------------------------------------------------------------------------
-
-
+# --- Stdin / spawn helpers ---
 def _pipe_stdin(proc: subprocess.Popen, data: str) -> None:
     """Write *data* to proc.stdin on a daemon thread to avoid pipe-buffer deadlocks.
-
     Writes go through ``proc.stdin.buffer`` as UTF-8 bytes we encode ourselves: Windows
     text-mode stdin would translate ``\\n`` -> ``\\r\\n`` and corrupt every write_file/patch
     payload. Encoding uses ``surrogateescape`` (exact inverse of the read-side decode);
@@ -275,11 +267,7 @@ def _popen_bash(cmd: list[str], stdin_data: str | None = None, **kwargs) -> subp
     return proc
 
 
-# ---------------------------------------------------------------------------
-# ProcessHandle protocol
-# ---------------------------------------------------------------------------
-
-
+# --- ProcessHandle protocol ---
 class ProcessHandle(Protocol):
     """Duck type every backend's _run_bash() must return. subprocess.Popen satisfies this
     natively; SDK backends (Modal, Daytona) return _ThreadedProcessHandle."""
@@ -304,7 +292,6 @@ class _ThreadedProcessHandle:
         self._cancel_fn = cancel_fn
         self._done = threading.Event()
         self._returncode: int | None = None
-        self._error: Exception | None = None
 
         # Pipe for stdout — the drain thread in _wait_for_process reads the read end.
         read_fd, write_fd = os.pipe()
@@ -319,8 +306,7 @@ class _ThreadedProcessHandle:
                     os.write(self._write_fd, output.encode("utf-8", errors="replace"))
                 except OSError:
                     pass
-            except Exception as exc:
-                self._error = exc
+            except Exception:
                 self._returncode = 1
             finally:
                 try:
@@ -354,14 +340,9 @@ class _ThreadedProcessHandle:
         return self._returncode
 
 
-# ---------------------------------------------------------------------------
-# Stdout drain thread
-# ---------------------------------------------------------------------------
-
-
+# --- Stdout drain thread ---
 def _drain_stdout(proc: ProcessHandle, output: _BoundedOutputCollector) -> None:
     """Drain ``proc.stdout`` into *output* until EOF or shortly after exit.
-
     ``for line in proc.stdout`` would block on ``readline()`` until EOF, and a backgrounded
     grandchild (``cmd &``, ``setsid cmd & disown``) inherits the pipe's write end — so the
     tool would hang for the grandchild's lifetime. Instead we ``select()`` with a short poll
@@ -376,10 +357,9 @@ def _drain_stdout(proc: ProcessHandle, output: _BoundedOutputCollector) -> None:
     if stream is None:
         return
     decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    fileno = getattr(stream, "fileno", None)
     try:
-        fd = fileno() if callable(fileno) else None
-    except Exception:
+        fd = stream.fileno()
+    except Exception:  # mocks / in-memory adapters without a real descriptor
         fd = None
     try:
         if not isinstance(fd, int) or fd < 0:

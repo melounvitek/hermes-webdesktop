@@ -478,7 +478,7 @@ def _paste_callback_reader(result: dict) -> None:
         line = sys.stdin.readline()
     except (KeyboardInterrupt, OSError, ValueError):
         return
-    line = line.strip() if line else ""
+    line = (line or "").strip()
     if not line or _result_taken(result):
         return  # EOF / blank, or the HTTP listener already won
     if line.lower() in _SKIP_TOKENS:
@@ -620,8 +620,7 @@ def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
             # Dashboard flow speaks the legacy tuple; normalize to one shape.
-            dash_code, dash_state = await dashboard_flow.wait_for_callback()
-            return _authorization_code_result(dash_code, dash_state)
+            return _authorization_code_result(*await dashboard_flow.wait_for_callback())
         # The SDK entered the authorization-code flow, so any cached token is unusable. Reject
         # BEFORE binding: binding would block for the full timeout and collide with the
         # TIME_WAIT port on retry.
