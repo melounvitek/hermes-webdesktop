@@ -28,48 +28,28 @@ _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.doctor_config import (  # noqa: F401  (re-exported; tests use hermes_cli.doctor.<name>)
-    _check_config_drift, _check_config_file, _check_env_file, _check_mcp_security,
-    _check_xai_retirement, _has_provider_env_config, collect_deprecated_env_vars,
-    collect_relay_plugin_cutover_findings, managed_scope_check, report_deprecated_config_and_env,
-)
-from hermes_cli.doctor_platform import (  # noqa: F401  (re-exported; tests use hermes_cli.doctor.<name>)
-    _check_certificates, _check_command_installation, _check_gateway_supervision,
-    _check_python_environment, _check_required_packages, _check_s6_supervision,
-    _check_security_advisories, _desktop_app_bundle, _format_db_size, _macos_desktop_dr,
-    _python_install_cmd, _read_journal_mode, _report_database_journal_modes, _sqlite_upgrade_hint,
-    _system_package_install_cmd, _unreadable_reason, check_certificates, check_macos_full_disk_access,
-    check_macos_tcc_anchor, check_macos_tcc_grants,
-)
-from hermes_cli.doctor_tools import (  # noqa: F401  (re-exported; tests use hermes_cli.doctor.<name>)
-    _apply_doctor_tool_availability_overrides, _check_git_and_rg, _check_node_and_browser,
-    _check_npm_audit, _check_terminal_backend, _check_tool_availability, _doctor_web_capability_rows,
-    _enabled_cli_toolsets_for_doctor, _missing_api_key_toolsets_for_summary, _safe_which,
-)
-from hermes_cli.doctor_state import (  # noqa: F401  (re-exported; tests use hermes_cli.doctor.<name>)
-    STATE_DB_SIZE_WARN_BYTES, _check_directory_structure, _check_memory_provider, _check_profiles,
-    _check_skills_hub, _check_state_db, _honcho_is_configured_for_doctor, _render_state_db_stats,
-)
 from hermes_cli.doctor_report import (  # noqa: F401  (re-exported for doctor_live and tests)
     Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
 )
 from hermes_cli.doctor_connectivity import (  # noqa: F401  (re-exported; tests import from hermes_cli.doctor)
-    _build_apikey_providers_list, _has_healthy_oauth_fallback_for_apikey_provider, build_probes,
-    run_probes,
+    _build_apikey_providers_list, _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes,
 )
+from hermes_cli.doctor_tools import _safe_which  # noqa: F401
+from hermes_cli.sizefmt import format_bytes as _human_bytes  # noqa: F401  (tests import doctor._human_bytes)
 
+# Every public/private name of the check modules is re-exported: ``hermes_cli.doctor.<name>`` is the stable
+# import + monkeypatch surface for tests (e.g. doctor._check_config_file, doctor._render_state_db_stats).
+for _sub in ("doctor_config", "doctor_platform", "doctor_tools", "doctor_state"):
+    globals().update({k: v for k, v in vars(importlib.import_module(f"hermes_cli.{_sub}")).items() if k[:2] != "__"})
 
 _PROVIDER_ENV_HINTS = (
-    "DEEPINFRA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-    "ANTHROPIC_TOKEN", "OPENAI_BASE_URL", "NOUS_API_KEY", "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY",
-    "KIMI_API_KEY", "KIMI_CN_API_KEY", "GMI_API_KEY", "FIREWORKS_API_KEY", "ACTUAL_API_KEY",
-    "ACTUAL_BASE_URL", "MINIMAX_API_KEY", "MINIMAX_CN_API_KEY", "KILOCODE_API_KEY", "DEEPSEEK_API_KEY",
-    "DASHSCOPE_API_KEY", "HF_TOKEN", "AI_GATEWAY_API_KEY", "OPENCODE_ZEN_API_KEY",
-    "OPENCODE_GO_API_KEY", "COMMANDCODE_API_KEY", "XIAOMI_API_KEY", "TOKENHUB_API_KEY",
-    "TOKENPLAN_API_KEY",
+    "DEEPINFRA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
+    "OPENAI_BASE_URL", "NOUS_API_KEY", "GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY", "KIMI_API_KEY",
+    "KIMI_CN_API_KEY", "GMI_API_KEY", "FIREWORKS_API_KEY", "ACTUAL_API_KEY", "ACTUAL_BASE_URL", "MINIMAX_API_KEY",
+    "MINIMAX_CN_API_KEY", "KILOCODE_API_KEY", "DEEPSEEK_API_KEY", "DASHSCOPE_API_KEY", "HF_TOKEN",
+    "AI_GATEWAY_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY", "COMMANDCODE_API_KEY", "XIAOMI_API_KEY",
+    "TOKENHUB_API_KEY", "TOKENPLAN_API_KEY",
 )
-
-from hermes_cli.sizefmt import format_bytes as _human_bytes  # noqa: F401  (tests import doctor._human_bytes)
 
 
 @doctor_check()
@@ -77,18 +57,16 @@ def _check_auth_providers(should_fix: bool, f: Finding) -> None:
     """Refresh-free OAuth status snapshot (doctor must never trigger a token refresh)."""
     try:
         from hermes_cli.auth import get_nous_auth_status_local, get_codex_auth_status, get_minimax_oauth_auth_status
-        # Read-only display: refresh-free snapshot — doctor must never trigger an OAuth refresh.
         _login_row("Nous Portal auth", get_nous_auth_status_local())
-        # Native OAuth uses Hermes' own device-code flow — the Codex CLI only imports existing tokens from
-        # ~/.codex/auth.json. Hint sits under the Codex row so it doesn't read as another provider's remedy.
+        # Native OAuth is Hermes' own device-code flow; the Codex CLI only imports existing ~/.codex/auth.json
+        # tokens, so the hint sits under the Codex row (not as another provider's remedy).
         if not _login_row("OpenAI Codex auth", get_codex_auth_status(), show_error=True) and not _safe_which("codex"):
             check_info("codex CLI not installed (optional — only required to import tokens from an existing Codex CLI login)")
         minimax_status = get_minimax_oauth_auth_status()
         _login_row("MiniMax OAuth", minimax_status, f"(logged in, region={minimax_status.get('region', 'global')})")
     except Exception as e:
         check_warn("Auth provider status", f"(could not check: {e})")
-    # xAI OAuth — separate try/except so an import failure cannot disrupt the already-printed rows above.
-    try:
+    try:  # xAI OAuth separately, so an import failure cannot disrupt the rows already printed above
         from hermes_cli.auth import get_xai_oauth_auth_status
         _login_row("xAI OAuth", get_xai_oauth_auth_status() or {}, show_error=True)
     except Exception:
