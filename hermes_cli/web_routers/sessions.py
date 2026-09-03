@@ -13,7 +13,7 @@ import json
 import re
 import sqlite3
 import time
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
@@ -21,15 +21,9 @@ from fastapi.responses import StreamingResponse
 
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
-    BulkDeleteSessions,
-    SessionImport,
-    SessionOwnerBackfill,
-    SessionPrune,
-    SessionRename,
-)
+    BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
 from hermes_cli.web_routers._common import log as _log, http_failure
 from hermes_state import is_malformed_db_error, is_transient_sqlite_error
-from typing import Any, Dict
 
 list_router = APIRouter()
 search_router = APIRouter()
@@ -42,20 +36,16 @@ _open_session_db_for_profile = late("_open_session_db_for_profile")
 _session_latest_descendant = late("_session_latest_descendant")
 _strip_session_list_rows = late("_strip_session_list_rows")
 
+_NOT_FOUND = "Session not found"
 
-# CRITICAL — every literal-path route below MUST be declared BEFORE the
-# templated ``/api/sessions/{session_id}`` family that follows. FastAPI/
-# Starlette match routes in registration order, and the ``{session_id}``
-# pattern is unconstrained — it would otherwise swallow e.g.
-# ``DELETE /api/sessions/empty``, ``POST /api/sessions/bulk-delete``, or
-# ``GET /api/sessions/stats`` as "operate on the session with id
-# 'empty'" / "'bulk-delete'" / "'stats'", which would 404 (or worse,
-# succeed and delete the wrong row). Same story as the older
-# ``/api/sessions/search`` endpoint up at line ~1191. If you split or
-# reorder this block, move every route in it together.
-# Keep the dashboard import endpoint stream-safe: FastAPI otherwise parses and
-# buffers an arbitrarily large JSON body before SessionDB can enforce its own
-# per-session and transaction-work limits.
+# CRITICAL — every literal-path route on ``manage_router`` MUST be declared
+# BEFORE the templated ``/api/sessions/{session_id}`` family. Starlette matches
+# in registration order and ``{session_id}`` is unconstrained, so e.g.
+# ``DELETE /api/sessions/empty`` would otherwise be taken as "the session with
+# id 'empty'" (404, or worse, deleting the wrong row). Move the block as a unit.
+
+# Stream-safe import: FastAPI otherwise buffers an arbitrarily large JSON body
+# before SessionDB can enforce its own per-session and transaction limits.
 _SESSION_IMPORT_MAX_BYTES = 25 * 1024 * 1024
 
 
@@ -76,58 +66,39 @@ def _import_sessions_for_profile(profile: Optional[str], sessions: List[Dict[str
         db.close()
 
 
+# Prune filters forwarded to SessionDB; string filters map "" -> None.
+_PRUNE_STR_FILTERS = (
+    "source", "title_like", "end_reason", "cwd_prefix", "model_like", "provider",
+    "user_id", "chat_id", "chat_type", "branch_like")
+_PRUNE_NUM_FILTERS = (
+    "min_messages", "max_messages", "min_tokens", "max_tokens", "min_cost", "max_cost",
+    "min_tool_calls", "max_tool_calls")
+
+
 def _prune_sessions(body: SessionPrune):
     """Delete ended sessions matching filters (mirrors `hermes sessions prune`)."""
     from hermes_cli.web_server import get_hermes_home
-    has_window = (
-        body.started_before is not None or body.started_after is not None
-    )
+    has_window = body.started_before is not None or body.started_after is not None
     if body.older_than_days is not None and body.older_than_days < 1 and not has_window:
         raise HTTPException(status_code=400, detail="older_than_days must be >= 1")
     # Mirror the CLI: the implicit 90-day cutoff only applies to a truly bare
-    # prune. Any attribute filter (source, title, model, ...) suppresses it
-    # unless the caller explicitly sent older_than_days.
-    _attr_filters_set = any(
-        getattr(body, f) is not None
-        for f in (
-            "source", "title_like", "end_reason", "cwd_prefix",
-            "min_messages", "max_messages", "model_like", "provider",
-            "user_id", "chat_id", "chat_type", "branch_like",
-            "min_tokens", "max_tokens", "min_cost", "max_cost",
-            "min_tool_calls", "max_tool_calls",
-        )
-    )
-    _older_than_explicit = "older_than_days" in body.model_fields_set
-    _effective_older_than = body.older_than_days
-    if has_window or (_attr_filters_set and not _older_than_explicit):
-        _effective_older_than = None
+    # prune. Any attribute filter suppresses it unless older_than_days was
+    # explicitly sent.
+    attr_filters_set = any(
+        getattr(body, f) is not None for f in _PRUNE_STR_FILTERS + _PRUNE_NUM_FILTERS)
+    effective_older_than = body.older_than_days
+    if has_window or (attr_filters_set and "older_than_days" not in body.model_fields_set):
+        effective_older_than = None
     profile_home = _cron_profile_home(body.profile)[1] if body.profile else get_hermes_home()
     db = _open_session_db_for_profile(body.profile, read_only=False)
     try:
-        filters = dict(
-            older_than_days=_effective_older_than,
-            source=(body.source or None),
-            started_before=body.started_before,
-            started_after=body.started_after,
-            title_like=(body.title_like or None),
-            end_reason=(body.end_reason or None),
-            cwd_prefix=(body.cwd_prefix or None),
-            min_messages=body.min_messages,
-            max_messages=body.max_messages,
-            model_like=(body.model_like or None),
-            provider=(body.provider or None),
-            user_id=(body.user_id or None),
-            chat_id=(body.chat_id or None),
-            chat_type=(body.chat_type or None),
-            branch_like=(body.branch_like or None),
-            min_tokens=body.min_tokens,
-            max_tokens=body.max_tokens,
-            min_cost=body.min_cost,
-            max_cost=body.max_cost,
-            min_tool_calls=body.min_tool_calls,
-            max_tool_calls=body.max_tool_calls,
-            archived=None if body.include_archived else False,
-        )
+        filters = {
+            "older_than_days": effective_older_than,
+            "started_before": body.started_before,
+            "started_after": body.started_after,
+            "archived": None if body.include_archived else False,
+            **{f: (getattr(body, f) or None) for f in _PRUNE_STR_FILTERS},
+            **{f: getattr(body, f) for f in _PRUNE_NUM_FILTERS}}
         skipped_open = db.count_open_prune_matches(**filters)
         if body.dry_run:
             rows = db.list_prune_candidates(**filters)
@@ -139,33 +110,21 @@ def _prune_sessions(body: SessionPrune):
                 # Rows are ordered by last activity, not creation time.
                 "oldest_last_active": rows[0]["last_active"] if rows else None,
                 "newest_last_active": rows[-1]["last_active"] if rows else None,
-                "oldest_started_at": (
-                    min(r["started_at"] for r in rows) if rows else None
-                ),
-                "newest_started_at": (
-                    max(r["started_at"] for r in rows) if rows else None
-                ),
+                "oldest_started_at": min(r["started_at"] for r in rows) if rows else None,
+                "newest_started_at": max(r["started_at"] for r in rows) if rows else None,
                 "sessions": [
                     {
-                        "id": r["id"],
-                        "source": r["source"],
-                        "title": r.get("title"),
-                        "model": r.get("model"),
-                        "started_at": r["started_at"],
-                        "last_active": r["last_active"],
-                        "message_count": r["message_count"],
-                    }
-                    for r in rows
-                ],
-            }
+                        "id": r["id"], "source": r["source"], "title": r.get("title"),
+                        "model": r.get("model"), "started_at": r["started_at"],
+                        "last_active": r["last_active"], "message_count": r["message_count"]}
+                    for r in rows]}
         sessions_dir = profile_home / "sessions"
         removed = db.prune_sessions(
-            sessions_dir=sessions_dir if sessions_dir.exists() else None,
-            **filters,
-        )
+            sessions_dir=sessions_dir if sessions_dir.exists() else None, **filters)
         return {"ok": True, "removed": removed, "skipped_open": skipped_open}
     finally:
         db.close()
+
 
 _ACTIVE_WINDOW_S = 300
 
@@ -178,8 +137,7 @@ def _csv(value: Optional[str]) -> List[str]:
 def _is_active(row: dict, now: float) -> bool:
     return (
         row.get("ended_at") is None
-        and (now - row.get("last_active", row.get("started_at", 0))) < _ACTIVE_WINDOW_S
-    )
+        and (now - row.get("last_active", row.get("started_at", 0))) < _ACTIVE_WINDOW_S)
 
 
 def _with_db(profile: Optional[str], fn: Callable, *, read_only: bool):
@@ -200,26 +158,22 @@ def _serving_profile(profile: Optional[str]) -> str:
 def _resolve_session_id(db, session_id: str) -> Optional[str]:
     """Resolve *session_id*, distinguishing "absent" from "unreadable".
 
-    On a corrupt ``state.db`` the exact-match lookup (primary-key index) just
-    misses, while the prefix fallback scans the b-tree and raises "database
-    disk image is malformed".  Both used to end at 404; report corruption as
-    503 with the actual problem instead of an empty store.
+    On a corrupt ``state.db`` the exact-match lookup just misses while the
+    prefix fallback scans the b-tree and raises "malformed"; report corruption
+    as 503 with the actual problem instead of an empty store (404).
     """
     try:
         return db.resolve_session_id(session_id)
     except sqlite3.DatabaseError as exc:
         if not is_malformed_db_error(exc):
             raise
-        _log.error(
-            "state.db is corrupt while resolving session %s: %s", session_id, exc
-        )
+        _log.error("state.db is corrupt while resolving session %s: %s", session_id, exc)
         raise HTTPException(
             status_code=503,
             detail=(
                 "Session store is corrupt (database disk image is malformed). "
                 "Sessions cannot be read until it is repaired — run "
-                "`hermes doctor` for diagnosis."
-            ),
+                "`hermes doctor` for diagnosis."),
         ) from exc
 
 
@@ -237,8 +191,7 @@ def get_sessions(
     exclude_sources: str = None,
     cwd_prefix: str = None,
     full: bool = False,
-    profile: Optional[str] = None,
-):
+    profile: Optional[str] = None):
     """List sessions.
 
     ``archived``: ``exclude`` (default) / ``only`` / ``include``.  ``order``:
@@ -248,15 +201,9 @@ def get_sessions(
     ``model_config`` unless ``full=1``.
     """
     if archived not in ("exclude", "only", "include"):
-        raise HTTPException(
-            status_code=400,
-            detail="archived must be one of: exclude, only, include",
-        )
+        raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
     if order not in ("created", "recent"):
-        raise HTTPException(
-            status_code=400,
-            detail="order must be one of: created, recent",
-        )
+        raise HTTPException(status_code=400, detail="order must be one of: created, recent")
     profile_name: Optional[str] = None
     if profile:
         profile_name, _ = _cron_profile_home(profile)
@@ -273,32 +220,24 @@ def get_sessions(
             # the cron-jobs section (source=cron) into two independent lists.
             source_list = _csv(sources)
             exclude_list = _csv(exclude_sources)
-            sessions = db.list_sessions_rich(
+            scope = dict(
                 source=source or None,
                 sources=source_list or None,
                 exclude_sources=exclude_list or None,
                 cwd_prefix=(cwd_prefix or None),
-                limit=limit,
-                offset=offset,
                 min_message_count=min_message_count,
                 include_archived=include_archived,
-                archived_only=archived_only,
+                archived_only=archived_only)
+            sessions = db.list_sessions_rich(
+                limit=limit,
+                offset=offset,
                 order_by_last_active=order == "recent",
                 # Skip the system_prompt blob inside SQLite too (pairs with
                 # _strip_session_list_rows below).
                 compact_rows=not full,
                 include_pinned=True,
-            )
-            total = db.session_count(
-                source=source or None,
-                sources=source_list or None,
-                cwd_prefix=(cwd_prefix or None),
-                exclude_sources=exclude_list or None,
-                min_message_count=min_message_count,
-                include_archived=include_archived,
-                archived_only=archived_only,
-                exclude_children=True,
-            )
+                **scope)
+            total = db.session_count(exclude_children=True, **scope)
             now = time.time()
             row_profile = profile_name or _cron_default_profile()
             for s in sessions:
@@ -326,12 +265,21 @@ def get_sessions(
             detail=(
                 "Session store is busy (disk I/O or lock). Retry; the list was not cleared."
                 if transient
-                else "Internal server error"
-            ),
+                else "Internal server error"),
         ) from exc
     except Exception:
         _log.exception("GET /api/sessions failed")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def _is_compression_edge(child: dict, parent: dict) -> bool:
+    parent_ended_at = parent.get("ended_at")
+    started_at = child.get("started_at")
+    return (
+        parent.get("end_reason") == "compression"
+        and parent_ended_at is not None
+        and started_at is not None
+        and started_at >= parent_ended_at)
 
 
 @search_router.get("/api/sessions/search")
@@ -341,8 +289,7 @@ async def search_sessions(
     profile: Optional[str] = None,
     source: str = None,
     sources: str = None,
-    exclude_sources: str = None,
-):
+    exclude_sources: str = None):
     """Search sessions by ID plus FTS5 message content.
 
     ID matches first, then content matches.  Results are deduped by
@@ -363,6 +310,12 @@ async def search_sessions(
             exclude_list = _csv(exclude_sources)
             now = time.time()
 
+            def get_session(sid):
+                try:
+                    return db.get_session(sid)
+                except Exception:
+                    return None
+
             # Walk parent_session_id to the compression root, memoized per
             # chain; stops at branch/delegate edges (those stay searchable).
             root_cache: dict = {}
@@ -382,33 +335,10 @@ async def search_sessions(
                     if cur in root_cache:
                         root = root_cache[cur]
                         break
-                    try:
-                        s = db.get_session(cur)
-                    except Exception:
-                        s = None
-                    if not s:
-                        root = cur
-                        break
+                    s = get_session(cur)
                     parent = s.get("parent_session_id") if isinstance(s, dict) else None
-                    if not parent:
-                        root = cur
-                        break
-                    try:
-                        parent_session = db.get_session(parent)
-                    except Exception:
-                        parent_session = None
-                    if not parent_session:
-                        root = cur
-                        break
-                    parent_ended_at = parent_session.get("ended_at")
-                    started_at = s.get("started_at")
-                    is_compression_edge = (
-                        parent_session.get("end_reason") == "compression"
-                        and parent_ended_at is not None
-                        and started_at is not None
-                        and started_at >= parent_ended_at
-                    )
-                    if not is_compression_edge:
+                    parent_session = get_session(parent) if parent else None
+                    if not parent_session or not _is_compression_edge(s, parent_session):
                         root = cur
                         break
                     cur = parent
@@ -423,9 +353,7 @@ async def search_sessions(
                     return tip_cache[root_id]
                 tip = root_id
                 try:
-                    resolved = db.get_compression_tip(root_id)
-                    if resolved:
-                        tip = resolved
+                    tip = db.get_compression_tip(root_id) or tip
                 except Exception:
                     pass
                 tip_cache[root_id] = tip
@@ -450,92 +378,59 @@ async def search_sessions(
                 except Exception:
                     row = None
                 if row:
-                    payload.update(
-                        {
-                            "id": row.get("id") or sid,
-                            "source": row.get("source"),
-                            "model": row.get("model"),
-                            "title": row.get("title"),
-                            "started_at": row.get("started_at"),
-                            "ended_at": row.get("ended_at"),
-                            "last_active": row.get("last_active") or row.get("started_at"),
-                            "is_active": (
-                                row.get("ended_at") is None
-                                and (now - (row.get("last_active") or row.get("started_at") or 0)) < 300
-                            ),
-                            "message_count": row.get("message_count") or 0,
-                            "tool_call_count": row.get("tool_call_count") or 0,
-                            "input_tokens": row.get("input_tokens") or 0,
-                            "output_tokens": row.get("output_tokens") or 0,
-                            "preview": row.get("preview"),
-                            "parent_session_id": row.get("parent_session_id"),
-                            "archived": bool(row.get("archived")),
-                        }
-                    )
+                    last_active = row.get("last_active") or row.get("started_at")
+                    payload.update({
+                        "id": row.get("id") or sid,
+                        "source": row.get("source"),
+                        "model": row.get("model"),
+                        "title": row.get("title"),
+                        "started_at": row.get("started_at"),
+                        "ended_at": row.get("ended_at"),
+                        "last_active": last_active,
+                        "is_active": row.get("ended_at") is None and (now - (last_active or 0)) < 300,
+                        "message_count": row.get("message_count") or 0,
+                        "tool_call_count": row.get("tool_call_count") or 0,
+                        "input_tokens": row.get("input_tokens") or 0,
+                        "output_tokens": row.get("output_tokens") or 0,
+                        "preview": row.get("preview"),
+                        "parent_session_id": row.get("parent_session_id"),
+                        "archived": bool(row.get("archived"))})
                 else:
                     payload["id"] = sid
                 seen[root] = payload
 
+            def hit_payload(row: dict, snippet: str, role) -> dict:
+                return {
+                    "snippet": snippet, "role": role, "source": row.get("source"),
+                    "model": row.get("model"), "session_started": row.get("session_started")}
+
             # Direct ID matches first (pasted ids never appear in message text).
             for row in db.search_sessions_by_id(
-                q,
-                limit=safe_limit,
-                include_archived=True,
-                source=source_filter,
-                sources=source_list or None,
-                exclude_sources=exclude_list or None,
-            ):
+                q, limit=safe_limit, include_archived=True, source=source_filter,
+                sources=source_list or None, exclude_sources=exclude_list or None):
                 sid = row.get("id")
                 preview = (row.get("preview") or "").strip()
-                snippet = preview or f"Session ID: {sid}"
-                add_lineage_result(
-                    sid,
-                    {
-                        "snippet": snippet,
-                        "role": None,
-                        "source": row.get("source"),
-                        "model": row.get("model"),
-                        "session_started": row.get("started_at"),
-                    },
-                )
+                payload = hit_payload(row, preview or f"Session ID: {sid}", None)
+                payload["session_started"] = row.get("started_at")
+                add_lineage_result(sid, payload)
 
             # Prefix wildcards so partial words match ("nimb" -> "nimb*");
             # quoted phrases and existing wildcards are kept as-is.
             prefix_query = " ".join(
                 tok if tok.startswith('"') or tok.endswith("*") else tok + "*"
-                for tok in re.findall(r'"[^"]*"|\S+', q.strip())
-            )
+                for tok in re.findall(r'"[^"]*"|\S+', q.strip()))
             # Over-fetch so lineage dedup can still surface `limit` distinct
             # conversations when several hits collapse onto one root.
-            fetch_limit = max(safe_limit * 5, 50)
             matches = db.search_messages(
                 query=prefix_query,
                 source_filter=include_sources,
                 exclude_sources=exclude_list or None,
-                limit=fetch_limit,
-                fields=(
-                    "session_id",
-                    "role",
-                    "snippet",
-                    "source",
-                    "model",
-                    "session_started",
-                ),
-            )
-
+                limit=max(safe_limit * 5, 50),
+                fields=("session_id", "role", "snippet", "source", "model", "session_started"))
             for m in matches:
                 if len(seen) >= safe_limit:
                     break
-                add_lineage_result(
-                    m["session_id"],
-                    {
-                        "snippet": m.get("snippet", ""),
-                        "role": m.get("role"),
-                        "source": m.get("source"),
-                        "model": m.get("model"),
-                        "session_started": m.get("session_started"),
-                    },
-                )
+                add_lineage_result(m["session_id"], hit_payload(m, m.get("snippet", ""), m.get("role")))
             return {"results": list(seen.values())}
         finally:
             db.close()
@@ -555,13 +450,9 @@ async def bulk_delete_sessions_endpoint(body: BulkDeleteSessions):
     # Hard cap so a runaway selection can't lock the writer for long; 500
     # covers "select all on every page of a reasonable scrollback".
     if len(body.ids) > 500:
-        raise HTTPException(
-            status_code=400,
-            detail="ids must contain at most 500 entries",
-        )
+        raise HTTPException(status_code=400, detail="ids must contain at most 500 entries")
     deleted = await asyncio.to_thread(
-        _with_db, body.profile, lambda db: db.delete_sessions(body.ids), read_only=False
-    )
+        _with_db, body.profile, lambda db: db.delete_sessions(body.ids), read_only=False)
     return {"ok": True, "deleted": deleted}
 
 
@@ -592,8 +483,7 @@ async def count_empty_sessions_endpoint(profile: Optional[str] = None):
     """Count of empty, ended, non-archived sessions (drives the "Delete empty
     (N)" button, hidden when N is 0)."""
     count = await asyncio.to_thread(
-        _with_db, profile, lambda db: db.count_empty_sessions(), read_only=True
-    )
+        _with_db, profile, lambda db: db.count_empty_sessions(), read_only=True)
     return {"count": count}
 
 
@@ -608,8 +498,7 @@ async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
     orphaned; on-disk cleanup is left to the next prune pass.
     """
     deleted = await asyncio.to_thread(
-        _with_db, profile, lambda db: db.delete_empty_sessions(), read_only=False
-    )
+        _with_db, profile, lambda db: db.delete_empty_sessions(), read_only=False)
     return {"ok": True, "deleted": deleted}
 
 
@@ -623,13 +512,9 @@ async def get_session_stats(profile: Optional[str] = None):
             "active_store": db.session_count(include_archived=False),
             "archived": db.session_count(archived_only=True),
             "messages": db.message_count(),
-            "by_source": {},
-        }
+            "by_source": {}}
         try:
-            out["by_source"] = db.session_count_by_source(
-                include_archived=True,
-                exclude_children=True,
-            )
+            out["by_source"] = db.session_count_by_source(include_archived=True, exclude_children=True)
         except Exception:
             pass
         return out
@@ -643,7 +528,7 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
         sid = _resolve_session_id(db, session_id)
         session = db.get_session(sid) if sid else None
         if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
         # Always stamp the owner: stamping only on explicit ``?profile=`` left
         # default-profile rows unowned, so multi-profile clients resolved them
         # to whichever gateway happened to be active.
@@ -655,61 +540,20 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
 
 
 @manage_router.get("/api/sessions/{session_id}/latest-descendant")
-async def get_session_latest_descendant(
-    session_id: str,
-    profile: Optional[str] = None,
-):
+async def get_session_latest_descendant(session_id: str, profile: Optional[str] = None):
     latest, path = await asyncio.to_thread(
-        _with_db, profile, lambda db: _session_latest_descendant(session_id, db), read_only=True
-    )
+        _with_db, profile, lambda db: _session_latest_descendant(session_id, db), read_only=True)
     if not latest:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
     return {
         "requested_session_id": path[0] if path else session_id,
         "session_id": latest,
         "path": path,
-        "changed": bool(path and latest != path[0]),
-    }
+        "changed": bool(path and latest != path[0])}
 
 
-@manage_router.get("/api/sessions/{session_id}/messages")
-async def get_session_messages(
-    session_id: str,
-    profile: Optional[str] = None,
-    limit: Optional[int] = Query(None, ge=0),
-    offset: int = Query(0, ge=0),
-    order: Optional[str] = Query(None),
-    include_compacted: bool = Query(False),
-):
-    if order not in (None, "oldest", "latest"):
-        raise HTTPException(
-            status_code=400,
-            detail="order must be one of: oldest, latest",
-        )
-
-    def _read(db):
-        sid = _resolve_session_id(db, session_id)
-        if not sid:
-            return None
-        sid = db.resolve_resume_session_id(sid)
-        # Always page: an omitted limit used to load whole transcripts (hundreds
-        # of thousands of rows for a runaway session).  Explicit pagination
-        # anchors at the start; the default view is the latest page.
-        default_page = limit is None
-        latest_page = order == "latest" or (order is None and default_page)
-        _limit = 500 if default_page else min(limit, 500)
-        return sid, _limit, db.get_messages(
-            sid,
-            limit=_limit,
-            offset=offset,
-            latest=latest_page,
-            include_compacted=include_compacted,
-        )
-
-    result = await asyncio.to_thread(_with_db, profile, _read, read_only=True)
-    if result is None:
-        raise HTTPException(status_code=404, detail="Session not found")
-    sid, _limit, messages = result
+def _project_for_display(messages: list) -> list:
+    """Replace compaction summaries with their display-only projection."""
     from agent.compaction_display import project_compaction_message_for_display
     from agent.context_compressor import is_compaction_summary_message
 
@@ -730,6 +574,40 @@ async def get_session_messages(
             projected["display_content"] = display_view.get("content")
             projected.pop("display_kind", None)
         projected_messages.append(projected)
+    return projected_messages
+
+
+@manage_router.get("/api/sessions/{session_id}/messages")
+async def get_session_messages(
+    session_id: str,
+    profile: Optional[str] = None,
+    limit: Optional[int] = Query(None, ge=0),
+    offset: int = Query(0, ge=0),
+    order: Optional[str] = Query(None),
+    include_compacted: bool = Query(False)):
+    if order not in (None, "oldest", "latest"):
+        raise HTTPException(status_code=400, detail="order must be one of: oldest, latest")
+
+    def _read(db):
+        sid = _resolve_session_id(db, session_id)
+        if not sid:
+            return None
+        sid = db.resolve_resume_session_id(sid)
+        # Always page: an omitted limit used to load whole transcripts (hundreds
+        # of thousands of rows for a runaway session).  Explicit pagination
+        # anchors at the start; the default view is the latest page.
+        default_page = limit is None
+        latest_page = order == "latest" or (order is None and default_page)
+        _limit = 500 if default_page else min(limit, 500)
+        return sid, _limit, db.get_messages(
+            sid, limit=_limit, offset=offset, latest=latest_page, include_compacted=include_compacted
+        )
+
+    result = await asyncio.to_thread(_with_db, profile, _read, read_only=True)
+    if result is None:
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
+    sid, _limit, messages = result
+    projected_messages = _project_for_display(messages)
     return {
         "session_id": sid,
         "messages": projected_messages,
@@ -737,9 +615,7 @@ async def get_session_messages(
             "limit": _limit,
             "offset": offset,
             "order": order or ("latest" if limit is None else "oldest"),
-            "returned": len(projected_messages),
-        },
-    }
+            "returned": len(projected_messages)}}
 
 
 @manage_router.delete("/api/sessions/{session_id}")
@@ -780,10 +656,14 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill):
     if stamped:
         _log.info(
             "owner-backfill: stamped %d legacy NULL-profile session row(s) with profile %r",
-            stamped,
-            stamp,
-        )
+            stamped, stamp)
     return {"ok": True, "stamped": stamped, "profile": stamp}
+
+
+_RENAME_FLAG_SETTERS = (
+    ("archived", "set_session_archived"),
+    ("hidden", "set_session_hidden"),
+    ("pinned", "set_session_pinned"))
 
 
 @manage_router.patch("/api/sessions/{session_id}")
@@ -796,7 +676,7 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
     def _update(db):
         sid = _resolve_session_id(db, session_id)
         if not sid:
-            raise HTTPException(status_code=404, detail="Session not found")
+            raise HTTPException(status_code=404, detail=_NOT_FOUND)
         if body.title is None and all(getattr(body, f) is None for f in flags):
             raise HTTPException(
                 status_code=400,
@@ -808,12 +688,10 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
             except ValueError as e:
                 # Title too long, invalid characters, or already in use.
                 raise HTTPException(status_code=400, detail=str(e))
-        if body.archived is not None:
-            db.set_session_archived(sid, body.archived)
-        if body.hidden is not None:
-            db.set_session_hidden(sid, body.hidden)
-        if body.pinned is not None:
-            db.set_session_pinned(sid, body.pinned)
+        for flag, setter in _RENAME_FLAG_SETTERS:
+            value = getattr(body, flag)
+            if value is not None:
+                getattr(db, setter)(sid, value)
         if body.unread is not None:
             db.set_session_read(sid, read=not body.unread)
         result = {"ok": True, "title": db.get_session_title(sid) or ""}
@@ -825,6 +703,10 @@ async def rename_session_endpoint(session_id: str, body: SessionRename):
     return _with_db(body.profile, _update, read_only=False)
 
 
+def _compact_json(obj) -> str:
+    return json.dumps(jsonable_encoder(obj), ensure_ascii=False, separators=(",", ":"))
+
+
 @manage_router.get("/api/sessions/{session_id}/export")
 async def export_session_endpoint(session_id: str, profile: Optional[str] = None):
     """Stream a single session (metadata + messages) as JSON."""
@@ -834,53 +716,36 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
 
     prepared = await asyncio.to_thread(_with_db, profile, _prepare_export, read_only=True)
     if prepared is None or prepared[1] is None:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail=_NOT_FOUND)
 
     sid, session = prepared
 
     def _stream_export():
         db = _open_session_db_for_profile(profile, read_only=True)
         try:
-            metadata = json.dumps(
-                jsonable_encoder(session),
-                ensure_ascii=False,
-                separators=(",", ":"),
-            )
-            yield metadata[:-1] + ',"messages":['
-
+            yield _compact_json(session)[:-1] + ',"messages":['
             # Keyset pagination (id > last_seen): O(n) total over the
             # transcript, vs OFFSET's O(n²) on huge sessions.
             last_id = None
             first = True
             while True:
                 messages = db.get_messages(
-                    sid,
-                    limit=500,
-                    after_id=last_id if last_id is not None else 0,
-                )
+                    sid, limit=500, after_id=last_id if last_id is not None else 0)
                 for message in messages:
                     if not first:
                         yield ","
-                    yield json.dumps(
-                        jsonable_encoder(message),
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
+                    yield _compact_json(message)
                     first = False
                 if len(messages) < 500:
                     break
                 last_id = messages[-1].get("id")
                 if last_id is None:
                     break  # defensive: cannot keyset without row ids
-
             yield "]}"
         finally:
             db.close()
 
-    return StreamingResponse(
-        _stream_export(),
-        media_type="application/json",
-    )
+    return StreamingResponse(_stream_export(), media_type="application/json")
 
 
 @manage_router.post("/api/sessions/prune")
