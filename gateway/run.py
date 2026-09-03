@@ -1968,9 +1968,7 @@ from gateway.run_common import _UNSET  # noqa: F401  (def-time sentinel shared w
 
 def _resolve_runtime_agent_kwargs() -> dict:
     """Resolve provider credentials for gateway-created AIAgent instances.
-
-    ``resolve_runtime_provider()`` falls through to env vars for legacy compatibility, but the
-    gateway never consults env vars for behavioral config — config.yaml is authoritative."""
+    ``resolve_runtime_provider()`` may fall back to env vars; behavioral config is config.yaml only."""
     from hermes_cli.runtime_provider import (
         resolve_runtime_provider, format_runtime_provider_error, _get_model_config)
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
@@ -1978,8 +1976,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
     try:
         runtime = resolve_runtime_provider()
     except AuthError as auth_exc:
-        # Distinguish a rate-limit/quota cap (credentials fine, re-auth can't help) from a real auth
-        # failure (expired/revoked token): both use the fallback chain; the log must not mislabel.
+        # Rate-limit cap vs real auth failure: both use the fallback chain; the log must not mislabel.
         if is_rate_limited_auth_error(auth_exc):
             logger.warning("Primary provider rate-limited (429): %s — trying fallback", auth_exc)
         else:
@@ -1995,16 +1992,12 @@ def _resolve_runtime_agent_kwargs() -> dict:
     max_tokens = None
     _env_mt = os.environ.get("HERMES_MAX_TOKENS")
     if _env_mt:
-        try:
+        with suppress(ValueError, TypeError):
             max_tokens = int(_env_mt)
-        except (ValueError, TypeError):
-            max_tokens = None
     elif isinstance(model_cfg, dict):
         mt = model_cfg.get("max_tokens")
-        if isinstance(mt, int):
-            max_tokens = mt
-    # Per-provider output cap (custom_providers max_output_tokens) applies only when the documented
-    # global model.max_tokens is unset, so the global key always wins.
+        max_tokens = mt if isinstance(mt, int) else None
+    # Per-provider max_output_tokens applies only when global model.max_tokens is unset (global wins).
     if max_tokens is None:
         _runtime_mot = runtime.get("max_output_tokens")
         if isinstance(_runtime_mot, int) and _runtime_mot > 0:
@@ -2020,9 +2013,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
 
 def _runtime_agent_kwargs(runtime: dict) -> dict:
     """AIAgent constructor kwargs shared by every runtime-provider resolution.
-
-    ``request_overrides`` is passed through as resolved (custom_providers ``extra_body`` etc.) so
-    the provider's configured request body reaches the per-turn route on the gateway path."""
+    ``request_overrides`` passes through as resolved so the provider's request body reaches each turn."""
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
@@ -2047,11 +2038,8 @@ class _GatewayModelContext:
 
 
 def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModelContext:
-    """Resolve the configured gateway route and its effective context window.
-
-    Shared by status/session banners and slash commands. Call off the event loop (may block)."""
+    """Resolve the configured gateway route and effective context window. Call off-loop (may block)."""
     from agent.model_metadata import DEFAULT_FALLBACK_CONTEXT, get_model_context_length
-
     resolved_model = model or _resolve_gateway_model()
     config_context_length = provider = base_url = api_key = custom_providers = None
     configured_model = configured_provider = configured_base_url = None
@@ -2106,13 +2094,8 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
         resolved_model, base_url=base_url or "", api_key=api_key or "",
         config_context_length=config_context_length, provider=provider or "",
         custom_providers=custom_providers)
-    if config_context_length is not None:
-        context_source = "config"
-    elif context_length == DEFAULT_FALLBACK_CONTEXT:
-        context_source = "default"
-    else:
-        context_source = "detected"
-
+    context_source = ("config" if config_context_length is not None
+                      else "default" if context_length == DEFAULT_FALLBACK_CONTEXT else "detected")
     return _GatewayModelContext(
         model=resolved_model, provider=provider or "", base_url=base_url or "",
         context_length=context_length, context_source=context_source)
@@ -2135,7 +2118,6 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
 def _deep_merge_request_overrides(base: Optional[dict], override: Optional[dict]) -> dict:
     """Merge request_overrides dicts, deep-merging nested dictionaries."""
     from hermes_cli.config import _deep_merge
-
     base_dict = dict(base or {})
     override_dict = dict(override or {})
     if not base_dict:
@@ -2168,7 +2150,6 @@ def _try_resolve_fallback_provider() -> dict | None:
         for entry in fb_list:
             try:
                 from hermes_cli.fallback_config import resolve_entry_api_key
-
                 runtime = resolve_runtime_provider(
                     requested=entry.get("provider"), explicit_base_url=entry.get("base_url"),
                     explicit_api_key=resolve_entry_api_key(entry))
@@ -2213,9 +2194,7 @@ def _event_media_is_stt_input(event, index: int) -> bool:
     message_type = getattr(event, "message_type", None)
     if message_type in {MessageType.AUDIO, MessageType.DOCUMENT}:
         return False
-    return (
-        message_type == MessageType.VOICE or _event_media_type_at(event, index).startswith("audio/")
-    )
+    return message_type == MessageType.VOICE or _event_media_type_at(event, index).startswith("audio/")
 
 
 def _event_media_is_video(event, index: int) -> bool:
@@ -2224,7 +2203,6 @@ def _event_media_is_video(event, index: int) -> bool:
 
 def _build_media_placeholder(event) -> str:
     """Text placeholder for media-only events (later replaced by vision enrichment).
-
     Queued media is dequeued via .text only, so a caption-less event would otherwise be lost."""
     parts = []
     media_urls = getattr(event, "media_urls", None) or []
@@ -2243,9 +2221,8 @@ def _build_media_placeholder(event) -> str:
 def _build_document_context_note(
     display_name: str, agent_path: str, mtype: str, *, content_inlined: bool = True) -> str:
     """Context note prepended to a user turn when they attach a document.
-
-    ``content_inlined=False`` = cached without content, so tell the agent to read it. Binary docs
-    must say *extract* the text; "ask the user" made it punt."""
+    ``content_inlined=False`` = cached without content, so tell the agent to read it. Binary docs must
+    say *extract* the text; "ask the user" made it punt."""
     if mtype.startswith("text/") and content_inlined:
         return (
             f"[The user sent a text document: '{display_name}'. Its content has been included below. "
@@ -2275,7 +2252,6 @@ def _format_duration(seconds: float) -> str:
 async def _probe_audio_duration(path: str) -> Optional[str]:
     """Best-effort duration probe. Returns formatted MM:SS / HH:MM:SS, or None on failure."""
     ext = os.path.splitext(path)[1].lower()
-
     if ext == ".wav":
         try:
             def _wav_duration() -> float:
@@ -2284,21 +2260,17 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
                     frames = wf.getnframes()
                     rate = wf.getframerate() or 1
                     return frames / float(rate)
-            secs = await asyncio.to_thread(_wav_duration)
-            return _format_duration(secs)
+            return _format_duration(await asyncio.to_thread(_wav_duration))
         except Exception:
             pass
-
     if ext in (".ogg", ".opus", ".oga"):
         try:
             def _ogg_duration() -> float:
                 from mutagen.oggopus import OggOpus
                 return float(OggOpus(path).info.length)
-            secs = await asyncio.to_thread(_ogg_duration)
-            return _format_duration(secs)
+            return _format_duration(await asyncio.to_thread(_ogg_duration))
         except Exception:
             pass
-
     try:
         proc = await asyncio.create_subprocess_exec(
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -2314,9 +2286,8 @@ async def _probe_audio_duration(path: str) -> Optional[str]:
 
 
 def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
-    """Consume and return the full pending event for a session.
-
-    Media metadata is kept so follow-ups re-enter normal image/STT/document preprocessing."""
+    """Consume and return the pending event; media metadata is kept so follow-ups re-enter preprocessing.
+    """
     return adapter.get_pending_message(session_key)
 
 
@@ -2332,10 +2303,8 @@ def _reap_gateway_turn_processes(
     task_id: str, process_baseline, *, source: str,
     is_still_current: Optional[Callable[[], bool]] = None) -> int:
     """Reap only background processes created by one abandoned turn.
-
     ``task_id`` is session-scoped, so a *replacement* turn can spawn its own process mid-reap;
-    ``is_still_current`` (closure over the captured run_generation) lets the caller bail instead of
-    killing it — that turn snapshots its own baseline, so nothing stays unreaped."""
+    ``is_still_current`` lets the caller bail instead of killing it (that turn owns its own baseline)."""
     if not task_id:
         # Blank task_id (sessionless callers) would match and kill every unrelated empty-task process.
         return 0
@@ -2352,7 +2321,6 @@ def _reap_gateway_turn_processes(
                 task_id, source, exc_info=True)
 
     from tools.process_registry import process_registry
-
     try:
         killed = process_registry.kill_started_since(task_id, process_baseline, source=source)
     except Exception:
@@ -2374,7 +2342,6 @@ _TURN_STACK_DUMP_FRAME_MARKERS = (
 
 def _dump_wedged_turn_stacks(task_id: str) -> None:
     """Log the stack of every thread that looks like turn work, at reap time.
-
     The hard interrupt frees the wedged worker before a profiler can attach, so dump BEFORE it.
     Best-effort, bounded (turn-machinery threads only, capped output), never raises."""
     try:
@@ -2467,26 +2434,20 @@ def _is_control_interrupt_message(message: Optional[str]) -> bool:
     """Return True when an interrupt message is internal control flow."""
     if not message:
         return False
-    normalized = " ".join(str(message).strip().split()).lower()
-    return normalized in _CONTROL_INTERRUPT_MESSAGES
+    return " ".join(str(message).strip().split()).lower() in _CONTROL_INTERRUPT_MESSAGES
 
 
 def _strip_response_attachments_for_direct_send(response: str, adapter) -> str:
     """Return the visible text portion of a response before direct send().
-
-    Replays only explicit ``MEDIA:`` attachments; bare paths/URLs stay visible (the post-stream
-    uploader ignores them). No broad ``MEDIA:`` regex after ``extract_media()``: it deliberately
-    preserves protected code spans and unvalidated tags."""
+    Only explicit ``MEDIA:`` attachments are stripped; bare paths/URLs stay visible. No broad regex after
+    ``extract_media()``: it deliberately preserves protected code spans and unvalidated tags."""
     _, cleaned = adapter.extract_media(response)
     return cleaned.replace("[[audio_as_voice]]", "").replace("[[as_document]]", "").strip()
 
 
 def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None]:
-    """Derive the /command slug and declared frontmatter name from a SKILL.md.
-
-    Matches ``scan_skill_commands``: the slug comes from frontmatter ``name:``, NOT the directory
-    name. Returns ``(slug, declared_name)`` or ``(None, None)`` if unreadable or lacking ``name:``.
-    """
+    """Derive ``(slug, declared_name)`` from a SKILL.md; ``(None, None)`` if unreadable or no ``name:``.
+    Matches ``scan_skill_commands``: the slug comes from frontmatter ``name:``, NOT the directory."""
     try:
         content = skill_md.read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -2512,9 +2473,7 @@ def _skill_slug_from_frontmatter(skill_md: Path) -> tuple[str | None, str | None
     # Mirrors _SKILL_INVALID_CHARS / _SKILL_MULTI_HYPHEN from skill_commands
     slug = re.sub(r"[^a-z0-9-]", "", slug)
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
-    if not slug:
-        return None, declared_name
-    return slug, declared_name
+    return (slug or None), declared_name
 
 
 def _check_unavailable_skill(command_name: str) -> str | None:
@@ -2569,8 +2528,7 @@ def _platform_config_key(platform: "Platform") -> str:
 
 def _teams_pipeline_plugin_enabled() -> bool:
     """Return True when the standalone Teams pipeline plugin is enabled."""
-    config = _load_gateway_config()
-    enabled = cfg_get(config, "plugins", "enabled", default=[])
+    enabled = cfg_get(_load_gateway_config(), "plugins", "enabled", default=[])
     return isinstance(enabled, list) and ("teams_pipeline" in enabled or "teams-pipeline" in enabled)
 
 
@@ -2582,9 +2540,8 @@ def _gateway_config_home() -> Path:
 
 def _load_gateway_config(config_path: "Path | None" = None) -> dict:
     """Load and parse a gateway config.yaml, returning {} on any error (fail-open).
-
-    Defaults to the active gateway home (``_hermes_home`` monkeypatches apply); multiplexed callers
-    may pass a profile path."""
+    Defaults to the active gateway home (``_hermes_home`` monkeypatches apply); multiplexers pass a path.
+    """
     if config_path is None:
         config_path = _gateway_config_home() / 'config.yaml'
     raw: dict = {}
@@ -2628,14 +2585,12 @@ def _load_gateway_config(config_path: "Path | None" = None) -> dict:
 
 def _checkpoint_agent_kwargs(config: dict | None) -> dict:
     """Translate gateway checkpoint config into ``AIAgent`` constructor args.
-
     Gateway bypasses ``load_config()``, so defaults are here; legacy ``checkpoints: true`` works."""
     cp_cfg = config.get("checkpoints", {}) if isinstance(config, dict) else {}
     if isinstance(cp_cfg, bool):
         cp_cfg = {"enabled": cp_cfg}
     elif not isinstance(cp_cfg, dict):
         cp_cfg = {}
-
     from hermes_cli.config import DEFAULT_CONFIG
     defaults = DEFAULT_CONFIG["checkpoints"]
     return {
@@ -2647,14 +2602,12 @@ def _checkpoint_agent_kwargs(config: dict | None) -> dict:
 
 def _load_gateway_runtime_config() -> dict:
     """Load gateway config for runtime reads, expanding supported ``${VAR}`` refs.
-
-    Built on ``_load_gateway_config()``. Expansion failures are deliberately NOT swallowed —
-    returning the unexpanded dict would mask the very bug this helper fixes."""
+    Expansion failures are deliberately NOT swallowed: an unexpanded dict would mask the bug fixed here.
+    """
     cfg = _load_gateway_config()
     if not isinstance(cfg, dict) or not cfg:
         return {}
     from hermes_cli.config import _expand_env_vars
-
     expanded = _expand_env_vars(cfg)
     return expanded if isinstance(expanded, dict) else {}
 
@@ -2675,17 +2628,7 @@ def _channel_override_lookup_keys(
     chat_id: str, *, thread_id: Optional[str] = None, parent_id: Optional[str] = None) -> list[str]:
     """Ordered, de-duplicated ``channel_overrides`` lookup keys (matches ``resolve_channel_prompt``:
     exact id first, then parent — Discord threads inherit parent overrides)."""
-    keys: list[str] = []
-    seen: set[str] = set()
-    for key in (chat_id, thread_id, parent_id):
-        if not key:
-            continue
-        sk = str(key)
-        if sk in seen:
-            continue
-        seen.add(sk)
-        keys.append(sk)
-    return keys
+    return list(dict.fromkeys(str(key) for key in (chat_id, thread_id, parent_id) if key))
 
 
 def _get_channel_override(
@@ -2709,27 +2652,22 @@ def _get_channel_override(
 def _resolve_hermes_bin() -> Optional[list[str]]:
     """Hermes update command argv: ``hermes`` on PATH, else ``python -m hermes_cli.main``, else None."""
     import shutil
-
     hermes_bin = shutil.which("hermes")
     if hermes_bin:
         return [hermes_bin]
-
     try:
         import importlib.util
-
         if importlib.util.find_spec("hermes_cli") is not None:
             return [sys.executable, "-m", "hermes_cli.main"]
     except Exception:
         pass
-
     return None
 
 
 def _parse_session_key(session_key: str) -> "dict | None":
     """Parse a session key (``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``).
-
-    For group/channel sessions the suffix may be a user_id (per-user isolation), not a thread_id,
-    so ``thread_id`` is left out to avoid mis-routing."""
+    For group/channel sessions the suffix may be a user_id, not a thread_id, so ``thread_id`` is omitted.
+    """
     parts = session_key.split(":")
     if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
         result = {"platform": parts[2], "chat_type": parts[3], "chat_id": parts[4]}
@@ -2749,10 +2687,7 @@ def _shorten_command_for_display(command: str, limit: int = 80) -> str:
 
 def _format_concise_process_notification(
     session_id: str, command: str, exit_code, output: str, duration_seconds=None) -> str:
-    """One-line completion message for the ``concise`` display mode.
-
-    Success is one status line; failure appends a short output tail (full output via process(log)).
-    """
+    """One-line completion message for ``concise`` display mode; failure appends a short output tail."""
     ok = exit_code in {0, None}
     icon = "✅" if ok else "❌"
     verb = "finished" if ok else f"failed (exit {exit_code})"
@@ -2812,9 +2747,7 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
 
 def _drain_gateway_watch_events(completion_queue) -> "list[dict]":
     """Drain gateway-owned watch events without spinning on requeued events.
-
-    Foreign events (process completions, async delegations) requeued inside ``while not
-    queue.empty()`` never terminate, so detach the batch first and requeue afterwards."""
+    Foreign events requeued inside ``while not queue.empty()`` never terminate: detach, then requeue."""
     watch_events: list[dict] = []
     requeue: list[dict] = []
     while not completion_queue.empty():
@@ -2842,20 +2775,17 @@ _gateway_runner_ref: _weakref.ref = lambda: None
 def _normalize_empty_agent_response(
     agent_result: dict, response: str, *, history_len: int = 0) -> str:
     """Normalize empty/None agent responses into user-facing messages.
-
-    Covers ``failed``, work done (api_calls > 0) with no text, and never-ran (api_calls == 0,
-    the post-/stop silent-drop from a stale generation token) with a retry hint."""
+    Covers ``failed``, work done (api_calls > 0) with no text, and never-ran (api_calls == 0, the
+    post-/stop silent-drop from a stale generation token) with a retry hint."""
     if response:
         return response
-
     if agent_result.get("failed"):
         # ``error`` can be an EXPLICIT None (bypasses dict.get default) -> would render "failed: None".
         error_detail = agent_result.get("error") or "unknown error"
         error_str = str(error_detail).lower()
         # Persistence failures: suggesting /reset would destroy context without fixing storage.
         failure_reason = str(agent_result.get("failure_reason") or "")
-        if failure_reason.startswith("session_persistence_failed") or (
-            "session storage" in error_str):
+        if failure_reason.startswith("session_persistence_failed") or "session storage" in error_str:
             if failure_reason.endswith(":disk") or "disk" in error_str:
                 return (
                     "⚠️ Session storage was temporarily unavailable, so this "
@@ -2865,10 +2795,9 @@ def _normalize_empty_agent_response(
                 "⚠️ Session storage was temporarily unavailable, so this "
                 "turn was stopped to protect your conversation history. "
                 "Your message should already be saved — please send it again in a moment.")
-        is_context_failure = any(
-            p in error_str for p in ("context", "token", "too large", "too long", "exceed", "payload")
-        ) or ("400" in error_str and history_len > 50)
-        if is_context_failure:
+        if any(p in error_str for p in (
+                "context", "token", "too large", "too long", "exceed", "payload")) or (
+                "400" in error_str and history_len > 50):
             return (
                 "⚠️ Session too large for the model's context window.\n"
                 "Use /compact to compress the conversation, or /reset to start fresh.")
@@ -2906,15 +2835,10 @@ def _normalize_empty_agent_response(
 
 def _is_gateway_hidden_reasoning_incomplete_turn(agent_result: dict) -> bool:
     """Detect retry-exhausted turns with hidden reasoning but no visible answer.
-
-    The loop returns the retry-exhaustion sentinel as BOTH ``final_response`` and ``error``, so
-    non-empty ``final_response`` proves nothing; any text other than the sentinel is a real answer.
-    """
-    if not isinstance(agent_result, dict):
-        return False
-    if agent_result.get("failed") or agent_result.get("interrupted"):
-        return False
-    if not agent_result.get("partial"):
+    The loop returns the retry-exhaustion sentinel as BOTH ``final_response`` and ``error``, so a
+    non-empty ``final_response`` proves nothing; any text other than the sentinel is a real answer."""
+    if (not isinstance(agent_result, dict) or agent_result.get("failed")
+            or agent_result.get("interrupted") or not agent_result.get("partial")):
         return False
     error_text = str(agent_result.get("error", "") or "").strip()
     if "remained incomplete after" not in error_text.lower():
@@ -2925,12 +2849,9 @@ def _is_gateway_hidden_reasoning_incomplete_turn(agent_result: dict) -> bool:
 
 def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
     """True only when a gateway turn really completed successfully.
-
     ``resume_pending`` is a durable restart-recovery marker; a soft interrupt can look like a normal
     empty result, and clearing then loses the signal."""
-    if not isinstance(agent_result, dict):
-        return False
-    if agent_result.get("interrupted"):
+    if not isinstance(agent_result, dict) or agent_result.get("interrupted"):
         return False
     if agent_result.get("failed") or agent_result.get("partial") or agent_result.get("error"):
         return False
@@ -2940,37 +2861,29 @@ def _should_clear_resume_pending_after_turn(agent_result: dict) -> bool:
 def _preserve_queued_followup_history_offset(
     current_result: dict, followup_result: dict) -> dict:
     """Carry the outer history offset through queued follow-up drains.
-
     Each recursive ``_run_agent()`` advances ``history_offset``; uncorrected, the outer persistence
     step sees only the *last* queued turn as "new" and drops earlier ones."""
     if not isinstance(followup_result, dict) or not isinstance(current_result, dict):
         return followup_result
-
     current_offset = current_result.get("history_offset")
     followup_offset = followup_result.get("history_offset")
     if not isinstance(current_offset, int):
         return followup_result
     if isinstance(followup_offset, int) and followup_offset <= current_offset:
         return followup_result
-
-    merged = dict(followup_result)
-    merged["history_offset"] = current_offset
-    return merged
+    return {**followup_result, "history_offset": current_offset}
 
 
 async def _dispose_unused_adapter(adapter: "BasePlatformAdapter | None") -> None:
-    """Best-effort dispose for an adapter that never made it onto ``self.adapters``.
-
-    A failed connect leaves it uninstalled so nothing else calls ``disconnect()``; resources opened
-    in ``__init__`` (e.g. SQLite fds) would leak until GC (not prompt for asyncio-bound objects) and
-    exhaust the fd ulimit over a long retry loop. ``adapter`` may be ``None`` (half-constructed)."""
+    """Best-effort dispose for an adapter that never made it onto ``self.adapters`` (may be ``None``).
+    Nothing else calls ``disconnect()`` on it, so ``__init__`` resources (e.g. SQLite fds) would leak
+    until GC (not prompt for asyncio-bound objects) and exhaust the fd ulimit over a long retry loop."""
     if adapter is None:
         return
     try:
         await adapter.disconnect()
     except Exception:
-        # Half-constructed adapters can raise from disconnect(); must not abort the watcher loop.
-        # CancelledError is a BaseException, so cancellation is not swallowed.
+        # Half-constructed adapters may raise; must not abort the watcher (CancelledError propagates).
         logger.debug(
             "Adapter dispose raised on unowned adapter %r",
             getattr(adapter, "name", type(adapter).__name__), exc_info=True)
@@ -2991,7 +2904,6 @@ def _reconnect_backoff(attempt: int) -> int:
 
 def _reconnect_needs_attention(info: dict, now: float) -> bool:
     """True when a reconnect-queue entry has waited long enough for NEEDS_ATTENTION.
-
     ``queued_at`` is re-stamped on each (re)entry, so only *continuous* failure escalates."""
     if _RECONNECT_ATTENTION_AFTER_SECONDS <= 0:
         return False  # escalation disabled
@@ -3034,7 +2946,6 @@ def _write_runtime_status_quiet(**fields: Any) -> None:
     """Best-effort ``gateway_state.json`` write; status persistence must never abort the caller."""
     try:
         from gateway.status import write_runtime_status
-
         write_runtime_status(**fields)
     except Exception:
         pass
@@ -3059,7 +2970,6 @@ def _command_origin_for_source(source: Any) -> Optional[dict]:
 def _builtin_adapter_import(module: str, adapter_name: str, requirement: str):
     """Lazy-import ``(adapter_cls, requirements_ok)`` from ``gateway.platforms.<module>``."""
     import importlib
-
     mod = importlib.import_module(f"gateway.platforms.{module}")
     return getattr(mod, adapter_name), getattr(mod, requirement)
 
@@ -3098,7 +3008,6 @@ def _instantiate_builtin_adapter(platform: Platform, config: Any) -> Optional[Ba
         return None
     if platform == Platform.SIGNAL:
         from gateway.platforms.signal import validate_signal_config
-
         if not validate_signal_config(config):
             logger.warning("Signal: SIGNAL_HTTP_URL or SIGNAL_ACCOUNT not configured")
             return None
