@@ -336,8 +336,7 @@ def _print_side_result_panel(cli, *, header_lines, body, title_suffix, empty_not
     _cp(*header_lines)
     ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
     if not body:
-        _cp(empty_note)
-        return
+        return _cp(empty_note)
     try:
         from hermes_cli.skin_engine import get_active_skin
         _skin = get_active_skin()
@@ -377,18 +376,15 @@ def _print_lightpanda_engine_status() -> None:
     except Exception:
         return
     if not used:
-        print(f"   ⚠ browser.engine is 'lightpanda' but it is NOT in use: {reason}")
-        return
+        return print(f"   ⚠ browser.engine is 'lightpanda' but it is NOT in use: {reason}")
     print(f"   Engine: Lightpanda — {reason} (no screenshots)")
     try:
         from tools.browser_lightpanda import LIGHTPANDA_INSTALL_HINT, find_lightpanda_binary
         lightpanda_bin = find_lightpanda_binary()
     except Exception:
         return
-    if lightpanda_bin:
-        print(f"   Binary: {lightpanda_bin}")
-    else:
-        print(f"   ⚠ lightpanda binary not found — {LIGHTPANDA_INSTALL_HINT}")
+    print(f"   Binary: {lightpanda_bin}" if lightpanda_bin
+          else f"   ⚠ lightpanda binary not found — {LIGHTPANDA_INSTALL_HINT}")
 
 
 def _browser_use(cli, arg: str) -> None:
@@ -396,11 +392,10 @@ def _browser_use(cli, arg: str) -> None:
     from hermes_cli.config import load_config, save_config
     from tools.registry import invalidate_check_fn_cache
     if arg not in {"on", "off"}:
-        _say_block(
+        return _say_block(
             "Usage: /browser use [off]",
             "   /browser use       — switch to Browser Use mode (browser_exec via CLI 3.0)",
             "   /browser use off   — revert to the built-in browser tools")
-        return
     config = load_config()
     if arg == "on":
         config.setdefault("browser", {})["backend"] = "browser-use"
@@ -504,8 +499,8 @@ def _browser_connect(cli, cdp_url: str) -> None:
     else:
         print(f"   ⚠ Port {port} is not reachable at {cdp_url}")
     if not already_open:
-        _say_block("Browser not connected — start a Chromium-family browser with remote debugging and retry /browser connect")
-        return
+        return _say_block("Browser not connected — start a Chromium-family browser with remote "
+                          "debugging and retry /browser connect")
     os.environ["BROWSER_CDP_URL"] = cdp_url
     # Eagerly start the CDP supervisor so pending_dialogs + frame_tree show up in the next snapshot.
     with suppress(Exception):
@@ -529,8 +524,8 @@ def _browser_connect(cli, cdp_url: str) -> None:
 
 def _browser_disconnect(cli) -> None:
     if not os.environ.get("BROWSER_CDP_URL", "").strip():
-        _say_block("Browser is not connected to a live Chromium-family browser (already using default mode)")
-        return
+        return _say_block("Browser is not connected to a live Chromium-family browser "
+                          "(already using default mode)")
     os.environ.pop("BROWSER_CDP_URL", None)
     with suppress(Exception):
         from tools.browser_tool import cleanup_all_browsers, _stop_cdp_supervisor
@@ -565,8 +560,7 @@ def _browser_status() -> None:
         _pr("🌐 Browser: Browser Use mode (browser_exec via the Browser Use CLI 3.0)",
             "   Local Chrome via CDP, or Browser Use cloud browsers")
         _print_lightpanda_engine_status()
-        _say_block("   /browser use off      — revert to the built-in browser tools")
-        return
+        return _say_block("   /browser use off      — revert to the built-in browser tools")
     if current:
         _pr("🌐 Browser: connected to live Chromium-family browser via CDP",
             f"   Endpoint: {current}")
@@ -641,18 +635,14 @@ class CLICommandsMixin:
                 all_checkpoints = mgr.list_all_checkpoints()
                 if all_checkpoints:
                     print(f"  No checkpoints for {cwd} — showing all directories.")
-                    print(format_checkpoint_list(all_checkpoints, "all directories"))
-                    return
-            print(format_checkpoint_list(checkpoints, cwd))
-            return
+                    return print(format_checkpoint_list(all_checkpoints, "all directories"))
+            return print(format_checkpoint_list(checkpoints, cwd))
         is_diff = args[0].lower() == "diff"
         if is_diff and len(args) < 2:
-            print("  Usage: /rollback diff <N>")
-            return
+            return print("  Usage: /rollback diff <N>")
         checkpoints = mgr.list_checkpoints(cwd)
         if not checkpoints:
-            print(f"  No checkpoints found for {cwd}")
-            return
+            return print(f"  No checkpoints found for {cwd}")
         target_hash = self._resolve_checkpoint_ref(args[1 if is_diff else 0], checkpoints)
         if not target_hash:
             return
@@ -665,12 +655,10 @@ class CLICommandsMixin:
     def _rollback_diff(self, mgr, cwd: str, target_hash: str) -> None:
         result = mgr.diff(cwd, target_hash)
         if not result["success"]:
-            print(f"  ❌ {result['error']}")
-            return
+            return print(f"  ❌ {result['error']}")
         stat, diff = result.get("stat", ""), result.get("diff", "")
         if not stat and not diff:
-            print("  No changes since this checkpoint.")
-            return
+            return print("  No changes since this checkpoint.")
         if stat:
             print(f"\n{stat}")
         if diff:
@@ -686,8 +674,7 @@ class CLICommandsMixin:
         result = mgr.restore(cwd, target_hash, file_path=file_path,
                              safe=not restore_all and not file_path)
         if not result["success"]:
-            print(f"  ❌ {result['error']}")
-            return
+            return print(f"  ❌ {result['error']}")
         what = f"{file_path} from checkpoint" if file_path else "to checkpoint"
         print(f"  ✅ Restored {what} {result['restored_to']}: {result['reason']}")
         skipped = result.get("skipped_user_edits") or []
@@ -730,13 +717,11 @@ class CLICommandsMixin:
         from tools.working_diff import collect_working_diff
         result = collect_working_diff(cwd, mode=mode, paths=paths or None)
         if not result.get("success"):
-            print(f"  {result.get('error', 'Could not generate diff')}")
-            return
+            return print(f"  {result.get('error', 'Could not generate diff')}")
         stat, diff = result.get("stat", ""), result.get("diff", "")
         untracked = result.get("untracked", [])
         if result.get("empty") or (not stat and not diff and not untracked):
-            print("  No changes.")
-            return
+            return print("  No changes.")
         if stat:
             print(f"\n  {_DIFF_LABELS[mode]}:")
             self._print_diff_text(stat)
@@ -766,12 +751,10 @@ class CLICommandsMixin:
             return
         result = mgr.session_diff(cwd)
         if not result.get("success"):
-            print(f"  {result.get('error', 'Could not generate diff')}")
-            return
+            return print(f"  {result.get('error', 'Could not generate diff')}")
         stat, diff = result.get("stat", ""), result.get("diff", "")
         if result.get("empty") or (not stat and not diff):
-            print("  No changes — Hermes hasn't edited any files here yet.")
-            return
+            return print("  No changes — Hermes hasn't edited any files here yet.")
         if stat:
             self._print_diff_text(f"\n{stat}")
         if stat_only or not diff:
@@ -802,17 +785,15 @@ class CLICommandsMixin:
             "restore": self._snapshot_restore, "rewind": self._snapshot_restore,
             "prune": self._snapshot_prune}.get(subcmd)
         if handler is None:
-            _pr(f"  Unknown subcommand: {subcmd}",
-                "  Usage: /snapshot [list|create [label]|restore <id>|prune [N]]")
-            return
+            return _pr(f"  Unknown subcommand: {subcmd}",
+                       "  Usage: /snapshot [list|create [label]|restore <id>|prune [N]]")
         handler(parts)
 
     def _snapshot_list(self, parts) -> None:
         from hermes_cli.backup import list_quick_snapshots
         snaps = list_quick_snapshots()
         if not snaps:
-            _pr("  No state snapshots yet.", "  Create one: /snapshot create [label]")
-            return
+            return _pr("  No state snapshots yet.", "  Create one: /snapshot create [label]")
         print(f"  State snapshots ({display_hermes_home()}/state-snapshots/):\n")
         _pr(f"  {'#':>3}  {'ID':<35} {'Files':>5} {'Size':>10} {'Label'}",
             f"  {'─'*3}  {'─'*35} {'─'*5} {'─'*10} {'─'*20}")
@@ -848,8 +829,7 @@ class CLICommandsMixin:
         if idx is not None:
             snaps = list_quick_snapshots()
             if not 1 <= idx <= len(snaps):
-                print(f"  Invalid snapshot number. Use 1-{len(snaps)}.")
-                return
+                return print(f"  Invalid snapshot number. Use 1-{len(snaps)}.")
             snap_id = snaps[idx - 1]["id"]
 
         # Close our SessionDB first so the restore doesn't contend with this process's live connection.
@@ -871,8 +851,7 @@ class CLICommandsMixin:
             try:
                 keep = int(parts[2])
             except ValueError:
-                print("  Usage: /snapshot prune [keep-count]")
-                return
+                return print("  Usage: /snapshot prune [keep-count]")
         deleted = prune_quick_snapshots(keep=keep)
         print(f"  Pruned {deleted} old snapshot(s) (keeping {keep}).")
 
@@ -883,8 +862,7 @@ class CLICommandsMixin:
         from hermes_cli.profiles import export_profile, get_active_profile_name, get_profile_export_path
         parts, output, ok = _take_flag(command.split()[1:], "-o")
         if not ok:
-            print("  Usage: /export [profile] [-o output.tar.gz]")
-            return
+            return print("  Usage: /export [profile] [-o output.tar.gz]")
         name = parts[0] if parts else (get_active_profile_name() or "default")
         try:
             result = export_profile(name, output or str(get_profile_export_path(name)))
@@ -899,13 +877,11 @@ class CLICommandsMixin:
         from hermes_cli.profiles import check_alias_collision, create_wrapper_script, import_profile
         parts, name, ok = _take_flag(command.split()[1:], "--name")
         if not ok or not parts:
-            print("  Usage: /import <archive.tar.gz> [--name <name>]")
-            return
+            return print("  Usage: /import <archive.tar.gz> [--name <name>]")
         try:
             profile_dir = import_profile(" ".join(parts), name=name)  # paths may contain spaces
         except (ValueError, FileExistsError, FileNotFoundError) as e:
-            print(f"  Error: {e}")
-            return
+            return print(f"  Error: {e}")
         imported = profile_dir.name
         print(f"  ✓ Imported profile '{imported}' at {profile_dir}")
         with suppress(Exception):
@@ -930,8 +906,7 @@ class CLICommandsMixin:
             n_async = 0
             interrupt_all = None
         if not running and not n_async:
-            print("  No running background processes.")
-            return
+            return print("  No running background processes.")
         if running:
             print(f"  Stopping {len(running)} background process(es)...")
             print(f"  ✅ Stopped {process_registry.kill_all()} process(es).")
@@ -1020,9 +995,9 @@ class CLICommandsMixin:
         BracketedPaste doesn't fire for image-only clipboards (VSCode terminal, Windows Terminal/WSL2)."""
         from cli import _termux_example_image_path
         if _is_termux_environment():
-            _cp(_dim_line("Clipboard image paste is not available on Termux — use /image <path> or "
-                          f"paste a local image path like {_termux_example_image_path()}"))
-            return
+            return _cp(_dim_line(
+                       "Clipboard image paste is not available on Termux — use /image <path> or "
+                       f"paste a local image path like {_termux_example_image_path()}"))
         from hermes_cli.clipboard import has_clipboard_image
         if not has_clipboard_image():
             _cp(_dim_line('(._.) No image found in clipboard'))
@@ -1037,28 +1012,23 @@ class CLICommandsMixin:
         arg = _command_arg(cmd_original)
         assistant = [m for m in self.conversation_history if m.get("role") == "assistant"]
         if not assistant:
-            _cp("  Nothing to copy yet.")
-            return
+            return _cp("  Nothing to copy yet.")
         if arg:
             try:
                 idx = int(arg) - 1
             except ValueError:
-                _cp("  Usage: /copy [number]")
-                return
+                return _cp("  Usage: /copy [number]")
             if idx < 0 or idx >= len(assistant):
-                _cp(f"  Invalid response number. Use 1-{len(assistant)}.")
-                return
+                return _cp(f"  Invalid response number. Use 1-{len(assistant)}.")
         else:
             idx = len(assistant) - 1
             while idx >= 0 and not _assistant_copy_text(assistant[idx].get("content")):
                 idx -= 1
             if idx < 0:
-                _cp("  Nothing to copy in assistant responses yet.")
-                return
+                return _cp("  Nothing to copy in assistant responses yet.")
         text = _assistant_copy_text(assistant[idx].get("content"))
         if not text:
-            _cp("  Nothing to copy in that assistant response.")
-            return
+            return _cp("  Nothing to copy in that assistant response.")
         try:
             from hermes_cli.clipboard import is_remote_shell_session, write_clipboard_text
             # Over SSH native tools write the REMOTE clipboard; OSC 52 reaches the user's terminal.
@@ -1078,16 +1048,13 @@ class CLICommandsMixin:
         raw_args = (cmd_original.split(None, 1)[1].strip() if " " in cmd_original else "")
         if not raw_args:
             hint = _termux_example_image_path() if _is_termux_environment() else "/path/to/image.png"
-            _cp(_dim_line(f'Usage: /image <path>  e.g. /image {hint}'))
-            return
+            return _cp(_dim_line(f'Usage: /image <path>  e.g. /image {hint}'))
         path_token, _remainder = _split_path_input(raw_args)
         image_path = _resolve_attachment_path(path_token)
         if image_path is None:
-            _cp(_dim_line(f'(>_<) File not found: {path_token}'))
-            return
+            return _cp(_dim_line(f'(>_<) File not found: {path_token}'))
         if image_path.suffix.lower() not in _IMAGE_EXTENSIONS:
-            _cp(_dim_line(f'(._.) Not a supported image file: {image_path.name}'))
-            return
+            return _cp(_dim_line(f'(._.) Not a supported image file: {image_path.name}'))
         self._attached_images.append(image_path)
         _cp(f"  📎 Attached image: {image_path.name}")
         if _remainder:
@@ -1135,10 +1102,9 @@ class CLICommandsMixin:
             return
         names = parts[1:]
         if not names:
-            _pr(f"(._.) Usage: /tools {subcommand} <name> [name ...]",
-                f"  Built-in toolset:  /tools {subcommand} web",
-                f"  MCP tool:          /tools {subcommand} github:create_issue")
-            return
+            return _pr(f"(._.) Usage: /tools {subcommand} <name> [name ...]",
+                       f"  Built-in toolset:  /tools {subcommand} web",
+                       f"  MCP tool:          /tools {subcommand} github:create_issue")
 
         # Typing the command is consent. Do NOT use input() — it hangs in prompt_toolkit's loop.
         verb = "Disabling" if subcommand == "disable" else "Enabling"
@@ -1338,32 +1304,28 @@ class CLICommandsMixin:
                 # and the numbered branch resolves (all use _list_recent_sessions(limit=10)).
                 self._pending_resume_sessions = self._list_recent_sessions(limit=10)
                 return
-            _cp("  Tip:   Use /history or `hermes sessions list` to find sessions.")
-            return
+            return _cp("  Tip:   Use /history or `hermes sessions list` to find sessions.")
 
         # Any explicit /resume <target> supersedes a previously-armed bare numbered prompt.
         self._pending_resume_sessions = None
         if not self._session_db:
-            _cp(_db_unavailable_line())
-            return
+            return _cp(_db_unavailable_line())
 
         # Resolve numbered selection, title, or ID
         if target.isdigit():
             sessions = self._list_recent_sessions(limit=10)
             index = int(target)
             if index < 1 or index > len(sessions):
-                _cp(f"  Resume index {index} is out of range.",
-                    "  Use /resume with no arguments to see available sessions.")
-                return
+                return _cp(f"  Resume index {index} is out of range.",
+                           "  Use /resume with no arguments to see available sessions.")
             target_id = sessions[index - 1]["id"]
         else:
             from hermes_cli.main import _resolve_session_by_name_or_id
             target_id = _resolve_session_by_name_or_id(target) or target
         session_meta = self._session_db.get_session(target_id)
         if not session_meta:
-            _cp(f"  Session not found: {target}",
-                "  Use /sessions or `hermes sessions list` to see available sessions.")
-            return
+            return _cp(f"  Session not found: {target}",
+                       "  Use /sessions or `hermes sessions list` to see available sessions.")
 
         # If the target is the empty head of a compression chain, redirect to the descendant
         # that actually holds the transcript.
@@ -1377,8 +1339,7 @@ class CLICommandsMixin:
             target_id = resolved_id
             session_meta = self._session_db.get_session(target_id) or session_meta
         if target_id == self.session_id:
-            _cp("  Already on that session.")
-            return
+            return _cp("  Already on that session.")
         old_session_id = self.session_id
         _end_current_session(self, "resumed_other")
         self.session_id = target_id
@@ -1429,11 +1390,9 @@ class CLICommandsMixin:
         full history so a different approach can be explored without losing the original."""
         from cli import _sync_process_session_id
         if not self.conversation_history:
-            _cp("  No conversation to branch — send a message first.")
-            return
+            return _cp("  No conversation to branch — send a message first.")
         if not self._session_db:
-            _cp(_db_unavailable_line())
-            return
+            return _cp(_db_unavailable_line())
         branch_name = _command_arg(cmd_original)
         now = datetime.now()
         new_session_id = f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
@@ -1457,8 +1416,7 @@ class CLICommandsMixin:
                     "_branched_from": parent_session_id},
                 parent_session_id=parent_session_id)
         except Exception as e:
-            _cp(f"  Failed to create branch session: {e}")
-            return
+            return _cp(f"  Failed to create branch session: {e}")
 
         # Best-effort chunked copy (a failed copy still yields a usable branch); the api_content
         # sidecar lets the branch's first turn replay the parent's exact wire bytes (warm cache).
@@ -1522,8 +1480,8 @@ class CLICommandsMixin:
             return
         handler = _WORKTREE_SUBCOMMANDS.get(sub)
         if handler is None:
-            _pr(f"  Unknown /worktree subcommand: {sub}", "  Usage: /worktree [new [name] | list]")
-            return
+            return _pr(f"  Unknown /worktree subcommand: {sub}",
+                       "  Usage: /worktree [new [name] | list]")
         if not repo_root:
             print("  ❌ /worktree new requires being inside a git repository."
                   if handler == "_worktree_new" else "  Not inside a git repository.")
@@ -1622,14 +1580,12 @@ class CLICommandsMixin:
             for name, prompt in self.personalities.items():
                 marker = " *" if name == current else "  "
                 print(f" {marker}{name:<12} - {describe_personality(prompt)}")
-            _pr("", "  Usage: /personality <name>   (* = active)", "")
-            return
+            return _pr("", "  Usage: /personality <name>   (* = active)", "")
         try:
             name, personality_prompt = resolve_personality(personality_name, getattr(self, "config", None))
         except ValueError:
             print(f"(._.) Unknown personality: {personality_name.lower()}")
-            print(f"  Available: none, {', '.join(self.personalities.keys())}")
-            return
+            return print(f"  Available: none, {', '.join(self.personalities.keys())}")
         saved = persist_personality(name)
         scope = "(saved to config)" if saved else "(session only)"
         face = "(^_^)b" if saved else "(^_^)"
@@ -1672,8 +1628,7 @@ class CLICommandsMixin:
         elif low == "scale" or low.startswith("scale "):
             value = arg[len("scale"):].strip()
             if not value:
-                print("(o_o) Usage: /pet scale <factor>  (e.g. /pet scale 0.5)")
-                return
+                return print("(o_o) Usage: /pet scale <factor>  (e.g. /pet scale 0.5)")
             scale, err = set_pet_scale(value)
             print(f"(x_x) {err}" if err else f"(^_^) Pet scale → {scale:g}.")
         elif low == "off":
@@ -1684,8 +1639,7 @@ class CLICommandsMixin:
             try:
                 pet = store.install_pet(arg)
             except (store.PetStoreError, ManifestError) as exc:
-                print(f"(x_x) Couldn't adopt '{arg}': {exc}")
-                return
+                return print(f"(x_x) Couldn't adopt '{arg}': {exc}")
             _set_active(arg)
             print(f"(^_^)b {pet.display_name} is out — it'll pop in shortly.")
 
@@ -1708,11 +1662,9 @@ class CLICommandsMixin:
                 try:
                     concept = input("(o_o) Describe your pet: ").strip()
                 except (EOFError, KeyboardInterrupt):
-                    print()
-                    return
+                    return print()
         if not concept:
-            print("(o_o) Usage: /hatch <description>  (e.g. /hatch a tiny cyber fox)")
-            return
+            return print("(o_o) Usage: /hatch <description>  (e.g. /hatch a tiny cyber fox)")
 
         # A short, friendly display name from the first few words of the concept.
         display_name = " ".join(w.capitalize() for w in concept.split()[:3])[:28].strip() or "Pet"
@@ -1721,11 +1673,9 @@ class CLICommandsMixin:
         try:
             drafts = orchestrate.generate_base_drafts(concept, n=1)
         except GenerationError as exc:
-            print(f"(x_x) Couldn't generate a base look: {exc}")
-            return
+            return print(f"(x_x) Couldn't generate a base look: {exc}")
         if not drafts:
-            print("(x_x) No base draft came back — try again.")
-            return
+            return print("(x_x) No base draft came back — try again.")
 
         def _progress(event: str, detail: str) -> None:
             if event == "row":  # detail is "<state>:<done>:<total>"; show the state name.
@@ -1739,8 +1689,7 @@ class CLICommandsMixin:
                 base_image=drafts[0], slug=slug, display_name=display_name, concept=concept,
                 on_progress=_progress)
         except GenerationError as exc:
-            print(f"(x_x) Hatch failed: {exc}")
-            return
+            return print(f"(x_x) Hatch failed: {exc}")
         _set_active(result.slug)
         print(f"(^_^)b {result.display_name} hatched and adopted — it'll pop in shortly!")
 
@@ -1759,9 +1708,8 @@ class CLICommandsMixin:
             return
         handler = _CRON_SUBCOMMANDS.get(subcommand)
         if handler is None:
-            _pr(f"(._.) Unknown cron command: {subcommand}",
-                "  Available: list, add, edit, pause, resume, run, remove")
-            return
+            return _pr(f"(._.) Unknown cron command: {subcommand}",
+                       "  Available: list, add, edit, pause, resume, run, remove")
         getattr(self, handler)(subcommand, opts)
 
     def _cron_overview(self) -> None:
@@ -1797,8 +1745,7 @@ class CLICommandsMixin:
         result = _cron_api(action="list", include_disabled=opts["all"])
         jobs = result.get("jobs", []) if result.get("success") else []
         if not jobs:
-            print("(._.) No scheduled jobs.")
-            return
+            return print("(._.) No scheduled jobs.")
         print()
         _pr("Scheduled Jobs:", "-" * 80)
         for job in jobs:
@@ -1821,20 +1768,17 @@ class CLICommandsMixin:
     def _cron_add(self, subcommand: str, opts: dict) -> None:
         positionals = opts["positionals"]
         if not positionals:
-            print("(._.) Usage: /cron add <schedule> <prompt>")
-            return
+            return print("(._.) Usage: /cron add <schedule> <prompt>")
         schedule = opts["schedule"] or positionals[0]
         prompt = opts["prompt"] or " ".join(positionals[1:])
         skills = _normalize_skills(opts["skills"])
         if not prompt and not skills:
-            print("(._.) Please provide a prompt or at least one skill")
-            return
+            return print("(._.) Please provide a prompt or at least one skill")
         result = _cron_api(
             action="create", schedule=schedule, prompt=prompt or None, name=opts["name"],
             deliver=opts["deliver"], repeat=opts["repeat"], skills=skills or None)
         if not result.get("success"):
-            print(f"(x_x) Failed to create job: {result.get('error')}")
-            return
+            return print(f"(x_x) Failed to create job: {result.get('error')}")
         _pr(f"(^_^)b Created job: {result['job_id']}", f"  Schedule: {result['schedule']}")
         if result.get("skills"):
             print(f"  Skills: {', '.join(result['skills'])}")
@@ -1844,13 +1788,12 @@ class CLICommandsMixin:
         from cli import get_job
         positionals = opts["positionals"]
         if not positionals:
-            print("(._.) Usage: /cron edit <job_id> [--schedule ...] [--prompt ...] [--skill ...]")
-            return
+            return print("(._.) Usage: /cron edit <job_id> "
+                         "[--schedule ...] [--prompt ...] [--skill ...]")
         job_id = positionals[0]
         existing = get_job(job_id)
         if not existing:
-            print(f"(._.) Job not found: {job_id}")
-            return
+            return print(f"(._.) Job not found: {job_id}")
 
         # Skill edit precedence: --clear-skills > --skill (replace) > --add/--remove (merge) > untouched.
         final_skills = None
@@ -1870,8 +1813,7 @@ class CLICommandsMixin:
             action="update", job_id=job_id, schedule=opts["schedule"], prompt=opts["prompt"],
             name=opts["name"], deliver=opts["deliver"], repeat=opts["repeat"], skills=final_skills)
         if not result.get("success"):
-            print(f"(x_x) Failed to update job: {result.get('error')}")
-            return
+            return print(f"(x_x) Failed to update job: {result.get('error')}")
         job = result["job"]
         _pr(f"(^_^)b Updated job: {job['job_id']}", f"  Schedule: {job['schedule']}",
             f"  Skills: {', '.join(job['skills'])}" if job.get("skills") else "  Skills: none")
@@ -1880,19 +1822,16 @@ class CLICommandsMixin:
         """pause / resume / run / remove (aliases rm, delete) on one job id."""
         positionals = opts["positionals"]
         if not positionals:
-            print(f"(._.) Usage: /cron {subcommand} <job_id>")
-            return
+            return print(f"(._.) Usage: /cron {subcommand} <job_id>")
         job_id = positionals[0]
         action = "remove" if subcommand in {"remove", "rm", "delete"} else subcommand
         result = _cron_api(action=action, job_id=job_id,
                            reason="paused from /cron" if action == "pause" else None)
         if not result.get("success"):
-            print(f"(x_x) Failed to {action} job: {result.get('error')}")
-            return
+            return print(f"(x_x) Failed to {action} job: {result.get('error')}")
         if action == "remove":
             removed = result.get("removed_job", {})
-            print(f"(^_^)b Removed job: {removed.get('name', job_id)} ({job_id})")
-            return
+            return print(f"(^_^)b Removed job: {removed.get('name', job_id)} ({job_id})")
         verb = {"pause": "Paused", "resume": "Resumed", "run": "Triggered"}[action]
         print(f"(^_^)b {verb} job: {result['job']['name']} ({job_id})")
         if action == "resume":
@@ -1971,8 +1910,7 @@ class CLICommandsMixin:
                 wa.SKILLS, args, set_mode_fn=lambda enabled: self._save_write_approval("skills", enabled),
             )
             if out is not None:
-                print(out)
-                return
+                return print(out)
         from hermes_cli.skills_hub import handle_skills_slash
         handle_skills_slash(cmd, ChatConsole())
 
@@ -2044,16 +1982,14 @@ class CLICommandsMixin:
             AIAgent, set_approval_callback, set_secret_capture_callback, set_sudo_password_callback)
         prompt = _command_arg(cmd)
         if not prompt:
-            _cp("  Usage: /bg <prompt>", "  Example: /bg Summarize the top HN stories today",
-                "  (For a side question about this conversation, use /btw <question>.)",
-                "  The task runs in a separate session and results display here when done.")
-            return
+            return _cp("  Usage: /bg <prompt>", "  Example: /bg Summarize the top HN stories today",
+                       "  (For a side question about this conversation, use /btw <question>.)",
+                       "  The task runs in a separate session and results display here when done.")
         self._background_task_counter += 1
         task_num = self._background_task_counter
         task_id = f"bg_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6]}"
         if not self._ensure_runtime_credentials():
-            _cp("  (>_<) Cannot start background task: no valid credentials.")
-            return
+            return _cp("  (>_<) Cannot start background task: no valid credentials.")
         preview = _ellipsize(prompt, 60)
         _cp(f"  🔄 Background task #{task_num} started: \"{preview}\"", f"  Task ID: {task_id}",
             "  You can continue chatting — results will appear when done.\n")
@@ -2124,13 +2060,11 @@ class CLICommandsMixin:
         (no history mutation, no role-alternation risk, no cache invalidation)."""
         question = _command_arg(cmd)
         if not question:
-            _cp("  Usage: /btw <question>", "  Example: /btw which file was that error in?",
-                "  Answers a quick question about this conversation without interrupting it.",
-                "  (For an independent background task, use /bg <prompt>.)")
-            return
+            return _cp("  Usage: /btw <question>", "  Example: /btw which file was that error in?",
+                       "  Answers a quick question about this conversation without interrupting it.",
+                       "  (For an independent background task, use /bg <prompt>.)")
         if not self._ensure_runtime_credentials():
-            _cp("  (>_<) Cannot answer side question: no valid credentials.")
-            return
+            return _cp("  (>_<) Cannot answer side question: no valid credentials.")
 
         # Snapshot NOW, on the UI thread — the foreground turn keeps appending to
         # conversation_history while the worker runs.
@@ -2172,14 +2106,12 @@ class CLICommandsMixin:
         from hermes_cli.slash_exec import CommandContext, execute_command
         reply = execute_command("bundles", CommandContext(surface="cli"))
         if "error" in reply.data:
-            _cp(f"\033[1;31mBundle subsystem unavailable: {reply.data['error']}{_RST}")
-            return
+            return _cp(f"\033[1;31mBundle subsystem unavailable: {reply.data['error']}{_RST}")
         bundles = reply.data["bundles"]
         if not bundles:
-            _cp("  No skill bundles installed.",
-                _dim_line('Create one with: hermes bundles create <name> --skill <s1> --skill <s2>'),
-                _dim_line(f"Directory: {reply.data['dir']}"))
-            return
+            return _cp("  No skill bundles installed.",
+                       _dim_line('Create one with: hermes bundles create <name> --skill <s1> --skill <s2>'),
+                       _dim_line(f"Directory: {reply.data['dir']}"))
         _cp(f"\n  ▣ {_BOLD}Skill Bundles{_RST} ({len(bundles)} installed):")
         for info in bundles:
             skill_count = len(info.get("skills", []))
@@ -2262,21 +2194,18 @@ class CLICommandsMixin:
             interval = parse_interval(tokens[0])
             prompt = arg[len(tokens[0]):].strip() if interval and interval > 0 else ""
         if interval is None:
-            _cp("  Usage: /heartbeat every <interval> <prompt>   (e.g. /heartbeat every 10m Check CI)",
-                _dim_line('Also: /heartbeat status | pause | resume | clear'))
-            return
+            return _cp(
+                       "  Usage: /heartbeat every <interval> <prompt>   (e.g. /heartbeat every 10m Check CI)",
+                       _dim_line('Also: /heartbeat status | pause | resume | clear'))
         if interval < 0:
             from hermes_cli.heartbeat import MIN_INTERVAL_SECONDS
-            _cp(f"  Interval too small — minimum is {MIN_INTERVAL_SECONDS}s.")
-            return
+            return _cp(f"  Interval too small — minimum is {MIN_INTERVAL_SECONDS}s.")
         if not prompt.strip():
-            _cp("  Usage: /heartbeat every <interval> <prompt> — the prompt is required.")
-            return
+            return _cp("  Usage: /heartbeat every <interval> <prompt> — the prompt is required.")
         try:
             state = mgr.set(prompt, interval)
         except ValueError as exc:
-            _cp(f"  Invalid heartbeat: {exc}")
-            return
+            return _cp(f"  Invalid heartbeat: {exc}")
         self._start_heartbeat_watchdog()
         _cp(f"  ♥ Heartbeat set (every {format_interval(state.interval_seconds)}): {state.prompt}",
             _dim_line("Fires as a normal turn whenever the session is idle and the interval has "
@@ -2290,20 +2219,17 @@ class CLICommandsMixin:
         focus = _command_arg(cmd)
         agent = getattr(self, "agent", None)
         if agent is None:
-            _cp(_dim_line('Nothing to refine yet — send a message first.'))
-            return
+            return _cp(_dim_line('Nothing to refine yet — send a message first.'))
         snapshot = list(getattr(self, "conversation_history", None) or [])
         if not snapshot:
-            _cp(_dim_line('Nothing to refine yet — the conversation is empty.'))
-            return
+            return _cp(_dim_line('Nothing to refine yet — the conversation is empty.'))
         try:
             agent._spawn_background_review(
                 messages_snapshot=snapshot, review_memory=True,
                 review_skills="skill_manage" in getattr(agent, "valid_tool_names", set()),
                 focus=focus or None, explicit=True)
         except Exception as exc:
-            _cp(f"  /refine failed to start: {exc}")
-            return
+            return _cp(f"  /refine failed to start: {exc}")
         tail = f" (focus: {focus})" if focus else ""
         _cp(f"  ⚗ Reviewing this conversation in the background{tail} — "
             f"any memory/skill updates will be reported when done.")
@@ -2315,18 +2241,15 @@ class CLICommandsMixin:
         prompt = _command_arg(cmd)
         agent = getattr(self, "agent", None)
         if agent is None:
-            _cp(_dim_line('Nothing to review yet — send a message first.'))
-            return
+            return _cp(_dim_line('Nothing to review yet — send a message first.'))
         snapshot = list(getattr(self, "conversation_history", None) or [])
         try:
             from agent.review_engine import format_dispatch_note, start_review
             result = start_review(agent, snapshot, prompt)
         except ValueError as exc:
-            _cp(_dim_line(str(exc)))
-            return
+            return _cp(_dim_line(str(exc)))
         except Exception as exc:
-            _cp(f"  /review failed to start: {exc}")
-            return
+            return _cp(f"  /review failed to start: {exc}")
         _cp(f"  {format_dispatch_note(result, prompt)}")
 
     # ---- /goal, /loop, /subgoal -----------------------------------------------------------
@@ -2351,8 +2274,7 @@ class CLICommandsMixin:
             # instead of a vibe check.
             objective = arg[len("draft"):].strip()
             if not objective:
-                _cp("  Usage: /goal draft <objective in plain language>")
-                return
+                return _cp("  Usage: /goal draft <objective in plain language>")
             self._handle_goal_draft(objective)
         elif lower == "pause":
             state = mgr.pause(reason="user-paused")
@@ -2384,8 +2306,7 @@ class CLICommandsMixin:
     def _goal_resume(self, mgr) -> None:
         state = mgr.resume()
         if state is None:
-            _cp(_dim_line('No goal to resume.'))
-            return
+            return _cp(_dim_line('No goal to resume.'))
         _cp(f"  ▶ Goal resumed: {state.goal}")
         # Resume must restart work, not just flip state: queue the continuation prompt the same
         # way /goal <text> queues its kickoff.
@@ -2399,20 +2320,17 @@ class CLICommandsMixin:
         """/goal wait <pid> [reason] — park the loop on a background process (CI / build);
         the barrier auto-clears when the PID exits."""
         if not wait_arg:
-            _cp("  Usage: /goal wait <pid> [reason]")
-            return
+            return _cp("  Usage: /goal wait <pid> [reason]")
         wtokens = wait_arg.split(None, 1)
         try:
             pid = int(wtokens[0])
         except ValueError:
-            _cp("  /goal wait: <pid> must be an integer process id.")
-            return
+            return _cp("  /goal wait: <pid> must be an integer process id.")
         reason = wtokens[1].strip() if len(wtokens) > 1 else ""
         try:
             mgr.wait_on(pid, reason=reason)
         except (RuntimeError, ValueError) as exc:
-            _cp(f"  /goal wait: {exc}")
-            return
+            return _cp(f"  /goal wait: {exc}")
         rtxt = f" ({reason})" if reason else ""
         _cp(f"  ⏳ Goal parked on pid {pid}{rtxt}. Loop pauses until it exits.")
 
@@ -2428,8 +2346,7 @@ class CLICommandsMixin:
             try:
                 gate = mgr.add_gate(gate_arg[len("add"):].strip())
             except (RuntimeError, ValueError) as exc:
-                _cp(f"  /goal gate add: {exc}")
-                return
+                return _cp(f"  /goal gate add: {exc}")
             _cp(f"  ⚿ Gate added: $ {gate.command} "
                 f"({gate.max_retries} retries, {gate.timeout_seconds}s timeout). "
                 f"It must pass before the goal can complete.")
@@ -2437,15 +2354,13 @@ class CLICommandsMixin:
             try:
                 removed = mgr.remove_gate(int(gate_arg.split(None, 1)[1].strip()))
             except (RuntimeError, ValueError, IndexError) as exc:
-                _cp(f"  /goal gate remove: {exc}")
-                return
+                return _cp(f"  /goal gate remove: {exc}")
             _cp(f"  ✓ Gate removed: $ {removed}")
         elif gate_lower == "clear":
             try:
                 prev = mgr.clear_gates()
             except RuntimeError as exc:
-                _cp(f"  /goal gate clear: {exc}")
-                return
+                return _cp(f"  /goal gate clear: {exc}")
             _cp(f"  ✓ Cleared {_plural(prev, 'gate')}.")
         else:
             _cp("  Usage: /goal gate [list | add <command> | remove <N> | clear]")
@@ -2458,8 +2373,7 @@ class CLICommandsMixin:
         try:
             state = mgr.set(headline or arg, contract=contract if not contract.is_empty() else None)
         except ValueError as exc:
-            _cp(f"  Invalid goal: {exc}")
-            return
+            return _cp(f"  Invalid goal: {exc}")
         self._print_goal_set(state, "Completion contract:")
         against = " against the contract above" if state.has_contract() else ""
         _cp(_dim_line(f"After each turn, a judge model checks if the goal is done{against}. "
@@ -2491,8 +2405,7 @@ class CLICommandsMixin:
         try:
             state = mgr.set(objective, contract=contract)
         except ValueError as exc:
-            _cp(f"  Invalid goal: {exc}")
-            return
+            return _cp(f"  Invalid goal: {exc}")
         self._print_goal_set(state, "Drafted completion contract:")
         if state.has_contract():
             _cp(_dim_line("Tighten any field by re-setting the goal with inline lines "
@@ -2529,43 +2442,36 @@ class CLICommandsMixin:
         if mgr is None:
             return
         if not mgr.has_goal():
-            _cp(_dim_line('No active goal. Set one with /goal <text>.'))
-            return
+            return _cp(_dim_line('No active goal. Set one with /goal <text>.'))
         if not arg:  # list current subgoals
             _cp(f"  {mgr.status_line()}")
-            _cp(f"  {mgr.render_subgoals()}")
-            return
+            return _cp(f"  {mgr.render_subgoals()}")
         tokens = arg.split(None, 1)
         verb = tokens[0].lower()
         rest = tokens[1].strip() if len(tokens) > 1 else ""
         if verb == "remove":
             if not rest:
-                _cp("  Usage: /subgoal remove <n>")
-                return
+                return _cp("  Usage: /subgoal remove <n>")
             try:
                 idx = int(rest.split()[0])
             except ValueError:
-                _cp("  /subgoal remove: <n> must be an integer (1-based index).")
-                return
+                return _cp("  /subgoal remove: <n> must be an integer (1-based index).")
             try:
                 removed = mgr.remove_subgoal(idx)
             except (IndexError, RuntimeError) as exc:
-                _cp(f"  /subgoal remove: {exc}")
-                return
+                return _cp(f"  /subgoal remove: {exc}")
             _cp(f"  ✓ Removed subgoal {idx}: {removed}")
         elif verb == "clear":
             try:
                 prev = mgr.clear_subgoals()
             except RuntimeError as exc:
-                _cp(f"  /subgoal clear: {exc}")
-                return
+                return _cp(f"  /subgoal clear: {exc}")
             _cp(f"  ✓ Cleared {_plural(prev, 'subgoal')}." if prev else _dim_line('No subgoals to clear.'))
         else:  # append the whole arg as a new subgoal
             try:
                 text = mgr.add_subgoal(arg)
             except (ValueError, RuntimeError) as exc:
-                _cp(f"  /subgoal: {exc}")
-                return
+                return _cp(f"  /subgoal: {exc}")
             idx = len(mgr.state.subgoals) if mgr.state else 0
             _cp(f"  ✓ Added subgoal {idx}: {text}")
 
@@ -2577,8 +2483,7 @@ class CLICommandsMixin:
         try:
             from hermes_cli.skin_engine import list_skins, set_active_skin, get_active_skin_name
         except ImportError:
-            print("Skin engine not available.")
-            return
+            return print("Skin engine not available.")
         new_skin = _command_arg(cmd).lower()
         if not new_skin:  # show current skin and list available
             current = get_active_skin_name()
@@ -2588,12 +2493,11 @@ class CLICommandsMixin:
                 source = f" ({s['source']})" if s["source"] == "user" else ""
                 print(f"   {marker} {s['name']}{source} — {s['description']}")
             print("\n  Usage: /skin <name>")
-            print(f"  Custom skins: drop a YAML file in {display_hermes_home()}/skins/\n")
-            return
+            return print(f"  Custom skins: drop a YAML file in {display_hermes_home()}/skins/\n")
         available = {s["name"] for s in list_skins()}
         if new_skin not in available:
-            _pr(f"  Unknown skin: {new_skin}", f"  Available: {', '.join(sorted(available))}")
-            return
+            return _pr(f"  Unknown skin: {new_skin}",
+                       f"  Available: {', '.join(sorted(available))}")
         set_active_skin(new_skin)
         _ACCENT.reset()  # re-resolve ANSI color for the new skin (_DIM is a fixed escape)
         saved = " (saved)" if _save("display.skin", new_skin) else ""
@@ -2640,11 +2544,9 @@ class CLICommandsMixin:
         try:
             composed = self._compose_in_editor(parts[1] if len(parts) > 1 else "")
         except Exception as exc:
-            _cp(_dim_line(f'(>_<) Could not open editor: {exc}'))
-            return
+            return _cp(_dim_line(f'(>_<) Could not open editor: {exc}'))
         if not composed:
-            _cp(_dim_line('(._.) Empty prompt — nothing sent.'))
-            return
+            return _cp(_dim_line('(._.) Empty prompt — nothing sent.'))
         # One-shot seed: the interactive loop runs this as the next agent turn right after
         # process_command() returns (see cli.py main loop).
         self._pending_agent_seed = composed
@@ -2663,8 +2565,7 @@ class CLICommandsMixin:
         current = bool(getattr(self, "_focus_view_enabled", False))
         action, target = resolve_focus_arg(_command_arg(cmd_original), current)
         if action == "usage":
-            _cp("  Usage: /focus [on|off|status]")
-            return
+            return _cp("  Usage: /focus [on|off|status]")
 
         # The mode /focus off restores: while focus is ON the live mode is "off", so use the stash.
         restore_mode = normalize_tool_progress_mode(
@@ -2674,12 +2575,10 @@ class CLICommandsMixin:
             head, _, tail = format_focus_status(current, restore_mode).partition("\n")
             label, _, rest = head.partition(":")
             state_color = _Colors.GREEN if current else _Colors.DIM
-            _cp(f"  {_Colors.BOLD}{label}:{_Colors.RESET}{state_color}{rest}{_Colors.RESET}"
-                + (f"\n{_Colors.DIM}  {tail.strip()}{_Colors.RESET}" if tail else ""))
-            return
+            return _cp(f"  {_Colors.BOLD}{label}:{_Colors.RESET}{state_color}{rest}{_Colors.RESET}"
+                       + (f"\n{_Colors.DIM}  {tail.strip()}{_Colors.RESET}" if tail else ""))
         if target == current:  # idempotent explicit set — report without rewriting config
-            _cp(f"  {format_focus_toggle_message(current, restore_mode)}")
-            return
+            return _cp(f"  {format_focus_toggle_message(current, restore_mode)}")
         if target:
             # Stash the user's configured mode, then reuse the EXISTING suppression path by
             # snapping to "off".
@@ -2807,11 +2706,10 @@ class CLICommandsMixin:
                 level = rc.get("effort", "medium")
             display_state = "on ✓" if self.show_reasoning else "off"
             full_state = "full" if getattr(self, "reasoning_full", False) else "clamped to 10 lines"
-            _cp(_accent_line(f"Reasoning effort:  {level}"),
-                _accent_line(f"Reasoning display: {display_state} ({full_state})"),
-                _dim_line("Usage: /reasoning <none|minimal|low|medium|high|xhigh|max|ultra"
+            return _cp(_accent_line(f"Reasoning effort:  {level}"),
+                       _accent_line(f"Reasoning display: {display_state} ({full_state})"),
+                       _dim_line("Usage: /reasoning <none|minimal|low|medium|high|xhigh|max|ultra"
                           "|show|hide|full|clamp> [--global]"))
-            return
         arg, explicit_global = _split_scope_flags(raw)
 
         toggle = _REASONING_TOGGLES.get(arg)
@@ -2831,11 +2729,10 @@ class CLICommandsMixin:
         # Effort level change
         parsed = _parse_reasoning_config(arg)
         if parsed is None:
-            _cp(_dim_line(f'(._.) Unknown argument: {arg}'),
-                _dim_line('Valid levels: none, minimal, low, medium, high, xhigh, max, ultra'),
-                _dim_line('Display:      show, hide'),
-                _dim_line('Scope:        session-scoped by default, --global to persist'))
-            return
+            return _cp(_dim_line(f'(._.) Unknown argument: {arg}'),
+                       _dim_line('Valid levels: none, minimal, low, medium, high, xhigh, max, ultra'),
+                       _dim_line('Display:      show, hide'),
+                       _dim_line('Scope:        session-scoped by default, --global to persist'))
         self.reasoning_config = parsed
         self.agent = None  # Force agent re-init with new reasoning config
         saved = explicit_global and _save("agent.reasoning_effort", arg)
@@ -2853,12 +2750,10 @@ class CLICommandsMixin:
         usage = _dim_line('Usage: /busy [queue|steer|interrupt|status]')
         if not arg or arg == "status":
             behavior = _BUSY_MODE_SHORT.get(self.busy_input_mode, _BUSY_MODE_SHORT["interrupt"])
-            _cp(_accent_line(f"Busy input mode: {self.busy_input_mode}"),
-                _dim_line(f'Enter while busy: {behavior}'), usage)
-            return
+            return _cp(_accent_line(f"Busy input mode: {self.busy_input_mode}"),
+                       _dim_line(f'Enter while busy: {behavior}'), usage)
         if arg not in _BUSY_MODE_LONG:
-            _cp(_dim_line(f'(._.) Unknown argument: {arg}'), usage)
-            return
+            return _cp(_dim_line(f'(._.) Unknown argument: {arg}'), usage)
         self.busy_input_mode = arg
         _persist_display_choice("display.busy_input_mode", arg, "Busy input mode", _BUSY_MODE_LONG[arg])
 
@@ -2870,11 +2765,9 @@ class CLICommandsMixin:
         arg = _command_arg(cmd, lower=True)
         usage = _dim_line(f"Usage: /indicator [{'|'.join(INDICATOR_STYLES)}]")
         if not arg or arg == "status":
-            _cp(_accent_line(f"Busy-indicator style: {current}"), usage)
-            return
+            return _cp(_accent_line(f"Busy-indicator style: {current}"), usage)
         if arg not in INDICATOR_STYLES:
-            _cp(_dim_line(f'(._.) Unknown indicator style: {arg}'), usage)
-            return
+            return _cp(_dim_line(f'(._.) Unknown indicator style: {arg}'), usage)
         self.config.setdefault("display", {})["tui_status_indicator"] = arg
         _persist_display_choice("display.tui_status_indicator", arg, "Busy-indicator style",
                                 "The TUI picks up the new style on its next render.")
@@ -2884,9 +2777,8 @@ class CLICommandsMixin:
         Session-scoped by default; ``--global`` persists agent.service_tier to config.yaml
         (parity with /model and /reasoning)."""
         if not self._fast_command_available():
-            _cp("  (._.) /fast is only available for models that support fast mode "
-                "(OpenAI Priority Processing or Anthropic Fast Mode).")
-            return
+            return _cp("  (._.) /fast is only available for models that support fast mode "
+                       "(OpenAI Priority Processing or Anthropic Fast Mode).")
 
         # Determine the branding for the current model
         try:
@@ -2899,12 +2791,10 @@ class CLICommandsMixin:
         usage = _dim_line('Usage: /fast [normal|fast|auto|cold|status] [--global]')
         if not raw or raw.lower() == "status":
             status = {"priority": "fast", None: "normal"}.get(self.service_tier, self.service_tier)
-            _cp(_accent_line(f"{feature_name}: {status}"), usage)
-            return
+            return _cp(_accent_line(f"{feature_name}: {status}"), usage)
         arg, explicit_global = _split_scope_flags(raw)
         if arg not in _FAST_TIERS:
-            _cp(_dim_line(f'(._.) Unknown argument: {arg}'), usage)
-            return
+            return _cp(_dim_line(f'(._.) Unknown argument: {arg}'), usage)
         self.service_tier, saved_value = _FAST_TIERS[arg]
         self.agent = None  # Force agent re-init with new service-tier config
         saved = explicit_global and _save("agent.service_tier", saved_value)
