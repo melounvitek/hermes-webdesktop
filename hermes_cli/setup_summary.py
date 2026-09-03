@@ -1,7 +1,7 @@
 """Setup-completion summary (tool availability + "Setup Complete!" banner).
 
-Extracted from hermes_cli/setup.py. Names originating in setup.py are imported lazily
-inside function bodies so test patches on ``hermes_cli.setup.<name>`` take effect.
+Names originating in setup.py are imported lazily inside function bodies so test patches on
+``hermes_cli.setup.<name>`` take effect.
 """
 
 import logging
@@ -37,6 +37,8 @@ _BROWSER_MISSING_HINTS = {
     "Local browser": "npm install -g agent-browser && agent-browser install --with-deps",
 }
 _BROWSER_MISSING_DEFAULT = "npm install -g agent-browser, set CAMOFOX_URL, or configure Browser Use or Browserbase"
+_WEB_MISSING = ("EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, TAVILY_API_KEY, "
+                "KEENABLE_API_KEY, or SEARXNG_URL")
 
 _DONE_BANNER = (
     "┌─────────────────────────────────────────────────────────┐",
@@ -78,6 +80,27 @@ def _voice_provider_status(kind: str, provider: str, rows: dict, default: tuple)
     return (f"{kind} ({label} — not installed)", False, hint)
 
 
+def _first_available_plugin_provider(registry: str, skip: str = None):
+    """display_name of the first plugin-registered provider in ``agent.<registry>`` that reports
+    available (fail-soft: any error means none), skipping ``skip``."""
+    try:
+        import importlib
+        from hermes_cli.plugins import _ensure_plugins_discovered
+
+        _ensure_plugins_discovered()
+        for provider in importlib.import_module(f"agent.{registry}").list_providers():
+            if provider.name == skip:
+                continue
+            try:
+                if provider.is_available():
+                    return provider.display_name
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return None
+
+
 # ---- tool_status row builders: each takes (config, subscription_features) and returns
 # a (name, available, hint) row or None (row omitted). Evaluated in _TOOL_ROW_BUILDERS order.
 
@@ -86,34 +109,30 @@ def _vision_row(config, feats):
     try:
         from agent.auxiliary_client import get_available_vision_backends
 
-        _vision_backends = get_available_vision_backends()
+        ok = bool(get_available_vision_backends())
     except Exception:
-        _vision_backends = []
-    if _vision_backends:
-        return ("Vision (image analysis)", True, None)
-    return ("Vision (image analysis)", False, "run 'hermes setup' to configure")
+        ok = False
+    return ("Vision (image analysis)", True, None) if ok else ("Vision (image analysis)", False, "run 'hermes setup' to configure")
+
+
+def _managed_or_provider_row(feature, name: str, managed_label: str, missing_hint: str):
+    """Row for a Nous-manageable feature: managed > available (with provider) > missing hint."""
+    if feature.managed_by_nous:
+        return (f"{name} ({managed_label})", True, None)
+    if feature.available:
+        return (f"{name} ({feature.current_provider})" if feature.current_provider else name, True, None)
+    return (name, False, missing_hint)
 
 
 def _web_row(config, feats):
     # Web tools (Exa, Parallel, Firecrawl, Tavily, or Keenable)
-    web = feats.web
-    if web.managed_by_nous:
-        return ("Web Search & Extract (Nous subscription)", True, None)
-    if web.available:
-        label = f"Web Search & Extract ({web.current_provider})" if web.current_provider else "Web Search & Extract"
-        return (label, True, None)
-    return ("Web Search & Extract", False, "EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, TAVILY_API_KEY, KEENABLE_API_KEY, or SEARXNG_URL")
+    return _managed_or_provider_row(feats.web, "Web Search & Extract", "Nous subscription", _WEB_MISSING)
 
 
 def _browser_row(config, feats):
     # Browser tools (local Chromium, Camofox, Browserbase, Browser Use, or Firecrawl)
-    browser_provider = feats.browser.current_provider
-    if feats.browser.managed_by_nous:
-        return ("Browser Automation (Nous Browser Use)", True, None)
-    if feats.browser.available:
-        label = f"Browser Automation ({browser_provider})" if browser_provider else "Browser Automation"
-        return (label, True, None)
-    return ("Browser Automation", False, _BROWSER_MISSING_HINTS.get(browser_provider, _BROWSER_MISSING_DEFAULT))
+    hint = _BROWSER_MISSING_HINTS.get(feats.browser.current_provider, _BROWSER_MISSING_DEFAULT)
+    return _managed_or_provider_row(feats.browser, "Browser Automation", "Nous Browser Use", hint)
 
 
 def _image_gen_row(config, feats):
@@ -123,25 +142,9 @@ def _image_gen_row(config, feats):
     if feats.image_gen.available:
         return ("Image Generation", True, None)
     # Probe plugin-registered providers so OpenAI-only setups don't show as "missing FAL_KEY".
-    _img_backend = None
-    try:
-        from agent.image_gen_registry import list_providers
-        from hermes_cli.plugins import _ensure_plugins_discovered
-
-        _ensure_plugins_discovered()
-        for _p in list_providers():
-            if _p.name == "fal":
-                continue
-            try:
-                if _p.is_available():
-                    _img_backend = _p.display_name
-                    break
-            except Exception:
-                continue
-    except Exception:
-        pass
-    if _img_backend:
-        return (f"Image Generation ({_img_backend})", True, None)
+    backend = _first_available_plugin_provider("image_gen_registry", skip="fal")
+    if backend:
+        return (f"Image Generation ({backend})", True, None)
     return ("Image Generation", False, "FAL_KEY or OPENAI_API_KEY")
 
 
@@ -150,21 +153,8 @@ def _video_gen_row(config, feats):
     # available so we don't badger users who don't care about video gen with a "missing" line.
     if feats.video_gen.managed_by_nous:
         return ("Video Generation (FAL via Nous subscription)", True, None)
-    try:
-        from agent.video_gen_registry import list_providers as _list_video_providers
-        from hermes_cli.plugins import _ensure_plugins_discovered as _ensure_plugins
-        _ensure_plugins()
-        _video_backend = None
-        for _vp in _list_video_providers():
-            try:
-                if _vp.is_available():
-                    _video_backend = _vp.display_name
-                    break
-            except Exception:
-                continue
-    except Exception:
-        _video_backend = None
-    return (f"Video Generation ({_video_backend})", True, None) if _video_backend else None
+    backend = _first_available_plugin_provider("video_gen_registry")
+    return (f"Video Generation ({backend})", True, None) if backend else None
 
 
 def _tts_row(config, feats):
@@ -217,18 +207,14 @@ def _spotify_row(config, feats):
 
 def _skills_hub_row(config, feats):
     from hermes_cli.setup import get_env_value
-    if get_env_value("GITHUB_TOKEN"):
-        return ("Skills Hub (GitHub)", True, None)
-    return ("Skills Hub (GitHub)", False, "GITHUB_TOKEN")
+    ok = bool(get_env_value("GITHUB_TOKEN"))
+    return ("Skills Hub (GitHub)", ok, None if ok else "GITHUB_TOKEN")
 
 
 def _always_on_rows(config, feats):
     # Terminal (system deps met), task planning (in-memory), skills (bundled + user-created).
-    return [
-        ("Terminal/Commands", True, None),
-        ("Task Planning (todo)", True, None),
-        ("Skills (view, create, edit)", True, None),
-    ]
+    return [("Terminal/Commands", True, None), ("Task Planning (todo)", True, None),
+            ("Skills (view, create, edit)", True, None)]
 
 
 _TOOL_ROW_BUILDERS = (
@@ -258,16 +244,14 @@ def _print_setup_summary(config: dict, hermes_home):
         color, Colors, get_config_path, get_env_path, get_nous_subscription_features, _info, print_header,
         print_warning,
     )
+    from hermes_constants import display_hermes_home as _dhh
     # Provider readiness — the one thing setup must produce. A user who cancelled the API-key
     # prompt mid-wizard used to exit "successfully" with NO working model; say so loudly.
     try:
         from hermes_cli.auth import resolve_provider
 
         resolve_provider()
-        _provider_ready = True
     except Exception:
-        _provider_ready = False
-    if not _provider_ready:
         print()
         print_warning("No inference provider is configured — Hermes cannot chat yet.")
         _info("  Finish this one step with either of:",
@@ -292,9 +276,8 @@ def _print_setup_summary(config: dict, hermes_home):
             print(f"   {color('✗', Colors.RED)} {name} {color(f'(missing {missing_var})', Colors.DIM)}")
     print()
 
-    if any(not avail for _, avail, _ in tool_status):
+    if available_count < len(tool_status):
         print_warning("Some tools are disabled. Run 'hermes setup tools' to configure them,")
-        from hermes_constants import display_hermes_home as _dhh
         print_warning(f"or edit {_dhh()}/.env directly to add the missing API keys.")
         print()
 
@@ -302,8 +285,6 @@ def _print_setup_summary(config: dict, hermes_home):
     for line in _DONE_BANNER:
         print(color(line, Colors.GREEN))
     print()
-
-    from hermes_constants import display_hermes_home as _dhh
     print(color(f"📁 All your files are in {_dhh()}/:", Colors.CYAN, Colors.BOLD))
     print()
     print(f"   {color('Settings:', Colors.YELLOW)}  {get_config_path()}")
