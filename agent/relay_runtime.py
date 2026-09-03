@@ -138,11 +138,8 @@ def _same_handle(a: Any, b: Any) -> bool:
     # Native ScopeHandle has no value __eq__; compare by uuid when both expose one.
     if a is None or b is None:
         return a is b
-    if a is b or a == b:
-        return True
     a_uuid = getattr(a, "uuid", None)
-    b_uuid = getattr(b, "uuid", None)
-    return a_uuid is not None and a_uuid == b_uuid
+    return a is b or a == b or (a_uuid is not None and a_uuid == getattr(b, "uuid", None))
 
 
 class _RelayPluginConfigurationState(Enum):
@@ -188,21 +185,19 @@ _SEGMENTS_CONFIG_LOCK = threading.Lock()
 
 
 def _load_segments_config() -> dict[str, Any]:
-    on_compaction = False
-    max_turns = 0
+    segments: dict[str, Any] = {}
     try:
         from gateway.run import _load_gateway_config  # late import
 
         telemetry = (_load_gateway_config().get("gateway") or {}).get("telemetry") or {}
         segments = telemetry.get("session_segments") or {}
-        on_compaction = bool(segments.get("on_compaction", False))
-        try:
-            max_turns = max(0, int(segments.get("max_turns", 0) or 0))
-        except (TypeError, ValueError):
-            max_turns = 0
     except Exception:  # noqa: BLE001 - config absence must not crash
         pass
-    return {"on_compaction": on_compaction, "max_turns": max_turns}
+    try:
+        max_turns = max(0, int(segments.get("max_turns", 0) or 0))
+    except (TypeError, ValueError):
+        max_turns = 0
+    return {"on_compaction": bool(segments.get("on_compaction", False)), "max_turns": max_turns}
 
 
 def _segments_config() -> dict[str, Any]:
@@ -266,46 +261,54 @@ class _ProcessRelayPluginConfiguration:
             if self._owners:
                 self._owners.add(owner_id)
                 return self._state
-            if self._active and not self._clear_active():
-                logger.warning(
-                    "Hermes Relay plugin cleanup is still pending; refusing to "
-                    "replace the process-global configuration"
+            state = self._preflight(relay)
+            if state is None:
+                state = self._activate(relay)
+            state = self._remember(owner_id, state)
+            if state is _RelayPluginConfigurationState.ACTIVE:
+                logger.info(
+                    "Relay plugins are active process-wide and apply to all profiles "
+                    "hosted by this Hermes process."
                 )
-                return self._remember(owner_id, _RelayPluginConfigurationState.FAILED)
-
-            try:
-                existing_report = relay.plugin.report()
-            except Exception:
-                logger.warning(
-                    "Hermes could not determine whether a process-global Relay "
-                    "plugin configuration is already active; refusing to replace it",
-                    exc_info=True,
-                )
-                return self._remember(owner_id, _RelayPluginConfigurationState.FAILED)
-            if existing_report is not None:
-                logger.warning(
-                    "A process-global Relay plugin configuration is already active "
-                    "outside Hermes native ownership; leaving it unchanged and "
-                    "disabling Hermes-managed Relay middleware for this process"
-                )
-                return self._remember(owner_id, _RelayPluginConfigurationState.FOREIGN)
-
-            try:
-                if not self._initialize(relay):
-                    return self._remember(owner_id, _RelayPluginConfigurationState.DISABLED)
-            except Exception as exc:
-                self._activation = None
-                logger.warning("Hermes Relay plugin initialization failed: %s", exc, exc_info=True)
-                return self._remember(owner_id, _RelayPluginConfigurationState.FAILED)
-
-            self._active = True
-            self._relay = relay
-            state = self._remember(owner_id, _RelayPluginConfigurationState.ACTIVE)
-            logger.info(
-                "Relay plugins are active process-wide and apply to all profiles "
-                "hosted by this Hermes process."
-            )
             return state
+
+    def _activate(self, relay: Any) -> _RelayPluginConfigurationState:
+        try:
+            if not self._initialize(relay):
+                return _RelayPluginConfigurationState.DISABLED
+        except Exception as exc:
+            self._activation = None
+            logger.warning("Hermes Relay plugin initialization failed: %s", exc, exc_info=True)
+            return _RelayPluginConfigurationState.FAILED
+        self._active = True
+        self._relay = relay
+        return _RelayPluginConfigurationState.ACTIVE
+
+    def _preflight(self, relay: Any) -> _RelayPluginConfigurationState | None:
+        """Return a terminal state when the process cannot take ownership; None to proceed."""
+        if self._active and not self._clear_active():
+            logger.warning(
+                "Hermes Relay plugin cleanup is still pending; refusing to "
+                "replace the process-global configuration"
+            )
+            return _RelayPluginConfigurationState.FAILED
+        try:
+            existing_report = relay.plugin.report()
+        except Exception:
+            logger.warning(
+                "Hermes could not determine whether a process-global Relay "
+                "plugin configuration is already active; refusing to replace it",
+                exc_info=True,
+            )
+            return _RelayPluginConfigurationState.FAILED
+        if existing_report is not None:
+            logger.warning(
+                "A process-global Relay plugin configuration is already active "
+                "outside Hermes native ownership; leaving it unchanged and "
+                "disabling Hermes-managed Relay middleware for this process"
+            )
+            return _RelayPluginConfigurationState.FOREIGN
+        return None
 
     def _initialize(self, relay: Any) -> bool:
         """Initialize Relay from the selected plugins.toml; False when none is selected."""
@@ -345,13 +348,11 @@ class _ProcessRelayPluginConfiguration:
 
     def release(self, owner: Any) -> None:
         """Release one host and clear Relay after the final host exits."""
-        owner_id = id(owner)
         with self._lock:
-            if owner_id not in self._owners:
+            if id(owner) not in self._owners:
                 return
-            self._owners.remove(owner_id)
-            if not self._owners:
-                self._reset_if_cleared()
+            self._owners.remove(id(owner))
+            self.retry_pending_cleanup()
 
     def reset_for_tests(self) -> None:
         """Clear process-global state left by directly constructed test hosts."""
@@ -416,10 +417,10 @@ class RelayRuntime:
         self._execution_consumers_lock = threading.RLock()
         self._execution_consumers: set[str] = set()
         self._plugin_configuration_state = _PLUGIN_CONFIGURATION.acquire(self, self.relay)
+        # Cleared (with the atexit hook) by the first successful _finish_shutdown.
         self._plugin_configuration_registered = True
         if self._plugins_active():
             self.retain_managed_execution(RELAY_PLUGINS_EXECUTION_CONSUMER)
-        self._shutdown_registered = True
         atexit.register(self.shutdown)
 
     def _plugins_active(self) -> bool:
@@ -467,11 +468,7 @@ class RelayRuntime:
             return context.run(*args, input={}, **push_kwargs)
 
     def _open_session_scope(
-        self,
-        session: RelaySession,
-        scope_metadata: dict[str, Any],
-        *,
-        resolve_parent: bool,
+        self, session: RelaySession, scope_metadata: dict[str, Any], *, resolve_parent: bool,
         **push_kwargs: Any,
     ) -> None:
         """Push a fresh session scope for ``session`` and record its handle + context.
@@ -516,11 +513,8 @@ class RelayRuntime:
             if session.handle is None:
                 try:
                     self._open_session_scope(
-                        session,
-                        {**(metadata or {}), **runtime_metadata(self.runtime_id)},
-                        resolve_parent=True,
-                        data=data,
-                        exit_fallback=True,
+                        session, {**(metadata or {}), **runtime_metadata(self.runtime_id)},
+                        resolve_parent=True, data=data, exit_fallback=True,
                     )
                 except Exception:
                     session.context = None
@@ -547,12 +541,9 @@ class RelayRuntime:
             session.rotate_pending = False
             try:
                 self.run_in_session(
-                    session,
-                    self.relay.scope.pop,
-                    old_handle,
+                    session, self.relay.scope.pop, old_handle,
                     output={"hermes.session.segment_reason": reason},
-                    metadata=runtime_metadata(self.runtime_id),
-                    timeout=_SCOPE_OP_TIMEOUT,
+                    metadata=runtime_metadata(self.runtime_id), timeout=_SCOPE_OP_TIMEOUT,
                 )
             except Exception:
                 logger.warning(
@@ -625,10 +616,10 @@ class RelayRuntime:
         """Return an active Hermes Relay session without creating one."""
         with self._sessions_lock:
             session = None if self._closing else self._sessions.get(str(session_id or ""))
-        if session is None:
-            return None
-        with session.lock:
-            return None if session.closing else session
+        if session is not None:
+            with session.lock:
+                return None if session.closing else session
+        return None
 
     def _session_context(
         self, session: RelaySession, *, allow_closing: bool
@@ -648,13 +639,8 @@ class RelayRuntime:
         return context
 
     def run_in_session(
-        self,
-        session: RelaySession,
-        callback: Callable[..., Any],
-        *args: Any,
-        allow_closing: bool = False,
-        timeout: float | None = None,
-        **kwargs: Any,
+        self, session: RelaySession, callback: Callable[..., Any], *args: Any,
+        allow_closing: bool = False, timeout: float | None = None, **kwargs: Any,
     ) -> Any:
         """Run a Relay operation against a session's isolated scope stack.
 
@@ -674,13 +660,8 @@ class RelayRuntime:
             self._end_operation()
 
     def _run_in_session_untracked(
-        self,
-        session: RelaySession,
-        callback: Callable[..., Any],
-        *args: Any,
-        allow_closing: bool = False,
-        timeout: float | None = None,
-        **kwargs: Any,
+        self, session: RelaySession, callback: Callable[..., Any], *args: Any,
+        allow_closing: bool = False, timeout: float | None = None, **kwargs: Any,
     ) -> Any:
         """Run inside a session whose host-level lifetime is already held."""
         context = self._session_context(session, allow_closing=allow_closing)
@@ -716,12 +697,8 @@ class RelayRuntime:
             ) from exc
 
     async def run_in_session_async(
-        self,
-        session: RelaySession,
-        callback: Callable[..., Any],
-        *args: Any,
-        allow_closing: bool = False,
-        **kwargs: Any,
+        self, session: RelaySession, callback: Callable[..., Any], *args: Any,
+        allow_closing: bool = False, **kwargs: Any,
     ) -> Any:
         """Create and await an operation inside the session's saved context."""
         self._begin_operation()
@@ -767,11 +744,7 @@ class RelayRuntime:
         if session is None:
             return False
         self.run_in_session(
-            session,
-            self.relay.scope.event,
-            name,
-            handle=session.handle,
-            data=data,
+            session, self.relay.scope.event, name, handle=session.handle, data=data,
             metadata=metadata,
         )
         return True
@@ -792,12 +765,7 @@ class RelayRuntime:
         return result if isinstance(result, dict) else args
 
     def _pop_with_drain(
-        self,
-        handle: Any,
-        *,
-        output: dict[str, Any],
-        metadata: dict[str, Any],
-        session_root: Any,
+        self, handle: Any, *, output: dict[str, Any], metadata: dict[str, Any], session_root: Any,
         drain_limit: int,
     ) -> BaseException | None:
         """Pop ``handle``; if that fails, drain orphans above it and retry once.
@@ -824,9 +792,7 @@ class RelayRuntime:
                 break
             try:
                 pop_relay_scope(
-                    self.relay,
-                    top,
-                    output={"outcome": "cancelled", "hermes.orphan_drain": True},
+                    self.relay, top, output={"outcome": "cancelled", "hermes.orphan_drain": True},
                     metadata=metadata,
                 )
                 drained += 1
@@ -844,15 +810,9 @@ class RelayRuntime:
             return retry_exc
 
     def _close_scope_handle(
-        self,
-        session: RelaySession,
-        handle: Any,
-        *,
-        output: dict[str, Any] | None = None,
-        allow_closing: bool = False,
-        failure_label: str = "scope close failed",
-        drain_limit: int = 32,
-        operation_already_held: bool = False,
+        self, session: RelaySession, handle: Any, *, output: dict[str, Any] | None = None,
+        allow_closing: bool = False, failure_label: str = "scope close failed",
+        drain_limit: int = 32, operation_already_held: bool = False,
     ) -> str | None:
         """Pop ``handle``, draining orphaned children in the same session context.
 
@@ -868,18 +828,12 @@ class RelayRuntime:
         )
         try:
             failure = run_in_session(
-                session,
-                self._pop_with_drain,
-                handle,
-                output=output or {},
-                metadata=runtime_metadata(self.runtime_id),
-                session_root=session.handle,
-                drain_limit=drain_limit,
-                allow_closing=allow_closing,
-                timeout=_SCOPE_OP_TIMEOUT,
+                session, self._pop_with_drain, handle, output=output or {},
+                metadata=runtime_metadata(self.runtime_id), session_root=session.handle,
+                drain_limit=drain_limit, allow_closing=allow_closing, timeout=_SCOPE_OP_TIMEOUT,
             )
         except Exception as exc:
-            return f"{failure_label}: {exc}"
+            failure = exc
         return None if failure is None else f"{failure_label}: {failure}"
 
     def close_session(self, event: dict[str, Any]) -> None:
@@ -908,12 +862,8 @@ class RelayRuntime:
             session.closing = True
             if session.handle is not None:
                 failure = self._close_scope_handle(
-                    session,
-                    session.handle,
-                    output={},
-                    allow_closing=True,
-                    failure_label="session scope close failed",
-                    operation_already_held=True,
+                    session, session.handle, output={}, allow_closing=True,
+                    failure_label="session scope close failed", operation_already_held=True,
                 )
         # Subscriber flushing is process-wide and may wait for publications
         # owned by other sessions; final plugin teardown flushes once after all
@@ -936,8 +886,7 @@ class RelayRuntime:
         if has_active_operations:
             thread = threading.Thread(
                 target=self._finish_shutdown_after_operations,
-                name=f"hermes-nemo-relay-shutdown-{self.runtime_id[:8]}",
-                daemon=True,
+                name=f"hermes-nemo-relay-shutdown-{self.runtime_id[:8]}", daemon=True,
             )
             try:
                 thread.start()
@@ -963,9 +912,7 @@ class RelayRuntime:
                     self.release_managed_execution(RELAY_PLUGINS_EXECUTION_CONSUMER)
                 _PLUGIN_CONFIGURATION.release(self)
                 self._plugin_configuration_registered = False
-            if self._shutdown_registered:
                 self._safe(atexit.unregister, self.shutdown, quiet=True)
-                self._shutdown_registered = False
         except Exception:
             with self._sessions_lock:
                 self._shutdown_started = False
@@ -1119,6 +1066,13 @@ class managed_callback_guard:
         _MANAGED_CALLBACK_DEPTH.reset(self._token)
 
 
+def _flag_open_session(session: RelaySession, flag: str) -> None:
+    """Set a pending-rotation/close flag unless the session is already closing."""
+    with session.lock:
+        if not session.closing:
+            setattr(session, flag, True)
+
+
 class RelaySessionCoordinator:
     """Own semantic conversation and turn lifetimes for Hermes core."""
 
@@ -1146,26 +1100,18 @@ class RelaySessionCoordinator:
                 logger.warning("Hermes Relay session initializer failed: %s", name, exc_info=True)
 
     def acquire_conversation(
-        self,
-        *,
-        profile_key: str,
-        session_id: str,
-        platform: str,
-        parent_session_id: str = "",
+        self, *, profile_key: str, session_id: str, platform: str, parent_session_id: str = "",
         model: str = "",
     ) -> ConversationLease:
-        host = self.registry.for_profile(profile_key)
-        if host is None:
-            host = NoopRelayRuntime(profile_key, "Relay host creation was disabled")
+        host = self.registry.for_profile(profile_key) or NoopRelayRuntime(
+            profile_key, "Relay host creation was disabled"
+        )
         session = None
         if isinstance(host, RelayRuntime):
             try:
                 self._prepare_session(host, {
-                    "profile_key": profile_key,
-                    "session_id": session_id,
-                    "platform": platform,
-                    "parent_session_id": parent_session_id,
-                    "model": model,
+                    "profile_key": profile_key, "session_id": session_id, "platform": platform,
+                    "parent_session_id": parent_session_id, "model": model,
                 })
                 metadata = {"hermes.execution_surface": platform or "unknown"}
                 if parent_session_id and parent_session_id != session_id:
@@ -1178,12 +1124,8 @@ class RelaySessionCoordinator:
             except Exception:
                 logger.warning("Hermes Relay conversation initialization failed", exc_info=True)
         return ConversationLease(
-            profile_key=profile_key,
-            session_id=session_id,
-            platform=platform,
-            host=host,
-            session=session,
-            parent_session_id=parent_session_id,
+            profile_key=profile_key, session_id=session_id, platform=platform, host=host,
+            session=session, parent_session_id=parent_session_id,
         )
 
     def begin_turn(
@@ -1199,10 +1141,8 @@ class RelaySessionCoordinator:
                 # would create sibling scopes whose completion order is not LIFO.
                 turn.relay_enabled = False
                 logger.warning(
-                    "Skipping Relay instrumentation for concurrent Hermes turn "
-                    "%s in session %s",
-                    turn_id,
-                    lease.session_id,
+                    "Skipping Relay instrumentation for concurrent Hermes turn " "%s in session %s",
+                    turn_id, lease.session_id,
                 )
             else:
                 self._active_turns[key] = {id(turn)}
@@ -1286,9 +1226,7 @@ class RelaySessionCoordinator:
         if turn.handle is None:
             return
         failure = host._close_scope_handle(
-            turn.lease.session,
-            turn.handle,
-            output={"outcome": outcome},
+            turn.lease.session, turn.handle, output={"outcome": outcome},
             failure_label="turn scope close failed",
         )
         if failure:
@@ -1307,14 +1245,12 @@ class RelaySessionCoordinator:
             host = lease.live_runtime()
             if host is None:
                 return
-            session = lease.session
-            with session.lock:
-                pending = session.close_pending and not session.closing
-            if not pending:
-                return
-            if self.has_active_turn(profile_key=lease.profile_key, session_id=lease.session_id):
-                return
-            host.close_session({"session_id": lease.session_id})
+            with lease.session.lock:
+                pending = lease.session.close_pending and not lease.session.closing
+            if pending and not self.has_active_turn(
+                profile_key=lease.profile_key, session_id=lease.session_id
+            ):
+                host.close_session({"session_id": lease.session_id})
         except Exception:  # noqa: BLE001 - telemetry must never block end_turn
             logger.warning("Hermes Relay deferred session close failed", exc_info=True)
 
@@ -1345,19 +1281,14 @@ class RelaySessionCoordinator:
                 if old_session is not None and self.has_active_turn(
                     profile_key=profile_key, session_id=old_session_id
                 ):
-                    with old_session.lock:
-                        if not old_session.closing:
-                            old_session.close_pending = True
-                    return
-                host.close_session({"session_id": old_session_id})
+                    _flag_open_session(old_session, "close_pending")
+                else:
+                    host.close_session({"session_id": old_session_id})
                 return
             with host._sessions_lock:
                 session = host._sessions.get(session_id)
-            if session is None:
-                return
-            with session.lock:
-                if not session.closing:
-                    session.rotate_pending = True
+            if session is not None:
+                _flag_open_session(session, "rotate_pending")
         except Exception:  # noqa: BLE001 - telemetry must never block compaction
             logger.warning("Hermes Relay compaction notification failed", exc_info=True)
 
@@ -1394,12 +1325,9 @@ class RelaySessionCoordinator:
         with turn.logical_llm_lock:
             logical_calls = list(turn.logical_llm_calls.items())
             turn.logical_llm_calls.clear()
-        for index in range(len(logical_calls) - 1, -1, -1):
-            request_id, logical_handle = logical_calls[index]
+        for index, (request_id, logical_handle) in reversed(list(enumerate(logical_calls))):
             failure = host._close_scope_handle(
-                lease.session,
-                logical_handle,
-                output={"outcome": outcome},
+                lease.session, logical_handle, output={"outcome": outcome},
                 failure_label="logical LLM scope close failed",
             )
             if failure is None:
@@ -1458,15 +1386,15 @@ def active_turn(session_id: str | None = None) -> RelayTurnContext | None:
     turn = current_turn()
     if turn is None or not turn.relay_enabled or turn.closed or turn.lease.released:
         return None
-    if turn.lease.profile_key != current_profile_key():
+    lease = turn.lease
+    if lease.profile_key != current_profile_key():
         return None
-    if session_id is not None and turn.lease.session_id != session_id:
+    if session_id is not None and lease.session_id != session_id:
         return None
-    if isinstance(turn.lease.host, RelayRuntime):
-        if turn.lease.session is None:
-            return None
-        if turn.lease.host.get_session(turn.lease.session_id) is not turn.lease.session:
-            return None
+    if isinstance(lease.host, RelayRuntime) and (
+        lease.session is None or lease.host.get_session(lease.session_id) is not lease.session
+    ):
+        return None
     return turn
 
 
@@ -1535,8 +1463,7 @@ def _is_relay_wrapped_callback_error(
         return False
     callback_type = callback_error.__class__
     type_names = {
-        callback_type.__name__,
-        callback_type.__qualname__,
+        callback_type.__name__, callback_type.__qualname__,
         f"{callback_type.__module__}.{callback_type.__qualname__}",
     }
     message = str(relay_error)

@@ -34,11 +34,8 @@ class ProviderTransport(ABC):
 
     @abstractmethod
     def build_kwargs(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **params,
+        self, model: str, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None, **params,
     ) -> Dict[str, Any]:
         """Primary entry point: convert messages/tools and return kwargs ready for the provider SDK."""
 

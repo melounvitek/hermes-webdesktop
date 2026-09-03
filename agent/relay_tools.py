@@ -2,26 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
-import inspect
 import json
 import logging
 from collections.abc import Callable
 from typing import Any
 
-from agent import relay_runtime
+from agent import relay_llm, relay_runtime
 
 logger = logging.getLogger(__name__)
 
 
 def execute(
-    tool_name: str,
-    args: dict[str, Any],
-    callback: Callable[[dict[str, Any]], Any],
-    *,
-    session_id: str,
-    metadata: dict[str, Any] | None = None,
+    tool_name: str, args: dict[str, Any], callback: Callable[[dict[str, Any]], Any], *,
+    session_id: str, metadata: dict[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Run one tool call through Relay and return its final arguments."""
     runtime, session, parent = relay_runtime.resolve_execution_context(session_id)
@@ -57,13 +51,8 @@ def execute(
     try:
         managed = _run_awaitable(
             runtime.run_in_session_async(
-                session,
-                runtime.relay.tools.execute,
-                tool_name,
-                _jsonable(args),
-                invoke,
-                handle=parent,
-                metadata=_jsonable(metadata or {}),
+                session, runtime.relay.tools.execute, tool_name, _jsonable(args), invoke,
+                handle=parent, metadata=_jsonable(metadata or {}),
             )
         )
     except BaseException as exc:
@@ -122,12 +111,7 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 def _run_awaitable(value: Any) -> Any:
-    if not inspect.isawaitable(value):
-        return value
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(value)
-    raise RuntimeError(
-        "Synchronous Hermes Relay tool execution cannot run on an active event-loop thread"
+    return relay_llm._run_awaitable(
+        value,
+        loop_error="Synchronous Hermes Relay tool execution cannot run on an active event-loop thread",
     )

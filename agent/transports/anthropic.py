@@ -35,11 +35,8 @@ class AnthropicTransport(ProviderTransport):
     """Transport for api_mode='anthropic_messages'."""
 
     _STOP_REASON_MAP = {
-        "end_turn": "stop",
-        "tool_use": "tool_calls",
-        "max_tokens": "length",
-        "stop_sequence": "stop",
-        "refusal": "content_filter",
+        "end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "length",
+        "stop_sequence": "stop", "refusal": "content_filter",
         "model_context_window_exceeded": "length",
     }
 
@@ -60,26 +57,18 @@ class AnthropicTransport(ProviderTransport):
         return convert_tools_to_anthropic(tools)
 
     def build_kwargs(
-        self,
-        model: str,
-        messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None,
-        **params,
+        self, model: str, messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None, **params,
     ) -> Dict[str, Any]:
         """Build Anthropic messages.create() kwargs (converts messages and tools internally)."""
         from agent.anthropic_adapter import build_anthropic_kwargs
 
         return build_anthropic_kwargs(
-            model=model,
-            messages=messages,
-            tools=tools,
-            max_tokens=params.get("max_tokens", 16384),
-            reasoning_config=params.get("reasoning_config"),
-            tool_choice=params.get("tool_choice"),
+            model=model, messages=messages, tools=tools, max_tokens=params.get("max_tokens", 16384),
+            reasoning_config=params.get("reasoning_config"), tool_choice=params.get("tool_choice"),
             is_oauth=params.get("is_oauth", False),
             preserve_dots=params.get("preserve_dots", False),
-            context_length=params.get("context_length"),
-            base_url=params.get("base_url"),
+            context_length=params.get("context_length"), base_url=params.get("base_url"),
             fast_mode=params.get("fast_mode", False),
             drop_context_1m_beta=params.get("drop_context_1m_beta", False),
         )
@@ -135,11 +124,9 @@ class AnthropicTransport(ProviderTransport):
             provider_data["anthropic_content_blocks"] = ordered_blocks
 
         return NormalizedResponse(
-            content="\n".join(text_parts) if text_parts else None,
-            tool_calls=tool_calls or None,
+            content="\n".join(text_parts) if text_parts else None, tool_calls=tool_calls or None,
             finish_reason=self.map_finish_reason(response.stop_reason),
-            reasoning="\n\n".join(reasoning_parts) if reasoning_parts else None,
-            usage=None,
+            reasoning="\n\n".join(reasoning_parts) if reasoning_parts else None, usage=None,
             provider_data=provider_data or None,
         )
 
