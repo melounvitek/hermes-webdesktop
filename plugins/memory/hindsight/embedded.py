@@ -107,8 +107,7 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     base_url = config.get("llm_base_url") or os.environ.get("HINDSIGHT_API_LLM_BASE_URL", "")
     if base_url:
         env_values["HINDSIGHT_API_LLM_BASE_URL"] = str(base_url)
-    idle_timeout = config.get("idle_timeout")
-    if idle_timeout is None:
+    if (idle_timeout := config.get("idle_timeout")) is None:
         idle_timeout = os.environ.get("HINDSIGHT_IDLE_TIMEOUT")
     if idle_timeout is not None and idle_timeout != "":
         env_values["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(_parse_int_setting(idle_timeout, _DEFAULT_IDLE_TIMEOUT))

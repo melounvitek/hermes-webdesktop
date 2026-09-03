@@ -325,13 +325,10 @@ class HindsightMemoryProvider(MemoryProvider):
         self._sync_thread = None  # legacy alias external callers may join; points at the writer
         self._shutting_down = threading.Event()
         self._atexit_registered = False
-        self._auto_retain = self._retain_async = self._retain_indicator = True
-        self._retain_every_n_turns = 1
         self._retain_tags: List[str] = []
         self._tags: list[str] | None = None
         self._retain_source = _DEFAULT_RETAIN_SOURCE
         self._retain_user_prefix, self._retain_assistant_prefix = "User", "Assistant"
-        self._retain_context = _RETAIN_CONTEXT_DEFAULT
         self._turn_counter = self._turn_index = 0
         self._session_turns: list[str] = []  # ALL turns for the session
         self._last_retained_turn_count = 0  # append-mode delta watermark
@@ -341,18 +338,14 @@ class HindsightMemoryProvider(MemoryProvider):
         self._pending_retain_ops: set[str] = set()
         self._pending_retain_ops_lock = threading.Lock()
         self._retain_ops_bank_id = ""
-        # The next turn's warm prefetch could read BEFORE an async retain is
-        # recall-visible; when True it first waits (bounded, off the reply path)
-        # for the queue to drain AND the server-side op(s) to complete.
-        self._prefetch_waits_for_retain = True
-        self._prefetch_retain_drain_timeout = 10.0
+        self._apply_retain_policy({})
 
         # Recall: pending prefetch block + count, and the indicator state (recall_status()).
         self._prefetch_result, self._prefetch_count = "", 0
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread = None
         self._last_recall_returned, self._last_recall_count = False, 0
-        self._apply_recall_settings({})  # pure-config defaults (no env/secret reads)
+        self._apply_recall_settings({})
 
     @property
     def name(self) -> str:
@@ -753,6 +746,10 @@ class HindsightMemoryProvider(MemoryProvider):
             str(_cfg_or_env("retain_assistant_prefix", "HINDSIGHT_RETAIN_ASSISTANT_PREFIX", "Assistant")).strip()
             or "Assistant"
         )
+        self._apply_retain_policy(cfg)
+
+    def _apply_retain_policy(self, cfg: dict) -> None:
+        """Pure-config retain knobs (no env/secret reads; ``{}`` yields the defaults)."""
         self._auto_retain = cfg.get("auto_retain", True)
         self._retain_every_n_turns = max(1, int(cfg.get("retain_every_n_turns", 1)))
         self._retain_context = cfg.get("retain_context", _RETAIN_CONTEXT_DEFAULT)
@@ -760,10 +757,14 @@ class HindsightMemoryProvider(MemoryProvider):
         # On by default so the user SEES memory working whether or not the model
         # mentions it; off switch for customer-facing agents (recall_indicator too).
         self._retain_indicator = bool(cfg.get("retain_indicator", True))
+        # The next turn's warm prefetch could read BEFORE an async retain is
+        # recall-visible; when True it first waits (bounded, off the reply path)
+        # for the queue to drain AND the server-side op(s) to complete.
         self._prefetch_waits_for_retain = cfg.get("prefetch_waits_for_retain", True)
         self._prefetch_retain_drain_timeout = float(cfg.get("prefetch_retain_drain_timeout", 10.0))
 
     def _apply_recall_settings(self, cfg: dict) -> None:
+        """Recall knobs are pure config too (``{}`` yields the defaults)."""
         self._recall_tags = cfg.get("recall_tags") or None
         self._recall_tags_match = cfg.get("recall_tags_match", "any")
         self._auto_recall = cfg.get("auto_recall", True)
@@ -775,12 +776,10 @@ class HindsightMemoryProvider(MemoryProvider):
         # recall_max_tokens budget); a comma-separated string is accepted for parity
         # with recall_tags; an explicit list broadens or disables the filter.
         configured_types = cfg.get("recall_types")
-        if configured_types is None:
-            self._recall_types = ["observation"]
-        elif isinstance(configured_types, str):
+        if isinstance(configured_types, str):
             self._recall_types = [t.strip() for t in configured_types.split(",") if t.strip()]
         else:
-            self._recall_types = list(configured_types) or ["observation"]
+            self._recall_types = list([] if configured_types is None else configured_types) or ["observation"]
         self._recall_prompt_preamble = cfg.get("recall_prompt_preamble", "")
         self._recall_indicator = bool(cfg.get("recall_indicator", True))
 
@@ -866,7 +865,7 @@ class HindsightMemoryProvider(MemoryProvider):
     def _do_recall(self, query: str) -> tuple[str, int]:
         """One recall/reflect for *query* (background prefetch and ``recall_sync`` paths)
         -> (text, memory count); the count is 0 for reflect (synthesis) and on error."""
-        if self._recall_max_input_chars and len(query) > self._recall_max_input_chars:
+        if self._recall_max_input_chars:
             query = query[:self._recall_max_input_chars]
         try:
             if self._prefetch_method == "reflect":

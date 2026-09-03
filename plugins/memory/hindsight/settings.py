@@ -123,6 +123,4 @@ def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str)
         logger.warning("Invalid bank_id_template %r: %s — using fallback %r",
                        template, exc, fallback)
         return fallback
-    rendered = re.sub(r"-{2,}", "-", rendered)
-    rendered = re.sub(r"_{2,}", "_", rendered)
-    return rendered.strip("-_") or fallback
+    return re.sub(r"([-_])\1+", r"\1", rendered).strip("-_") or fallback
