@@ -345,22 +345,17 @@ def _normalize_read_file_payload(value: dict[str, Any], *, args: Any = None) -> 
     if lines:
         normalized["returned_lines"] = {"start": lines[0]["line"], "end": lines[-1]["line"], "count": len(lines)}
         head, tail = _READ_FILE_HEAD_LINES, _READ_FILE_TAIL_LINES
-        if len(lines) <= head + tail:
-            normalized["content_preview"] = {"lines": lines}
-        else:
-            normalized["content_preview"] = {
-                "head": lines[:head],
-                "tail": lines[-tail:],
-                "omitted_line_count": len(lines) - head - tail,
-            }
+        normalized["content_preview"] = {"lines": lines} if len(lines) <= head + tail else {
+            "head": lines[:head], "tail": lines[-tail:], "omitted_line_count": len(lines) - head - tail,
+        }
     elif value.get("content"):
         normalized["content_preview"] = {"text": value.get("content", "")}
 
     normalized.update({key: value[key] for key in _READ_FILE_META_KEYS if key in value})
 
-    base64_content = value.get("base64_content")
-    if isinstance(base64_content, str) and base64_content:
-        normalized["base64_content"] = {"omitted": True, "length": len(base64_content)}
+    b64 = value.get("base64_content")
+    if isinstance(b64, str) and b64:
+        normalized["base64_content"] = {"omitted": True, "length": len(b64)}
     return normalized
 
 
@@ -588,10 +583,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     trace_ctx: Dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
 
     def open_root():
-        ctx = client.start_as_current_observation(
-            trace_context=trace_ctx, name="Hermes turn", as_type="chain",
-            input=trace_input, metadata=metadata, end_on_exit=False,
-        )
+        ctx = client.start_as_current_observation(trace_context=trace_ctx, name="Hermes turn", as_type="chain",
+                                                  input=trace_input, metadata=metadata, end_on_exit=False)
         return ctx, ctx.__enter__()
 
     root_ctx = root_span = None
@@ -618,10 +611,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
                              input_value: Any, metadata: Optional[dict] = None,
                              model: Optional[str] = None, model_parameters: Optional[dict] = None) -> Any:
-    return state.root_span.start_observation(
-        name=name, as_type=as_type, input=input_value, metadata=metadata or {},
-        model=model, model_parameters=model_parameters,
-    )
+    return state.root_span.start_observation(name=name, as_type=as_type, input=input_value, metadata=metadata or {},
+                                             model=model, model_parameters=model_parameters)
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
@@ -768,8 +759,7 @@ def _pop_generation(task_key: str, api_call_count: Any) -> tuple[Optional[TraceS
     """Detach the open generation for one API call. Returns (state, generation); either may be None."""
     with _STATE_LOCK:
         state = _TRACE_STATE.get(task_key)
-        generation = state.generations.pop(_request_key(api_call_count), None) if state else None
-    return state, generation
+        return state, state.generations.pop(_request_key(api_call_count), None) if state else None
 
 
 def _get_or_start_state_locked(task_key: str, **root_kwargs: Any) -> TraceState:

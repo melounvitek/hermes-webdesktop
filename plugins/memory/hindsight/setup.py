@@ -94,8 +94,7 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     print("\n  Configuring Hindsight memory:\n")
 
     existing_config = provider._config if isinstance(provider._config, dict) else _load_config()
-    if not isinstance(existing_config, dict):
-        existing_config = {}
+    existing_config = existing_config if isinstance(existing_config, dict) else {}
 
     mode = _select("  Select mode", _MODE_ITEMS, _MODE_VALUES, existing_config.get("mode"))
     if mode is None:
