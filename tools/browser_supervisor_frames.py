@@ -25,12 +25,9 @@ _AUTO_ATTACH_PARAMS = {"autoAttach": True, "waitForDebuggerOnStart": False, "fla
 
 @dataclass
 class FrameInfo:
-    """One frame in the page's frame tree.
-
-    ``is_oopif`` frames have their own CDP target (reachable via
-    ``cdp_session_id``); same-origin / srcdoc iframes share the parent process
-    and have ``is_oopif=False`` + ``cdp_session_id=None``.
-    """
+    """One frame in the page's frame tree. ``is_oopif`` frames have their own CDP
+    target (reachable via ``cdp_session_id``); same-origin / srcdoc iframes share
+    the parent process (``is_oopif=False``, ``cdp_session_id=None``)."""
 
     frame_id: str
     url: str
@@ -42,12 +39,10 @@ class FrameInfo:
 
     def to_dict(self) -> Dict[str, Any]:
         d = {"frame_id": self.frame_id, "url": self.url, "origin": self.origin, "is_oopif": self.is_oopif}
-        if self.cdp_session_id:
-            d["session_id"] = self.cdp_session_id
-        if self.parent_frame_id:
-            d["parent_frame_id"] = self.parent_frame_id
-        if self.name:
-            d["name"] = self.name
+        for key, value in (("session_id", self.cdp_session_id), ("parent_frame_id", self.parent_frame_id),
+                           ("name", self.name)):
+            if value:
+                d[key] = value
         return d
 
 
@@ -62,13 +57,13 @@ class FrameTrackingMixin:
 
     def _on_frame_attached(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
         frame_id = params.get("frameId")
-        if not frame_id:
-            return
+        if frame_id:
+            self._set_frame(FrameInfo(frame_id=frame_id, url="", origin="", parent_frame_id=params.get("parentFrameId"),
+                                      is_oopif=False, cdp_session_id=session_id))
+
+    def _set_frame(self, frame: FrameInfo) -> None:
         with self._state_lock:
-            self._frames[frame_id] = FrameInfo(
-                frame_id=frame_id, url="", origin="", parent_frame_id=params.get("parentFrameId"),
-                is_oopif=False, cdp_session_id=session_id,
-            )
+            self._frames[frame.frame_id] = frame
 
     def _on_frame_navigated(self, params: Dict[str, Any], session_id: Optional[str]) -> None:
         frame = params.get("frame") or {}
@@ -78,8 +73,7 @@ class FrameTrackingMixin:
         with self._state_lock:
             old = self._frames.get(frame_id)
             self._frames[frame_id] = FrameInfo(
-                frame_id=frame_id,
-                url=str(frame.get("url") or ""),
+                frame_id=frame_id, url=str(frame.get("url") or ""),
                 origin=str(frame.get("securityOrigin") or frame.get("origin") or ""),
                 parent_frame_id=frame.get("parentId") or (old.parent_frame_id if old else None),
                 is_oopif=bool(old.is_oopif if old else False),
@@ -91,10 +85,10 @@ class FrameTrackingMixin:
         """Drop a frame only when it's truly gone.
 
         ``reason="swap"`` means the frame is migrating processes (e.g. promoted
-        to an OOPIF) — dropping it would hide the iframe, so it's a no-op. Even
-        with ``reason="remove"`` the parent only knows the child left ITS
-        process; if we hold a live child session for that frame_id it is still
-        alive, so keep it until Target.detached + a later frameDetached clear it.
+        to an OOPIF) — dropping it would hide the iframe. Even with ``remove``
+        the parent only knows the child left ITS process; if we hold a live
+        child session for that frame_id it is still alive, so keep it until
+        Target.detached + a later frameDetached clear it.
         """
         frame_id = params.get("frameId")
         if not frame_id or str(params.get("reason") or "remove").lower() == "swap":
@@ -118,9 +112,8 @@ class FrameTrackingMixin:
             with self._state_lock:
                 old = self._frames.get(target_id)
                 self._frames[target_id] = FrameInfo(
-                    frame_id=target_id, url=str(info.get("url") or ""), origin="",
-                    parent_frame_id=(old.parent_frame_id if old else None), is_oopif=True,
-                    cdp_session_id=sid, name=str(info.get("title") or (old.name if old else "")),
+                    frame_id=target_id, url=str(info.get("url") or ""), origin="", is_oopif=True, cdp_session_id=sid,
+                    parent_frame_id=(old.parent_frame_id if old else None), name=str(info.get("title") or (old.name if old else "")),
                 )
         # Enable child domains off-loop: awaiting the replies here would deadlock
         # because only the reader can resolve those Futures.
@@ -138,8 +131,7 @@ class FrameTrackingMixin:
         """Clear the session binding of frames on a detached child session.
 
         Frames are deliberately NOT dropped: Browserbase fires transient detaches
-        during page transitions while the iframe is still visible, and dropping
-        would hide OOPIFs until the next ``Target.attachedToTarget``. Clearing
+        during page transitions while the iframe is still visible. Clearing
         ``cdp_session_id`` just stops stale routing; ``Page.frameDetached``
         cleans up if the iframe truly goes away.
         """
@@ -152,12 +144,9 @@ class FrameTrackingMixin:
                     self._frames[fid] = replace(frame, cdp_session_id=None)
 
     def _build_frame_tree_locked(self) -> Dict[str, Any]:
-        """Build the capped frame_tree payload. Must be called under state lock.
-
-        Top frame = one with no parent, preferring oopif=False. BFS from it,
-        capped by FRAME_TREE_MAX_ENTRIES and FRAME_TREE_MAX_OOPIF_DEPTH for
-        OOPIF branches.
-        """
+        """Capped frame_tree payload (must hold state lock). Top frame = one with
+        no parent, preferring oopif=False; BFS from it, capped by
+        FRAME_TREE_MAX_ENTRIES and FRAME_TREE_MAX_OOPIF_DEPTH for OOPIF branches."""
         frames = self._frames
         tops = [f for f in frames.values() if not f.parent_frame_id]
         top = next((f for f in tops if not f.is_oopif), tops[0] if tops else None)
@@ -167,7 +156,7 @@ class FrameTrackingMixin:
         children: List[Dict[str, Any]] = []
         truncated = False
         queue: List[Tuple[FrameInfo, int]] = [(f, 1) for f in frames.values() if f.parent_frame_id == top.frame_id]
-        visited: set[str] = {top.frame_id}
+        visited = {top.frame_id}
         while queue and len(children) < FRAME_TREE_MAX_ENTRIES:
             frame, depth = queue.pop(0)
             if frame.frame_id in visited:
