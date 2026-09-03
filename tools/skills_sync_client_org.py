@@ -44,14 +44,12 @@ def resolve_org_identity() -> Dict[str, Any]:
     from tools.skills_sync_client import SyncInertError, resolve_identity
     identity = resolve_identity()
     claims = identity.get("claims") or {}
-    org_id = claims.get("org_id")
-    org_role = claims.get("org_role")
+    org_id, org_role = claims.get("org_id"), claims.get("org_role")
     if not org_id:
         raise SyncInertError("no organisation associated with this account")
     if not isinstance(org_role, str) or not org_role:
         raise SyncInertError("this account isn't a member of a shared organisation")
-    identity["org_id"] = str(org_id)
-    identity["org_role"] = org_role
+    identity.update(org_id=str(org_id), org_role=org_role)
     return identity
 
 
@@ -114,24 +112,22 @@ def _sidecar_path(org_id: Optional[str], const: str) -> Path:
     return (_mirror_root(org_id) if org_id else _ssc()._org_dir()) / getattr(sku, const)
 
 
-def _org_baseline_path(org_id: str) -> Path:
-    """Sidecar recording the upstream fingerprint of each mirrored skill."""
-    return _sidecar_path(org_id, "ORG_BASELINE_FILE")
-
-
 def _read_org_baseline(org_id: str) -> Dict[str, Any]:
+    """The baseline sidecar: upstream fingerprint + tree of each mirrored skill ({} if absent)."""
     try:
-        return json.loads(_org_baseline_path(org_id).read_text(encoding="utf-8"))
+        return json.loads(_sidecar_path(org_id, "ORG_BASELINE_FILE").read_text(encoding="utf-8"))
     except Exception:
         return {}
 
 
 def _write_org_baseline(org_id: str, baseline: Dict[str, Any]) -> None:
-    _write_sidecar("baseline", lambda: _org_baseline_path(org_id), json.dumps(baseline, indent=2, sort_keys=True))
+    _write_sidecar("baseline", lambda: _sidecar_path(org_id, "ORG_BASELINE_FILE"),
+                   json.dumps(baseline, indent=2, sort_keys=True))
 
 
 def _write_org_provenance(org_id: str, data: Dict[str, Any]) -> None:
-    _write_sidecar("org provenance", lambda: _sidecar_path(org_id, "ORG_PROVENANCE_FILE"), json.dumps(data, indent=2))
+    _write_sidecar("org provenance", lambda: _sidecar_path(org_id, "ORG_PROVENANCE_FILE"),
+                   json.dumps(data, indent=2))
 
 
 def _write_active_org_marker(org_id: str) -> None:
@@ -145,9 +141,8 @@ def _clear_active_org_marker() -> None:
         marker = _sidecar_path(None, "ORG_ACTIVE_MARKER")
         if marker.exists():
             marker.unlink()
-            logger.info(
-                "skills_sync_client: cleared active-org marker "
-                "(token has no org workflow); org skills no longer resolve")
+            logger.info("skills_sync_client: cleared active-org marker "
+                        "(token has no org workflow); org skills no longer resolve")
     except Exception as e:
         logger.debug("skills_sync_client: marker clear failed: %s", e)
 
@@ -242,9 +237,8 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     })
     _write_org_baseline(org_id, baseline)
     if conflicted:
-        logger.warning(
-            "skills_sync_client: %d org skill(s) have local edits AND upstream "
-            "changes; left untouched: %s", len(conflicted), ", ".join(conflicted))
+        logger.warning("skills_sync_client: %d org skill(s) have local edits AND upstream "
+                       "changes; left untouched: %s", len(conflicted), ", ".join(conflicted))
     return {"ok": True, "org_id": org_id, "head": head, "updated": updated, "conflicted": conflicted}
 
 
@@ -271,9 +265,8 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
     skill_tree = build_tree(skill_dir, objects, max_object_bytes=max_bytes)
     for attempt in range(1, _ORG_CAS_MAX_ATTEMPTS + 1):
         base_head = _read_org_head(client, org_id)
-        skill_map = (
-            skill_trees_of_root(client, root_tree_of_commit(client, base_head, org_scope=True), org_scope=True)
-            if base_head else {})
+        skill_map = {} if not base_head else skill_trees_of_root(
+            client, root_tree_of_commit(client, base_head, org_scope=True), org_scope=True)
         skill_map[str(rel)] = skill_tree
         root_hash = assemble_root_from_skill_trees(skill_map, objects)
         commit_hash = build_commit(
@@ -286,19 +279,15 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
             break
         except SyncConflict as conflict:
             if attempt >= _ORG_CAS_MAX_ATTEMPTS:
-                raise SyncError(
-                    "the organisation's skills changed while this was being "
-                    f"proposed, and {attempt} attempts to catch up all lost "
-                    "the race — run the command again",
-                    status=409,
-                ) from conflict
+                raise SyncError("the organisation's skills changed while this was being "
+                                f"proposed, and {attempt} attempts to catch up all lost "
+                                "the race — run the command again", status=409) from conflict
             logger.debug("propose_skill: org HEAD moved (actual=%r), re-splicing (attempt %d)",
                          conflict.actual, attempt)
 
     if result.get("proposal_pending"):
-        return {
-            "ok": True, "proposal_pending": True, "proposal_id": result.get("proposal_id"),
-            "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id}
+        return {"ok": True, "proposal_pending": True, "proposal_id": result.get("proposal_id"),
+                "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id}
     return {"ok": True, "merged": True, "head": result.get("hash", commit_hash),
             "commit": commit_hash, "org_id": org_id}
 

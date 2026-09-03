@@ -54,9 +54,8 @@ def resolve_identity() -> Dict[str, Any]:
         logger.debug("skills_sync_client: JWT payload decode failed: %s", e)
         claims = {}
     owner = claims.get("sub") or claims.get("privy_did") or claims.get("tid") or "unknown"
-    return {
-        "api_key": api_key, "base_url": creds.get("base_url"), "owner": str(owner),
-        "nous_admin": claims.get(NOUS_ADMIN_CLAIM) is True, "claims": claims}
+    return {"api_key": api_key, "base_url": creds.get("base_url"), "owner": str(owner),
+            "nous_admin": claims.get(NOUS_ADMIN_CLAIM) is True, "claims": claims}
 
 
 # Configuration -- env-first so Hermes Cloud can enable sync via environment alone. Every knob:
@@ -247,12 +246,10 @@ def _default_device_label() -> str:
 def stable_device_id() -> str:
     """Per-device label at ~/.hermes/skills/.sync_device_id. An existing file always wins; else seeded
     from HERMES_SYNC_DEVICE_NAME (first use only, for Hermes Cloud) or a friendly default, then persisted."""
-    path = _skills_dir() / ".sync_device_id"
     with suppress(OSError):
-        if path.exists():
-            val = path.read_text(encoding="utf-8").strip()
-            if val:
-                return val
+        val = _device_id_path().read_text(encoding="utf-8").strip()
+        if val:
+            return val
     val = (os.environ.get("HERMES_SYNC_DEVICE_NAME") or "").strip() or _default_device_label()
     try:
         _write_device_id(val)
@@ -261,10 +258,13 @@ def stable_device_id() -> str:
     return val
 
 
+def _device_id_path() -> Path:
+    return _skills_dir() / ".sync_device_id"
+
+
 def _write_device_id(val: str) -> None:
-    path = _skills_dir() / ".sync_device_id"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(val, encoding="utf-8")
+    _device_id_path().parent.mkdir(parents=True, exist_ok=True)
+    _device_id_path().write_text(val, encoding="utf-8")
 
 
 def set_device_name(name: str) -> str:
@@ -293,11 +293,7 @@ def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict
     except (OSError, json.JSONDecodeError) as e:
         logger.debug("skills_sync_client: %s failed: %s", what, e)
         return None
-    if not isinstance(data, dict):
-        return None
-    data.setdefault("head", None)
-    data.setdefault("skills", {})
-    return data
+    return {**_EMPTY_STATE, **data} if isinstance(data, dict) else None
 
 
 def read_sync_state() -> Dict[str, Any]:
@@ -307,30 +303,26 @@ def read_sync_state() -> Dict[str, Any]:
     if path.exists():
         return _load_state_file(path) or dict(_EMPTY_STATE)
     legacy = _skills_dir() / ".sync_manifest"
-    if legacy.exists():
-        data = _load_state_file(legacy, "legacy sync state migrate")
-        if data is not None:
-            write_sync_state(data)
-            with suppress(OSError):
-                legacy.unlink()
-            return data
-    return dict(_EMPTY_STATE)
+    data = _load_state_file(legacy, "legacy sync state migrate") if legacy.exists() else None
+    if data is not None:
+        write_sync_state(data)
+        with suppress(OSError):
+            legacy.unlink()
+    return data if data is not None else dict(_EMPTY_STATE)
 
 
 def write_sync_state(data: Dict[str, Any]) -> None:
     """Write the local sync state atomically. Best-effort."""
     try:
         from tools.skill_usage import _atomic_write
-        _atomic_write(
-            _sync_state_path(), ".sync_state_",
-            lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
+        _atomic_write(_sync_state_path(), ".sync_state_",
+                      lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
     except Exception as e:
         logger.debug("skills_sync_client: sync state write failed: %s", e)
 
 
 def _record_head(state: Dict[str, Any], head: str, root: str) -> None:
-    state["head"] = head
-    state["root"] = root
+    state.update(head=head, root=root)
     write_sync_state(state)
 
 
@@ -527,10 +519,8 @@ def _gate_and_swallow(op: str, run: Callable[[Dict[str, Any]], Optional[Dict[str
 
 def maybe_push_skills(*, message: str = "hermes skill sync") -> Optional[Dict[str, Any]]:
     """Best-effort push (debounced skill_manage hook). Never raises."""
-    return _gate_and_swallow(
-        "maybe_push_skills",
-        lambda identity: push_skills(identity=identity, message=message) if list_synced_skill_names() else None,
-    )
+    return _gate_and_swallow("maybe_push_skills", lambda identity: push_skills(
+        identity=identity, message=message) if list_synced_skill_names() else None)
 
 
 def maybe_pull_skills() -> Optional[Dict[str, Any]]:

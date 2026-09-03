@@ -150,12 +150,10 @@ def _is_install_failed_on_disk() -> bool:
     """True if a recent install failure was persisted and is still non-retryable.
     A 'cosign_missing' marker is auto-cleared once cosign appears on PATH."""
     reason = _read_failure_reason()
-    if reason is None:
-        return False
     if reason == "cosign_missing" and shutil.which("cosign"):
         _clear_install_failed()
         return False
-    return True
+    return reason is not None
 
 
 def _mark_install_failed(reason: str = ""):
@@ -284,8 +282,7 @@ def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) 
     actual = sha.hexdigest()
     if actual != expected:
         logger.warning("Checksum mismatch: expected %s, got %s", expected, actual)
-        return False
-    return True
+    return actual == expected
 
 
 def _extract_tirith_binary(tar: tarfile.TarFile, dest_dir: str, log) -> tuple[str | None, str]:
