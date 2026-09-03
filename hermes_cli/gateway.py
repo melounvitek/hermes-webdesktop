@@ -1924,17 +1924,14 @@ def _systemd_operational(system: bool = False) -> bool:
     """Return True when the requested systemd scope is usable."""
     try:
         result = _run_systemctl(["is-system-running"], system=system, timeout=5, **_CAPTURE_TEXT)
-        # "running", "degraded", "starting" all mean systemd is PID 1
-        status = result.stdout.strip().lower()
-        return status in {"running", "degraded", "starting", "initializing"}
     except (RuntimeError, subprocess.TimeoutExpired, OSError):
         return False
+    # "running", "degraded", "starting" all mean systemd is PID 1
+    return result.stdout.strip().lower() in {"running", "degraded", "starting", "initializing"}
 
 
 def supports_systemd_services() -> bool:
-    if not is_linux() or is_termux():
-        return False
-    if shutil.which("systemctl") is None:
+    if not is_linux() or is_termux() or shutil.which("systemctl") is None:
         return False
     if is_wsl():
         return _wsl_systemd_operational()
@@ -1982,27 +1979,19 @@ def _windows_scheduled_task_state(task_name: str) -> str | None:
         )
         result = subprocess.run(
             [powershell, "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=10,
         )
-        if result.returncode != 0:
-            return None
-        state = (result.stdout or "").strip()
-        return state or None
     except (OSError, subprocess.TimeoutExpired):
         return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "").strip() or None
 
 
 def _windows_scheduled_task_supervises(task_name: str) -> bool:
-    """True when Task Scheduler still owns this profile's gateway (Ready counts: the task is Ready, not Running, after bootstrap exits).
-
-    Best-effort: any failure returns False so the caller falls back to pidfile / parent-chain exclusions.
-    """
-    state = _windows_scheduled_task_state(task_name)
-    return state in _WINDOWS_TASK_SUPERVISOR_STATES
+    """True when Task Scheduler still owns this profile's gateway (Ready counts: the task is Ready, not
+    Running, after bootstrap exits). Any failure returns False so callers fall back to pidfile / parent-chain."""
+    return _windows_scheduled_task_state(task_name) in _WINDOWS_TASK_SUPERVISOR_STATES
 
 
 def _windows_gateway_should_absorb_console_controls() -> bool:
@@ -2039,12 +2028,7 @@ def _windows_gateway_breakaway_state() -> bool | None:
         return None
     from hermes_cli._subprocess_compat import _WINDOWS_GATEWAY_BREAKAWAY_ENV
 
-    value = os.environ.pop(_WINDOWS_GATEWAY_BREAKAWAY_ENV, None)
-    if value == "1":
-        return True
-    if value == "0":
-        return False
-    return None
+    return {"1": True, "0": False}.get(os.environ.pop(_WINDOWS_GATEWAY_BREAKAWAY_ENV, None))
 
 
 # =============================================================================
@@ -2055,28 +2039,31 @@ _SERVICE_BASE = "hermes-gateway"
 SERVICE_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
 
 
+def _profile_name_from_home(home: Path, default: Path) -> str | None:
+    """Profile name when ``home`` is ``<default>/profiles/<name>`` with a service-safe name, else None."""
+    import re
+
+    try:
+        parts = home.relative_to((default / "profiles").resolve()).parts
+    except ValueError:
+        return None
+    if len(parts) == 1 and re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", parts[0]):
+        return parts[0]
+    return None
+
+
 def _profile_suffix() -> str:
     """Service-name suffix for HERMES_HOME: "" for the default root, the profile name for
     ``<root>/profiles/<name>``, else a short hash of the path."""
     import hashlib
-    import re
     from hermes_constants import get_default_hermes_root
 
     home = get_hermes_home().resolve()
     default = get_default_hermes_root().resolve()
     if home == default:
         return ""
-    # Detect <root>/profiles/<name> pattern → use the profile name
-    profiles_root = (default / "profiles").resolve()
-    try:
-        rel = home.relative_to(profiles_root)
-        parts = rel.parts
-        if len(parts) == 1 and re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", parts[0]):
-            return parts[0]
-    except ValueError:
-        pass
     # Fallback: short hash for arbitrary HERMES_HOME paths
-    return hashlib.sha256(str(home).encode()).hexdigest()[:8]
+    return _profile_name_from_home(home, default) or hashlib.sha256(str(home).encode()).hexdigest()[:8]
 
 
 def _profile_arg(hermes_home: str | None = None, default_root: str | Path | None = None) -> str:
@@ -2085,22 +2072,14 @@ def _profile_arg(hermes_home: str | None = None, default_root: str | Path | None
     *hermes_home*/*default_root* let a sudo/root process generate a unit for another user, where
     ``get_hermes_home()``/``get_default_hermes_root()`` would otherwise refer to root.
     """
-    import re
     from hermes_constants import get_default_hermes_root
 
     home = Path(hermes_home or str(get_hermes_home())).resolve()
     default = Path(default_root).resolve() if default_root else get_default_hermes_root().resolve()
     if home == default:
         return ""
-    profiles_root = (default / "profiles").resolve()
-    try:
-        rel = home.relative_to(profiles_root)
-        parts = rel.parts
-        if len(parts) == 1 and re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", parts[0]):
-            return f"--profile {parts[0]}"
-    except ValueError:
-        pass
-    return ""
+    name = _profile_name_from_home(home, default)
+    return f"--profile {name}" if name else ""
 
 
 def _profile_arg_for_target_user(hermes_home: str, target_home_dir: str) -> str:
@@ -2117,9 +2096,7 @@ def get_service_name() -> str:
     """Systemd service name: ``hermes-gateway`` for default HERMES_HOME, ``hermes-gateway-<profile>``
     or ``-<hash>`` otherwise."""
     suffix = _profile_suffix()
-    if not suffix:
-        return _SERVICE_BASE
-    return f"{_SERVICE_BASE}-{suffix}"
+    return f"{_SERVICE_BASE}-{suffix}" if suffix else _SERVICE_BASE
 
 
 def get_systemd_unit_path(system: bool = False) -> Path:
@@ -2146,16 +2123,19 @@ class SystemScopeRequiresRootError(RuntimeError):
         return self.args[0] if self.args else ""
 
 
+def _user_runtime_dir() -> Path:
+    """``$XDG_RUNTIME_DIR`` or ``/run/user/<uid>`` (regardless of existence)."""
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
+
+
 def _user_dbus_socket_path() -> Path:
     """Return the expected per-user D-Bus socket path (regardless of existence)."""
-    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
-    return Path(xdg) / "bus"
+    return _user_runtime_dir() / "bus"
 
 
 def _user_systemd_private_socket_path() -> Path:
     """Return the per-user systemd private socket path (regardless of existence)."""
-    xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
-    return Path(xdg) / "systemd" / "private"
+    return _user_runtime_dir() / "systemd" / "private"
 
 
 def _path_exists_safe(path: Path) -> bool:
@@ -2184,10 +2164,7 @@ def _user_systemd_socket_ready() -> bool:
     Some distros expose only the private socket and ``systemctl --user`` still works, so either
     counts. An inaccessible path counts as not-ready (falls through to UserSystemdUnavailableError).
     """
-    return (
-        _path_exists_safe(_user_dbus_socket_path())
-        or _path_exists_safe(_user_systemd_private_socket_path())
-    )
+    return _path_exists_safe(_user_dbus_socket_path()) or _path_exists_safe(_user_systemd_private_socket_path())
 
 
 def _ensure_user_systemd_env() -> None:
@@ -2212,8 +2189,6 @@ def _ensure_user_systemd_env() -> None:
 
 def _wait_for_user_dbus_socket(timeout: float = 3.0) -> bool:
     """Poll up to ``timeout`` s for a user systemd control socket (user@.service takes a moment after enable-linger)."""
-    import time
-
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _user_systemd_socket_ready():
@@ -2221,6 +2196,16 @@ def _wait_for_user_dbus_socket(timeout: float = 3.0) -> bool:
             return True
         time.sleep(0.2)
     return _user_systemd_socket_ready()
+
+
+def _loginctl_enable_linger(username: str) -> subprocess.CompletedProcess:
+    """``loginctl enable-linger <username>`` (check=False, 30s); exceptions propagate to the caller."""
+    return subprocess.run(["loginctl", "enable-linger", username], check=False, timeout=30, **_CAPTURE_TEXT)
+
+
+def _completed_process_detail(result) -> str:
+    """stderr, else stdout, else ``exit <rc>`` — stripped."""
+    return (result.stderr or result.stdout or f"exit {result.returncode}").strip()
 
 
 def _preflight_user_systemd(*, auto_enable_linger: bool = True) -> None:
@@ -2238,6 +2223,7 @@ def _preflight_user_systemd(*, auto_enable_linger: bool = True) -> None:
 
     username = getpass.getuser()
     linger_enabled, linger_detail = get_systemd_linger_status()
+    sudo_hint = f"  sudo loginctl enable-linger {username}"
 
     if linger_enabled is True:
         if _wait_for_user_dbus_socket(timeout=3.0):
@@ -2254,17 +2240,10 @@ def _preflight_user_systemd(*, auto_enable_linger: bool = True) -> None:
 
     if auto_enable_linger and shutil.which("loginctl"):
         try:
-            result = subprocess.run(
-                ["loginctl", "enable-linger", username],
-                check=False,
-                timeout=30,
-                **_CAPTURE_TEXT,
-            )
+            result = _loginctl_enable_linger(username)
         except Exception as exc:
             _raise_user_systemd_unavailable(
-                username,
-                reason=f"loginctl enable-linger failed ({exc}).",
-                fix_hint=f"  sudo loginctl enable-linger {username}",
+                username, reason=f"loginctl enable-linger failed ({exc}).", fix_hint=sudo_hint
             )
         else:
             if result.returncode == 0:
@@ -2280,17 +2259,16 @@ def _preflight_user_systemd(*, auto_enable_linger: bool = True) -> None:
                         f"  Or reboot and run: systemctl --user start {get_service_name()}"
                     ),
                 )
-            detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
             _raise_user_systemd_unavailable(
                 username,
-                reason=f"loginctl enable-linger was denied: {detail}",
-                fix_hint=f"  sudo loginctl enable-linger {username}",
+                reason=f"loginctl enable-linger was denied: {_completed_process_detail(result)}",
+                fix_hint=sudo_hint,
             )
 
     _raise_user_systemd_unavailable(
         username,
-        reason=("User D-Bus session is not available " f"({linger_detail or 'linger disabled'})."),
-        fix_hint=f"  sudo loginctl enable-linger {username}",
+        reason=f"User D-Bus session is not available ({linger_detail or 'linger disabled'}).",
+        fix_hint=sudo_hint,
     )
 
 
@@ -2338,9 +2316,7 @@ def get_installed_systemd_scopes() -> list[str]:
     seen_paths: set[Path] = set()
     for system, label in ((False, "user"), (True, "system")):
         unit_path = get_systemd_unit_path(system=system)
-        if unit_path in seen_paths:
-            continue
-        if unit_path.exists():
+        if unit_path not in seen_paths and unit_path.exists():
             scopes.append(label)
             seen_paths.add(unit_path)
     return scopes
@@ -2388,10 +2364,8 @@ def _find_legacy_hermes_units() -> list[tuple[str, Path, bool]]:
                 text = unit_path.read_text(encoding="utf-8", errors="ignore")
             except (OSError, PermissionError):
                 continue
-            if not any(marker in text for marker in _LEGACY_UNIT_EXECSTART_MARKERS):
-                # Not our gateway — leave alone
-                continue
-            results.append((name, unit_path, is_system))
+            if any(marker in text for marker in _LEGACY_UNIT_EXECSTART_MARKERS):
+                results.append((name, unit_path, is_system))
     return results
 
 
@@ -2407,8 +2381,7 @@ def print_legacy_unit_warning() -> None:
         return
     print_warning("Legacy Hermes gateway unit(s) detected from an older install:")
     for name, path, is_system in legacy:
-        scope = "system" if is_system else "user"
-        print_info(f"    {path}  ({scope} scope)")
+        print_info(f"    {path}  ({_service_scope_label(is_system)} scope)")
     print_info("  These run alongside the current hermes-gateway service and")
     print_info("  cause SIGTERM flap loops — both try to use the same bot token.")
     print_info("  Remove them with:")
@@ -2427,14 +2400,10 @@ def remove_legacy_hermes_units(interactive: bool = True, dry_run: bool = False) 
         print("No legacy Hermes gateway units found.")
         return 0, []
 
-    user_units = [(n, p) for n, p, is_sys in legacy if not is_sys]
-    system_units = [(n, p) for n, p, is_sys in legacy if is_sys]
-
     print()
     print("Legacy Hermes gateway unit(s) found:")
     for name, path, is_system in legacy:
-        scope = "system" if is_system else "user"
-        print(f"  {path}  ({scope} scope)")
+        print(f"  {path}  ({_service_scope_label(is_system)} scope)")
     print()
 
     if dry_run:
@@ -2463,6 +2432,8 @@ def remove_legacy_hermes_units(interactive: bool = True, dry_run: bool = False) 
         with contextlib.suppress(RuntimeError):
             _run_systemctl(["daemon-reload"], system=system, check=False, timeout=30)
 
+    user_units = [(n, p) for n, p, is_sys in legacy if not is_sys]
+    system_units = [(n, p) for n, p, is_sys in legacy if is_sys]
     if user_units:
         _remove_units(user_units, system=False)
 
@@ -2490,8 +2461,7 @@ def print_systemd_scope_conflict_warning() -> None:
     if len(scopes) < 2:
         return
 
-    rendered_scopes = " + ".join(scopes)
-    print_warning(f"Both user and system gateway services are installed ({rendered_scopes}).")
+    print_warning(f"Both user and system gateway services are installed ({' + '.join(scopes)}).")
     print_info("  This is confusing and can make start/stop/status behavior ambiguous.")
     print_info("  Default gateway commands target the user service unless you pass --system.")
     print_info("  Keep one of these:")
@@ -2501,10 +2471,7 @@ def print_systemd_scope_conflict_warning() -> None:
 
 def _require_root_for_system_service(action: str) -> None:
     if os.geteuid() != 0:  # windows-footgun: ok — POSIX systemd helper, never invoked on Windows
-        raise SystemScopeRequiresRootError(
-            f"System gateway {action} requires root. Re-run with sudo.",
-            action,
-        )
+        raise SystemScopeRequiresRootError(f"System gateway {action} requires root. Re-run with sudo.", action)
 
 
 def _system_service_identity(run_as_user: str | None = None) -> tuple[str, str, str]:
@@ -2551,22 +2518,20 @@ def _read_systemd_user_from_unit(unit_path: Path) -> str | None:
 
 def _default_system_service_user() -> str | None:
     for candidate in (os.getenv("SUDO_USER"), os.getenv("USER"), os.getenv("LOGNAME")):
-        if candidate and candidate.strip() and candidate.strip() != "root":
-            return candidate.strip()
+        candidate = (candidate or "").strip()
+        if candidate and candidate != "root":
+            return candidate
     return None
 
 
 def prompt_linux_gateway_install_scope() -> str | None:
     # Only root can create a boot-time system service, so that scope is offered only to root
     # sessions — a non-root user is never handed a "re-run under sudo" recipe.
-    is_root = os.geteuid() == 0  # windows-footgun: ok — Linux systemd install wizard, never invoked on Windows
-    if not is_root:
+    user_option = "User service (no sudo; best for laptops/dev boxes; may need linger after logout)"
+    if os.geteuid() != 0:  # windows-footgun: ok — Linux systemd install wizard, never invoked on Windows
         choice = prompt_choice(
             "  Choose how the gateway should run in the background:",
-            [
-                "User service (no sudo; best for laptops/dev boxes; may need linger after logout)",
-                "Skip service install for now",
-            ],
+            [user_option, "Skip service install for now"],
             default=0,
         )
         if choice == 0:
@@ -2579,7 +2544,7 @@ def prompt_linux_gateway_install_scope() -> str | None:
     choice = prompt_choice(
         "  Choose how the gateway should run in the background:",
         [
-            "User service (no sudo; best for laptops/dev boxes; may need linger after logout)",
+            user_option,
             "System service (starts on boot; runs as your chosen user)",
             "Skip service install for now",
         ],
@@ -2695,7 +2660,6 @@ def get_systemd_linger_status() -> tuple[bool | None, str]:
         return None, "not supported in Termux"
     if not is_linux():
         return None, "not supported on this platform"
-
     if not shutil.which("loginctl"):
         return None, "loginctl not found"
 
@@ -2711,25 +2675,20 @@ def get_systemd_linger_status() -> tuple[bool | None, str]:
     try:
         result = subprocess.run(
             ["loginctl", "show-user", username, "--property=Linger", "--value"],
-            check=False,
-            timeout=10,
-            **_CAPTURE_TEXT,
+            check=False, timeout=10, **_CAPTURE_TEXT,
         )
     except Exception as e:
         return None, str(e)
 
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
-        return None, detail or "loginctl query failed"
+        return None, _completed_process_detail(result) or "loginctl query failed"
 
     value = (result.stdout or "").strip().lower()
     if value in {"yes", "true", "1"}:
         return True, ""
     if value in {"no", "false", "0"}:
         return False, ""
-
-    rendered = value or "<empty>"
-    return None, f"unexpected loginctl output: {rendered}"
+    return None, f"unexpected loginctl output: {value or '<empty>'}"
 
 
 def print_systemd_linger_guidance() -> None:
@@ -2785,27 +2744,13 @@ def launchd_gateway_labels_for_install() -> list[str]:
 def _detect_venv_dir() -> Path | None:
     """Active virtualenv dir: ``sys.prefix``, then ``VIRTUAL_ENV`` (uv sets it without changing
     sys.prefix), then .venv/venv under PROJECT_ROOT; None if none found."""
-    # If we're running inside a virtualenv, sys.prefix points to it.
+    candidates: list[Path] = []
     if sys.prefix != sys.base_prefix:
-        venv = Path(sys.prefix)
-        if venv.is_dir():
-            return venv
-
-    # uv and some other tools set VIRTUAL_ENV without changing sys.prefix. This catches `uv run`
-    # where sys.prefix == sys.base_prefix but the environment IS a venv.
-    _virtual_env = os.environ.get("VIRTUAL_ENV")
-    if _virtual_env:
-        venv = Path(_virtual_env)
-        if venv.is_dir():
-            return venv
-
-    # Fallback: check common virtualenv directory names under the project root.
-    for candidate in (".venv", "venv"):
-        venv = PROJECT_ROOT / candidate
-        if venv.is_dir():
-            return venv
-
-    return None
+        candidates.append(Path(sys.prefix))
+    if os.environ.get("VIRTUAL_ENV"):
+        candidates.append(Path(os.environ["VIRTUAL_ENV"]))
+    candidates += [PROJECT_ROOT / ".venv", PROJECT_ROOT / "venv"]
+    return next((venv for venv in candidates if venv.is_dir()), None)
 
 
 def get_python_path() -> str:
