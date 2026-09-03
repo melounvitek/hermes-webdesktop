@@ -124,6 +124,18 @@ class TestDispatch:
         assert drag_kw["from_element"] == 1
         assert drag_kw["to_element"] == 5
 
+    def test_scroll_coordinate_axes_are_independent(self, noop_backend):
+        """scroll forwards each coordinate axis on its own (main parity):
+        ``coordinate=[null, 100]`` scrolls at y=100 with x=None, whereas
+        click treats a coordinate without x as no point at all."""
+        from tools.computer_use.tool import handle_computer_use
+        handle_computer_use({"action": "scroll", "coordinate": [None, 100]})
+        scroll_kw = next(c[1] for c in noop_backend.calls if c[0] == "scroll")
+        assert (scroll_kw["x"], scroll_kw["y"]) == (None, 100)
+        handle_computer_use({"action": "click", "coordinate": [None, 100]})
+        click_kw = next(c[1] for c in noop_backend.calls if c[0] == "click")
+        assert (click_kw["x"], click_kw["y"]) == (None, None)
+
 
     def test_capture_forwards_exact_pid_window_target(self, noop_backend):
         from tools.computer_use.tool import handle_computer_use

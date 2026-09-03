@@ -292,7 +292,14 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 #     final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
 
 def _xy(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Click semantics: a coordinate only counts when its x is set (a bare y is not a point)."""
     return dict(x=coord[0], y=coord[1]) if (coord := args.get("coordinate")) and coord[0] is not None else dict(x=None, y=None)
+
+def _scroll_xy(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Scroll semantics: axes are independent — ``coordinate=[null, 100]`` scrolls at y=100 with x unset."""
+    coord = args.get("coordinate") or (None, None)
+    return dict(x=coord[0] if coord and coord[0] is not None else None,
+                y=coord[1] if coord and coord[1] is not None else None)
 
 def _do_click(backend, action, args, button=None, count=1, **delivery):
     return backend.click(element=args.get("element"), **_xy(args), button=button or args.get("button") or "left",
@@ -308,7 +315,7 @@ def _do_drag(backend, action, args, **delivery):
 
 def _do_scroll(backend, action, args, **delivery):
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
-                          element=args.get("element"), **_xy(args), modifiers=args.get("modifiers"), **delivery)
+                          element=args.get("element"), **_scroll_xy(args), modifiers=args.get("modifiers"), **delivery)
 
 def _do_capture(backend, action, args, **_):
     if (mode := str(args.get("mode", "som"))) not in {"som", "vision", "ax"}:
