@@ -82,26 +82,18 @@ class AnthropicTransport(ProviderTransport):
             elif block.type in _THINKING_TYPES:
                 if block.type == "thinking":
                     reasoning_parts.append(block.thinking)
-                # Sanitized block preferred; raw only if sanitize dropped it.
-                if isinstance(clean_block, dict):
-                    reasoning_details.append(clean_block)
-                elif isinstance(block_dict, dict):
-                    reasoning_details.append(block_dict)
+                detail = clean_block if clean_block is not None else block_dict  # raw only if sanitize dropped it
+                if isinstance(detail, dict):
+                    reasoning_details.append(detail)
             elif block.type == "tool_use":
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
                     name = _unprefix_oauth_tool_name(name)
                 tool_calls.append(ToolCall(id=block.id, name=name, arguments=json.dumps(block.input)))
-        provider_data = {}
-        if reasoning_details:
-            provider_data["reasoning_details"] = reasoning_details
+        provider_data = {"reasoning_details": reasoning_details} if reasoning_details else {}
         # Ordered channel only for the shape the parallel lists reconstruct wrongly.
-        kinds = {b.get("type") for b in ordered_blocks if isinstance(b, dict)}
-        signed = any(
-            b.get("type") in _THINKING_TYPES and (b.get("signature") or b.get("data"))
-            for b in ordered_blocks if isinstance(b, dict)
-        )
-        if signed and "tool_use" in kinds:
+        signed = any(b.get("type") in _THINKING_TYPES and (b.get("signature") or b.get("data")) for b in ordered_blocks)
+        if signed and any(b.get("type") == "tool_use" for b in ordered_blocks):
             provider_data["anthropic_content_blocks"] = ordered_blocks
         return NormalizedResponse(
             content="\n".join(text_parts) if text_parts else None, tool_calls=tool_calls or None,
@@ -114,9 +106,9 @@ class AnthropicTransport(ProviderTransport):
         """Structural check; empty content is legitimate for ``end_turn``/``refusal`` (retrying
         either would loop forever)."""
         content_blocks = getattr(response, "content", None)
-        if not isinstance(content_blocks, list):
-            return False
-        return bool(content_blocks) or getattr(response, "stop_reason", None) in {"end_turn", "refusal"}
+        return isinstance(content_blocks, list) and (
+            bool(content_blocks) or getattr(response, "stop_reason", None) in {"end_turn", "refusal"}
+        )
 
     def extract_cache_stats(self, response: Any) -> Optional[Dict[str, int]]:
         """Anthropic cache_read / cache_creation token counts."""

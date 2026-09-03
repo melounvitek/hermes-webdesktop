@@ -41,8 +41,7 @@ def execute(
         except BaseException as exc:
             callback_error = exc
             raise
-        raw_result["value"] = result
-        raw_result["json"] = _jsonable(result)
+        raw_result.update(value=result, json=_jsonable(result))
         return raw_result["json"]
 
     try:
