@@ -374,26 +374,27 @@ class GatewayBusySessionMixin:
             else (None if event.source.platform == Platform.TELEGRAM and event.source.thread_id else event.message_id)
         )
 
+    async def _send_busy_reply(self, event: MessageEvent, adapter, content: str, *, plain_anchor: bool = False) -> None:
+        """Send a busy-path reply anchored to the event (thread metadata included)."""
+        reply_anchor = self._reply_anchor_for_event(event)
+        await adapter._send_with_retry(
+            chat_id=event.source.chat_id,
+            content=content,
+            reply_to=reply_anchor if plain_anchor else self._busy_reply_to(event, reply_anchor),
+            metadata=self._thread_metadata_for_source(event.source, reply_anchor),
+        )
+
     async def _send_busy_drain_notice(self, event: MessageEvent, session_key: str, effective_mode: str) -> None:
         """Busy path while the gateway is restarting/stopping: queue (if allowed) and tell the user."""
         adapter = self._adapter_for_source(event.source)
         if not adapter:
             return
-
-        reply_anchor = self._reply_anchor_for_event(event)
-        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
         if self._queue_during_drain_enabled(effective_mode):
             self._queue_or_replace_pending_event(session_key, event)
             message = f"⏳ Gateway {self._status_action_gerund()} — queued for the next turn after it comes back."
         else:
             message = f"⏳ Gateway is {self._status_action_gerund()} and is not accepting another turn right now."
-
-        await adapter._send_with_retry(
-            chat_id=event.source.chat_id,
-            content=message,
-            reply_to=self._busy_reply_to(event, reply_anchor),
-            metadata=thread_meta,
-        )
+        await self._send_busy_reply(event, adapter, message)
 
     # Bare-word approval replies → (verb, args) for the synthesized slash command.
     _PLAINTEXT_APPROVAL_WORDS: Dict[str, tuple] = {
@@ -434,13 +435,7 @@ class GatewayBusySessionMixin:
                     if _adapter and _reply:
                         _text, _eph_ttl = _adapter._unwrap_ephemeral(_reply)
                         if _text:
-                            _anchor = self._reply_anchor_for_event(event)
-                            await _adapter._send_with_retry(
-                                chat_id=event.source.chat_id,
-                                content=_text,
-                                reply_to=_anchor,
-                                metadata=self._thread_metadata_for_source(event.source, _anchor),
-                            )
+                            await self._send_busy_reply(event, _adapter, _text, plain_anchor=True)
                     return True
         except Exception:
             logger.warning(
@@ -671,15 +666,8 @@ class GatewayBusySessionMixin:
         return message
 
     async def _send_busy_ack_reply(self, event: MessageEvent, adapter, message: str) -> None:
-        reply_anchor = self._reply_anchor_for_event(event)
-        thread_meta = self._thread_metadata_for_source(event.source, reply_anchor)
         try:
-            await adapter._send_with_retry(
-                chat_id=event.source.chat_id,
-                content=message,
-                reply_to=self._busy_reply_to(event, reply_anchor),
-                metadata=thread_meta,
-            )
+            await self._send_busy_reply(event, adapter, message)
         except Exception as e:
             logger.debug("Failed to send busy-ack: %s", e)
 
@@ -786,31 +774,35 @@ class GatewayBusySessionMixin:
         await self._send_busy_ack_reply(event, adapter, message)
         return True
 
+    # Slash name → handler method is ``_handle_<name>_command`` (``-`` → ``_``) except these.
+    _COMMAND_HANDLER_ALIASES = {"bg": "_handle_background_command", "sethome": "_handle_set_home_command"}
+    # Ordinary slash handlers shared by idle and busy dispatch.
+    _PLAIN_COMMANDS = (
+        "status", "context", "restart", "approve", "deny", "pause", "agents", "bg", "btw",
+        "kanban", "subgoal", "heartbeat", "busy", "yolo", "verbose", "footer", "help",
+        "commands", "profile", "update", "version",
+    )
+    # Dispatched only on the idle path (busy dispatch has its own allowlist).
+    _IDLE_COMMANDS = (
+        "topic", "whoami", "platform", "stop", "reasoning", "memory", "skills", "fast",
+        "approvals", "model", "codex-runtime", "personality", "suggestions", "save", "retry",
+        "sethome", "compress", "usage", "topup", "insights", "reload-mcp", "reload-skills",
+        "bundles", "debug", "title", "resume", "sessions", "branch", "rollback", "diff", "goal",
+        "loop", "refine", "review", "voice",
+    )
+
+    def _command_handler_table(self, names) -> Dict[str, Any]:
+        return {
+            name: getattr(
+                self,
+                self._COMMAND_HANDLER_ALIASES.get(name, f"_handle_{name.replace('-', '_')}_command"),
+            )
+            for name in names
+        }
+
     def _gateway_plain_command_handlers(self):
         """Return ordinary slash handlers shared by idle and busy dispatch."""
-        return {
-            "status": self._handle_status_command,
-            "context": self._handle_context_command,
-            "restart": self._handle_restart_command,
-            "approve": self._handle_approve_command,
-            "deny": self._handle_deny_command,
-            "pause": self._handle_pause_command,
-            "agents": self._handle_agents_command,
-            "bg": self._handle_background_command,
-            "btw": self._handle_btw_command,
-            "kanban": self._handle_kanban_command,
-            "subgoal": self._handle_subgoal_command,
-            "heartbeat": self._handle_heartbeat_command,
-            "busy": self._handle_busy_command,
-            "yolo": self._handle_yolo_command,
-            "verbose": self._handle_verbose_command,
-            "footer": self._handle_footer_command,
-            "help": self._handle_help_command,
-            "commands": self._handle_commands_command,
-            "profile": self._handle_profile_command,
-            "update": self._handle_update_command,
-            "version": self._handle_version_command,
-        }
+        return self._command_handler_table(self._PLAIN_COMMANDS)
 
     async def _send_command_ack(self, source, text: str, label: str) -> None:
         """Best-effort acknowledgment for a slash command that falls through to agent processing."""
@@ -825,43 +817,7 @@ class GatewayBusySessionMixin:
 
     def _gateway_idle_command_handlers(self):
         """Slash handlers dispatched only on the idle path (busy dispatch has its own allowlist)."""
-        return {
-            "topic": self._handle_topic_command,
-            "whoami": self._handle_whoami_command,
-            "platform": self._handle_platform_command,
-            "stop": self._handle_stop_command,
-            "reasoning": self._handle_reasoning_command,
-            "memory": self._handle_memory_command,
-            "skills": self._handle_skills_command,
-            "fast": self._handle_fast_command,
-            "approvals": self._handle_approvals_command,
-            "model": self._handle_model_command,
-            "codex-runtime": self._handle_codex_runtime_command,
-            "personality": self._handle_personality_command,
-            "suggestions": self._handle_suggestions_command,
-            "save": self._handle_save_command,
-            "retry": self._handle_retry_command,
-            "sethome": self._handle_set_home_command,
-            "compress": self._handle_compress_command,
-            "usage": self._handle_usage_command,
-            "topup": self._handle_topup_command,
-            "insights": self._handle_insights_command,
-            "reload-mcp": self._handle_reload_mcp_command,
-            "reload-skills": self._handle_reload_skills_command,
-            "bundles": self._handle_bundles_command,
-            "debug": self._handle_debug_command,
-            "title": self._handle_title_command,
-            "resume": self._handle_resume_command,
-            "sessions": self._handle_sessions_command,
-            "branch": self._handle_branch_command,
-            "rollback": self._handle_rollback_command,
-            "diff": self._handle_diff_command,
-            "goal": self._handle_goal_command,
-            "loop": self._handle_loop_command,
-            "refine": self._handle_refine_command,
-            "review": self._handle_review_command,
-            "voice": self._handle_voice_command,
-        }
+        return self._command_handler_table(self._IDLE_COMMANDS)
 
     # busy_handler key (hermes_cli/commands.py CommandDef) → mid-run variant method name.
     _BUSY_SPECIAL_HANDLERS: Dict[str, str] = {

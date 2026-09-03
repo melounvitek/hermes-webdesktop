@@ -511,9 +511,7 @@ class GatewayAdapterLifecycleMixin:
         # Does _process_handoff accept the profile argument? Test stand-ins bind a one-arg callable.
         try:
             import inspect as _inspect
-            _process_takes_profile = len(
-                _inspect.signature(self._process_handoff).parameters
-            ) >= 2
+            _process_takes_profile = len(_inspect.signature(self._process_handoff).parameters) >= 2
         except Exception:
             _process_takes_profile = False
 
@@ -959,22 +957,7 @@ class GatewayAdapterLifecycleMixin:
 
         active = get_active_profile_name() or "default"
         connected = 0
-        # Resource claim -> owning profile (credential: same account; listener: same bind+port).
-        claimed: Dict[tuple, str] = {}
-        for _plat, _ad in self.adapters.items():
-            fp = self._adapter_credential_fingerprint(_ad)
-            if fp is not None:
-                claimed[(_plat, fp)] = active
-            listener_claim = self._adapter_listener_claim(_plat, _ad)
-            if listener_claim is not None:
-                claimed[listener_claim] = active
-        # A queued retryable primary still owns its credential and listener; reserve both.
-        for retry_info in getattr(self, "_failed_platforms", {}).values():
-            for claim_name in ("credential_claim", "listener_claim"):
-                retry_claim = retry_info.get(claim_name)
-                if isinstance(retry_claim, tuple):
-                    claimed[retry_claim] = active
-
+        claimed = self._primary_resource_claims(active)
         profile_homes = _multiplex_profile_homes(self.config)
         for profile_name, profile_home in profile_homes:
             if profile_name == active:
@@ -997,27 +980,48 @@ class GatewayAdapterLifecycleMixin:
                     profile_name, e, exc_info=True,
                 )
 
-        # Record the served set for `hermes status`. "Served" = eligible for shared routing, HTTP
-        # prefixes, cron and runtime scope — broader than "has a connected secondary adapter".
+        self._record_served_profiles(active, profile_homes)
+        return connected
+
+    def _primary_resource_claims(self, active: str) -> Dict[tuple, str]:
+        """Resource claim -> owning profile for every live or queued primary adapter.
+
+        Credential claims stop two profiles polling one account; listener claims stop sidecars with
+        distinct credentials binding one endpoint. A queued retryable primary still owns both.
+        """
+        claimed: Dict[tuple, str] = {}
+        for _plat, _ad in self.adapters.items():
+            for claim in (
+                self._adapter_credential_claim(_plat, _ad),
+                self._adapter_listener_claim(_plat, _ad),
+            ):
+                if claim is not None:
+                    claimed[claim] = active
+        for retry_info in getattr(self, "_failed_platforms", {}).values():
+            for claim_name in ("credential_claim", "listener_claim"):
+                retry_claim = retry_info.get(claim_name)
+                if isinstance(retry_claim, tuple):
+                    claimed[retry_claim] = active
+        return claimed
+
+    def _record_served_profiles(self, active: str, profile_homes) -> None:
+        """Record the served set for `hermes status` and seed per-profile PairingStores.
+
+        "Served" = eligible for shared routing, HTTP prefixes, cron and runtime scope — broader
+        than "has a connected secondary adapter".
+        """
         try:
             from gateway.status import write_runtime_status
             from gateway.pairing import PairingStore
-            served = [active] + sorted(
-                name for name, _home in profile_homes if name != active
-            )
-            # Per-profile PairingStores so authz routes pairing checks to the right whitelist.
+            served = [active] + sorted(name for name, _home in profile_homes if name != active)
             for name in served:
                 if name and name not in self.pairing_stores:
                     self.pairing_stores[name] = (
-                        self.pairing_store
-                        if name == active
-                        else PairingStore(profile=name)
+                        self.pairing_store if name == active else PairingStore(profile=name)
                     )
             write_runtime_status(served_profiles=served)
         except Exception:
             logger.debug("could not record served_profiles", exc_info=True)
-
-        return connected
 
     async def _load_secondary_profile_config(self, profile_name: str, profile_home: "Path"):
         """Hydrate + enter ``profile_home``'s scope once; return its gateway config.
@@ -1356,11 +1360,7 @@ class GatewayAdapterLifecycleMixin:
                         if platform not in profile_map:
                             profile_map[platform] = adapter
                             self._sync_voice_mode_state_to_adapter(adapter)
-                            logger.info(
-                                "✓ %s reconnected (profile: %s)",
-                                platform.value,
-                                profile_name,
-                            )
+                            logger.info("✓ %s reconnected (profile: %s)", platform.value, profile_name)
                             await self._redeliver_failed_obligations_for_platform(
                                 platform, profile=profile_name
                             )
@@ -1796,8 +1796,7 @@ class GatewayAdapterLifecycleMixin:
             # resolve the receiving adapter even once the routed profile is stamped below.
             registry = (
                 (getattr(self, "_profile_adapters", None) or {}).get(profile_name)
-                if profile_name
-                else getattr(self, "adapters", None)
+                if profile_name else getattr(self, "adapters", None)
             ) or {}
             adapter = registry.get(platform)
             if adapter is not None:
