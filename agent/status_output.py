@@ -89,10 +89,7 @@ class StatusOutputMixin:
 
         # cooldown + anti-thrash (ineffective) are both "compression blocked".
         if _warn_kind in ("cooldown", "ineffective"):
-            self._touch_activity(
-                f"compression blocked ({reason})",
-                provenance=ActivityProvenance.AGENT_COMPRESSION_COOLDOWN,
-            )
+            self._touch_activity(f"compression blocked ({reason})", provenance=ActivityProvenance.AGENT_COMPRESSION_COOLDOWN)
         self._emit_warning(CONTEXT_OVERFLOW_BLOCKED_WARNING_TEMPLATE.format(
             tokens=preflight_tokens, threshold=threshold_tokens, reason=reason,
         ))
@@ -180,12 +177,11 @@ class StatusOutputMixin:
             # Drain first so a callback exception doesn't double-emit.
             messages = list(buf)
             buf.clear()
+            replay = {"status": self._emit_status, "warn": self._emit_warning}
             for kind, msg in messages:
                 try:
-                    if kind == "status":
-                        self._emit_status(msg)
-                    elif kind == "warn":
-                        self._emit_warning(msg)
+                    if kind in replay:
+                        replay[kind](msg)
                     else:
                         self._vprint(f"{self.log_prefix}{msg}", force=True)
                 except Exception:

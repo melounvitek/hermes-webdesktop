@@ -38,8 +38,7 @@ def stream_diag_capture_response(agent: Any, diag: Dict[str, Any], http_response
     try:
         headers = getattr(http_response, "headers", None) or {}
         captured: Dict[str, str] = {}
-        # Per-agent override of the headers list (back-compat).
-        for name in getattr(agent, "_STREAM_DIAG_HEADERS", STREAM_DIAG_HEADERS):
+        for name in getattr(agent, "_STREAM_DIAG_HEADERS", STREAM_DIAG_HEADERS):  # per-agent override (back-compat)
             try:
                 val = headers.get(name)
                 if val:
@@ -52,12 +51,9 @@ def stream_diag_capture_response(agent: Any, diag: Dict[str, Any], http_response
 
 
 def flatten_exception_chain(error: BaseException) -> str:
-    """Compact ``Outer(msg) <- Inner(msg) <- ...`` rendering.
-
-    The OpenAI SDK wraps httpx errors so only the wrapper class is visible at the
-    catch site; the inner RemoteProtocolError/ConnectError/ReadError says WHY the
-    stream died. Walks ``__cause__`` then ``__context__`` (deduped, max 4 deep).
-    """
+    """Compact ``Outer(msg) <- Inner(msg) <- ...`` rendering, walking ``__cause__`` then ``__context__``
+    (deduped, max 4 deep): the OpenAI SDK wraps httpx errors so only the wrapper class is visible at
+    the catch site; the inner RemoteProtocolError/ConnectError/ReadError says WHY the stream died."""
     seen: List[BaseException] = []
     link: Optional[BaseException] = error
     while link is not None and len(seen) < 4 and link not in seen:
@@ -66,13 +62,13 @@ def flatten_exception_chain(error: BaseException) -> str:
         if nxt is None or nxt is link:
             break
         link = nxt
-    parts: List[str] = []
-    for e in seen:
+
+    def render(e: BaseException) -> str:
         msg = str(e).strip().replace("\n", " ")
-        if len(msg) > 140:
-            msg = msg[:140] + "…"
-        parts.append(f"{type(e).__name__}({msg})" if msg else type(e).__name__)
-    return " <- ".join(parts) if parts else type(error).__name__
+        msg = msg[:140] + "…" if len(msg) > 140 else msg
+        return f"{type(e).__name__}({msg})" if msg else type(e).__name__
+
+    return " <- ".join(render(e) for e in seen) if seen else type(error).__name__
 
 
 def _diag_fields(diag: Optional[Dict[str, Any]]) -> tuple:
@@ -101,21 +97,12 @@ def _diag_fields(diag: Optional[Dict[str, Any]]) -> tuple:
 
 
 def log_stream_retry(
-    agent: Any,
-    *,
-    kind: str,
-    error: BaseException,
-    attempt: int,
-    max_attempts: int,
-    mid_tool_call: bool,
-    diag: Optional[Dict[str, Any]] = None,
+    agent: Any, *, kind: str, error: BaseException, attempt: int, max_attempts: int,
+    mid_tool_call: bool, diag: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Structured WARNING to ``agent.log`` for a transient stream drop + retry.
-
-    Always logged regardless of UI verbosity. With *diag*, also records upstream headers,
-    HTTP status, bytes/chunks streamed, elapsed and TTFB on the dying attempt — enough to
-    tell "one CF edge / downstream provider" from "random across runs".
-    """
+    """Structured WARNING to ``agent.log`` for a transient stream drop + retry, always logged regardless of
+    UI verbosity. With *diag*, also records upstream headers, HTTP status, bytes/chunks, elapsed and TTFB on
+    the dying attempt — enough to tell "one CF edge / downstream provider" from "random across runs"."""
     try:
         try:
             _summary = agent._summarize_api_error(error)
@@ -149,19 +136,11 @@ def log_stream_retry(
 
 
 def emit_stream_drop(
-    agent: Any,
-    *,
-    error: BaseException,
-    attempt: int,
-    max_attempts: int,
-    mid_tool_call: bool,
-    diag: Optional[Dict[str, Any]] = None,
+    agent: Any, *, error: BaseException, attempt: int, max_attempts: int,
+    mid_tool_call: bool, diag: Optional[Dict[str, Any]] = None,
 ) -> None:
     """One compact user-visible status line for a stream drop+retry, plus the full WARNING via log_stream_retry.
-
-    Subagent lines get a ``[subagent-N]`` prefix from ``log_prefix``. ``after Xs``
-    distinguishes "couldn't connect" (0s) from "died mid-stream" (idle-kill / proxy timeout).
-    """
+    ``after Xs`` distinguishes "couldn't connect" (0s) from "died mid-stream" (idle-kill / proxy timeout)."""
     kind = "drop mid tool-call" if mid_tool_call else "drop"
     log_stream_retry(
         agent, kind=kind, error=error, attempt=attempt, max_attempts=max_attempts, mid_tool_call=mid_tool_call, diag=diag
