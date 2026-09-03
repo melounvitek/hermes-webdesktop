@@ -704,31 +704,28 @@ def _recover_auth_failure(agent, pool, *, status_code, has_retried_429, error_co
     if credential_id:
         refresh_kwargs["credential_id"] = credential_id
     refreshed = pool.try_refresh_matching(**refresh_kwargs)
-    if refreshed is not None:
-        # try_refresh_matching() reports success even when upstream keeps rejecting; cap same-entry
-        # refreshes so a single-entry pool falls through to fallback.
-        refreshed_id = getattr(refreshed, "id", None)
-        if refreshed_id is not None:
-            refresh_counts = getattr(agent, "_auth_pool_refresh_counts", None)
-            if refresh_counts is None:
-                refresh_counts = {}
-                agent._auth_pool_refresh_counts = refresh_counts
-            refresh_key = (agent.provider, refreshed_id)
-            refresh_counts[refresh_key] = refresh_counts.get(refresh_key, 0) + 1
-            if refresh_counts[refresh_key] > _MAX_AUTH_REFRESH_ATTEMPTS:
-                _ra().logger.warning(
-                    "Credential auth failure persists after %s refreshes for "
-                    "pool entry %s — treating as unrecoverable and allowing "
-                    "fallback to activate.", refresh_counts[refresh_key] - 1, refreshed_id,
-                )
-                return False, has_retried_429
-        _ra().logger.info("Credential auth failure — refreshed pool entry %s", getattr(refreshed, 'id', '?'))
-        agent._swap_credential(refreshed)
-        return True, has_retried_429
-    # Refresh failed; rotate (the failed entry is already marked exhausted).
-    if rotate_and_swap(401, "auth refresh failed"):
-        return True, False
-    return False, has_retried_429
+    if refreshed is None:
+        # Refresh failed; rotate (the failed entry is already marked exhausted).
+        return (True, False) if rotate_and_swap(401, "auth refresh failed") else (False, has_retried_429)
+    # try_refresh_matching() reports success even when upstream keeps rejecting; cap same-entry
+    # refreshes so a single-entry pool falls through to fallback.
+    refreshed_id = getattr(refreshed, "id", None)
+    if refreshed_id is not None:
+        if getattr(agent, "_auth_pool_refresh_counts", None) is None:
+            agent._auth_pool_refresh_counts = {}
+        refresh_counts = agent._auth_pool_refresh_counts
+        refresh_key = (agent.provider, refreshed_id)
+        refresh_counts[refresh_key] = refresh_counts.get(refresh_key, 0) + 1
+        if refresh_counts[refresh_key] > _MAX_AUTH_REFRESH_ATTEMPTS:
+            _ra().logger.warning(
+                "Credential auth failure persists after %s refreshes for "
+                "pool entry %s — treating as unrecoverable and allowing "
+                "fallback to activate.", refresh_counts[refresh_key] - 1, refreshed_id,
+            )
+            return False, has_retried_429
+    _ra().logger.info("Credential auth failure — refreshed pool entry %s", getattr(refreshed, 'id', '?'))
+    agent._swap_credential(refreshed)
+    return True, has_retried_429
 
 
 def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, credential_id, rotate_and_swap):
@@ -1214,10 +1211,10 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
 
 def _api_error_debug_info(error: Exception) -> Dict[str, Any]:
     info: Dict[str, Any] = {"type": type(error).__name__, "message": str(error)}
-    for attr_name in ("status_code", "request_id", "code", "param", "type", "body"):
-        attr_value = getattr(error, attr_name, None)
-        if attr_value is not None:
-            info[attr_name] = attr_value
+    info.update({
+        k: v for k in ("status_code", "request_id", "code", "param", "type", "body")
+        if (v := getattr(error, k, None)) is not None
+    })
     response_obj = getattr(error, "response", None)
     if response_obj is not None:
         try:
@@ -1377,9 +1374,7 @@ def plan_cache_sections_for_destination(
         ),
         # LiteLLM-style envelope routes forward part-level markers into tool_result.content[] →
         # non-retryable 400.
-        tool_part_markers=envelope_tool_part_cache_markers_supported(
-            provider, base_url
-        ),
+        tool_part_markers=envelope_tool_part_cache_markers_supported(provider, base_url),
     )
     return plan.messages, plan.tools
 
@@ -2281,29 +2276,25 @@ _empty_heal_user_notified: set = set()
 _empty_heal_pending_notice: Dict[str, str] = {}
 
 
+def _content_has_payload(content: Any) -> bool:
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        # Any typed block counts, as long as a text block is not itself blank.
+        return any(
+            (block.get("type") != "text" or (isinstance(block.get("text"), str) and block["text"].strip()))
+            if isinstance(block, dict) else bool(block)
+            for block in content
+        )
+    return content not in (None, "")
+
+
 def _msg_has_payload(msg: Dict[str, Any]) -> bool:
     """True if ``msg`` carries anything the API treats as non-empty content (text, multimodal
-    blocks, tool_calls, reasoning). Role-agnostic counterpart of ``AIAgent._is_thinking_only_assistant``."""
-    content = msg.get("content")
-    if isinstance(content, str):
-        if content.strip():
-            return True
-    elif isinstance(content, list):
-        for block in content:
-            if isinstance(block, dict):
-                # any typed block counts, as long as a text block is not itself blank
-                if block.get("type") != "text":
-                    return True
-                if isinstance(block.get("text"), str) and block["text"].strip():
-                    return True
-            elif block:
-                return True
-    elif content not in (None, ""):
-        return True
-    # Structural payloads that make an "empty-content" message still valid. Codex Responses item
-    # carriers persist with content:"" by design (text lives in codex_*_items and is replayed);
-    # treating them as payload keeps the repair from rewriting a designed-empty turn.
-    return bool(
+    blocks, tool_calls, reasoning). Role-agnostic counterpart of ``AIAgent._is_thinking_only_assistant``.
+    Codex Responses item carriers persist with content:"" by design (text lives in codex_*_items
+    and is replayed); treating them as payload keeps the repair from rewriting a designed-empty turn."""
+    return _content_has_payload(msg.get("content")) or bool(
         msg.get("tool_calls")
         or (isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"].strip())
         or msg.get("reasoning")
@@ -2373,20 +2364,15 @@ def _log_empty_non_final_heal(healed: int) -> None:
     with _empty_heal_log_lock:
         state = _empty_heal_log_state.get(key)
         if state is None or (now - state["window_start"]) > _EMPTY_HEAL_WINDOW_S:
-            state = {
-                "count": 0,
-                "window_start": now,
-                "escalated": False,
-                "total_events": state.get("total_events", 0) if state else 0,
-                "total_healed": state.get("total_healed", 0) if state else 0,
+            prior = state or {}
+            state = _empty_heal_log_state[key] = {
+                "count": 0, "window_start": now, "escalated": False,
+                "total_events": prior.get("total_events", 0), "total_healed": prior.get("total_healed", 0),
             }
-            _empty_heal_log_state[key] = state
         state["count"] += 1
         state["total_events"] = state.get("total_events", 0) + 1
         state["total_healed"] = state.get("total_healed", 0) + healed
-        count = state["count"]
-        total_events = state["total_events"]
-        total_healed = state["total_healed"]
+        count, total_events, total_healed = state["count"], state["total_events"], state["total_healed"]
         if state["escalated"]:
             return
         escalate = threshold > 0 and count >= threshold
@@ -2399,8 +2385,7 @@ def _log_empty_non_final_heal(healed: int) -> None:
                     f"({total_events} heal passes so far). Replies keep "
                     "working, but a corrupted turn is stuck in this "
                     "session's history — run /debug share or `hermes "
-                    "doctor` to capture diagnostics, or /new to start a "
-                    "clean session."
+                    "doctor` to capture diagnostics, or /new to start a clean session."
                 )
     if escalate:
         _ra().logger.error(
@@ -2578,13 +2563,13 @@ def _pair_tool_calls_positionally(messages: List[Dict[str, Any]]) -> List[Dict[s
         for key in sorted(declared_calls):
             tc, _variants = declared_calls[key]
             paired.append({
-                "role": "tool",
-                "name": _ra().AIAgent._get_tool_call_name_static(tc),
+                "role": "tool", "name": _ra().AIAgent._get_tool_call_name_static(tc),
                 "content": "[Result unavailable — see context summary above]",
                 "tool_call_id": coalesce_tool_call_id(tc) or key,
             })
             stubs += 1
         declared_calls.clear()
+
     for msg in messages:
         role = msg.get("role")
         if role == "assistant":
@@ -2598,30 +2583,22 @@ def _pair_tool_calls_positionally(messages: List[Dict[str, Any]]) -> List[Dict[s
                     # Key on a stable representative of the alias group so a result matching ANY
                     # spelling can consume the call.
                     declared_calls[sorted(variants)[0]] = (tc, variants)
-            paired.append(msg)
         elif role == "tool":
             result_variants = tool_result_id_variants(msg.get("tool_call_id"))
-            matched = next(
-                (key for key, (_tc, variants) in declared_calls.items() if variants & result_variants),
-                None,
-            )
+            matched = next((k for k, (_tc, v) in declared_calls.items() if v & result_variants), None)
             if matched is None:
                 dropped += 1
                 continue
-            paired.append(msg)
             # Consume so a duplicate result reusing the id is dropped (strict providers reject duplicates).
             declared_calls.pop(matched, None)
-        else:
-            if role == "user":
-                # A user turn closes the tool-result run; later tool messages are orphans.
-                _flush_unanswered_stubs()
-            paired.append(msg)
+        elif role == "user":
+            # A user turn closes the tool-result run; later tool messages are orphans.
+            _flush_unanswered_stubs()
+        paired.append(msg)
     # The transcript may end right after an unanswered assistant turn.
     _flush_unanswered_stubs()
     if dropped:
-        _ra().logger.debug(
-            "Pre-call sanitizer: removed %d positionally orphaned tool result(s)", dropped
-        )
+        _ra().logger.debug("Pre-call sanitizer: removed %d positionally orphaned tool result(s)", dropped)
     if stubs:
         _ra().logger.debug(
             "Pre-call sanitizer: added %d stub tool result(s) for "
@@ -2813,9 +2790,7 @@ def intent_ack_continuation_mode(agent) -> str:
 def copy_reasoning_content_for_api(agent, source_msg: dict, api_msg: dict) -> None:
     """Forward reasoning fields onto an API replay message; policy lives in ``agent.message_sanitization.apply_reasoning_content_policy``."""
     from agent.message_sanitization import apply_reasoning_content_policy
-    apply_reasoning_content_policy(
-        source_msg, api_msg, agent._needs_thinking_reasoning_pad()
-    )
+    apply_reasoning_content_policy(source_msg, api_msg, agent._needs_thinking_reasoning_pad())
 
 
 def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
@@ -2824,9 +2799,7 @@ def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
     (DeepSeek/Kimi/MiMo) 400 without the pad, strict ones (Mistral, Cerebras, Groq) 400/422
     with it. Idempotent; returns the number of assistant turns changed."""
     from agent.message_sanitization import reapply_reasoning_echo
-    return reapply_reasoning_echo(
-        api_messages, agent._needs_thinking_reasoning_pad()
-    )
+    return reapply_reasoning_echo(api_messages, agent._needs_thinking_reasoning_pad())
 
 
 def _iter_httpx_pool_objects(http_client: Any):
@@ -2867,26 +2840,16 @@ def _connection_candidates(conn: Any):
 def _socket_from_stream(stream: Any):
     """Raw socket behind an httpcore network stream (several backends), or None."""
     sock = getattr(stream, "_sock", None)
+    if sock is None and callable(getattr(stream, "get_extra_info", None)):
+        with contextlib.suppress(Exception):
+            sock = stream.get_extra_info("socket")
     if sock is None:
-        get_extra_info = getattr(stream, "get_extra_info", None)
-        if callable(get_extra_info):
-            try:
-                sock = get_extra_info("socket")
-            except Exception:
-                sock = None
-    if sock is None:
-        wrapped = getattr(stream, "stream", None)
-        if wrapped is not None:
-            sock = getattr(wrapped, "_sock", None)
-    if sock is None:
+        sock = getattr(getattr(stream, "stream", None), "_sock", None)
+    if sock is None and callable(getattr(getattr(stream, "_stream", None), "extra", None)):
         # anyio-backed streams expose the raw socket through SocketAttribute.raw_socket.
-        extra = getattr(getattr(stream, "_stream", None), "extra", None)
-        if callable(extra):
-            try:
-                from anyio.abc import SocketAttribute
-                sock = extra(SocketAttribute.raw_socket)
-            except Exception:
-                sock = None
+        with contextlib.suppress(Exception):
+            from anyio.abc import SocketAttribute
+            sock = stream._stream.extra(SocketAttribute.raw_socket)
     return sock
 
 
@@ -2898,9 +2861,7 @@ def _iter_pool_sockets(client: Any):
     try:
         # Some SDK wrappers *are* the httpx client; fall through so mount-aware discovery runs.
         http_client = getattr(client, "_client", None)
-        if http_client is None:
-            http_client = client
-        pools = list(_iter_httpx_pool_objects(http_client))
+        pools = list(_iter_httpx_pool_objects(client if http_client is None else http_client))
     except Exception:
         return
     seen: set[int] = set()
@@ -2910,18 +2871,17 @@ def _iter_pool_sockets(client: Any):
         if raw_conns is None:
             raw_conns = getattr(pool, "_pool", None)
         connections = list(raw_conns or [])
-        for pool_req in list(getattr(pool, "_requests", None) or []):
-            conn = getattr(pool_req, "connection", None)
-            if conn is not None:
-                connections.append(conn)
+        connections += [
+            c for c in (getattr(r, "connection", None) for r in list(getattr(pool, "_requests", None) or []))
+            if c is not None
+        ]
         for conn in connections:
             for candidate in _connection_candidates(conn):
                 stream = getattr(candidate, "_network_stream", None) or getattr(candidate, "_stream", None)
                 sock = _socket_from_stream(stream) if stream is not None else None
-                if sock is None or id(sock) in seen:
-                    continue
-                seen.add(id(sock))
-                yield sock
+                if sock is not None and id(sock) not in seen:
+                    seen.add(id(sock))
+                    yield sock
 
 
 def _socket_is_dead(sock) -> bool:
