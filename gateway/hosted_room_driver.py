@@ -166,7 +166,6 @@ def _task_payload(value: Any) -> tuple[dict[str, Any], str, str]:
 @dataclass(frozen=True)
 class TaskIdentity:
     """Stable identity for one admitted room turn."""
-
     room_id: str
     task_id: str
     thread_id: str
@@ -180,7 +179,6 @@ class TaskIdentity:
 @dataclass(frozen=True)
 class DriverLease:
     """A fenced lease held by one gateway process incarnation."""
-
     room_id: str
     gateway_id: str
     authority_epoch: int
@@ -193,7 +191,6 @@ class DriverLease:
 @dataclass(frozen=True)
 class TaskAttempt:
     """The exact running generation authorized to settle one task."""
-
     identity: TaskIdentity
     lease: DriverLease
     execution_generation: int

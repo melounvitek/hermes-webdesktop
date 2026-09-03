@@ -78,7 +78,6 @@ class DiscussionReconstructionError(DiscussionPolicyError):
 @dataclass(frozen=True)
 class DiscussionMember:
     """One immutable local or peer member of the hosted room."""
-
     member_id: str
     profile: str
     handle: str
@@ -89,7 +88,6 @@ class DiscussionMember:
 @dataclass(frozen=True)
 class DiscussionRoom:
     """Validated policy projection of one active hosted room."""
-
     room_id: str
     name: str
     members: tuple[DiscussionMember, ...]
@@ -100,7 +98,6 @@ class DiscussionRoom:
 @dataclass(frozen=True)
 class DiscussionTaskPlan:
     """One deterministic member turn compatible with the driver schema."""
-
     identity: driver.TaskIdentity
     payload: Mapping[str, Any]
     discussion_event_id: str
@@ -113,7 +110,6 @@ class DiscussionTaskPlan:
 @dataclass(frozen=True)
 class DiscussionDecision:
     """Current result of replaying one room's Discussion policy."""
-
     status: DecisionStatus
     reason: str
     discussion_event_id: str | None = None
@@ -125,7 +121,6 @@ class DiscussionDecision:
 @dataclass(frozen=True)
 class EventPlan:
     """One idempotent append for :func:`gateway.hosted_rooms.append_event`."""
-
     event_id: str
     kind: str
     actor: Mapping[str, str]
@@ -141,7 +136,6 @@ class EventPlan:
 @dataclass(frozen=True)
 class PublicationPlan:
     """Ordered visible and terminal effects for one driver task."""
-
     task_id: str
     terminal_kind: str
     events: tuple[EventPlan, ...]
@@ -354,8 +348,6 @@ def _validate_turn_coordinates(payload: Mapping[str, Any], room: DiscussionRoom)
 
 # -- per-kind event payload validators (dispatched by _validate_event) ---------
 # Each takes (kind, payload, actor, room) and returns the payload to record.
-
-
 def _validate_user_event(kind: str, payload: Payload, actor: Payload, room: DiscussionRoom) -> Payload:
     payload = validate_user_payload(payload)
     if actor.get("kind") != "user":

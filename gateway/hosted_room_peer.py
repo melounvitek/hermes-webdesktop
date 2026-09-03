@@ -194,7 +194,6 @@ _CATALOG_FIELDS = {
 @dataclass(frozen=True)
 class GatewayRoomCatalog:
     """Authenticated gateway capabilities inherited by its Bots."""
-
     installation_id: str
     protocol_versions: tuple[int, ...]
     link_modes: tuple[LinkMode, ...]
@@ -353,7 +352,6 @@ _DISPATCH_FIELDS: dict[str, Callable[..., Any]] = dict(
 @dataclass(frozen=True)
 class HostedMemberDispatch:
     """Recipient-validated identity for one remote room member attempt."""
-
     protocol_version: int
     room_id: str
     home_install_id: str

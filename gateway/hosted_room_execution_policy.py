@@ -30,7 +30,6 @@ def _identifier(value: Any, *, field: str) -> str:
 @dataclass(frozen=True)
 class RoomExecutionPolicy:
     """Immutable target policy applied at the agent and approval boundaries."""
-
     version: int
     target_profile: str
     enabled_toolsets: tuple[str, ...]

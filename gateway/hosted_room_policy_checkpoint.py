@@ -69,7 +69,6 @@ _TRANSCRIPT_EVENTS_SQL = f"""WITH transcript_events(seq) AS (
 @dataclass(frozen=True)
 class PolicySnapshot:
     """Bounded active policy input at one durable room-log cursor."""
-
     through_seq: int
     stopped_through_seq: int
     events: tuple[dict[str, Any], ...]
@@ -100,7 +99,6 @@ def _settled_message(
 
 class HostedRoomPolicyCheckpoint:
     """Incrementally index room policy without compacting visible history."""
-
     def __init__(self, db_path: DbPath) -> None:
         self.db_path = Path(db_path)
         with self._connect() as conn:
