@@ -1,8 +1,5 @@
-"""Hybrid keyword/BM25 retrieval for the memory store.
-
-Ported from KIK memory_agent.py — combines FTS5 full-text search with
-Jaccard similarity reranking and trust-weighted scoring.
-"""
+"""Hybrid keyword/BM25 retrieval for the memory store: FTS5 candidates reranked with
+Jaccard similarity and HRR vector similarity, trust-weighted (ported from KIK memory_agent.py)."""
 
 from __future__ import annotations
 
@@ -23,6 +20,9 @@ _FACT_COLUMNS = (
     "fact_id, content, category, tags, trust_score, "
     "retrieval_count, helpful_count, created_at, updated_at"
 )
+_ROLE_ENTITY = "__hrr_role_entity__"
+_ROLE_CONTENT = "__hrr_role_content__"
+_PUNCT = ".,;:!?\"'()[]{}#@<>"
 
 
 class FactRetriever:
@@ -38,11 +38,12 @@ class FactRetriever:
         self.store = store
         self.half_life = temporal_decay_half_life
         self.hrr_dim = hrr_dim
-
-        # Auto-redistribute weights if numpy unavailable
-        if hrr_weight > 0 and not hrr._HAS_NUMPY:
+        if hrr_weight > 0 and not hrr._HAS_NUMPY:  # redistribute weights without numpy
             fts_weight, jaccard_weight, hrr_weight = 0.6, 0.4, 0.0
         self.fts_weight, self.jaccard_weight, self.hrr_weight = fts_weight, jaccard_weight, hrr_weight
+
+    def _atom(self, word: str):
+        return hrr.encode_atom(word, self.hrr_dim)
 
     def search(self, query: str, category: str | None = None, min_trust: float = 0.3, limit: int = 10) -> list[dict]:
         """Hybrid search: FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust
@@ -55,9 +56,8 @@ class FactRetriever:
             return []
 
         query_tokens = self._tokenize(query)
-        # Query vector is loop-invariant; encode lazily on the first candidate
-        # that carries an HRR vector so migrated stores whose hrr_vector was
-        # never backfilled don't pay for an encode nothing uses.
+        # Query vector is loop-invariant; encode lazily on the first candidate that carries
+        # an HRR vector so stores whose hrr_vector was never backfilled don't pay for it.
         query_vec = None
         for fact in candidates:
             all_tokens = self._tokenize(fact["content"]) | self._tokenize(fact.get("tags", ""))
@@ -82,16 +82,14 @@ class FactRetriever:
         return results
 
     def probe(self, entity: str, category: str | None = None, limit: int = 10) -> list[dict]:
-        """Compositional entity query: unbind bind(entity, ROLE_ENTITY) from the
-        category bank (or each fact vector) to find facts where the entity plays
-        a structural role. Not keyword search. Falls back to FTS5 without numpy.
-        """
+        """Compositional entity query: unbind bind(entity, ROLE_ENTITY) from the category bank
+        (or each fact vector) to find facts where the entity plays a structural role.
+        Not keyword search. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
 
-        role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
-        entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
-        probe_key = hrr.bind(entity_vec, role_entity)
+        role_entity = self._atom(_ROLE_ENTITY)
+        probe_key = hrr.bind(self._atom(entity.lower()), role_entity)
 
         # Try the category-specific bank first, then individual fact vectors
         if category:
@@ -108,75 +106,56 @@ class FactRetriever:
         rows = self._vector_rows(category)
         if not rows:
             return self.search(entity, category=category, limit=limit)
-
-        # role_content is loop-invariant — encode once, not per row.
-        role_content = hrr.encode_atom("__hrr_role_content__", self.hrr_dim)
+        role_content = self._atom(_ROLE_CONTENT)  # loop-invariant — encode once
 
         def _sim(fact: dict, fact_vec) -> float:
             # Does unbinding the probe key leave the fact's content signal?
             residual = hrr.unbind(fact_vec, probe_key)
-            content_vec = hrr.bind(hrr.encode_text(fact["content"], self.hrr_dim), role_content)
-            return hrr.similarity(residual, content_vec)
+            return hrr.similarity(residual, hrr.bind(hrr.encode_text(fact["content"], self.hrr_dim), role_content))
 
         return self._rank_by_vector(rows, _sim, limit)
 
     def related(self, entity: str, category: str | None = None, limit: int = 10) -> list[dict]:
-        """Facts structurally connected to an entity (shared context), not just
-        facts *about* it as in probe. Falls back to FTS5 without numpy.
-        """
+        """Facts structurally connected to an entity (shared context), not just facts
+        *about* it as in probe. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
 
-        # Bare atom, not role-bound — we want ANY structural match
-        entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
-
+        entity_vec = self._atom(entity.lower())  # bare atom, not role-bound: ANY structural match
         rows = self._vector_rows(category)
         if not rows:
             return self.search(entity, category=category, limit=limit)
-
-        # Both role atoms are loop-invariant — encode once, not per row.
-        role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
-        role_content = hrr.encode_atom("__hrr_role_content__", self.hrr_dim)
+        role_entity, role_content = self._atom(_ROLE_ENTITY), self._atom(_ROLE_CONTENT)  # encode once
 
         def _sim(fact: dict, fact_vec) -> float:
-            # A residual similar to ANY role vector means the entity plays a
-            # structural role in the fact; take the max over both roles.
+            # A residual similar to ANY role vector means the entity plays a structural role.
             residual = hrr.unbind(fact_vec, entity_vec)
             return max(hrr.similarity(residual, role_entity), hrr.similarity(residual, role_content))
 
         return self._rank_by_vector(rows, _sim, limit)
 
     def reason(self, entities: list[str], category: str | None = None, limit: int = 10) -> list[dict]:
-        """Multi-entity compositional query (vector-space JOIN): facts where ALL
-        entities play structural roles. Falls back to FTS5 without numpy.
-        """
+        """Multi-entity compositional query (vector-space JOIN): facts where ALL entities
+        play structural roles. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY or not entities:
             return self.search(" ".join(entities), category=category, limit=limit)
 
-        role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
-        probe_keys = [
-            hrr.bind(hrr.encode_atom(entity.lower(), self.hrr_dim), role_entity)
-            for entity in entities
-        ]
-
+        role_entity = self._atom(_ROLE_ENTITY)
+        probe_keys = [hrr.bind(self._atom(entity.lower()), role_entity) for entity in entities]
         rows = self._vector_rows(category)
         if not rows:
             return self.search(" ".join(entities), category=category, limit=limit)
-
-        role_content = hrr.encode_atom("__hrr_role_content__", self.hrr_dim)
+        role_content = self._atom(_ROLE_CONTENT)
 
         def _sim(fact: dict, fact_vec) -> float:
             # AND semantics via min: high only if EVERY entity is structurally present.
-            return min(
-                hrr.similarity(hrr.unbind(fact_vec, key), role_content) for key in probe_keys
-            )
+            return min(hrr.similarity(hrr.unbind(fact_vec, key), role_content) for key in probe_keys)
 
         return self._rank_by_vector(rows, _sim, limit)
 
     def contradict(self, category: str | None = None, threshold: float = 0.3, limit: int = 10) -> list[dict]:
-        """Memory hygiene: pairs of facts that share entities (same subject) but
-        have low content-vector similarity (different claims). Empty without numpy.
-        """
+        """Memory hygiene: pairs of facts that share entities (same subject) but have low
+        content-vector similarity (different claims). Empty without numpy."""
         if not hrr._HAS_NUMPY:
             return []
 
@@ -186,8 +165,7 @@ class FactRetriever:
         )
         if len(rows) < 2:
             return []
-        # O(n²) guard: ~125K comparisons at 500 facts is acceptable; above that
-        # only compare the most recently updated facts.
+        # O(n²) guard: above 500 facts only compare the most recently updated ones.
         if len(rows) > 500:
             rows = sorted(rows, key=lambda r: r["updated_at"] or r["created_at"], reverse=True)[:500]
 
@@ -281,7 +259,7 @@ class FactRetriever:
         """Lowercase whitespace tokens with surrounding punctuation stripped (no stemming)."""
         if not text:
             return set()
-        return {c for c in (w.strip(".,;:!?\"'()[]{}#@<>") for w in text.lower().split()) if c}
+        return {c for c in (w.strip(_PUNCT) for w in text.lower().split()) if c}
 
     # Stopwords dropped before FTS5 OR-expansion: short English function words
     # that carry no retrieval signal and force false-negative AND matches.
@@ -300,17 +278,16 @@ class FactRetriever:
     def _sanitize_fts_query(cls, query: str) -> str:
         """Natural-language query -> FTS5-safe OR expression of quoted tokens.
 
-        FTS5 AND-joins a multi-word MATCH by default, which tanks recall on prose.
-        Drops stopwords and <2-char tokens, strips FTS5 operator chars, and
-        phrase-quotes each survivor. If nothing survives, returns the raw query
-        (caller gets zero results rather than a SQL error).
+        FTS5 AND-joins a multi-word MATCH by default, which tanks recall on prose. Drops
+        stopwords and <2-char tokens, strips FTS5 operator chars, and phrase-quotes each
+        survivor. If nothing survives, returns the raw query (zero results, not a SQL error).
         """
         if not query:
             return ""
         strip_special = str.maketrans("", "", '"()*^:-+')
         tokens = [
             f'"{cleaned}"'
-            for cleaned in (raw.strip(".,;:!?\"'()[]{}#@<>").translate(strip_special) for raw in query.lower().split())
+            for cleaned in (raw.strip(_PUNCT).translate(strip_special) for raw in query.lower().split())
             if len(cleaned) >= 2 and cleaned not in cls._FTS_STOPWORDS
         ]
         return " OR ".join(tokens) if tokens else query

@@ -1,18 +1,10 @@
-"""hermes-memory-store — holographic memory plugin using MemoryProvider interface.
-
-Registers as a MemoryProvider plugin, giving the agent structured fact storage
+"""hermes-memory-store — holographic memory plugin (MemoryProvider): structured fact storage
 with entity resolution, trust scoring, and HRR-based compositional retrieval.
-
 Original plugin by dusterbloom (PR #2351), adapted to the MemoryProvider ABC.
 
-Config in $HERMES_HOME/config.yaml (profile-scoped):
-  plugins:
-    hermes-memory-store:
-      db_path: $HERMES_HOME/memory_store.db   # omit to use the default
-      auto_extract: false
-      default_trust: 0.5
-      min_trust_threshold: 0.3
-      temporal_decay_half_life: 0
+Config in $HERMES_HOME/config.yaml (profile-scoped) under plugins.hermes-memory-store:
+  db_path ($HERMES_HOME/memory_store.db), auto_extract (false), default_trust (0.5),
+  min_trust_threshold (0.3), temporal_decay_half_life (0), hrr_dim (1024), hrr_weight (0.3).
 """
 
 from __future__ import annotations
@@ -97,14 +89,14 @@ _DECISION_PATTERNS = [
     re.compile(r'\bwe\s+(?:decided|agreed|chose)\s+(?:to\s+)?(.+)', re.IGNORECASE),
     re.compile(r'\bthe\s+project\s+(?:uses|needs|requires)\s+(.+)', re.IGNORECASE),
 ]
+_EXTRACT_CATEGORIES = ((_PREF_PATTERNS, "user_pref"), (_DECISION_PATTERNS, "project"))
 
 
 def _load_plugin_config() -> dict:
     try:
         # Canonical loader: honors the managed-scope overlay + ${VAR} expansion.
         from hermes_cli.config import load_config_readonly
-        all_config = load_config_readonly()
-        return cfg_get(all_config, "plugins", "hermes-memory-store", default={}) or {}
+        return cfg_get(load_config_readonly(), "plugins", "hermes-memory-store", default={}) or {}
     except Exception:
         return {}
 
@@ -134,8 +126,7 @@ class HolographicMemoryProvider(MemoryProvider):
         config_path = Path(hermes_home) / "config.yaml"
         try:
             import yaml
-            # Raw read for the write-back round-trip: merged defaults must not
-            # be persisted into the user's file.
+            # Raw read for the write-back round-trip: merged defaults must not be persisted.
             from hermes_cli.config import read_user_config_raw
             existing = read_user_config_raw(config_path)
             existing.setdefault("plugins", {})["hermes-memory-store"] = values
@@ -162,7 +153,6 @@ class HolographicMemoryProvider(MemoryProvider):
         if isinstance(db_path, str):
             db_path = db_path.replace("$HERMES_HOME", _hermes_home).replace("${HERMES_HOME}", _hermes_home)
         hrr_dim = int(self._config.get("hrr_dim", 1024))
-
         self._store = MemoryStore(
             db_path=db_path, default_trust=float(self._config.get("default_trust", 0.5)), hrr_dim=hrr_dim,
         )
@@ -209,8 +199,7 @@ class HolographicMemoryProvider(MemoryProvider):
             return ""
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        # Facts are stored explicitly via tools; on_session_end handles auto-extraction if configured.
-        pass
+        pass  # facts are stored explicitly via tools; on_session_end handles auto-extraction
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
@@ -227,8 +216,8 @@ class HolographicMemoryProvider(MemoryProvider):
             return tool_error(str(exc))
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        # is_truthy_value: the config schema declares auto_extract as a string
-        # enum ("false"/"true"); plain truthiness would treat "false" as enabled.
+        # is_truthy_value: the config schema declares auto_extract as a string enum
+        # ("false"/"true"); plain truthiness would treat "false" as enabled.
         if is_truthy_value(self._config.get("auto_extract", False)) and self._store and messages:
             self._auto_extract_facts(messages)
 
@@ -236,15 +225,13 @@ class HolographicMemoryProvider(MemoryProvider):
         """Mirror built-in memory writes as facts."""
         if action == "add" and self._store and content:
             try:
-                category = "user_pref" if target == "user" else "general"
-                self._store.add_fact(content, category=category)
+                self._store.add_fact(content, category="user_pref" if target == "user" else "general")
             except Exception as e:
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
     def shutdown(self) -> None:
-        # Release the shared SQLite connection on the caller's thread: leaving
-        # it to GC keeps the connection (and its write lock) alive on a
-        # long-running gateway. close() is idempotent and refcount-guarded.
+        # Release the shared SQLite connection on the caller's thread: leaving it to GC keeps
+        # the connection (and its write lock) alive on a long-running gateway. close() is idempotent.
         if self._store is not None:
             try:
                 self._store.close()
@@ -320,8 +307,7 @@ class HolographicMemoryProvider(MemoryProvider):
     # -- Auto-extraction (on_session_end) ------------------------------------
 
     def _auto_extract_facts(self, messages: list) -> None:
-        # Local import: the compressor module is heavier than this plugin and
-        # only needed when auto_extract is on.
+        # Local import: the compressor module is heavier than this plugin and only needed here.
         from agent.context_compressor import (
             _MERGED_PRIOR_CONTEXT_HEADER,
             _MERGED_SUMMARY_DELIMITER,
@@ -333,12 +319,10 @@ class HolographicMemoryProvider(MemoryProvider):
             if msg.get("role") != "user":
                 continue
             content = msg.get("content", "")
-            # Compaction handoff summaries arrive as role="user" and reliably
-            # match the decision patterns; skip them so the compactor's own
-            # output is never stored as a durable fact. A merge-into-tail row
-            # holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER
-            # (prefixed with the header) and the summary AFTER it — harvest
-            # only the pre-delimiter segment.
+            # Compaction handoff summaries arrive as role="user" and reliably match the
+            # decision patterns; never store the compactor's own output as a durable fact.
+            # A merge-into-tail row holds genuine prior user text BEFORE _MERGED_SUMMARY_DELIMITER
+            # (prefixed with the header) and the summary AFTER it — harvest only the pre-delimiter segment.
             if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content:
                 pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
                 if pre.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
@@ -352,7 +336,7 @@ class HolographicMemoryProvider(MemoryProvider):
             if not isinstance(content, str) or len(content) < 10:
                 continue
 
-            for patterns, category in ((_PREF_PATTERNS, "user_pref"), (_DECISION_PATTERNS, "project")):
+            for patterns, category in _EXTRACT_CATEGORIES:
                 if any(p.search(content) for p in patterns):
                     try:
                         self._store.add_fact(content[:400], category=category)
