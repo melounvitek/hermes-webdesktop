@@ -833,91 +833,84 @@ def _build_tool_complete_content(
 # --- ToolCallStart / ToolCallProgress events ---------------------------------
 
 
-def _start_todo(args: Args) -> List[Any]:
+def _start_todo(args: Args) -> str:
     items = args.get("todos")
     if not isinstance(items, list):
-        return [_text("Reading todo list")]
+        return "Reading todo list"
     lines = ["Updating todo list", ""]
     lines.extend(f"- {i.get('status', 'pending')}: {i.get('content', i.get('id', ''))}" for i in items[:8] if isinstance(i, dict))
     if len(items) > 8:
         lines.append(f"... {len(items) - 8} more")
-    return [_text("\n".join(lines))]
+    return "\n".join(lines)
 
 
-def _start_skill_manage(args: Args) -> List[Any]:
+def _start_skill_manage(args: Args) -> Any:
     action = _arg(args, "action", default="manage")
     name = _arg(args, "name", default="?")
     file_path = _arg(args, "file_path", default="SKILL.md")
     path = f"skills/{name}/{file_path}"
     if action == "patch":
         old = str(args.get("old_string") or "")
-        return [acp.tool_diff_content(path=path, old_text=old or None, new_text=str(args.get("new_string") or ""))]
+        return acp.tool_diff_content(path=path, old_text=old or None, new_text=str(args.get("new_string") or ""))
     if action in {"edit", "create"}:
-        return [acp.tool_diff_content(path=path, new_text=str(args.get("content") or ""))]
+        return acp.tool_diff_content(path=path, new_text=str(args.get("content") or ""))
     if action == "write_file":
         target = str(args.get("file_path") or "file")
-        return [acp.tool_diff_content(path=f"skills/{name}/{target}", new_text=str(args.get("file_content") or ""))]
+        return acp.tool_diff_content(path=f"skills/{name}/{target}", new_text=str(args.get("file_content") or ""))
     if action in {"delete", "remove_file"}:
-        return [_text(f"Removing {str(args.get('file_path') or file_path)} from skill '{name}'")]
-    return [_text(f"Running skill_manage action '{action}' on skill '{name}' ({file_path})")]
+        return f"Removing {str(args.get('file_path') or file_path)} from skill '{name}'"
+    return f"Running skill_manage action '{action}' on skill '{name}' ({file_path})"
 
 
-def _start_execute_code(args: Args) -> List[Any]:
+def _start_execute_code(args: Args) -> str:
     code = _arg(args, "code")
     preview = code[:1200] + (f"\n... ({len(code)} chars total, truncated)" if len(code) > 1200 else "")
-    return [_text(_fmt(preview, "Running Python helper script:\n\n```python\n{}\n```", "Running Python helper script"))]
+    return _fmt(preview, "Running Python helper script:\n\n```python\n{}\n```", "Running Python helper script")
 
 
-def _start_process(args: Args) -> List[Any]:
-    text = f"Process action: {_arg(args, 'action', default='manage')}" + _fmt(_arg(args, "session_id"), "\nSession: {}", "")
-    data_preview = _arg(args, "data")
-    return [_text(text + (f"\nInput: {_truncate_text(data_preview, limit=500)}" if data_preview else ""))]
-
-
-def _start_delegate(args: Args) -> List[Any]:
+def _start_delegate(args: Args) -> str:
     tasks = args.get("tasks")
     if not (isinstance(tasks, list) and tasks):
-        goal = _arg(args, "goal")
-        return [_text("Delegating task" + (f":\n{_truncate_text(goal, limit=800)}" if goal else ""))]
+        return "Delegating task" + _fmt(_truncate_text(_arg(args, "goal"), limit=800), ":\n{}", "")
     lines = [f"Delegating {len(tasks)} tasks", ""]
     for i, task in enumerate(tasks[:8], 1):
         if isinstance(task, dict):
             lines.append(f"{i}. " + _truncate_text(_arg(task, "goal"), limit=160) + _fmt(_arg(task, "role"), " ({})", ""))
     if len(tasks) > 8:
         lines.append(f"... {len(tasks) - 8} more")
-    return [_text("\n".join(lines))]
+    return "\n".join(lines)
 
 
-def _start_memory(args: Args) -> List[Any]:
-    text = f"Memory {_arg(args, 'action', default='manage')} ({_arg(args, 'target', default='memory')})"
-    preview = _arg(args, "content", "old_text")
-    return [_text(text + (f"\nPreview: {_truncate_text(preview, limit=500)}" if preview else ""))]
+def _preview(label: str, value: str, limit: int) -> str:
+    return f"\n{label}: {_truncate_text(value, limit=limit)}" if value else ""
 
 
-# Per-tool start-content builders. ``None`` means the title/location already
-# identify the target (read_file, web_extract): a synthetic content block would
-# make Zed render an unhelpful Output section before completion.
-_START_CONTENT_BUILDERS: Dict[str, Optional[Callable[[Args], List[Any]]]] = {
-    "patch": lambda a: [_text(
+# Per-tool start-content builders returning text or one ACP content block. ``None`` means the
+# title/location already identify the target (read_file, web_extract): a synthetic content block
+# would make Zed render an unhelpful Output section before completion.
+_START_CONTENT_BUILDERS: Dict[str, Optional[Callable[[Args], Any]]] = {
+    "patch": lambda a: (
         f"Preparing {a.get('mode', 'replace')} edit for {a.get('path') or 'patch input'}. Approval prompt shows the diff."
-    )],
-    "write_file": lambda a: [_text(_fmt(a.get("path", ""), "Preparing write to {}. Approval prompt shows the diff.",
-                                        "Preparing file write. Approval prompt shows the diff."))],
-    "terminal": lambda a: [_text(f"$ {a.get('command', '')}")],
+    ),
+    "write_file": lambda a: _fmt(a.get("path", ""), "Preparing write to {}. Approval prompt shows the diff.",
+                                 "Preparing file write. Approval prompt shows the diff."),
+    "terminal": lambda a: f"$ {a.get('command', '')}",
     "read_file": None,
-    "search_files": lambda a: [_text(
+    "search_files": lambda a: (
         f"Searching for '{a.get('pattern', '')}' ({a.get('target', 'content')})" + _fmt(a.get("path"), " in {}", "")
-    )],
+    ),
     "todo": _start_todo,
-    "skill_view": lambda a: [_text(f"Loading skill '{_arg(a, 'name', default='?')}' ({_arg(a, 'file_path', default='SKILL.md')})")],
+    "skill_view": lambda a: f"Loading skill '{_arg(a, 'name', default='?')}' ({_arg(a, 'file_path', default='SKILL.md')})",
     "skill_manage": _start_skill_manage,
     "execute_code": _start_execute_code,
-    "web_search": lambda a: [_text(_fmt(_arg(a, "query"), "Searching the web for: {}", "Searching the web"))],
+    "web_search": lambda a: _fmt(_arg(a, "query"), "Searching the web for: {}", "Searching the web"),
     "web_extract": None,
-    "process": _start_process,
+    "process": lambda a: f"Process action: {_arg(a, 'action', default='manage')}" + _fmt(_arg(a, "session_id"), "\nSession: {}", "")
+    + _preview("Input", _arg(a, "data"), 500),
     "delegate_task": _start_delegate,
-    "session_search": lambda a: [_text(_fmt(_arg(a, "query"), "Searching past sessions for: {}", "Loading recent sessions"))],
-    "memory": _start_memory,
+    "session_search": lambda a: _fmt(_arg(a, "query"), "Searching past sessions for: {}", "Loading recent sessions"),
+    "memory": lambda a: f"Memory {_arg(a, 'action', default='manage')} ({_arg(a, 'target', default='memory')})"
+    + _preview("Preview", _arg(a, "content", "old_text"), 500),
 }
 
 
@@ -945,7 +938,8 @@ def _build_tool_start(tool_call_id: str, tool_name: str, arguments: Args, *, edi
         content = [acp.tool_diff_content(path=edit_diff.path, old_text=edit_diff.old_text, new_text=edit_diff.new_text)]
     elif tool_name in _START_CONTENT_BUILDERS:
         builder = _START_CONTENT_BUILDERS[tool_name]
-        content = builder(arguments) if builder is not None else None
+        built = builder(arguments) if builder is not None else None
+        content = None if built is None else [_text(built) if isinstance(built, str) else built]
     elif tool_name in _POLISHED_TOOLS:
         content = [_text(_truncate_text(_args_json(arguments), limit=1200))]
     elif not arguments:
