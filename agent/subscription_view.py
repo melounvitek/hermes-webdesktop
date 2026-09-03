@@ -2,12 +2,9 @@
 
 Companion to :mod:`agent.billing_view` — same fail-open philosophy (``logged_in=False``
 when not logged in / portal unreachable; never crash) and decimal money end-to-end.
-
-The TUI ``SubscriptionOverlay`` drives the plan change in-terminal: preview, then
-schedule a downgrade / cancellation / resume (chargeless) or apply an upgrade
-(charges the subscription card). The portal deep-link (``portal_url`` + ``org_id``)
-remains the fallback for an upgrade that needs 3DS / was declined. Until the NAS
-``GET /api/billing/subscription`` endpoint ships, 404s take the fail-open path.
+The TUI drives plan changes in-terminal (preview, then schedule a downgrade/cancel/resume
+or apply an upgrade); the portal deep-link (``portal_url`` + ``org_id``) is the fallback
+for an upgrade that needs 3DS / was declined. A 404 from NAS takes the fail-open path.
 """
 
 from __future__ import annotations
@@ -23,17 +20,10 @@ from agent.billing_view import OrgRoleCapability, fetch_portal_state, format_mon
 logger = logging.getLogger(__name__)
 
 
-# ── Parsed sub-structures ────────────────────────────────────────────────────
-
-
 @dataclass(frozen=True)
 class CurrentSubscription:
-    """The user's active subscription. ``None`` (not this object) = no plan.
-
-    NAS guarantees a present ``current`` is fully populated: ``tier_id`` /
-    ``tier_name`` / ``monthly_credits`` / ``cycle_ends_at`` are always set; only
-    ``credits_remaining`` and the cancel/downgrade fields are optional.
-    """
+    """Active subscription (``None``, not this object, = no plan). NAS guarantees ``tier_id`` /
+    ``tier_name`` / ``monthly_credits`` / ``cycle_ends_at`` are set; the rest are optional."""
 
     tier_id: Optional[str] = None
     tier_name: Optional[str] = None
@@ -48,12 +38,9 @@ class CurrentSubscription:
 
 @dataclass(frozen=True)
 class SubscriptionTier:
-    """One row of the tier picker (mirrors NAS ``SubscriptionTierOption``).
-
-    ``is_current`` = active plan (shown, not selectable); ``is_enabled=False`` = a
-    grandfathered tier the user is on but can no longer select. ``tier_order`` sorts
-    the picker and drives the upgrade-vs-downgrade hint.
-    """
+    """Tier-picker row (NAS ``SubscriptionTierOption``). ``is_current`` = active plan (shown, not
+    selectable); ``is_enabled=False`` = grandfathered, no longer selectable; ``tier_order`` sorts
+    the picker and drives the upgrade-vs-downgrade hint."""
 
     tier_id: str
     name: str
@@ -66,12 +53,9 @@ class SubscriptionTier:
 
 @dataclass(frozen=True)
 class SubscriptionChangePreview:
-    """Parsed ``POST /api/billing/subscription/preview``.
-
-    ``effect``: ``charge_now`` (upgrade; ``amount_due_now_cents`` is the prorated
-    charge) · ``scheduled`` (downgrade / same-price change at ``effective_at``) ·
-    ``no_op`` (already on target) · ``blocked`` (commit refused; ``reason`` says why).
-    """
+    """Parsed ``POST /api/billing/subscription/preview``. ``effect``: ``charge_now`` (upgrade; prorated
+    ``amount_due_now_cents``) · ``scheduled`` (downgrade / same-price change at ``effective_at``) ·
+    ``no_op`` (already on target) · ``blocked`` (commit refused; ``reason`` says why)."""
 
     effect: str
     reason: Optional[str] = None
@@ -91,7 +75,7 @@ class SubscriptionState(OrgRoleCapability):
 
     logged_in: bool
     org_name: Optional[str] = None
-    org_id: Optional[str] = None  # org.id from the NAS response
+    org_id: Optional[str] = None
     role: Optional[str] = None  # "OWNER" | "ADMIN" | "FINANCE_ADMIN" | "SECURITY_ADMIN" | "MEMBER"
     can_change_plan_raw: Optional[bool] = None
     context: str = "personal"  # "personal" | "team"
@@ -104,12 +88,13 @@ class SubscriptionState(OrgRoleCapability):
 # ── Payload parsing ──────────────────────────────────────────────────────────
 
 
+def _tier_id(raw: Any) -> Optional[str]:
+    """Real tier id of a NAS dict, else None ("no plan" is ``current: null``; junk is skipped)."""
+    return (raw.get("tierId") or raw.get("id") or None) if isinstance(raw, dict) else None
+
+
 def _parse_current(raw: Any) -> Optional[CurrentSubscription]:
-    # "No plan" is wire-represented as current:null; a present current is a real
-    # plan, so guard on a real tier id and return None otherwise.
-    if not isinstance(raw, dict):
-        return None
-    tier_id = raw.get("tierId") or raw.get("id")
+    tier_id = _tier_id(raw)
     if not tier_id:
         return None
     return CurrentSubscription(
@@ -126,19 +111,12 @@ def _parse_current(raw: Any) -> Optional[CurrentSubscription]:
 
 
 def _coalesce(*vals: Any) -> Any:
-    """First non-``None`` value. NAS sends ``0`` for the free tier's ``tierOrder`` /
-    ``dollarsPerMonth``, which a plain ``x or default`` would drop."""
-    for v in vals:
-        if v is not None:
-            return v
-    return None
+    """First non-``None`` value (NAS sends ``0`` for the free tier, which ``x or default`` would drop)."""
+    return next((v for v in vals if v is not None), None)
 
 
 def _parse_tier(raw: Any) -> Optional[SubscriptionTier]:
-    """Map one NAS ``SubscriptionTierOption`` dict into a :class:`SubscriptionTier`."""
-    if not isinstance(raw, dict):
-        return None
-    tier_id = raw.get("tierId") or raw.get("id")
+    tier_id = _tier_id(raw)
     if not tier_id:
         return None
     return SubscriptionTier(
@@ -152,9 +130,7 @@ def _parse_tier(raw: Any) -> Optional[SubscriptionTier]:
     )
 
 
-def subscription_change_preview_from_payload(
-    payload: dict[str, Any],
-) -> SubscriptionChangePreview:
+def subscription_change_preview_from_payload(payload: dict[str, Any]) -> SubscriptionChangePreview:
     """Map a raw ``/subscription/preview`` JSON dict into :class:`SubscriptionChangePreview`."""
     effect = payload.get("effect")
     cents = payload.get("amountDueNowCents")
@@ -172,18 +148,10 @@ def subscription_change_preview_from_payload(
     )
 
 
-def subscription_state_from_payload(
-    payload: dict[str, Any], *, portal_url: Optional[str] = None
-) -> SubscriptionState:
+def subscription_state_from_payload(payload: dict[str, Any], *, portal_url: Optional[str] = None) -> SubscriptionState:
     """Map a raw ``/api/billing/subscription`` JSON dict into :class:`SubscriptionState`."""
     org, can_change_plan_raw = parse_org_fields(payload)
-    raw_context = payload.get("context")
-    raw_tiers = payload.get("tiers")
-    tiers = (
-        tuple(t for t in (_parse_tier(x) for x in raw_tiers) if t is not None)
-        if isinstance(raw_tiers, list)
-        else ()
-    )
+    raw_context, raw_tiers = payload.get("context"), payload.get("tiers")
     return SubscriptionState(
         logged_in=True,
         org_name=org.get("name"),
@@ -192,7 +160,7 @@ def subscription_state_from_payload(
         can_change_plan_raw=can_change_plan_raw,
         context=raw_context if raw_context in ("personal", "team") else "personal",
         current=_parse_current(payload.get("current")),
-        tiers=tiers,
+        tiers=tuple(filter(None, map(_parse_tier, raw_tiers))) if isinstance(raw_tiers, list) else (),
         portal_url=portal_url,
     )
 
@@ -201,44 +169,31 @@ def subscription_state_from_payload(
 
 
 def build_subscription_state(*, timeout: float = 15.0) -> SubscriptionState:
-    """Fetch + parse ``GET /api/billing/subscription``. Fail-open (see
-    :func:`agent.billing_view.fetch_portal_state`).
-
-    ``HERMES_DEV_SUBSCRIPTION_FIXTURE`` short-circuits to a fixture so every
-    plan/cancel/downgrade/team/not-admin state is testable on CLI and TUI offline.
-    """
+    """Fetch + parse ``GET /api/billing/subscription``; fail-open like ``fetch_portal_state``.
+    ``HERMES_DEV_SUBSCRIPTION_FIXTURE`` short-circuits to a fixture so every state is testable offline."""
     fixture = dev_fixture_subscription_state()
     if fixture is not None:
         return fixture
     return fetch_portal_state(
-        "get_subscription_state",
-        "subscription",
+        "get_subscription_state", "subscription",
         failed=lambda **kw: SubscriptionState(logged_in=False, **kw),
         parse=lambda payload, portal_url: subscription_state_from_payload(payload, portal_url=portal_url),
-        portal_fallback=lambda base: base,
-        timeout=timeout,
-        log=logger,
+        portal_fallback=lambda base: base, timeout=timeout, log=logger,
     )
 
 
-def subscription_manage_url(
-    state: SubscriptionState, tier_id: Optional[str] = None
-) -> Optional[str]:
-    """Build ``{portal_origin}/manage-subscription?org_id=<id>[&plan=<tier_id>]``.
+def subscription_manage_url(state: SubscriptionState, tier_id: Optional[str] = None) -> Optional[str]:
+    """Build ``{portal_origin}/manage-subscription?org_id=<id>[&plan=<tier_id>]`` (None if unresolvable).
 
-    Mirrors the TUI's ``buildManageUrl``: the target is NAS's OWN ``/manage-subscription``
-    page (NOT the Stripe Billing Portal), which routes upgrade→Checkout /
-    downgrade→scheduled internally. ``org_id`` pins the right account in multi-org
-    situations. ``tier_id`` (the stable ``tiers[]`` id, never a name/slug) preselects
-    the picked plan; the portal ignores an unknown tier, so it's appended
-    unconditionally when picked. None when no portal URL is resolvable.
+    Mirrors the TUI's ``buildManageUrl``: the target is NAS's OWN ``/manage-subscription`` page
+    (NOT the Stripe Billing Portal). ``org_id`` pins the account in multi-org situations; ``tier_id``
+    (the stable ``tiers[]`` id, never a name/slug) preselects the plan — the portal ignores an
+    unknown tier, so it's appended unconditionally.
     """
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-    if not state.portal_url:
-        return None
     try:
-        parts = urlsplit(state.portal_url)
+        parts = urlsplit(state.portal_url or "")
     except Exception:
         return None
     if parts.scheme not in ("http", "https") or not parts.netloc:
@@ -260,8 +215,7 @@ def subscription_manage_url(
 
 
 def selectable_tiers(state: SubscriptionState) -> list[SubscriptionTier]:
-    """Enabled paid tiers other than the current plan, cheapest first (``tier_order > 0``
-    — dropping to free is a cancellation, not a plan pick)."""
+    """Enabled paid tiers other than the current plan, cheapest first (dropping to free is a cancellation)."""
     return sorted(
         (t for t in (state.tiers or ()) if t.is_enabled and not t.is_current and (t.tier_order or 0) > 0),
         key=lambda t: t.tier_order or 0,
@@ -269,8 +223,7 @@ def selectable_tiers(state: SubscriptionState) -> list[SubscriptionTier]:
 
 
 def format_tier_row(tier: SubscriptionTier) -> str:
-    """``name · $X/mo[ · $Y credits/mo]`` — thousands-grouped money (mirrors the TUI
-    Free rows); the credits suffix appears ONLY when monthly credits are present and > 0."""
+    """``name · $X/mo[ · $Y credits/mo]`` (grouped money, like the TUI); credits suffix only when > 0."""
     row = f"{tier.name} · {format_money(tier.dollars_per_month, grouped=True)}/mo"
     mc = tier.monthly_credits
     if mc is not None and mc > 0:
@@ -281,70 +234,61 @@ def format_tier_row(tier: SubscriptionTier) -> str:
 def is_upgrade(state: SubscriptionState, tier_id: str) -> bool:
     """True when ``tier_id`` ranks above the current plan by ``tier_order``. Prefers the
     active subscription's tier; falls back to the ``tiers[]`` ``is_current`` marker, else 0."""
-    orders = {t.tier_id: (t.tier_order or 0) for t in (state.tiers or ())}
+    tiers = state.tiers or ()
+    orders = {t.tier_id: (t.tier_order or 0) for t in tiers}
     cur_id = state.current.tier_id if state.current else None
-    if cur_id is not None and cur_id in orders:
-        cur_order = orders[cur_id]
-    else:
-        cur_order = next((t.tier_order or 0 for t in (state.tiers or ()) if t.is_current), 0)
+    cur_order = orders[cur_id] if cur_id in orders else next((t.tier_order or 0 for t in tiers if t.is_current), 0)
     return orders.get(tier_id, 0) > cur_order
 
 
-# ── Dev fixtures (throwaway scaffolding — env-var driven, no live portal) ────
+# ── Dev fixtures (env-var driven, no live portal) ────────────────────────────
 
 _DEV_FIXTURE_PORTAL = "https://portal.nousresearch.com/billing"
-
-
-def _dev_current(**over: Any) -> CurrentSubscription:
-    base: dict[str, Any] = dict(
-        tier_id="plus", tier_name="Plus", monthly_credits=Decimal("1000"),
-        credits_remaining=Decimal("420"), cycle_ends_at="2026-07-01",
-    )
-    return CurrentSubscription(**{**base, **over})
+_DEV_TIER_SPECS = (("free", "Free", 0, "0", "0"), ("plus", "Plus", 1, "20", "1000"),
+                   ("super", "Super", 2, "40", "3000"), ("ultra", "Ultra", 3, "80", "7000"))
+_DEV_FIXTURE_ALIASES = {"logged_out": "logged-out", "loggedout": "logged-out", "mid-tier": "mid",
+                        "top-tier": "top", "member": "not-admin"}
 
 
 def _dev_tiers(current_id: Optional[str]) -> tuple[SubscriptionTier, ...]:
-    """A sample plan catalog for fixtures (marks ``current_id`` as the active tier)."""
-    specs = (("free", "Free", 0, "0", "0"), ("plus", "Plus", 1, "20", "1000"),
-             ("super", "Super", 2, "40", "3000"), ("ultra", "Ultra", 3, "80", "7000"))
+    """Sample plan catalog for fixtures (marks ``current_id`` as the active tier)."""
     return tuple(
         SubscriptionTier(
             tier_id=tid, name=name, tier_order=order, dollars_per_month=parse_money(dpm),
             monthly_credits=parse_money(mc), is_current=(tid == current_id), is_enabled=True,
         )
-        for tid, name, order, dpm, mc in specs
+        for tid, name, order, dpm, mc in _DEV_TIER_SPECS
     )
 
 
-def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
-    """``HERMES_DEV_SUBSCRIPTION_FIXTURE`` -> fixture :class:`SubscriptionState`; None when unset.
+def _dev_plan(tier_id: str, remaining: str, **over: Any) -> dict[str, Any]:
+    """``current`` + ``tiers`` fixture fields for being on ``tier_id`` with ``remaining`` credits left."""
+    tid, name, _order, _dpm, mc = next(spec for spec in _DEV_TIER_SPECS if spec[0] == tier_id)
+    current = CurrentSubscription(
+        tier_id=tid, tier_name=name, monthly_credits=Decimal(mc), credits_remaining=Decimal(remaining),
+        cycle_ends_at="2026-07-01", **over,
+    )
+    return dict(current=current, tiers=_dev_tiers(tid))
 
-    ``free | mid | top | not-admin | downgrade | cancel | team | logged-out``. Unknown
-    name → logged-out with ``error`` so the misconfiguration is visible.
-    """
+
+def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
+    """``HERMES_DEV_SUBSCRIPTION_FIXTURE`` (``free | mid | top | not-admin | downgrade | cancel | team |
+    logged-out``) -> fixture state; None when unset; unknown name → logged-out with ``error`` set."""
     name = (os.getenv("HERMES_DEV_SUBSCRIPTION_FIXTURE") or "").strip().lower()
     if not name:
         return None
-    name = {"logged_out": "logged-out", "loggedout": "logged-out", "mid-tier": "mid",
-            "top-tier": "top", "member": "not-admin"}.get(name, name)
+    name = _DEV_FIXTURE_ALIASES.get(name, name)
     if name == "logged-out":
         return SubscriptionState(logged_in=False)
 
     common = dict(logged_in=True, org_name="Acme Inc", org_id="org_acme", role="OWNER", portal_url=_DEV_FIXTURE_PORTAL)
-    plus = dict(current=_dev_current(), tiers=_dev_tiers("plus"))
     states: dict[str, dict[str, Any]] = {
         "free": dict(current=None, tiers=_dev_tiers(None)),
-        "mid": plus,
-        "top": dict(
-            current=_dev_current(tier_id="ultra", tier_name="Ultra", monthly_credits=Decimal("7000"), credits_remaining=Decimal("5000")),
-            tiers=_dev_tiers("ultra"),
-        ),
-        "not-admin": {**plus, "role": "MEMBER"},
-        "downgrade": dict(
-            current=_dev_current(tier_id="super", tier_name="Super", monthly_credits=Decimal("3000"), credits_remaining=Decimal("1500"), pending_downgrade_tier_name="Plus", pending_downgrade_at="2026-07-15"),
-            tiers=_dev_tiers("super"),
-        ),
-        "cancel": dict(current=_dev_current(cancel_at_period_end=True, cancellation_effective_at="2026-07-01"), tiers=_dev_tiers("plus")),
+        "mid": _dev_plan("plus", "420"),
+        "top": _dev_plan("ultra", "5000"),
+        "not-admin": {**_dev_plan("plus", "420"), "role": "MEMBER"},
+        "downgrade": _dev_plan("super", "1500", pending_downgrade_tier_name="Plus", pending_downgrade_at="2026-07-15"),
+        "cancel": _dev_plan("plus", "420", cancel_at_period_end=True, cancellation_effective_at="2026-07-01"),
         "team": dict(context="team", current=None, org_name="Acme Engineering", org_id="org_eng"),
     }
     if name not in states:

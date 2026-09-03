@@ -1,11 +1,10 @@
 """Thread-scoped stdout/stderr silencing for background worker threads.
 
-``contextlib.redirect_stdout`` reassigns the *process-global* stream, so a
-daemon worker silencing itself also silences every other thread (gateway
-event loop included) for the duration. This module installs a per-thread
-routing proxy as ``sys.stdout``/``sys.stderr``: silenced threads write to a
-sink, everyone else passes through to the original stream. Installed once,
-idempotently, and never uninstalled (that would race other threads mid-write).
+``contextlib.redirect_stdout`` reassigns the *process-global* stream, so a daemon worker
+silencing itself also silences every other thread (gateway event loop included). This
+module installs a per-thread routing proxy as ``sys.stdout``/``sys.stderr``: silenced
+threads write to a sink, everyone else passes through to the original stream. Installed
+once, idempotently, and never uninstalled (that would race other threads mid-write).
 """
 
 from __future__ import annotations
@@ -45,9 +44,7 @@ class _ThreadRoutingStream:
         self._state = state
 
     def _target(self) -> TextIO:
-        if self._state.silenced.get(threading.get_ident(), 0) > 0:
-            return self._state.sink
-        return self._passthrough
+        return self._state.sink if self._state.silenced.get(threading.get_ident(), 0) > 0 else self._passthrough
 
     def silence(self, ident: int) -> None:
         with self._state.lock:
@@ -61,24 +58,21 @@ class _ThreadRoutingStream:
             else:
                 self._state.silenced.pop(ident, None)
 
-    def write(self, data):  # type: ignore[no-untyped-def]
+    def _forward(self, name: str, fallback, *args):  # type: ignore[no-untyped-def]
+        """Call ``name`` on the current target; a dead target yields ``fallback(*args)`` instead of raising."""
         try:
-            return self._target().write(data)
+            return getattr(self._target(), name)(*args)
         except Exception:
-            return len(data) if isinstance(data, str) else 0
+            return fallback(*args)
+
+    def write(self, data):  # type: ignore[no-untyped-def]
+        return self._forward("write", lambda d: len(d) if isinstance(d, str) else 0, data)
 
     def flush(self):  # type: ignore[no-untyped-def]
-        try:
-            return self._target().flush()
-        except Exception:
-            return None
+        return self._forward("flush", lambda: None)
 
     def writelines(self, lines):  # type: ignore[no-untyped-def]
-        target = self._target()
-        try:
-            return target.writelines(lines)
-        except Exception:
-            return None
+        return self._forward("writelines", lambda _l: None, lines)
 
     def isatty(self) -> bool:
         try:
@@ -111,15 +105,12 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
         passthrough = current if current is not None else passthrough
         sink = _sinks.get(attr)
         if sink is None or sink.closed:
-            sink = open(os.devnull, "w", encoding="utf-8")
-            _sinks[attr] = sink
+            sink = _sinks[attr] = open(os.devnull, "w", encoding="utf-8")
         state = _routing_states.get(attr)
         if state is None or state.sink is not sink:
-            state = _RoutingState(sink)
-            _routing_states[attr] = state
-        proxy = _ThreadRoutingStream(passthrough, state)
+            state = _routing_states[attr] = _RoutingState(sink)
+        proxy = _installed[attr] = _ThreadRoutingStream(passthrough, state)
         setattr(sys, attr, proxy)
-        _installed[attr] = proxy
         return proxy
 
 
@@ -127,12 +118,11 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
 def thread_scoped_silence() -> Iterator[None]:
     """Silence ``stdout``/``stderr`` for the *current thread only*."""
     ident = threading.get_ident()
-    out_proxy = _ensure_installed("stdout", sys.__stdout__ or sys.stdout)
-    err_proxy = _ensure_installed("stderr", sys.__stderr__ or sys.stderr)
-    out_proxy.silence(ident)
-    err_proxy.silence(ident)
+    proxies = (_ensure_installed("stdout", sys.__stdout__ or sys.stdout), _ensure_installed("stderr", sys.__stderr__ or sys.stderr))
+    for proxy in proxies:
+        proxy.silence(ident)
     try:
         yield
     finally:
-        out_proxy.unsilence(ident)
-        err_proxy.unsilence(ident)
+        for proxy in proxies:
+            proxy.unsilence(ident)
