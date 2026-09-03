@@ -81,7 +81,6 @@ def _strip_marker_for_comparison(msgs: Any) -> Any:
     and non-dict entries pass through unchanged.
     """
     from agent.context_compressor import _DB_PERSISTED_MARKER
-
     if not isinstance(msgs, list):
         return msgs
     return [{k: v for k, v in m.items() if k != _DB_PERSISTED_MARKER} if isinstance(m, dict) else m for m in msgs]
@@ -177,7 +176,6 @@ def _refresh_agent_tool_definitions(agent) -> bool:
     CONTENT change). Returns True when tools were added. Never raises.
     """
     from tools.mcp_tool import refresh_agent_mcp_tools
-
     added = refresh_agent_mcp_tools(agent, content_aware=True)
     if added:
         logger.info("Compaction tool refresh added tools: %s", sorted(added))
@@ -387,7 +385,6 @@ def _capture_authoritative_cooldown_under_lease(
     """
     try:
         from agent.context_compressor import ContextCompressor
-
         if not isinstance(compressor, ContextCompressor):
             return None, None
         values = vars(compressor)
@@ -745,7 +742,6 @@ def _get_compress_timeout_executor():
     if executor is not None:
         return executor
     from tools.daemon_pool import DaemonThreadPoolExecutor
-
     with _compress_timeout_executor_lock:
         if _compress_timeout_executor is None:
             # Small pool: compress is rare/heavy; sized for live compress + cancelled
@@ -768,7 +764,6 @@ def resolve_context_compression_timeouts(compression_cfg: Optional[dict] = None)
     if cfg is None:
         try:
             from hermes_cli.config import load_config
-
             raw = load_config()
             maybe = raw.get("compression", {}) if isinstance(raw, dict) else {}
             cfg = maybe if isinstance(maybe, dict) else {}
@@ -879,7 +874,6 @@ def resolve_compression_fallback_route() -> Optional[dict]:
     """
     try:
         from agent.auxiliary_client import _fallback_entry_api_key, _get_auxiliary_task_config
-
         chain = _get_auxiliary_task_config("compression").get("fallback_chain")
     except Exception:
         logger.debug("compression fallback_chain lookup failed", exc_info=True)
@@ -902,7 +896,6 @@ def resolve_compression_fallback_route() -> Optional[dict]:
             logger.debug("compression fallback_chain[%d] api key resolution failed", index, exc_info=True)
             api_key = None
         from agent.auxiliary_client import _coerce_positive_timeout
-
         timeout = _coerce_positive_timeout(entry.get("timeout"))
         return {
             "label": f"fallback_chain[{index}]({provider})",
@@ -972,7 +965,6 @@ def _retry_compression_on_fallback_chain(
     )
     try:
         from agent.context_compressor import pin_summary_route
-
         with pin_summary_route(route):
             result_msgs, result_prompt = run_compress_context_with_progress_timeout(
                 worker=worker,
@@ -1150,7 +1142,6 @@ def run_compress_context_with_progress_timeout(
     # Sync mirror of gateway hygiene's run_in_executor + wait_for loop: offload,
     # poll idle budget + ceiling, fence-cancel on timeout so no late commit lands.
     from tools.thread_context import propagate_context_to_thread
-
     executor = _get_compress_timeout_executor()
     # Refuse rather than queue when the pool is full: a queued job would wait out
     # its budget unstarted and run stale later. Skip compression this cycle.
@@ -1286,7 +1277,6 @@ def _lock_api_is_absent_on_session_db(lock_db: Any) -> bool:
     """
     try:
         from hermes_state import SessionDB
-
         missing = object()
         return (
             type(lock_db) is SessionDB
@@ -1524,13 +1514,11 @@ def _rebind_session_context(session_id: str) -> None:
     """Point the worker thread's session ContextVar and log context at ``session_id``."""
     try:
         from gateway.session_context import set_current_session_id
-
         set_current_session_id(session_id)
     except Exception:
         os.environ["HERMES_SESSION_ID"] = session_id
     with contextlib.suppress(Exception):
         from hermes_logging import set_session_context
-
         set_session_context(session_id)
 
 
@@ -1767,7 +1755,6 @@ def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, An
     # Deferred import: context_compressor → turn_context → this module would form
     # an import cycle.
     from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY
-
     direct_messages: list[dict[str, Any]] = []
     for message in messages or []:
         if not isinstance(message, dict):
@@ -1871,7 +1858,6 @@ def _lower_threshold_to_aux_context(
     # 64K floor): a suggestion it would override is silently ignored and this
     # warning reappears every session. External engines own policy: keep it plain.
     from agent.context_compressor import ContextCompressor as _CC
-
     recomputed_threshold = None
     if main_ctx and isinstance(compressor, _CC):
         recomputed_threshold = _CC._compute_threshold_tokens(
@@ -1888,7 +1874,6 @@ def _lower_threshold_to_aux_context(
     if not _aux_provider_label:
         try:
             from urllib.parse import urlparse
-
             _aux_provider_label = urlparse(aux_base_url).hostname or aux_base_url
         except Exception:
             _aux_provider_label = aux_base_url or "auto"
@@ -1954,7 +1939,6 @@ def check_compression_model_feasibility(agent: Any) -> None:
             get_text_auxiliary_client,
         )
         from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, get_model_context_length
-
         # Provider may be "auto"; fall back to the client's base_url hostname so the
         # user can tell where the compression model is actually called.
         try:
@@ -2119,7 +2103,6 @@ def _is_real_user_message(message: Any) -> bool:
     if text.startswith(_SYNTHETIC_USER_PREFIXES):
         return False
     from agent.context_compressor import ContextCompressor
-
     return not ContextCompressor._is_synthetic_compression_user_turn(message)
 
 
@@ -2134,7 +2117,6 @@ def _message_contains_busy_steer(message: Any) -> bool:
         return False
     try:
         from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
-
         return STEER_MARKER_OPEN in text and STEER_MARKER_CLOSE in text
     except Exception:
         return "[OUT-OF-BAND USER MESSAGE" in text and "[/OUT-OF-BAND USER MESSAGE]" in text
@@ -2147,7 +2129,6 @@ def _extract_steer_text_from_message(message: Any) -> Optional[str]:
         return None
     try:
         from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN
-
         open_marker = STEER_MARKER_OPEN
         close_marker = STEER_MARKER_CLOSE
     except Exception:
@@ -2198,7 +2179,6 @@ def _strip_stale_todo_snapshot(content: Any) -> Any:
     stale; stripping before re-injection prevents accumulation across boundaries.
     """
     from tools.todo_tool import TODO_INJECTION_HEADER
-
     if isinstance(content, str):
         idx = content.find(TODO_INJECTION_HEADER)
         if idx == -1:
@@ -2244,7 +2224,6 @@ def _todo_snapshot_is_only_content(content: Any, stripped: Any) -> bool:
 def _replace_message_content(message: dict, content: Any) -> None:
     """Rewrite message content without allowing an old API sidecar to replay."""
     from agent.turn_context import drop_stale_api_content
-
     message["content"] = content
     drop_stale_api_content(message)
 
@@ -2262,7 +2241,6 @@ def _pruned_skill_reload_notice(compressed: list) -> str:
     first-seen order, deduplicated, capped at ``_MAX_PRUNED_SKILL_MARKERS``.
     """
     from agent.context_compressor import _MAX_PRUNED_SKILL_MARKERS, _extract_pruned_skill_names
-
     names: list = []
     for message in compressed:
         if not isinstance(message, dict):
@@ -2317,7 +2295,6 @@ CompressedUserTurnOutcome = Literal["inserted", "merged", "already_present", "pl
 def _insert_real_user_anchor(messages: list, anchor: dict) -> CompressedUserTurnOutcome:
     """Insert the latest human turn without breaking role alternation."""
     from agent.context_compressor import _DB_PERSISTED_MARKER
-
     def _role(msg: Any) -> Optional[str]:
         return msg.get("role") if isinstance(msg, dict) else None
 
@@ -2340,7 +2317,6 @@ def _insert_real_user_anchor(messages: list, anchor: dict) -> CompressedUserTurn
     # The transcript ends with a user-role message and no slot avoids
     # user/user adjacency.
     from agent.context_compressor import ContextCompressor
-
     if ContextCompressor._is_context_summary_content(_message_text(messages[-1])):
         # Never merge into a summary: its prefix must stay at message start for summary
         # detection; repair_message_sequence merges adjacent user turns summary-first.
@@ -2361,7 +2337,6 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
     if _compressed_has_busy_steer(compressed):
         return "already_present"
     from agent.context_compressor import COMPRESSION_CONTINUATION_USER_CONTENT, _fresh_compaction_message_copy
-
     # One reversed scan over BOTH kinds: scanning steer then user would let an older
     # consumed steer outrank a newer real user request and replay it.
     for message in reversed(original_messages):
@@ -2373,7 +2348,6 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
         if steer_text:
             return _insert_real_user_anchor(compressed, {"role": "user", "content": steer_text})
     from agent.message_metadata import append_message
-
     append_message(compressed, {"role": "user", "content": COMPRESSION_CONTINUATION_USER_CONTENT})
     return "placeholder_appended"
 
@@ -2401,7 +2375,6 @@ def _stamp_scoped_twins(targets: list, source: dict, *, exact_counts_stamped: bo
     broad scoped pass is skipped so a content-equal old duplicate is left alone.
     """
     from agent.context_compressor import _DB_PERSISTED_MARKER
-
     source_timestamp = source.get("timestamp")
     exact_hit = False
     if source_timestamp is not None:
@@ -2437,7 +2410,6 @@ def _notify_context_engine_compression_complete(agent: Any, *, new_session_id: s
     # never undo or delay the committed compression.
     with _swallow('relay segment rotation notification failed', exc_info=True):
         from agent import relay_runtime
-
         relay_runtime.SESSION_COORDINATOR.notify_session_compacted(
             profile_key=relay_runtime.current_profile_key(), session_id=new_session_id, old_session_id=old_session_id
         )
@@ -2987,7 +2959,6 @@ def _run_summary_dispatch(
     # flow. Any active hook (even no-op) selects the streamed path: the timeout is
     # inactivity-based and a byte-trickling provider hits the stream total ceiling.
     from agent.auxiliary_client import aux_interrupt_protection, aux_progress_hook, aux_stream_deadline
-
     _progress_hook = commit_fence.touch_progress if commit_fence is not None else (lambda: None)
     # Return leg: cancel frees the owner but the provider daemon streams on to its
     # own larger ceiling; share the host deadline so orphan streams stop with it.
@@ -3075,7 +3046,6 @@ def _fold_todo_snapshot(agent: Any, compressed: list) -> None:
         # Fold the snapshot into a trailing REAL user msg (no synthetic user/user pair);
         # strip old snapshots first. Scaffolding tails must not absorb it (provenance).
         from agent.context_compressor import _append_text_to_content
-
         merged = False
         _tail = compressed[-1] if compressed and isinstance(compressed[-1], dict) else None
         if _tail is not None and _tail.get("role") == "user":
@@ -3119,7 +3089,6 @@ def _rebuild_system_prompt_at_boundary(agent: Any, system_message: str) -> str:
         new_system_prompt = cached_system_prompt
         agent._cached_system_prompt = cached_system_prompt
         from agent.system_prompt import reconstruct_static_prefix
-
         reconstruct_static_prefix(agent, system_message=system_message, log_label="compression keep-prompt")
     else:
         new_system_prompt = rebuilt_system_prompt
@@ -3158,7 +3127,6 @@ def _salvage_or_refuse_grown_transcript(
         # Todo refresh and user-turn anchoring run after the compressor's own size check
         # and can tip a break-even candidate; give it one mechanical salvage pass.
         from agent.context_compressor import salvage_grown_transcript
-
         _salvaged = salvage_grown_transcript(messages, compressed, budget=_rough_in)
         if _salvaged is not None:
             _salv_est = estimate_messages_tokens_rough(_salvaged)
@@ -3207,7 +3175,6 @@ def _parent_deliberately_ended(session_db: Any, session_id: str) -> bool:
         return False
     try:
         from hermes_state_common import is_automatic_end_reason
-
         row = reader(session_id) or {}
         return row.get("ended_at") is not None and not is_automatic_end_reason(row.get("end_reason"))
     except Exception:
@@ -3224,15 +3191,12 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
     """
     with _swallow('Could not migrate goal on compression: %s'):
         from hermes_cli.goals import migrate_goal_to_session
-
         migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
     with _swallow('Could not migrate heartbeat on compression: %s'):
         from hermes_cli.heartbeat import migrate_heartbeat_to_session
-
         migrate_heartbeat_to_session(old_session_id, agent.session_id)
     with _swallow('Could not migrate loop on compression: %s'):
         from hermes_cli.loops import migrate_loop_to_session
-
         migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
     if not old_title:
         return
@@ -3290,7 +3254,6 @@ def _publish_rotated_compaction(
     # publish also COALESCEs from the parent row for threads lacking HERMES_HOME.
     try:
         from hermes_cli.profiles import get_active_profile_name
-
         _profile_for_child = get_active_profile_name()
         if _profile_for_child == "default":
             _profile_for_child = None
@@ -3299,7 +3262,6 @@ def _publish_rotated_compaction(
     old_title = agent._session_db.get_session_title(agent.session_id)
     new_session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     from agent.context_compressor import _DB_PERSISTED_MARKER
-
     agent._session_db.publish_compression_child(
         parent_session_id=old_session_id,
         child_session_id=new_session_id,
@@ -3378,13 +3340,11 @@ def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
     """
     with contextlib.suppress(Exception):
         from tools.file_tools import reset_file_dedup
-
         reset_file_dedup(task_id)
     if not skills:
         return
     with contextlib.suppress(Exception):
         from tools.skills_tool import reset_skill_view_dedup
-
         reset_skill_view_dedup(task_id)
 
 
@@ -3656,7 +3616,6 @@ def _commit_compaction(
                 # In-place compaction: same session_id; soft-archive old turns (active=0, still
                 # searchable) + insert `compressed` atomically; no pre-flush (tail already in).
                 from agent.context_compressor import PROACTIVE_PRUNE_REARM_MODEL_CONFIG_KEY, stamp_db_persisted_markers
-
                 # Tail rows tagged by compress() are archived as superseded duplicates, not
                 # compacted=1. Count against the FINAL list — salvage may have dropped rows.
                 agent._session_db.archive_and_compact(
@@ -4254,7 +4213,6 @@ def _record_codex_compaction_failure(agent: Any, error: str) -> None:
     still-over-threshold session would retry every turn.
     """
     from agent.context_compressor import _SUMMARY_FAILURE_COOLDOWN_SECONDS
-
     compressor = getattr(agent, "context_compressor", None)
     recorder = getattr(compressor, "_record_compression_failure_cooldown", None)
     if not callable(recorder):
@@ -4335,7 +4293,6 @@ def _compress_context_via_codex_app_server(
 
     with _swallow('codex compaction bookkeeping failed', exc_info=True):
         from agent.codex_runtime import _record_codex_app_server_compaction, _record_codex_app_server_usage
-
         _record_codex_app_server_compaction(agent, result, approx_tokens=approx_tokens, force=True)
         # An empty usage report must consume the pending verdict, not leave deferral
         # armed until a later turn; minimal test engines may lack update_from_response.
@@ -4384,12 +4341,10 @@ def _decode_pixels(data_url: str) -> Optional[tuple]:
     try:
         import base64 as _b64_dim
         import io as _io_dim
-
         header_d, _, data_d = data_url.partition(",")
         if not data_d or not data_url.startswith("data:"):
             return None
         from PIL import Image as _PILImage
-
         with _PILImage.open(_io_dim.BytesIO(_b64_dim.b64decode(data_d))) as _img:
             return _img.size
     except Exception:
@@ -4421,7 +4376,6 @@ def _shrink_data_url(url: str, *, max_dimension: int, resize_fn: Any) -> tuple:
         header, _, data = url.partition(",")
         mime = _data_url_mime(header)
         import base64 as _b64
-
         raw = _b64.b64decode(data)
         tmp = tempfile.NamedTemporaryFile(
             prefix="hermes_shrink_", suffix=_IMAGE_SUFFIX_BY_MIME.get(mime, ".jpg"), delete=False

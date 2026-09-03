@@ -44,7 +44,6 @@ def _report_compression_timeout(
 ) -> None:
     """Host-side timeout bookkeeping: log, activity stamp, cooldown ladder, user warning."""
     from agent.conversation_compression import mark_context_compression_timed_out
-
     mark_context_compression_timed_out(agent)
     if total_exhausted:
         logger.warning(
@@ -122,7 +121,6 @@ def _sync_persisted_markers(target_messages, source_messages) -> None:
     """
     from agent.context_compressor import _DB_PERSISTED_MARKER
     from agent.conversation_compression import _stamp_scoped_twins
-
     if not isinstance(target_messages, list) or not isinstance(source_messages, list):
         return
     for source_message in source_messages:
@@ -141,7 +139,6 @@ def _run_under_progress_timeout(
     handed back to keep identity semantics.
     """
     from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
-
     def _snapshot_worker(fence=None):
         snapshot = copy.deepcopy(messages)
         result_msgs, result_prompt = run(fence, target_messages=snapshot)
@@ -205,11 +202,9 @@ def _rebind_caller_session_context(agent) -> None:
     """
     with contextlib.suppress(Exception):
         from hermes_logging import set_session_context
-
         set_session_context(agent.session_id)
     try:
         from gateway.session_context import set_current_session_id
-
         if agent.session_id:
             set_current_session_id(agent.session_id)
     except Exception:
@@ -245,7 +240,6 @@ class CompressionFacadeMixin:
             reset_context_compression_timeout_outcome,
             resolve_context_compression_timeouts,
         )
-
         reset_context_compression_timeout_outcome(self)
         from agent.portal_tags import (
             get_affinity_scope,
@@ -256,7 +250,6 @@ class CompressionFacadeMixin:
             set_conversation_context,
         )
         from agent.prompt_cache_scope import declared_conversation_scope_safe
-
         # Out-of-turn compaction (/compact, gateway /compress, partial head compression) runs outside
         # run_conversation's ambient scope; publish the root as a fallback so the summarizer's call carries
         # the conversation tag. No-op for in-turn callers. Same for the ROUTING scope when declared.
