@@ -1,8 +1,7 @@
 """Typed contracts for autonomous cross-gateway hosted-room members.
 
-The Desktop may bootstrap an invitation but is never the issuer or runtime
-courier: the target gateway verifies a scoped grant and the full task
-coordinates before admitting any model or tool work.
+The Desktop may bootstrap an invitation but is never the issuer or runtime courier: the target gateway
+verifies a scoped grant and the full task coordinates before admitting any model or tool work.
 """
 
 from __future__ import annotations

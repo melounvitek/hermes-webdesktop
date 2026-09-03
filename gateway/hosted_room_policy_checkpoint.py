@@ -1,8 +1,8 @@
 """Durable bounded policy projection for hosted Group Chat preparation.
 
-The append-only room log remains the user-visible source of truth. This module
-materializes only the state needed to choose and reconstruct the next active
-discussion, so a busy room does not replay its complete history every poll.
+The append-only room log remains the user-visible source of truth. This module materializes only the state
+needed to choose and reconstruct the next active discussion, so a busy room does not replay its complete
+history every poll.
 """
 
 from __future__ import annotations

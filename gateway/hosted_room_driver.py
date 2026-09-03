@@ -1,9 +1,8 @@
 """Durable execution state for a same-gateway hosted room driver.
 
-Owns only the driver lease and task state machine: no model calls, no
-sessions, no dependency on the hosted-room event log. Callers supply the
-database path and clock so recovery and fencing are testable without
-process-global state.
+Owns only the driver lease and task state machine: no model calls, no sessions, no dependency on the
+hosted-room event log. Callers supply the database path and clock so recovery and fencing are testable
+without process-global state.
 """
 
 from __future__ import annotations
@@ -53,8 +52,8 @@ _TASK_INDEX_SQL = """CREATE INDEX {if_not_exists}idx_hosted_room_driver_tasks_st
            ON hosted_room_driver_tasks(room_id, status, source_event_seq, created_at, task_id)"""
 
 # --- Fenced task UPDATE statements (one per state-machine transition) ---------
-# Every transition is "UPDATE ... SET <set> WHERE room_id=? AND task_id=? AND <fence>";
-# the fence names the expected status plus the generations that must not have moved.
+# Every transition is "UPDATE ... SET <set> WHERE room_id=? AND task_id=? AND <fence>"; the fence names the
+# expected status plus the generations that must not have moved.
 _GENERATION_FENCE = "execution_generation=? AND cancel_generation=?"
 _RUN_FENCE = "run_gateway_id=? AND run_process_generation=? AND run_lease_generation=?"
 _SETTLE_SET = "status=?, settlement_id=?, settlement_status=?, result_json=?, terminal_at=?, updated_at=?"
@@ -263,9 +262,7 @@ def _migrate_task_status_constraint(conn: sqlite3.Connection) -> None:
 
 def _connect(db_path: DbPath) -> sqlite3.Connection:
     """Open the store; existing tables are validated (after the status-constraint migration when needed).
-
-    The driver schema never shipped, so an incompatible draft fails closed in ``_validate_schema``.
-    """
+    The driver schema never shipped, so an incompatible draft fails closed in ``_validate_schema``."""
     existing: list[bool] = []
     def ready(conn: sqlite3.Connection) -> bool:
         existing.append(_schema_objects_exist(conn))
@@ -417,10 +414,8 @@ def _terminal_settlement_id(settlement_id: Any, status: Any) -> str:
 def _settlement(
     settlement_id: Any, status: Any, result: Any, clock: Clock
 ) -> tuple[float, Callable[[sqlite3.Row], Any], tuple[Any, ...]]:
-    """Validate one terminal settlement -> (now, replay predicate, ``_SETTLE_SET`` params).
-
-    Replay: an identical settlement already committed is idempotent; a different one is a conflict.
-    """
+    """Validate one terminal settlement -> (now, replay predicate, ``_SETTLE_SET`` params); the replay treats an
+    identical committed settlement as idempotent and a different one as a conflict."""
     settlement_id = _terminal_settlement_id(settlement_id, status)
     result_json = _canonical_json(result)
     now = _timestamp(clock)
@@ -456,9 +451,9 @@ def _transition(
     guard: Callable[[sqlite3.Row], None] | None = None) -> dict[str, Any]:
     """Run one fenced task transition: load -> idempotent replay -> lease/fence guard -> UPDATE.
 
-    ``sql`` binds ``(*set_params, room_id, task_id, *fence_params)`` and must hit exactly one row or
-    ``stale`` is raised. ``lease_first`` checks the lease before the row load (recovery paths) instead
-    of after the replay (settlement paths: an identical replay still succeeds after the lease moved on).
+    ``sql`` binds ``(*set_params, room_id, task_id, *fence_params)`` and must hit exactly one row or ``stale``
+    is raised. ``lease_first`` checks the lease before the row load (recovery paths) instead of after the
+    replay (settlement paths: an identical replay still succeeds after the lease moved on).
     """
     params = (*set_params, identity.room_id, identity.task_id, *fence_params)
     with _transaction(db_path) as conn:
@@ -493,9 +488,7 @@ def _run_fence_transition(
     db_path: DbPath, attempt: TaskAttempt, *, guard_stale: str, lease_generation: Callable[[Any], int] = int,
     **transition: Any) -> dict[str, Any]:
     """Transition fenced on this attempt's running generation under its exact lease (row guard + SQL fence).
-
-    ``lease_generation`` casts the stored run_lease_generation: ``int`` raises on NULL, ``int(v or 0)`` reads 0.
-    """
+    ``lease_generation`` casts the stored run_lease_generation: ``int`` raises on NULL, ``int(v or 0)`` reads 0."""
     lease = attempt.lease
     def guard(row: sqlite3.Row) -> None:
         if not _generations_match(row, "running", attempt.execution_generation, attempt.cancel_generation) or (

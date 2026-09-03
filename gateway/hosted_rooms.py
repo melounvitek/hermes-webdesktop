@@ -1,9 +1,8 @@
 """Durable state for gateway-hosted Bot Mode rooms.
 
-Owns only hosted-room identity and its append-only event log; delivery, relay leasing
-and agent turns belong to the relay and the hosted-room driver, so the log composes with
-a durable relay without a second transport queue. Callers supply the database path
-(production handlers use the gateway's root ``state.db``).
+Owns only hosted-room identity and its append-only event log; delivery, relay leasing and agent turns
+belong to the relay and the hosted-room driver, so the log composes with a durable relay without a second
+transport queue. Callers supply the database path (production handlers use the gateway's root ``state.db``).
 """
 
 from __future__ import annotations
@@ -39,9 +38,8 @@ MAX_DISBANDED_ROOM_TOMBSTONES = 512
 DISBANDED_ROOM_RETENTION_SECONDS = 90 * 24 * 60 * 60
 MAX_EVENTS_PER_ROOM = 50_000
 MAX_ROOM_EVENT_BYTES = 256 * 1024 * 1024
-# Leave substantial headroom below the pre-update state.db snapshot ceiling.
-# Event accounting does not include SQLite indexes or repeated room ids, so the
-# logical budget must stay well below the physical-file limit.
+# Leave substantial headroom below the pre-update state.db snapshot ceiling: event accounting excludes
+# SQLite indexes and repeated room ids, so the logical budget must stay well below the physical-file limit.
 MAX_GATEWAY_EVENT_BYTES = 16 * 1024 * 1024
 CONTROL_EVENT_COUNT_RESERVE = 64
 CONTROL_EVENT_BYTE_RESERVE = 1024 * 1024
@@ -335,9 +333,8 @@ def _migrate_remote_run_schema(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE hosted_room_remote_runs_migrating RENAME TO hosted_room_remote_runs")
 
 
-# Draft builds before the actor contract carried no identity. Preserve their
-# inert replay rows explicitly as legacy system events rather than guessing a
-# user or Bot author.
+# Draft builds before the actor contract carried no identity. Preserve their inert replay rows explicitly
+# as legacy system events rather than guessing a user or Bot author.
 _LEGACY_ACTOR_JSON = _system_actor_json("legacy").replace("'", "''")
 # (table, column, ddl) applied in this exact order; each table's PRAGMA is read on first use.
 _LEGACY_COLUMN_DDL = (
@@ -377,10 +374,9 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     for statement in _SCHEMA_DDL:
         conn.execute(statement)
     _migrate_legacy_columns(conn)
-    # Old schemas kept the final identity tombstone in hosted_rooms itself.
-    # Copy those identities before bounded history pruning can remove their
-    # heavier room/event payloads. This compact registry is intentionally
-    # permanent: a stale coordinate must never name a different Group Chat.
+    # Old schemas kept the final identity tombstone in hosted_rooms itself. Copy those identities before
+    # bounded history pruning can remove their heavier room/event payloads. This compact registry is
+    # intentionally permanent: a stale coordinate must never name a different Group Chat.
     conn.execute(_RETIRE_FROM_ROOMS.format(where="disbanded_at IS NOT NULL"))
     _migrate_remote_run_schema(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_hosted_room_events_cursor ON hosted_room_events(room_id, seq)")
@@ -446,8 +442,7 @@ def _room_row(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...], room_
     row = conn.execute(sql, params).fetchone()
     if row is not None:
         return row
-    # A retained disband tombstone still has replayable history; the caller simply
-    # did not opt into reading disbanded rooms.
+    # A retained disband tombstone still has replayable history; the caller did not opt into disbanded rooms.
     retained = conn.execute("SELECT 1 FROM hosted_rooms WHERE room_id=?", (room_id,)).fetchone()
     if retained is None and _is_retired(conn, room_id):
         raise RoomHistoryExpiredError("Group Chat history expired; room_id remains permanently retired")
@@ -918,10 +913,8 @@ def rename_room(db_path: DbPath, *, room_id: Any, event_id: Any, name: Any, now:
 def append_event(
     db_path: DbPath, *, room_id: Any, event_id: Any, kind: Any, actor: Any, payload: Any,
     authority_gateway_id: Any = None, authority_epoch: Any = None, now: float | None = None) -> dict[str, Any]:
-    """Append one immutable event and allocate its per-room sequence atomically.
-
-    Repeating an ``event_id`` with identical content returns the original; different content fails closed.
-    """
+    """Append one immutable event and allocate its per-room sequence atomically; repeating an ``event_id``
+    with identical content returns the original, different content fails closed."""
     room_id = _room_id(room_id)
     event_id = _event_id(event_id)
     kind = _validate_event_kind(kind)
@@ -972,11 +965,9 @@ def _probe(path: Path, table: str, query: str, params: tuple[Any, ...], unavaila
 
 
 def probe_hosted_room(db_path: DbPath, *, room_id: Any) -> bool:
-    """Check room ownership without creating or migrating the shared store.
-
-    Runs on the synchronous prompt-admission path for older Desktop clients, so it fails fast
-    under contention instead of blocking the WebSocket reader for SQLite's ten-second timeout.
-    """
+    """Check room ownership without creating or migrating the shared store; runs on the synchronous
+    prompt-admission path for older Desktop clients, so it fails fast under contention instead of blocking
+    the WebSocket reader for SQLite's ten-second timeout."""
     return _probe(
         Path(db_path), "hosted_rooms", "SELECT 1 FROM hosted_rooms WHERE room_id=? AND disbanded_at IS NULL LIMIT 1",
         (_room_id(room_id),), "hosted room ownership is temporarily unavailable")
@@ -1019,11 +1010,9 @@ def request_room_stop(
 def claim_authority(
     db_path: DbPath, *, room_id: Any, expected_gateway_id: Any, expected_epoch: Any, new_gateway_id: Any, event_id: Any,
     now: float | None = None) -> dict[str, Any]:
-    """Fence a verified authority transfer with a compare-and-swap epoch.
-
-    Does not decide *when* takeover is safe: a replicated driver calls it only after its
-    lease/quorum policy established that the previous owner can no longer commit.
-    """
+    """Fence a verified authority transfer with a compare-and-swap epoch; does not decide *when* takeover is
+    safe (a replicated driver calls it only after its lease/quorum policy established that the previous
+    owner can no longer commit)."""
     room_id = _room_id(room_id)
     expected_gateway_id = _actor_id(expected_gateway_id, "expected_gateway_id")
     new_gateway_id = _actor_id(new_gateway_id, "new_gateway_id")

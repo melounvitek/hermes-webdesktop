@@ -1,10 +1,9 @@
 """Deterministic policy for same-gateway hosted-room Discussions.
 
-Pure (no I/O, transport or model knowledge): a frozen local roster plus the complete
-typed room log yields at most one next driver task. Discussion coordinates live in
-deterministic ``TaskIdentity`` values and typed terminal events rather than a widened
-driver payload, so a restart reconstructs tasks from durable state. Callers must
-reconcile terminal driver rows into publication plans before asking for the next task.
+Pure (no I/O, transport or model knowledge): a frozen local roster plus the complete typed room log yields
+at most one next driver task. Discussion coordinates live in deterministic ``TaskIdentity`` values and typed
+terminal events rather than a widened driver payload, so a restart reconstructs tasks from durable state.
+Callers must reconcile terminal driver rows into publication plans before asking for the next task.
 """
 
 from __future__ import annotations
@@ -754,9 +753,8 @@ def plan_publication(
     result: Any = None, execution_generation: int | None = None, local_profiles: Iterable[str]) -> PublicationPlan:
     """Plan idempotent room effects for one terminal driver task.
 
-    A newer user event in the same thread supersedes a late result: the task
-    stays terminal in driver state, but only a deterministic cancellation is
-    published so stale prose and its watermark cannot hide the newer message.
+    A newer user event in the same thread supersedes a late result: the task stays terminal in driver state,
+    but only a deterministic cancellation is published so stale prose and its watermark cannot hide it.
     """
     room = validate_room(room_value, local_profiles=local_profiles)
     validated = _validated_events(events, room=room)

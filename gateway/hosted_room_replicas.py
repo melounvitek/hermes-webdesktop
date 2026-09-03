@@ -53,10 +53,8 @@ def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
 
 @contextmanager
 def _replica_transaction(db_path: DbPath) -> Iterator[sqlite3.Connection]:
-    """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction.
-
-    The DDL is deliberately re-run inside the transaction: that double init is the established statement order.
-    """
+    """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction. The DDL is
+    deliberately re-run inside the transaction: that double init is the established statement order."""
     with closing(_connect(db_path)) as conn, conn:
         _initialize_replica_schema(conn)
     with _transaction(db_path, immediate=True) as conn:
@@ -202,9 +200,9 @@ def promote_replica(
 ) -> dict[str, Any]:
     """Continue a replicated room on THIS gateway at ``epoch + 1``.
 
-    Copies the replica log into the authoritative store and appends a lineage-proving
-    ``authority.claimed`` event, so wherever the claim replicates the old epoch is stale and every
-    fenced primitive rejects it. The caller decides takeover is safe; this makes it atomic and provable.
+    Copies the replica log into the authoritative store and appends a lineage-proving ``authority.claimed``
+    event, so wherever the claim replicates the old epoch is stale and every fenced primitive rejects it.
+    The caller decides takeover is safe; this makes it atomic and provable.
     """
     room_id = _room_id(room_id)
     if not isinstance(reason, str) or not reason or len(reason) > 200:
@@ -251,9 +249,9 @@ def demote_room(
 ) -> dict[str, Any]:
     """Fence THIS gateway's stale room authority against a proven newer epoch.
 
-    When a returning gateway observes (replicated ``authority.claimed`` or a transport rejection) that
-    another gateway owns the room at a higher epoch, append ``authority.lost`` and adopt the observed
-    lineage so no local send can commit at the stale epoch. Idempotent per lineage.
+    When a returning gateway observes (replicated ``authority.claimed`` or a transport rejection) that another
+    gateway owns the room at a higher epoch, append ``authority.lost`` and adopt the observed lineage so no
+    local send can commit at the stale epoch. Idempotent per lineage.
     """
     room_id = _room_id(room_id)
     observed_gateway_id = _validate_identifier(
