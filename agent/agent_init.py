@@ -998,13 +998,13 @@ def _init_fallback_chain(agent, fallback_model):
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
     agent._fallback_model = agent._fallback_chain[0] if agent._fallback_chain else None
-    if agent._fallback_chain and not agent.quiet_mode:
-        if len(agent._fallback_chain) == 1:
-            fb = agent._fallback_chain[0]
-            print(f"🔄 Fallback model: {fb['model']} ({fb['provider']})")
+    chain = agent._fallback_chain
+    if chain and not agent.quiet_mode:
+        labels = [f"{f['model']} ({f['provider']})" for f in chain]
+        if len(chain) == 1:
+            print(f"🔄 Fallback model: {labels[0]}")
         else:
-            print(f"🔄 Fallback chain ({len(agent._fallback_chain)} providers): " +
-                  " → ".join(f"{f['model']} ({f['provider']})" for f in agent._fallback_chain))
+            print(f"🔄 Fallback chain ({len(chain)} providers): " + " → ".join(labels))
 
 
 def _load_tools(agent, enabled_toolsets, disabled_toolsets):
@@ -1163,8 +1163,6 @@ def _apply_display_config(agent, _agent_cfg, platform):
         )
     except Exception as _tlg_err:
         _ra().logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
-    # Only this derived override is cached (startup feasibility check) — no config object.
-    agent._aux_compression_context_length_config = None
 
 
 def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
