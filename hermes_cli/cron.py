@@ -568,8 +568,8 @@ def cron_doctor() -> int:
 
     if not findings:
         print(color("✓ Cron doctor found no issues", Colors.GREEN))
-        summary = f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured."
-        print(color(summary, Colors.DIM))
+        note = f"  Checked {len(jobs)} active job(s)." if jobs else "  No active jobs configured."
+        print(color(note, Colors.DIM))
         return 0
 
     issue_count = sum(len(issues) for _, issues in findings)
