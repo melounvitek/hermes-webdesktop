@@ -150,32 +150,26 @@ def _save_aux_choice(task: str, *, provider: str, model: str = "", base_url: str
 def _reset_aux_to_auto() -> int:
     """Reset every known aux task (built-in + plugin) back to auto/empty. Returns number reset."""
     from hermes_cli.config import load_config, save_config
-    cfg = load_config()
-    aux = _ensure_dict_section(cfg, "auxiliary")
-    count = 0
-    for task, _name, _desc in _all_aux_tasks():
-        entry = _ensure_dict_section(aux, task)
+    def _clear(entry: dict, auto: str) -> bool:
+        # Only the routing fields; timeout/download_timeout (aux) and max_concurrent_children
+        # etc. (delegation) are user-tuned and preserved. *auto* is the reset provider value
+        # ("auto" for aux tasks, "" for delegation); anything else counts as a change.
         changed = False
-        if entry.get("provider") not in {None, "", "auto"}:
-            entry["provider"] = "auto"
+        if entry.get("provider") not in {None, "", auto}:
+            entry["provider"] = auto
             changed = True
         for field in ("model", "base_url", "api_key"):
             if entry.get(field):
                 entry[field] = ""
                 changed = True
-        # Preserve timeout/download_timeout — those are user-tuned, not routing
-        if changed:
-            count += 1
-    # Delegation: clear only the routing fields; max_concurrent_children etc. are preserved.
+        return changed
+
+    cfg = load_config()
+    aux = _ensure_dict_section(cfg, "auxiliary")
+    count = sum(_clear(_ensure_dict_section(aux, task), "auto") for task, _name, _desc in _all_aux_tasks())
     dele = cfg.get("delegation")
     if isinstance(dele, dict):
-        changed = False
-        for field in ("provider", "model", "base_url", "api_key"):
-            if dele.get(field):
-                dele[field] = ""
-                changed = True
-        if changed:
-            count += 1
+        count += _clear(dele, "")
     save_config(cfg)
     return count
 
@@ -444,7 +438,6 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
     providers = cfg.get("custom_providers") or []
     if not isinstance(providers, list):
         providers = []
-
     for entry in providers:
         if not (isinstance(entry, dict) and entry.get("base_url", "").rstrip("/") == base_url.rstrip("/")):
             continue
@@ -453,11 +446,7 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
             entry["model"] = model
             changed = True
         if model and context_length:
-            models_cfg = entry.get("models", {})
-            if not isinstance(models_cfg, dict):
-                models_cfg = {}
-            models_cfg[model] = {"context_length": context_length}
-            entry["models"] = models_cfg
+            _ensure_dict_section(entry, "models")[model] = {"context_length": context_length}
             changed = True
         if api_mode:
             if entry.get("api_mode") != api_mode:
@@ -475,8 +464,7 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
             save_config(cfg)
         return  # already saved, updated if needed
 
-    if not name:
-        name = _auto_provider_name(base_url)
+    name = name or _auto_provider_name(base_url)
     entry = {"name": name, "base_url": base_url}
     if key_env:
         entry["key_env"] = key_env
@@ -754,10 +742,7 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
         name_lc = str(name or "").strip().lower()
         pkey_lc = str(provider_key or "").strip().lower()
         model = str(model or "").strip()
-        for identity in ((pkey_lc, model), (pkey_lc,), (name_lc, model), (name_lc,)):
-            if identity[0] and identity in refs:
-                return refs[identity]
-        return ""
+        return next((refs[i] for i in ((pkey_lc, model), (pkey_lc,), (name_lc, model), (name_lc,)) if i[0] and i in refs), "")
 
     custom_provider_map = {}
     for entry in get_compatible_custom_providers(cfg):
