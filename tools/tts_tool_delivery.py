@@ -23,11 +23,90 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_cli._subprocess_compat import windows_hide_flags
+from tools.tts_command_provider import (
+    BUILTIN_TTS_PROVIDERS,
+    DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
+    _get_named_provider_config,
+    _is_command_provider_config,
+)
 
 logger = logging.getLogger("tools.tts_tool")
 
 # Final fallback when provider isn't recognised at all.
 FALLBACK_MAX_TEXT_LENGTH = 4000
+
+# Per-provider input-character caps (from official provider docs); override
+# via ``tts.<provider>.max_text_length``.
+PROVIDER_MAX_TEXT_LENGTH: Dict[str, int] = {
+    "edge": 5000,         # edge-tts practical sync limit
+    "openai": 4096,       # https://platform.openai.com/docs/guides/text-to-speech
+    "xai": 15000,         # https://docs.x.ai/developers/model-capabilities/audio/text-to-speech
+    "minimax": 10000,     # https://platform.minimax.io/docs/api-reference/speech-t2a-http (sync)
+    "mistral": 4000,      # conservative; no published per-request cap
+    "gemini": 32000,      # 32k-token context window; char cap is conservative
+    "elevenlabs": 10000,  # fallback when model-aware lookup can't resolve (multilingual_v2)
+    "neutts": 2000,       # local model, quality falls off on long text
+    "kittentts": 2000,    # local 25MB model
+    "piper": 5000,        # local VITS model, phoneme-based; practical cap
+}
+
+# ElevenLabs caps vary by model_id. https://elevenlabs.io/docs/overview/models
+ELEVENLABS_MODEL_MAX_TEXT_LENGTH: Dict[str, int] = {
+    "eleven_v3": 5000,
+    "eleven_ttv_v3": 5000,
+    "eleven_multilingual_v2": 10000,
+    "eleven_multilingual_v1": 10000,
+    "eleven_english_sts_v2": 10000,
+    "eleven_english_sts_v1": 10000,
+    "eleven_flash_v2": 30000,
+    "eleven_flash_v2_5": 40000,
+}
+
+def _positive_int_override(value: Any) -> Optional[int]:
+    """A user ``max_text_length`` override, or None when absent/bool/non-positive."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+def _resolve_max_text_length(
+    provider: Optional[str],
+    tts_config: Optional[Dict[str, Any]] = None,
+) -> int:
+    """Return the input-character cap for *provider*.
+
+    Order: ``tts.<provider>.max_text_length`` > ElevenLabs model table >
+    ``PROVIDER_MAX_TEXT_LENGTH`` > command provider's own ``max_text_length``
+    (else ``DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH``) > ``FALLBACK_MAX_TEXT_LENGTH``.
+    Non-positive / non-int overrides fall through so a broken config can't
+    disable truncation.
+    """
+    if not provider:
+        return FALLBACK_MAX_TEXT_LENGTH
+    key = provider.lower().strip()
+    cfg = tts_config or {}
+
+    prov_cfg = cfg.get(key) if isinstance(cfg.get(key), dict) else {}
+    override = _positive_int_override(prov_cfg.get("max_text_length") if prov_cfg else None)
+    if override:
+        return override
+
+    if key == "elevenlabs":
+        from tools.tts_tool_providers import DEFAULT_ELEVENLABS_MODEL_ID  # providers imports this module
+
+        model_id = (prov_cfg or {}).get("model_id") or DEFAULT_ELEVENLABS_MODEL_ID
+        mapped = ELEVENLABS_MODEL_MAX_TEXT_LENGTH.get(str(model_id).strip())
+        if mapped:
+            return mapped
+
+    if key in PROVIDER_MAX_TEXT_LENGTH:
+        return PROVIDER_MAX_TEXT_LENGTH[key]
+
+    if key not in BUILTIN_TTS_PROVIDERS:
+        named = _get_named_provider_config(cfg, key)
+        if _is_command_provider_config(named):
+            return _positive_int_override(named.get("max_text_length")) or DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH
+
+    return FALLBACK_MAX_TEXT_LENGTH
 
 # PCM output specs for Gemini TTS (fixed by the API)
 GEMINI_TTS_SAMPLE_RATE = 24000

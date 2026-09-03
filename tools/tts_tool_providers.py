@@ -205,6 +205,34 @@ def _strip_code_fence(content: str) -> str:
     return fence.group(1).strip() if fence else clean
 
 
+def _rewrite_with_auxiliary_model(
+    system_prompt: str,
+    user_prompt: str,
+    fallback: str,
+    *,
+    label: str,
+    fallback_label: str,
+    level: int,
+) -> str:
+    """Ask the auxiliary model (task ``tts_audio_tags``) to rewrite a script; *fallback* on any failure/empty reply."""
+    try:
+        from agent.auxiliary_client import call_llm
+
+        response = call_llm(
+            task=GEMINI_AUDIO_TAG_REWRITE_TASK,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+        )
+        tagged = _strip_code_fence(_extract_auxiliary_message_content(response))
+        return tagged or fallback
+    except Exception as exc:
+        logger.log(level, "%s audio tag rewrite failed; using %s: %s", label, fallback_label, exc)
+        return fallback
+
+
 # ===========================================================================
 # Provider: Edge TTS (free default)
 # ===========================================================================
@@ -288,10 +316,6 @@ _XAI_SPEECH_TAG_RE = re.compile(
 _XAI_FIRST_SENTENCE_RE = re.compile(r"^(.{12,120}?[.!?…])\s+(?=\S)", flags=re.DOTALL)
 
 
-def _xai_bool_config(value: Any, default: bool = False) -> bool:
-    return _config_bool(value, default=default)
-
-
 def _apply_xai_auto_speech_tags(text: str) -> str:
     """Add xAI speech tags for more natural voice-mode replies.
 
@@ -331,22 +355,9 @@ def _apply_xai_auto_speech_tags(text: str) -> str:
         "- Do not explain or comment.\n"
         "- Return only the tagged TTS script."
     )
-    try:
-        from agent.auxiliary_client import call_llm
-
-        response = call_llm(
-            task="tts_audio_tags",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"TRANSCRIPT TO TAG:\n{local}"},
-            ],
-            temperature=0.7,
-        )
-        tagged = _strip_code_fence(_extract_auxiliary_message_content(response))
-        return tagged or local
-    except Exception as exc:
-        logger.debug("xAI TTS audio tag rewrite failed; using locally-tagged text: %s", exc)
-        return local
+    return _rewrite_with_auxiliary_model(
+        system_prompt, f"TRANSCRIPT TO TAG:\n{local}", local, label="xAI TTS", fallback_label="locally-tagged text", level=logging.DEBUG,
+    )
 
 
 def _clamped_number(raw: Any, cast, lo, hi):
@@ -384,7 +395,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     language = str(xai_config.get("language", DEFAULT_XAI_LANGUAGE)).strip() or DEFAULT_XAI_LANGUAGE
     sample_rate = int(xai_config.get("sample_rate", DEFAULT_XAI_SAMPLE_RATE))
     bit_rate = int(xai_config.get("bit_rate", DEFAULT_XAI_BIT_RATE))
-    auto_speech_tags = _xai_bool_config(
+    auto_speech_tags = _config_bool(
         xai_config.get("auto_speech_tags", xai_config.get("speech_tags")),
         DEFAULT_XAI_AUTO_SPEECH_TAGS,
     )
@@ -398,7 +409,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
         xai_config.get("optimize_streaming_latency", tts_config.get("optimize_streaming_latency")),
         int, 0, 2,
     )
-    text_normalization = _xai_bool_config(
+    text_normalization = _config_bool(
         xai_config.get("text_normalization"),
         DEFAULT_XAI_TEXT_NORMALIZATION_DEFAULT,
     )
@@ -483,8 +494,7 @@ def _resolve_minimax_tts_runtime(
     is the sole configured MiniMax credential.
     """
     mm_config = tts_config.get("minimax", {})
-    if not isinstance(mm_config, dict):
-        mm_config = {}
+    mm_config = mm_config if isinstance(mm_config, dict) else {}
 
     resolve_key = _origin()._resolve_provider_key
     credentials = {
@@ -551,8 +561,7 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     runtime = _resolve_minimax_tts_runtime(tts_config)
 
     mm_config = tts_config.get("minimax", {})
-    if not isinstance(mm_config, dict):
-        mm_config = {}
+    mm_config = mm_config if isinstance(mm_config, dict) else {}
     model = mm_config.get("model", DEFAULT_MINIMAX_MODEL)
     voice_id = mm_config.get("voice_id", DEFAULT_MINIMAX_VOICE_ID)
     base_url = runtime.endpoint
@@ -745,22 +754,9 @@ def _rewrite_gemini_tts_audio_tags(text: str, persona_prompt: str = "") -> str:
     )
     context = persona_prompt.strip() or "(none)"
     user_prompt = f"PERSONA AND DIRECTOR CONTEXT:\n{context}\n\nTRANSCRIPT TO TAG:\n{transcript}"
-    try:
-        from agent.auxiliary_client import call_llm
-
-        response = call_llm(
-            task=GEMINI_AUDIO_TAG_REWRITE_TASK,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.7,
-        )
-        tagged = _strip_code_fence(_extract_auxiliary_message_content(response))
-        return tagged or text
-    except Exception as exc:
-        logger.warning("Gemini TTS audio tag rewrite failed; using untagged text: %s", exc)
-        return text
+    return _rewrite_with_auxiliary_model(
+        system_prompt, user_prompt, text, label="Gemini TTS", fallback_label="untagged text", level=logging.WARNING,
+    )
 
 
 def _compose_gemini_tts_prompt(
