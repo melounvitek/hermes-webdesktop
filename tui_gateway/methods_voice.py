@@ -6,6 +6,7 @@ method_ctx.bind_module), so they reference server.py globals bare.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 
 from .method_ctx import HandlerRegistry, bind_module
@@ -58,17 +59,12 @@ def _end_voice_chat(*, stop_loop: bool, stop_tts: bool) -> None:
     os.environ["HERMES_VOICE"] = "0"
     os.environ["HERMES_VOICE_TTS"] = "0"
     if stop_loop:
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.voice import stop_continuous
-
             stop_continuous()
-        except Exception:
-            pass
     if stop_tts:
-        try:
+        with contextlib.suppress(Exception):
             _tts_stream_stop(user_barge=False)
-        except Exception:
-            pass
 
 
 def _tts_lease_async(lease: str, active: bool) -> None:
@@ -79,11 +75,7 @@ def _tts_lease_async(lease: str, active: bool) -> None:
     def _run():
         try:
             from tools.tts_tool import acquire_tts_lease, release_tts_lease
-
-            if active:
-                acquire_tts_lease(lease)
-            else:
-                release_tts_lease(lease)
+            (acquire_tts_lease if active else release_tts_lease)(lease)
         except Exception as e:
             logger.debug("voice: tts lease %s active=%s failed: %s", lease, active, e)
 
@@ -114,27 +106,18 @@ def _tts_stream_begin() -> Optional[queue.Queue]:
         return None
     try:
         from tools.tts_tool import check_tts_requirements, stream_tts_to_speaker
-
         if not check_tts_requirements():
             return None
     except Exception:
         return None
-
     _tts_stream_stop()
     text_queue: queue.Queue = queue.Queue()
-    stop = threading.Event()
-    done = threading.Event()
-    threading.Thread(
-        target=stream_tts_to_speaker, args=(text_queue, stop, done), daemon=True
-    ).start()
-
+    stop, done = threading.Event(), threading.Event()
+    threading.Thread(target=stream_tts_to_speaker, args=(text_queue, stop, done), daemon=True).start()
     global _tts_stream_state
     with _tts_stream_lock:
         _tts_stream_state = {"stop": stop, "done": done}
-
-    if _voice_mode_enabled() and _voice_cfg_dict().get("barge_in", True):
-        _arm_full_duplex_listener()
-
+    _arm_barge_listener_if_enabled()
     return text_queue
 
 
@@ -148,21 +131,14 @@ def _tts_stream_stop(user_barge: bool = True) -> None:
         return
     if user_barge and not state["done"].is_set():
         import traceback as _tb
-        logger.debug(
-            "TTS CUT: _tts_stream_stop(user_barge=True) — new turn or "
-            "interrupt cutting in-flight TTS\n%s",
-            "".join(_tb.format_stack()),
-        )
+        logger.debug("TTS CUT: _tts_stream_stop(user_barge=True) — new turn or "
+                     "interrupt cutting in-flight TTS\n%s", "".join(_tb.format_stack()))
         from tools.tts_streaming import mark_speech_interrupted
-
         mark_speech_interrupted()
     state["stop"].set()
-    try:
+    with contextlib.suppress(Exception):
         from tools.voice_mode import stop_playback
-
         stop_playback()
-    except Exception:
-        pass
 
 
 # ── Full-duplex agent-turn listener (one mic, whole turn) ──────────────────
@@ -187,15 +163,24 @@ def _arm_full_duplex_listener() -> None:
     threading.Thread(target=_full_duplex_listener, daemon=True, name="voice-full-duplex").start()
 
 
+def _arm_barge_listener_if_enabled() -> None:
+    """Arm the listener when voice mode is on and ``voice.barge_in`` isn't disabled."""
+    if _voice_mode_enabled() and _voice_cfg_dict().get("barge_in", True):
+        _arm_full_duplex_listener()
+
+
+def _fd_speak_pipelines_snapshot() -> list:
+    with _fd_listener_lock:
+        return list(_fd_speak_pipelines)
+
+
 def _fd_tts_pending() -> bool:
     """True while any TTS (streaming pipeline or fallback speak) is unfinished."""
     with _tts_stream_lock:
         state = _tts_stream_state
     if state is not None and not state["done"].is_set():
         return True
-    with _fd_listener_lock:
-        pipelines = list(_fd_speak_pipelines)
-    return any(not done.is_set() for _stop, done in pipelines)
+    return any(not done.is_set() for _stop, done in _fd_speak_pipelines_snapshot())
 
 
 def _full_duplex_listener() -> None:
@@ -209,104 +194,105 @@ def _full_duplex_listener() -> None:
     """
     global _fd_listener_active
     try:
-        from tools.tts_streaming import mark_speech_interrupted
-        from tools.voice_mode import (
-            full_duplex_listen,
-            is_audio_output_active,
-            stop_playback,
-            transcribe_recording,
-        )
-
-        cfg = _voice_cfg_dict()
-        try:
-            _mult = float(cfg.get("barge_in_threshold_multiplier", 0) or 0)
-        except (TypeError, ValueError):
-            _mult = 0.0
-        try:
-            _grace_ms = int(float(cfg.get("barge_in_grace_seconds", 0.5)) * 1000)
-        except (TypeError, ValueError):
-            _grace_ms = 500
+        from tools.voice_mode import full_duplex_listen, is_audio_output_active, transcribe_recording
 
         def _should_stop() -> bool:
             if not _voice_mode_enabled():
                 return True
-            if _any_session_running():
-                return False
-            if _fd_tts_pending():
+            if _any_session_running() or _fd_tts_pending():
                 return False
             return not is_audio_output_active()
 
         tripped = threading.Event()
 
-        def _cut_all_tts() -> None:
-            _tts_stream_stop(user_barge=True)
-            with _fd_listener_lock:
-                pipelines = list(_fd_speak_pipelines)
-            for _stop, _done in pipelines:
-                _stop.set()
-            stop_playback()
-
         def _on_trigger(phase: str) -> None:
             tripped.set()
-            mark_speech_interrupted()
-            if phase == "playback":
-                logger.debug("TTS CUT: full-duplex listener tripped during playback")
-                _cut_all_tts()
-            else:
-                logger.debug(
-                    "full-duplex listener tripped during generation — "
-                    "interrupting running turn(s)"
-                )
-                # Cut pending TTS FIRST so the stale reply can never speak.
-                _cut_all_tts()
-                try:
-                    with _sessions_lock:
-                        running = [s for s in _sessions.values() if s.get("running")]
-                    for s in running:
-                        agent = s.get("agent")
-                        if agent is not None and hasattr(agent, "interrupt"):
-                            try:
-                                agent.interrupt()
-                            except Exception:
-                                pass
-                except Exception as e:
-                    logger.debug("voice interjection interrupt failed: %s", e)
-            _voice_emit("voice.interrupted")
+            _fd_trip(phase)
 
-        wav_path = full_duplex_listen(
-            _should_stop, is_playing=is_audio_output_active, on_trigger=_on_trigger,
-            multiplier=_mult or None, grace_ms=max(0, _grace_ms),
-        )
+        mult, grace_ms = _fd_barge_params(_voice_cfg_dict())
+        wav_path = full_duplex_listen(_should_stop, is_playing=is_audio_output_active,
+                                      on_trigger=_on_trigger, multiplier=mult or None, grace_ms=grace_ms)
         if not (wav_path and tripped.is_set()):
             return
         try:
             result = transcribe_recording(wav_path)
             text = (result.get("transcript") or "").strip() if result.get("success") else ""
             if text:
-                # Stop-check must never break transcript delivery (stubbed
-                # voice_mode in tests, partial installs) — treat as not-a-stop.
-                try:
-                    from tools.voice_mode import is_voice_stop_phrase
-                    _is_stop = is_voice_stop_phrase(text)
-                except Exception:
-                    _is_stop = False
-
-                if _is_stop:
-                    # Turn already interrupted / TTS cut at trip time; now end the chat.
-                    _end_voice_chat(stop_loop=True, stop_tts=False)
-                    _voice_emit("voice.transcript", {"stop_phrase": True, "text": text})
-                else:
-                    _voice_emit("voice.transcript", {"text": text})
+                _deliver_fd_transcript(text)
         finally:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(wav_path)
-            except OSError:
-                pass
     except Exception as e:
         logger.debug("full-duplex listener failed: %s", e)
     finally:
         with _fd_listener_lock:
             _fd_listener_active = False
+
+
+def _fd_barge_params(cfg: dict) -> tuple[float, int]:
+    """``(threshold multiplier, grace ms)`` from the voice config; malformed -> defaults."""
+    try:
+        mult = float(cfg.get("barge_in_threshold_multiplier", 0) or 0)
+    except (TypeError, ValueError):
+        mult = 0.0
+    try:
+        grace_ms = int(float(cfg.get("barge_in_grace_seconds", 0.5)) * 1000)
+    except (TypeError, ValueError):
+        grace_ms = 500
+    return mult, max(0, grace_ms)
+
+
+def _cut_all_tts() -> None:
+    """Cut streaming TTS, every fallback speak pipeline, and the file player."""
+    from tools.voice_mode import stop_playback
+
+    _tts_stream_stop(user_barge=True)
+    for _stop, _done in _fd_speak_pipelines_snapshot():
+        _stop.set()
+    stop_playback()
+
+
+def _fd_trip(phase: str) -> None:
+    """Listener tripped: latch the interruption, cut TTS, and during generation also
+    interrupt every running turn (the ``agent.interrupt()`` seam ``session.interrupt`` uses)."""
+    from tools.tts_streaming import mark_speech_interrupted
+
+    mark_speech_interrupted()
+    if phase == "playback":
+        logger.debug("TTS CUT: full-duplex listener tripped during playback")
+        _cut_all_tts()
+    else:
+        logger.debug("full-duplex listener tripped during generation — interrupting running turn(s)")
+        # Cut pending TTS FIRST so the stale reply can never speak.
+        _cut_all_tts()
+        try:
+            with _sessions_lock:
+                running = [s for s in _sessions.values() if s.get("running")]
+            for s in running:
+                agent = s.get("agent")
+                if agent is not None and hasattr(agent, "interrupt"):
+                    with contextlib.suppress(Exception):
+                        agent.interrupt()
+        except Exception as e:
+            logger.debug("voice interjection interrupt failed: %s", e)
+    _voice_emit("voice.interrupted")
+
+
+def _deliver_fd_transcript(text: str) -> None:
+    """Emit the captured interjection; a bare stop phrase also ends the voice chat."""
+    # Stop-check must never break transcript delivery (stubbed voice_mode in tests,
+    # partial installs) — treat as not-a-stop.
+    try:
+        from tools.voice_mode import is_voice_stop_phrase
+        is_stop = is_voice_stop_phrase(text)
+    except Exception:
+        is_stop = False
+    if is_stop:
+        # Turn already interrupted / TTS cut at trip time; now end the chat.
+        _end_voice_chat(stop_loop=True, stop_tts=False)
+        _voice_emit("voice.transcript", {"stop_phrase": True, "text": text})
+    else:
+        _voice_emit("voice.transcript", {"text": text})
 
 
 def _speak_text_with_barge(text: str) -> None:
@@ -315,8 +301,7 @@ def _speak_text_with_barge(text: str) -> None:
     it on a playback trip and keeps listening while it is pending."""
     from hermes_cli.voice import speak_text
 
-    stop = threading.Event()
-    done = threading.Event()
+    stop, done = threading.Event(), threading.Event()
     with _fd_listener_lock:
         _fd_speak_pipelines.add((stop, done))
 
@@ -332,8 +317,7 @@ def _speak_text_with_barge(text: str) -> None:
                 _fd_speak_pipelines.discard((stop, done))
 
     threading.Thread(target=_speak, daemon=True).start()
-    if _voice_mode_enabled() and _voice_cfg_dict().get("barge_in", True):
-        _arm_full_duplex_listener()
+    _arm_barge_listener_if_enabled()
 
 
 def _voice_cfg_dict() -> dict:
@@ -341,7 +325,6 @@ def _voice_cfg_dict() -> dict:
     root and ``voice`` may be any YAML scalar/list/None; malformed → {}."""
     cfg = _load_cfg()
     voice_cfg = cfg.get("voice") if isinstance(cfg, dict) else None
-
     return voice_cfg if isinstance(voice_cfg, dict) else {}
 
 
@@ -354,7 +337,6 @@ def _voice_cfg_number(value, default):
 def _voice_record_key() -> str:
     """Current ``voice.record_key`` value, documented default on error."""
     record_key = _voice_cfg_dict().get("record_key")
-
     return str(record_key) if isinstance(record_key, str) and record_key else "ctrl+b"
 
 
@@ -374,17 +356,21 @@ def _wake_owner_snapshot():
         return _wake_owner_transport, _wake_owner_surface
 
 
+def _set_wake_owner(transport, surface: str) -> None:
+    global _wake_owner_transport, _wake_owner_surface
+    with _wake_lock:
+        _wake_owner_transport, _wake_owner_surface = transport, surface
+
+
 def _release_wake_for_transport(transport: "Transport") -> bool:
     """Release the wake lease iff ``transport`` is the current gateway owner."""
     global _wake_owner_transport, _wake_owner_surface
     with _wake_lock:
         if _wake_owner_transport is not transport:
             return False
-        _wake_owner_transport = None
-        _wake_owner_surface = ""
+        _wake_owner_transport, _wake_owner_surface = None, ""
     try:
         from tools.wake_word import stop_listening
-
         stop_listening(owner=transport)
     except Exception as e:
         logger.debug("wake stop failed: %s", e)
@@ -438,10 +424,8 @@ def _wake_resume_if_owner(owner: "Transport", *, retry_seconds: float = 15.0,
                     continue
                 # False — detector gone or lease moved: stop, don't fight it.
                 return
-            logger.warning(
-                "wake: could not resume detector after voice turn "
-                "(microphone still busy?) — toggle the wake word to re-arm"
-            )
+            logger.warning("wake: could not resume detector after voice turn "
+                           "(microphone still busy?) — toggle the wake word to re-arm")
         finally:
             with _wake_resume_retry_lock:
                 _wake_resume_retry_active = False
@@ -455,7 +439,6 @@ def _persist_wake_enabled(enabled: bool) -> bool:
     (ear toggle, /wake on|off) — never passive auto-arm paths."""
     try:
         from cli import save_config_value
-
         return bool(save_config_value("wake_word.enabled", enabled))
     except Exception as e:
         logger.warning("wake: failed to persist wake_word.enabled=%s: %s", enabled, e)
@@ -474,9 +457,7 @@ def _wake_probe(cfg: dict, prefer_client: bool) -> tuple[str, dict]:
     from tools.wake_word import check_wake_word_requirements, resolve_capture_mode
 
     capture_mode = resolve_capture_mode(cfg, prefer_client=prefer_client)
-    probe_cfg = dict(cfg)
-    probe_cfg["capture"] = capture_mode
-    return capture_mode, check_wake_word_requirements(probe_cfg)
+    return capture_mode, check_wake_word_requirements({**cfg, "capture": capture_mode})
 
 
 def _wake_detect_handler(transport, sid: str, phrase: str, new_session: bool):
@@ -486,9 +467,7 @@ def _wake_detect_handler(transport, sid: str, phrase: str, new_session: bool):
     def _on_detect() -> None:
         from tools.wake_word import get_last_match, owns_listener, pause_listening
 
-        if not pause_listening(owner=transport):
-            return
-        if not owns_listener(transport):
+        if not pause_listening(owner=transport) or not owns_listener(transport):
             return
         if _transport_is_dead(transport):
             _release_wake_for_transport(transport)
@@ -517,7 +496,6 @@ def _(rid, params: dict) -> dict:
     withholds unless the guarantee is advertised. Sourced from the enforcing module,
     never config: a believed-but-absent capability is worse than none."""
     from hermes_cli.active_sessions import PER_SESSION_EXCLUSIVE_SUBMIT
-
     return _ok(rid, {"per_session_exclusive_submit": bool(PER_SESSION_EXCLUSIVE_SUBMIT)})
 
 
@@ -543,13 +521,8 @@ def _(rid, params: dict) -> dict:
     transport = _caller_transport()
     try:
         from tools.wake_word import (
-            WakeWordInUse,
-            detector_frame_info,
-            load_wake_word_config,
-            owns_listener,
-            start_listening,
-            wake_phrase,
-            wake_surface_enabled,
+            WakeWordInUse, detector_frame_info, load_wake_word_config, owns_listener, start_listening,
+            wake_phrase, wake_surface_enabled,
         )
     except Exception as e:
         return _err(rid, 5026, f"wake module unavailable: {e}")
@@ -565,12 +538,9 @@ def _(rid, params: dict) -> dict:
             "started": False, "reason": "unavailable", "hint": reqs.get("hint") or "",
             "capture": capture_mode,
         })
-    enabled_persisted = False
-    if persist and not cfg.get("enabled"):
-        enabled_persisted = _persist_wake_enabled(True)
-        if enabled_persisted:
-            cfg = dict(cfg)
-            cfg["enabled"] = True
+    enabled_persisted = bool(persist and not cfg.get("enabled") and _persist_wake_enabled(True))
+    if enabled_persisted:
+        cfg = {**cfg, "enabled": True}
     if not wake_surface_enabled(surface, cfg):
         # "disabled" (a persist:true retry can turn it on) vs "disabled_for_surface"
         # (explicit wake_word.surface choice, which persist does NOT override).
@@ -580,36 +550,22 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"started": False, "reason": reason})
 
     existing_owner, existing_surface = _wake_owner_snapshot()
-    if existing_owner is not None and (
-        _transport_is_dead(existing_owner) or not owns_listener(existing_owner)
-    ):
+    if existing_owner is not None and (_transport_is_dead(existing_owner) or not owns_listener(existing_owner)):
         _release_wake_for_transport(existing_owner)
-        existing_owner = None
-        existing_surface = ""
+        existing_owner, existing_surface = None, ""
     if existing_owner is not None and existing_owner is not transport:
         return _ok(rid, {"started": False, "reason": "owned", "owner_surface": existing_surface})
 
     sid = str(params.get("session_id") or "")
     try:
-        start_listening(
-            _wake_detect_handler(
-                transport, sid, wake_phrase(cfg), bool(cfg.get("start_new_session", True))
-            ),
-            owner=transport,
-            config=cfg,
-            external_audio=external_audio,
-        )
+        on_detect = _wake_detect_handler(transport, sid, wake_phrase(cfg), bool(cfg.get("start_new_session", True)))
+        start_listening(on_detect, owner=transport, config=cfg, external_audio=external_audio)
     except WakeWordInUse:
-        return _ok(rid, {
-            "started": False, "reason": "owned", "owner_surface": existing_surface or None,
-        })
+        return _ok(rid, {"started": False, "reason": "owned", "owner_surface": existing_surface or None})
     except Exception as e:
         logger.warning("wake.start(%s): failed to start listener: %s", surface, e)
         return _err(rid, 5026, str(e))
-    global _wake_owner_transport, _wake_owner_surface
-    with _wake_lock:
-        _wake_owner_transport = transport
-        _wake_owner_surface = surface
+    _set_wake_owner(transport, surface)
     frame = detector_frame_info()
     logger.info(
         "wake.start(%s): listening for %r (%s) capture=%s frame=%s",
@@ -633,7 +589,6 @@ def _(rid, params: dict) -> dict:
     if bool(params.get("persist")):
         try:
             from tools.wake_word import load_wake_word_config
-
             currently_enabled = bool(load_wake_word_config().get("enabled"))
         except Exception:
             currently_enabled = True
@@ -651,7 +606,6 @@ def _(rid, params: dict) -> dict:
     transport = _caller_transport()
     try:
         from tools.wake_word import pause_listening
-
         paused = pause_listening(owner=transport)
         logger.info("wake.pause: detector paused=%s", paused)
     except Exception as e:
@@ -672,18 +626,12 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     try:
         from tools.wake_word import (
-            audio_is_silent,
-            detector_frame_info,
-            get_input_device_status,
-            is_listening,
-            load_wake_word_config,
-            owns_listener,
-            silent_audio_hint,
+            audio_is_silent, detector_frame_info, get_input_device_status, is_listening,
+            load_wake_word_config, owns_listener, silent_audio_hint,
         )
         cfg = load_wake_word_config()
-        probe_capture, reqs = _wake_probe(
-            cfg, _wake_prefers_client(params, str(params.get("surface") or "").strip().lower())
-        )
+        surface = str(params.get("surface") or "").strip().lower()
+        probe_capture, reqs = _wake_probe(cfg, _wake_prefers_client(params, surface))
         transport = _caller_transport()
         owner, owner_surface = _wake_owner_snapshot()
         owned_by_caller = owns_listener(transport)
@@ -706,23 +654,17 @@ def _(rid, params: dict) -> dict:
         else:
             capture = probe_capture or reqs.get("capture") or str(cfg.get("capture") or "auto")
         return _ok(rid, {
-            "listening": listening,
-            "owned_by_caller": owned_by_caller,
+            "listening": listening, "owned_by_caller": owned_by_caller,
             "owner_surface": owner_surface if owner is not None else None,
-            "phrase": reqs["phrase"],
-            "provider": reqs["provider"],
+            "phrase": reqs["phrase"], "provider": reqs["provider"],
             "configured_surface": str(cfg.get("surface") or "auto"),
-            "input_device": input_device,
-            "available": reqs["available"],
-            "hint": hint,
+            "input_device": input_device, "available": reqs["available"], "hint": hint,
             # Config truth: clients re-arm after a voice turn ("permanent on") from this.
             "enabled": bool(cfg.get("enabled")),
             # Armed but deaf despite an open stream; see platform-specific hint.
-            "audio_silent": silent,
-            "capture": capture,
+            "audio_silent": silent, "capture": capture,
             "local_input_available": bool(reqs.get("local_input_available")),
-            "sample_rate": frame.get("sample_rate", 16000),
-            "frame_length": frame.get("frame_length", 1280),
+            "sample_rate": frame.get("sample_rate", 16000), "frame_length": frame.get("frame_length", 1280),
         })
     except Exception as e:
         return _err(rid, 5026, str(e))
@@ -762,19 +704,12 @@ def _(rid, params: dict) -> dict:
 def _voice_toggle_status(rid, params: dict) -> dict:
     # Mirrors CLI _show_voice_status: STT/TTS availability tells the user WHY
     # voice isn't working; record_key lets the TUI bind and display the shortcut.
-    payload: dict = {
-        "enabled": _voice_mode_enabled(),
-        "record_key": _voice_record_key(),
-        "tts": _voice_tts_enabled(),
-    }
+    payload: dict = {"enabled": _voice_mode_enabled(), "record_key": _voice_record_key(), "tts": _voice_tts_enabled()}
     try:
         from tools.voice_mode import check_voice_requirements
-
         reqs = check_voice_requirements()
-        payload["available"] = bool(reqs.get("available"))
-        payload["audio_available"] = bool(reqs.get("audio_available"))
-        payload["stt_available"] = bool(reqs.get("stt_available"))
-        payload["details"] = reqs.get("details") or ""
+        payload.update(available=bool(reqs.get("available")), audio_available=bool(reqs.get("audio_available")),
+                       stt_available=bool(reqs.get("stt_available")), details=reqs.get("details") or "")
     except Exception as e:
         # Optional transcription deps — /voice status must always answer.
         logger.warning("voice.toggle status: requirements probe failed: %s", e)
@@ -790,44 +725,30 @@ def _voice_toggle_mode(rid, params: dict) -> dict:
 
     stop_hint = ""
     if enabled:
-        # Spoken-stop hint for the client; sourced from voice.stop_phrases,
-        # empty when the feature is disabled.
+        # Spoken-stop hint for the client; sourced from voice.stop_phrases, empty when disabled.
         try:
             from tools.voice_mode import voice_stop_hint
-
             stop_hint = voice_stop_hint()
         except Exception:
             stop_hint = ""
-
         # Speech output already on → warm the engine now, not on the first reply.
         if _voice_tts_enabled():
             _tts_lease_async("tui:voice-tts", True)
-
-    if not enabled:
+    else:
         # The continuous loop holds the microphone; tear it down with the mode.
         try:
             from hermes_cli.voice import stop_continuous
-
             stop_continuous()
         except ImportError:
             pass
         except Exception as e:
             logger.warning("voice: stop_continuous failed during toggle off: %s", e)
-
         # Clear TTS so it can be toggled independently later; silence live speech.
         os.environ["HERMES_VOICE_TTS"] = "0"
         _tts_stream_stop(user_barge=False)
         _tts_lease_async("tui:voice-tts", False)
-
-    return _ok(
-        rid,
-        {
-            "enabled": enabled,
-            "record_key": _voice_record_key(),
-            "tts": _voice_tts_enabled(),
-            "stop_hint": stop_hint,
-        },
-    )
+    return _ok(rid, {"enabled": enabled, "record_key": _voice_record_key(), "tts": _voice_tts_enabled(),
+                     "stop_hint": stop_hint})
 
 
 def _voice_toggle_tts(rid, params: dict) -> dict:
@@ -907,63 +828,46 @@ def _(rid, params: dict) -> dict:
 
     try:
         global _voice_event_sid, _voice_wake_owner
-        if action == "start":
-            if not _voice_mode_enabled():
-                return _err(rid, 4015, "voice mode is off — enable with /voice on")
-
-            with _voice_sid_lock:
-                _voice_event_sid = params.get("session_id") or _voice_event_sid
-
-            from hermes_cli.voice import start_continuous
-
-            # Busy probe holds the no-speech counter during long agent turns.
-            # Safe to re-register every start; older wrappers lack the setter.
-            try:
-                from hermes_cli.voice import set_voice_busy_probe
-
-                set_voice_busy_probe(_any_session_running)
-            except Exception:
-                pass
-
-            # Shape-safe: malformed voice YAML falls back to documented defaults.
-            voice_cfg = _voice_cfg_dict()
-            safe_threshold = _voice_cfg_number(voice_cfg.get("silence_threshold"), 200)
-            safe_duration = _voice_cfg_number(voice_cfg.get("silence_duration"), 3.0)
-            # max_recording_seconds: explicit numeric <= 0 disables the cap (0.0).
-            max_rec = _voice_cfg_number(voice_cfg.get("max_recording_seconds"), 120.0)
-            safe_max_rec = max_rec if max_rec > 0 else 0.0
-            # Hand the mic to STT if the wake detector holds it; resume on a
-            # terminal capture event so wake-triggered and manual captures coexist.
-            try:
-                from tools.wake_word import pause_listening
-
-                wake_paused = pause_listening(owner=transport)
-            except Exception:
-                wake_paused = False
-            if wake_paused:
-                with _voice_sid_lock:
-                    _voice_wake_owner = transport
-
-            started = start_continuous(
-                on_transcript=_vr_on_transcript, on_status=_vr_on_status,
-                on_silent_limit=_vr_on_silent, silence_threshold=safe_threshold,
-                silence_duration=safe_duration, auto_restart=False,
-                max_recording_seconds=safe_max_rec, on_stop_phrase=_vr_on_stop_phrase,
-            )
-            if started is False:
-                _resume_voice_wake()
-                return _ok(rid, {"status": "busy"})
-            return _ok(rid, {"status": "recording"})
-
-        # action == "stop"
+        if action == "start" and not _voice_mode_enabled():
+            return _err(rid, 4015, "voice mode is off — enable with /voice on")
         with _voice_sid_lock:
             _voice_event_sid = params.get("session_id") or _voice_event_sid
+        if action == "stop":
+            from hermes_cli.voice import stop_continuous
+            stop_continuous(force_transcribe=True)
+            _resume_voice_wake()
+            return _ok(rid, {"status": "stopped"})
 
-        from hermes_cli.voice import stop_continuous
-
-        stop_continuous(force_transcribe=True)
-        _resume_voice_wake()
-        return _ok(rid, {"status": "stopped"})
+        from hermes_cli.voice import start_continuous
+        # Busy probe holds the no-speech counter during long agent turns.
+        # Safe to re-register every start; older wrappers lack the setter.
+        with contextlib.suppress(Exception):
+            from hermes_cli.voice import set_voice_busy_probe
+            set_voice_busy_probe(_any_session_running)
+        # Shape-safe: malformed voice YAML falls back to documented defaults.
+        # max_recording_seconds: explicit numeric <= 0 disables the cap (0.0).
+        voice_cfg = _voice_cfg_dict()
+        max_rec = _voice_cfg_number(voice_cfg.get("max_recording_seconds"), 120.0)
+        # Hand the mic to STT if the wake detector holds it; resume on a terminal
+        # capture event so wake-triggered and manual captures coexist.
+        try:
+            from tools.wake_word import pause_listening
+            wake_paused = pause_listening(owner=transport)
+        except Exception:
+            wake_paused = False
+        if wake_paused:
+            with _voice_sid_lock:
+                _voice_wake_owner = transport
+        started = start_continuous(
+            on_transcript=_vr_on_transcript, on_status=_vr_on_status, on_silent_limit=_vr_on_silent,
+            silence_threshold=_voice_cfg_number(voice_cfg.get("silence_threshold"), 200),
+            silence_duration=_voice_cfg_number(voice_cfg.get("silence_duration"), 3.0), auto_restart=False,
+            max_recording_seconds=max_rec if max_rec > 0 else 0.0, on_stop_phrase=_vr_on_stop_phrase,
+        )
+        if started is False:
+            _resume_voice_wake()
+            return _ok(rid, {"status": "busy"})
+        return _ok(rid, {"status": "recording"})
     except Exception as e:
         if wake_paused or action == "stop":
             _resume_voice_wake()
@@ -981,10 +885,7 @@ def _(rid, params: dict) -> dict:
         # Import check up front so a missing voice module returns 5026 instead
         # of failing silently in the thread.
         import hermes_cli.voice  # noqa: F401
-
-        threading.Thread(
-            target=_speak_text_with_barge, args=(text,), daemon=True
-        ).start()
+        threading.Thread(target=_speak_text_with_barge, args=(text,), daemon=True).start()
         return _ok(rid, {"status": "speaking"})
     except ImportError:
         return _err(rid, 5026, "voice module not available")

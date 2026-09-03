@@ -31,7 +31,6 @@ def _(rid, params: dict) -> dict:
             if db is None:
                 return _ok(rid, {"repos": []})
             from hermes_cli import projects_db as pdb
-
             policy = _repo_discovery_policy()
             with pdb.connect_closing() as conn:
                 _reconcile_repo_discovery(pdb, conn, policy, _repo_discovery_policy_key(policy))
@@ -53,20 +52,14 @@ def _(rid, params: dict) -> dict:
     crawl runs on the desktop), then return the merged repo list."""
     try:
         from hermes_cli import projects_db as pdb
-
         policy = _repo_discovery_policy()
         policy_key = _repo_discovery_policy_key(policy)
         incoming_raw = params.get("discovery_policy")
-        incoming_policy = (
-            _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None
-        )
+        incoming_policy = _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None
         incoming_matches = (
-            incoming_policy is not None
-            and _repo_discovery_policy_key(incoming_policy) == policy_key
+            incoming_policy is not None and _repo_discovery_policy_key(incoming_policy) == policy_key
         )
-        accept_legacy_default = (
-            incoming_policy is None and _repo_discovery_policy_is_default(policy)
-        )
+        accept_legacy_default = incoming_policy is None and _repo_discovery_policy_is_default(policy)
 
         pairs: list[tuple[str, str | None]] = []
         for item in params.get("repos") or []:
@@ -84,16 +77,8 @@ def _(rid, params: dict) -> dict:
                 pdb.clear_discovered_repos(conn, policy_key=policy_key)
 
         with _profile_db(params) as db:
-            return _ok(
-                rid,
-                {
-                    "repos": _discover_repos_payload(db, include_cached=policy["enabled"])
-                    if db is not None
-                    else [],
-                    "accepted": accepted,
-                    "discovery_policy": policy,
-                },
-            )
+            repos = _discover_repos_payload(db, include_cached=policy["enabled"]) if db is not None else []
+            return _ok(rid, {"repos": repos, "accepted": accepted, "discovery_policy": policy})
     except Exception as e:
         return _err(rid, 5061, str(e))
 
@@ -101,7 +86,6 @@ def _(rid, params: dict) -> dict:
 def _stamped_project_tree(db, params, **kwargs):
     """``_build_project_tree`` + profile stamping shared by the two tree RPCs."""
     from tui_gateway.project_tree import stamp_profile
-
     tree, active_id = _build_project_tree(db, **kwargs)
     stamp_profile(tree["projects"], _response_profile_name(params.get("profile")))
     return tree, active_id
@@ -120,21 +104,13 @@ def _(rid, params: dict) -> dict:
             if db is None:
                 return _ok(rid, {"projects": [], "active_id": None, "scoped_session_ids": []})
             tree, active_id = _stamped_project_tree(
-                db,
-                params,
-                preview_limit=int(params.get("preview_limit") or 3),
-                hydrate=False,
-                session_limit=int(params.get("session_limit") or 2000),
-                include_discovered=True,
+                db, params, preview_limit=int(params.get("preview_limit") or 3), hydrate=False,
+                session_limit=int(params.get("session_limit") or 2000), include_discovered=True,
             )
-            return _ok(
-                rid,
-                {
-                    "projects": tree["projects"],
-                    "active_id": active_id,
-                    "scoped_session_ids": tree["scoped_session_ids"],
-                },
-            )
+            return _ok(rid, {
+                "projects": tree["projects"], "active_id": active_id,
+                "scoped_session_ids": tree["scoped_session_ids"],
+            })
     except Exception as e:
         return _err(rid, 5061, str(e))
 
@@ -156,12 +132,8 @@ def _(rid, params: dict) -> dict:
             # Drill-in only needs the entered project (which has sessions):
             # skip the zero-session discovery tier.
             tree, _active = _stamped_project_tree(
-                db,
-                params,
-                preview_limit=0,
-                hydrate=True,
-                session_limit=int(params.get("session_limit") or 5000),
-                include_discovered=False,
+                db, params, preview_limit=0, hydrate=True,
+                session_limit=int(params.get("session_limit") or 5000), include_discovered=False,
             )
             proj = next((p for p in tree["projects"] if p["id"] == project_id), None)
             return _ok(rid, {"project": proj})
@@ -175,24 +147,17 @@ def _(rid, params: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _display_cfg() -> dict:
-    display = _load_cfg().get("display")
-    return display if isinstance(display, dict) else {}
-
-
 def _display_mode(cfg: dict, key: str, allowed: frozenset, default: str) -> str:
     raw = str((cfg.get("display") or {}).get(key, default) or default).strip().lower()
     return raw if raw in allowed else default
 
 
-_DETAILS_MODES = frozenset({"hidden", "collapsed", "expanded"})
 _THINKING_MODES = frozenset({"collapsed", "truncated", "full"})
 
 
 def _cfg_get_provider(rid, params):
     try:
         from hermes_cli.models import list_available_providers, normalize_provider
-
         model = _resolve_model()
         parts = model.split("/", 1)
         return {
@@ -206,7 +171,6 @@ def _cfg_get_provider(rid, params):
 
 def _cfg_get_profile(rid, params):
     from hermes_constants import display_hermes_home
-
     return {"home": str(_hermes_home), "display": display_hermes_home()}
 
 
@@ -229,7 +193,6 @@ def _cfg_get_personality(rid, params):
     # EFFECTIVE personality via the single owner — a stale/unknown name in
     # config must not display as active.
     from hermes_cli.personality import active_personality_name
-
     return {"value": active_personality_name(_load_cfg()) or "none"}
 
 
@@ -238,13 +201,9 @@ def _cfg_get_reasoning(rid, params):
     session = _sessions.get(params.get("session_id", ""))
     reasoning_config = None
     if session is not None:
-        if isinstance(session.get("create_reasoning_override"), dict):
-            reasoning_config = session.get("create_reasoning_override")
-        else:
-            agent_reasoning = getattr(session.get("agent"), "reasoning_config", None)
-            if isinstance(agent_reasoning, dict):
-                reasoning_config = agent_reasoning
-
+        reasoning_config = session.get("create_reasoning_override")
+        if not isinstance(reasoning_config, dict):
+            reasoning_config = getattr(session.get("agent"), "reasoning_config", None)
     if isinstance(reasoning_config, dict):
         if reasoning_config.get("enabled") is False:
             effort = "none"
@@ -287,7 +246,7 @@ def _cfg_get_thinking_mode(rid, params):
     raw = str((cfg.get("display") or {}).get("thinking_mode", "") or "").strip().lower()
     if raw in _THINKING_MODES:
         return {"value": raw}
-    dm = _display_mode(cfg, "details_mode", _DETAILS_MODES, "collapsed")
+    dm = _display_mode(cfg, "details_mode", _DETAIL_MODES, "collapsed")
     return {"value": "full" if dm == "expanded" else "collapsed"}
 
 
@@ -332,7 +291,7 @@ def _config_getters() -> dict:
         "approval_mode": _cfg_get_approval_mode,
         "approvals.mode": _cfg_get_approval_mode,
         "details_mode": lambda rid, params: {
-            "value": _display_mode(_load_cfg(), "details_mode", _DETAILS_MODES, "collapsed")
+            "value": _display_mode(_load_cfg(), "details_mode", _DETAIL_MODES, "collapsed")
         },
         "thinking_mode": _cfg_get_thinking_mode,
         "density": lambda rid, params: {
@@ -376,12 +335,10 @@ def _readiness_profile_scope(params: dict):
     quietly answer for the launch profile instead.
     """
     import contextlib
-
     profile = str(params.get("profile") or "").strip() if isinstance(params, dict) else ""
     if not profile:
         return "", contextlib.nullcontext()
     from hermes_cli import profiles as profiles_mod
-
     if not profiles_mod.profile_exists(profile):
         raise FileNotFoundError(f"Profile '{profile}' does not exist on this backend.")
     home = _profile_home(profile)
@@ -410,13 +367,9 @@ def _(rid, params: dict) -> dict:
     """Loose provider check; ``profile`` (optional) scopes it to that profile's home."""
     try:
         from hermes_cli.main import _has_any_provider_configured
-
         def probe(profile):
             configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
-            payload = {"provider_configured": configured}
-            if profile:
-                payload["profile"] = profile
-            return payload
+            return {"provider_configured": configured, **({"profile": profile} if profile else {})}
 
         return _readiness_check(rid, params, probe)
     except Exception as e:
@@ -439,7 +392,6 @@ def _(rid, params: dict) -> dict:
         from hermes_cli.runtime_provider import resolve_runtime_provider
         from hermes_cli.auth import has_usable_secret
         from hermes_cli.main import _has_any_provider_configured
-
         requested = str(params.get("provider") or "").strip() or None
 
         def probe(profile):
@@ -450,44 +402,24 @@ def _(rid, params: dict) -> dict:
             scoped = {"profile": profile} if profile else {}
             provider = runtime.get("provider") or "provider"
             source = str(runtime.get("source") or "")
-            if (
-                not provider_configured
-                and provider == "bedrock"
-                and source in {"iam-role", "aws-sdk-default-chain"}
-            ):
-                return {
-                    "ok": False,
-                    "provider": provider,
-                    "model": runtime.get("model"),
-                    "source": source,
-                    "error": "No Hermes provider is configured.",
-                    **scoped,
-                }
 
+            def fail(error, src):
+                return {"ok": False, "provider": provider, "model": runtime.get("model"),
+                        "source": src, "error": error, **scoped}
+
+            if (not provider_configured and provider == "bedrock"
+                    and source in {"iam-role", "aws-sdk-default-chain"}):
+                return fail("No Hermes provider is configured.", source)
             api_key = runtime.get("api_key")
             api_key_text = "" if callable(api_key) else str(api_key or "").strip()
             credential_ok = (
-                callable(api_key)
-                or api_key_text in {"aws-sdk", "no-key-required"}
-                or has_usable_secret(api_key_text)
-                or bool(runtime.get("command"))
+                callable(api_key) or api_key_text in {"aws-sdk", "no-key-required"}
+                or has_usable_secret(api_key_text) or bool(runtime.get("command"))
             )
             if not credential_ok:
-                return {
-                    "ok": False,
-                    "provider": provider,
-                    "model": runtime.get("model"),
-                    "source": runtime.get("source"),
-                    "error": f"No usable credentials found for {provider}.",
-                    **scoped,
-                }
-            return {
-                "ok": True,
-                "provider": runtime.get("provider"),
-                "model": runtime.get("model"),
-                "source": runtime.get("source"),
-                **scoped,
-            }
+                return fail(f"No usable credentials found for {provider}.", runtime.get("source"))
+            return {"ok": True, "provider": runtime.get("provider"), "model": runtime.get("model"),
+                    "source": runtime.get("source"), **scoped}
 
         return _readiness_check(rid, params, probe)
     except Exception as e:
@@ -512,7 +444,6 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_cli.debug import _redact_log_text, build_nous_bundle, collect_share_bundle
         from hermes_cli.diagnostics_upload import share_to_nous
-
         log_lines = params.get("log_lines")
         if not isinstance(log_lines, int) or not (10 <= log_lines <= 2000):
             log_lines = 200
@@ -548,18 +479,11 @@ def _(rid, params: dict) -> dict:
         upload_id = res.get("id")
         if not view_url and not upload_id:
             # An upload the user can't reference is useless to support.
-            return _ok(
-                rid, {"ok": False, "error": "upload succeeded but returned no view URL or id"}
-            )
-        return _ok(
-            rid,
-            {
-                "ok": True,
-                "view_url": view_url,
-                "upload_id": upload_id,
-                "expires_at": res.get("expiresAt") or res.get("expires_at"),
-            },
-        )
+            return _ok(rid, {"ok": False, "error": "upload succeeded but returned no view URL or id"})
+        return _ok(rid, {
+            "ok": True, "view_url": view_url, "upload_id": upload_id,
+            "expires_at": res.get("expiresAt") or res.get("expires_at"),
+        })
     except Exception as e:
         return _ok(rid, {"ok": False, "error": str(e)})
 
