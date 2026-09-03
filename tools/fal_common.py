@@ -61,17 +61,16 @@ class _ManagedFalSyncClient:
         client_module = _require(getattr(fal_client, "client", None), "fal_client.client")
         self._queue_url_format = _normalize_fal_queue_url_format(queue_run_origin)
         self._sync_client = sync_client_class(key=key)
-        self._http_client = getattr(self._sync_client, "_client", None)
+        self._http_client = _require(getattr(self._sync_client, "_client", None), "fal_client.SyncClient._client")
         self._maybe_retry_request = getattr(client_module, "_maybe_retry_request", None)
         self._raise_for_status = getattr(client_module, "_raise_for_status", None)
-        self._request_handle_class = getattr(client_module, "SyncRequestHandle", None)
+        if self._maybe_retry_request is None or self._raise_for_status is None:
+            raise RuntimeError("fal_client.client request helpers are required for managed FAL gateway mode")
+        self._request_handle_class = _require(
+            getattr(client_module, "SyncRequestHandle", None), "fal_client.client.SyncRequestHandle")
         self._add_hint_header = getattr(client_module, "add_hint_header", None)
         self._add_priority_header = getattr(client_module, "add_priority_header", None)
         self._add_timeout_header = getattr(client_module, "add_timeout_header", None)
-        _require(self._http_client, "fal_client.SyncClient._client")
-        if self._maybe_retry_request is None or self._raise_for_status is None:
-            raise RuntimeError("fal_client.client request helpers are required for managed FAL gateway mode")
-        _require(self._request_handle_class, "fal_client.client.SyncRequestHandle")
 
     def submit(
         self, application: str, arguments: Dict[str, Any], *, path: str = "",
