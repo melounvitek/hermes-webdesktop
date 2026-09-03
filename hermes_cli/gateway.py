@@ -1940,20 +1940,26 @@ def _windows_scheduled_task_supervises(task_name: str) -> bool:
     return state in _WINDOWS_TASK_SUPERVISOR_STATES
 
 
+def _gateway_detached_env() -> bool:
+    return _truthy_env(os.getenv("HERMES_GATEWAY_DETACHED"))
+
+
+def _stdin_is_tty() -> bool | None:
+    """``sys.stdin.isatty()``; None when stdin is closed/invalid."""
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (ValueError, OSError):
+        return None
+
+
 def _windows_gateway_should_absorb_console_controls() -> bool:
     """True for detached Windows gateway runs that should ignore Ctrl+C (``HERMES_GATEWAY_DETACHED=1``
     or no interactive stdin); foreground runs stay interruptible."""
     if not is_windows():
         return False
-
-    detached = os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower()
-    if detached in {"1", "true", "yes", "on"}:
+    if _gateway_detached_env():
         return True
-
-    try:
-        return not bool(sys.stdin and sys.stdin.isatty())
-    except (ValueError, OSError):
-        return True
+    return not _stdin_is_tty()
 
 
 def _windows_console_window_attached() -> bool | None:
@@ -1974,12 +1980,7 @@ def _windows_gateway_breakaway_state() -> bool | None:
         return None
     from hermes_cli._subprocess_compat import _WINDOWS_GATEWAY_BREAKAWAY_ENV
 
-    value = os.environ.pop(_WINDOWS_GATEWAY_BREAKAWAY_ENV, None)
-    if value == "1":
-        return True
-    if value == "0":
-        return False
-    return None
+    return {"1": True, "0": False}.get(os.environ.pop(_WINDOWS_GATEWAY_BREAKAWAY_ENV, None))
 
 
 # =============================================================================
@@ -4765,9 +4766,7 @@ def _guard_existing_gateway_process_conflict(replace: bool = False) -> None:
 
 def _guard_official_docker_root_gateway() -> None:
     """Refuse gateway startup when the official Docker privilege drop was bypassed."""
-    if not hasattr(os, "geteuid") or os.geteuid() != 0:
-        return
-    if _truthy_env(os.getenv("HERMES_ALLOW_ROOT_GATEWAY")):
+    if not hasattr(os, "geteuid") or os.geteuid() != 0 or _truthy_env(os.getenv("HERMES_ALLOW_ROOT_GATEWAY")):
         return
     if not _is_official_docker_checkout():
         return
@@ -4796,11 +4795,8 @@ def _apply_startup_watchdog_config() -> None:
     """
     try:
         from hermes_startup_watchdog import (
-            ENV_STARTUP_WATCHDOG,
-            ENV_STARTUP_WATCHDOG_TIMEOUT_S,
-            arm_startup_watchdog,
-            disarm_startup_watchdog,
-            startup_watchdog_disabled,
+            ENV_STARTUP_WATCHDOG, ENV_STARTUP_WATCHDOG_TIMEOUT_S, arm_startup_watchdog,
+            disarm_startup_watchdog, startup_watchdog_disabled,
         )
         _sw_timeout_bridged = False
         try:
@@ -4809,7 +4805,7 @@ def _apply_startup_watchdog_config() -> None:
             if ENV_STARTUP_WATCHDOG not in os.environ and not _gw_cfg.get("startup_watchdog", True):
                 os.environ[ENV_STARTUP_WATCHDOG] = "0"
             _sw_timeout = _gw_cfg.get("startup_watchdog_timeout_seconds")
-            if (ENV_STARTUP_WATCHDOG_TIMEOUT_S not in os.environ and _sw_timeout is not None):
+            if ENV_STARTUP_WATCHDOG_TIMEOUT_S not in os.environ and _sw_timeout is not None:
                 os.environ[ENV_STARTUP_WATCHDOG_TIMEOUT_S] = str(_sw_timeout)
                 _sw_timeout_bridged = True
         except Exception:
@@ -4859,19 +4855,12 @@ def _make_exit_diag():
 
             log_dir = _ghh() / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
-            ts = _dt.now(_tz.utc).isoformat()
             line = {
-                "ts": ts,
-                "tag": tag,
-                "pid": os.getpid(),
-                "python": sys.version.split()[0],
-                "platform": sys.platform,
-                **extra,
+                "ts": _dt.now(_tz.utc).isoformat(), "tag": tag, "pid": os.getpid(),
+                "python": sys.version.split()[0], "platform": sys.platform, **extra,
             }
-            import json as _json
-
             with open(log_dir / "gateway-exit-diag.log", "a", encoding="utf-8") as f:
-                f.write(_json.dumps(line, default=str) + "\n")
+                f.write(json.dumps(line, default=str) + "\n")
         except Exception:
             pass  # never let the diagnostic itself crash the gateway
 
@@ -4885,8 +4874,6 @@ def _respawn_storm_backoff() -> None:
     HERMES_GATEWAY_START_WINDOW_S override. max_starts <= 0 disables. Never blocks startup.
     """
     try:
-        import time as _time
-
         from gateway.status import record_start_and_check_storm
 
         _max_starts = 5
@@ -4905,28 +4892,18 @@ def _respawn_storm_backoff() -> None:
         except Exception:
             pass
         try:
-            _env_starts = os.getenv("HERMES_GATEWAY_MAX_STARTS")
-            if _env_starts is not None:
-                _max_starts = int(_env_starts)
-        except ValueError:
+            _max_starts = int(os.environ["HERMES_GATEWAY_MAX_STARTS"])
+        except (KeyError, ValueError):
             pass
         try:
-            _env_win = os.getenv("HERMES_GATEWAY_START_WINDOW_S")
-            if _env_win is not None:
-                _win = float(_env_win)
-        except ValueError:
+            _win = float(os.environ["HERMES_GATEWAY_START_WINDOW_S"])
+        except (KeyError, ValueError):
             pass
-        _storm = (
-            record_start_and_check_storm(max_starts=_max_starts, window_s=_win)
-            if _max_starts > 0
-            else None
-        )
+        _storm = record_start_and_check_storm(max_starts=_max_starts, window_s=_win) if _max_starts > 0 else None
         if _storm is not None:
             logger.warning(
                 "Gateway (re)started %d times in %.0fs — backing off %.0fs to break a respawn storm.",
-                _storm.count,
-                _storm.window_s,
-                _storm.backoff_s,
+                _storm.count, _storm.window_s, _storm.backoff_s,
             )
             # Tell the startup watchdog the backoff sleep is intentional, not a parked deadlock.
             try:
@@ -4935,7 +4912,7 @@ def _respawn_storm_backoff() -> None:
                 kick_startup_watchdog(extra_s=_storm.backoff_s)
             except Exception:
                 pass
-            _time.sleep(_storm.backoff_s)
+            time.sleep(_storm.backoff_s)
     except Exception as _be:
         logger.debug("respawn-storm breaker check failed (non-fatal): %s", _be)
 
@@ -4953,12 +4930,8 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     # Detached Windows runs (HERMES_GATEWAY_DETACHED=1, or non-TTY for older wrappers) ignore
     # console-control broadcasts from sibling CLIs; foreground runs keep Ctrl+C-to-stop.
-    try:
-        _stdin_is_tty = bool(sys.stdin and sys.stdin.isatty())
-    except (ValueError, OSError):
-        _stdin_is_tty = False
+    stdin_is_tty = bool(_stdin_is_tty())
     _console_window_attached = _windows_console_window_attached()
-    _gateway_detached = os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower() in {"1", "true", "yes", "on"}
     _breakaway = _windows_gateway_breakaway_state()
     _absorb = _windows_gateway_should_absorb_console_controls()
     if _absorb:
@@ -4990,14 +4963,9 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
 
     _exit_diag = _make_exit_diag()
     _exit_diag(
-        "gateway.start",
-        replace=replace,
-        argv=sys.argv,
-        stdin_is_tty=_stdin_is_tty,
-        console_window_attached=_console_window_attached,
-        detached=_gateway_detached,
-        breakaway=_breakaway,
-        absorb_windows_console_controls=_absorb,
+        "gateway.start", replace=replace, argv=sys.argv, stdin_is_tty=stdin_is_tty,
+        console_window_attached=_console_window_attached, detached=_gateway_detached_env(),
+        breakaway=_breakaway, absorb_windows_console_controls=_absorb,
     )
     _atexit.register(lambda: _exit_diag("atexit.hook", sys_exc=repr(sys.exc_info())))
 
@@ -5021,22 +4989,11 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         _hard_exit_after_gateway_teardown(0)
         return  # unreachable in production (os._exit); guard for test stubs
     except SystemExit as e:
-        _exit_diag("asyncio.run.SystemExit", code=getattr(e, "code", None), traceback=_traceback.format_exc())
-        if e.code is None:
-            _code = 0
-        elif isinstance(e.code, int):
-            _code = e.code
-        else:
-            _code = 1
-        _hard_exit_after_gateway_teardown(_code)
+        _exit_diag("asyncio.run.SystemExit", code=e.code, traceback=_traceback.format_exc())
+        _hard_exit_after_gateway_teardown(0 if e.code is None else e.code if isinstance(e.code, int) else 1)
     except BaseException as e:
         # Everything else (CancelledError, exotic BaseExceptions): log the cause, then re-raise.
-        _exit_diag(
-            "asyncio.run.exception",
-            exc_type=type(e).__name__,
-            exc_repr=repr(e),
-            traceback=_traceback.format_exc(),
-        )
+        _exit_diag("asyncio.run.exception", exc_type=type(e).__name__, exc_repr=repr(e), traceback=_traceback.format_exc())
         raise
     if not success:
         _exit_diag("gateway.exit_nonzero")
