@@ -398,11 +398,9 @@ def _model_flow_qwen_oauth(_config, current_model=""):
     from hermes_cli.models import fetch_api_models
     status = get_qwen_auth_status()
     if not status.get("logged_in"):
-        _say("Not logged into Qwen CLI OAuth.", "Run: qwen auth qwen-oauth")
-        if status.get("auth_file"):
-            print(f"Expected credentials file: {status.get('auth_file')}")
-        if status.get("error"):
-            print(f"Error: {status.get('error')}")
+        _say("Not logged into Qwen CLI OAuth.", "Run: qwen auth qwen-oauth",
+             *([f"Expected credentials file: {status.get('auth_file')}"] if status.get("auth_file") else []),
+             *([f"Error: {status.get('error')}"] if status.get("error") else []))
         return
 
     # Try live model discovery, fall back to curated list.
@@ -538,12 +536,9 @@ def _model_flow_copilot(config, current_model=""):
     else:
         if source in {"GITHUB_TOKEN", "GH_TOKEN"}:
             from hermes_cli.env_loader import format_secret_source_suffix
-            print(f"  GitHub token: {api_key[:8]}... ✓ ({source}{format_secret_source_suffix(source)})")
-        elif source == "gh auth token":
-            print("  GitHub token: ✓ (from `gh auth token`)")
+            _say(f"  GitHub token: {api_key[:8]}... ✓ ({source}{format_secret_source_suffix(source)})", "")
         else:
-            print("  GitHub token: ✓")
-        print()
+            _say("  GitHub token: ✓ (from `gh auth token`)" if source == "gh auth token" else "  GitHub token: ✓", "")
 
     effective_base = pconfig.inference_base_url
     catalog, live_models, _normalize = _copilot_catalog(api_key)
@@ -671,14 +666,11 @@ def _model_flow_stepfun(config, current_model=""):
             current_base = str(model_cfg.get("base_url") or "").strip()
     current_region = _infer_stepfun_region(current_base or pconfig.inference_base_url)
 
-    ordered_regions = []
-    for region_key, region_name in (("international", "International"), ("china", "China")):
-        label = f"{region_name} ({_stepfun_base_url_for_region(region_key)})"
-        if region_key == current_region:
-            ordered_regions.insert(0, (region_key, f"{label}  ← currently active"))
-        else:
-            ordered_regions.append((region_key, label))
-    ordered_regions.append(("cancel", "Cancel"))
+    regions = [(key, f"{name} ({_stepfun_base_url_for_region(key)})") for key, name in
+               (("international", "International"), ("china", "China"))]
+    # Active region first, marked; then the other; then Cancel.
+    ordered_regions = ([(k, f"{label}  ← currently active") for k, label in regions if k == current_region]
+                       + [(k, label) for k, label in regions if k != current_region] + [("cancel", "Cancel")])
 
     region_idx = _prompt_provider_choice([label for _, label in ordered_regions])
     if region_idx is None or ordered_regions[region_idx][0] == "cancel":
