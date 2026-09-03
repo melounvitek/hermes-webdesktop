@@ -30,15 +30,12 @@ def _interleave_addrinfos(addrinfos: list[tuple]) -> list[tuple]:
     seen: set[tuple] = set()
     for addrinfo in addrinfos:
         family, socktype, proto, _canonname, sockaddr = addrinfo
-        marker = (family, socktype, proto, sockaddr)
-        if marker not in seen:
-            seen.add(marker)
+        if (family, socktype, proto, sockaddr) not in seen:
+            seen.add((family, socktype, proto, sockaddr))
             queues.setdefault(family, []).append(addrinfo)
     interleaved: list[tuple] = []
     while any(queues.values()):
-        for queue in queues.values():
-            if queue:
-                interleaved.append(queue.pop(0))
+        interleaved.extend(queue.pop(0) for queue in queues.values() if queue)
     return interleaved
 
 
@@ -49,12 +46,8 @@ def _quiet_unregister(selector, sock) -> None:
         pass
 
 
-def _happy_eyeballs_create_connection(
-    address: tuple[str, int],
-    timeout: Optional[float],
-    source_address: Optional[tuple[str, int]] = None,
-    socket_options=(),
-):
+def _happy_eyeballs_create_connection(address: tuple[str, int], timeout: Optional[float],
+                                      source_address: Optional[tuple[str, int]] = None, socket_options=()):
     """RFC 8305-style connect: staggered non-blocking attempts across families.
 
     ``socket.create_connection`` tries addresses serially, so broken-but-
@@ -101,7 +94,6 @@ def _happy_eyeballs_create_connection(
             now = time.monotonic()
             if deadline is not None and now >= deadline:
                 raise socket.timeout("timed out")
-
             if pending and now >= next_launch:
                 try:
                     winner = start_attempt(pending.pop(0))
@@ -113,12 +105,10 @@ def _happy_eyeballs_create_connection(
                 if winner is not None:
                     break
                 next_launch = now + _HAPPY_EYEBALLS_DELAY_SECONDS
-
             wait_timeout = None if deadline is None else max(0.0, deadline - now)
             if pending:
                 until_launch = max(0.0, next_launch - now)
                 wait_timeout = until_launch if wait_timeout is None else min(wait_timeout, until_launch)
-
             for key, _mask in selector.select(wait_timeout):
                 candidate = key.fileobj
                 error_code = candidate.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
@@ -136,7 +126,6 @@ def _happy_eyeballs_create_connection(
 
         if winner is None:
             raise last_error if last_error is not None else OSError(f"Could not connect to {host}:{port}")
-
         _quiet_unregister(selector, winner)
         active.discard(winner)
         winner.settimeout(timeout)
@@ -160,22 +149,17 @@ class _HappyEyeballsSyncBackend:
     def _default_backend(self):
         if self._fallback is None:
             from httpcore import SyncBackend
-
             self._fallback = SyncBackend()
         return self._fallback
 
-    def connect_tcp(
-        self, host: str, port: int, timeout: Optional[float] = None,
-        local_address: Optional[str] = None, socket_options=None,
-    ):
+    def connect_tcp(self, host: str, port: int, timeout: Optional[float] = None, local_address: Optional[str] = None,
+                    socket_options=None):
         from httpcore import ConnectError, ConnectTimeout
         from httpcore._backends.sync import SyncStream
-
         source_address = None if local_address is None else (local_address, 0)
         try:
-            sock = _happy_eyeballs_create_connection(
-                (host, port), timeout, source_address=source_address, socket_options=socket_options or ()
-            )
+            sock = _happy_eyeballs_create_connection((host, port), timeout, source_address=source_address,
+                                                     socket_options=socket_options or ())
         except socket.timeout as exc:
             raise ConnectTimeout(str(exc)) from exc
         except OSError as exc:
@@ -201,11 +185,8 @@ def _enable_happy_eyeballs(transport, skip_pool_types: tuple = ()) -> None:
     serial backend. Pools of ``skip_pool_types`` (proxies) are left alone.
     """
     pool = getattr(transport, "_pool", None)
-    if pool is None or not hasattr(pool, "_network_backend"):
-        return
-    if skip_pool_types and isinstance(pool, skip_pool_types):
-        return
-    pool._network_backend = _HappyEyeballsSyncBackend()
+    if pool is not None and hasattr(pool, "_network_backend") and not (skip_pool_types and isinstance(pool, skip_pool_types)):
+        pool._network_backend = _HappyEyeballsSyncBackend()
 
 
 def enable_happy_eyeballs_on_client(client) -> None:
@@ -217,14 +198,11 @@ def enable_happy_eyeballs_on_client(client) -> None:
     """
     try:
         import httpcore
-
         proxy_pool_types = tuple(
-            t for t in (getattr(httpcore, "HTTPProxy", None), getattr(httpcore, "SOCKSProxy", None)) if t is not None
-        )
+            t for t in (getattr(httpcore, "HTTPProxy", None), getattr(httpcore, "SOCKSProxy", None)) if t is not None)
     except Exception:
         return
-    transports = [getattr(client, "_transport", None), *(getattr(client, "_mounts", None) or {}).values()]
-    for transport in transports:
+    for transport in (getattr(client, "_transport", None), *(getattr(client, "_mounts", None) or {}).values()):
         _enable_happy_eyeballs(transport, proxy_pool_types)
 
 
@@ -232,8 +210,7 @@ def _load_openai_cls() -> type:
     """Import and cache ``openai.OpenAI``."""
     global _OPENAI_CLS_CACHE
     if _OPENAI_CLS_CACHE is None:
-        from openai import OpenAI as _cls
-        _OPENAI_CLS_CACHE = _cls
+        from openai import OpenAI as _OPENAI_CLS_CACHE
     return _OPENAI_CLS_CACHE
 
 
@@ -292,25 +269,18 @@ class _SafeWriter:
 
 def _get_proxy_from_env() -> Optional[str]:
     """First configured proxy URL from HTTPS_PROXY / HTTP_PROXY / ALL_PROXY (any case), or None."""
-    for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"):
-        value = os.environ.get(key, "").strip()
-        if value:
-            return normalize_proxy_url(value)
-    return None
+    keys = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+    return next((normalize_proxy_url(v) for k in keys if (v := os.environ.get(k, "").strip())), None)
 
 
 def _get_proxy_for_base_url(base_url: Optional[str]) -> Optional[str]:
     """Env-configured proxy unless NO_PROXY excludes this base URL."""
     proxy = _get_proxy_from_env()
     host = base_url_hostname(base_url) if proxy and base_url else ""
-    if not host:
-        return proxy
     try:
-        if urllib.request.proxy_bypass_environment(host):
-            return None
+        return None if host and urllib.request.proxy_bypass_environment(host) else proxy
     except Exception:
-        pass
-    return proxy
+        return proxy
 
 
 def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False, verify: Any = True) -> Optional[Any]:
@@ -324,7 +294,6 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
     """
     try:
         import httpx
-
         proxy = _get_proxy_for_base_url(base_url)
         limits = httpx.Limits(max_keepalive_connections=20, max_connections=100, keepalive_expiry=20.0)
         timeout = httpx.Timeout(connect=15.0, read=None, write=15.0, pool=10.0)  # read=None for SSE streaming

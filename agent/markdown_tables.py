@@ -28,14 +28,9 @@ def _disp_width(s: str) -> int:
     return max(wcswidth(s), 0)
 
 
-def _pad_to_width(s: str, target: int) -> str:
-    return s + " " * max(0, target - _disp_width(s))
-
-
 def split_table_row(row: str) -> List[str]:
     """Split ``| a | b | c |`` into ``["a", "b", "c"]`` with trims."""
-    s = row.strip().removeprefix("|").removesuffix("|")
-    return [c.strip() for c in s.split("|")]
+    return [c.strip() for c in row.strip().removeprefix("|").removesuffix("|").split("|")]
 
 
 def is_table_divider(row: str) -> bool:
@@ -66,14 +61,12 @@ def _render_block(rows: List[List[str]], available_width: int | None = None) -> 
     ncols = max(len(r) for r in rows)
     rows = [r + [""] * (ncols - len(r)) for r in rows]
     widths = [max(_MIN_COL_WIDTH, *(_disp_width(r[c]) for r in rows)) for c in range(ncols)]
-
     # `| ` + cell + ` ` per column, plus the closing `|`.
-    horizontal_width = sum(widths) + 3 * ncols + 1
-    if available_width is not None and horizontal_width > max(available_width, 20):
+    if available_width is not None and sum(widths) + 3 * ncols + 1 > max(available_width, 20):
         return _render_vertical(rows, ncols, available_width)
 
     def _row(cells: List[str]) -> str:
-        return "| " + " | ".join(_pad_to_width(c, widths[k]) for k, c in enumerate(cells)) + " |"
+        return "| " + " | ".join(c + " " * max(0, widths[k] - _disp_width(c)) for k, c in enumerate(cells)) + " |"
 
     out = [_row(rows[0]), "|" + "|".join("-" * (w + 2) for w in widths) + "|"]
     out.extend(_row(r) for r in rows[1:])
@@ -90,11 +83,8 @@ def _hard_break(word: str, w: int) -> List[str]:
             out.append(buf)
             buf, bw = ch, cw
         else:
-            buf += ch
-            bw += cw
-    if buf:
-        out.append(buf)
-    return out
+            buf, bw = buf + ch, bw + cw
+    return out + [buf] if buf else out
 
 
 def _wrap_to_width(text: str, width: int) -> List[str]:
@@ -108,7 +98,6 @@ def _wrap_to_width(text: str, width: int) -> List[str]:
     words = text.split()
     if not words:
         return [""]
-
     lines: List[str] = []
     current, current_w = "", 0
 
@@ -145,18 +134,14 @@ def _render_vertical(rows: List[List[str]], ncols: int, available_width: int) ->
     """
     if not rows:
         return []
-    headers = rows[0] + [""] * (ncols - len(rows[0]))
-    labels = [h or f"Column {i + 1}" for i, h in enumerate(headers)]
+    labels = [h or f"Column {i + 1}" for i, h in enumerate(rows[0] + [""] * (ncols - len(rows[0])))]
     separator = "─" * (max(20, min(40, available_width - 2)) if available_width else 30)
-    indent = "  "
-    cont_budget = max(10, available_width - _disp_width(indent))
-
+    cont_budget = max(10, available_width - 2)  # continuation lines are indented two spaces
     out: List[str] = []
     for ri, row in enumerate(rows[1:]):
         if ri > 0:
             out.append(separator)
-        for ci in range(ncols):
-            label = labels[ci]
+        for ci, label in enumerate(labels):
             value = row[ci] if ci < len(row) else ""
             if not value:
                 out.append(f"{label}:")
@@ -166,7 +151,7 @@ def _render_vertical(rows: List[List[str]], ncols: int, available_width: int) ->
             # Re-flow continuation text at the wider continuation budget.
             for cl in _wrap_to_width(" ".join(wrapped[1:]), cont_budget) if len(wrapped) > 1 else ():
                 if cl.strip():
-                    out.append(f"{indent}{cl}")
+                    out.append(f"  {cl}")
     return out
 
 
@@ -179,7 +164,6 @@ def realign_markdown_tables(text: str, available_width: int | None = None) -> st
     """
     if "|" not in text:
         return text
-
     lines = text.split("\n")
     out: List[str] = []
     i, n = 0, len(lines)
