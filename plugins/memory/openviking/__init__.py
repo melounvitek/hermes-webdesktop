@@ -546,10 +546,9 @@ def _openviking_endpoint_label(value: Any) -> str:
         if not host:
             return "<configured endpoint>"
         display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-        try:
+        port = None
+        with suppress(ValueError):
             port = parsed.port
-        except ValueError:
-            port = None
         return f"{parsed.scheme + '://' if parsed.scheme else ''}{display_host}{f':{port}' if port is not None else ''}"
     except Exception:
         return "<configured endpoint>"
@@ -710,10 +709,7 @@ def _discover_ovcli_profiles() -> list[_OvcliProfile]:
 
     def add(path: Path, *, source: str, name: str) -> None:
         identity = _profile_identity(path)
-        if not path.is_file() or identity in seen_paths:
-            return
-        profile = _load_profile(path, source=source, name=name)
-        if profile is not None:
+        if path.is_file() and identity not in seen_paths and (profile := _load_profile(path, source=source, name=name)) is not None:
             seen_paths.add(identity)
             profiles.append(profile)
 
@@ -986,10 +982,7 @@ def _describe_local_port_listener(host: str, port: int) -> str:
 def _local_listener_suffix(endpoint: str) -> str:
     if not _is_local_openviking_url(endpoint):
         return ""
-    try:
-        host, port = _local_openviking_bind(endpoint)
-    except ValueError:
-        return ""
+    host, port = _local_openviking_bind(endpoint)  # cannot raise: _is_local_openviking_url already normalized it
     if not _local_openviking_port_is_open(host, port):
         return ""
     return f" The listener on {host}:{port} is {_describe_local_port_listener(host, port)}."
@@ -1111,14 +1104,10 @@ def _tool_call_input(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     raw_args = function.get("arguments") if isinstance(function, dict) else None
     if raw_args is None:
         raw_args = tool_call.get("args")
-    if raw_args is None:
+    if raw_args is None or (isinstance(raw_args, str) and not raw_args.strip()):
         return {}
-    if isinstance(raw_args, dict):
-        return raw_args
     if not isinstance(raw_args, str):
-        return {"value": raw_args}
-    if not raw_args.strip():
-        return {}
+        return raw_args if isinstance(raw_args, dict) else {"value": raw_args}
     try:
         parsed = json.loads(raw_args)
     except Exception:
@@ -1520,11 +1509,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
             settings = _resolve_connection_settings(_load_hermes_openviking_config())
         except _OpenVikingEndpointError as exc:
             failed_key = ("invalid-endpoint", str(exc))
-            should_warn = not self._in_cooldown(failed_key)
+            if not self._in_cooldown(failed_key):
+                logger.warning("%s %s", exc, _FIX_ENDPOINT)
             self._failed_refresh = (failed_key, time.monotonic())
             self._client = None
-            if should_warn:
-                logger.warning("%s %s", exc, _FIX_ENDPOINT)
             return None
         settings_key = tuple(settings[k] for k in _CONNECTION_KEYS)
         if settings_key == self._settings_tuple():
@@ -2028,8 +2016,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return matched if matched is not None else _rfind_message(messages, role, start)
 
         end_idx = locate("assistant", last, assistant_content)
-        if end_idx is None:
-            end_idx = last
+        end_idx = last if end_idx is None else end_idx
         start_idx = locate("user", end_idx, user_content)
         if start_idx is None:
             return []
@@ -2050,10 +2037,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
         pending_tool_parts: List[Dict[str, Any]] = []
 
         def emit(role: str, parts: List[Dict[str, Any]]) -> None:
-            payload: Dict[str, Any] = {"role": role, "parts": parts}
-            if role == "assistant" and assistant_peer_id:
-                payload["peer_id"] = assistant_peer_id
-            payload_messages.append(payload)
+            peer = {"peer_id": assistant_peer_id} if role == "assistant" and assistant_peer_id else {}
+            payload_messages.append({"role": role, "parts": parts, **peer})
 
         def flush_tool_parts() -> None:
             nonlocal pending_tool_parts
@@ -2582,13 +2567,12 @@ class OpenVikingMemoryProvider(MemoryProvider):
             result = self._unwrap_result(self._client.get("/api/v1/fs/stat", params={"uri": uri}))
         except Exception:
             return None
-        if isinstance(result, dict):
-            for key in ("isDir", "is_dir"):
-                if key in result:
-                    return bool(result.get(key))
-            if result.get("type") in {"dir", "file"}:
-                return result["type"] == "dir"
-        return None
+        if not isinstance(result, dict):
+            return None
+        for key in ("isDir", "is_dir"):
+            if key in result:
+                return bool(result.get(key))
+        return result["type"] == "dir" if result.get("type") in {"dir", "file"} else None
 
     def _tool_search(self, args: dict) -> str:
         query = args.get("query", "")
@@ -2651,15 +2635,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         uri_arg = args.get("uri", "")
         uris_arg = args.get("uris", [])
         batch_requested = bool(uris_arg) or isinstance(uri_arg, list)
-        if isinstance(uris_arg, list) and uris_arg:
-            raw_uris = uris_arg
-        elif isinstance(uri_arg, list):
-            raw_uris = uri_arg
-        elif isinstance(uri_arg, str) and uri_arg:
-            raw_uris = [uri_arg]
-        else:
-            return tool_error("uri or uris is required")
-
+        raw_uris = uris_arg if isinstance(uris_arg, list) and uris_arg else uri_arg if isinstance(uri_arg, list) else [uri_arg]
         uris = list(dict.fromkeys(u.strip() for u in raw_uris if isinstance(u, str) and u.strip()))
         if not uris:
             return tool_error("uri or uris is required")
@@ -2680,8 +2656,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
     def _tool_browse(self, args: dict) -> str:
         action = args.get("action", "list")
         path = args.get("path", "viking://")
-        endpoint = {"tree": "/api/v1/fs/tree", "list": "/api/v1/fs/ls", "stat": "/api/v1/fs/stat"}.get(action, "/api/v1/fs/ls")
-        result = self._unwrap_result(self._client.get(endpoint, params={"uri": path}))
+        result = self._unwrap_result(self._client.get(f"/api/v1/fs/{ {'tree': 'tree', 'stat': 'stat'}.get(action, 'ls') }", params={"uri": path}))
 
         if action in {"list", "tree"}:
             raw_entries = result
@@ -2778,17 +2753,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
                 if source_path is not None and _is_local_path_reference(url):
                     return tool_error(f"Local resource path does not exist: {url}")
                 payload["path"] = url
-            elif source_path.is_dir():
+            elif source_path.is_dir() or source_path.is_file():
+                if source_path.is_dir():
+                    cleanup_path = _zip_directory(source_path)  # directories upload as a zip
+                else:
+                    try:
+                        raise_if_read_blocked(str(source_path))
+                    except ValueError as exc:
+                        return tool_error(str(exc))
                 payload["source_name"] = source_path.name
-                cleanup_path = _zip_directory(source_path)
-                payload["temp_file_id"] = self._client.upload_temp_file(cleanup_path)
-            elif source_path.is_file():
-                try:
-                    raise_if_read_blocked(str(source_path))
-                except ValueError as exc:
-                    return tool_error(str(exc))
-                payload["source_name"] = source_path.name
-                payload["temp_file_id"] = self._client.upload_temp_file(source_path)
+                payload["temp_file_id"] = self._client.upload_temp_file(cleanup_path or source_path)
             else:
                 return tool_error(f"Unsupported local resource path: {url}")
             result = self._client.post("/api/v1/resources", payload).get("result", {})
