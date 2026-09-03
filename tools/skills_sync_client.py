@@ -18,18 +18,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tools.skills_sync_client_wire import (  # noqa: F401  (re-exports)
-    ARTIFACT_TYPE_SKILL, DEFAULT_MAX_OBJECT_BYTES, KIND_BLOB, KIND_COMMIT, KIND_TREE, MODE_DIR,
-    MODE_EXEC, MODE_FILE, SYNC_MANIFEST_ENTRY_NAME, SYNC_MANIFEST_TYPE, SYNC_MANIFEST_VERSION,
-    WIRE_VERSION, ObjectSet, SyncClient, SyncConflict, SyncError, _check_version,
-    assemble_root_from_skill_trees, build_commit, build_root_tree, build_sync_manifest_bytes,
-    build_tree, canonical_json_bytes, materialize_tree, merge_skill, nest_skill_tree,
-    parse_sync_manifest, read_manifest_of_root, read_ref_hash, root_tree_of_commit,
-    skill_trees_of_root, wire_address)
+    DEFAULT_MAX_OBJECT_BYTES, KIND_BLOB, KIND_COMMIT, KIND_TREE, MODE_EXEC, MODE_FILE, ObjectSet,
+    SyncClient, SyncConflict, SyncError, _check_version, assemble_root_from_skill_trees, build_commit,
+    build_root_tree, build_sync_manifest_bytes, build_tree, canonical_json_bytes, materialize_tree,
+    merge_skill, nest_skill_tree, parse_sync_manifest, read_manifest_of_root, read_ref_hash,
+    root_tree_of_commit, skill_trees_of_root, wire_address)
 
 logger = logging.getLogger(__name__)
-
-_merge_skill = merge_skill
-_skill_trees_of_root = skill_trees_of_root
 
 # Gate claim (NAS's wire name; means "Nous admin" / Permissions.ADMIN_ACCESS). The bearer comes
 # from resolve_nous_runtime_credentials(); its payload is decoded unverified to read this.
@@ -577,8 +572,6 @@ def sync_status() -> Dict[str, Any]:
 
 # Imported last: skills_sync_client_org reads this module's state lazily.
 from tools.skills_sync_client_org import (  # noqa: E402,F401  (re-exports)
-    ORG_DIR_NAME, _ORG_CAS_MAX_ATTEMPTS, _clear_active_org_marker, _org_baseline_path,
-    _read_org_baseline, _read_org_head, _skill_dir_fingerprint, _write_active_org_marker,
-    _write_org_baseline, _write_org_provenance, list_locally_modified_org_skills,
-    list_org_skill_names, maybe_pull_org_skills, org_head_ref, org_skill_is_locally_modified,
-    propose_skill, pull_org_skills, resolve_org_identity)
+    ORG_DIR_NAME, _skill_dir_fingerprint, _write_org_baseline, list_locally_modified_org_skills,
+    list_org_skill_names, maybe_pull_org_skills, org_skill_is_locally_modified, propose_skill,
+    pull_org_skills, resolve_org_identity)

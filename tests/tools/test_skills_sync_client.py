@@ -430,22 +430,22 @@ class TestObjectBuilding:
 
 class TestMergeDecision:
     def test_no_change(self):
-        assert ssc._merge_skill("b", "b", "b") == "either"
+        assert ssc.merge_skill("b", "b", "b") == "either"
 
     def test_ours_only_changed(self):
-        assert ssc._merge_skill("b", "o", "b") == "ours"
+        assert ssc.merge_skill("b", "o", "b") == "ours"
 
     def test_theirs_only_changed(self):
-        assert ssc._merge_skill("b", "b", "t") == "theirs"
+        assert ssc.merge_skill("b", "b", "t") == "theirs"
 
     def test_both_converged(self):
-        assert ssc._merge_skill("b", "x", "x") == "either"
+        assert ssc.merge_skill("b", "x", "x") == "either"
 
     def test_true_overlap(self):
-        assert ssc._merge_skill("b", "o", "t") == "overlap"
+        assert ssc.merge_skill("b", "o", "t") == "overlap"
 
     def test_deleted_both(self):
-        assert ssc._merge_skill(None, None, None) == "none"
+        assert ssc.merge_skill(None, None, None) == "none"
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +683,7 @@ class TestSyncManifest:
 
         # The manifest is a root-level BLOB, not a skill subtree, so the skill
         # walk must not surface it as a skill.
-        trees = ssc._skill_trees_of_root(client, root_hash)
+        trees = ssc.skill_trees_of_root(client, root_hash)
         assert "sync-manifest" not in trees
         assert set(trees) == {"alpha", "devops/beta"}
 
