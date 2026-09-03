@@ -39,7 +39,6 @@ def _profile_scoped_rpc(fail_code: int, *, required=(), catch_resolve: bool = Tr
                 try:
                     from hermes_cli.profiles import get_profile_dir
                     from hermes_constants import set_hermes_home_override
-
                     profile_dir = get_profile_dir(profile)
                     if not profile_dir or not profile_dir.is_dir():
                         return _err(rid, 4064, f"profile '{profile}' not found")
@@ -54,16 +53,32 @@ def _profile_scoped_rpc(fail_code: int, *, required=(), catch_resolve: bool = Tr
                 return _err(rid, fail_code, f"{prefix}{e}")
             finally:
                 _mcp_reset_profile(token)
-
         handler.__doc__ = body.__doc__
         return handler
-
     return deco
 
 
 def _guarded(fail_code: int, prefix: str = ""):
     """Handler body exceptions → ``_err(rid, fail_code, prefix + str(e))``."""
     return _profile_scoped_rpc(fail_code, prefix=prefix, scoped=False)
+
+
+def _live_session_guarded(fail_code: int):
+    """Resolve the session via ``_sess`` (waits for the agent build) and call
+    ``body(rid, params, session)``; body exceptions → ``fail_code``."""
+
+    def deco(body):
+        def handler(rid, params: dict) -> dict:
+            session, err = _sess(params, rid)
+            if err:
+                return err
+            try:
+                return body(rid, params, session)
+            except Exception as e:
+                return _err(rid, fail_code, str(e))
+        handler.__doc__ = body.__doc__
+        return handler
+    return deco
 
 
 def _stripped(v) -> bool:
@@ -86,7 +101,6 @@ def _mcp_server_scoped(body):
 def _mcp_named_server(rid, params):
     """(name, servers, None) for a configured server, else (name, servers, 4064 error)."""
     from hermes_cli.mcp_config import _get_mcp_servers
-
     name = str(params.get("name") or "").strip()
     servers = _get_mcp_servers()
     err = None if name in servers else _err(rid, 4064, f"server '{name}' not found")
@@ -112,7 +126,6 @@ def _session_key_or_err(rid, session):
 def _user_turn_indices(session):
     """(history, indices of user-originated turns) minus ephemeral scaffolding. Call under history_lock."""
     from agent.context_compressor import user_originated_turn_view
-
     history = _history_without_ephemeral_scaffolding(session.get("history", []))
     return history, [i for i, m in enumerate(history) if user_originated_turn_view(m) is not None]
 
@@ -121,26 +134,34 @@ def _clip(text: str, n: int = 120) -> str:
     return text[:n] + ("…" if len(text) > n else "")
 
 
+def _exec_out(rid, output: str) -> dict:
+    """command.dispatch display-only result."""
+    return _ok(rid, {"type": "exec", "output": output})
+
+
 def _capture_run_kwargs(timeout: int) -> dict:
     """subprocess.run kwargs shared by cli.exec / shell.exec / quick commands: captured
     text, UTF-8 + lossy decode (non-UTF-8 child output must not crash the gateway thread
     on locale-mismatched Windows), no stdin, no console flash under the desktop parent."""
     from hermes_cli._subprocess_compat import windows_hide_flags
-
     return dict(
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout,
-        stdin=subprocess.DEVNULL,
-        creationflags=windows_hide_flags(),
-    )
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+
+
+def _captured_exec(rid, cmd, timeout: int, *, on_result, timeout_err: tuple, fail_code: int, **kw) -> dict:
+    """Run ``cmd`` captured (see ``_capture_run_kwargs``) and hand the CompletedProcess to
+    ``on_result``; TimeoutExpired → ``timeout_err`` (code, message), other errors → ``fail_code``."""
+    try:
+        return on_result(subprocess.run(cmd, cwd=os.getcwd(), **kw, **_capture_run_kwargs(timeout)))
+    except subprocess.TimeoutExpired:
+        return _err(rid, *timeout_err)
+    except Exception as e:
+        return _err(rid, fail_code, str(e))
 
 
 def _toolset_rows(params: dict, *, with_tools: bool) -> list[dict]:
     from toolsets import get_all_toolsets, get_toolset_info
-
     session = _sessions.get(params.get("session_id", ""))
     enabled = (
         set(getattr(session["agent"], "enabled_toolsets", []) or []) if session else set(_load_enabled_toolsets() or [])
@@ -154,8 +175,7 @@ def _toolset_rows(params: dict, *, with_tools: bool) -> list[dict]:
             "name": name,
             "description": info["description"],
             "tool_count": info["tool_count"],
-            "enabled": name in enabled if enabled else True,
-        }
+            "enabled": name in enabled if enabled else True}
         if with_tools:
             row["tools"] = info["resolved_tools"]
         items.append(row)
@@ -170,7 +190,6 @@ def _(rid, params: dict) -> dict:
     """Host battery for the status bar. Always resolves; ``available: false`` = no battery or read failed."""
     try:
         from agent.battery import battery_category, read_battery
-
         batt = read_battery()
         return _ok(
             rid,
@@ -178,9 +197,7 @@ def _(rid, params: dict) -> dict:
                 "available": batt.available,
                 "percent": batt.percent,
                 "plugged": batt.plugged,
-                "category": battery_category(batt),
-            },
-        )
+                "category": battery_category(batt)})
     except Exception:
         return _ok(rid, {"available": False, "percent": None, "plugged": None, "category": "dim"})
 
@@ -189,47 +206,34 @@ def _(rid, params: dict) -> dict:
 @_guarded(5010)
 def _(rid, params: dict) -> dict:
     from tools.process_registry import process_registry
-
     return _ok(rid, {"killed": process_registry.kill_all()})
 
 
 @method("process.list")
-def _(rid, params: dict) -> dict:
+@_live_session_guarded(5010)
+def _(rid, params: dict, session) -> dict:
     """Session-scoped view of the background process registry (desktop status stack)."""
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    try:
-        return _ok(rid, {"processes": _session_processes(session)})
-    except Exception as e:
-        return _err(rid, 5010, str(e))
+    return _ok(rid, {"processes": _session_processes(session)})
 
 
 @method("process.kill")
-def _(rid, params: dict) -> dict:
+@_live_session_guarded(5010)
+def _(rid, params: dict, session) -> dict:
     """Kill ONE background process, scoped to the caller's session (unlike process.stop's kill_all)."""
-    session, err = _sess(params, rid)
-    if err:
-        return err
     proc_id = str(params.get("process_id") or "")
     if not proc_id:
         return _err(rid, 4012, "process_id required")
-    try:
-        from tools.process_registry import process_registry
-
-        proc = process_registry.get(proc_id)
-        if proc is None or str(getattr(proc, "session_key", "") or "") != str(session.get("session_key") or ""):
-            return _err(rid, 4044, f"no such process: {proc_id}")
-        return _ok(rid, process_registry.kill_process(proc_id))
-    except Exception as e:
-        return _err(rid, 5010, str(e))
+    from tools.process_registry import process_registry
+    proc = process_registry.get(proc_id)
+    if proc is None or str(getattr(proc, "session_key", "") or "") != str(session.get("session_key") or ""):
+        return _err(rid, 4044, f"no such process: {proc_id}")
+    return _ok(rid, process_registry.kill_process(proc_id))
 
 
 def _mcp_reload_confirm_required() -> bool:
     """``approvals.mcp_reload_confirm`` from disk config; True (safe) on any failure."""
     try:
         from hermes_cli.config import load_config
-
         cfg = load_config()
         approvals = cfg.get("approvals") if isinstance(cfg, dict) else None
         return bool(approvals.get("mcp_reload_confirm", True)) if isinstance(approvals, dict) else True
@@ -248,19 +252,15 @@ def _(rid, params: dict) -> dict:
         message = (
             "⚠️  /reload-mcp invalidates the prompt cache (next message re-sends full input tokens). "
             "Reply `/reload-mcp now` to proceed, or `/reload-mcp always` to proceed and "
-            "silence this prompt permanently."
-        )
+            "silence this prompt permanently.")
         return _ok(rid, {"status": "confirm_required", "message": message})
-
     if session and _session_uses_compute_host(session):
         try:
             ack = _get_compute_host_supervisor().reload_mcp(
-                str(params.get("session_id") or ""), request_id=f"reload-mcp-{rid}"
-            )
+                str(params.get("session_id") or ""), request_id=f"reload-mcp-{rid}")
         except Exception as exc:
             return _err(rid, 5019, f"compute-host reload_mcp failed: {exc}")
         return _ok(rid, {"status": "reloaded", "turn_isolation": True, "host_ack": ack})
-
     from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, reprobe_tool_availability
 
     def _refresh_session_agent() -> None:
@@ -279,7 +279,6 @@ def _(rid, params: dict) -> dict:
         except Exception as _exc:
             logger.warning("Failed to refresh cached agent tools after /reload-mcp: %s", _exc)
         _emit("session.info", params.get("session_id", ""), _session_info(agent, session))
-
     global _mcp_reload_gen, _mcp_reload_loaded_rev
 
     # Revision the CALLER wants loaded (the mcp_rev its poll observed); empty on
@@ -292,7 +291,6 @@ def _(rid, params: dict) -> dict:
         down mid-rebuild. Config can change WHILE discover connects: re-hash after
         discovery and repeat until stable so the marked generation matches what loaded."""
         global _mcp_reload_gen, _mcp_reload_loaded_rev
-
         loaded = _compute_mcp_rev()
         for _ in range(_MCP_RELOAD_MAX_PASSES):
             shutdown_mcp_servers()
@@ -302,7 +300,6 @@ def _(rid, params: dict) -> dict:
             if after == loaded:
                 break
             loaded = after
-
         _refresh_session_agent()
         _mcp_reload_loaded_rev = loaded
         _mcp_reload_gen += 1
@@ -317,22 +314,17 @@ def _(rid, params: dict) -> dict:
             _do_full_reload()
         finally:
             _mcp_reload_lock.release()
-
         return _finish_reload(rid, params, coalesced=False)
-
     gen_before = _mcp_reload_gen
-
     with _mcp_reload_lock:
         leader_completed = _mcp_reload_gen > gen_before
         rev_satisfied = not req_rev or req_rev == _mcp_reload_loaded_rev
-
         if leader_completed and rev_satisfied:
             _refresh_session_agent()
             coalesced = True
         else:
             _do_full_reload()
             coalesced = False
-
     return _finish_reload(rid, params, coalesced=coalesced)
 
 
@@ -342,119 +334,121 @@ def _(rid, params: dict) -> dict:
     """Re-read ``~/.hermes/.env`` (classic CLI ``/reload`` parity). Already-built agents
     keep their credential pool / provider routing; ``/new`` resolves fresh."""
     from hermes_cli.config import reload_env
-
     return _ok(rid, {"updated": int(reload_env())})
 
 
 # ─── Command catalog / dispatch ──────────────────────────────────────────────
 
 
+class _Catalog:
+    """Accumulator for commands.catalog: ``pairs`` (every [key, desc]), ``canon`` (lowercase
+    key/alias → canonical key), ``commands`` (key → desktop meta) and ordered categories."""
+
+    def __init__(self) -> None:
+        self.pairs: list[list[str]] = []
+        self.canon: dict[str, str] = {}
+        self.commands: dict[str, dict[str, str | None]] = {}
+        self.cat_map: dict[str, list[list[str]]] = {}  # insertion order = category order
+
+    def bucket(self, cat: str) -> list[list[str]]:
+        return self.cat_map.setdefault(cat, [])
+
+    def add(self, key: str, desc: str, cat: str) -> None:
+        self.canon[key.lower()] = key
+        self.pairs.append([key, desc])
+        self.bucket(cat).append([key, desc])
+
+
+def _catalog_registry(cat: _Catalog) -> None:
+    from hermes_cli.commands import COMMAND_REGISTRY, _build_description, command_desktop_meta
+    for cmd in COMMAND_REGISTRY:
+        meta = command_desktop_meta(cmd)
+        for key in (cmd.name, *cmd.aliases):
+            cat.commands[f"/{key}"] = dict(meta)
+        if cmd.name in _TUI_HIDDEN or cmd.gateway_only:
+            continue
+        cat.add(f"/{cmd.name}", _build_description(cmd), cmd.category)
+        for a in cmd.aliases:
+            cat.canon[f"/{a}".lower()] = f"/{cmd.name}"
+    for name, desc, category in _TUI_EXTRA:
+        # Registry command/alias wins over a colliding TUI extra (e.g. /compact, /sessions).
+        if name.lower() not in cat.canon:
+            cat.add(name, desc, category)
+
+
+def _catalog_quick_commands(cat: _Catalog) -> None:
+    qcmds = _load_cfg().get("quick_commands", {}) or {}
+    if not (isinstance(qcmds, dict) and qcmds):
+        return
+    cat.bucket("User commands")  # category exists even when every entry is malformed
+    for qname, qc in sorted(qcmds.items()):
+        if not isinstance(qc, dict):
+            continue
+        qtype = qc.get("type", "")
+        default_desc = {
+            "exec": f"exec: {qc.get('command', '')}", "alias": f"alias → {qc.get('target', '')}"
+        }.get(qtype, qtype or "quick command")
+        cat.add(f"/{qname}", _clip(str(qc.get("description") or default_desc)), "User commands")
+
+
+def _catalog_plugin_commands(cat: _Catalog) -> None:
+    from hermes_cli.plugins import get_plugin_commands
+    plugin_cmds = get_plugin_commands() or {}
+    if plugin_cmds:
+        cat.bucket("Plugin commands")
+    for pname, info in sorted(plugin_cmds.items()):
+        key = f"/{pname}"
+        if not isinstance(info, dict) or key.lower() in cat.canon:
+            continue
+        cat.add(key, _clip(str(info.get("description") or "Plugin command")), "Plugin commands")
+        mode = info.get("argument_mode")
+        if mode not in {"options", "text", "mixed"}:
+            mode = "text" if str(info.get("args_hint") or "").strip() else None
+        cat.commands[key] = {"argument_mode": mode, "desktop": None}
+
+
+def _catalog_skills(cat: _Catalog, skills: dict[str, dict]) -> None:
+    """Append skill pairs and fill ``skills`` = ``{key: {usage, origin}}`` (usage + origin ride
+    along — not a second RPC — because every catalog consumer also ranks by them)."""
+    from agent.skill_commands import scan_skill_commands
+    usage, origin_of = _skill_usage_lookup()
+    for k, info in sorted(scan_skill_commands().items()):
+        cat.pairs.append([k, _clip(str(info.get("description", "Skill")))])
+        name = str(info.get("name") or k.lstrip("/"))
+        skills[k] = {"usage": usage(name), "origin": origin_of(name)}
+
+
 @method("commands.catalog")
 @_guarded(5020)
 def _(rid, params: dict) -> dict:
-    """Registry-backed slash metadata for the TUI — categorized, no aliases."""
-    from hermes_cli.commands import COMMAND_REGISTRY, SUBCOMMANDS, _build_description, command_desktop_meta
-
-    all_pairs: list[list[str]] = []
-    canon: dict[str, str] = {}
-    commands: dict[str, dict[str, str | None]] = {}
-    cat_map: dict[str, list[list[str]]] = {}
-    cat_order: list[str] = []
-
-    def bucket(cat: str) -> list[list[str]]:
-        if cat not in cat_map:
-            cat_map[cat] = []
-            cat_order.append(cat)
-        return cat_map[cat]
-
-    def add(key: str, desc: str, rows: list[list[str]]) -> None:
-        canon[key.lower()] = key
-        all_pairs.append([key, desc])
-        rows.append([key, desc])
-
-    for cmd in COMMAND_REGISTRY:
-        meta = command_desktop_meta(cmd)
-        commands[f"/{cmd.name}"] = dict(meta)
-        for alias in cmd.aliases:
-            commands[f"/{alias}"] = dict(meta)
-        if cmd.name in _TUI_HIDDEN or cmd.gateway_only:
-            continue
-        c = f"/{cmd.name}"
-        add(c, _build_description(cmd), bucket(cmd.category))
-        for a in cmd.aliases:
-            canon[f"/{a}".lower()] = c
-
-    for name, desc, cat in _TUI_EXTRA:
-        # Registry command/alias wins over a colliding TUI extra (e.g. /compact, /sessions).
-        if name.lower() not in canon:
-            add(name, desc, bucket(cat))
-
+    """Registry-backed slash metadata for the TUI — categorized, no aliases. Discovery
+    failures land in ``warning`` (skills' message wins, then quick commands', then plugins')."""
+    from hermes_cli.commands import SUBCOMMANDS
+    cat = _Catalog()
+    _catalog_registry(cat)
     warning = ""
     try:
-        qcmds = _load_cfg().get("quick_commands", {}) or {}
-        if isinstance(qcmds, dict) and qcmds:
-            rows = bucket("User commands")
-            for qname, qc in sorted(qcmds.items()):
-                if not isinstance(qc, dict):
-                    continue
-                qtype = qc.get("type", "")
-                default_desc = {
-                    "exec": f"exec: {qc.get('command', '')}",
-                    "alias": f"alias → {qc.get('target', '')}",
-                }.get(qtype, qtype or "quick command")
-                add(f"/{qname}", _clip(str(qc.get("description") or default_desc)), rows)
+        _catalog_quick_commands(cat)
     except Exception as e:
         warning = f"quick_commands discovery unavailable: {e}"
-
     try:
-        from hermes_cli.plugins import get_plugin_commands
-
-        plugin_cmds = get_plugin_commands() or {}
-        if plugin_cmds:
-            rows = bucket("Plugin commands")
-            for pname, info in sorted(plugin_cmds.items()):
-                if not isinstance(info, dict):
-                    continue
-                key = f"/{pname}"
-                if key.lower() in canon:
-                    continue
-                add(key, _clip(str(info.get("description") or "Plugin command")), rows)
-                hint = str(info.get("args_hint") or "").strip()
-                mode = info.get("argument_mode")
-                if mode not in {"options", "text", "mixed"}:
-                    mode = "text" if hint else None
-                commands[key] = {"argument_mode": mode, "desktop": None}
+        _catalog_plugin_commands(cat)
     except Exception as e:
-        if not warning:
-            warning = f"plugin command discovery unavailable: {e}"
-
-    skill_count = 0
+        warning = warning or f"plugin command discovery unavailable: {e}"
     skills: dict[str, dict] = {}
     try:
-        from agent.skill_commands import scan_skill_commands
-
-        # Usage + origin ride along (not a second RPC): every catalog consumer also ranks it.
-        usage, origin_of = _skill_usage_lookup()
-
-        for k, info in sorted(scan_skill_commands().items()):
-            all_pairs.append([k, _clip(str(info.get("description", "Skill")))])
-            name = str(info.get("name") or k.lstrip("/"))
-            skills[k] = {"usage": usage(name), "origin": origin_of(name)}
-            skill_count += 1
+        _catalog_skills(cat, skills)
     except Exception as e:
         warning = f"skill discovery unavailable: {e}"
-
-    payload = {
-        "pairs": all_pairs,
+    return _ok(rid, {
+        "pairs": cat.pairs,
         "sub": {k: v[:] for k, v in SUBCOMMANDS.items()},
-        "canon": canon,
-        "commands": commands,
-        "categories": [{"name": cat, "pairs": cat_map[cat]} for cat in cat_order],
+        "canon": cat.canon,
+        "commands": cat.commands,
+        "categories": [{"name": c, "pairs": rows} for c, rows in cat.cat_map.items()],
         "skills": skills,
-        "skill_count": skill_count,
-        "warning": warning,
-    }
-    return _ok(rid, payload)
+        "skill_count": len(skills),
+        "warning": warning})
 
 
 @method("cli.exec")
@@ -466,28 +460,22 @@ def _(rid, params: dict) -> dict:
     hint = _cli_exec_blocked(argv)
     if hint:
         return _ok(rid, {"blocked": True, "hint": hint, "code": -1, "output": ""})
-    try:
-        r = subprocess.run(
-            [sys.executable, "-m", "hermes_cli.main", *argv],
-            cwd=os.getcwd(),
-            # Can drive the agent → needs provider credentials; tier-1 secrets still stripped.
-            env=hermes_subprocess_env(inherit_credentials=True),
-            **_capture_run_kwargs(min(int(params.get("timeout", 240)), 600)),
-        )
-        parts = [r.stdout or "", r.stderr or ""]
-        out = "\n".join(p for p in parts if p).strip() or "(no output)"
+
+    def done(r):
+        out = "\n".join(p for p in (r.stdout or "", r.stderr or "") if p).strip() or "(no output)"
         return _ok(rid, {"blocked": False, "code": r.returncode, "output": out[:48_000]})
-    except subprocess.TimeoutExpired:
-        return _err(rid, 5016, "cli.exec: timeout")
-    except Exception as e:
-        return _err(rid, 5017, str(e))
+
+    # Can drive the agent → needs provider credentials; tier-1 secrets still stripped.
+    return _captured_exec(
+        rid, [sys.executable, "-m", "hermes_cli.main", *argv], min(int(params.get("timeout", 240)), 600),
+        on_result=done, timeout_err=(5016, "cli.exec: timeout"), fail_code=5017,
+        env=hermes_subprocess_env(inherit_credentials=True))
 
 
 @method("command.resolve")
 @_guarded(5012)
 def _(rid, params: dict) -> dict:
     from hermes_cli.commands import resolve_command
-
     r = resolve_command(params.get("name", ""))
     if r:
         return _ok(rid, {"canonical": r.name, "description": r.description, "category": r.category})
@@ -506,17 +494,15 @@ def _dispatch_quick(rid, params, session, name, arg):
     if qc.get("type") == "exec":
         # Sanitized env: the TUI server process holds every API key in os.environ.
         from tools.environments.local import build_subprocess_env
-
         sanitized_env = build_subprocess_env()
         r = subprocess.run(qc.get("command", ""), shell=True, env=sanitized_env, **_capture_run_kwargs(30))
-        output = ((r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")).strip()[:4000]
+        output = "\n".join(p for p in (r.stdout or "", r.stderr or "") if p).strip()[:4000]
         if output:
             from agent.redact import redact_sensitive_text
-
             output = redact_sensitive_text(output)
         if r.returncode != 0:
             return _err(rid, 4018, output or f"quick command failed with exit code {r.returncode}")
-        return _ok(rid, {"type": "exec", "output": output})
+        return _exec_out(rid, output)
     if qc.get("type") == "alias":
         return _ok(rid, {"type": "alias", "target": qc.get("target", "")})
     return None
@@ -525,10 +511,14 @@ def _dispatch_quick(rid, params, session, name, arg):
 def _plugin_command_handler(name: str):
     try:
         from hermes_cli.plugins import get_plugin_command_handler
-
         return get_plugin_command_handler(name)
     except Exception:
         return None
+
+
+def _run_plugin_command(handler, arg: str) -> str:
+    from hermes_cli.plugins import resolve_plugin_command_result
+    return str(resolve_plugin_command_result(handler(arg)) or "")
 
 
 def _is_profile_skill_command(session: dict, base: str) -> bool:
@@ -538,7 +528,6 @@ def _is_profile_skill_command(session: dict, base: str) -> bool:
     try:
         from agent.skill_commands import get_skill_commands
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-
         profile_home = session.get("profile_home")
         token = set_hermes_home_override(profile_home) if profile_home else None
         try:
@@ -553,13 +542,8 @@ def _is_profile_skill_command(session: dict, base: str) -> bool:
 def _dispatch_plugin(rid, params, session, name, arg):
     handler = _plugin_command_handler(name)
     if handler:
-        try:
-            from hermes_cli.plugins import resolve_plugin_command_result
-
-            result = resolve_plugin_command_result(handler(arg))
-            return _ok(rid, {"type": "plugin", "output": str(result or "")})
-        except Exception:
-            pass
+        with contextlib.suppress(Exception):
+            return _ok(rid, {"type": "plugin", "output": _run_plugin_command(handler, arg)})
     return None
 
 
@@ -568,7 +552,6 @@ def _bundle_key_for(name: str):
     try:
         from agent.skill_bundles import resolve_bundle_command_key
         from hermes_cli.commands import resolve_command
-
         return resolve_bundle_command_key(name) if resolve_command(name) is None else None
     except Exception:
         return None
@@ -579,19 +562,14 @@ def _dispatch_bundle(rid, params, session, name, arg):
     if bundle_key is None:
         return None
     from agent.skill_bundles import build_bundle_invocation_message, get_skill_bundles
-
     try:
         bundle_result = build_bundle_invocation_message(
-            bundle_key,
-            arg,
-            task_id=session.get("session_key", "") if session else "",
-            platform=_resolve_session_platform(),
-        )
+            bundle_key, arg, task_id=session.get("session_key", "") if session else "",
+            platform=_resolve_session_platform())
     except Exception as exc:
         return _err(rid, 4018, f"bundle dispatch failed: {exc}")
     if not bundle_result:
         return _err(rid, 4018, f"failed to load bundle: {bundle_key}")
-
     msg, loaded_names, missing = bundle_result
     bundle_name = get_skill_bundles().get(bundle_key, {}).get("name", bundle_key.lstrip("/"))
     notice = f"⚡ Loading bundle: {bundle_name} ({len(loaded_names)} skills)"
@@ -604,7 +582,6 @@ def _dispatch_bundle(rid, params, session, name, arg):
 def _dispatch_skill(rid, params, session, name, arg):
     try:
         from agent.skill_commands import scan_skill_commands, build_skill_invocation_message
-
         cmds = scan_skill_commands()
         key = f"/{name}"
         if key in cmds:
@@ -628,25 +605,20 @@ def _cmd_queue(rid, params, session, name, arg):
     return _ok(rid, {"type": "send", "message": arg})
 
 
-def _cmd_learn(rid, params, session, name, arg):
-    # Submitted as a normal turn; the live agent gathers sources and authors the skill via skill_manage.
-    from agent.learn_prompt import build_learn_prompt
+def _prompt_builtin(module: str, fn: str, kw: str = ""):
+    """/learn, /plan, /init: submit ``module.fn(arg)`` as a normal turn (the live agent does the
+    work — authors the skill via skill_manage, saves the plan, generates AGENTS.md)."""
 
-    return _ok(rid, {"type": "send", "message": build_learn_prompt(arg)})
-
-
-def _cmd_plan(rid, params, session, name, arg):
-    # Normal turn (as /learn); the agent saves the plan under .hermes/plans/ via write_file.
-    from agent.plan_prompt import build_plan_prompt
-
-    return _ok(rid, {"type": "send", "message": build_plan_prompt(arg)})
+    def cmd(rid, params, session, name, arg):
+        import importlib
+        build = getattr(importlib.import_module(module), fn)
+        return _ok(rid, {"type": "send", "message": build(**{kw: arg}) if kw else build(arg)})
+    return cmd
 
 
-def _cmd_init(rid, params, session, name, arg):
-    # Generate-or-update AGENTS.md as a normal turn (as /learn).
-    from hermes_cli.init_command import build_init_prompt_for_cwd
-
-    return _ok(rid, {"type": "send", "message": build_init_prompt_for_cwd(extra=arg)})
+_cmd_learn = _prompt_builtin("agent.learn_prompt", "build_learn_prompt")
+_cmd_plan = _prompt_builtin("agent.plan_prompt", "build_plan_prompt")
+_cmd_init = _prompt_builtin("hermes_cli.init_command", "build_init_prompt_for_cwd", kw="extra")
 
 
 def _cmd_moa(rid, params, session, name, arg):
@@ -654,7 +626,6 @@ def _cmd_moa(rid, params, session, name, arg):
     # switching goes through the model picker (MoA presets = virtual "Mixture of Agents" provider).
     try:
         from hermes_cli.moa_config import moa_usage, normalize_moa_config
-
         if not arg:
             return _err(rid, 4004, moa_usage())
         if not session:
@@ -666,31 +637,22 @@ def _cmd_moa(rid, params, session, name, arg):
         agent = session.get("agent")
         session["moa_one_shot_restore"] = {
             "override": session.get("model_override"),
-            "model": getattr(agent, "model", None) if agent else None,
-            "provider": getattr(agent, "provider", None) if agent else None,
-        }
+            "model": getattr(agent, "model", None),
+            "provider": getattr(agent, "provider", None)}
         if agent is not None:
             try:
+                # persist_override=False: turn-scoped, never persist the MoA provider to config.yaml
                 _apply_model_switch(
-                    sid,
-                    session,
-                    f"{preset} --provider moa",
-                    confirm_expensive_model=False,
-                    pin_session_override=True,
-                    persist_override=False,  # turn-scoped: never persist the MoA provider to config.yaml
-                )
+                    sid, session, f"{preset} --provider moa", confirm_expensive_model=False,
+                    pin_session_override=True, persist_override=False)
             except Exception as exc:
                 session.pop("moa_one_shot_restore", None)
                 return _err(rid, 5030, f"moa unavailable: {exc}")
         else:
             # Lazy/fresh session: the override is consumed by the first build.
             session["model_override"] = {
-                "provider": "moa",
-                "model": preset,
-                "base_url": "moa://local",
-                "api_key": "moa-virtual-provider",
-                "api_mode": "chat_completions",
-            }
+                "provider": "moa", "model": preset, "base_url": "moa://local",
+                "api_key": "moa-virtual-provider", "api_mode": "chat_completions"}
         notice = f"MoA one-shot queued with preset {preset}; previous model will be restored after this turn."
         return _ok(rid, {"type": "send", "notice": notice, "message": arg})
     except Exception as exc:
@@ -700,24 +662,22 @@ def _cmd_moa(rid, params, session, name, arg):
 def _cmd_focus(rid, params, session, name, arg):
     # Display-only; routed through the config.set branch Ink uses so both surfaces share one state machine.
     from hermes_cli.focus_view import format_focus_status, format_focus_toggle_message, resolve_focus_arg
-
-    _display_focus = _load_cfg().get("display")
-    _d_focus: dict = _display_focus if isinstance(_display_focus, dict) else {}
-    _cur_focus = bool(_d_focus.get("focus_view", False))
-    _action, _target = resolve_focus_arg(arg, _cur_focus)
-    if _action == "usage":
+    display = _load_cfg().get("display")
+    display = display if isinstance(display, dict) else {}
+    cur = bool(display.get("focus_view", False))
+    action, target = resolve_focus_arg(arg, cur)
+    if action == "usage":
         return _err(rid, 4004, "usage: /focus [on|off|status]")
-    if _action == "status":
-        _saved = _d_focus.get("focus_saved_tool_progress") or _load_tool_progress_mode()
-        return _ok(rid, {"type": "exec", "output": format_focus_status(_cur_focus, _saved)})
-    _res = _methods["config.set"](
-        rid, {"key": "focus", "value": "on" if _target else "off", "session_id": params.get("session_id", "")}
+    if action == "status":
+        saved = display.get("focus_saved_tool_progress") or _load_tool_progress_mode()
+        return _exec_out(rid, format_focus_status(cur, saved))
+    res = _methods["config.set"](
+        rid, {"key": "focus", "value": "on" if target else "off", "session_id": params.get("session_id", "")}
     )
-    if "error" in _res:
-        return _res
-    _payload = _res.get("result") or {}
-    output = format_focus_toggle_message(bool(_target), _payload.get("tool_progress") or "all")
-    return _ok(rid, {"type": "exec", "output": output})
+    if "error" in res:
+        return res
+    output = format_focus_toggle_message(bool(target), (res.get("result") or {}).get("tool_progress") or "all")
+    return _exec_out(rid, output)
 
 
 def _cmd_retry(rid, params, session, name, arg):
@@ -726,7 +686,6 @@ def _cmd_retry(rid, params, session, name, arg):
     if busy := _busy_error(rid, session, "retry"):
         return busy
     from agent.context_compressor import history_before_user_originated_turn, retryable_user_text
-
     with session["history_lock"]:
         if busy := _busy_error(rid, session, "retry"):
             return busy
@@ -742,8 +701,7 @@ def _cmd_retry(rid, params, session, name, arg):
             return _err(rid, 4018, str(exc))
         try:
             _active, durable_live_view, _rewound_count = _rewind_active_session_history(
-                session, len(user_indices) - 1, require_retryable=True
-            )
+                session, len(user_indices) - 1, require_retryable=True)
         except ValueError as exc:
             return _err(rid, 4018, str(exc))
         except Exception as exc:
@@ -760,51 +718,47 @@ def _cmd_steer(rid, params, session, name, arg):
         try:
             if agent.steer(arg):
                 shown = f"{arg[:80]}{'...' if len(arg) > 80 else ''}"
-                return _ok(rid, {"type": "exec", "output": f"⏩ Steer queued — arrives after the next tool call: {shown}"})
+                return _exec_out(rid, f"⏩ Steer queued — arrives after the next tool call: {shown}")
         except Exception:
             pass
-    # No active run: treat as next-turn message.
-    return _ok(rid, {"type": "send", "message": arg})
+    return _ok(rid, {"type": "send", "message": arg})  # no active run: next-turn message
 
 
 def _cmd_goal(rid, params, session, name, arg):
-    if not session:
-        return _err(rid, 4001, "no active session")
+    sid_key, err = _session_key_or_err(rid, session)
+    if err:
+        return err
     try:
         from hermes_cli.goals import GoalManager
     except Exception as exc:
         return _err(rid, 5030, f"goals unavailable: {exc}")
-    sid_key, err = _session_key_or_err(rid, session)
-    if err:
-        return err
     try:
         max_turns = int((_load_cfg().get("goals") or {}).get("max_turns", 20) or 20)
     except Exception:
         max_turns = 20
     mgr = GoalManager(session_id=sid_key, default_max_turns=max_turns)
-
     lower = arg.strip().lower()
     if not arg.strip() or lower == "status":
-        return _ok(rid, {"type": "exec", "output": mgr.status_line()})
+        return _exec_out(rid, mgr.status_line())
     if lower == "pause":
         state = mgr.pause(reason="user-paused")
         out = "No goal set." if state is None else f"⏸ Goal paused: {state.goal}"
-        return _ok(rid, {"type": "exec", "output": out})
+        return _exec_out(rid, out)
     if lower == "resume":
         state = mgr.resume()
         if state is None:
-            return _ok(rid, {"type": "exec", "output": "No goal to resume."})
+            return _exec_out(rid, "No goal to resume.")
         # Resume must restart work: `exec` is display-only, so return a `send` with the
         # continuation prompt; `display` keeps model-facing scaffolding out of the transcript.
         prompt = mgr.next_continuation_prompt()
         if not prompt:
-            return _ok(rid, {"type": "exec", "output": f"▶ Goal resumed: {state.goal}"})
+            return _exec_out(rid, f"▶ Goal resumed: {state.goal}")
         notice = f"▶ Goal resumed: {state.goal}\nContinuing now — taking the next step."
         return _ok(rid, {"type": "send", "notice": notice, "message": prompt, "display": "/goal resume"})
     if lower in {"clear", "stop", "done"}:
         had = mgr.has_goal()
         mgr.clear()
-        return _ok(rid, {"type": "exec", "output": "✓ Goal cleared." if had else "No active goal."})
+        return _exec_out(rid, "✓ Goal cleared." if had else "No active goal.")
 
     # Remaining text = new goal. Client renders `notice`, submits `message`; the post-turn judge takes over.
     try:
@@ -814,38 +768,31 @@ def _cmd_goal(rid, params, session, name, arg):
     notice = (
         f"⊙ Goal set ({state.max_turns}-turn budget): {state.goal}\n"
         "I'll keep working until the goal is done, you pause/clear it, or the budget is exhausted.\n"
-        "Controls: /goal status · /goal pause · /goal resume · /goal clear"
-    )
+        "Controls: /goal status · /goal pause · /goal resume · /goal clear")
     return _ok(rid, {"type": "send", "notice": notice, "message": state.goal})
 
 
 def _cmd_loop(rid, params, session, name, arg):
-    # Recurring in-session wakeups; the notification poller fires due ones while the session is idle.
-    if not session:
-        return _err(rid, 4001, "no active session")
+    sid_key, err = _session_key_or_err(rid, session)
+    if err:
+        return err
     try:
         from hermes_cli.loops import LoopManager, dispatch_loop_command
     except Exception as exc:
         return _err(rid, 5030, f"loops unavailable: {exc}")
-    sid_key, err = _session_key_or_err(rid, session)
-    if err:
-        return err
     result = dispatch_loop_command(LoopManager(session_id=sid_key), arg)
     output = result.get("output") or ""
     if result.get("created"):
         with contextlib.suppress(Exception):
             from hermes_cli.loops import goal_blocks_loop_tick
-
             if goal_blocks_loop_tick(sid_key):
                 output += (
                     "\nNote: an active /goal is driving this session — loop "
-                    "wakeups defer until the goal finishes, pauses, or parks."
-                )
-    return _ok(rid, {"type": "exec", "output": output})
+                    "wakeups defer until the goal finishes, pauses, or parks.")
+    return _exec_out(rid, output)
 
 
 def _cmd_undo(rid, params, session, name, arg):
-    # /undo [N]: back up N user turns, soft-delete truncated rows on disk, prefill the composer.
     if not session:
         return _err(rid, 4001, "no active session to undo")
     if busy := _busy_error(rid, session, "undo"):
@@ -853,16 +800,12 @@ def _cmd_undo(rid, params, session, name, arg):
     session_key = session.get("session_key", "")
     if not session_key:
         return _err(rid, 4001, "no session key for undo")
-    n = 1
     arg_str = (arg or "").strip()
-    if arg_str:
-        try:
-            n = int(arg_str.split()[0])
-        except (ValueError, IndexError):
-            return _err(rid, 4004, f"undo: invalid count {arg_str!r} — use /undo or /undo N")
-    n = max(n, 1)
+    try:
+        n = max(int(arg_str.split()[0]), 1) if arg_str else 1
+    except (ValueError, IndexError):
+        return _err(rid, 4004, f"undo: invalid count {arg_str!r} — use /undo or /undo N")
     from agent.message_content import flatten_message_text
-
     with session["history_lock"]:
         if busy := _busy_error(rid, session, "undo"):
             return busy
@@ -903,7 +846,7 @@ def _cmd_snapshot(rid, params, session, name, arg):
         "/snapshot restore is blocked in the TUI because it changes config/state on disk "
         "while the live agent has cached settings. Run it in the classic CLI, then restart the TUI."
     )
-    return _ok(rid, {"type": "exec", "output": output})
+    return _exec_out(rid, output)
 
 
 def _cmd_compress(rid, params, session, name, arg):
@@ -912,7 +855,6 @@ def _cmd_compress(rid, params, session, name, arg):
     if busy := _busy_error(rid, session, "compress"):
         return busy
     from agent.conversation_compression import finalize_context_engine_compression_notification
-
     sid = params.get("session_id", "")
     if _session_uses_compute_host(session):
         status, text = _compute_host_slash(sid, session, "compress", f"/{name}" + (f" {arg}" if arg else ""))
@@ -921,27 +863,18 @@ def _cmd_compress(rid, params, session, name, arg):
         payload = {"type": "exec", "status": "pending", "output": text} if status == "pending" else {"type": "exec", "output": text}
         return _ok(rid, payload)
     try:
-        summary = _compress_live_with_feedback(sid, session, session["agent"], arg, snapshot_kwargs=True)
-        output = "\n".join(filter(None, [summary["headline"], summary["token_line"], summary.get("note")]))
-        return _ok(rid, {"type": "exec", "output": output})
-    except CompressionLockHeld as e:
-        # Clean no-op (parity with the slash mirror / session.compress), never "compress failed";
-        # _compress_session_history already discarded the deferred context-engine notification.
-        from agent.manual_compression_feedback import describe_compression_lock_skip
-
-        return _ok(rid, {"type": "exec", "output": describe_compression_lock_skip(e.holder)})
+        output = _compress_live_with_feedback(sid, session, session["agent"], arg, snapshot_kwargs=True)
+        return _exec_out(rid, output)
     except Exception as exc:
         finalize_context_engine_compression_notification(session["agent"], committed=False)
         return _err(rid, 5009, f"compress failed: {exc}")
 
 
-# name → built-in handler (values are rebound onto server globals by bind_module).
 _SLASH_BUILTINS = {
     "queue": _cmd_queue, "q": _cmd_queue, "learn": _cmd_learn, "plan": _cmd_plan, "init": _cmd_init,
     "moa": _cmd_moa, "focus": _cmd_focus, "retry": _cmd_retry, "steer": _cmd_steer, "goal": _cmd_goal,
     "loop": _cmd_loop, "undo": _cmd_undo, "snapshot": _cmd_snapshot, "snap": _cmd_snapshot,
-    "compress": _cmd_compress, "compact": _cmd_compress,
-}
+    "compress": _cmd_compress, "compact": _cmd_compress}
 
 
 @method("command.dispatch")
@@ -968,49 +901,37 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
-
     cmd = params.get("command", "").strip()
     if not cmd:
         return _err(rid, 4004, "empty command")
 
     # Skill/bundle and _PENDING_INPUT_COMMANDS must NOT reach the slash worker. Plugin
     # commands also bypass it but return normal slash.exec output (TUI keeps the pager path).
-    _cmd_text = cmd.lstrip("/") if cmd.startswith("/") else cmd
-    _cmd_parts = _cmd_text.split(maxsplit=1)
-    _cmd_base = (_cmd_parts[0] if _cmd_parts else "").lower()
-    _cmd_arg = _cmd_parts[1] if len(_cmd_parts) > 1 else ""
+    parts = cmd.lstrip("/").split(maxsplit=1)
+    base = (parts[0] if parts else "").lower()
+    arg = parts[1] if len(parts) > 1 else ""
     sid = params.get("session_id", "")
-
-    live_output = _live_slash_command_output(sid, session, _cmd_base, _cmd_arg)
+    live_output = _live_slash_command_output(sid, session, base, arg)
     if live_output is not None:
         return _ok(rid, {"output": live_output or "(no output)"})
-
-    if _cmd_base in _PENDING_INPUT_COMMANDS:
+    if base in _PENDING_INPUT_COMMANDS:
         # Route straight to command.dispatch: some clients fail the error-then-retry fallback ("empty command").
-        return _methods["command.dispatch"](rid, {"name": _cmd_base, "arg": _cmd_arg, "session_id": sid})
-
-    if _cmd_base in _WORKER_BLOCKED_COMMANDS:
-        subcommand = _cmd_arg.split(maxsplit=1)[0].lower() if _cmd_arg else ""
+        return _methods["command.dispatch"](rid, {"name": base, "arg": arg, "session_id": sid})
+    if base in _WORKER_BLOCKED_COMMANDS:
+        subcommand = arg.split(maxsplit=1)[0].lower() if arg else ""
         if subcommand in {"restore", "rewind"}:
             return _err(rid, 4018, "snapshot restore mutates live config/state; use command.dispatch for /snapshot restore")
-
-    _bundle_key = _bundle_key_for(_cmd_base)
-    if _bundle_key is not None:
-        return _methods["command.dispatch"](rid, {"name": _bundle_key.lstrip("/"), "arg": _cmd_arg, "session_id": sid})
-
-    if _is_profile_skill_command(session, _cmd_base):
-        return _err(rid, 4018, f"skill command: use command.dispatch for /{_cmd_base}")
-
-    plugin_handler = _plugin_command_handler(_cmd_base) if _cmd_base else None
+    bundle_key = _bundle_key_for(base)
+    if bundle_key is not None:
+        return _methods["command.dispatch"](rid, {"name": bundle_key.lstrip("/"), "arg": arg, "session_id": sid})
+    if _is_profile_skill_command(session, base):
+        return _err(rid, 4018, f"skill command: use command.dispatch for /{base}")
+    plugin_handler = _plugin_command_handler(base) if base else None
     if plugin_handler:
         try:
-            from hermes_cli.plugins import resolve_plugin_command_result
-
-            result = resolve_plugin_command_result(plugin_handler(_cmd_arg))
-            return _ok(rid, {"output": str(result or "(no output)")})
+            return _ok(rid, {"output": _run_plugin_command(plugin_handler, arg) or "(no output)"})
         except Exception as e:
             return _ok(rid, {"output": f"Plugin command error: {e}"})
-
     worker = session.get("slash_worker")
     if not worker:
         # slash.exec runs on the RPC pool: two concurrent commands could both see
@@ -1025,12 +946,10 @@ def _(rid, params: dict) -> dict:
                     worker = _SlashWorker(
                         session["session_key"],
                         getattr(session.get("agent"), "model", _resolve_model()),
-                        profile_home=session.get("profile_home"),
-                    )
+                        profile_home=session.get("profile_home"))
                     _attach_worker(sid, session, worker)
                 except Exception as e:
                     return _err(rid, 5030, f"slash worker start failed: {e}")
-
     try:
         output = worker.run(cmd)
         warning = _mirror_slash_side_effects(sid, session, cmd)
@@ -1049,45 +968,33 @@ def _(rid, params: dict) -> dict:
 
 
 @method("insights.get")
+@_guarded(5017)
 def _(rid, params: dict) -> dict:
     days = params.get("days", 30)
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5017)
-    try:
-        cutoff = time.time() - days * 86400
-        rows = [s for s in db.list_sessions_rich(limit=500, compact_rows=True) if (s.get("started_at") or 0) >= cutoff]
-        return _ok(rid, {"days": days, "sessions": len(rows), "messages": sum(s.get("message_count", 0) for s in rows)})
-    except Exception as e:
-        return _err(rid, 5017, str(e))
+    cutoff = time.time() - days * 86400
+    rows = [s for s in db.list_sessions_rich(limit=500, compact_rows=True) if (s.get("started_at") or 0) >= cutoff]
+    return _ok(rid, {"days": days, "sessions": len(rows), "messages": sum(s.get("message_count", 0) for s in rows)})
 
 
 @method("rollback.list")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
-    try:
-
-        def go(mgr, cwd):
-            if not mgr.enabled:
-                return _ok(rid, {"enabled": False, "checkpoints": []})
-            rows = [
-                {"hash": c.get("hash", ""), "timestamp": c.get("timestamp", ""), "message": c.get("message", "")}
-                for c in mgr.list_checkpoints(cwd)
-            ]
-            return _ok(rid, {"enabled": True, "checkpoints": rows})
-
-        return _with_checkpoints(session, go)
-    except Exception as e:
-        return _err(rid, 5020, str(e))
+@_live_session_guarded(5020)
+def _(rid, params: dict, session) -> dict:
+    def go(mgr, cwd):
+        if not mgr.enabled:
+            return _ok(rid, {"enabled": False, "checkpoints": []})
+        rows = [
+            {"hash": c.get("hash", ""), "timestamp": c.get("timestamp", ""), "message": c.get("message", "")}
+            for c in mgr.list_checkpoints(cwd)]
+        return _ok(rid, {"enabled": True, "checkpoints": rows})
+    return _with_checkpoints(session, go)
 
 
 @method("rollback.restore")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
+@_live_session_guarded(5021)
+def _(rid, params: dict, session) -> dict:
     target = params.get("hash", "")
     file_path = params.get("file_path", "")
     if not target:
@@ -1096,46 +1003,37 @@ def _(rid, params: dict) -> dict:
     # would drop the agent's output or clobber it). File-scoped only touches disk.
     if not file_path and session.get("running"):
         return _err(rid, 4009, "session busy — /interrupt the current turn before full rollback.restore")
-    try:
 
-        def go(mgr, cwd):
-            resolved = _resolve_checkpoint_hash(mgr, cwd, target)
-            result = mgr.restore(cwd, resolved, file_path=file_path or None)
-            if result.get("success") and not file_path:
-                removed = 0
-                with session["history_lock"]:
-                    _history, user_indices = _user_turn_indices(session)
-                    if user_indices:
-                        try:
-                            _active, _live_view, removed = _rewind_active_session_history(session, len(user_indices) - 1)
-                        except Exception as exc:
-                            raise RuntimeError(f"checkpoint restored, but session history rewind failed: {exc}") from exc
-                result["history_removed"] = removed
-            return result
-
-        return _ok(rid, _with_checkpoints(session, go))
-    except Exception as e:
-        return _err(rid, 5021, str(e))
+    def go(mgr, cwd):
+        resolved = _resolve_checkpoint_hash(mgr, cwd, target)
+        result = mgr.restore(cwd, resolved, file_path=file_path or None)
+        if result.get("success") and not file_path:
+            removed = 0
+            with session["history_lock"]:
+                _history, user_indices = _user_turn_indices(session)
+                if user_indices:
+                    try:
+                        _active, _live_view, removed = _rewind_active_session_history(session, len(user_indices) - 1)
+                    except Exception as exc:
+                        raise RuntimeError(f"checkpoint restored, but session history rewind failed: {exc}") from exc
+            result["history_removed"] = removed
+        return result
+    return _ok(rid, _with_checkpoints(session, go))
 
 
 @method("rollback.diff")
-def _(rid, params: dict) -> dict:
-    session, err = _sess(params, rid)
-    if err:
-        return err
+@_live_session_guarded(5022)
+def _(rid, params: dict, session) -> dict:
     target = params.get("hash", "")
     if not target:
         return _err(rid, 4014, "hash required")
-    try:
-        r = _with_checkpoints(session, lambda mgr, cwd: mgr.diff(cwd, _resolve_checkpoint_hash(mgr, cwd, target)))
-        raw = r.get("diff", "")[:4000]
-        payload = {"stat": r.get("stat", ""), "diff": raw}
-        rendered = render_diff(raw, session.get("cols", 80))
-        if rendered:
-            payload["rendered"] = rendered
-        return _ok(rid, payload)
-    except Exception as e:
-        return _err(rid, 5022, str(e))
+    r = _with_checkpoints(session, lambda mgr, cwd: mgr.diff(cwd, _resolve_checkpoint_hash(mgr, cwd, target)))
+    raw = r.get("diff", "")[:4000]
+    payload = {"stat": r.get("stat", ""), "diff": raw}
+    rendered = render_diff(raw, session.get("cols", 80))
+    if rendered:
+        payload["rendered"] = rendered
+    return _ok(rid, payload)
 
 
 @method("browser.manage")
@@ -1155,11 +1053,9 @@ def _(rid, params: dict) -> dict:
 @_guarded(5032)
 def _(rid, params: dict) -> dict:
     from hermes_cli.plugins import get_plugin_manager
-
     rows = [
         {"name": n, "version": getattr(i, "version", "?"), "enabled": getattr(i, "enabled", True)}
-        for n, i in get_plugin_manager()._plugins.items()
-    ]
+        for n, i in get_plugin_manager()._plugins.items()]
     return _ok(rid, {"plugins": rows})
 
 
@@ -1169,15 +1065,13 @@ def _(rid, params: dict) -> dict:
     cfg = _load_cfg()
     model = _resolve_model()
     from agent.secret_scope import get_secret
-
     api_key = get_secret("HERMES_API_KEY", "") or cfg.get("api_key", "")
     masked = f"****{api_key[-4:]}" if len(api_key) > 4 else "(not set)"
     base_url = os.environ.get("HERMES_BASE_URL", "") or cfg.get("base_url", "")
     agent_rows = [
         ["Max Turns", str(_cfg_max_turns(cfg, 500))],
         ["Toolsets", ", ".join(cfg.get("enabled_toolsets", [])) or "all"],
-        ["Verbose", str(cfg.get("verbose", False))],
-    ]
+        ["Verbose", str(cfg.get("verbose", False))]]
     sections = [
         {"title": "Model", "rows": [["Model", model], ["Base URL", base_url or "(default)"], ["API Key", masked]]},
         {"title": "Agent", "rows": agent_rows},
@@ -1205,7 +1099,6 @@ def _(rid, params: dict) -> dict:
 @_guarded(5034)
 def _(rid, params: dict) -> dict:
     from model_tools import get_toolset_for_tool, get_tool_definitions
-
     session = _sessions.get(params.get("session_id", ""))
     enabled = getattr(session["agent"], "enabled_toolsets", None) if session else _load_enabled_toolsets()
     # Pre-assembly list: /tools must also show tools deferred behind the tool_search bridge (as the CLI).
@@ -1222,6 +1115,7 @@ def _(rid, params: dict) -> dict:
 
 
 @method("tools.configure")
+@_guarded(5035)
 def _(rid, params: dict) -> dict:
     action = str(params.get("action", "") or "").strip().lower()
     targets = [str(name).strip() for name in params.get("names", []) or [] if str(name).strip()]
@@ -1229,64 +1123,45 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4017, f"unknown tools action: {action}")
     if not targets:
         return _err(rid, 4018, "names required")
-
-    try:
-        from hermes_cli.config import load_config, save_config
-        from hermes_cli.tools_config import (
-            CONFIGURABLE_TOOLSETS,
-            _apply_mcp_change,
-            _apply_toolset_change,
-            _get_platform_tools,
-            _get_plugin_toolset_keys,
-        )
-
-        cfg = load_config()
-        valid_toolsets = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS} | _get_plugin_toolset_keys()
-        toolset_targets = [name for name in targets if ":" not in name]
-        mcp_targets = [name for name in targets if ":" in name]
-        unknown = [name for name in toolset_targets if name not in valid_toolsets]
-        toolset_targets = [name for name in toolset_targets if name in valid_toolsets]
-
-        if toolset_targets:
-            _apply_toolset_change(cfg, "cli", toolset_targets, action)
-
-        missing_servers = _apply_mcp_change(cfg, mcp_targets, action) if mcp_targets else set()
-        save_config(cfg)
-
-        sid = params.get("session_id", "")
-        session = _sessions.get(sid)
-        info = _reset_session_agent(sid, session) if session else None
-        enabled = sorted(_get_platform_tools(load_config(), "cli", include_default_mcp_servers=False))
-        changed = [
-            name
-            for name in targets
-            if name not in unknown and (":" not in name or name.split(":", 1)[0] not in missing_servers)
-        ]
-
-        return _ok(
-            rid,
-            {
-                "changed": changed,
-                "enabled_toolsets": enabled,
-                "info": info,
-                "missing_servers": sorted(missing_servers),
-                "reset": bool(session),
-                "unknown": unknown,
-            },
-        )
-    except Exception as e:
-        return _err(rid, 5035, str(e))
+    from hermes_cli.config import load_config, save_config
+    from hermes_cli.tools_config import (
+        CONFIGURABLE_TOOLSETS, _apply_mcp_change, _apply_toolset_change, _get_platform_tools,
+        _get_plugin_toolset_keys)
+    cfg = load_config()
+    valid_toolsets = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS} | _get_plugin_toolset_keys()
+    toolset_targets = [name for name in targets if ":" not in name]
+    mcp_targets = [name for name in targets if ":" in name]
+    unknown = [name for name in toolset_targets if name not in valid_toolsets]
+    toolset_targets = [name for name in toolset_targets if name in valid_toolsets]
+    if toolset_targets:
+        _apply_toolset_change(cfg, "cli", toolset_targets, action)
+    missing_servers = _apply_mcp_change(cfg, mcp_targets, action) if mcp_targets else set()
+    save_config(cfg)
+    sid = params.get("session_id", "")
+    session = _sessions.get(sid)
+    info = _reset_session_agent(sid, session) if session else None
+    enabled = sorted(_get_platform_tools(load_config(), "cli", include_default_mcp_servers=False))
+    changed = [
+        name
+        for name in targets
+        if name not in unknown and (":" not in name or name.split(":", 1)[0] not in missing_servers)
+    ]
+    return _ok(rid, {
+        "changed": changed,
+        "enabled_toolsets": enabled,
+        "info": info,
+        "missing_servers": sorted(missing_servers),
+        "reset": bool(session),
+        "unknown": unknown})
 
 
 @method("agents.list")
 @_guarded(5033)
 def _(rid, params: dict) -> dict:
     from tools.process_registry import process_registry
-
     rows = [
         {"session_id": p["session_id"], "command": p["command"][:80], "status": p["status"], "uptime": p["uptime_seconds"]}
-        for p in process_registry.list_sessions()
-    ]
+        for p in process_registry.list_sessions()]
     return _ok(rid, {"processes": rows})
 
 
@@ -1299,7 +1174,6 @@ def _(rid, params: dict) -> dict:
     """cronjob() keys off HERMES_HOME, so the optional ``profile`` scope reaches a
     per-profile cron store even when that profile runs its own gateway."""
     from tools.cronjob_tools import cronjob
-
     action, jid = params.get("action", "list"), params.get("name", "")
     if action == "list":
         # Paused jobs are excluded by default (reads as deletion in a toggle UI) — forward the flag.
@@ -1315,14 +1189,11 @@ def _(rid, params: dict) -> dict:
     if action == "add":
         # Optional repeat / continuity / deliver ('bot-chat[:name]'): None keeps each cronjob() default.
         raw = cronjob(
-            action="create",
-            name=jid,
-            schedule=params.get("schedule", ""),
+            action="create", name=jid, schedule=params.get("schedule", ""),
             prompt=params.get("prompt", ""),
             repeat=int(params["repeat"]) if str(params.get("repeat", "")).strip().isdigit() else None,
             continuity=is_truthy_value(params.get("continuity")) if params.get("continuity") is not None else None,
-            deliver=str(params.get("deliver") or "").strip() or None,
-        )
+            deliver=str(params.get("deliver") or "").strip() or None)
         return _ok(rid, json.loads(raw))
     if action in {"remove", "pause", "resume"}:
         return _ok(rid, json.loads(cronjob(action=action, job_id=jid)))
@@ -1342,96 +1213,80 @@ def _(rid, params: dict) -> dict:
         cols, rows, frames = 80, 24, 48
     from agent.learning_graph import build_learning_graph
     from agent.learning_graph_render import render_frames
-
     return _ok(rid, render_frames(build_learning_graph(), cols=max(20, cols), rows=max(10, rows), frames=frames))
 
 
-@method("learning.detail")
-@_guarded(5000, "learning.detail failed: ")
-def _(rid, params: dict) -> dict:
-    """Current content of a journey node, for an edit prefill."""
-    from agent.learning_mutations import node_detail
+def _learning_mutation(fn_name: str, arg_keys: tuple):
+    """learning.* body: ``agent.learning_mutations.<fn_name>(*str(params[k]) for k in arg_keys)``."""
 
-    return _ok(rid, node_detail(str(params.get("id", ""))))
-
-
-@method("learning.delete")
-@_guarded(5000, "learning.delete failed: ")
-def _(rid, params: dict) -> dict:
-    """Delete a journey node — skills are archived (restorable), memories removed."""
-    from agent.learning_mutations import delete_node
-
-    return _ok(rid, delete_node(str(params.get("id", ""))))
+    def body(rid, params: dict) -> dict:
+        import agent.learning_mutations as mutations
+        return _ok(rid, getattr(mutations, fn_name)(*(str(params.get(k, "")) for k in arg_keys)))
+    return body
 
 
-@method("learning.edit")
-@_guarded(5000, "learning.edit failed: ")
-def _(rid, params: dict) -> dict:
-    """Rewrite a journey node's content (SKILL.md or memory chunk)."""
-    from agent.learning_mutations import edit_node
+# detail → node content for an edit prefill; delete → skills archived (restorable), memories
+# removed; edit → rewrite a node's content (SKILL.md or memory chunk).
+for _rpc, _fn, _keys in (
+    ("detail", "node_detail", ("id",)), ("delete", "delete_node", ("id",)), ("edit", "edit_node", ("id", "content")),
+):
+    method(f"learning.{_rpc}")(_guarded(5000, f"learning.{_rpc} failed: ")(_learning_mutation(_fn, _keys)))
+del _rpc, _fn, _keys
 
-    return _ok(rid, edit_node(str(params.get("id", "")), str(params.get("content", ""))))
+
+class _QuietConsole:
+    def print(self, *a, **k):
+        pass
 
 
 def _skills_list(rid, params, query):
     from hermes_cli.banner import get_available_skills
-
     return _ok(rid, {"skills": get_available_skills()})
 
 
 def _skills_search(rid, params, query):
     from tools.skills_hub import GitHubAuth, create_source_router, unified_search
-
     raw = unified_search(query, create_source_router(GitHubAuth()), source_filter="all", limit=20) or []
     return _ok(rid, {"results": [{"name": r.name, "description": r.description} for r in raw]})
 
 
 def _skills_install(rid, params, query):
     from hermes_cli.skills_hub import do_install
-
-    class _Q:
-        def print(self, *a, **k):
-            pass
-
-    do_install(query, skip_confirm=True, console=_Q())
+    do_install(query, skip_confirm=True, console=_QuietConsole())
     return _ok(rid, {"installed": True, "name": query})
 
 
 def _skills_browse(rid, params, query):
     from hermes_cli.skills_hub import browse_skills
-
     pg = int(params.get("page", 0) or 0) or (int(query) if query.isdigit() else 1)
     return _ok(rid, browse_skills(page=pg, page_size=int(params.get("page_size", 20))))
 
 
 def _skills_inspect(rid, params, query):
     from hermes_cli.skills_hub import inspect_skill
-
     return _ok(rid, {"info": inspect_skill(query) or {}})
+
+
+_SKILLS_ACTIONS = {
+    "list": _skills_list, "search": _skills_search, "install": _skills_install, "browse": _skills_browse,
+    "inspect": _skills_inspect}
 
 
 @method("skills.manage")
 @_profile_scoped_rpc(5024)
 def _(rid, params: dict) -> dict:
     """list/install use the scoped profile's skills dir; search/browse/inspect hit the shared hub."""
-    action, query = params.get("action", "list"), params.get("query", "")
-    handler = {
-        "list": _skills_list,
-        "search": _skills_search,
-        "install": _skills_install,
-        "browse": _skills_browse,
-        "inspect": _skills_inspect,
-    }.get(action)
+    action = params.get("action", "list")
+    handler = _SKILLS_ACTIONS.get(action)
     if handler is None:
         return _err(rid, 4017, f"unknown skills action: {action}")
-    return handler(rid, params, query)
+    return handler(rid, params, params.get("query", ""))
 
 
 @method("skills.reload")
 @_guarded(5025)
 def _(rid, params: dict) -> dict:
     from agent.skill_commands import reload_skills
-
     result = reload_skills()
     added = result.get("added") or []
     removed = result.get("removed") or []
@@ -1457,7 +1312,6 @@ def _(rid, params: dict) -> dict:
     """``{servers: [{name, description, installed, enabled, requires: [env keys], transport}]}``
     — the `hermes mcp` menu with per-profile state, so UIs know which entries need setup."""
     from hermes_cli import mcp_catalog
-
     out = []
     for entry in mcp_catalog.list_catalog():
         try:
@@ -1465,16 +1319,13 @@ def _(rid, params: dict) -> dict:
         except Exception:
             requires = []
         transport = getattr(entry, "transport", None)  # TransportSpec → its kind string
-        out.append(
-            {
-                "name": entry.name,
-                "description": getattr(entry, "description", "") or "",
-                "installed": bool(mcp_catalog.is_installed(entry.name)),
-                "enabled": bool(mcp_catalog.is_enabled(entry.name)),
-                "requires": requires,
-                "transport": str(getattr(transport, "kind", "") or transport or "stdio"),
-            }
-        )
+        out.append({
+            "name": entry.name,
+            "description": getattr(entry, "description", "") or "",
+            "installed": bool(mcp_catalog.is_installed(entry.name)),
+            "enabled": bool(mcp_catalog.is_enabled(entry.name)),
+            "requires": requires,
+            "transport": str(getattr(transport, "kind", "") or transport or "stdio")})
     return _ok(rid, {"servers": out})
 
 
@@ -1484,7 +1335,6 @@ def _(rid, params: dict) -> dict:
     """``{servers: [{name, transport, url, command, args, env (key names only),
     auth, oauth_tokens_present, enabled, tools}]}`` for the scoped profile."""
     from hermes_cli.mcp_config import _get_mcp_servers
-
     servers = _get_mcp_servers()
     return _ok(rid, {"servers": [_mcp_summarize_server(name, cfg) for name, cfg in sorted(servers.items())]})
 
@@ -1496,7 +1346,6 @@ def _(rid, params: dict) -> dict:
     headers/auth/tools). ``bearer_token`` goes to the profile's .env; only the
     ``Authorization`` header template is persisted. Duplicate names → 4090."""
     from hermes_cli.mcp_config import _apply_mcp_preset, _get_mcp_servers, _save_bearer_auth_token, _save_mcp_server
-
     name = str(params.get("name") or "").strip()
     if name in _get_mcp_servers():
         return _err(rid, 4090, f"server '{name}' already exists")
@@ -1505,14 +1354,9 @@ def _(rid, params: dict) -> dict:
     server_config: dict = dict(raw_cfg) if isinstance(raw_cfg, dict) else {}
     if preset:  # fills url/command/args when omitted; mutates server_config in place
         _apply_mcp_preset(
-            name,
-            preset_name=preset,
-            url=server_config.get("url"),
-            command=server_config.get("command"),
-            cmd_args=list(server_config.get("args") or []),
-            server_config=server_config,
-        )
-
+            name, preset_name=preset, url=server_config.get("url"),
+            command=server_config.get("command"), cmd_args=list(server_config.get("args") or []),
+            server_config=server_config)
     if not server_config.get("url") and not server_config.get("command"):
         return _err(rid, 4063, "config must specify a 'url' (http) or 'command' (stdio), or a valid 'preset'")
     bearer_token = params.get("bearer_token")
@@ -1532,7 +1376,6 @@ def _(rid, params: dict) -> dict:
     (stdio), matching ``cmd_mcp_configure`` / ``_save_bearer_auth_token``."""
     from hermes_cli.config import load_config, save_config, save_env_value
     from hermes_cli.mcp_config import _bearer_auth_headers, _env_key_for_server, _strip_bearer_prefix
-
     name, servers, err = _mcp_named_server(rid, params)
     if err:
         return err
@@ -1541,7 +1384,6 @@ def _(rid, params: dict) -> dict:
     entry = servers[name]
     if not isinstance(entry, dict):
         return _err(rid, 4001, "malformed server config")
-
     if entry.get("url"):
         normalized = _strip_bearer_prefix(str(value))
         if not normalized or normalized.lower() == "bearer":
@@ -1554,11 +1396,8 @@ def _(rid, params: dict) -> dict:
     else:
         save_env_value(env_var, str(value))
         env_block = entry.get("env")
-        if not isinstance(env_block, dict):
-            env_block = {}
+        entry["env"] = env_block = env_block if isinstance(env_block, dict) else {}
         env_block[env_var] = f"${{{env_var}}}"
-        entry["env"] = env_block
-
     cfg = load_config()
     cfg.setdefault("mcp_servers", {})[name] = entry
     save_config(cfg)
@@ -1572,7 +1411,6 @@ def _(rid, params: dict) -> dict:
     oauth_tokens_present}``; failure: ``{ok: false, error, tools: [], oauth_needed, ...}``.
     Runs on the RPC pool (_LONG_HANDLERS): a cold stdio `npx` spawn can block for seconds."""
     from hermes_cli.mcp_config import _oauth_tokens_present, _probe_single_server
-
     name, servers, err = _mcp_named_server(rid, params)
     if err:
         return err
@@ -1583,9 +1421,8 @@ def _(rid, params: dict) -> dict:
     details: dict = {}
 
     def failure(error: str, oauth_needed: bool, tokens_present) -> dict:
-        payload = {"ok": False, "error": error, "tools": [], "oauth_needed": oauth_needed}
-        return _ok(rid, {**payload, "oauth_tokens_present": tokens_present})
-
+        return _ok(rid, {"ok": False, "error": error, "tools": [], "oauth_needed": oauth_needed,
+                         "oauth_tokens_present": tokens_present})
     try:
         tools = _probe_single_server(name, cfg, details=details)
         token_present = _oauth_tokens_present(name) if needs_oauth_token else True
@@ -1599,8 +1436,7 @@ def _(rid, params: dict) -> dict:
         "prompts": details.get("prompts", 0),
         "resources": details.get("resources", 0),
         "oauth_needed": needs_oauth_token,
-        "oauth_tokens_present": True if needs_oauth_token else None,
-    }
+        "oauth_tokens_present": True if needs_oauth_token else None}
     return _ok(rid, payload)
 
 
@@ -1609,7 +1445,6 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     """Remove a server from the profile's config.yaml → ``{ok: true, removed: true}``."""
     from hermes_cli.mcp_config import _remove_mcp_server
-
     name = str(params.get("name") or "").strip()
     if not _remove_mcp_server(name):
         return _err(rid, 4064, f"server '{name}' not found")
@@ -1630,7 +1465,6 @@ def _(rid, params: dict) -> dict:
     try:
         from hermes_constants import get_hermes_home
         from tui_gateway import mcp_oauth_sessions
-
         name, servers, err = _mcp_named_server(rid, params)
         if err:
             return err
@@ -1640,12 +1474,16 @@ def _(rid, params: dict) -> dict:
         if cfg.get("headers") and cfg.get("auth") != "oauth":
             return _err(rid, 4001, "this server uses header/API-key auth, not OAuth")
         cfg["auth"] = "oauth"
-
         hermes_home = str(get_hermes_home().expanduser().resolve(strict=False))
         result = mcp_oauth_sessions.start_flow(hermes_home, name, cfg, client_redirect_uri=client_redirect_uri)
     except ValueError as e:
         return _err(rid, 4001, str(e))
     return _ok(rid, {"ok": True, "session_id": result["session_id"], "auth_url": result["auth_url"], "flow": result["flow"]})
+
+
+def _oauth_flow_ids(params: dict) -> tuple[str, str]:
+    """(session_id, name) as stripped strings."""
+    return str(params.get("session_id") or "").strip(), str(params.get("name") or "").strip()
 
 
 @method("mcp.servers.oauth.poll")
@@ -1654,10 +1492,7 @@ def _(rid, params: dict) -> dict:
     """Poll a flow → ``{ok, status: pending|approved|error, error_message?, auth_url?, tools?}``.
     On ``approved`` tokens persist for that server/profile (profile scope applies here too)."""
     from tui_gateway import mcp_oauth_sessions
-
-    name = str(params.get("name") or "").strip()
-    session_id = str(params.get("session_id") or "").strip()
-    result = mcp_oauth_sessions.poll_flow(session_id, name)
+    result = mcp_oauth_sessions.poll_flow(*_oauth_flow_ids(params))
     return _ok(rid, {"ok": True, **result})
 
 
@@ -1667,17 +1502,9 @@ def _(rid, params: dict) -> dict:
     """Relay a client-captured redirect (``code``/``state``/``error``) into a flow started with
     ``client_redirect_uri``. ``{ok: true}`` once accepted (state verified), else ``{ok: false, error_message}``."""
     from tui_gateway import mcp_oauth_sessions
-
-    name = str(params.get("name") or "").strip()
-    session_id = str(params.get("session_id") or "").strip()
-    result = mcp_oauth_sessions.deliver_callback_flow(
-        session_id,
-        name,
-        code=str(params.get("code") or "") or None,
-        state=str(params.get("state") or "") or None,
-        error=str(params.get("error") or "") or None,
-    )
-    return _ok(rid, result)
+    code, state, error = (str(params.get(k) or "") or None for k in ("code", "state", "error"))
+    session_id, name = _oauth_flow_ids(params)
+    return _ok(rid, mcp_oauth_sessions.deliver_callback_flow(session_id, name, code=code, state=state, error=error))
 
 
 # ─── Plugins ─────────────────────────────────────────────────────────────────
@@ -1685,14 +1512,8 @@ def _(rid, params: dict) -> dict:
 
 def _plugin_rows() -> list[dict]:
     from hermes_cli.plugins_cmd import (
-        _bundled_default_on,
-        _discover_all_plugins,
-        _get_disabled_set,
-        _get_enabled_set,
-        _is_portable_plugin_dir,
-        _plugin_status,
-    )
-
+        _bundled_default_on, _discover_all_plugins, _get_disabled_set, _get_enabled_set,
+        _is_portable_plugin_dir, _plugin_status)
     enabled = _get_enabled_set()
     disabled = _get_disabled_set()
     out = []
@@ -1702,17 +1523,11 @@ def _plugin_rows() -> list[dict]:
         # truthful default instead of "not enabled" (reads as OFF).
         if status == "not enabled" and source == "bundled" and _bundled_default_on(_dir):
             status = "enabled"
-        out.append(
-            {
-                "name": name,
-                "key": key,  # canonical registry key (``image_gen/fal``): names collide across category dirs
-                "version": str(version or ""),
-                "description": desc or "",
-                "source": source,
-                "status": status,
-                "portable": _is_portable_plugin_dir(_dir),  # Agent Plugins v1 package vs native Hermes plugin
-            }
-        )
+        # key = canonical registry key (``image_gen/fal``; names collide across category dirs);
+        # portable = Agent Plugins v1 package vs native Hermes plugin.
+        out.append({
+            "name": name, "key": key, "version": str(version or ""), "description": desc or "",
+            "source": source, "status": status, "portable": _is_portable_plugin_dir(_dir)})
     return out
 
 
@@ -1738,7 +1553,6 @@ def _plugins_toggle(rid, params):
 
 def _plugins_install(rid, params):
     from hermes_cli.plugins_cmd import dashboard_install_plugin
-
     ident = (params.get("identifier") or params.get("repo") or "").strip()
     if not ident:
         return _err(rid, 4019, "plugins.install requires 'identifier' or 'repo'")
@@ -1746,6 +1560,9 @@ def _plugins_install(rid, params):
     if not result.get("ok"):
         return _err(rid, 5026, result.get("error") or "install failed")
     return _ok(rid, result)
+
+
+_PLUGINS_ACTIONS = {"list": _plugins_list, "toggle": _plugins_toggle, "install": _plugins_install}
 
 
 @method("plugins.manage")
@@ -1757,7 +1574,7 @@ def _(rid, params: dict) -> dict:
       - ``install`` → git-clone ``identifier``/``repo`` into ~/.hermes/plugins/ (``force``, ``enable`` default True)
     Optional ``profile`` scopes HERMES_HOME (mcp.servers.* contract)."""
     action = params.get("action", "list")
-    handler = {"list": _plugins_list, "toggle": _plugins_toggle, "install": _plugins_install}.get(action)
+    handler = _PLUGINS_ACTIONS.get(action)
     if handler is None:
         return _err(rid, 4017, f"unknown plugins action: {action}")
     return handler(rid, params)
@@ -1770,7 +1587,6 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4004, "empty command")
     try:
         from tools.approval import detect_dangerous_command, detect_hardline_command
-
         is_hardline, hardline_desc = detect_hardline_command(cmd)
         if is_hardline:
             return _err(rid, 4005, f"blocked (hardline): {hardline_desc}. Use the agent for dangerous commands.")
@@ -1779,13 +1595,9 @@ def _(rid, params: dict) -> dict:
             return _err(rid, 4005, f"blocked: {desc}. Use the agent for dangerous commands.")
     except ImportError:
         return _err(rid, 5001, "shell.exec unavailable: approval safety module not importable")
-    try:
-        r = subprocess.run(cmd, shell=True, cwd=os.getcwd(), **_capture_run_kwargs(30))
-        return _ok(rid, {"stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:], "code": r.returncode})
-    except subprocess.TimeoutExpired:
-        return _err(rid, 5002, "command timed out (30s)")
-    except Exception as e:
-        return _err(rid, 5003, str(e))
+    return _captured_exec(
+        rid, cmd, 30, shell=True, fail_code=5003, timeout_err=(5002, "command timed out (30s)"),
+        on_result=lambda r: _ok(rid, {"stdout": r.stdout[-4000:], "stderr": r.stderr[-2000:], "code": r.returncode}))
 
 
 def register(server) -> None:
