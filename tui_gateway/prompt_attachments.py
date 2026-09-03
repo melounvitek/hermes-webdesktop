@@ -20,8 +20,7 @@ _PDF_ATTACH_MAX_PAGES = 25
 # Leading magic bytes -> file extension, for filename-less uploads.
 _IMAGE_MAGIC: tuple[tuple[bytes, str], ...] = (
     (b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF87a", ".gif"),
-    (b"GIF89a", ".gif"), (b"BM", ".bmp"),
-)
+    (b"GIF89a", ".gif"), (b"BM", ".bmp"))
 
 # Context-ref values containing any of these must be quoted (desktop formatRefValue parity).
 _ATTACHMENT_REF_NEEDS_QUOTING_RE = _re.compile(r"""[\s()\[\]{}<>"'`]""")
@@ -46,15 +45,13 @@ def _decode_attach_base64(raw: str, *, mime_prefix: str) -> bytes | None:
     import re as _re
     try:
         return _b64_payload(
-            raw, rf"^data:{_re.escape(mime_prefix)}[a-zA-Z0-9.+-]*;base64,(.*)$", _re.DOTALL,
-        )
+            raw, rf"^data:{_re.escape(mime_prefix)}[a-zA-Z0-9.+-]*;base64,(.*)$", _re.DOTALL)
     except Exception:
         return None
 
 
 def _decode_attach_payload(
-    rid, raw_b64: str, *, mime_prefix: str, max_bytes: int, label: str, empty_msg: str
-):
+    rid, raw_b64: str, *, mime_prefix: str, max_bytes: int, label: str, empty_msg: str):
     """``(bytes, None)`` or ``(None, error)`` for an upload: 4017 on bad/empty
     base64, 4018 over *max_bytes*."""
     data = _decode_attach_base64(raw_b64, mime_prefix=mime_prefix)
@@ -192,15 +189,13 @@ def _decode_attachment_data_url(data_url: str) -> bytes:
     import re as _re
     try:
         return _b64_payload(
-            data_url, r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", _re.DOTALL | _re.I,
-        )
+            data_url, r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", _re.DOTALL | _re.I)
     except (ValueError, _binascii.Error) as exc:
         raise ValueError("invalid data_url payload") from exc
 
 
 def _stage_session_file_attachment(
-    session: dict, *, raw_path: str, data_url: str, name: str
-) -> tuple[Path, bool]:
+    session: dict, *, raw_path: str, data_url: str, name: str) -> tuple[Path, bool]:
     """Make a desktop file attachment available to the gateway agent.
 
     1. Path resolves INSIDE the session workspace -> use as-is (``uploaded=False``).
@@ -225,8 +220,7 @@ def _stage_session_file_attachment(
         payload = _decode_attachment_data_url(data_url)
         filename = _sanitize_attachment_name(name or Path(str(raw_path or "")).name)
     target = _unique_attachment_path(
-        _desktop_attachment_dir(session), _sanitize_attachment_name(filename)
-    )
+        _desktop_attachment_dir(session), _sanitize_attachment_name(filename))
     target.write_bytes(payload)
     return target.resolve(), True
 
