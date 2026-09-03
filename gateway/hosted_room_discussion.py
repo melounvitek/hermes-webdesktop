@@ -767,8 +767,7 @@ def reconstruct_task_plan(
     if not isinstance(identity, driver.TaskIdentity) or not isinstance(payload, Mapping):
         raise DiscussionReconstructionError("driver task has no valid identity or payload")
     required_payload = frozenset({"target_profile", "prompt", "source_event_seq"})
-    if not required_payload <= frozenset(payload) or (
-        frozenset(payload) - required_payload - {"target_member_id"}):
+    if not required_payload <= frozenset(payload) or (frozenset(payload) - required_payload - {"target_member_id"}):
         raise DiscussionReconstructionError("driver task payload shape changed")
     match = _TURN_ID_RE.fullmatch(identity.turn_id)
     if match is None:

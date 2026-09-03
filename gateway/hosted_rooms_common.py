@@ -36,11 +36,7 @@ def identifier(
 
 def bounded_int(value: Any, *, error: type[Exception], message: str, low: int = 0, high: int | None = None) -> int:
     """Reject bools, non-ints and values outside ``[low, high]`` (``message`` is the exact text)."""
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, int)
-        or value < low
-        or (high is not None and value > high)):
+    if isinstance(value, bool) or not isinstance(value, int) or value < low or (high is not None and value > high):
         raise error(message)
     return value
 

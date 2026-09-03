@@ -336,9 +336,8 @@ def _validate_actor(value: Any, *, kind: str) -> tuple[dict[str, str], str]:
         raise HostedRoomError(f"actor kind '{actor_kind}' cannot append '{kind}'")
     actor = {"kind": actor_kind, "id": _actor_id(value.get("id"), "actor.id")}
     for field, max_chars in (
-        ("display_name", MAX_ACTOR_LABEL_CHARS),
-        ("profile", MAX_ACTOR_ID_CHARS),
-        ("connection_id", MAX_ACTOR_ID_CHARS)):
+        ("display_name", MAX_ACTOR_LABEL_CHARS), ("profile", MAX_ACTOR_ID_CHARS), ("connection_id", MAX_ACTOR_ID_CHARS)
+    ):
         field_value = _optional_actor_field(value, field, max_chars)
         if field_value:
             actor[field] = field_value
@@ -961,8 +960,7 @@ def create_room(
     now = _now(now)
 
     with _transaction(db_path, immediate=True) as conn:
-        if conn.execute(
-            "SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
+        if conn.execute("SELECT 1 FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone():
             raise RoomConflictError("room_id belongs to a disbanded room")
         existing = conn.execute(_SELECT_ROOM_WITH_BYTES, (room_id,)).fetchone()
         if existing is not None:
@@ -1090,9 +1088,7 @@ def append_event(
             (room_id,)).fetchone()
         if room is None:
             _raise_room_not_found(conn, room_id)
-        if (
-            room["authority_gateway_id"] != authority_gateway_id
-            or int(room["authority_epoch"]) != authority_epoch):
+        if room["authority_gateway_id"] != authority_gateway_id or int(room["authority_epoch"]) != authority_epoch:
             raise AuthorityConflictError("stale hosted room authority")
         seq = int(room["next_seq"])
         event_bytes = _insert_event(
@@ -1299,9 +1295,7 @@ def disband_room(
         replay = _disband_replay(conn, room_id, room)
         if replay is not None:
             return replay
-        if (
-            str(room["authority_gateway_id"]) != expected_gateway_id
-            or int(room["authority_epoch"]) != expected_epoch):
+        if str(room["authority_gateway_id"]) != expected_gateway_id or int(room["authority_epoch"]) != expected_epoch:
             raise AuthorityConflictError("stale hosted room authority")
         disband_bytes = _insert_event(
             conn, room, room_id, int(room["next_seq"]), "system:room-disbanded", "room.disbanded",
