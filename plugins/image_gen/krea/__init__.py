@@ -1,19 +1,13 @@
 """Krea image generation backend.
 
-Exposes Krea's ``Krea 2`` foundation image model family (Medium, Large,
-Medium Turbo) as an :class:`ImageGenProvider`.
+Exposes Krea's ``Krea 2`` family (Medium, Large, Medium Turbo) as an
+:class:`ImageGenProvider`. Krea's API is asynchronous: submit returns a
+``job_id`` polled at ``GET /jobs/{job_id}``; ``generate()`` hides that
+(submit, poll every 2s with light backoff, cache the result URL locally).
 
-Krea's API is asynchronous: the generate endpoint returns a ``job_id`` polled
-at ``GET /jobs/{job_id}``. This provider hides that roundtrip behind the
-synchronous ``generate()`` contract: submit, poll every 2s with light backoff,
-materialise the result URL to local cache, return the usual dict.
-
-Selection precedence (first hit wins): ``model`` kwarg → ``KREA_IMAGE_MODEL``
-env → ``image_gen.krea.model`` → ``image_gen.model`` (when it's one of our
-IDs) → :data:`DEFAULT_MODEL` (``krea-2-medium``, Krea's "start here" pick).
-
+Selection: ``model`` kwarg → ``KREA_IMAGE_MODEL`` → ``image_gen.krea.model`` →
+``image_gen.model`` (when one of our IDs) → :data:`DEFAULT_MODEL`.
 Docs: https://docs.krea.ai/developers/krea-2/overview
-API:  https://docs.krea.ai/api-reference/krea/krea-2-large
 """
 
 from __future__ import annotations
@@ -21,24 +15,18 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
 from agent.secret_scope import get_secret
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-    save_url_image,
-    success_response,
-)
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_url_image, success_response
 from plugins.image_gen._common import (
-    api_key_setup_schema,
-    catalog_rows,
+    StaticImageGenProvider,
     collect_source_images,
     error_factory,
     load_image_gen_config,
+    post_json,
     prompt_required_error,
     resolve_static_model,
 )
@@ -81,37 +69,40 @@ DEFAULT_MODEL = "krea-2-medium"
 
 # Hermes' 3 abstract ratios → Krea's enum (1:1, 4:3, 3:2, 16:9, 2.35:1, 4:5, 2:3, 9:16).
 _ASPECT_MAP = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
-
 # Only resolution Krea currently supports.
 DEFAULT_RESOLUTION = "1K"
-
-# image_style_references entries are objects ({"url", "strength"}), not bare
-# strings; a URL without explicit strength gets Krea's recommended start (range -2..2).
+# image_style_references entries are objects ({"url", "strength"}); a URL
+# without explicit strength gets Krea's recommended start (range -2..2).
 _DEFAULT_STYLE_REFERENCE_STRENGTH = 0.6
 _MAX_STYLE_REFERENCES = 10
-
 _VALID_CREATIVITY = {"raw", "low", "medium", "high"}
 
-# Polling: Krea recommends 2-5s; start at 2s, back off to 5s for long jobs
-# (Large can take ~1min). Ceiling matches Krea's hosted-tool timeout of 3 min.
+# Polling: Krea recommends 2-5s; start at 2s, back off to 5s (Large can take
+# ~1min). Ceiling matches Krea's hosted-tool timeout of 3 min.
 _POLL_INITIAL_INTERVAL = 2.0
 _POLL_MAX_INTERVAL = 5.0
 _POLL_BACKOFF = 1.3
 _POLL_TIMEOUT_SECONDS = 180.0
-
-# Statuses worth retrying while polling. Everything else (401/402/403/404,
-# other 4xx) is permanent — surface it immediately instead of burning the
-# 180s deadline on a request that will never succeed.
+# Statuses worth retrying while polling; everything else (401/402/403/404,
+# other 4xx) is permanent — surface it instead of burning the 180s deadline.
 _RETRYABLE_POLL_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-
 _TERMINAL_STATES = {"completed", "failed", "cancelled"}
 
-# Krea Enhance — the optional ``upscale`` pass after generation ("1.5K native,
-# 4K via Enhancer" is Krea's own pipeline shape). Cheap creative enhancer, max 8K.
+# Krea Enhance — the optional ``upscale`` pass after generation (max 8K).
 _ENHANCE_PATH = "/generate/enhance/krea/enhance"
 _ENHANCE_SCALE_FACTOR = 2
-
 _USER_AGENT = "Hermes-Agent/1.0 (krea-image-gen)"
+
+# Fatal poll outcome (``_poll_krea_job`` ``kind``) → (error_type, message builder).
+_POLL_FAILURES: Dict[str, Tuple[str, Callable[[str, Any], str]]] = {
+    "http": ("api_error", lambda job_id, detail: f"Krea poll failed ({detail}) for job {job_id}"),
+    "timeout": ("timeout", lambda job_id, detail: f"Krea poll timed out for job {job_id}: {detail}"),
+    "invalid_json": ("invalid_response", lambda job_id, detail: f"Krea poll returned invalid JSON: {detail}"),
+    "deadline": ("timeout", lambda job_id, detail: (
+        f"Krea job {job_id} did not complete within "
+        f"{int(_POLL_TIMEOUT_SECONDS)}s (last status: {detail or 'unknown'})"
+    )),
+}
 
 
 def _load_krea_config() -> Dict[str, Any]:
@@ -125,8 +116,6 @@ def _krea_section() -> Dict[str, Any]:
 
 
 def _resolve_model(explicit: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
-    """``(model_id, meta)``: explicit → ``KREA_IMAGE_MODEL`` → ``image_gen.krea.model``
-    → ``image_gen.model`` → :data:`DEFAULT_MODEL`."""
     return resolve_static_model(
         _MODELS, DEFAULT_MODEL, env_var="KREA_IMAGE_MODEL", config_key="krea",
         explicit=explicit, config=_load_krea_config(),
@@ -136,11 +125,10 @@ def _resolve_model(explicit: Optional[str] = None) -> Tuple[str, Dict[str, Any]]
 def _resolve_managed_krea_gateway():
     """Managed Krea gateway config when the user is on the managed path, else ``None``.
 
-    Strict selection: managed when the stored ``image_gen`` selection is
-    ``nous`` (or legacy ``use_gateway: true``), or on a never-configured install
-    with no direct ``KREA_API_KEY``. An explicit vendor selection (``krea``,
-    ``fal``, ...) pins the direct path. Never raises — plugin discovery and
-    availability scans must stay robust.
+    Strict selection: managed when the stored ``image_gen`` selection is ``nous``
+    (or legacy ``use_gateway: true``), or on a never-configured install with no
+    direct ``KREA_API_KEY``. An explicit vendor selection pins the direct path.
+    Never raises — plugin discovery and availability scans must stay robust.
     """
     try:
         from tools.managed_tool_gateway import resolve_managed_tool_gateway
@@ -148,7 +136,6 @@ def _resolve_managed_krea_gateway():
     except Exception as exc:  # noqa: BLE001
         logger.debug("Managed Krea gateway resolution unavailable: %s", exc)
         return None
-
     try:
         selected = read_selection("image_gen")
     except Exception:  # noqa: BLE001
@@ -157,7 +144,6 @@ def _resolve_managed_krea_gateway():
         return None
     if selected is None and get_secret("KREA_API_KEY"):
         return None
-
     try:
         return resolve_managed_tool_gateway("krea")
     except Exception as exc:  # noqa: BLE001
@@ -189,8 +175,8 @@ def _headers(auth_token: str, *, managed: bool, json_body: bool) -> Dict[str, st
         headers["Content-Type"] = "application/json"
     if managed:
         # The gateway derives the per-generation billing idempotency boundary
-        # from this header (else a body fingerprint); a fresh key per submit
-        # keeps each generation a distinct billable execution.
+        # from this header; a fresh key per submit keeps each generation a
+        # distinct billable execution.
         headers["x-idempotency-key"] = str(uuid.uuid4())
     return headers
 
@@ -294,8 +280,7 @@ def _poll_krea_job(
 
 
 def _extract_result_url(job: Optional[Dict[str, Any]]) -> Optional[str]:
-    """First result URL from a terminal Krea job: ``result.urls[]`` per Krea's
-    job-lifecycle docs, falling back to a single ``result.url``."""
+    """First result URL: ``result.urls[]`` per Krea's job docs, else ``result.url``."""
     result = job.get("result") if isinstance(job, dict) else None
     if not isinstance(result, dict):
         return None
@@ -307,18 +292,13 @@ def _extract_result_url(job: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 def _enhance_image(
-    base_url: str,
-    auth_token: str,
-    image_url: str,
-    prompt: str,
-    *,
-    managed: bool,
+    base_url: str, auth_token: str, image_url: str, prompt: str, *, managed: bool
 ) -> Optional[str]:
     """Run Krea Enhance on ``image_url``; return the enhanced URL or None.
 
-    Best-effort: any submit/poll/result failure logs and returns ``None`` so
-    the caller falls back to the original image — an upscale failure must
-    never destroy an already-successful generation.
+    Best-effort: any submit/poll/result failure logs and returns ``None`` so the
+    caller falls back to the original image — an upscale failure must never
+    destroy an already-successful generation.
     """
     payload: Dict[str, Any] = {
         "image_url": image_url,
@@ -341,7 +321,6 @@ def _enhance_image(
     if not isinstance(job_id, str) or not job_id:
         logger.warning("Krea Enhance submit response missing job_id")
         return None
-
     job = _poll_krea_job(base_url, auth_token, job_id)
     if not isinstance(job, dict) or job.get("status") in {"failed", "cancelled"}:
         logger.warning("Krea Enhance job %s did not complete successfully", job_id)
@@ -352,18 +331,16 @@ def _enhance_image(
 def _collect_style_refs(
     image_url: Optional[str], reference_image_urls: Optional[List[str]], legacy_refs: Any
 ) -> List[Any]:
-    """Reference images for style transfer: unified ``image_url`` +
-    ``reference_image_urls`` first, then the legacy ``image_style_references``
-    kwarg, whose entries may be URL strings or Krea ref objects (passed through
-    verbatim). Strings are deduped in order; capped at Krea's limit of 10."""
+    """Style-transfer references: unified ``image_url`` + ``reference_image_urls``
+    first, then the legacy ``image_style_references`` kwarg (URL strings or Krea
+    ref objects, passed through). Strings deduped in order; capped at 10."""
     refs: List[Any] = collect_source_images(image_url, reference_image_urls)
-    if isinstance(legacy_refs, list):
-        for ref in legacy_refs:
-            if isinstance(ref, str):
-                if ref.strip():
-                    refs.append(ref.strip())
-            elif ref:
-                refs.append(ref)
+    for ref in legacy_refs if isinstance(legacy_refs, list) else []:
+        if isinstance(ref, str):
+            if ref.strip():
+                refs.append(ref.strip())
+        elif ref:
+            refs.append(ref)
     seen: set = set()
     deduped: List[Any] = []
     for r in refs:
@@ -375,38 +352,48 @@ def _collect_style_refs(
     return deduped[:_MAX_STYLE_REFERENCES]
 
 
-class KreaImageGenProvider(ImageGenProvider):
+def _build_payload(
+    prompt: str, krea_ar: str, creativity: str, style_refs: List[Any], kwargs: Dict[str, Any]
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "prompt": prompt, "aspect_ratio": krea_ar, "resolution": DEFAULT_RESOLUTION, "creativity": creativity,
+    }
+    if isinstance(kwargs.get("seed"), int):
+        payload["seed"] = kwargs["seed"]
+    styles, moodboards = kwargs.get("styles"), kwargs.get("moodboards")
+    if isinstance(styles, list) and styles:
+        payload["styles"] = styles
+    if style_refs:
+        # Krea requires objects ({"url", "strength"}) — a bare string yields a
+        # 422 "Expected object, received string". Object refs pass through.
+        payload["image_style_references"] = [
+            {"url": ref, "strength": _DEFAULT_STYLE_REFERENCE_STRENGTH} if isinstance(ref, str) else ref
+            for ref in style_refs
+        ]
+    if isinstance(moodboards, list) and moodboards:
+        payload["moodboards"] = moodboards[:1]  # Krea caps at 1 moodboard per request.
+    return payload
+
+
+class KreaImageGenProvider(StaticImageGenProvider):
     """Krea ``Krea 2`` foundation image model backend (Medium + Large)."""
 
-    @property
-    def name(self) -> str:
-        return "krea"
-
-    @property
-    def display_name(self) -> str:
-        return "Krea"
+    provider_id = "krea"
+    label = "Krea"
+    models = _MODELS
+    default_model_id = DEFAULT_MODEL
+    setup = dict(
+        name="Krea", badge="paid",
+        tag="Krea 2 foundation model — Medium ($0.03), Large ($0.06), Medium Turbo ($0.015). Style transfer, moodboards, reference-guided generation. Direct key or managed Nous Subscription gateway.",
+        key="KREA_API_KEY", prompt="Krea API key", url="https://www.krea.ai/settings/api-tokens",
+    )
 
     def is_available(self) -> bool:
-        # Direct key OR the managed Nous gateway (Nous Subscription), so portal
-        # users without a Krea key can still reach Krea 2.
+        # Direct key OR the managed Nous gateway, so portal users without a
+        # Krea key can still reach Krea 2.
         return bool(get_secret("KREA_API_KEY")) or _managed_krea_gateway_ready()
 
-    def list_models(self) -> List[Dict[str, Any]]:
-        return catalog_rows(_MODELS)
-
-    def default_model(self) -> Optional[str]:
-        return DEFAULT_MODEL
-
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "Krea", "paid",
-            "Krea 2 foundation model — Medium ($0.03), Large ($0.06), Medium Turbo ($0.015). Style transfer, moodboards, reference-guided generation. Direct key or managed Nous Subscription gateway.",
-            key="KREA_API_KEY", prompt="Krea API key", url="https://www.krea.ai/settings/api-tokens",
-        )
-
     def capabilities(self) -> Dict[str, Any]:
-        # Reference-guided generation via image_style_references (up to 10) plus
-        # the opt-in Enhance upscale pass.
         return {
             "modalities": ["text", "image"],
             "max_reference_images": _MAX_STYLE_REFERENCES,
@@ -425,18 +412,15 @@ class KreaImageGenProvider(ImageGenProvider):
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
         krea_ar = _ASPECT_MAP.get(aspect, "1:1")
-
         style_refs = _collect_style_refs(
             image_url, reference_image_urls, kwargs.get("image_style_references")
         )
-        modality = "image" if style_refs else "text"
-
         if not prompt:
             return prompt_required_error("krea", aspect)
 
-        # Managed Nous gateway (Nous Subscription) owns the shared Krea
-        # credential and meters per generation, so the caller token is the Nous
-        # access token; otherwise the direct Krea API with a BYO ``KREA_API_KEY``.
+        # Managed Nous gateway (Nous Subscription) owns the shared Krea credential
+        # and meters per generation, so the caller token is the Nous access
+        # token; otherwise the direct Krea API with a BYO ``KREA_API_KEY``.
         managed = _resolve_managed_krea_gateway()
         if managed is not None:
             base_url = managed.gateway_origin.rstrip("/")
@@ -457,117 +441,66 @@ class KreaImageGenProvider(ImageGenProvider):
         model_id, meta = _resolve_model(kwargs.get("model"))
         creativity = _resolve_creativity(kwargs.get("creativity"))
         fail = error_factory("krea", aspect, model=model_id, prompt=prompt)
-
-        styles = kwargs.get("styles")
-        moodboards = kwargs.get("moodboards")
-        styles = styles if isinstance(styles, list) and styles else None
-        moodboards = moodboards if isinstance(moodboards, list) and moodboards else None
+        payload = _build_payload(prompt, krea_ar, creativity, style_refs, kwargs)
 
         # The managed gateway only prices base text-to-image and URL style
         # references; LoRAs and moodboards are rejected there, so fail fast
         # with guidance instead of a raw 400.
         if managed is not None:
-            for present, what, arg in (
-                (styles, "trained styles (LoRAs)", "styles"),
-                (moodboards, "moodboards", "moodboards"),
-            ):
-                if present:
+            for what, arg in (("trained styles (LoRAs)", "styles"), ("moodboards", "moodboards")):
+                if arg in payload:
                     return fail(
                         f"Managed Krea (Nous Subscription) does not support {what}. "
                         f"Set KREA_API_KEY to use Krea directly, or omit `{arg}`.",
                         "unsupported_argument",
                     )
 
-        payload: Dict[str, Any] = {
-            "prompt": prompt,
-            "aspect_ratio": krea_ar,
-            "resolution": DEFAULT_RESOLUTION,
-            "creativity": creativity,
-        }
-        seed = kwargs.get("seed")
-        if isinstance(seed, int):
-            payload["seed"] = seed
-        if styles:
-            payload["styles"] = styles
-        if style_refs:
-            # Krea requires objects ({"url", "strength"}) — a bare string yields
-            # a 422 "Expected object, received string". Object refs pass through.
-            payload["image_style_references"] = [
-                {"url": ref, "strength": _DEFAULT_STYLE_REFERENCE_STRENGTH}
-                if isinstance(ref, str) else ref
-                for ref in style_refs
-            ]
-        if moodboards:
-            # Krea currently caps at 1 moodboard per request.
-            payload["moodboards"] = moodboards[:1]
-
         # 1. Submit job.
-        submit_url = f"{base_url}/generate/image/krea/krea-2/{meta['path']}"
-        try:
-            response = requests.post(
-                submit_url,
-                headers=_headers(auth_token, managed=managed is not None, json_body=True),
-                json=payload, timeout=30,
-            )
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            resp = exc.response
-            status = resp.status_code if resp is not None else 0
-            err_msg = _submit_error_message(resp, exc)
-            logger.error("Krea submit failed (%d): %s", status, err_msg)
-            # Managed 4xx: the model may not be enabled/priced on the Nous
-            # Portal, or the gateway's shared key hit its concurrency cap (429).
-            if managed is not None and 400 <= status < 500:
-                hint = (
-                    "Krea's shared-key concurrency cap was hit — retry shortly."
-                    if status == 429
-                    else (
-                        f"Model '{model_id}' may not be enabled/priced on the "
-                        "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
-                        "Krea directly, or pick a different model via "
-                        "`hermes tools` → Image Generation."
+        submit_body, failure = post_json(
+            f"{base_url}/generate/image/krea/krea-2/{meta['path']}",
+            headers=_headers(auth_token, managed=managed is not None, json_body=True),
+            payload=payload, timeout=30, label="Krea", error_message=_submit_error_message,
+        )
+        if failure is not None:
+            if failure.kind == "http":
+                status, err_msg = failure.status, failure.message
+                logger.error("Krea submit failed (%d): %s", status, err_msg)
+                # Managed 4xx: the model may not be enabled/priced on the Nous
+                # Portal, or the gateway's shared key hit its concurrency cap (429).
+                if managed is not None and 400 <= status < 500:
+                    hint = (
+                        "Krea's shared-key concurrency cap was hit — retry shortly."
+                        if status == 429
+                        else (
+                            f"Model '{model_id}' may not be enabled/priced on the "
+                            "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
+                            "Krea directly, or pick a different model via "
+                            "`hermes tools` → Image Generation."
+                        )
                     )
-                )
-                return fail(
-                    f"Nous Subscription Krea gateway rejected '{model_id}' "
-                    f"(HTTP {status}): {err_msg}. {hint}",
-                    "api_error",
-                )
-            return fail(f"Krea image generation failed ({status}): {err_msg}", "api_error")
-        except requests.Timeout:
-            return fail("Krea submit timed out (30s)", "timeout")
-        except requests.ConnectionError as exc:
-            return fail(f"Krea connection error: {exc}", "connection_error")
-
-        try:
-            submit_body = response.json()
-        except Exception as exc:  # noqa: BLE001
-            return fail(f"Krea returned invalid JSON on submit: {exc}", "invalid_response")
-
+                    return fail(
+                        f"Nous Subscription Krea gateway rejected '{model_id}' "
+                        f"(HTTP {status}): {err_msg}. {hint}",
+                        "api_error",
+                    )
+                return fail(failure.error, "api_error")
+            if failure.kind == "timeout":
+                return fail("Krea submit timed out (30s)", "timeout")
+            if failure.kind == "invalid_json":
+                return fail(f"Krea returned invalid JSON on submit: {failure.message}", "invalid_response")
+            return fail(failure.error, failure.error_type)
         job_id = submit_body.get("job_id")
         if not isinstance(job_id, str) or not job_id:
             return fail("Krea submit response missing job_id", "invalid_response")
 
-        # 2. Poll for completion. Polling is bound to the same principal at the
-        # gateway, so the managed path polls the gateway's ``/jobs/{id}`` with
-        # the Nous token (404 on cross-user/unknown jobs).
+        # 2. Poll. Polling is bound to the same principal at the gateway, so the
+        # managed path polls the gateway's ``/jobs/{id}`` with the Nous token.
         poll_errors: List[Dict[str, Any]] = []
 
         def poll_error(kind: str, detail: Any) -> Dict[str, Any]:
-            if kind == "http":
-                err = fail(f"Krea poll failed ({detail}) for job {job_id}", "api_error")
-            elif kind == "timeout":
-                err = fail(f"Krea poll timed out for job {job_id}: {detail}", "timeout")
-            elif kind == "invalid_json":
-                err = fail(f"Krea poll returned invalid JSON: {detail}", "invalid_response")
-            else:
-                err = fail(
-                    f"Krea job {job_id} did not complete within "
-                    f"{int(_POLL_TIMEOUT_SECONDS)}s (last status: {detail or 'unknown'})",
-                    "timeout",
-                )
-            poll_errors.append(err)
-            return err
+            error_type, build = _POLL_FAILURES.get(kind, _POLL_FAILURES["deadline"])
+            poll_errors.append(fail(build(job_id, detail), error_type))
+            return poll_errors[-1]
 
         job = _poll_krea_job(base_url, auth_token, job_id, on_error=poll_error)
         if poll_errors:
@@ -576,15 +509,14 @@ class KreaImageGenProvider(ImageGenProvider):
             return fail("Krea returned non-dict job body", "invalid_response")
 
         # 3. Terminal — extract result.
-        last_status = job.get("status")
-        if last_status == "failed":
-            err = (job.get("result") or {}).get("error") if isinstance(job.get("result"), dict) else None
+        result = job.get("result")
+        if job.get("status") == "failed":
+            err = result.get("error") if isinstance(result, dict) else None
             return fail(f"Krea job {job_id} failed: {err or 'unknown error'}", "api_error")
-        if last_status == "cancelled":
+        if job.get("status") == "cancelled":
             return fail(f"Krea job {job_id} was cancelled", "cancelled")
-        if not isinstance(job.get("result"), dict):
+        if not isinstance(result, dict):
             return fail("Krea job completed but result was missing", "empty_response")
-
         result_image_url = _extract_result_url(job)
         if result_image_url is None:
             return fail("Krea result contained no image URL", "empty_response")
@@ -630,15 +562,9 @@ class KreaImageGenProvider(ImageGenProvider):
             extra["upscale_factor"] = _ENHANCE_SCALE_FACTOR
         if isinstance(job.get("completed_at"), str):
             extra["completed_at"] = job["completed_at"]
-
         return success_response(
-            image=image_ref,
-            model=model_id,
-            prompt=prompt,
-            aspect_ratio=aspect,
-            provider="krea",
-            modality=modality,
-            extra=extra,
+            image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="krea",
+            modality="image" if style_refs else "text", extra=extra,
         )
 
 

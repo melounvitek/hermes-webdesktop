@@ -1,14 +1,9 @@
-"""FAL.ai image generation backend.
+"""FAL.ai image generation backend — registration adapter.
 
-Wraps the FAL catalog (FLUX 2, Z-Image, Nano Banana, GPT Image 1.5, Recraft,
-Imagen 4, Qwen, Ideogram, …) as an :class:`ImageGenProvider`.
-
-The heavy lifting — model catalog, payload construction, request submission,
-managed-Nous-gateway selection, Clarity Upscaler chaining — lives in
-:mod:`tools.image_generation_tool`. This plugin reaches into that module via
-call-time indirection (``import tools.image_generation_tool as _it``) so the
-existing tests keep patching ``image_tool.*`` unchanged, and there is exactly
-one canonical FAL code path on disk — the plugin is a registration adapter.
+Catalog, payload construction, submission, managed-Nous-gateway selection and
+Clarity Upscaler chaining live in :mod:`tools.image_generation_tool`; this
+plugin reaches into it at call time (``import tools.image_generation_tool as
+_it``) so tests keep patching ``image_tool.*`` and there is one FAL code path.
 """
 
 from __future__ import annotations
@@ -17,12 +12,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO,
-    ImageGenProvider,
-    resolve_aspect_ratio,
-)
-from plugins.image_gen._common import api_key_setup_schema, catalog_rows
+from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio
+from plugins.image_gen._common import StaticImageGenProvider, catalog_rows
 
 logger = logging.getLogger(__name__)
 
@@ -31,21 +22,21 @@ _PASSTHROUGH_KWARGS = (
 )
 
 
-class FalImageGenProvider(ImageGenProvider):
+class FalImageGenProvider(StaticImageGenProvider):
     """FAL.ai backend delegating to ``tools.image_generation_tool`` at call time."""
 
-    @property
-    def name(self) -> str:
-        return "fal"
-
-    @property
-    def display_name(self) -> str:
-        return "FAL.ai"
+    provider_id = "fal"
+    label = "FAL.ai"
+    setup = dict(
+        name="FAL.ai", badge="paid",
+        tag="Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
+        key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
+    )
 
     def is_available(self) -> bool:
-        # Direct FAL_KEY or a managed Nous fal-queue origin; both checks live in
-        # the legacy module so this provider tracks whatever logic ships there.
+        # Direct FAL_KEY or a managed Nous fal-queue origin, per the legacy module.
         import tools.image_generation_tool as _it
+
         try:
             return bool(_it.check_fal_api_key())
         except Exception:  # noqa: BLE001 — never break the picker
@@ -59,17 +50,9 @@ class FalImageGenProvider(ImageGenProvider):
         import tools.image_generation_tool as _it
         return _it.DEFAULT_MODEL
 
-    def get_setup_schema(self) -> Dict[str, Any]:
-        return api_key_setup_schema(
-            "FAL.ai", "paid",
-            "Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
-            key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
-        )
-
     def capabilities(self) -> Dict[str, Any]:
-        # Image-to-image depends on the currently selected FAL model (each entry
-        # declares an edit_endpoint or not); Clarity Upscaler chains on request
-        # for any model.
+        # Image-to-image depends on the selected FAL model (``edit_endpoint``);
+        # Clarity Upscaler chains on request for any model.
         import tools.image_generation_tool as _it
 
         try:
@@ -98,12 +81,8 @@ class FalImageGenProvider(ImageGenProvider):
         import tools.image_generation_tool as _it
 
         aspect = resolve_aspect_ratio(aspect_ratio)
-        passthrough = {
-            key: kwargs[key] for key in _PASSTHROUGH_KWARGS
-            if key in kwargs and kwargs[key] is not None
-        }
-        # Only forward image-to-image inputs when supplied, so a plain
-        # text-to-image call delegates exactly as before (no noisy None kwargs).
+        passthrough = {key: kwargs[key] for key in _PASSTHROUGH_KWARGS if kwargs.get(key) is not None}
+        # Only forward image-to-image inputs when supplied (no noisy None kwargs).
         if image_url is not None:
             passthrough["image_url"] = image_url
         if reference_image_urls is not None:
@@ -114,13 +93,8 @@ class FalImageGenProvider(ImageGenProvider):
         except Exception as exc:  # noqa: BLE001 — never raise out of generate
             logger.warning("FAL image_generate_tool raised: %s", exc, exc_info=True)
             return {
-                "success": False,
-                "image": None,
-                "error": f"FAL image generation failed: {exc}",
-                "error_type": type(exc).__name__,
-                "provider": "fal",
-                "prompt": prompt,
-                "aspect_ratio": aspect,
+                "success": False, "image": None, "error": f"FAL image generation failed: {exc}",
+                "error_type": type(exc).__name__, "provider": "fal", "prompt": prompt, "aspect_ratio": aspect,
             }
 
         try:
@@ -130,14 +104,11 @@ class FalImageGenProvider(ImageGenProvider):
 
         if not isinstance(response, dict):
             response = {
-                "success": False,
-                "image": None,
-                "error": "FAL pipeline returned a non-dict response",
+                "success": False, "image": None, "error": "FAL pipeline returned a non-dict response",
                 "error_type": "provider_contract",
             }
-
-        # Stamp the uniform shape declared in ``agent.image_gen_provider``; the
-        # legacy pipeline resolves the model internally, so query it after the fact.
+        # Stamp the uniform provider shape; the legacy pipeline resolves the
+        # model internally, so query it after the fact.
         response.setdefault("provider", "fal")
         response.setdefault("prompt", prompt)
         response.setdefault("aspect_ratio", aspect)

@@ -1,11 +1,10 @@
 """Shared base for the bundled cloud-browser provider plugins.
 
 Every vendor (Browserbase, Browser Use, Firecrawl) speaks the same REST shape:
-POST to create a session, one request to release it, credentials from
-:func:`agent.secret_scope.get_secret`. :class:`CloudBrowserProvider` owns that
-lifecycle; subclasses supply class attributes and small hooks. Log messages are
-rendered with the vendor label so the emitted text matches the pre-refactor
-per-vendor modules, and they are emitted on the subclass module's logger.
+POST to create a session, one request to release it. :class:`CloudBrowserProvider`
+owns that lifecycle; subclasses supply class attributes and small hooks. Log
+messages carry the vendor label and go to the subclass module's logger so the
+emitted text matches the pre-refactor per-vendor modules.
 """
 
 from __future__ import annotations
@@ -24,11 +23,10 @@ _CLOSE_OK = {200, 201, 204}
 class CloudBrowserProvider(BrowserProvider):
     """REST cloud-browser provider driven by class attributes + hooks.
 
-    Subclasses set ``provider_id`` / ``label``, ``release_method`` /
-    ``release_path`` (``{session_id}`` placeholder, appended to
-    ``config["base_url"]``), implement ``_get_config_or_none()`` and
-    ``_headers(config)``, and write ``create_session`` on top of
-    :meth:`_post_create` / :meth:`_check_created` / :meth:`_session_name`.
+    Subclasses set ``provider_id`` / ``label``, ``release_method`` / ``release_path``
+    (``{session_id}`` placeholder, appended to ``config["base_url"]``), implement
+    ``_get_config_or_none()`` and ``_headers(config)``, and write ``create_session``
+    on top of :meth:`_post_create` / :meth:`_check_created` / :meth:`_session_name`.
     """
 
     provider_id: str
@@ -59,8 +57,6 @@ class CloudBrowserProvider(BrowserProvider):
     def is_available(self) -> bool:
         return self._get_config_or_none() is not None
 
-    # -- config / request hooks ------------------------------------------
-
     def _get_config_or_none(self) -> Optional[Dict[str, Any]]:
         raise NotImplementedError
 
@@ -87,8 +83,6 @@ class CloudBrowserProvider(BrowserProvider):
         url = f"{config['base_url']}{self.release_path.format(session_id=session_id)}"
         return getattr(requests, self.release_method)(url, **kwargs)
 
-    # -- create helpers ---------------------------------------------------
-
     @staticmethod
     def _session_name(task_id: str) -> str:
         return f"hermes_{task_id}_{uuid.uuid4().hex[:8]}"
@@ -96,7 +90,7 @@ class CloudBrowserProvider(BrowserProvider):
     def _post_create(
         self, url: str, headers: Dict[str, str], payload: Dict[str, object], *, wrap_errors: bool = True
     ) -> requests.Response:
-        """POST the create request; wrap network failures into RuntimeError unless
+        """POST the create request; network failures become RuntimeError unless
         the caller (managed gateway) needs the raw exception to retry."""
         try:
             return requests.post(url, headers=headers, json=payload, timeout=30)
@@ -112,8 +106,6 @@ class CloudBrowserProvider(BrowserProvider):
                 f"{response.status_code} {response.text}"
             )
 
-    # -- lifecycle --------------------------------------------------------
-
     def close_session(self, session_id: str) -> bool:
         try:
             config = self._get_config()
@@ -127,9 +119,7 @@ class CloudBrowserProvider(BrowserProvider):
                 return True
             self._log.warning(
                 self.close_fail_fmt or f"Failed to close {self.label} session %s: HTTP %s - %s",
-                session_id,
-                response.status_code,
-                response.text[:200],
+                session_id, response.status_code, response.text[:200],
             )
             return False
         except Exception as e:
