@@ -194,8 +194,6 @@ def _is_summary_access_or_quota_error(exc: Exception) -> bool:
     if status in {401, 402, 403}:
         return True
 
-    if classified.reason is FailoverReason.billing:
-        return any(marker in err_text for marker in _SUMMARY_PERMANENT_QUOTA_MARKERS)
     return any(marker in err_text for marker in _SUMMARY_PERMANENT_QUOTA_MARKERS)
 
 
@@ -1336,26 +1334,11 @@ def _append_text_to_content(content: Any, text: str, *, prepend: bool = False) -
     return text + rendered if prepend else rendered + text
 
 
-def _strip_image_parts_from_parts(parts: Any) -> Any:
-    """Strip image parts from an OpenAI-style content-parts list.
-
-    Returns a new list with text placeholders, or None if the list had no images.
-    """
-    if not isinstance(parts, list):
+def _replace_image_parts(parts: Any, placeholder: str) -> Optional[List[Any]]:
+    """New parts list with every image part replaced by a text placeholder; None if no images."""
+    if not isinstance(parts, list) or not any(_is_image_part(p) for p in parts):
         return None
-    had_image = False
-    out = []
-    for part in parts:
-        if not isinstance(part, dict):
-            out.append(part)
-            continue
-        ptype = part.get("type")
-        if ptype in {"image", "image_url", "input_image"}:
-            had_image = True
-            out.append({"type": "text", "text": "[screenshot removed to save context]"})
-        else:
-            out.append(part)
-    return out if had_image else None
+    return [{"type": "text", "text": placeholder} if _is_image_part(p) else p for p in parts]
 
 
 def _tool_content_has_images(content: Any) -> bool:
@@ -1377,7 +1360,7 @@ def _strip_images_from_tool_msg(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]
         new_msg = {**msg, "content": f"[screenshot removed] {str(summary)[:200]}"}
         drop_stale_api_content(new_msg)
         return new_msg
-    stripped = _strip_image_parts_from_parts(content)
+    stripped = _replace_image_parts(content, "[screenshot removed to save context]")
     if stripped is None:
         return None
     new_msg = {**msg, "content": stripped}
@@ -1459,25 +1442,9 @@ def _content_has_images(content: Any) -> bool:
 
 
 def _strip_images_from_content(content: Any) -> Any:
-    """Return a copy of ``content`` with every image part replaced by a text placeholder.
-
-    Non-list content is returned unchanged. Input is never mutated.
-    """
-    if not isinstance(content, list):
-        return content
-    if not any(_is_image_part(p) for p in content):
-        return content
-
-    new_parts: List[Any] = []
-    for p in content:
-        if _is_image_part(p):
-            new_parts.append({
-                "type": "text",
-                "text": "[Attached image — stripped after compression]",
-            })
-        else:
-            new_parts.append(p)
-    return new_parts
+    """``content`` with image parts replaced by placeholders; unchanged (same object) when none."""
+    stripped = _replace_image_parts(content, "[Attached image — stripped after compression]")
+    return content if stripped is None else stripped
 
 
 def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1490,33 +1457,18 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
     if not messages:
         return messages
 
-    # Anchor on image-bearing user messages (not all) so a text follow-up still
-    # strips the old image.
-    anchor = -1
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") != "user":
-            continue
-        if _content_has_images(msg.get("content")):
-            anchor = i
-            break
+    def _newest(role: str, has_images) -> int:
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            if isinstance(msg, dict) and msg.get("role") == role and has_images(msg.get("content")):
+                return i
+        return -1
 
-    # Tool-result images age on their own timeline: keep only the newest one,
-    # wherever it sits (the user anchor never protects stale ones).
-    tool_anchor = -1
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") != "tool":
-            continue
-        # Envelope-aware matcher so the native {_multimodal: True} dict shape
-        # anchors here too, otherwise rule 2 strips it as stale.
-        if _tool_content_has_images(msg.get("content")):
-            tool_anchor = i
-            break
+    # Anchor on image-bearing user messages (not all) so a text follow-up still strips the old image.
+    anchor = _newest("user", _content_has_images)
+    # Tool-result images age on their own timeline: keep only the newest one, wherever it sits.
+    # Envelope-aware matcher so the native {_multimodal: True} dict shape anchors too.
+    tool_anchor = _newest("tool", _tool_content_has_images)
 
     if anchor <= 0 and tool_anchor < 0:
         # Nothing to strip under any rule.
@@ -1615,10 +1567,6 @@ def _sum_terminal(name, args, content, content_len, line_count):
     return f"[terminal] ran `{cmd}` -> exit {exit_code}, {line_count} lines output"
 
 
-def _sum_read_file(name, args, content, content_len, line_count):
-    return f"[read_file] read {args.get('path', '?')} from line {args.get('offset', 1)} ({content_len:,} chars)"
-
-
 def _sum_write_file(name, args, content, content_len, line_count):
     written_lines = _str_arg(args, "content").count("\n") + 1 if args.get("content") else "?"
     return f"[write_file] wrote to {args.get('path', '?')} ({written_lines} lines)"
@@ -1633,19 +1581,11 @@ def _sum_search_files(name, args, content, content_len, line_count):
     )
 
 
-def _sum_patch(name, args, content, content_len, line_count):
-    return f"[patch] {args.get('mode', 'replace')} in {args.get('path', '?')} ({content_len:,} chars result)"
-
-
 def _sum_browser(name, args, content, content_len, line_count):
     url = args.get("url", "")
     ref = args.get("ref", "")
     detail = f" {url}" if url else (f" ref={ref}" if ref else "")
     return f"[{name}]{detail} ({content_len:,} chars)"
-
-
-def _sum_web_search(name, args, content, content_len, line_count):
-    return f"[web_search] query='{args.get('query', '?')}' ({content_len:,} chars result)"
 
 
 def _sum_web_extract(name, args, content, content_len, line_count):
@@ -1686,18 +1626,6 @@ def _sum_skill_view(name, args, content, content_len, line_count):
     return f"[skill_view] name={skill} ({content_len:,} chars)"
 
 
-def _sum_named(name, args, content, content_len, line_count):
-    return f"[{name}] name={args.get('name', '?')} ({content_len:,} chars)"
-
-
-def _sum_vision_analyze(name, args, content, content_len, line_count):
-    return f"[vision_analyze] '{_str_arg(args, 'question')[:50]}' ({content_len:,} chars)"
-
-
-def _sum_memory(name, args, content, content_len, line_count):
-    return f"[memory] {args.get('action', '?')} on {args.get('target', '?')}"
-
-
 def _sum_clarify(name, args, content, content_len, line_count):
     response_prefix = "[clarify] user responded: "
     # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
@@ -1731,38 +1659,48 @@ def _sum_clarify(name, args, content, content_len, line_count):
     return "[clarify] asked user a question"
 
 
-def _sum_process_manage(name, args, content, content_len, line_count):
-    return f"[process] {args.get('action', '?')} session={args.get('session_id', '?')}"
+def _sum_named(name, args, content, content_len, line_count):
+    return f"[{name}] name={args.get('name', '?')} ({content_len:,} chars)"
 
 
 # tool_name -> (name, args, content, content_len, line_count) -> one-line summary.
 _TOOL_RESULT_SUMMARIZERS = {
     "terminal": _sum_terminal,
-    "read_file": _sum_read_file,
+    "read_file": lambda name, args, content, content_len, line_count: (
+        f"[read_file] read {args.get('path', '?')} from line {args.get('offset', 1)} ({content_len:,} chars)"
+    ),
     "write_file": _sum_write_file,
     "search_files": _sum_search_files,
-    "patch": _sum_patch,
+    "patch": lambda name, args, content, content_len, line_count: (
+        f"[patch] {args.get('mode', 'replace')} in {args.get('path', '?')} ({content_len:,} chars result)"
+    ),
     **{
         _b: _sum_browser
         for _b in ("browser_navigate", "browser_click", "browser_snapshot",
                    "browser_type", "browser_scroll", "browser_vision")
     },
-    "web_search": _sum_web_search,
+    "web_search": lambda name, args, content, content_len, line_count: (
+        f"[web_search] query='{args.get('query', '?')}' ({content_len:,} chars result)"
+    ),
     "web_extract": _sum_web_extract,
     "delegate_task": _sum_delegate_task,
     "execute_code": _sum_execute_code,
     "skill_view": _sum_skill_view,
     "skills_list": _sum_named,
     "skill_manage": _sum_named,
-    "vision_analyze": _sum_vision_analyze,
-    "memory": _sum_memory,
+    "vision_analyze": lambda name, args, content, content_len, line_count: (
+        f"[vision_analyze] '{_str_arg(args, 'question')[:50]}' ({content_len:,} chars)"
+    ),
+    "memory": lambda name, args, *_: f"[memory] {args.get('action', '?')} on {args.get('target', '?')}",
     "todo_list": lambda *a: "[todo] updated task list",
     "clarify": _sum_clarify,
     "text_to_speech": lambda name, args, content, content_len, line_count: (
         f"[text_to_speech] generated audio ({content_len:,} chars)"
     ),
     "cronjob_manage": lambda name, args, *_: f"[cronjob] {args.get('action', '?')}",
-    "process_manage": _sum_process_manage,
+    "process_manage": lambda name, args, *_: (
+        f"[process] {args.get('action', '?')} session={args.get('session_id', '?')}"
+    ),
 }
 
 
@@ -2578,16 +2516,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return None
         return ivalue if ivalue > 0 else None
 
-    @staticmethod
-    def _coerce_threshold_tokens_cap(value: Any) -> int | None:
-        """Normalize a threshold_tokens cap to a positive int, or None for "no cap"."""
-        if value is None:
-            return None
-        try:
-            ivalue = int(value)
-        except (TypeError, ValueError):
-            return None
-        return ivalue if ivalue > 0 else None
+    # Same normalization: a threshold_tokens cap is a positive int, or None for "no cap".
+    _coerce_threshold_tokens_cap = _coerce_max_tokens
 
     def _apply_threshold_tokens_cap(self) -> None:
         """Clamp threshold_tokens to the configured cap (itself clamped to the context length)."""
