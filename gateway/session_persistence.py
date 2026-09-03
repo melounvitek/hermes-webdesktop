@@ -1,6 +1,5 @@
-"""SessionStore storage plumbing: per-profile SessionDB handle resolution and the
-routing-index load/save paths (state.db gateway_routing primary, sessions.json
-legacy mirror).
+"""SessionStore storage plumbing: per-profile SessionDB handle resolution and the routing-index
+load/save paths (state.db gateway_routing primary, sessions.json legacy mirror).
 
 Mixin split out of ``gateway/session.py``; bound onto ``SessionStore`` via the MRO.
 """
@@ -27,8 +26,7 @@ logger = logging.getLogger("gateway.session")
 # active scope" from a deliberate ``store._db = None`` (JSONL fallback).
 _DB_UNPINNED = object()
 
-# Self-documenting sentinel written first into sessions.json; "_" keys are
-# skipped on load.
+# Self-documenting sentinel written first into sessions.json; "_" keys are skipped on load.
 _SESSIONS_JSON_README = (
     "LEGACY MIRROR of the gateway routing index (the primary copy "
     "lives in the gateway_routing table in ~/.hermes/state.db). "
@@ -121,10 +119,9 @@ class SessionPersistenceMixin:
     def _named_profile_for_key(self, session_key: Optional[str]) -> Optional[str]:
         """The non-default profile that owns *session_key*, or None.
 
-        None means the ambient store is authoritative (multiplexing off, or
-        legacy ``agent:main`` namespace). It deliberately does NOT cover "that
-        profile has no directory" — ownership and resolvability are separate
-        questions that ``_db_for_key`` answers separately.
+        None means the ambient store is authoritative (multiplexing off, or legacy ``agent:main``
+        namespace). It deliberately does NOT cover "that profile has no directory" — ownership and
+        resolvability are separate questions that ``_db_for_key`` answers separately.
         """
         if not getattr(self.config, "multiplex_profiles", False):
             return None
@@ -174,10 +171,9 @@ class SessionPersistenceMixin:
             return self._db
         home = self._profile_home_for_key(session_key)
         if home is None:
-            # Named owner we cannot resolve (not provisioned yet, or lookup
-            # failed). Falling back to the ambient store would split ONE
-            # session identity across two physical stores — fail closed;
-            # callers already handle a missing DB.
+            # Named owner we cannot resolve (not provisioned yet, or lookup failed). Falling back to
+            # the ambient store would split ONE session identity across two physical stores — fail
+            # closed; callers already handle a missing DB.
             logger.warning(
                 "gateway.session: profile %r has no resolvable home (key %r); "
                 "refusing to fall back to the ambient store",
@@ -400,9 +396,8 @@ class SessionPersistenceMixin:
                 )
                 return None
 
-        # Compression-ended parent with a newer live child for the same peer:
-        # repoint instead of dropping, or queued/resume-pending work vanishes
-        # until the next message.
+        # Compression-ended parent with a newer live child for the same peer: repoint instead of
+        # dropping, or queued/resume-pending work vanishes until the next message.
         if recovered_entry is not None and recovered_entry.session_id != entry.session_id:
             logger.warning(
                 "gateway.session: repointing stale sessions.json entry "

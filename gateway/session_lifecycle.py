@@ -43,10 +43,9 @@ def _parse_iso(value) -> Optional[datetime]:
         return None
 
 
-# Default auto-continue freshness window (1 hour): a restart-interrupted
-# session is only auto-resumed while within this window of when
-# ``resume_pending`` was marked. ``gateway/run.py`` bridges config.yaml
-# ``agent.gateway_auto_continue_freshness`` into the env var at startup.
+# Default auto-continue freshness window (1 hour): a restart-interrupted session is only
+# auto-resumed while within this window of when ``resume_pending`` was marked. ``gateway/run.py``
+# bridges config.yaml ``agent.gateway_auto_continue_freshness`` into the env var at startup.
 _AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT = 60 * 60
 
 
@@ -94,10 +93,9 @@ class SessionLifecycleMixin:
             except Exception as exc:
                 logger.debug("Session DB expiry_finalized write failed for %s: %s", entry.session_id, exc)
         try:
-            # Without a durable ``session_reset`` end_reason, later agent
-            # cleanup ends the row as ``agent_close``, which stale-route
-            # recovery treats as resumable. Promotion only upgrades live/
-            # agent_close rows; explicit boundaries are preserved.
+            # Without a durable ``session_reset`` end_reason, later agent cleanup ends the row as
+            # ``agent_close``, which stale-route recovery treats as resumable. Promotion only
+            # upgrades live/ agent_close rows; explicit boundaries are preserved.
             _db.promote_to_session_reset(entry.session_id)
         except Exception as exc:
             logger.debug("Session DB promote_to_session_reset failed for %s: %s", entry.session_id, exc)
@@ -283,8 +281,7 @@ class SessionLifecycleMixin:
                     started_at is None or (max_age_seconds > 0 and now - started_at > max_age)
                 )
             except TypeError:
-                # Mixed aware/naive timestamps: clear rather than risk an
-                # unsafe old resume.
+                # Mixed aware/naive timestamps: clear rather than risk an unsafe old resume.
                 marker_is_stale = True
 
             if not marker_is_stale and not entry.suspended:

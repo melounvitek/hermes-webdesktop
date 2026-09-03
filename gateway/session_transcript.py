@@ -282,14 +282,12 @@ class SessionTranscriptMixin:
                     return
 
                 if isinstance(exc, CompressionSessionClosedError):
-                    # Adopt only a different, still-live compression tip, else
-                    # fail closed.
+                    # Adopt only a different, still-live compression tip, else fail closed.
                     _owner_key = self._owner_key_for_session_id(session_id)
                     child_id = self._live_compression_child(session_id)
                     if child_id:
-                        # Record the child's owner BEFORE writing to it (the
-                        # reroute is published only after the write succeeds
-                        # — load-bearing for backlog order).
+                        # Record the child's owner BEFORE writing to it (the reroute is published
+                        # only after the write succeeds — load-bearing for backlog order).
                         if _owner_key:
                             self._lazy("_session_owner_hints", dict)[child_id] = _owner_key
                         try:

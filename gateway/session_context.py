@@ -1,9 +1,8 @@
 """Session-scoped context variables for the Hermes gateway.
 
-Replaces the old ``os.environ``-based ``HERMES_SESSION_*`` state with task-local
-``ContextVar``s (inherited by ``run_in_executor`` threads), so concurrently handled
-messages no longer clobber each other's routing ids.  ``get_session_env`` is a drop-in
-for ``os.getenv``.
+Replaces the old ``os.environ``-based ``HERMES_SESSION_*`` state with task-local ``ContextVar``s
+(inherited by ``run_in_executor`` threads), so concurrently handled messages no longer clobber each
+other's routing ids.  ``get_session_env`` is a drop-in for ``os.getenv``.
 """
 
 import os

@@ -40,8 +40,7 @@ from gateway.session_transcript import SessionTranscriptMixin, TranscriptReadErr
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# PII redaction helpers
+# --------------------------------------------------------------------------- PII redaction helpers
 # ---------------------------------------------------------------------------
 
 def _hash_id(value: str) -> str:
@@ -98,10 +97,9 @@ class SessionSource:
     user_id_alt: Optional[str] = None  # platform-specific stable alt ID (Signal UUID, Feishu union_id)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
     is_bot: bool = False  # message author is a bot/webhook (Discord)
-    # Platform-neutral SCOPE discriminator (Discord guild / Slack workspace /
-    # Matrix server) driving server/workspace isolation. ``scope_id`` is
-    # canonical; ``guild_id`` is a deprecated alias kept while the cross-repo
-    # dual-read/dual-write overlap lasts (both written, scope_id wins on read).
+    # Platform-neutral SCOPE discriminator (Discord guild / Slack workspace / Matrix server) driving
+    # server/workspace isolation. ``scope_id`` is canonical; ``guild_id`` is a deprecated alias kept
+    # while the cross-repo dual-read/dual-write overlap lasts (both written, scope_id wins on read).
     scope_id: Optional[str] = None
     guild_id: Optional[str] = None
     parent_chat_id: Optional[str] = None  # parent channel when chat_id is a thread
@@ -121,11 +119,10 @@ class SessionSource:
     # that WILL be delivered into a new thread whose id == this message id, so
     # the initiating message and later in-thread follow-ups share ONE session.
     prospective_thread_id: Optional[str] = None
-    # Wire-INVISIBLE trust signal: delivered over the per-instance authenticated
-    # relay WebSocket whose connector already resolved owner-only author
-    # bindings. ``platform`` carries the UNDERLYING platform (not ``relay``), so
-    # authz must key upstream trust off THIS flag. Excluded from to_dict/
-    # from_dict so a peer can never forge or persist it.
+    # Wire-INVISIBLE trust signal: delivered over the per-instance authenticated relay WebSocket
+    # whose connector already resolved owner-only author bindings. ``platform`` carries the
+    # UNDERLYING platform (not ``relay``), so authz must key upstream trust off THIS flag. Excluded
+    # from to_dict/ from_dict so a peer can never forge or persist it.
     delivered_via_upstream_relay: bool = False
 
     def __post_init__(self) -> None:
@@ -350,9 +347,8 @@ def _discord_platform_notes(context: SessionContext) -> List[str]:
         else:
             lines.append(f"  - Channel: `{src.chat_id}`")
         if src.message_id:
-            # The volatile per-turn message id must stay OUT of this cached
-            # block (it would bust the agent-cache signature every message);
-            # run.py injects it into the user message instead.
+            # The volatile per-turn message id must stay OUT of this cached block (it would bust the
+            # agent-cache signature every message); run.py injects it into the user message instead.
             lines.append(
                 "  - Triggering message: provided per-turn in the incoming "
                 "user message (use it as `message_id` for reply/react/pin)"
@@ -467,9 +463,8 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
             "about other Matrix rooms or projects unless the user explicitly says so."
         )
 
-    # Shared multi-user sessions: never pin one user name in the system
-    # prompt (changes per turn -> busts the prompt cache); sender names are
-    # prefixed on each user message instead.
+    # Shared multi-user sessions: never pin one user name in the system prompt (changes per turn ->
+    # busts the prompt cache); sender names are prefixed on each user message instead.
     if context.shared_multi_user_session:
         session_label = "Multi-user thread" if src.thread_id else "Multi-user session"
         lines.append(
@@ -565,8 +560,7 @@ class SessionEntry:
     # re-inject topic/channel skills. Distinct from was_auto_reset, which
     # fires the "expired due to inactivity" notice (wrong for a manual reset).
     is_fresh_reset: bool = False
-    # Set by the expiry watcher after finalizing; persisted so restarts don't
-    # re-run finalization.
+    # Set by the expiry watcher after finalizing; persisted so restarts don't re-run finalization.
     expiry_finalized: bool = False
     # Next get_or_create_session() auto-resets (new session_id). Set by /stop
     # to break stuck-resume loops.
@@ -761,10 +755,9 @@ def build_session_key(
         return ":".join(str(part) for part in dm_parts)
 
     participant_id = _canonical_participant(source)
-    # Discord auto-thread continuity: key a channel-initiating message on the
-    # thread it WILL be delivered into (prospective_thread_id), and normalize
-    # the chat_type slot to "thread" so in-thread follow-ups byte-match. A
-    # real thread_id always wins.
+    # Discord auto-thread continuity: key a channel-initiating message on the thread it WILL be
+    # delivered into (prospective_thread_id), and normalize the chat_type slot to "thread" so
+    # in-thread follow-ups byte-match. A real thread_id always wins.
     effective_thread_id = source.thread_id or source.prospective_thread_id
     chat_type_slot = source.chat_type
     if source.prospective_thread_id and not source.thread_id:
@@ -882,30 +875,27 @@ class SessionStore(
         # Keep the legacy sessions.json mirror (disable via gateway.write_sessions_json).
         self._write_sessions_json = bool(getattr(config, "write_sessions_json", True))
 
-        # SQLite handles are cached per resolved path and resolved through the
-        # ``_db`` property, never bound once here: a multiplexed gateway serves
-        # every profile from ONE process and a handle frozen to the root home
-        # would land every profile's rows in the root state.db. Priming the
-        # current scope below keeps startup diagnostics at construction time.
+        # SQLite handles are cached per resolved path and resolved through the ``_db`` property,
+        # never bound once here: a multiplexed gateway serves every profile from ONE process and a
+        # handle frozen to the root home would land every profile's rows in the root state.db.
+        # Priming the current scope below keeps startup diagnostics at construction time.
         self._db_pinned = _DB_UNPINNED
         self._db_handles: Dict[Path, Any] = {}
         self._db_handles_lock = threading.Lock()
         # profile name -> HERMES_HOME; memoized so per-key store lookup is a
         # dict hit, not a profile-directory stat per append.
         self._profile_home_cache: Dict[str, Optional[Path]] = {}
-        # session_id -> owning routing key for ids whose ownership is proven
-        # but not yet published in ``_entries`` (compression child row is
-        # written before its reroute is published).
+        # session_id -> owning routing key for ids whose ownership is proven but not yet published
+        # in ``_entries`` (compression child row is written before its reroute is published).
         self._session_owner_hints: Dict[str, str] = {}
         from gateway.session_db_recovery import RecoverableHandleCache
 
         self._db_handle_cache = RecoverableHandleCache(
             handles=self._db_handles, lock=self._db_handles_lock,
         )
-        # The routing index is one process-wide structure keyed by
-        # ``agent:<profile>:…`` and needs exactly one home for its lifetime:
-        # the gateway's own, captured before any profile scope exists
-        # (see ``_routing_db``).
+        # The routing index is one process-wide structure keyed by ``agent:<profile>:…`` and needs
+        # exactly one home for its lifetime: the gateway's own, captured before any profile scope
+        # exists (see ``_routing_db``).
         try:
             from hermes_constants import get_hermes_home
 
@@ -917,9 +907,8 @@ class SessionStore(
     def _lazy(self, name: str, factory):
         """Return ``self.<name>``, creating it via *factory* when missing/None.
 
-        Suites build bare stores via ``object.__new__`` without running
-        ``__init__``; every optional lock/map is read through this so those
-        instances still work.
+        Suites build bare stores via ``object.__new__`` without running ``__init__``; every optional
+        lock/map is read through this so those instances still work.
         """
         value = getattr(self, name, None)
         if value is None:
@@ -1077,9 +1066,8 @@ class SessionStore(
             stale_hit = checked and checks.is_stale
             reset_reason = checks.reset_reason if checked else None
             if stale_hit:
-                # Stale routing self-heal: the entry points at a session
-                # ALREADY ended in state.db. Drop it and fall through to
-                # recovery (reopens agent_close / ws_orphan_reap rows,
+                # Stale routing self-heal: the entry points at a session ALREADY ended in state.db.
+                # Drop it and fall through to recovery (reopens agent_close / ws_orphan_reap rows,
                 # fresh session for other end_reasons).
                 logger.warning(
                     "gateway.session: routing key %r -> %s is ended in "
