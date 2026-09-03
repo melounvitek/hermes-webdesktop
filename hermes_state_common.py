@@ -802,18 +802,15 @@ if hasattr(errno, "EDEADLK"):
 
 
 def is_advisory_lock_contention(exc: BaseException) -> bool:
-    """True when *exc* means another process holds the advisory lock.  For
-    any other ``OSError`` callers must fail closed IMMEDIATELY: retrying
-    cannot succeed and polling only stalls the caller."""
-    if isinstance(exc, BlockingIOError):
-        return True
-    return isinstance(exc, OSError) and exc.errno in _LOCK_CONTENTION_ERRNOS
+    """True when *exc* means another process holds the advisory lock.  For any
+    other ``OSError`` callers must fail closed IMMEDIATELY: retrying cannot succeed."""
+    return isinstance(exc, BlockingIOError) or (isinstance(exc, OSError) and exc.errno in _LOCK_CONTENTION_ERRNOS)
 
 
 def _proc_start_ticks(pid: int):
-    """Kernel start time of *pid* (field 22 of ``/proc/<pid>/stat``), which
-    with the PID uniquely identifies a process; None off Linux or on any
-    failure — callers must treat None as unknowable and FAIL CLOSED."""
+    """Kernel start time of *pid* (field 22 of ``/proc/<pid>/stat``), which with the PID
+    uniquely identifies a process; None off Linux or on any failure — callers must
+    treat None as unknowable and FAIL CLOSED."""
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             stat = fh.read()
@@ -828,45 +825,41 @@ def _read_lock_holder_record(handle):
     try:
         handle.seek(0)
         raw = handle.read(4096)
-    except (OSError, ValueError):
-        return None
-    if not raw:
-        return None
-    try:
-        record = json.loads(raw.decode("utf-8", "replace"))
-    except (ValueError, UnicodeDecodeError):
+        record = json.loads(raw.decode("utf-8", "replace")) if raw else None
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
     return record if isinstance(record, dict) else None
 
 
-def _write_lock_holder_record(handle) -> None:
-    """Record this process as holder (best effort), written under the flock so
-    timed-out contenders can tell an orphaned-fd holder from a live wedged one."""
+def _rewrite_lock_file(handle, payload: bytes) -> None:
+    """Best-effort truncate-and-write of *payload* at offset 0."""
     try:
-        record = {"pid": os.getpid(), "start_ticks": _proc_start_ticks(os.getpid()), "acquired_at": time.time()}
         handle.seek(0)
         handle.truncate()
-        handle.write(json.dumps(record, sort_keys=True).encode("utf-8"))
+        if payload:
+            handle.write(payload)
         handle.flush()
     except (OSError, ValueError):
         pass
+
+
+def _write_lock_holder_record(handle) -> None:
+    """Record this process as holder (best effort), written under the flock so timed-out
+    contenders can tell an orphaned-fd holder from a live wedged one."""
+    record = {"pid": os.getpid(), "start_ticks": _proc_start_ticks(os.getpid()), "acquired_at": time.time()}
+    _rewrite_lock_file(handle, json.dumps(record, sort_keys=True).encode("utf-8"))
 
 
 def _clear_lock_holder_record(handle) -> None:
-    """Erase holder metadata before a normal release, so a surviving record
-    always means an ABNORMAL exit — the only condition allowing a break."""
-    try:
-        handle.seek(0)
-        handle.truncate()
-        handle.flush()
-    except (OSError, ValueError):
-        pass
+    """Erase holder metadata before a normal release, so a surviving record always
+    means an ABNORMAL exit — the only condition allowing a break."""
+    _rewrite_lock_file(handle, b"")
 
 
 def _lock_holder_provably_dead(record) -> bool:
-    """True ONLY when the recorded holder is provably dead or PID-recycled.
-    Anything indeterminate (no/malformed record, PID owned by another user,
-    /proc unavailable) is False — the caller must FAIL CLOSED and defer."""
+    """True ONLY when the recorded holder is provably dead or PID-recycled. Anything
+    indeterminate (no/malformed record, PID owned by another user, /proc unavailable)
+    is False — the caller must FAIL CLOSED and defer."""
     if not isinstance(record, dict):
         return False
     try:
@@ -885,37 +878,25 @@ def _lock_holder_provably_dead(record) -> bool:
     if recorded_ticks is None:
         return False
     current_ticks = _proc_start_ticks(pid)
-    if current_ticks is None:
-        return False
     # Same PID, different start time: recycled by an unrelated process.
-    return current_ticks != recorded_ticks
-
-
-def _reopen_lock(lock_path, handle):
-    """Close *handle* and reopen *lock_path*; returns the new handle or None."""
-    try:
-        handle.close()
-        return open(lock_path, "a+b")
-    except OSError:
-        return None
+    return current_ticks is not None and current_ticks != recorded_ticks
 
 
 def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, description):
     """Bounded POSIX flock acquire with orphaned-holder staleness break.
-    Returns ``(acquired, handle)``; *handle* may have been re-opened and the
-    caller closes whichever comes back.  *acquired* is True, False (a holder
-    kept the lock past the deadline), or None (non-contention ``OSError``,
-    already logged; callers treat it as not acquired without the
-    held-by-another-process warning).
 
-    ``flock`` belongs to the open file DESCRIPTION, which ``fork()``
-    duplicates: a holder that forks then dies leaves the lock held forever by
-    a child that never releases.  When the process that ACQUIRED is provably
-    dead (its critical section died with it) yet the flock is held, the file
-    is unlinked and retaken on a fresh inode; the orphan's flock stays on the
-    old inode blocking nobody.  Every successful acquire verifies its inode
-    still names *lock_path*, so a racer that locked a dead inode retries
-    instead of running alongside the breaker.  Indeterminate liveness defers."""
+    Returns ``(acquired, handle)``; *handle* may have been re-opened and the caller
+    closes whichever comes back. *acquired* is True, False (a holder kept the lock past
+    the deadline), or None (non-contention ``OSError``, already logged; callers treat it
+    as not acquired without the held-by-another-process warning).
+
+    ``flock`` belongs to the open file DESCRIPTION, which ``fork()`` duplicates: a holder
+    that forks then dies leaves the lock held forever by a child that never releases.
+    When the process that ACQUIRED is provably dead yet the flock is held, the file is
+    unlinked and retaken on a fresh inode; the orphan's flock stays on the old inode
+    blocking nobody. Every successful acquire verifies its inode still names
+    *lock_path*, so a racer that locked a dead inode retries instead of running
+    alongside the breaker. Indeterminate liveness defers."""
     import fcntl
 
     deadline = time.monotonic() + timeout_seconds
@@ -969,10 +950,11 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
         if same_file:
             _write_lock_holder_record(handle)
             return True, handle
-        reopened = _reopen_lock(lock_path, handle)
-        if reopened is None:
+        try:
+            handle.close()
+            handle = open(lock_path, "a+b")
+        except OSError:
             return False, handle
-        handle = reopened
         if time.monotonic() >= deadline:
             return False, handle
 
@@ -981,15 +963,13 @@ def _describe_lock_holder(record) -> str:
     """Human-readable holder identity for deferral warnings."""
     if not isinstance(record, dict) or "pid" not in record:
         return "unknown (no holder record; pre-fix writer or non-Hermes)"
-    pid = record.get("pid")
-    acquired_at = record.get("acquired_at")
     age = ""
     try:
-        if acquired_at is not None:
-            age = f", acquired {time.time() - float(acquired_at):.0f}s ago"
+        if record.get("acquired_at") is not None:
+            age = f", acquired {time.time() - float(record['acquired_at']):.0f}s ago"
     except (TypeError, ValueError):
         pass
-    return f"pid {pid}{age}"
+    return f"pid {record.get('pid')}{age}"
 
 
 def _acquire_msvcrt_lock(lock_path, handle, timeout):
@@ -1019,13 +999,13 @@ def _acquire_msvcrt_lock(lock_path, handle, timeout):
 @contextlib.contextmanager
 def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     """Serialize full structural FTS rebuilds on *db_path* across processes.
-    Yields True when this process holds the authority, False when the bounded
-    acquire timed out or the lock file could not be opened.  On False the
-    caller must NOT rebuild (fail closed); the stale breadcrumb guarantees a
-    retry.  ``db_path`` None (in-memory DB) yields True.
 
-    Opportunistic in-process retries pass ``timeout_seconds=0`` so a live
-    holder never stalls a long-lived writer; the orphan break still applies."""
+    Yields True when this process holds the authority, False when the bounded acquire
+    timed out or the lock file could not be opened. On False the caller must NOT
+    rebuild (fail closed); the stale breadcrumb guarantees a retry. ``db_path`` None
+    (in-memory DB) yields True. Opportunistic in-process retries pass
+    ``timeout_seconds=0`` so a live holder never stalls a long-lived writer; the orphan
+    break still applies."""
     if db_path is None:
         yield True
         return
@@ -1034,12 +1014,11 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     try:
         handle = open(lock_path, "a+b")
     except OSError as exc:
-        # Fail closed like a timed-out acquire.  An unopenable lock file means
-        # the FS is out of space/inodes/descriptors, and a sibling that opened
-        # its handle earlier may still be rebuilding; yielding True here gave
-        # every process on a full disk a concurrent rebuild of the same DB.
-        # Deferring costs nothing: the breadcrumb retries, and the rebuild's
-        # own writes could not have committed either.
+        # Fail closed like a timed-out acquire: an unopenable lock file means the FS is
+        # out of space/inodes/descriptors, and a sibling that opened its handle earlier
+        # may still be rebuilding — yielding True gave every process on a full disk a
+        # concurrent rebuild of the same DB. Deferring costs nothing (the breadcrumb
+        # retries, and the rebuild's own writes could not have committed either).
         logger.warning(
             "Could not open FTS rebuild lock %s (%s) — deferring this rebuild "
             "rather than running it without cross-process authority.",
