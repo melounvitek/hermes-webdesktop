@@ -314,12 +314,8 @@ class ToolCallGuardrailController:
 
         # Loop caps apply regardless of hard_stop_enabled (which only governs the detector).
         cap_block = self._check_loop_cap(tool_name, args, signature)
-        if cap_block is not None:
-            return cap_block
-
-        if not self.config.hard_stop_enabled:
-            return allow
-
+        if cap_block is not None or not self.config.hard_stop_enabled:
+            return cap_block or allow
         # A mutation since this call last failed makes the retry a new experiment.
         exact_count = 0 if self._progress_since_failure.get(signature) else self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
@@ -344,13 +340,9 @@ class ToolCallGuardrailController:
             # a mutation since the last identical failure restarts the exact-args streak.
             if self._progress_since_failure.pop(signature, False):
                 self._exact_failure_counts.pop(signature, None)
-            exact_count = self._exact_failure_counts.get(signature, 0) + 1
-            self._exact_failure_counts[signature] = exact_count
+            exact_count = self._exact_failure_counts[signature] = self._exact_failure_counts.get(signature, 0) + 1
+            same_count = self._same_tool_failure_counts[tool_name] = self._same_tool_failure_counts.get(tool_name, 0) + 1
             self._no_progress.pop(signature, None)
-
-            same_count = self._same_tool_failure_counts.get(tool_name, 0) + 1
-            self._same_tool_failure_counts[tool_name] = same_count
-
             # same_tool_failure counts DIFFERENT args on one tool; for failure-tolerant
             # tools a run of distinct red commands is diagnosis, not a loop — warn, never halt.
             if (
@@ -370,14 +362,11 @@ class ToolCallGuardrailController:
 
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
-
         # A successful mutation is progress for every failing signature still counted
         # this turn. Pure loops never mutate between attempts, so the replay detector keeps its teeth.
         if tool_name in PROGRESS_RESET_TOOL_NAMES or file_mutation_result_landed(tool_name, result):
-            for sig in list(self._exact_failure_counts):
-                self._progress_since_failure[sig] = True
+            self._progress_since_failure.update(dict.fromkeys(self._exact_failure_counts, True))
             self._same_tool_failure_counts.clear()
-
         if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)
             return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
@@ -386,7 +375,6 @@ class ToolCallGuardrailController:
         previous = self._no_progress.get(signature)
         repeat_count = previous[1] + 1 if previous is not None and previous[0] == result_hash else 1
         self._no_progress[signature] = (result_hash, repeat_count)
-
         if warnings and repeat_count >= self.config.no_progress_warn_after:
             return self._decide("warn", "idempotent_no_progress_warning", tool_name, repeat_count, signature)
         return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
