@@ -1,31 +1,11 @@
 """Shared auxiliary client router for side tasks (compression, search, vision, ...).
 
-Resolution order for text tasks (auto mode):
-  1. User's main provider + main model (used regardless of provider type —
-     aggregators, direct API-key providers, native Anthropic, Codex, etc.)
-  2. OpenRouter  (OPENROUTER_API_KEY)
-  3. Nous Portal (~/.hermes/auth.json active provider)
-  4. Custom endpoint (config.yaml model.base_url + OPENAI_API_KEY)
-  5. Native Anthropic
-  6. Direct API-key providers (z.ai/GLM, Kimi/Moonshot, MiniMax, MiniMax-CN)
-  7. None
-
-``auxiliary.free_only: true`` restricts the step-2 OpenRouter fallback to
-``:free`` SKUs; ``auxiliary.openrouter_model`` overrides the default.
-
-Resolution order for vision/multimodal tasks (auto mode):
-  1. Selected main provider, if it is one of the supported vision backends below
-  2. OpenRouter
-  3. Nous Portal
-  4. Native Anthropic
-  5. Custom endpoint (for local vision models: Qwen-VL, LLaVA, Pixtral, etc.)
-  6. None
-
-Codex OAuth is deliberately in neither chain (undocumented, shifting model
-allow-list); it is used only as the main provider or via explicit
-auxiliary.<task>.provider + auxiliary.<task>.model. Per-task overrides live
-under ``auxiliary:`` in config.yaml. HTTP 402 / credit errors in call_llm()
-fall through to the next provider in the chain.
+Text auto chain: main provider+model → OpenRouter → Nous Portal → custom endpoint →
+native Anthropic → direct API-key providers → None. Vision auto chain: main
+provider (if a supported vision backend) → OpenRouter → Nous → Anthropic → custom.
+``auxiliary.free_only`` restricts the OpenRouter lane to ``:free`` SKUs. Codex OAuth is
+in neither chain (undocumented, shifting allow-list): main provider or explicit
+``auxiliary.<task>.provider`` only. HTTP 402 in call_llm() falls through the chain.
 """
 
 import contextlib
