@@ -85,7 +85,7 @@ def _kill_port_process(port: int) -> None:
                     os.kill(pid, signal.SIGTERM)
                     continue
                 from hermes_cli._subprocess_compat import windows_hide_flags
-                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, timeout=5, creationflags=windows_hide_flags())
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True, stdin=subprocess.DEVNULL, timeout=5, creationflags=windows_hide_flags())
 
 
 def _bridge_pid_is_ours(pid: int, session_path: Path, expected_start) -> bool:

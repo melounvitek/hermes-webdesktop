@@ -35,7 +35,7 @@ def _present(**kwargs) -> dict:
 def _pgroup_alive(pgid: Optional[int]) -> bool:
     """Signal 0 to the group succeeds iff any member is alive (POSIX only)."""
     try:
-        os.killpg(pgid, 0)
+        os.killpg(pgid, 0)  # windows-footgun: ok — guarded by AttributeError below
         return True
     except (AttributeError, TypeError, OSError):  # non-POSIX / pgid None / gone
         return False

@@ -4695,7 +4695,7 @@ class TelegramAdapter(BasePlatformAdapter):
             if _idx % 2 == 1:
                 _safe_parts.append(_seg)  # inside code — untouched
             else:
-                _safe_parts.append(re.sub(r'[(){}]', lambda m, _seg=_seg: self._escape_bare_bracket(m, _seg), _seg))
+                _safe_parts.append(re.sub(r'[(){}]', lambda m, _seg=_seg: TelegramAdapter._escape_bare_bracket(m, _seg), _seg))
         return ''.join(_safe_parts)
 
     @staticmethod

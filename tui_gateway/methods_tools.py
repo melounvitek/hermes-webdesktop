@@ -167,11 +167,12 @@ def _capture_run_kwargs(timeout: int) -> dict:
         stdin=subprocess.DEVNULL, creationflags=_tools_mod("hermes_cli._subprocess_compat").windows_hide_flags())
 
 
-def _captured_exec(rid, cmd, timeout: int, *, on_result, timeout_err: tuple, fail_code: int, **kw) -> dict:
+def _captured_exec(rid, cmd, timeout: int, *, on_result, timeout_err: tuple, fail_code: int,
+                   shell: bool = False, env: "dict | None" = None) -> dict:
     """Run ``cmd`` captured (see ``_capture_run_kwargs``) and hand the CompletedProcess to
     ``on_result``; TimeoutExpired → ``timeout_err`` (code, message), other errors → ``fail_code``."""
     try:
-        return on_result(subprocess.run(cmd, cwd=os.getcwd(), **kw, **_capture_run_kwargs(timeout)))
+        return on_result(subprocess.run(cmd, cwd=os.getcwd(), shell=shell, env=env, **_capture_run_kwargs(timeout)))
     except subprocess.TimeoutExpired:
         return _err(rid, *timeout_err)
     except Exception as e:

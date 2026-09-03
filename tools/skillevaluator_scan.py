@@ -105,7 +105,8 @@ def run_tier1_scan(skill_dir: Path, timeout: int = SCAN_TIMEOUT_SECONDS) -> Tier
     with tempfile.TemporaryDirectory(prefix="se-tier1-") as outdir:
         try:
             subprocess.run([SCANNER_BIN, "validate", str(skill_dir), "--checks", TIER1_CHECKS, "--no-dedup",
-                            "-r", "json", "-o", outdir], capture_output=True, text=True, timeout=timeout)
+                            "-r", "json", "-o", outdir], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL, timeout=timeout)
         except subprocess.TimeoutExpired:
             return unavailable(f"scan timed out after {timeout}s")
         except OSError as exc:

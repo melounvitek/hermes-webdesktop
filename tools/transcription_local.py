@@ -97,7 +97,8 @@ def _looks_like_cuda_lib_error(exc: BaseException) -> bool:
 def _sysctl_value(name: str) -> str:
     """Return a sysctl value, or an empty string when unavailable."""
     try:
-        return subprocess.check_output(["/usr/sbin/sysctl", "-n", name], stderr=subprocess.DEVNULL, text=True,
+        return subprocess.check_output(["/usr/sbin/sysctl", "-n", name], stderr=subprocess.DEVNULL,
+                                       stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace",
                                        timeout=2).strip()
     except Exception:
         return ""

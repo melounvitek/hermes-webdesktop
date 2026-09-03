@@ -150,8 +150,8 @@ def run_command_provider(
     # locale-mismatched bytes must not raise in the reader threads.
     group = ({"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)} if os.name == "nt"
              else {"start_new_session": True})
-    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            encoding="utf-8", errors="replace", env=delegated_child_subprocess_env(scrubbed),
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, encoding="utf-8", errors="replace", env=delegated_child_subprocess_env(scrubbed),
                             stdin=subprocess.DEVNULL, **group)
     output_queue: "queue.Queue[tuple[str, Optional[str]]]" = queue.Queue()
     chunks: Dict[str, list[str]] = {"stdout": [], "stderr": []}
