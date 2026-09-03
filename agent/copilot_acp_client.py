@@ -164,9 +164,7 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
     if not session_id or not requested_model or requested_model == "copilot-acp":
         return None
     model_option = next(
-        (o for o in (session.get("configOptions") or [])
-         if isinstance(o, dict) and (o.get("category") == "model" or o.get("id") == "model")),
-        None,
+        (o for o in (session.get("configOptions") or []) if isinstance(o, dict) and "model" in (o.get("category"), o.get("id"))), None
     )
     if model_option is not None:
         if requested_model not in _enabled_ids(model_option.get("options"), "value"):
@@ -208,9 +206,7 @@ def _render_message_content(content: Any) -> str:
     if isinstance(content, dict):
         if "text" in content:
             return str(content.get("text") or "").strip()
-        if isinstance(content.get("content"), str):
-            return content["content"].strip()
-        return json.dumps(content, ensure_ascii=True)
+        return content["content"].strip() if isinstance(content.get("content"), str) else json.dumps(content, ensure_ascii=True)
     if isinstance(content, list):
         parts = [
             item if isinstance(item, str) else item["text"].strip()
@@ -225,8 +221,7 @@ def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
     candidate = Path(path_text)
     if not candidate.is_absolute():
         raise PermissionError("ACP file-system paths must be absolute.")
-    resolved = candidate.resolve()
-    root = Path(cwd).resolve()
+    resolved, root = candidate.resolve(), Path(cwd).resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
@@ -241,8 +236,7 @@ def _effective_timeout(timeout: Any) -> float:
     if isinstance(timeout, (int, float)):
         return float(timeout)
     candidates = [getattr(timeout, attr, None) for attr in ("read", "write", "connect", "pool", "timeout")]
-    numeric = [float(v) for v in candidates if isinstance(v, (int, float))]
-    return max(numeric) if numeric else _DEFAULT_TIMEOUT_SECONDS
+    return max((float(v) for v in candidates if isinstance(v, (int, float))), default=_DEFAULT_TIMEOUT_SECONDS)
 
 
 def _fs_read_text_file(params: dict[str, Any], cwd: str) -> Any:

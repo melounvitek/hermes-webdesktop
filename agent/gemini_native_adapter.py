@@ -102,24 +102,22 @@ def probe_gemini_tier(
     base = str(base_url or DEFAULT_GEMINI_BASE_URL).strip().rstrip("/") or DEFAULT_GEMINI_BASE_URL
     if base.lower().endswith("/openai"):
         base = base[: -len("/openai")]
-    payload = {"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 1}}
     try:
         with httpx.Client(timeout=timeout) as client:
             resp = client.post(
-                f"{base}/models/{model}:generateContent", params={"key": key}, json=payload,
+                f"{base}/models/{model}:generateContent", params={"key": key},
+                json={"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "generationConfig": {"maxOutputTokens": 1}},
                 headers={"Content-Type": "application/json", "X-Goog-Api-Client": _API_CLIENT},
             )
     except Exception as exc:
         logger.debug("probe_gemini_tier: network error: %s", exc)
         return "unknown"
-
     rpd_header = {k.lower(): v for k, v in resp.headers.items()}.get("x-ratelimit-limit-requests-per-day")
-    if rpd_header:
-        # Free-tier daily caps top out at 1000 (flash-lite); Tier 1 starts ~1500+.
-        try:
+    try:
+        if rpd_header:  # free-tier daily caps top out at 1000 (flash-lite); Tier 1 starts ~1500+
             return "free" if int(rpd_header) <= 1000 else "paid"
-        except (TypeError, ValueError):
-            pass
+    except (TypeError, ValueError):
+        pass
     if resp.status_code == 429:
         return "free" if "free_tier" in _response_text(resp).lower() else "paid"
     return "paid" if 200 <= resp.status_code < 300 else "unknown"
@@ -204,9 +202,7 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
 
 def _tool_call_extra_signature(tool_call: Dict[str, Any]) -> Optional[str]:
     extra = tool_call.get("extra_content") or {}
-    if not isinstance(extra, dict):
-        return None
-    google = extra.get("google") or extra.get("thought_signature")
+    google = (extra.get("google") or extra.get("thought_signature")) if isinstance(extra, dict) else None
     sig = (google.get("thought_signature") or google.get("thoughtSignature")) if isinstance(google, dict) else google
     return sig if isinstance(sig, str) and sig else None
 
@@ -343,11 +339,8 @@ def _translate_tools_to_gemini(tools: Any) -> List[Dict[str, Any]]:
 def _translate_tool_choice_to_gemini(tool_choice: Any) -> Optional[Dict[str, Any]]:
     if isinstance(tool_choice, str) and tool_choice in _TOOL_CHOICE_MODES:
         return {"functionCallingConfig": {"mode": _TOOL_CHOICE_MODES[tool_choice]}}
-    if isinstance(tool_choice, dict):
-        name = (tool_choice.get("function") or {}).get("name")
-        if isinstance(name, str) and name:
-            return {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [name]}}
-    return None
+    name = (tool_choice.get("function") or {}).get("name") if isinstance(tool_choice, dict) else None
+    return {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [name]}} if isinstance(name, str) and name else None
 
 
 # (camelCase key, snake_case alias, accepted types, normalizer)
@@ -390,9 +383,7 @@ def _effective_gemini_max_output_tokens(max_tokens: Optional[int], thinking_conf
         requested = int(max_tokens)
     except (TypeError, ValueError):
         requested = 0
-    if requested <= 0:
-        return GEMINI_DEFAULT_MAX_OUTPUT_TOKENS
-    if _thinking_requests_output_headroom(thinking_config):
+    if requested <= 0 or _thinking_requests_output_headroom(thinking_config):
         return max(requested, GEMINI_DEFAULT_MAX_OUTPUT_TOKENS)
     return requested
 
@@ -405,26 +396,18 @@ def build_gemini_request(
     # Gemini 3+ both requires tool-call ids and accepts multimodal functionResponse parts.
     is_gemini3 = gemini_requires_tool_call_ids(model)
     contents, system_instruction = _build_gemini_contents(messages, include_tool_call_ids=is_gemini3, is_gemini3=is_gemini3)
-    request: Dict[str, Any] = {"contents": contents}
-    for key, value in (
-        ("systemInstruction", system_instruction),
-        ("tools", _translate_tools_to_gemini(tools)),
+    optional = (
+        ("systemInstruction", system_instruction), ("tools", _translate_tools_to_gemini(tools)),
         ("toolConfig", _translate_tool_choice_to_gemini(tool_choice)),
-    ):
-        if value:
-            request[key] = value
-
-    generation_config: Dict[str, Any] = {}
-    if temperature is not None:
-        generation_config["temperature"] = temperature
-    generation_config["maxOutputTokens"] = _effective_gemini_max_output_tokens(max_tokens, thinking_config)
-    if top_p is not None:
-        generation_config["topP"] = top_p
-    if stop:
-        generation_config["stopSequences"] = stop if isinstance(stop, list) else [str(stop)]
-    if normalized_thinking := _normalize_thinking_config(thinking_config):
-        generation_config["thinkingConfig"] = normalized_thinking
-    request["generationConfig"] = generation_config
+    )
+    request: Dict[str, Any] = {"contents": contents, **{k: v for k, v in optional if v}}
+    # Key order is part of the wire format (prompt-cache parity): temperature, maxOutputTokens, topP, stop, thinking.
+    generation = (
+        ("temperature", temperature), ("maxOutputTokens", _effective_gemini_max_output_tokens(max_tokens, thinking_config)),
+        ("topP", top_p), ("stopSequences", (stop if isinstance(stop, list) else [str(stop)]) if stop else None),
+        ("thinkingConfig", _normalize_thinking_config(thinking_config)),
+    )
+    request["generationConfig"] = {k: v for k, v in generation if v is not None}
     return request
 
 
