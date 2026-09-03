@@ -330,8 +330,10 @@ class GatewayNotificationsMixin:
         # they succeeded — mirrors the ``not agent_result.get("failed")`` completed-turn guard.
         if not deliver_media:
             return
-        synthetic_event = MessageEvent(text="", source=source, message_id=event_message_id)
-        await self._deliver_media_from_response(response, synthetic_event, adapter, thread_metadata=metadata)
+        await self._deliver_media_from_response(
+            response, MessageEvent(text="", source=source, message_id=event_message_id), adapter,
+            thread_metadata=metadata,
+        )
 
     def _schedule_update_notification_watch(self) -> None:
         """Ensure a background task is watching for update completion."""

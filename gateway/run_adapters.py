@@ -170,10 +170,11 @@ class GatewayAdapterLifecycleMixin:
         tasks = getattr(self, "_fatal_handler_tasks", None)
         if tasks is None:
             tasks = self._fatal_handler_tasks = set()
-        task = self._track_task_in(tasks, asyncio.create_task(self._handle_adapter_fatal_error_detached(adapter)))
         # shield(): a plain `await task` would tunnel the caller's cancellation into the detached
         # task; with shield the caller sees CancelledError and the handler runs to completion.
-        await asyncio.shield(task)
+        await asyncio.shield(
+            self._track_task_in(tasks, asyncio.create_task(self._handle_adapter_fatal_error_detached(adapter)))
+        )
 
     def _reconnect_queue_entry(
         self, platform, adapter, platform_config, *, attempts: int, delay: float, queued: bool = True
@@ -591,7 +592,6 @@ class GatewayAdapterLifecycleMixin:
             return
         info["attention_flagged"] = True
         queued_for = now - info.get("queued_at", now)
-        retrying_since_iso = (datetime.now(timezone.utc) - timedelta(seconds=queued_for)).isoformat()
         logger.warning(
             "%s has been failing/reconnecting continuously for %.1f hours (%d attempts) — flagging "
             "NEEDS_ATTENTION. Retries continue, but this usually means a permanent problem (revoked "
@@ -599,7 +599,8 @@ class GatewayAdapterLifecycleMixin:
             platform.value, queued_for / 3600.0, info.get("attempts", 0),
         )
         self._update_platform_runtime_status(
-            platform.value, platform_state="retrying", needs_attention=True, retrying_since=retrying_since_iso
+            platform.value, platform_state="retrying", needs_attention=True,
+            retrying_since=(datetime.now(timezone.utc) - timedelta(seconds=queued_for)).isoformat(),
         )
 
     def _mark_platform_fatal(self, status_key: str, adapter) -> None:
@@ -749,7 +750,7 @@ class GatewayAdapterLifecycleMixin:
         from gateway.run import (
             MultiplexConfigError, SecondaryPortBindingConfigError, _multiplex_profile_homes
         )
-        if not getattr(self.config, "multiplex_profiles", False):
+        if not self._multiplex_on():
             return 0
         try:
             from hermes_cli.profiles import get_active_profile_name
@@ -890,7 +891,7 @@ class GatewayAdapterLifecycleMixin:
         """Create+connect one profile's adapters under its runtime scope."""
         from gateway.run import _platform_has_bot_credential, _profile_runtime_scope
         profile_cfg = await self._load_secondary_profile_config(profile_name, profile_home)
-        multiplex = getattr(self.config, "multiplex_profiles", False)
+        multiplex = self._multiplex_on()
         profile_map = self._profile_adapters.setdefault(profile_name, {})
         connected = 0
         for platform, platform_config in profile_cfg.platforms.items():
@@ -1232,8 +1233,7 @@ class GatewayAdapterLifecycleMixin:
         """Stamp an owning adapter's profile before resolving busy policy."""
         async def _handler(event, _session_key):
             self._stamp_event_profile(event, profile_name)
-            routed_session_key = self._session_key_for_source(event.source)
-            return await self._handle_active_session_busy_message(event, routed_session_key)
+            return await self._handle_active_session_busy_message(event, self._session_key_for_source(event.source))
 
         return _handler
 
@@ -1274,9 +1274,10 @@ class GatewayAdapterLifecycleMixin:
 
     def _primary_message_handler(self):
         """Return the correctly scoped handler for a primary adapter."""
-        if getattr(self.config, "multiplex_profiles", False):
-            return self._make_default_profile_message_handler()
-        return self._handle_message
+        return self._make_default_profile_message_handler() if self._multiplex_on() else self._handle_message
+
+    def _multiplex_on(self) -> bool:
+        return bool(getattr(self.config, "multiplex_profiles", False))
 
     async def _handle_gateway_platform_event(self, event: dict, source) -> None:
         """Authorize and publish one normalized adapter event to plugin hooks."""
@@ -1312,7 +1313,7 @@ class GatewayAdapterLifecycleMixin:
         return _handler
 
     def _primary_platform_event_handler(self):
-        if getattr(self.config, "multiplex_profiles", False):
+        if self._multiplex_on():
             return self._make_default_profile_platform_event_handler()
         return self._handle_gateway_platform_event
 
@@ -1393,8 +1394,7 @@ class GatewayAdapterLifecycleMixin:
         its scope; for the shared primary (None) the routed profile is stamped so its pairing store
         is consulted while allowlist reads stay under the transport home."""
         from gateway.run import get_hermes_home
-        multiplex = bool(getattr(self.config, "multiplex_profiles", False))
-        transport_home = (Path(get_hermes_home()) if multiplex and profile_name is None else None)
+        transport_home = Path(get_hermes_home()) if self._multiplex_on() and profile_name is None else None
 
         def check(
             user_id: str, chat_type: Optional[str] = None, chat_id: Optional[str] = None, *,

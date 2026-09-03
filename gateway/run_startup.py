@@ -882,7 +882,7 @@ class GatewayStartupMixin:
         (aborted, enabled_platform_count, multiplex_skipped_platforms, pending_connects)."""
         from gateway.run import _platform_has_bot_credential
         enabled_platform_count = 0
-        _multiplex_on = bool(getattr(self.config, "multiplex_profiles", False))
+        _multiplex_on = self._multiplex_on()
         _multiplex_skipped_platforms: list[Platform] = []
         _pending_connects = []  # (platform, platform_config, adapter); connected concurrently later
         for platform, platform_config in self.config.platforms.items():

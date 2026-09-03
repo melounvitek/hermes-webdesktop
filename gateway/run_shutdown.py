@@ -155,8 +155,7 @@ class GatewayShutdownMixin:
 
         Only the primary API server owns the HTTP listener, so only it is a source of this work.
         """
-        adapter = getattr(self, "adapters", {}).get(Platform.API_SERVER)
-        helper = getattr(adapter, name, None)
+        helper = getattr(getattr(self, "adapters", {}).get(Platform.API_SERVER), name, None)
         return max(0, int(helper(*args))) if callable(helper) else 0
 
     def _active_api_run_count(self) -> int:
