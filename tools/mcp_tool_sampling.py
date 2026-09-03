@@ -18,10 +18,6 @@ def _tool_use_id(block):
     return mcp_field(block, "tool_use_id", "toolUseId", _MISSING)
 
 
-def _is_tool_use(block) -> bool:
-    return hasattr(block, "name") and hasattr(block, "input")
-
-
 def _tool_result_text(block) -> str:
     """Text of a ToolResultContent block ("" when it carries no content)."""
     content = getattr(block, "content", None)
@@ -54,9 +50,9 @@ def _convert_sampling_message(msg) -> List[dict]:
     blocks = msg.content_as_list if hasattr(msg, "content_as_list") else (
         msg.content if isinstance(msg.content, list) else [msg.content])
     tool_results = [b for b in blocks if _tool_use_id(b) is not _MISSING]
-    tool_uses = [b for b in blocks if _is_tool_use(b) and _tool_use_id(b) is _MISSING]
-    content_blocks = [b for b in blocks if _tool_use_id(b) is _MISSING and not _is_tool_use(b)]
-
+    others = [b for b in blocks if _tool_use_id(b) is _MISSING]
+    tool_uses = [b for b in others if hasattr(b, "name") and hasattr(b, "input")]
+    content_blocks = [b for b in others if not (hasattr(b, "name") and hasattr(b, "input"))]
     out = [{"role": "tool", "tool_call_id": _tool_use_id(tr), "content": _tool_result_text(tr)} for tr in tool_results]
     if tool_uses:
         msg_dict: dict = {"role": msg.role, "tool_calls": [_tool_call_dict(tu, i) for i, tu in enumerate(tool_uses)]}
@@ -64,13 +60,12 @@ def _convert_sampling_message(msg) -> List[dict]:
         if text_parts:
             msg_dict["content"] = "\n".join(text_parts)
         out.append(msg_dict)
+    elif len(content_blocks) == 1 and hasattr(content_blocks[0], "text"):
+        out.append({"role": msg.role, "content": content_blocks[0].text})
     elif content_blocks:
-        if len(content_blocks) == 1 and hasattr(content_blocks[0], "text"):
-            out.append({"role": msg.role, "content": content_blocks[0].text})
-        else:
-            parts = [p for p in map(_content_part, content_blocks) if p is not None]
-            if parts:
-                out.append({"role": msg.role, "content": parts})
+        parts = [p for p in map(_content_part, content_blocks) if p is not None]
+        if parts:
+            out.append({"role": msg.role, "content": parts})
     return out
 
 
@@ -84,10 +79,6 @@ def _parse_tool_call_arguments(server_name: str, args) -> dict:
                            server_name, args)
             return {"_raw": args}
     return args if isinstance(args, dict) else {"_raw": str(args)}
-
-
-def _response_total_tokens(response, default):
-    return getattr(getattr(response, "usage", None), "total_tokens", default)
 
 
 class SamplingHandler:
@@ -135,9 +126,9 @@ class SamplingHandler:
     @staticmethod
     def _error(message: str, code: int = -1):
         """Return ErrorData (MCP spec) or raise as fallback."""
-        if _core._MCP_SAMPLING_TYPES:
-            return _core.ErrorData(code=code, message=message)
-        raise Exception(message)
+        if not _core._MCP_SAMPLING_TYPES:
+            raise Exception(message)
+        return _core.ErrorData(code=code, message=message)
 
     def _fail(self, message: str):
         """Count an error and return the ErrorData for it."""
@@ -146,23 +137,20 @@ class SamplingHandler:
 
     def _log_response(self, response, suffix: str = "", *args) -> None:
         logger.log(self.audit_level, "MCP server '%s' sampling response: model=%s, tokens=%s" + suffix,
-                   self.server_name, response.model, _response_total_tokens(response, "?"), *args)
+                   self.server_name, response.model, getattr(getattr(response, "usage", None), "total_tokens", "?"), *args)
 
     def _build_tool_use_result(self, choice, response):
         """CreateMessageResultWithTools from a tool_calls response, under ``max_tool_rounds`` (0 disables)."""
         self.metrics["tool_use_count"] += 1
-        if self.max_tool_rounds == 0:
-            self._tool_loop_count = 0
-            return self._error(f"Tool loops disabled for server '{self.server_name}' (max_tool_rounds=0)")
         self._tool_loop_count += 1
-        if self._tool_loop_count > self.max_tool_rounds:
+        if self.max_tool_rounds == 0 or self._tool_loop_count > self.max_tool_rounds:
             self._tool_loop_count = 0
             return self._error(
-                f"Tool loop limit exceeded for server '{self.server_name}' (max {self.max_tool_rounds} rounds)")
-        content_blocks = [
-            _core.ToolUseContent(type="tool_use", id=tc.id, name=tc.function.name,
-                                 input=_parse_tool_call_arguments(self.server_name, tc.function.arguments))
-            for tc in choice.message.tool_calls]
+                f"Tool loops disabled for server '{self.server_name}' (max_tool_rounds=0)" if self.max_tool_rounds == 0
+                else f"Tool loop limit exceeded for server '{self.server_name}' (max {self.max_tool_rounds} rounds)")
+        content_blocks = [_core.ToolUseContent(type="tool_use", id=tc.id, name=tc.function.name,
+                                               input=_parse_tool_call_arguments(self.server_name, tc.function.arguments))
+                          for tc in choice.message.tool_calls]
         self._log_response(response, ", tool_calls=%d", len(content_blocks))
         return _core.CreateMessageResultWithTools(
             role="assistant", content=content_blocks, model=response.model, stopReason="toolUse")
@@ -187,8 +175,7 @@ class SamplingHandler:
             logger.warning("MCP server '%s' sampling rate limit exceeded (%d/min)", self.server_name, self.max_rpm)
             return None, self._fail(
                 f"Sampling rate limit exceeded for server '{self.server_name}' ({self.max_rpm} requests/minute)")
-        model = self._resolve_model(mcp_field(params, "model_preferences", "modelPreferences"))
-        resolved_model = model or self.model_override or ""
+        resolved_model = self._resolve_model(mcp_field(params, "model_preferences", "modelPreferences")) or ""
         if self.allowed_models and resolved_model and resolved_model not in self.allowed_models:
             logger.warning("MCP server '%s' requested model '%s' not in allowed_models",
                            self.server_name, resolved_model)
@@ -205,7 +192,6 @@ class SamplingHandler:
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
         max_tokens = min(mcp_field(params, "max_tokens", "maxTokens", self.max_tokens_cap), self.max_tokens_cap)
-        temperature = getattr(params, "temperature", None)
         server_tools = getattr(params, "tools", None)
         tools = [{"type": "function", "function": {
             "name": getattr(t, "name", ""), "description": getattr(t, "description", "") or "",
@@ -213,15 +199,15 @@ class SamplingHandler:
             for t in server_tools] if server_tools else None
         logger.log(self.audit_level, "MCP server '%s' sampling request: model=%s, max_tokens=%d, messages=%d",
                    self.server_name, resolved_model, max_tokens, len(messages))
-        return lambda: call_llm(task="mcp", model=resolved_model or None, messages=messages, temperature=temperature,
-                                max_tokens=max_tokens, tools=tools, timeout=self.timeout)
+        return lambda: call_llm(task="mcp", model=resolved_model or None, messages=messages, max_tokens=max_tokens,
+                                temperature=getattr(params, "temperature", None), tools=tools, timeout=self.timeout)
 
     async def __call__(self, context, params):
         """SDK ``SamplingFnT``: CreateMessageResult, CreateMessageResultWithTools, or ErrorData."""
         resolved_model, err = self._admit(params)
         if err is not None:
             return err
-        sync_call = self._build_llm_call(params, resolved_model)
+        sync_call = self._build_llm_call(params, resolved_model)  # outside the try: its errors propagate, not _fail
         try:
             response = await asyncio.wait_for(asyncio.to_thread(sync_call), timeout=self.timeout)
         except asyncio.TimeoutError:
@@ -233,9 +219,8 @@ class SamplingHandler:
             return self._fail(f"LLM returned empty response (no choices) for server '{self.server_name}'")
         choice = response.choices[0]
         self.metrics["requests"] += 1
-        total_tokens = _response_total_tokens(response, 0)
-        if isinstance(total_tokens, int):
-            self.metrics["tokens_used"] += total_tokens
+        total_tokens = getattr(getattr(response, "usage", None), "total_tokens", 0)
+        self.metrics["tokens_used"] += total_tokens if isinstance(total_tokens, int) else 0
         if choice.finish_reason == "tool_calls" and getattr(choice.message, "tool_calls", None):
             return self._build_tool_use_result(choice, response)
         return self._build_text_result(choice, response)
@@ -249,10 +234,8 @@ def _format_elicitation_schema_summary(schema: dict, server_name: str) -> str:
     lines = [f"Fields requested by MCP server '{server_name}':"]
     for field_name, field_spec in props.items():
         spec = field_spec if isinstance(field_spec, dict) else {}
-        field_type = str(spec.get("type", "") or "")
-        field_desc = str(spec.get("description", "") or "")
-        suffix = f" ({field_type})" if field_type else ""
-        lines.append(f"  - {field_name}{suffix}: {field_desc}" if field_desc else f"  - {field_name}{suffix}")
+        field_type, field_desc = str(spec.get("type", "") or ""), str(spec.get("description", "") or "")
+        lines.append(f"  - {field_name}" + (f" ({field_type})" if field_type else "") + (f": {field_desc}" if field_desc else ""))
     return "\n".join(lines)
 
 
@@ -299,8 +282,7 @@ class ElicitationHandler:
     async def __call__(self, context, params):
         """SDK elicitation callback (``ElicitationFnT``). Returns ElicitResult or ErrorData."""
         self.metrics["requests"] += 1
-        # URL-mode (OAuth, payment) needs a browser + notifications/elicitation/complete — not implemented.
-        if getattr(params, "mode", "form") == "url":
+        if getattr(params, "mode", "form") == "url":  # OAuth/payment: needs a browser + elicitation/complete; unsupported
             logger.info("MCP server '%s' requested URL-mode elicitation; declining "
                         "(URL-mode elicitation not implemented)", self.server_name)
             return self._result("decline", "declined")
@@ -309,16 +291,13 @@ class ElicitationHandler:
         # ``requestedSchema`` on mcp 1.x, ``requested_schema`` on 2.0 (aliases don't apply to attribute
         # access) — read both or the user approves without seeing the fields.
         schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None) or {}
-        description = _format_elicitation_schema_summary(schema, self.server_name)
         logger.info("MCP server '%s' elicitation request: %s", self.server_name, _sanitize_error(message)[:200])
-        # Lazy import avoids import-order coupling with early-bootstrap tools.approval.
-        try:
-            invoke_consent = self._consent_thunk(message, description)
+        try:  # lazy import inside avoids import-order coupling with early-bootstrap tools.approval
+            invoke_consent = self._consent_thunk(message, _format_elicitation_schema_summary(schema, self.server_name))
         except Exception as exc:  # pragma: no cover -- defensive
             logger.error("MCP server '%s' elicitation: approval system unavailable: %s", self.server_name, exc)
             return self._result("decline", "errors")
-        # Off-thread: inline, the sync consent flow would freeze the MCP loop and every RPC on it.
-        try:
+        try:  # off-thread: inline, the sync consent flow would freeze the MCP loop and every RPC on it
             answer = await asyncio.wait_for(
                 asyncio.to_thread(invoke_consent), timeout=self.timeout + self._OUTER_TIMEOUT_GRACE_SECONDS)
         except asyncio.TimeoutError:
