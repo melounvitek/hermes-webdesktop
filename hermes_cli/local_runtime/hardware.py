@@ -2,14 +2,13 @@
 
 Budget-source rule: discrete cards may trust the device query (measured honest within rounding);
 unified-memory devices must budget from OS free physical memory minus headroom — their device
-queries have been observed off by 3x in both directions.
-
-Every probe here must work under a stripped PATH — gateway and service sessions don't inherit the
-interactive environment.
+queries have been observed off by 3x in both directions. Every probe here must work under a
+stripped PATH — gateway and service sessions don't inherit the interactive environment.
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 import logging
 import os
 import re
@@ -24,44 +23,35 @@ from hermes_cli.local_runtime.estimator import HardwareBudget
 logger = logging.getLogger(__name__)
 
 _GIB = 1 << 30
-# Reserve carved off the card before any grant: the desktop's own
-# co-residents (compositor, browser, Electron) measure ~2-2.5 GiB on a
-# working machine, and a window granted into that space demotes silently
-# under WDDM. 7% covers big cards; the 2 GiB floor is what the margin's
-# old 512 MiB floor failed to cover in practice (a 221K grant measured
-# 31.9/32.6 GiB with the desktop running — 'fits' by the math, demoted
-# in reality). Small cards give up window to this; spill mode is their
-# path to big models regardless.
+# Reserve carved off the card before any grant: the desktop's own co-residents (compositor,
+# browser, Electron) measure ~2-2.5 GiB, and a window granted into that space demotes silently
+# under WDDM. 7% covers big cards; the 2 GiB floor is what a 512 MiB floor failed to cover (a
+# 221K grant measured 31.9/32.6 GiB with the desktop running — 'fits' by the math, demoted in
+# reality). Small cards give up window to this; spill mode is their path to big models.
 _MARGIN_FLOOR = 2 << 30
 _MARGIN_FRACTION = 0.09
-# UMA headroom: on unified-memory machines (Apple Silicon, unified-memory
-# NVIDIA) the model shares physical memory with the OS and every app, so
-# budget from RAM minus this fraction.
+# UMA headroom: on unified-memory machines the model shares physical memory with the OS and every
+# app, so budget from RAM minus this fraction.
 _UMA_HEADROOM_FRACTION = 0.20
 
-# Engine-fallback gates for the unified-pool quirk — BOTH must hold, and
-# no discrete card can meet either: (1) the allocator's pool exceeds the
-# smi report by well past rounding/ECC slack (discrete cards agree within
-# ~2%; carve-out disagreement runs to whole multiples), and (2) the pool is
-# system-RAM-sized — a workstation card in a RAM-matched box fails (1)
-# because its smi and allocator AGREE, and a big discrete card in a
-# bigger box fails (2). The driver's INTEGRATED attribute, when
-# readable, bypasses both gates in whichever direction it points.
+# Engine-fallback gates for the unified-pool quirk — BOTH must hold, and no discrete card can
+# meet either: (1) the allocator's pool exceeds the smi report by well past rounding/ECC slack
+# (discrete cards agree within ~2%; carve-out disagreement runs to whole multiples), and (2) the
+# pool is system-RAM-sized. The driver's INTEGRATED attribute, when readable, bypasses both gates
+# in whichever direction it points.
 _POOL_DISAGREEMENT_FACTOR = 1.5
 _POOL_RAM_FRACTION = 0.75
 
 # cuDeviceGetAttribute enum: device is integrated with host memory.
 _CU_DEVICE_ATTRIBUTE_INTEGRATED = 18
 
-# One probe per process once a device answers (silicon doesn't change);
-# a miss retries after this long so a runtime installed mid-session gets
-# picked up by the engine fallback.
+# One probe per process once a device answers (silicon doesn't change); a miss retries after this
+# long so a runtime installed mid-session gets picked up by the engine fallback.
 _POOL_NEGATIVE_TTL_S = 60.0
 _pool_probe_cache: tuple[float, "tuple[int, bool | None] | None"] | None = None
 
 # '  CUDA0: NVIDIA Example Device (1234-core Example GPU) (46464 MiB, 46284 MiB free)'
-# — greedy .* pins the LAST parenthesized group, so device names carrying
-# their own parentheses parse correctly.
+# — greedy .* pins the LAST parenthesized group, so device names with parentheses parse.
 _DEVICE_LINE_RE = re.compile(r"CUDA\d+:.*\((\d+)\s*MiB,\s*\d+\s*MiB free\)\s*$")
 
 
@@ -79,9 +69,8 @@ def _ram_bytes() -> tuple[int, int]:
         class MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = ([("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)]
                         + [(name, ctypes.c_ulonglong) for name in (
-                            "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
-                            "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual",
-                            "ullAvailExtendedVirtual")])
+                            "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                            "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")])
 
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
@@ -91,51 +80,44 @@ def _ram_bytes() -> tuple[int, int]:
         pass
     try:
         if sys.platform == "darwin":
-            # macOS getconf has no _PHYS_PAGES/_AVPHYS_PAGES (exit 64, "no such
-            # configuration parameter") — the POSIX branch below returns (0, 0)
-            # and every model reads unavailable. sysctl is the platform truth.
+            # macOS getconf has no _PHYS_PAGES/_AVPHYS_PAGES (exit 64) — the POSIX branch would
+            # return (0, 0) and every model would read unavailable. sysctl is the platform truth.
             total = int(_stdout("/usr/sbin/sysctl", "-n", "hw.memsize").strip() or 0)
             if total <= 0:
                 return 0, 0
             avail = total // 2  # conservative fallback
-            try:
+            with suppress(OSError, ValueError):
                 out = _stdout("/usr/bin/vm_stat")
                 page_m = re.search(r"page size of (\d+)", out)
                 page = int(page_m.group(1)) if page_m else 16384
-                # free + inactive + purgeable ≈ reclaimable-on-demand; the
-                # speculative pool is dropped by the OS under pressure too.
+                # free + inactive + purgeable ≈ reclaimable-on-demand; the speculative pool is
+                # dropped by the OS under pressure too.
                 pages = sum(int(m.group(1)) for key in (
                     "Pages free", "Pages inactive", "Pages purgeable", "Pages speculative")
                     if (m := re.search(rf"{key}:\s+(\d+)\.", out)))
                 if pages > 0:
                     avail = pages * page
-            except (OSError, ValueError):
-                pass
             return total, avail
         # POSIX
         page = int(_stdout("getconf", "PAGE_SIZE") or 4096)
         total = int(_stdout("getconf", "_PHYS_PAGES") or 0) * page
         avail = total // 2  # conservative when _AVPHYS is unavailable
-        try:
+        with suppress(OSError, ValueError):
             avail = int(_stdout("getconf", "_AVPHYS_PAGES") or 0) * page or avail
-        except (OSError, ValueError):
-            pass
         return total, avail
     except (OSError, ValueError):
         return 0, 0
 
 
-# nvidia-smi lives at a fixed path under the driver install; PATH presence
-# varies by session type (services and gateways often run with a minimal
-# environment) and by driver generation (legacy NVSMI dir was never on
-# PATH). Resolution result is cached: the driver doesn't move mid-process.
+# nvidia-smi lives at a fixed path under the driver install; PATH presence varies by session type
+# (services and gateways often run minimal environments) and by driver generation (the legacy
+# NVSMI dir was never on PATH). Cached: the driver doesn't move mid-process.
 _smi_path_cache: "tuple[str | None] | None" = None
 
 
 def _nvidia_smi_path() -> str | None:
-    """Absolute path to nvidia-smi, or None. PATH first (respects user overrides), then the driver's
-    known install locations on Windows; on Linux/WSL the PATH lookup is the whole ladder.
-    """
+    """Absolute path to nvidia-smi, or None. PATH first (respects user overrides), then the
+    driver's known Windows install locations; on Linux/WSL the PATH lookup is the whole ladder."""
     global _smi_path_cache
     if _smi_path_cache is not None:
         return _smi_path_cache[0]
@@ -159,7 +141,7 @@ def _nvidia_vram() -> tuple[int, int] | None:
     exe = _nvidia_smi_path()
     if exe is None:
         return None
-    try:
+    with suppress(OSError, ValueError, subprocess.TimeoutExpired):
         out = subprocess.run(
             [exe, "--query-gpu=memory.total,memory.free",
              "--format=csv,noheader,nounits"],
@@ -168,16 +150,14 @@ def _nvidia_vram() -> tuple[int, int] | None:
             return None
         total_mib, free_mib = (int(x) for x in out.stdout.strip().splitlines()[0].split(","))
         return total_mib << 20, free_mib << 20
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        return None
+    return None
 
 
 def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
-    """(allocator_total_bytes, integrated_or_None) from the CUDA driver API, or None when unreachable.
-    ctypes against the driver's own DLL/SO — no toolkit, no subprocess, ~ms. INTEGRATED is the
-    vendor's own unified-memory declaration; total is the pool the allocator will actually hand out
-    (on carve-out devices, several times what nvidia-smi reports).
-    """
+    """(allocator_total_bytes, integrated_or_None) from the CUDA driver API via ctypes against the
+    driver's own DLL/SO — no toolkit, no subprocess, ~ms. INTEGRATED is the vendor's own
+    unified-memory declaration; total is the pool the allocator will actually hand out (on
+    carve-out devices, several times what nvidia-smi reports)."""
     import ctypes
 
     for name in ("nvcuda.dll", "libcuda.so.1", "libcuda.so"):
@@ -188,7 +168,7 @@ def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
             continue
     else:
         return None
-    try:
+    with suppress(OSError, AttributeError):
         if cuda.cuInit(0) != 0:
             return None
         dev = ctypes.c_int()
@@ -204,27 +184,20 @@ def _cuda_driver_pool() -> "tuple[int, bool | None] | None":
                 ctypes.byref(attr), _CU_DEVICE_ATTRIBUTE_INTEGRATED, dev) == 0:
             integrated = bool(attr.value)
         return total.value, integrated
-    except (OSError, AttributeError):
-        return None
+    return None
 
 
 def _engine_device_pool() -> "tuple[int, bool | None] | None":
     """(engine_total_bytes, None) from the installed runtime's own --list-devices, or None. The
-    fallback truth source when the driver API is unreachable: asks the exact binary that will do the
-    allocating. Carries no integrated verdict — callers must gate it.
-    """
-    try:
-        from hermes_cli.local_runtime.binaries import (
-            installed_tags,
-            runtimes_root,
-            server_binary,
-        )
+    fallback when the driver API is unreachable: asks the exact binary that will do the
+    allocating. Carries no integrated verdict — callers must gate it."""
+    with suppress(Exception):  # a probe miss must never block budgeting
+        from hermes_cli.local_runtime.binaries import installed_tags, runtimes_root, server_binary
 
         tags = installed_tags()
         if not tags:
             return None
-        tag_dir = runtimes_root() / tags[0]
-        backend_dirs = [d for d in tag_dir.iterdir() if d.is_dir()]
+        backend_dirs = [d for d in (runtimes_root() / tags[0]).iterdir() if d.is_dir()]
         if not backend_dirs:
             return None
         exe = server_binary(backend_dirs[0])
@@ -236,15 +209,12 @@ def _engine_device_pool() -> "tuple[int, bool | None] | None":
             m = _DEVICE_LINE_RE.search(line)
             if m:
                 return int(m.group(1)) << 20, None
-        return None
-    except Exception:  # noqa: BLE001 — a probe miss must never block budgeting
-        return None
+    return None
 
 
 def _device_pool_view() -> "tuple[int, bool | None] | None":
-    """Best available allocator-side view, cached: a hit is permanent for the process, a miss retries
-    after a short TTL (the engine binary can appear mid-session via a pane install).
-    """
+    """Best available allocator-side view, cached: a hit is permanent for the process, a miss
+    retries after a short TTL (the engine binary can appear mid-session via a pane install)."""
     global _pool_probe_cache
     now = time.monotonic()
     if _pool_probe_cache is not None:
@@ -257,20 +227,17 @@ def _device_pool_view() -> "tuple[int, bool | None] | None":
 
 
 def _unified_pool_bytes(smi_total: int, ram_total: int) -> int | None:
-    """The real pool size when this NVIDIA device is unified memory behind
+    """The real pool size when this NVIDIA device is unified memory behind a carve-out, else None.
 
-    The driver's INTEGRATED attribute decides in BOTH directions when readable (0 pins discrete
-    even if numbers look odd; a declared-integrated driver is believed at modest pool sizes). Only
-    the attribute-less engine fallback needs the two numeric gates, both of which must hold.
+    The driver's INTEGRATED attribute decides in BOTH directions when readable; only the
+    attribute-less engine fallback needs the two numeric gates, both of which must hold.
     """
     view = _device_pool_view()
     if view is None:
         return None
     pool, integrated = view
-    if integrated is False:
-        return None
-    if integrated is True:
-        return pool
+    if integrated is not None:
+        return pool if integrated else None
     if (smi_total > 0 and pool >= int(smi_total * _POOL_DISAGREEMENT_FACTOR)
             and ram_total > 0 and pool >= int(ram_total * _POOL_RAM_FRACTION)):
         return pool
@@ -287,23 +254,18 @@ def probe_budget(*, planning: bool = False) -> HardwareBudget:
     """Construct the budget per the source rules above.
 
     ``planning=False``: LIVE budget (free VRAM now) for launch-time fit and growth re-grants.
-    ``planning=True``: CAPACITY budget (total minus margin) for catalog pricing and quant selection;
-    pricing against live-free while a model was loaded made every row read as too large and
-    degraded quant picks. The managed server unloads/relaunches itself, so capacity is real.
+    ``planning=True``: CAPACITY budget (total minus margin) for catalog pricing and quant
+    selection — pricing against live-free while a model was loaded made every row read as too
+    large. The managed server unloads/relaunches itself, so capacity is real.
     """
     ram_total, ram_avail = _ram_bytes()
     vram = _nvidia_vram()
 
-    # Unified-memory NVIDIA: the CUDA allocator pool is the real
-    # capacity. Classification comes from the driver API/engine — it
-    # must not require nvidia-smi (stripped-PATH sessions lose smi but
-    # nvcuda loads via the system loader regardless). Crossing the
-    # carve-out costs nothing (effective bandwidth is flat through the
-    # boundary; smi's used/total merely saturate at it) — the carve-out
-    # is an OS accounting knob, not a GPU limit. Deliberately NOT
-    # clamped to OS RAM: carved-out memory is invisible to
-    # GlobalMemoryStatusEx (the OS reports correspondingly less total
-    # RAM), so a RAM clamp would throw away exactly the carved capacity.
+    # Unified-memory NVIDIA: the CUDA allocator pool is the real capacity. Classification comes
+    # from the driver API/engine and must not require nvidia-smi (stripped-PATH sessions lose smi
+    # but nvcuda loads via the system loader). Crossing the carve-out costs nothing — it is an OS
+    # accounting knob, not a GPU limit. Deliberately NOT clamped to OS RAM: carved-out memory is
+    # invisible to GlobalMemoryStatusEx, so a RAM clamp would throw away exactly that capacity.
     unified = _unified_pool_bytes(vram[0] if vram else 0, ram_total)
     if unified is not None:
         logger.info(
@@ -314,19 +276,16 @@ def probe_budget(*, planning: bool = False) -> HardwareBudget:
         if planning:
             base = unified
         else:
-            # Live: dedicated-free plus what the OS can still give. smi's
-            # free saturates at the carve-out so this under-counts a bit —
-            # the safe direction (the pool edge is a measured soft cliff:
-            # decode collapses ~3.5x when concurrent demand hits it).
-            # Without smi, OS-available alone is the honest floor.
+            # Live: dedicated-free plus what the OS can still give. smi's free saturates at the
+            # carve-out so this under-counts a bit — the safe direction (the pool edge is a
+            # measured soft cliff: decode collapses ~3.5x when concurrent demand hits it).
             live = (vram[1] + ram_avail) if vram else ram_avail
             base = min(unified, live)
         return _uma_budget(base, unified)
 
     if vram is None:
-        # No NVIDIA device visible: Metal/Vulkan/CPU paths budget from RAM
-        # as UMA (Apple Silicon) — conservative for discrete AMD until a
-        # vendor probe lands (E3 hardware).
+        # No NVIDIA device visible: Metal/Vulkan/CPU paths budget from RAM as UMA (Apple
+        # Silicon) — conservative for discrete AMD until a vendor probe lands.
         return _uma_budget(ram_total if planning else ram_avail, ram_total)
 
     total, free = vram
