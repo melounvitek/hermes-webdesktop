@@ -21,14 +21,16 @@ from tools.mcp_tool_errors import _is_session_expired_error
 logger = logging.getLogger("tools.mcp_tool")
 _MISSING = object()
 
-_NEEDS_REAUTH_MSG = ("MCP server '{s}' requires re-authentication. Run `hermes mcp login {s}` (or delete the tokens "
-                     "file under ~/.hermes/mcp-tokens/ and restart). Do NOT retry this tool — ask the user to re-authenticate.")
-_STDIO_NO_RESPAWN_MSG = ("MCP server '{s}' stdio subprocess had exited (this is not a timeout — the call never reached the "
-                         "server). A respawn was requested but no fresh session came back within {t:.0f}s. Wait a few "
-                         "seconds before retrying; if it keeps failing the server is not starting and needs the user.")
-_STDIO_DIED_AGAIN_MSG = ("MCP server '{s}' respawned its stdio subprocess and it exited again immediately. The server is not "
-                         "starting cleanly — do NOT retry this tool; ask the user to check the server's command and its "
-                         "stderr log.")
+_NEEDS_REAUTH_MSG = (
+    "MCP server '{s}' requires re-authentication. Run `hermes mcp login {s}` (or delete the tokens file under "
+    "~/.hermes/mcp-tokens/ and restart). Do NOT retry this tool — ask the user to re-authenticate.")
+_STDIO_NO_RESPAWN_MSG = (
+    "MCP server '{s}' stdio subprocess had exited (this is not a timeout — the call never reached the server). A "
+    "respawn was requested but no fresh session came back within {t:.0f}s. Wait a few seconds before retrying; if it "
+    "keeps failing the server is not starting and needs the user.")
+_STDIO_DIED_AGAIN_MSG = (
+    "MCP server '{s}' respawned its stdio subprocess and it exited again immediately. The server is not starting "
+    "cleanly — do NOT retry this tool; ask the user to check the server's command and its stderr log.")
 
 
 # --------------------------------------------------------------- pre-call gates
@@ -77,7 +79,8 @@ def _acquire_call_server(server_name: str, tool_timeout: float):
     server task to rebuild (probing a dead transport would re-arm the breaker forever)."""
     not_connected = tool_error(f"MCP server '{server_name}' is not connected")
     server = _core._get_connected_server_for_call(server_name)
-    if server and (server.session or _core._wait_for_server_session_ready(server, timeout=min(5.0, float(tool_timeout or 5.0)))):
+    wait = min(5.0, float(tool_timeout or 5.0))
+    if server and (server.session or _core._wait_for_server_session_ready(server, timeout=wait)):
         return server, None
     _core._bump_server_error(server_name)
     if server and _core._signal_reconnect(server):
@@ -151,8 +154,8 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
         recovered = False
     if recovered:
         srv = _lookup_reconnectable_server(server_name)
-        # Recovery + reconnect is independent evidence of viability: close the breaker here, not
-        # only on retry success (else a failing retry pins it open forever).
+        # Recovery + reconnect is independent evidence of viability: close the breaker here, not only on
+        # retry success (else a failing retry pins it open forever).
         if srv is not None and _core._signal_reconnect_and_wait(
                 server_name, srv, op_description=f"{op_description} after OAuth recovery", timeout=15):
             _core._reset_server_error(server_name)
@@ -298,15 +301,13 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
 # ---------------------------------------------------------- result rendering
 
 def _error_result_text(result) -> str:
-    """Concatenated text of an ``isError`` result's blocks (EmbeddedResource error payloads
-    carry text under ``.resource.text``)."""
+    """Concatenated text of an ``isError`` result's blocks (EmbeddedResource payloads: ``.resource.text``)."""
     texts = (getattr(b, "text", None) or getattr(getattr(b, "resource", None), "text", None) for b in (result.content or []))
     return "".join(str(t) for t in texts if t)
 
 
 def _render_content_blocks(result, server_name: str) -> str:
-    """Text passes through; image/audio blocks are cached (MEDIA: tags); resource blocks are
-    materialized rather than silently dropped."""
+    """Text passes through; image/audio blocks are cached (MEDIA: tags); resource blocks are materialized."""
     parts: List[str] = []
     for block in (result.content or []):
         if getattr(block, "text", None):
@@ -316,9 +317,8 @@ def _render_content_blocks(result, server_name: str) -> str:
         if rendered:
             parts.append(rendered)
             continue
-        # Benign empty renders log at debug; warn only for unknown shapes.
         block_type = getattr(block, "type", None) or type(block).__name__
-        if block_type in {"text", "resource", "audio", "image"}:
+        if block_type in {"text", "resource", "audio", "image"}:  # benign empty render
             logger.debug("MCP %s: content block type %r rendered empty", server_name, block_type)
         else:
             logger.warning("MCP %s: dropping unsupported content block type %r", server_name, block_type)
@@ -326,8 +326,7 @@ def _render_content_blocks(result, server_name: str) -> str:
 
 
 def _capped_structured_content(result):
-    """``structuredContent`` (or None); over the hard cap it degrades to the head+tail
-    truncated JSON string (multi-MB JSON flood guard)."""
+    """``structuredContent`` (or None); over the hard cap it degrades to the truncated JSON string (flood guard)."""
     structured = mcp_field(result, "structured_content", "structuredContent")
     try:
         as_json = json.dumps(structured, ensure_ascii=False, default=str) if structured is not None else ""
@@ -337,8 +336,8 @@ def _capped_structured_content(result):
 
 
 def _render_call_tool_result(result, server_name: str) -> str:
-    """Pure: ``CallToolResult`` -> handler JSON. ``content`` is primary; ``structuredContent``
-    supplements it (or becomes ``result`` without text); ``_meta`` minus reserved keys."""
+    """Pure: ``CallToolResult`` -> handler JSON. ``content`` is primary; ``structuredContent`` supplements it (or
+    becomes ``result`` without text); ``_meta`` minus reserved keys."""
     if mcp_field(result, "is_error", "isError", False):
         return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
     text_result = _render_content_blocks(result, server_name)
@@ -346,8 +345,7 @@ def _render_call_tool_result(result, server_name: str) -> str:
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
     if structured is None and meta is None:
         return json.dumps({"result": text_result}, ensure_ascii=False)
-    # Key order is part of the output: "result" leads when there is text, otherwise "_meta"
-    # precedes the (empty) "result".
+    # Key order is part of the output: "result" leads when there is text, otherwise "_meta" precedes it.
     payload: Dict[str, Any] = {"result": text_result} if text_result else {}
     if structured is not None:
         payload["structuredContent" if text_result else "result"] = structured
@@ -426,8 +424,8 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
 
 
 def _pick(obj, *specs) -> dict:
-    """``{out_key: value}`` for each ``(out_key, attr[, truthy])`` present on *obj* (``hasattr``
-    so SDK models and stubs behave alike; ``truthy`` also skips falsy). Key order = spec order."""
+    """``{out_key: value}`` for each ``(out_key, attr[, truthy])`` present on *obj* (presence check so SDK models
+    and stubs behave alike; ``truthy`` also skips falsy). Key order = spec order."""
     entry = {}
     for out_key, attr, *truthy in specs:
         value = getattr(obj, attr, _MISSING)
@@ -497,8 +495,7 @@ _make_get_prompt_handler = _make_utility_handler(
 
 
 def _make_check_fn(server_name: str):
-    """Check function that verifies the MCP connection is alive. Lazy (schema-cache registered)
-    servers count as available: the first real call spawns/connects them."""
+    """Connection-alive check; lazy (schema-cache registered) servers count as available."""
     def _check() -> bool:
         with _core._lock:
             server = _core._servers.get(server_name)

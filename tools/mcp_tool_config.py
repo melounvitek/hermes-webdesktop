@@ -55,8 +55,7 @@ def _write_stderr_log_header(server_name: str) -> None:
 # Env vars safe to pass to stdio subprocesses (no secrets).
 _SAFE_ENV_KEYS = frozenset({"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"})
 
-# Windows process/location vars needed by launcher-style tools (e.g. Docker Desktop's MCP plugin
-# discovery); none carry secrets.
+# Windows process/location vars needed by launcher-style tools (e.g. Docker Desktop's MCP plugin discovery).
 _SAFE_ENV_KEYS_CASE_INSENSITIVE = frozenset({
     "ALLUSERSPROFILE", "APPDATA", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)",
     "COMMONPROGRAMW6432", "COMPUTERNAME", "COMSPEC", "HOMEDRIVE", "HOMEPATH",
@@ -109,8 +108,7 @@ def _build_safe_env(user_env: Optional[dict]) -> dict:
 
 
 def _which_with_config_pathext(command: str, path_arg, env: dict):
-    """``shutil.which`` retried under the config env's PATHEXT (Windows only):
-    ``which(path=...)`` uses the PARENT's PATHEXT, not the config env's."""
+    """``shutil.which`` retried under the config env's PATHEXT (Windows only; ``which`` uses the PARENT's)."""
     cfg_pathext = next((v for k, v in env.items() if k.upper() == "PATHEXT" and isinstance(v, str) and v.strip()), None)
     if not cfg_pathext or cfg_pathext == os.environ.get("PATHEXT"):
         return None
@@ -126,8 +124,7 @@ def _which_with_config_pathext(command: str, path_arg, env: dict):
 
 
 def _node_fallback(command: str) -> str:
-    """Well-known Node install locations for bare ``npx``/``npm``/``node`` when PATH lookup
-    failed; *command* unchanged when none is executable."""
+    """Well-known Node install locations for bare ``npx``/``npm``/``node``; *command* unchanged when none exists."""
     home = os.path.expanduser("~")
     hermes_home = os.path.expanduser(os.getenv("HERMES_HOME", os.path.join(home, ".hermes")))
     # /usr/local/bin: canonical Node location (from-source Linux, Hermes Docker image, Intel Homebrew),
@@ -138,8 +135,7 @@ def _node_fallback(command: str) -> str:
 
 
 def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
-    """Resolve a stdio command against the exact subprocess env, mainly so bare
-    ``npx``/``npm``/``node`` work under a filtered PATH."""
+    """Resolve a stdio command against the exact subprocess env (bare ``npx``/``npm``/``node`` under a filtered PATH)."""
     resolved_command = os.path.expanduser(str(command).strip())
     resolved_env = dict(env or {})
     if os.sep not in resolved_command:
@@ -189,8 +185,7 @@ def _interpolate_env_vars(value):
     return value
 
 
-# (server_name, dotted key path) pairs already warned about: config loads happen on every discovery
-# pass, so warn once per process.
+# (server_name, dotted key path) pairs already warned about: config loads repeat per discovery pass.
 _whitespace_warned: Set[Tuple[str, str]] = set()
 
 
@@ -238,8 +233,7 @@ def _filter_suspicious_mcp_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
 
 
 def _portable_mcp_servers(safe_servers: Dict[str, dict]) -> None:
-    """Merge plugin-provided (portable) MCP servers into *safe_servers*; native config wins
-    on a name clash. Never raises."""
+    """Merge plugin-provided (portable) MCP servers into *safe_servers*; native config wins on a clash. Never raises."""
     try:
         from hermes_cli.plugins import discover_plugins, get_plugin_manager
         discover_plugins()
@@ -254,8 +248,7 @@ def _portable_mcp_servers(safe_servers: Dict[str, dict]) -> None:
 
 
 def _load_mcp_config() -> Dict[str, dict]:
-    """Read ``mcp_servers`` from config.yaml as ``{name: config}`` (empty on error or in safe
-    mode); ``${VAR}`` placeholders are interpolated after ``.env`` is loaded."""
+    """``mcp_servers`` from config.yaml as ``{name: config}`` (empty on error / safe mode), ``${VAR}`` interpolated."""
     try:
         from hermes_cli.config import load_config
         from utils import env_var_enabled as _env_enabled

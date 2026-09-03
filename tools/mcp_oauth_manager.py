@@ -50,15 +50,13 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
 
     def __init__(self, *args: Any, server_name: str = "", preregistered: bool = False, **kwargs: Any):
         super().__init__(*args, **kwargs)
-        # mcp 2.0 uses a task-owned anyio.Lock held across the yielded resource request (a
-        # session-long GET blocks every POST; HTTPX may close the generator from another task).
-        # A binary semaphore keeps mutual exclusion without task ownership.
+        # mcp 2.0 uses a task-owned anyio.Lock held across the yielded resource request (a session-long GET blocks
+        # every POST; HTTPX may close the generator from another task). A binary semaphore drops task ownership.
         import anyio
         self.context.lock = anyio.Semaphore(1, max_value=1)
         self._hermes_server_name = server_name
         self._hermes_home = ""
-        # A config-supplied client_id rejected as invalid_client means the *config* is wrong —
-        # re-registration can't help, so only dynamically-registered clients auto-heal.
+        # A config-supplied client_id rejected as invalid_client means the *config* is wrong — only DCR clients auto-heal.
         self._hermes_preregistered = preregistered
 
     def _hermes_storage(self):
@@ -94,10 +92,9 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
                 self._log_nonfatal("pre-flight metadata discovery", exc)
 
     async def _prefetch_oauth_metadata(self) -> None:
-        """Fetch PRM + ASM from the well-known endpoints before the first request, using the
-        SDK's own URL builders/response handlers so we track whatever the pinned SDK expects."""
-        # The SDK's httpx flavour, not Hermes' — mcp 2.0 builds on httpx2 and
-        # `create_oauth_metadata_request` returns *its* Request objects.
+        """Fetch PRM + ASM from the well-known endpoints before the first request, via the SDK's own URL
+        builders/response handlers so we track whatever the pinned SDK expects."""
+        # The SDK's httpx flavour, not Hermes': `create_oauth_metadata_request` returns *its* (httpx2) Request objects.
         from tools.mcp_tool import sdk_httpx
         httpx = sdk_httpx()
         if httpx is None:  # pragma: no cover — SDK import would have failed
@@ -264,8 +261,8 @@ class MCPOAuthManager:
         self._inflight_tasks: set[asyncio.Task] = set()
 
     def get_or_build_provider(self, server_name: str, server_url: str, oauth_config: Optional[dict]) -> Optional[Any]:
-        """Cached OAuth provider for ``server_name``, built on first use (rebuilt when
-        ``server_url`` changes). None if the MCP SDK's OAuth support is unavailable."""
+        """Cached OAuth provider for ``server_name``, built on first use (rebuilt when ``server_url`` changes);
+        None if the MCP SDK's OAuth support is unavailable."""
         key = self._key(server_name)
         with self._entries_lock:
             entry = self._entries.get(key)
@@ -306,8 +303,7 @@ class MCPOAuthManager:
             **build_provider_kwargs(cfg, storage, ssh_proxy_hint=False))
 
     def remove(self, server_name: str, *, hermes_home: str | Path | None = None) -> _ProviderEntry | None:
-        """Evict the provider from cache AND delete tokens from disk (``hermes mcp remove``,
-        and ``hermes mcp login`` during forced re-auth)."""
+        """Evict the provider from cache AND delete tokens from disk (``hermes mcp remove`` / forced re-auth)."""
         entry = self.evict(server_name, hermes_home=hermes_home)
         from tools.mcp_oauth import remove_oauth_tokens
         remove_oauth_tokens(server_name, hermes_home=hermes_home)
@@ -327,8 +323,7 @@ class MCPOAuthManager:
             return self._entries.pop(self._key(server_name, hermes_home), None)
 
     async def invalidate_if_disk_changed(self, server_name: str, *, hermes_home: str | Path | None = None) -> bool:
-        """Force the SDK provider to reload when the tokens file mtime changed; True if
-        invalidated. A cron job writes fresh tokens and the next tool call picks them up."""
+        """Force the SDK provider to reload when the tokens file mtime changed (e.g. a cron refresh); True if so."""
         from tools.mcp_oauth import _get_token_dir, _safe_filename
         entry = self._entries.get(self._key(server_name, hermes_home))
         if entry is None or entry.provider is None:
@@ -351,8 +346,7 @@ class MCPOAuthManager:
         """Single recovery attempt behind *pending*; always clears the dedup slot."""
         can_refresh = False
         try:
-            # Disk changed (external refresh)? Else: if the SDK can refresh in place, let the
-            # caller retry (the httpx.Auth flow refreshes on the next request).
+            # Disk changed (external refresh)? Else: if the SDK can refresh in place, let the caller retry.
             if await self.invalidate_if_disk_changed(server_name):
                 can_refresh = True
             else:

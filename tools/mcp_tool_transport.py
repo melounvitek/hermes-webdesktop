@@ -13,8 +13,7 @@ from tools.mcp_tool_common import _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-# JSON-RPC ``initialize`` body used by the content-type preflight POST.
-_PROBE_INITIALIZE_BODY = (
+_PROBE_INITIALIZE_BODY = (  # JSON-RPC ``initialize`` body for the content-type preflight POST
     '{"jsonrpc":"2.0","id":"_probe","method":"initialize","params":{"protocolVersion":"2025-03-26",'
     '"capabilities":{},"clientInfo":{"name":"hermes-probe","version":"0.1"}}}')
 
@@ -43,8 +42,8 @@ def _pgroup_alive(pgid: Optional[int]) -> bool:
 
 
 async def _osv_malware_preflight(server_name: str, command: str, args: list) -> None:
-    """OSV malware preflight, off-loop with a wall-clock bound (fail-open on timeout). Must run on
-    the REAL command/args — the watchdog wrap rewrites argv to the supervisor (check becomes a no-op)."""
+    """OSV malware preflight, off-loop with a wall-clock bound (fail-open on timeout). Must run on the REAL
+    command/args — the watchdog wrap rewrites argv to the supervisor (check becomes a no-op)."""
     from tools.osv_check import check_package_for_malware
     try:
         malware_error = await asyncio.wait_for(
@@ -207,7 +206,8 @@ class MCPServerTransportMixin:
         # Subprocess stderr goes to ~/.hermes/logs/mcp-stderr.log so banners can't corrupt the TUI.
         _core._write_stderr_log_header(self.name)
         try:
-            async with _core.stdio_client(server_params, errlog=_core._get_mcp_stderr_log()) as (read_stream, write_stream):
+            errlog = _core._get_mcp_stderr_log()
+            async with _core.stdio_client(server_params, errlog=errlog) as (read_stream, write_stream):
                 # New PIDs for force-kill cleanup, minus non-MCP children (slash_worker, LSP) racing
                 # into the window: they share the TUI's pgid — leaking them would killpg() the TUI.
                 new_pids = _filter_mcp_children(_core._snapshot_child_pids() - pids_before)
@@ -239,8 +239,7 @@ class MCPServerTransportMixin:
             return  # No httpx → skip probe; SDK import would have failed first.
 
         def _non_mcp_2xx(resp) -> bool:
-            # Only judge 2xx (4xx/5xx may be an auth challenge the handshake handles); no content
-            # type advertised → don't second-guess the SDK.
+            # Only judge 2xx (4xx/5xx may be an auth challenge); no content type advertised → trust the SDK.
             ct = _content_type_base(resp)
             return _is_2xx(resp) and bool(ct) and ct not in self._MCP_CONTENT_TYPES
 
@@ -248,8 +247,7 @@ class MCPServerTransportMixin:
         try:
             async with _httpx.AsyncClient(verify=ssl_verify, follow_redirects=True, timeout=_httpx.Timeout(timeout),
                                           **_present(cert=client_cert)) as client:
-                # HEAD is cheapest; fall back to GET on 405/501.
-                resp = await client.head(url, headers=probe_headers)
+                resp = await client.head(url, headers=probe_headers)  # cheapest; GET on 405/501
                 if resp.status_code in (405, 501):
                     resp = await client.get(url, headers=probe_headers)
                 # Non-MCP content type on HEAD/GET: try a JSON-RPC POST so POST-only servers pass.

@@ -27,20 +27,19 @@ _UTILITY_HANDLER_FACTORIES = {
 
 
 def _normalize_server_trust(value: Any) -> str:
-    """Config ``trust`` -> tier. None -> ``full`` (backward-compatible default); an
-    unrecognized string -> ``untrusted`` so a misspelled tier fails closed."""
+    """Config ``trust`` -> tier. None -> ``full`` (compat default); unrecognized -> ``untrusted`` (fail closed)."""
     if value is None:
         return _core._TRUST_FULL
     text = str(value).strip().lower()
     if text in (_core._TRUST_FULL, _core._TRUST_UNTRUSTED):
         return text
-    logger.warning("MCP trust: unrecognized trust value %r — treating as 'untrusted' (valid values: full, untrusted)", value)
+    logger.warning("MCP trust: unrecognized trust value %r — treating as 'untrusted' (valid values: full, untrusted)",
+                   value)
     return _core._TRUST_UNTRUSTED
 
 
 def _annotation_read_only_hint(mcp_tool: Any) -> bool:
-    """True only when annotations (SDK object or schema-cache dict) carry ``readOnlyHint is
-    True``; unknown metadata means write-capable."""
+    """True only when annotations (SDK object or cache dict) carry ``readOnlyHint is True``; unknown = write-capable."""
     annotations = getattr(mcp_tool, "annotations", None)
     hint = annotations.get("readOnlyHint") if isinstance(annotations, dict) else getattr(annotations, "readOnlyHint", None)
     return hint is True
@@ -81,7 +80,9 @@ def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: d
         if not enabled[family]:
             return f"{family} disabled"
         if advertised is not None:
-            return None if getattr(advertised, family, None) is not None else f"server does not advertise '{family}' capability"
+            if getattr(advertised, family, None) is None:
+                return f"server does not advertise '{family}' capability"
+            return None
         # Legacy gate (no initialize_result): the ClientSession method shares the handler key.
         return None if hasattr(server.session, handler_key) else f"session lacks {handler_key}"
 
@@ -96,8 +97,7 @@ def _select_utility_schemas(server_name: str, server: "MCPServerTask", config: d
 
 
 def _existing_tool_names() -> List[str]:
-    """Tool names for all currently connected servers plus lazy (cache-registered) servers,
-    whose tools live only in the registry."""
+    """Tool names for all connected servers plus lazy (cache-registered) servers, whose tools live only in the registry."""
     names: List[str] = []
     for server in _core._servers.values():
         names.extend(server._registered_tool_names if hasattr(server, "_registered_tool_names")
@@ -131,8 +131,7 @@ def _cached_tools(raws: Iterable[Any]) -> List[SimpleNamespace]:
 
 @dataclass
 class _Candidate:
-    """One registration attempt: a native tool or a generated utility. ``origin`` is the
-    provenance text used in collision diagnostics."""
+    """One registration attempt (native tool or generated utility); ``origin`` is the provenance text in diagnostics."""
 
     registry_name: str
     origin: str
@@ -155,7 +154,8 @@ def _tool_candidates(name: str, tools: Iterable[Any], should_register: Callable[
             continue
         _core._scan_mcp_description(name, t.name, t.description or "")
         schema = _core._convert_mcp_schema(name, t)
-        out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, _core._make_tool_handler(name, t.name, tool_timeout)))
+        handler = _core._make_tool_handler(name, t.name, tool_timeout)
+        out.append(_Candidate(schema["name"], f"tool {t.name!r}", schema, handler))
     return out
 
 
@@ -247,8 +247,7 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
 
 
 def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should_register) -> None:
-    """Write-through: persist the manifest so the next startup can register this server
-    lazily without spawning it. Never raises."""
+    """Write-through: persist the manifest so the next startup registers this server lazily (no spawn). Never raises."""
     try:
         from tools.mcp_schema_cache import config_fingerprint, write_cache_entry
         tools_payload = [{

@@ -38,8 +38,7 @@ class MCPServerHealthMixin:
         self._recycled_reason = None
 
     def _stdio_recycle_deadlines(self):
-        """``[(deadline, reason), ...]`` for the configured lifetime/idle limits; empty for HTTP
-        servers or while an RPC holds the lock."""
+        """``[(deadline, reason), ...]`` for the lifetime/idle limits; empty for HTTP or while an RPC holds the lock."""
         if self._is_http() or self._rpc_lock.locked():
             return []
         limits = ((self._lifecycle_started_at, self._max_lifetime_seconds, "max_lifetime_seconds"),
@@ -74,8 +73,7 @@ class MCPServerHealthMixin:
         return task
 
     def _make_logging_callback(self):
-        """``logging_callback`` forwarding server ``notifications/message`` into Hermes logging
-        tagged with the server name (the SDK default drops them)."""
+        """``logging_callback`` forwarding server ``notifications/message`` into Hermes logging (SDK default drops them)."""
         async def _on_log(params):
             try:
                 level = _core._MCP_LOG_LEVEL_MAP.get(str(getattr(params, "level", "info")).lower(), logging.INFO)
@@ -88,14 +86,14 @@ class MCPServerHealthMixin:
                 if len(data) > 2000:  # cap payloads so a chatty server can't flood agent.log
                     data = data[:2000] + "... [truncated]"
                 logger_name = getattr(params, "logger", None)
-                logger.log(level, "MCP server log [%s]: %s", f"{self.name}/{logger_name}" if logger_name else self.name, data)
+                origin = f"{self.name}/{logger_name}" if logger_name else self.name
+                logger.log(level, "MCP server log [%s]: %s", origin, data)
             except Exception:
                 logger.debug("Failed to handle MCP log notification from '%s'", self.name, exc_info=True)
         return _on_log
 
     def _make_message_handler(self):
-        """``message_handler`` for ``ClientSession``: only ``ToolListChangedNotification`` triggers
-        a refresh; prompt/resource changes are logged."""
+        """``message_handler``: only ``ToolListChangedNotification`` triggers a refresh; prompt/resource changes log."""
         async def _handler(message):
             try:
                 if isinstance(message, Exception):
@@ -121,8 +119,7 @@ class MCPServerHealthMixin:
         return _handler
 
     def _deregister_owned(self, tool_names: Iterable[str]) -> None:
-        """Deregister *tool_names* this server's toolset still owns. Never removes a colliding
-        name currently owned by another server."""
+        """Deregister *tool_names* this server's toolset still owns (never a colliding name owned by another server)."""
         from tools.registry import registry
         for tool_name in tool_names:
             if registry.get_toolset_for_tool(tool_name) == f"mcp-{self.name}":
@@ -206,8 +203,7 @@ class MCPServerHealthMixin:
         self._permanent_grace_used = self._teardown_race = False
 
     def mark_suspect(self, reason: str) -> None:
-        """Latch a suspicion (no I/O). The NEXT call verifies via :meth:`ensure_healthy` and
-        recycles the transport if the probe fails."""
+        """Latch a suspicion (no I/O); the NEXT call verifies via :meth:`ensure_healthy` and recycles on failure."""
         if self._suspect_reason is None and reason:
             logger.warning("MCP server '%s': connection marked suspect (%s); next call will health-check it",
                            self.name, reason)
@@ -269,7 +265,6 @@ class MCPServerHealthMixin:
             return False
 
     async def _watch_stdio_children(self) -> None:
-        """Poll child liveness while a stdio RPC is in flight; resolves when a tracked child dies
-        so the caller cancels the RPC instead of waiting out the timeout."""
+        """Poll child liveness during a stdio RPC; resolves when a tracked child dies so the caller cancels the RPC."""
         while not self._stdio_children_dead():
             await asyncio.sleep(0.25)

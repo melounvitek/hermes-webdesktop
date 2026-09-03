@@ -14,8 +14,7 @@ from tools.mcp_tool_common import _sanitize_error, _core
 
 logger = logging.getLogger("tools.mcp_tool")
 
-# Stateless (2026-07-28) servers reject a legacy ``initialize`` with
-# UnsupportedProtocolVersion (-32022) or plain method-not-found.
+# Stateless (2026-07-28) servers reject a legacy ``initialize`` with this or plain method-not-found.
 _JSONRPC_UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 
@@ -44,8 +43,7 @@ def _is_method_not_found_error(exc: BaseException) -> bool:
 
 
 class InvalidMcpUrlError(ValueError):
-    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup so we
-    fail fast instead of burning the reconnect-backoff loop."""
+    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup to fail fast."""
 
 
 class NonMcpEndpointError(ConnectionError):
@@ -88,8 +86,8 @@ def _classify_mcp_failure(exc: BaseException) -> str:
 
 
 def _validate_remote_mcp_url(server_name: str, url: Any) -> str:
-    """The stripped URL if it is a valid http(s) URL; else InvalidMcpUrlError naming the server
-    (non-string, other scheme — stdio servers use ``command`` — or empty host)."""
+    """The stripped URL if valid http(s); else InvalidMcpUrlError naming the server (non-string, other scheme —
+    stdio servers use ``command`` — or empty host)."""
     def _bad(detail: str) -> InvalidMcpUrlError:
         return InvalidMcpUrlError(f"Invalid MCP URL for '{server_name}': {detail}")
 
@@ -286,8 +284,8 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "unknown session", "session terminated", "closedresourceerror", "closed resource",
     "transport is closed", "connection closed", "broken pipe", "end of file")
 
-# Node budget for ``_is_session_expired_error`` (the visited set breaks cycles; this bounds acyclic
-# blow-ups). Well above ``sys.getrecursionlimit()`` so deep task-group nesting is fully scanned.
+# Node budget for ``_is_session_expired_error`` (the visited set breaks cycles; this bounds acyclic blow-ups).
+# Well above ``sys.getrecursionlimit()`` so deep task-group nesting is fully scanned.
 _EXC_TRAVERSAL_MAX_NODES = 10_000
 
 
@@ -311,8 +309,7 @@ def _is_session_expired_error(exc: BaseException) -> bool:
         budget -= 1
         if isinstance(current, InterruptedError):
             return False
-        # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids
-        # false positives.
+        # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids false positives.
         msg = str(current).lower()
         found = found or isinstance(current, transport_error_types) or any(m in msg for m in _SESSION_EXPIRED_MARKERS)
         stack.extend(getattr(current, "exceptions", ()))
