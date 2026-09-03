@@ -1,13 +1,11 @@
 """Async LSP client over stdin/stdout — one per ``(server, workspace_root)``.
 
-Owns the child process, drives JSON-RPC, and exposes ``open_file`` /
-``wait_for_diagnostics`` / ``diagnostics_for`` / ``shutdown``.  Freshness is
-tracked with **document versions**, not timestamps: every didChange bumps
-``version`` and each stored push/pull result is tagged with the version it
-describes, so a slow server's leftovers can never masquerade as a verdict on
-the current content ("ghost diagnostics").  Whole-document sync is always
-sent (every major server tolerates it), every ``open_file`` also fires
-``workspace/didChangeWatchedFiles`` (clangd, eslint only re-scan on it), and
+Owns the child process and drives JSON-RPC.  Freshness is tracked with
+**document versions**, not timestamps: every didChange bumps ``version`` and
+each stored push/pull result is tagged with the version it describes, so a
+slow server's leftovers never masquerade as a verdict on the current content
+("ghost diagnostics").  Whole-document sync is always sent, every ``open_file``
+also fires ``didChangeWatchedFiles`` (clangd/eslint only re-scan on it), and
 ``ContentModified`` (-32801) errors are retried with exponential backoff.
 """
 from __future__ import annotations
@@ -56,22 +54,14 @@ _LIVE_STATES = {"starting", "running"}
 
 _CLIENT_CAPABILITIES: Dict[str, Any] = {
     "window": {"workDoneProgress": True},
-    "workspace": {
-        "configuration": True,
-        "workspaceFolders": True,
-        "didChangeWatchedFiles": {"dynamicRegistration": True},
-        "diagnostics": {"refreshSupport": False},
-    },
+    "workspace": {"configuration": True, "workspaceFolders": True,
+                  "didChangeWatchedFiles": {"dynamicRegistration": True}, "diagnostics": {"refreshSupport": False}},
     "textDocument": {
-        "synchronization": {
-            "dynamicRegistration": False, "didOpen": True, "didChange": True,
-            "didSave": True, "willSave": False, "willSaveWaitUntil": False,
-        },
+        "synchronization": {"dynamicRegistration": False, "didOpen": True, "didChange": True,
+                            "didSave": True, "willSave": False, "willSaveWaitUntil": False},
         "diagnostic": {"dynamicRegistration": True, "relatedDocumentSupport": True},
-        "publishDiagnostics": {
-            "relatedInformation": True, "tagSupport": {"valueSet": [1, 2]},
-            "versionSupport": True, "codeDescriptionSupport": True, "dataSupport": False,
-        },
+        "publishDiagnostics": {"relatedInformation": True, "tagSupport": {"valueSet": [1, 2]},
+                               "versionSupport": True, "codeDescriptionSupport": True, "dataSupport": False},
         "hover": {"contentFormat": ["markdown", "plaintext"]},
         "definition": {"linkSupport": True},
         "references": {},
@@ -119,10 +109,9 @@ class _DocState:
 
     ``version`` is the LSP document version last sent (didOpen=0, +1 per
     didChange) and doubles as the freshness token: ``push_version`` /
-    ``pull_version`` tag stored results, fresh iff tag >= version.  Tags
-    start at -1 ("no data yet").  Servers that echo a version in
-    publishDiagnostics get exact tagging; others are credited with the
-    current version at receipt time.
+    ``pull_version`` tag stored results, fresh iff tag >= version; -1 means
+    "no data yet".  Servers that echo a version in publishDiagnostics get
+    exact tagging; others are credited with the current version at receipt.
     """
 
     version: int = 0
@@ -170,38 +159,37 @@ class LSPClient:
         self._stderr_task: Optional[asyncio.Task] = None
         self._reader_task: Optional[asyncio.Task] = None
         self._cleanup_lock = asyncio.Lock()
-
         self._next_id: int = 0
         self._pending: Dict[int, asyncio.Future] = {}
 
-        # Server → client requests; anything else gets method-not-found.
+        # Server → client requests; anything else gets method-not-found.  Capability
+        # (un)registration and diagnostic refresh are acknowledged but not acted on:
+        # we re-pull on every touch anyway.
         self._request_handlers: Dict[str, Callable[[Any], Awaitable[Any]]] = {
-            "window/workDoneProgress/create": self._handle_null,  # ack progress tokens
+            "window/workDoneProgress/create": self._handle_null,
             "workspace/configuration": self._handle_workspace_configuration,
-            "client/registerCapability": self._handle_register_capability,
-            "client/unregisterCapability": self._handle_unregister_capability,
+            "client/registerCapability": self._handle_null,
+            "client/unregisterCapability": self._handle_null,
             "workspace/workspaceFolders": self._handle_workspace_folders,
-            "workspace/diagnostic/refresh": self._handle_null,  # we re-pull on every touch anyway
+            "workspace/diagnostic/refresh": self._handle_null,
         }
         # Server → client notifications; others (showMessage, $/progress) are dropped.
         self._notification_handlers: Dict[str, Callable[[Any], None]] = {
             "textDocument/publishDiagnostics": self._handle_publish_diagnostics,
         }
 
-        # Per-document state keyed by absolute path (NOT URI).
-        self._docs: Dict[str, _DocState] = {}
-        # Only diagnostic capability registrations are tracked.
-        self._diagnostic_registrations: Dict[str, Dict[str, Any]] = {}
-
+        self._docs: Dict[str, _DocState] = {}  # keyed by absolute path (NOT URI)
         self._state: str = "stopped"
         self._sync_kind: int = 1  # 1=Full, 2=Incremental
         self._stopping: bool = False
-
         # Waiters snapshot ``_push_counter`` and treat any increase as "recheck
         # the predicate" — avoids the asyncio.Event sticky-state trap.
         self._push_event = asyncio.Event()
         self._push_counter = 0
-        self._registration_event = asyncio.Event()
+
+    @property
+    def state(self) -> str:
+        return self._state
 
     @property
     def is_running(self) -> bool:
@@ -211,17 +199,10 @@ class LSPClient:
         proc, reader = self._proc, self._reader_task
         return (
             self._state in _LIVE_STATES
-            and proc is not None
-            and proc.returncode is None
-            and proc.stdin is not None
-            and not proc.stdin.is_closing()
-            and reader is not None
-            and not reader.done()
+            and proc is not None and proc.returncode is None
+            and proc.stdin is not None and not proc.stdin.is_closing()
+            and reader is not None and not reader.done()
         )
-
-    @property
-    def state(self) -> str:
-        return self._state
 
     async def start(self) -> None:
         """Spawn the server and complete the initialize handshake.
@@ -282,12 +263,8 @@ class LSPClient:
         if self._proc is None or self._proc.stderr is None:
             return
         try:
-            while True:
-                line = await self._proc.stderr.readline()
-                if not line:
-                    break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
+            while line := await self._proc.stderr.readline():
+                if text := line.decode("utf-8", errors="replace").rstrip():
                     logger.debug("[%s] stderr: %s", self.server_id, text[:1000])
         except (asyncio.CancelledError, OSError):
             pass
@@ -296,11 +273,7 @@ class LSPClient:
         if self._proc is None or self._proc.stdout is None:
             return
         try:
-            while True:
-                msg = await read_message(self._proc.stdout)
-                if msg is None:
-                    logger.debug("[%s] server closed stdout cleanly", self.server_id)
-                    break
+            while (msg := await read_message(self._proc.stdout)) is not None:
                 kind, key = classify_message(msg)
                 if kind == "response":
                     self._dispatch_response(key, msg)
@@ -310,6 +283,7 @@ class LSPClient:
                     self._dispatch_notification(key, msg)
                 else:
                     logger.warning("[%s] dropping invalid message: %r", self.server_id, msg)
+            logger.debug("[%s] server closed stdout cleanly", self.server_id)
         except LSPProtocolError as e:
             logger.warning("[%s] protocol error in reader loop: %s", self.server_id, e)
         except (asyncio.CancelledError, OSError):
@@ -383,11 +357,11 @@ class LSPClient:
     async def _cleanup_process(self) -> None:
         async with self._cleanup_lock:
             reader_task, self._reader_task = self._reader_task, None
+            stderr_task, self._stderr_task = self._stderr_task, None
+            proc, self._proc = self._proc, None
             if reader_task is not asyncio.current_task():
                 await self._cancel_task(reader_task)
-            stderr_task, self._stderr_task = self._stderr_task, None
             await self._cancel_task(stderr_task)
-            proc, self._proc = self._proc, None
             if proc is None or proc.returncode is not None:
                 return
             try:
@@ -400,9 +374,7 @@ class LSPClient:
             except ProcessLookupError:
                 pass
 
-    # ------------------------------------------------------------------
-    # request / notification plumbing
-    # ------------------------------------------------------------------
+    # ---- request / notification plumbing ----
 
     async def _write(self, msg: dict) -> None:
         assert self._proc is not None and self._proc.stdin is not None
@@ -448,12 +420,11 @@ class LSPClient:
 
     async def _send_reply(self, msg: dict) -> None:
         """Send a response to a server→client request; silently no-ops when the pipe is gone."""
-        if self._proc is None or self._proc.stdin is None or self._proc.stdin.is_closing():
-            return
-        try:
-            await self._write(msg)
-        except _WRITE_ERRORS:
-            pass
+        if self._proc is not None and self._proc.stdin is not None and not self._proc.stdin.is_closing():
+            try:
+                await self._write(msg)
+            except _WRITE_ERRORS:
+                pass
 
     def _dispatch_response(self, req_id: int, msg: dict) -> None:
         fut = self._pending.get(req_id)
@@ -461,11 +432,7 @@ class LSPClient:
             return
         if "error" in msg:
             err = msg["error"] or {}
-            fut.set_exception(LSPRequestError(
-                code=int(err.get("code", -32000)),
-                message=str(err.get("message", "unknown")),
-                data=err.get("data"),
-            ))
+            fut.set_exception(LSPRequestError(int(err.get("code", -32000)), str(err.get("message", "unknown")), err.get("data")))
         else:
             fut.set_result(msg.get("result"))
 
@@ -492,49 +459,30 @@ class LSPClient:
         except Exception as e:  # noqa: BLE001
             logger.debug("[%s] notification handler %s failed: %s", self.server_id, method, e)
 
-    # ------------------------------------------------------------------
-    # built-in server-→-client request handlers
-    # ------------------------------------------------------------------
+    # ---- built-in server-→-client request handlers ----
 
     async def _handle_null(self, params: Any) -> Any:
         return None
 
     async def _handle_workspace_configuration(self, params: Any) -> Any:
-        # Walk dotted sections through initializationOptions; null when missing.
+        """Walk dotted ``section`` paths through initializationOptions; null when missing."""
         if not isinstance(params, dict):
             return [None]
-        out: List[Any] = []
-        for item in params.get("items") or []:
+
+        def lookup(item: Any) -> Any:
             if not isinstance(item, dict):
-                out.append(None)
-                continue
+                return None
             section = item.get("section")
             if not section or not self._init_options:
-                out.append(self._init_options or None)
-                continue
+                return self._init_options or None
             cur: Any = self._init_options
             for part in str(section).split("."):
                 if not (isinstance(cur, dict) and part in cur):
-                    cur = None
-                    break
+                    return None
                 cur = cur[part]
-            out.append(cur)
-        return out
+            return cur
 
-    async def _handle_register_capability(self, params: Any) -> Any:
-        if isinstance(params, dict):
-            for reg in params.get("registrations") or []:
-                if isinstance(reg, dict) and reg.get("method") == "textDocument/diagnostic" and reg.get("id"):
-                    self._diagnostic_registrations[str(reg["id"])] = reg
-                    self._registration_event.set()
-        return None
-
-    async def _handle_unregister_capability(self, params: Any) -> Any:
-        if isinstance(params, dict):
-            for unreg in params.get("unregisterations") or []:
-                if isinstance(unreg, dict) and unreg.get("id"):
-                    self._diagnostic_registrations.pop(str(unreg["id"]), None)
-        return None
+        return [lookup(item) for item in params.get("items") or []]
 
     async def _handle_workspace_folders(self, params: Any) -> Any:
         return [{"name": "workspace", "uri": file_uri(self.workspace_root)}]
@@ -544,7 +492,6 @@ class LSPClient:
             return
         diagnostics = params.get("diagnostics") or []
         version = params.get("version")
-
         doc = self._docs.setdefault(uri_to_path(params["uri"]), _DocState(version=-1))
         is_seed = self._seed_first_push and not doc.seed_seen
         doc.seed_seen = True
@@ -563,21 +510,17 @@ class LSPClient:
         self._push_counter += 1
         self._push_event.set()
 
-    # ------------------------------------------------------------------
-    # public file-sync API
-    # ------------------------------------------------------------------
+    # ---- public file-sync API ----
 
     async def open_file(self, path: str, *, language_id: str = "plaintext") -> int:
         """Send didOpen (first time) or didChange (subsequent); return the new document version."""
         if not self.is_running:
             raise LSPProtocolError("client not running")
-
         abs_path = os.path.abspath(path)
         try:
             text = Path(abs_path).read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             raise LSPProtocolError(f"cannot read {abs_path}: {e}") from e
-
         uri = file_uri(abs_path)
         doc = self._docs.get(abs_path)
         if doc is not None and doc.version < 0:
@@ -588,21 +531,16 @@ class LSPClient:
         )
 
         if doc is not None:
-            new_version = doc.version + 1
+            change: Dict[str, Any] = {"text": text}
             if self._sync_kind == 2:
-                content_changes = [{
-                    "range": {"start": {"line": 0, "character": 0}, "end": _end_position(doc.text)},
-                    "text": text,
-                }]
-            else:
-                content_changes = [{"text": text}]
+                change["range"] = {"start": {"line": 0, "character": 0}, "end": _end_position(doc.text)}
+            new_version = doc.version + 1
             await self._send_notification(
                 "textDocument/didChange",
-                {"textDocument": {"uri": uri, "version": new_version}, "contentChanges": content_changes},
+                {"textDocument": {"uri": uri, "version": new_version}, "contentChanges": [change]},
             )
             # Bumping the version is the whole invalidation story (see _DocState).
-            doc.version = new_version
-            doc.text = text
+            doc.version, doc.text = new_version, text
             return new_version
 
         # Fresh state: anything a pre-open push stashed under this path
@@ -621,9 +559,7 @@ class LSPClient:
                 "textDocument/didSave", {"textDocument": {"uri": file_uri(os.path.abspath(path))}}
             )
 
-    # ------------------------------------------------------------------
-    # diagnostics: pull + wait
-    # ------------------------------------------------------------------
+    # ---- diagnostics: pull + wait ----
 
     async def _pull_document_diagnostics(self, path: str) -> None:
         """Send ``textDocument/diagnostic`` for one file into the pull store.
@@ -637,8 +573,7 @@ class LSPClient:
         sent_version = doc.version if doc else -1
         try:
             result = await self._send_request_with_retry(
-                "textDocument/diagnostic",
-                {"textDocument": {"uri": file_uri(abs_path)}},
+                "textDocument/diagnostic", {"textDocument": {"uri": file_uri(abs_path)}},
                 timeout=DIAGNOSTICS_REQUEST_TIMEOUT,
             )
         except (LSPRequestError, LSPProtocolError, asyncio.TimeoutError) as e:
@@ -646,20 +581,17 @@ class LSPClient:
             return
         if not isinstance(result, dict):
             return
-        items = result.get("items")
-        if isinstance(items, list):
-            doc = self._docs.setdefault(abs_path, _DocState(version=-1))
-            doc.pull = items
-            doc.pull_version = sent_version
         related = result.get("relatedDocuments")
+        reports = [(abs_path, result, sent_version)]
         if isinstance(related, dict):
-            for uri, sub in related.items():
-                sub_items = sub.get("items") if isinstance(sub, dict) else None
-                if isinstance(sub_items, list):
-                    rel = self._docs.setdefault(uri_to_path(uri), _DocState(version=-1))
-                    rel.pull = sub_items
-                    # Same send-anchored tagging: fresh only if that doc hasn't changed since.
-                    rel.pull_version = rel.version
+            # Related docs get the same send-anchored tagging: fresh only if unchanged since.
+            reports += [(uri_to_path(uri), sub, None) for uri, sub in related.items()]
+        for doc_path, report, tag in reports:
+            items = report.get("items") if isinstance(report, dict) else None
+            if isinstance(items, list):
+                d = self._docs.setdefault(doc_path, _DocState(version=-1))
+                d.pull = items
+                d.pull_version = d.version if tag is None else tag
 
     async def wait_for_diagnostics(
         self,
@@ -678,34 +610,27 @@ class LSPClient:
         "no data", NOT "no errors" — the stores may still hold stale entries.
         Never throws for servers lacking pull support; the push side still works.
         """
-        if timeout is not None and timeout > 0:
-            budget = timeout
-        else:
-            budget = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
-        deadline = asyncio.get_event_loop().time() + budget
+        if not (timeout is not None and timeout > 0):
+            timeout = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
+        now = asyncio.get_event_loop().time
+        deadline = now() + timeout
         abs_path = os.path.abspath(path)
 
         while True:
             if not self._connection_is_open():
                 raise LSPProtocolError("server connection closed while waiting for diagnostics")
-            remaining = deadline - asyncio.get_event_loop().time()
+            remaining = deadline - now()
             if remaining <= 0:
                 return False
-
             # Concurrent: document pull + push wait.
-            pull_task = asyncio.create_task(self._pull_document_diagnostics(abs_path))
-            push_task = asyncio.create_task(self._wait_for_fresh_push(abs_path, version, remaining))
-            _done, pending = await asyncio.wait(
-                {pull_task, push_task}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
-            )
+            tasks = {
+                asyncio.create_task(self._pull_document_diagnostics(abs_path)),
+                asyncio.create_task(self._wait_for_fresh_push(abs_path, version, remaining)),
+            }
+            _done, pending = await asyncio.wait(tasks, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
             for t in pending:
                 t.cancel()
-            for t in pending:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
-
+            await asyncio.gather(*pending, return_exceptions=True)
             doc = self._docs.get(abs_path)
             if doc and (doc.fresh_push(version) or doc.fresh_pull(version)):
                 return True
@@ -755,19 +680,18 @@ class LSPClient:
         doc = self._docs.get(os.path.abspath(path))
         if doc is None:
             return []
-        if fresh_only:
-            return _dedupe(doc.push if doc.fresh_push() else [], doc.pull if doc.fresh_pull() else [])
-        return _dedupe(doc.push, doc.pull)
+        push = doc.push if not fresh_only or doc.fresh_push() else []
+        pull = doc.pull if not fresh_only or doc.fresh_pull() else []
+        return _dedupe(push, pull)
 
 
 def _dedupe(*lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     seen: Set[str] = set()
     out: List[Dict[str, Any]] = []
-    for lst in lists:
-        for d in lst:
-            if isinstance(d, dict) and (key := _diagnostic_key(d)) not in seen:
-                seen.add(key)
-                out.append(d)
+    for d in (d for lst in lists for d in lst if isinstance(d, dict)):
+        if (key := _diagnostic_key(d)) not in seen:
+            seen.add(key)
+            out.append(d)
     return out
 
 
@@ -792,11 +716,4 @@ def _diagnostic_key(d: Dict[str, Any]) -> str:
     ])
 
 
-__all__ = [
-    "LSPClient",
-    "file_uri",
-    "uri_to_path",
-    "INITIALIZE_TIMEOUT",
-    "DIAGNOSTICS_DOCUMENT_WAIT",
-    "DIAGNOSTICS_FULL_WAIT",
-]
+__all__ = ["LSPClient", "file_uri", "uri_to_path", "INITIALIZE_TIMEOUT", "DIAGNOSTICS_DOCUMENT_WAIT", "DIAGNOSTICS_FULL_WAIT"]

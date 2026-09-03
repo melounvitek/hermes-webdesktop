@@ -54,7 +54,6 @@ _RootFn = Callable[[str, str], Optional[str]]
 @dataclass
 class SpawnSpec:
     """Result of resolving a server for a file (``None`` means skip)."""
-
     command: List[str]
     workspace_root: str
     cwd: str
@@ -65,13 +64,8 @@ class SpawnSpec:
 
 @dataclass
 class ServerDef:
-    """Definition of one language server.
-
-    ``resolve_root(file_path, workspace_root)`` returns the per-server
-    project root or ``None`` to skip; ``build_spawn(root, ctx)`` returns
-    a :class:`SpawnSpec` or ``None`` when the binary can't be found.
-    """
-
+    """One language server: ``resolve_root(file, ws)`` → per-server root or ``None`` to skip;
+    ``build_spawn(root, ctx)`` → :class:`SpawnSpec` or ``None`` when the binary can't be found."""
     server_id: str
     extensions: Tuple[str, ...]
     resolve_root: _RootFn
@@ -80,14 +74,12 @@ class ServerDef:
     description: str = ""
 
     def matches(self, file_path: str) -> bool:
-        """Return True iff this server handles ``file_path``."""
         return _file_ext_or_basename(file_path) in self.extensions
 
 
 @dataclass
 class ServerContext:
     """User policy passed into :meth:`ServerDef.build_spawn` (install strategy, overrides)."""
-
     workspace_root: str
     install_strategy: str = "auto"  # "auto" | "manual" | "off"
     binary_overrides: Dict[str, List[str]] = field(default_factory=dict)
@@ -95,9 +87,7 @@ class ServerContext:
     init_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
+# ---- helpers ----
 
 
 def _file_ext_or_basename(path: str) -> str:
@@ -136,14 +126,8 @@ def _find_binary(ctx: ServerContext, server_id: str, which: Sequence[str], insta
 def _make_spec(root: str, ctx: ServerContext, server_id: str, command: List[str],
                base_init: Optional[Dict[str, Any]] = None, seed: bool = False) -> SpawnSpec:
     init = ctx.init_overrides.get(server_id, {}) if base_init is None else {**base_init, **ctx.init_overrides.get(server_id, {})}
-    return SpawnSpec(
-        command=command,
-        workspace_root=root,
-        cwd=root,
-        env=ctx.env_overrides.get(server_id, {}),
-        initialization_options=init,
-        seed_diagnostics_on_first_push=seed,
-    )
+    return SpawnSpec(command, root, root, env=ctx.env_overrides.get(server_id, {}),
+                     initialization_options=init, seed_diagnostics_on_first_push=seed)
 
 
 def _simple_spawn(server_id: str, which: Sequence[str], args: Sequence[str] = (),
@@ -152,9 +136,7 @@ def _simple_spawn(server_id: str, which: Sequence[str], args: Sequence[str] = ()
     """Build a spawn function for the common single-binary server shape."""
     def build(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
         bin_path = _find_binary(ctx, server_id, which, install_pkg)
-        if bin_path is None:
-            return None
-        return _make_spec(root, ctx, server_id, [bin_path, *args], base_init, seed)
+        return None if bin_path is None else _make_spec(root, ctx, server_id, [bin_path, *args], base_init, seed)
     return build
 
 
@@ -165,9 +147,7 @@ def _markers_root(markers: Optional[Sequence[str]], excludes: Sequence[str] = ()
     return lambda fp, ws: _root_or_workspace(fp, ws, markers, excludes=excludes)
 
 
-# ---------------------------------------------------------------------------
-# bespoke spawn builders
-# ---------------------------------------------------------------------------
+# ---- bespoke spawn builders ----
 
 
 def _spawn_pyright(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
@@ -268,19 +248,15 @@ def _spawn_powershell_es(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     # PSES writes connection info to the session details file on startup.
     session_dir = hermes_lsp_session_dir()
     inner = (
-        f"& '{start_script}' "
-        f"-BundledModulesPath '{bundle}' "
+        f"& '{start_script}' -BundledModulesPath '{bundle}' "
         f"-LogPath '{os.path.join(session_dir, 'pses.log')}' "
         f"-SessionDetailsPath '{os.path.join(session_dir, f'pses-session-{os.getpid()}.json')}' "
         f"-FeatureFlags @() -AdditionalModules @() "
-        f"-HostName Hermes -HostProfileId hermes -HostVersion 1.0.0 "
-        f"-Stdio -LogLevel Normal"
+        f"-HostName Hermes -HostProfileId hermes -HostVersion 1.0.0 -Stdio -LogLevel Normal"
     )
     return SpawnSpec(
-        command=[pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", inner],
-        workspace_root=root,
-        cwd=root,
-        env=ctx.env_overrides.get("powershell", {}),
+        [pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", inner],
+        root, root, env=ctx.env_overrides.get("powershell", {}),
         initialization_options={k: v for k, v in ctx.init_overrides.get("powershell", {}).items() if k != "bundlePath"},
     )
 
@@ -294,9 +270,7 @@ def hermes_lsp_session_dir() -> str:
     return d
 
 
-# ---------------------------------------------------------------------------
-# the registry
-# ---------------------------------------------------------------------------
+# ---- the registry ----
 
 _JS_MARKERS = ["package-lock.json", "bun.lockb", "bun.lock", "pnpm-lock.yaml", "yarn.lock", "package.json", "tsconfig.json"]
 _DENO_EXCLUDES = ["deno.json", "deno.jsonc"]
@@ -308,13 +282,12 @@ def _server(server_id: str, extensions: Tuple[str, ...], description: str, *,
             resolve_root: Optional[_RootFn] = None, build_spawn: Optional[_SpawnFn] = None,
             which: Sequence[str] = (), args: Sequence[str] = (), install_pkg: Optional[str] = None,
             base_init: Optional[Dict[str, Any]] = None, seed: bool = False) -> ServerDef:
+    """Registry entry factory: defaults to marker-based root + single-binary spawn."""
     return ServerDef(
-        server_id=server_id,
-        extensions=extensions,
-        resolve_root=resolve_root or _markers_root(markers, excludes),
-        build_spawn=build_spawn or _simple_spawn(server_id, which or (server_id,), args, install_pkg, base_init, seed),
-        seed_first_push=seed,
-        description=description,
+        server_id, extensions,
+        resolve_root or _markers_root(markers, excludes),
+        build_spawn or _simple_spawn(server_id, which or (server_id,), args, install_pkg, base_init, seed),
+        seed_first_push=seed, description=description,
     )
 
 
@@ -388,12 +361,4 @@ def language_id_for(path: str) -> str:
     return LANGUAGE_BY_EXT.get(_file_ext_or_basename(path), "plaintext")
 
 
-__all__ = [
-    "ServerDef",
-    "ServerContext",
-    "SpawnSpec",
-    "SERVERS",
-    "find_server_for_file",
-    "language_id_for",
-    "LANGUAGE_BY_EXT",
-]
+__all__ = ["ServerDef", "ServerContext", "SpawnSpec", "SERVERS", "find_server_for_file", "language_id_for", "LANGUAGE_BY_EXT"]

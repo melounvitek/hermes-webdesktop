@@ -131,13 +131,10 @@ def try_install(pkg: str, strategy: str = "auto") -> Optional[str]:
 
     if pkg in _install_results:
         return _install_results[pkg]
-
     with _get_lock(pkg):
-        if pkg in _install_results:
-            return _install_results[pkg]
-        result = _do_install(pkg)
-        _install_results[pkg] = result
-        return result
+        if pkg not in _install_results:
+            _install_results[pkg] = _do_install(pkg)
+        return _install_results[pkg]
 
 
 def _do_install(pkg: str) -> Optional[str]:
@@ -148,11 +145,9 @@ def _do_install(pkg: str) -> Optional[str]:
 
     strategy = recipe.get("strategy", "manual")
     bin_name = recipe.get("bin", pkg)
-
     existing = _existing_binary(bin_name)
     if existing:
         return existing
-
     if strategy == "manual":
         logger.debug("[install] %s requires manual install (recipe=%s)", pkg, recipe)
         return None
@@ -168,14 +163,8 @@ def _run_installer(tool: str, pkg: str, cmd: list, *, timeout: int, env: Optiona
     """Run one install subprocess; log and return False on non-zero exit or error."""
     try:
         proc = subprocess.run(
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=timeout,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            creationflags=windows_hide_flags(),
+            cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, env=env, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
         )
         if proc.returncode != 0:
             logger.warning("[install] %s install failed for %s: %s", tool, pkg, proc.stderr.strip()[:500])
@@ -212,13 +201,9 @@ def _install_npm(pkg: str, bin_name: str, extra_pkgs: Optional[list] = None) -> 
     staging = hermes_lsp_bin_dir().parent  # <HERMES_HOME>/lsp/
     install_targets = [pkg] + list(extra_pkgs or [])
     logger.info("[install] npm install --prefix %s %s", staging, " ".join(install_targets))
-    if not _run_installer(
-        "npm", pkg,
-        [npm, "install", "--prefix", str(staging), "--silent", "--no-fund", "--no-audit", *install_targets],
-        timeout=300,
-    ):
+    cmd = [npm, "install", "--prefix", str(staging), "--silent", "--no-fund", "--no-audit", *install_targets]
+    if not _run_installer("npm", pkg, cmd, timeout=300):
         return None
-
     found = _first_existing(staging / "node_modules" / ".bin" / bin_name)
     if found is not None:
         return _link_into_bin(found)
@@ -237,9 +222,7 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
     logger.info("[install] go install %s (GOBIN=%s)", pkg, staging)
     if not _run_installer("go", pkg, [go, "install", pkg], timeout=600, env=env):
         return None
-    bin_path = staging / bin_name
-    if _is_windows():
-        bin_path = bin_path.with_suffix(".exe")
+    bin_path = (staging / bin_name).with_suffix(".exe") if _is_windows() else staging / bin_name
     if bin_path.exists():
         return str(bin_path)
     logger.warning("[install] go install for %s succeeded but bin %s not found", pkg, bin_name)
@@ -285,9 +268,4 @@ def detect_status(pkg: str) -> str:
     return "missing"
 
 
-__all__ = [
-    "INSTALL_RECIPES",
-    "try_install",
-    "detect_status",
-    "hermes_lsp_bin_dir",
-]
+__all__ = ["INSTALL_RECIPES", "try_install", "detect_status", "hermes_lsp_bin_dir"]

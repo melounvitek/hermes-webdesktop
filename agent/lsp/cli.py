@@ -83,26 +83,19 @@ def _cmd_status(emit_json: bool) -> int:
 
     if emit_json:
         import json
-        payload = {
-            "service": info,
-            "registry": [
-                {
-                    "server_id": s.server_id,
-                    "extensions": list(s.extensions),
-                    "description": s.description,
-                    "binary_status": detect_status(_recipe_pkg_for(s.server_id)),
-                }
-                for s in SERVERS
-            ],
-        }
-        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        registry = [
+            {"server_id": s.server_id, "extensions": list(s.extensions), "description": s.description,
+             "binary_status": detect_status(_recipe_pkg_for(s.server_id))}
+            for s in SERVERS
+        ]
+        sys.stdout.write(json.dumps({"service": info, "registry": registry}, indent=2) + "\n")
         return 0
 
     out = ["LSP Service", "===========", f"  enabled:         {info.get('enabled', False)}"]
     if svc is not None:
-        out.append(f"  wait_mode:       {info.get('wait_mode')}")
-        out.append(f"  wait_timeout:    {info.get('wait_timeout')}s")
-        out.append(f"  install_strategy:{info.get('install_strategy')}")
+        out += [f"  wait_mode:       {info.get('wait_mode')}",
+                f"  wait_timeout:    {info.get('wait_timeout')}s",
+                f"  install_strategy:{info.get('install_strategy')}"]
         clients = info.get("clients") or []
         if clients:
             out.append(f"  active clients:  {len(clients)}")

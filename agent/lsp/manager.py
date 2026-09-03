@@ -131,8 +131,7 @@ class LSPService:
         self._last_used: Dict[_Key, float] = {}
         self._state_lock = threading.Lock()
         self._idle_reaper_task: Optional[asyncio.Task] = None
-
-        # file path → diagnostics snapshot taken immediately before a write.
+        # abs file path → diagnostics snapshot taken immediately before a write.
         self._delta_baseline: Dict[str, List[Dict[str, Any]]] = {}
 
         if self._enabled and self._idle_timeout > 0:
@@ -162,35 +161,19 @@ class LSPService:
             # for the process lifetime.  Clamp (0 still disables).
             idle_timeout = MIN_IDLE_TIMEOUT
         servers_cfg = lsp_cfg.get("servers") or {}
-        disabled = []
-        binary_overrides: Dict[str, List[str]] = {}
-        env_overrides: Dict[str, Dict[str, str]] = {}
-        init_overrides: Dict[str, Dict[str, Any]] = {}
-        if isinstance(servers_cfg, dict):
-            for name, sub in servers_cfg.items():
-                if not isinstance(sub, dict):
-                    continue
-                if sub.get("disabled"):
-                    disabled.append(name)
-                cmd = sub.get("command")
-                if isinstance(cmd, list) and cmd:
-                    binary_overrides[name] = cmd
-                env = sub.get("env")
-                if isinstance(env, dict):
-                    env_overrides[name] = {k: str(v) for k, v in env.items()}
-                init = sub.get("initialization_options")
-                if isinstance(init, dict):
-                    init_overrides[name] = init
-
+        servers = {n: c for n, c in servers_cfg.items() if isinstance(c, dict)} if isinstance(servers_cfg, dict) else {}
         return cls(
             enabled=bool(lsp_cfg.get("enabled", True)),
             wait_mode=lsp_cfg.get("wait_mode", "document"),
             wait_timeout=float(lsp_cfg.get("wait_timeout", DIAGNOSTICS_DOCUMENT_WAIT)),
             install_strategy=lsp_cfg.get("install_strategy", "auto"),
-            binary_overrides=binary_overrides,
-            env_overrides=env_overrides,
-            init_overrides=init_overrides,
-            disabled_servers=disabled,
+            binary_overrides={n: c["command"] for n, c in servers.items()
+                              if isinstance(c.get("command"), list) and c["command"]},
+            env_overrides={n: {k: str(v) for k, v in c["env"].items()} for n, c in servers.items()
+                           if isinstance(c.get("env"), dict)},
+            init_overrides={n: c["initialization_options"] for n, c in servers.items()
+                            if isinstance(c.get("initialization_options"), dict)},
+            disabled_servers=[n for n, c in servers.items() if c.get("disabled")],
             idle_timeout=idle_timeout,
         )
 
@@ -212,10 +195,9 @@ class LSPService:
         if not (ws_root and gated):
             return None
         try:
-            per_server_root = srv.resolve_root(file_path, ws_root) or ws_root
+            return (srv.server_id, srv.resolve_root(file_path, ws_root) or ws_root)
         except Exception:  # noqa: BLE001
-            per_server_root = ws_root
-        return (srv.server_id, per_server_root)
+            return (srv.server_id, ws_root)
 
     def enabled_for(self, file_path: str) -> bool:
         """Return True iff LSP should run for this file.
@@ -225,9 +207,7 @@ class LSPService:
         (so a failed server costs no spawn attempts or timeouts until
         ``hermes lsp restart`` or process exit).
         """
-        if not self._enabled:
-            return False
-        srv = find_server_for_file(file_path)
+        srv = find_server_for_file(file_path) if self._enabled else None
         if srv is None or srv.server_id in self._disabled_servers:
             return False
         key = self._broken_key(srv, file_path)
@@ -273,11 +253,7 @@ class LSPService:
         """
         if not self.enabled_for(file_path):
             return []
-
-        # Resolve server_id eagerly for structured logs on the error paths.
-        srv = find_server_for_file(file_path)
-        server_id = srv.server_id if srv else "?"
-
+        server_id = find_server_for_file(file_path).server_id  # enabled_for guarantees a match
         try:
             t = timeout if timeout is not None else self._wait_timeout + 2.0
             diags = self._loop.run(self._open_and_wait_async(file_path), timeout=t)
@@ -299,28 +275,33 @@ class LSPService:
             eventlog.log_timeout(server_id, file_path, kind="fresh diagnostics")
             return []
 
-        abs_path = os.path.abspath(file_path)
         if delta:
-            baseline = self._delta_baseline.get(abs_path) or []
-            if baseline:
-                if line_shift is not None:
-                    # Entries that map into a deleted region drop out — they no longer apply.
-                    from agent.lsp.range_shift import shift_baseline
-                    baseline = shift_baseline(baseline, line_shift)
-                seen = {_diag_key(d) for d in baseline}
-                diags = [d for d in diags if _diag_key(d) not in seen]
-            # Roll the baseline forward so the next call is a delta against this state.
-            try:
-                fresh = self._loop.run(self._current_diags_async(file_path), timeout=2.0) or []
-            except Exception:  # noqa: BLE001
-                fresh = []
-            if fresh:
-                self._delta_baseline[abs_path] = fresh
-
+            diags = self._apply_delta(file_path, diags, line_shift)
         if diags:
             eventlog.log_diagnostics(server_id, file_path, len(diags))
         else:
             eventlog.log_clean(server_id, file_path)
+        return diags
+
+    def _apply_delta(self, file_path: str, diags: List[Dict[str, Any]],
+                     line_shift: Optional[Callable[[int], Optional[int]]]) -> List[Dict[str, Any]]:
+        """Drop diagnostics present in the pre-write baseline, then roll the baseline forward."""
+        abs_path = os.path.abspath(file_path)
+        baseline = self._delta_baseline.get(abs_path) or []
+        if baseline:
+            if line_shift is not None:
+                # Entries that map into a deleted region drop out — they no longer apply.
+                from agent.lsp.range_shift import shift_baseline
+                baseline = shift_baseline(baseline, line_shift)
+            seen = {_diag_key(d) for d in baseline}
+            diags = [d for d in diags if _diag_key(d) not in seen]
+        # Roll the baseline forward so the next call is a delta against this state.
+        try:
+            fresh = self._loop.run(self._current_diags_async(file_path), timeout=2.0) or []
+        except Exception:  # noqa: BLE001
+            fresh = []
+        if fresh:
+            self._delta_baseline[abs_path] = fresh
         return diags
 
     def _mark_broken_for_file(self, file_path: str, exc: BaseException) -> None:
@@ -338,7 +319,6 @@ class LSPService:
             return
         already_broken = key in self._broken
         self._broken.add(key)
-
         with self._state_lock:
             client = self._clients.pop(key, None)
             self._last_used.pop(key, None)
@@ -348,7 +328,6 @@ class LSPService:
                 self._loop.run(client.shutdown(), timeout=1.0)
             except Exception:  # noqa: BLE001
                 pass
-
         if not already_broken:
             eventlog.log_spawn_failed(key[0], key[1], exc)
 
@@ -399,9 +378,7 @@ class LSPService:
                 logger.debug("open/wait failed for %s: %s", file_path, e)
             return None
         self._touch(client)
-        if not fresh:
-            return None
-        return list(client.diagnostics_for(file_path, fresh_only=True))
+        return list(client.diagnostics_for(file_path, fresh_only=True)) if fresh else None
 
     async def _current_diags_async(self, file_path: str) -> List[Dict[str, Any]]:
         ws, gated = resolve_workspace_for_file(file_path)
@@ -410,9 +387,7 @@ class LSPService:
             return []
         with self._state_lock:
             client = self._clients.get((srv.server_id, ws))
-        if client is None:
-            return []
-        return list(client.diagnostics_for(file_path, fresh_only=True))
+        return list(client.diagnostics_for(file_path, fresh_only=True)) if client else []
 
     async def _get_or_spawn(self, file_path: str) -> Optional[LSPClient]:
         srv = find_server_for_file(file_path)
@@ -437,28 +412,29 @@ class LSPService:
             client = self._clients.get(key)
             if client is not None and client.is_running:
                 self._last_used[key] = time.time()
-                eventlog.log_active(srv.server_id, per_server_root)
+                eventlog.log_active(*key)
                 return client
             spawning = self._spawning.get(key)
-        if spawning is not None:
+            if spawning is None:
+                spawning = self._spawning[key] = asyncio.get_running_loop().create_future()
+                owner = True
+            else:
+                owner = False
+        if not owner:
             try:
                 return await spawning
             except Exception:  # noqa: BLE001
                 return None
-
-        spawn_future: asyncio.Future = asyncio.get_running_loop().create_future()
-        with self._state_lock:
-            self._spawning[key] = spawn_future
         try:
             client = await self._spawn_client(srv, per_server_root)
             if client is not None:
                 with self._state_lock:
                     self._clients[key] = client
                     self._last_used[key] = time.time()
-                eventlog.log_active(srv.server_id, per_server_root)
+                eventlog.log_active(*key)
             else:
                 self._broken.add(key)
-            spawn_future.set_result(client)
+            spawning.set_result(client)
             return client
         finally:
             with self._state_lock:
