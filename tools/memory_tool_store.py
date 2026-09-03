@@ -18,17 +18,9 @@ logger = logging.getLogger("tools.memory_tool")
 # agent/conversation_compression.py uses them to detect a leftover block for a
 # target whose entries have since been emptied — keep in lockstep.
 MEMORY_BLOCK_HEADERS = {
-    "memory": "MEMORY (your personal notes)",
-    "user": "USER PROFILE (who the user is)",
-}
+    "memory": "MEMORY (your personal notes)", "user": "USER PROFILE (who the user is)"}
 
 ENTRY_DELIMITER = "\n§\n"
-
-# Sentinel from ``_reload_target``: the file EXISTS but could not be read.
-# Distinct from a drift-backup path (str) and a clean reload (None); the caller
-# must abort rather than persist over an unreadable file.
-_READ_FAILED = object()
-
 
 def _memory_dir() -> Path:
     from tools import memory_tool
@@ -37,16 +29,15 @@ def _memory_dir() -> Path:
 
 
 def _scan_memory_content(content: str) -> Optional[str]:
-    """Scan memory content for injection/exfil patterns ("strict" scope: memory
-    enters the system prompt as a frozen snapshot, so a poisoned entry persists
-    across sessions). Returns the error string if blocked."""
+    """Scan for injection/exfil patterns ("strict" scope: memory enters the system
+    prompt as a frozen snapshot, so a poisoned entry persists across sessions).
+    Returns the error string if blocked."""
     return _first_threat_message(content, scope="strict")
 
 
 def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
-    """Error dict for external drift: the on-disk file wouldn't round-trip
-    through the parser/serializer, so flushing would discard content added by a
-    patch tool, shell append, manual edit, or sister session."""
+    """Error dict for external drift: the on-disk file wouldn't round-trip through
+    the parser/serializer, so flushing would discard externally added content."""
     return {
         "success": False,
         "error": (
@@ -60,19 +51,17 @@ def _drift_error(path: "Path", bak_path: str) -> Dict[str, Any]:
         "remediation": (
             "Open the .bak file, integrate the missing entries into the memory tool one at a time via "
             "memory(action=add, content=...), then remove or rewrite the original file to a clean state."
-        ),
-    }
+        )}
 
 
 def _read_failed_error(path: "Path") -> Dict[str, Any]:
-    """Error dict for an unreadable (but existing) memory file. Treating it as
+    """Error dict for an unreadable (but existing) memory file: treating it as
     empty and saving would rewrite the whole file from ``[]`` — wiping memory."""
     return {"success": False, "error": (
         f"Refusing to write {path.name}: the file exists on disk but could not be read right now "
         f"(temporarily locked by another program, a permission change, invalid/corrupt text encoding, "
         f"or a filesystem error). Treating an unreadable file as empty and saving would wipe existing "
-        f"memory, so the write is refused. Nothing was changed — retry in a moment."
-    )}
+        f"memory, so the write is refused. Nothing was changed — retry in a moment.")}
 
 
 def _find_unique_match(entries: List[str], old_text: str) -> Tuple[Optional[int], bool]:
@@ -119,18 +108,17 @@ class MemoryStore:
         self._consolidation_failures = 0
 
     def _consolidation_failure(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """Count an at-capacity consolidation failure. Under the per-turn cap
-        return ``response`` unchanged (it says how to retry); past it return a
-        TERMINAL result so the model stops looping — a failed memory side effect
-        must never block the turn's reply."""
+        """Count an at-capacity consolidation failure. Under the per-turn cap return
+        ``response`` unchanged (it says how to retry); past it return a TERMINAL
+        result so the model stops looping — a failed memory side effect must never
+        block the turn's reply."""
         self._consolidation_failures += 1
         if self._consolidation_failures <= self._MAX_CONSOLIDATION_FAILURES_PER_TURN:
             return response
         return {"success": False, "done": True, "error": (
             f"Memory consolidation failed {self._consolidation_failures} times this turn. Stop retrying "
             "memory calls — leave memory unchanged for now and continue with your reply to the user. "
-            "The fact can be saved in a later turn."
-        )}
+            "The fact can be saved in a later turn.")}
 
     def load_from_disk(self):
         """Load MEMORY.md / USER.md and capture the frozen system-prompt snapshot.
@@ -146,16 +134,14 @@ class MemoryStore:
         self._system_prompt_snapshot = {
             target: self._render_block(target, self._sanitize_entries_for_snapshot(entries, filename))
             for target, entries, filename in (
-                ("memory", self.memory_entries, "MEMORY.md"),
-                ("user", self.user_entries, "USER.md"),
-            )
+                ("memory", self.memory_entries, "MEMORY.md"), ("user", self.user_entries, "USER.md"))
         }
 
     @staticmethod
     def _sanitize_entries_for_snapshot(entries: List[str], filename: str) -> List[str]:
-        """Return *entries* with any threat-matching entry replaced by a
-        ``[BLOCKED: …]`` placeholder (strict scope, same as writes). Empty or
-        already-blocked entries pass through unchanged."""
+        """*entries* with any threat-matching entry replaced by a ``[BLOCKED: …]``
+        placeholder (strict scope, same as writes). Empty or already-blocked
+        entries pass through unchanged."""
         from tools.threat_patterns import scan_for_threats
 
         sanitized: List[str] = []
@@ -183,20 +169,20 @@ class MemoryStore:
             yield
             return
         fd = open(lock_path, "a+", encoding="utf-8")
-        try:
+
+        def _flock(unlock: bool):
             if fcntl:
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                fcntl.flock(fd, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
             else:
                 fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+                msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK if unlock else msvcrt.LK_LOCK, 1)
+
+        try:
+            _flock(False)
             yield
         finally:
             try:
-                if fcntl:
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                else:
-                    fd.seek(0)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
+                _flock(True)
             except OSError:
                 pass
             fd.close()
@@ -205,32 +191,21 @@ class MemoryStore:
     def _path_for(target: str) -> Path:
         return _memory_dir() / ("USER.md" if target == "user" else "MEMORY.md")
 
-    def _reload_target(self, target: str, *, skip_drift: bool = False):
-        """Re-read entries from disk (under file lock) before mutating.
-
-        Returns ``None`` on a clean reload; the backup path (str) on external
-        drift (caller must abort — flushing would discard un-roundtrippable
-        content); or ``_READ_FAILED`` when the file exists but could not be
-        read (caller MUST abort — rewriting from an assumed-empty view would
-        wipe it; even append-only ``add`` rewrites the whole file). Drift check
-        and parse use the SAME raw snapshot — a failed second read used to count
-        as "no drift". *skip_drift* skips the round-trip check (``add``).
-        """
-        raw, read_ok = self._read_raw_checked(self._path_for(target))
+    def _reload_or_error(self, target: str, *, skip_drift: bool = False) -> Optional[Dict[str, Any]]:
+        """Re-read entries from disk (under file lock) before mutating; return the
+        abort error dict, or None to proceed. Aborts on external drift (flushing
+        would discard un-roundtrippable content) and when the file exists but can't
+        be read (rewriting from an assumed-empty view would wipe it — even
+        append-only ``add`` rewrites the whole file). Drift check and parse use the
+        SAME raw snapshot — a failed second read used to count as "no drift".
+        *skip_drift* skips the round-trip check (``add``)."""
+        path = self._path_for(target)
+        raw, read_ok = self._read_raw_checked(path)
         if not read_ok:
-            return _READ_FAILED
+            return _read_failed_error(path)
         bak = None if skip_drift else self._detect_external_drift(target, raw)
         self._set_entries(target, list(dict.fromkeys(self._parse_entries(raw))))
-        return bak
-
-    def _reload_or_error(self, target: str, *, skip_drift: bool = False) -> Optional[Dict[str, Any]]:
-        """Reload under lock; return the abort error dict, or None to proceed."""
-        bak = self._reload_target(target, skip_drift=skip_drift)
-        if bak is _READ_FAILED:
-            return _read_failed_error(self._path_for(target))
-        if bak:
-            return _drift_error(self._path_for(target), bak)
-        return None
+        return _drift_error(path, bak) if bak else None
 
     def save_to_disk(self, target: str):
         """Persist entries to the appropriate file. Called after every mutation."""
@@ -241,10 +216,7 @@ class MemoryStore:
         return self.user_entries if target == "user" else self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
-        if target == "user":
-            self.user_entries = entries
-        else:
-            self.memory_entries = entries
+        setattr(self, "user_entries" if target == "user" else "memory_entries", entries)
 
     def _char_count(self, target: str) -> int:
         return len(ENTRY_DELIMITER.join(self._entries_for(target)))
@@ -256,8 +228,8 @@ class MemoryStore:
         return f"{self._char_count(target):,}/{self._char_limit(target):,}"
 
     def _failure_with_entries(self, target: str, message: str) -> Dict[str, Any]:
-        """Consolidation failure that shows the live entries so the model can
-        decide what to consolidate."""
+        """Consolidation failure showing the live entries so the model can decide
+        what to consolidate."""
         return self._consolidation_failure({"success": False, "error": message,
                                             "current_entries": self._entries_for(target), "usage": self._usage(target)})
 
@@ -272,8 +244,7 @@ class MemoryStore:
             return None, self._consolidation_failure({
                 "success": False,
                 "error": f"No entry matched '{old_text}'. Check current_entries below and retry with the exact text of the entry you want to {verb}.",
-                "current_entries": entries,
-            })
+                "current_entries": entries})
         return idx, None
 
     def _commit(self, target: str, entries: List[str], message: str) -> Dict[str, Any]:
@@ -305,8 +276,7 @@ class MemoryStore:
                     f"Memory at {self._char_count(target):,}/{limit:,} chars. Adding this entry "
                     f"({len(content)} chars) would exceed the limit. Consolidate now: use 'replace' to merge "
                     f"overlapping entries into shorter ones or 'remove' stale or less important entries (see "
-                    f"current_entries below), then retry this add — all in this turn."
-                ))
+                    f"current_entries below), then retry this add — all in this turn."))
             entries.append(content)
             return self._commit(target, entries, "Entry added.")
 
@@ -335,8 +305,7 @@ class MemoryStore:
                 return self._failure_with_entries(target, (
                     f"Replacement would put memory at {new_total:,}/{limit:,} chars. Shorten the new content, "
                     f"or 'remove' other stale or less important entries to make room (see current_entries "
-                    f"below), then retry — all in this turn."
-                ))
+                    f"below), then retry — all in this turn."))
             entries[idx] = new_content
             return self._commit(target, entries, "Entry replaced.")
 
@@ -386,13 +355,11 @@ class MemoryStore:
 
     def apply_batch(self, target: str, operations: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Apply a sequence of add/replace/remove ops to one target atomically.
-
-        Ops are validated and applied against the FINAL budget only — so a single
-        call can free space (remove/replace) and add new entries without the
-        multi-turn consolidate-then-retry dance. All-or-nothing: if any op is
-        malformed, doesn't match, or the net result exceeds the char limit,
-        NOTHING is written and the first failure plus live state is returned.
-        """
+        Ops are validated and applied against the FINAL budget only — so one call
+        can free space (remove/replace) and add new entries without the multi-turn
+        consolidate-then-retry dance. All-or-nothing: if any op is malformed,
+        doesn't match, or the net result exceeds the char limit, NOTHING is written
+        and the first failure plus live state is returned."""
         if not operations:
             return {"success": False, "error": "operations list is empty."}
 
@@ -419,27 +386,22 @@ class MemoryStore:
                 pos = f"Operation {i + 1} ({act or 'unknown'})"
                 msg = self._apply_batch_op(working, act, content, old_text, pos)
                 if msg:
-                    return self._batch_error(target, msg)
+                    # Batch-abort error reporting live (uncommitted) state.
+                    return self._failure_with_entries(
+                        target, msg + " No operations were applied (batch is all-or-nothing).")
             # Budget check against the FINAL state only.
             new_total = len(ENTRY_DELIMITER.join(working))
             if new_total > limit:
                 return self._failure_with_entries(target, (
                     f"After applying all {len(operations)} operations, memory would be at "
                     f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
-                    f"entries in the same batch (see current_entries below), then retry."
-                ))
+                    f"entries in the same batch (see current_entries below), then retry."))
             return self._commit(target, working, f"Applied {len(operations)} operation(s).")
 
-    def _batch_error(self, target: str, message: str) -> Dict[str, Any]:
-        """Build a batch-abort error that reports live (uncommitted) state."""
-        return self._failure_with_entries(
-            target, message + " No operations were applied (batch is all-or-nothing)."
-        )
-
     def format_for_system_prompt(self, target: str) -> Optional[str]:
-        """Return the frozen load-time snapshot for system-prompt injection (NOT
-        live state — mid-session writes don't affect it, preserving the prefix
-        cache). None if the snapshot is empty."""
+        """The frozen load-time snapshot for system-prompt injection (NOT live
+        state — mid-session writes don't affect it, preserving the prefix cache).
+        None if the snapshot is empty."""
         return self._system_prompt_snapshot.get(target, "") or None
 
     # -- Internal helpers --
@@ -482,11 +444,11 @@ class MemoryStore:
     @staticmethod
     def _read_raw_checked(path: Path) -> Tuple[str, bool]:
         """Read raw text as ``(raw, read_ok)``. ``read_ok`` is False ONLY when the
-        file EXISTS but can't be read (absent file → ``("", True)``). Invalid
-        UTF-8 counts as unreadable; decoding stays STRICT because
-        ``errors="replace"`` would hand callers a lossy view that a save then
-        persists over the real bytes. ``utf-8-sig`` strips a Notepad BOM that
-        otherwise glues U+FEFF onto the first entry forever."""
+        file EXISTS but can't be read (absent file → ``("", True)``). Invalid UTF-8
+        counts as unreadable; decoding stays STRICT because ``errors="replace"``
+        would hand callers a lossy view that a save then persists over the real
+        bytes. ``utf-8-sig`` strips a Notepad BOM that otherwise glues U+FEFF onto
+        the first entry forever."""
         if not path.exists():
             return "", True
         try:
@@ -501,25 +463,19 @@ class MemoryStore:
         return [e for e in (x.strip() for x in raw.split(ENTRY_DELIMITER)) if e]
 
     @staticmethod
-    def _read_entries_checked(path: Path) -> Tuple[List[str], bool]:
-        """Read + parse as ``(entries, read_ok)`` — see ``_read_raw_checked``."""
-        raw, read_ok = MemoryStore._read_raw_checked(path)
-        return MemoryStore._parse_entries(raw), read_ok
-
-    @staticmethod
     def _read_file(path: Path) -> List[str]:
         """Read a memory file into entries (empty list on any error). Only for
-        read-only callers (``load_from_disk``, learning_mutations); mutation
-        paths must use ``_read_raw_checked`` so they can refuse to overwrite an
+        read-only callers (``load_from_disk``, learning_mutations); mutation paths
+        must use ``_read_raw_checked`` so they can refuse to overwrite an
         unreadable file."""
-        return MemoryStore._read_entries_checked(path)[0]
+        return MemoryStore._parse_entries(MemoryStore._read_raw_checked(path)[0])
 
     def _detect_external_drift(self, target: str, raw: str) -> Optional[str]:
         """Backup-path string if *raw* (the caller's checked-read snapshot) shows
         external drift, else None. Signals: round-trip mismatch, or one parsed
-        entry exceeding the whole-file char limit (no tool-written entry can —
-        an external writer appended free-form content a flush would truncate).
-        The file is snapshotted to ``.bak.<ts>`` so the operator can recover it."""
+        entry exceeding the whole-file char limit (no tool-written entry can — an
+        external writer appended free-form content a flush would truncate). The
+        file is snapshotted to ``.bak.<ts>`` so the operator can recover it."""
         if not raw.strip():
             return None
         parsed = self._parse_entries(raw)

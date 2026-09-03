@@ -35,8 +35,7 @@ logger = logging.getLogger(__name__)
 # builds isolated while letting the check_fn result flow to the immediately
 # following dynamic_schema_overrides call in ToolRegistry.get_definitions().
 _memory_surface_flags: ContextVar[Optional[Tuple[bool, bool]]] = ContextVar(
-    "memory_surface_flags", default=None
-)
+    "memory_surface_flags", default=None)
 
 
 def get_memory_dir() -> Path:
@@ -46,16 +45,14 @@ def get_memory_dir() -> Path:
 
 
 from tools.memory_tool_store import (  # noqa: E402,F401  (re-exports)
-    ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore, _READ_FAILED,
-    _drift_error, _read_failed_error, _scan_memory_content,
-)
+    ENTRY_DELIMITER, MEMORY_BLOCK_HEADERS, MemoryStore,
+    _drift_error, _read_failed_error, _scan_memory_content)
 
 
 def load_on_disk_store() -> "MemoryStore":
     """Fresh on-disk MemoryStore with configured limits/flags, for contexts with
     no live agent (gateway, Desktop, bare CLI ``/memory``) so approvals enforce
     the SAME caps as ``agent_init``. Defaults if config can't load; never raises."""
-    kwargs: Dict[str, Any] = {}
     try:
         from hermes_cli.config import load_config
 
@@ -66,22 +63,15 @@ def load_on_disk_store() -> "MemoryStore":
             "memory_char_limit": int(mem_cfg.get("memory_char_limit", 2200)),
             "user_char_limit": int(mem_cfg.get("user_char_limit", 1375)),
             "memory_enabled": memory_enabled,
-            "user_profile_enabled": user_profile_enabled,
-        }
+            "user_profile_enabled": user_profile_enabled}
     except Exception:
-        kwargs = {}  # config optional — fall back to defaults rather than break /memory
+        kwargs: Dict[str, Any] = {}  # config optional — fall back to defaults rather than break /memory
     store = MemoryStore(**kwargs)
     store.load_from_disk()
     return store
 
 
-# ---------------------------------------------------------------------------
-# Write-approval gate
-# ---------------------------------------------------------------------------
-
-def _target_label(target: str) -> str:
-    return "user profile" if target == "user" else "memory"
-
+# -- Write-approval gate --
 
 def _gate_or_stage(summary: str, detail: str, payload: Dict[str, Any]) -> Optional[str]:
     """Run the memory write gate. Returns a JSON tool-result string when the
@@ -101,24 +91,25 @@ def _gate_or_stage(summary: str, detail: str, payload: Dict[str, Any]) -> Option
                       ensure_ascii=False)
 
 
+# action -> (gate summary verb, gate detail) for a single mutating op.
+_GATE_TEXT = {
+    "add": lambda label, content, old_text: (f"add to {label}", content or ""),
+    "replace": lambda label, content, old_text: (f"replace in {label}", f"old: {old_text}\nnew: {content}"),
+    "remove": lambda label, content, old_text: (f"remove from {label}", old_text or "")}
+
+
 def _apply_write_gate(action: str, target: str, content: Optional[str], old_text: Optional[str]) -> Optional[str]:
     """Gate a single mutating op (add/replace/remove); other actions pass."""
-    if action not in _STORE_ACTIONS:
+    if action not in _GATE_TEXT:
         return None
-    label = _target_label(target)
-    if action == "add":
-        summary, detail = f"add to {label}", content or ""
-    elif action == "replace":
-        summary, detail = f"replace in {label}", f"old: {old_text}\nnew: {content}"
-    else:
-        summary, detail = f"remove from {label}", old_text or ""
+    summary, detail = _GATE_TEXT[action]("user profile" if target == "user" else "memory", content, old_text)
     payload = {"action": action, "target": target, "content": content, "old_text": old_text}
     return _gate_or_stage(summary, detail, payload)
 
 
 def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Optional[str]:
     """Gate a whole batch as a single unit."""
-    summary = f"apply {len(operations)} op(s) to {_target_label(target)}"
+    summary = f"apply {len(operations)} op(s) to {'user profile' if target == 'user' else 'memory'}"
     detail_lines = []
     for op in operations:
         op = op or {}
@@ -134,32 +125,25 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
     return _gate_or_stage(summary, "\n".join(detail_lines), payload)
 
 
-# ---------------------------------------------------------------------------
-# Tool entry point
-# ---------------------------------------------------------------------------
-
-def _missing_old_text_error(store: "MemoryStore", target: str, action: str) -> str:
-    """Recoverable error for replace/remove without ``old_text``. It can't be
-    schema-required (needs a combinator the Codex backend rejects — see
-    test_memory_tool_schema.py) and some clients omit it, so return the current
-    inventory plus a retry instruction instead of a dead-end."""
-    return json.dumps({
-        "success": False,
-        "error": (f"'{action}' needs old_text -- a short unique substring of the entry "
-                  f"to {action}. None was provided. Reissue the {action} with old_text "
-                  f"set to part of one of the current_entries below."),
-        "current_entries": store._entries_for(target),
-        "usage": store._usage(target),
-    }, ensure_ascii=False)
-
+# -- Tool entry point --
 
 def _validate_single_op(store, action, target, content, old_text) -> Optional[str]:
     """Validate required params BEFORE the gate so an invalid write is rejected
-    now rather than staged and failing at approve time."""
+    now rather than staged and failing at approve time. A missing ``old_text``
+    is recoverable (it can't be schema-required — needs a combinator the Codex
+    backend rejects, see test_memory_tool_schema.py — and some clients omit it),
+    so return the current inventory plus a retry instruction, not a dead-end."""
     if action == "add" and not content:
         return tool_error("Content is required for 'add' action.", success=False)
     if action in ("replace", "remove") and not old_text:
-        return _missing_old_text_error(store, target, action)
+        return json.dumps({
+            "success": False,
+            "error": (f"'{action}' needs old_text -- a short unique substring of the entry "
+                      f"to {action}. None was provided. Reissue the {action} with old_text "
+                      f"set to part of one of the current_entries below."),
+            "current_entries": store._entries_for(target),
+            "usage": store._usage(target),
+        }, ensure_ascii=False)
     if action == "replace" and not content:
         return tool_error("content is required for 'replace' action.", success=False)
     return None
@@ -169,8 +153,7 @@ def _validate_single_op(store, action, target, content, old_text) -> Optional[st
 _STORE_ACTIONS = {
     "add": lambda store, target, content, old_text: store.add(target, content),
     "replace": lambda store, target, content, old_text: store.replace(target, old_text, content),
-    "remove": lambda store, target, content, old_text: store.remove(target, old_text),
-}
+    "remove": lambda store, target, content, old_text: store.remove(target, old_text)}
 
 
 def memory_tool(
@@ -180,8 +163,7 @@ def memory_tool(
     old_text: str = None,
     new_text: str = None,
     operations: Optional[List[Dict[str, Any]]] = None,
-    store: Optional[MemoryStore] = None,
-) -> str:
+    store: Optional[MemoryStore] = None) -> str:
     """Tool entry point; returns a JSON string. Single op (action + content /
     old_text) or batch (``operations`` applied atomically against the final
     budget). ``new_text`` aliases ``content`` — callers mirror ``old_text``
@@ -241,8 +223,7 @@ def get_builtin_memory_store_flags(config: Optional[Dict[str, Any]] = None) -> T
     section = get_builtin_memory_config(config)
     return (
         is_truthy_value(section.get("memory_enabled"), default=True),
-        is_truthy_value(section.get("user_profile_enabled"), default=True),
-    )
+        is_truthy_value(section.get("user_profile_enabled"), default=True))
 
 
 @no_cache_check_fn
@@ -282,9 +263,7 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
     return run(store, target, payload.get("content") or "", payload.get("old_text") or "")
 
 
-# =============================================================================
-# OpenAI Function-Calling Schema
-# =============================================================================
+# -- OpenAI Function-Calling Schema --
 
 MEMORY_SCHEMA = {
     "name": "memory",
@@ -364,13 +343,10 @@ _SINGLE_TARGET_TEXT = {
     ("memory",): (
         "The enabled built-in store: 'memory' for personal notes.",
         "TARGET: only 'memory' is enabled for personal notes (environment, conventions, "
-        "tool quirks, lessons).",
-    ),
+        "tool quirks, lessons)."),
     ("user",): (
         "The enabled built-in store: 'user' for user profile.",
-        "TARGET: only 'user' is enabled for user profile facts (name, role, preferences, style).",
-    ),
-}
+        "TARGET: only 'user' is enabled for user profile facts (name, role, preferences, style).")}
 
 
 def _build_memory_schema_overrides() -> Dict[str, Any]:
@@ -390,8 +366,7 @@ def _build_memory_schema_overrides() -> Dict[str, Any]:
         description = description.replace(
             "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
             "notes (environment, conventions, tool quirks, lessons).",
-            replacement,
-        )
+            replacement)
     return {"description": description, "parameters": parameters}
 
 
@@ -403,14 +378,8 @@ registry.register(
     toolset="memory",
     schema=MEMORY_SCHEMA,
     handler=lambda args, **kw: memory_tool(
-        action=args.get("action", ""),
-        target=args.get("target", "memory"),
-        content=args.get("content"),
-        old_text=args.get("old_text"),
-        new_text=args.get("new_text"),
-        operations=args.get("operations"),
-        store=kw.get("store")),
+        action=args.get("action", ""), target=args.get("target", "memory"), store=kw.get("store"),
+        **{k: args.get(k) for k in ("content", "old_text", "new_text", "operations")}),
     check_fn=check_memory_requirements,
     emoji="🧠",
-    dynamic_schema_overrides=_build_memory_schema_overrides,
-)
+    dynamic_schema_overrides=_build_memory_schema_overrides)

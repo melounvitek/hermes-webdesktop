@@ -5,16 +5,12 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 from agent.retry_utils import parse_retry_after_seconds
-from tools.microsoft_graph_auth import (
-    GraphCredentials,
-    MicrosoftGraphTokenProvider,
-    format_graph_error,
-)
+from tools.microsoft_graph_auth import GraphCredentials, MicrosoftGraphTokenProvider, format_graph_error
 
 
 DEFAULT_GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
@@ -32,8 +28,7 @@ class MicrosoftGraphAPIError(MicrosoftGraphClientError):
 
     def __init__(
         self, status_code: int, method: str, url: str, message: str, *,
-        retry_after_seconds: float | None = None, payload: Any = None,
-    ) -> None:
+        retry_after_seconds: float | None = None, payload: Any = None) -> None:
         self.status_code = status_code
         self.method = method
         self.url = url
@@ -55,8 +50,7 @@ class MicrosoftGraphClient:
         base_url: str = DEFAULT_GRAPH_BASE_URL, timeout: float = 60.0, max_retries: int = 3,
         transport: httpx.AsyncBaseTransport | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
-        user_agent: str = "Hermes-Agent/graph-client",
-    ) -> None:
+        user_agent: str = "Hermes-Agent/graph-client") -> None:
         self.token_provider = token_provider
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
@@ -87,9 +81,10 @@ class MicrosoftGraphClient:
             return {"deleted": True, "status_code": response.status_code}
         return self._decode_json(response)
 
-    async def iterate_pages(
-        self, path: str, *, params: Params = None, headers: Headers = None
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def collect_paginated(
+        self, path: str, *, params: Params = None, headers: Headers = None) -> list[Any]:
+        """Follow ``@odata.nextLink`` and concatenate every page's ``value`` list."""
+        items: list[Any] = []
         # Query params go on the first request only; @odata.nextLink already embeds them.
         next_url: str | None = self._resolve_url(path)
         next_params = dict(params or {})
@@ -98,20 +93,10 @@ class MicrosoftGraphClient:
             payload = self._decode_json(response)
             if not isinstance(payload, dict):
                 raise MicrosoftGraphClientError(
-                    f"Expected paginated Graph response dict, got {type(payload).__name__}."
-                )
-            yield payload
-            next_url = payload.get("@odata.nextLink")
-            next_params = {}
-
-    async def collect_paginated(
-        self, path: str, *, params: Params = None, headers: Headers = None
-    ) -> list[Any]:
-        items: list[Any] = []
-        async for page in self.iterate_pages(path, params=params, headers=headers):
-            value = page.get("value")
-            if isinstance(value, list):
-                items.extend(value)
+                    f"Expected paginated Graph response dict, got {type(payload).__name__}.")
+            if isinstance(payload.get("value"), list):
+                items.extend(payload["value"])
+            next_url, next_params = payload.get("@odata.nextLink"), {}
         return items
 
     async def download_to_file(
@@ -147,8 +132,7 @@ class MicrosoftGraphClient:
 
     async def _request(
         self, method: str, path_or_url: str, *,
-        params: Params = None, json_body: Any | None = None, headers: Headers = None,
-    ) -> httpx.Response:
+        params: Params = None, json_body: Any | None = None, headers: Headers = None) -> httpx.Response:
         url = self._resolve_url(path_or_url)
 
         async def perform(client: httpx.AsyncClient, request_headers: dict[str, str]):
@@ -160,8 +144,7 @@ class MicrosoftGraphClient:
     async def _with_retries(
         self, method: str, url: str, accept: str, json_body: Any | None, headers: Headers,
         perform: Callable[[httpx.AsyncClient, dict[str, str]], Awaitable[tuple[httpx.Response, Any]]],
-        kind: str,
-    ) -> Any:
+        kind: str) -> Any:
         """Run ``perform`` (returning ``(response, result)``) under the retry policy.
 
         ``kind`` ("request"/"download") only labels the transport-failure messages.
@@ -175,8 +158,7 @@ class MicrosoftGraphClient:
             token = await self.token_provider.get_access_token(
                 force_refresh=attempt > 0
                 and isinstance(last_error, MicrosoftGraphAPIError)
-                and last_error.status_code == 401
-            )
+                and last_error.status_code == 401)
             request_headers = {"Authorization": f"Bearer {token}", "Accept": accept, "User-Agent": self.user_agent}
             if json_body is not None:
                 request_headers["Content-Type"] = "application/json"
@@ -190,8 +172,7 @@ class MicrosoftGraphClient:
                 last_error = exc
                 if attempt >= self.max_retries:
                     raise MicrosoftGraphClientError(
-                        f"Microsoft Graph {kind} failed for {method} {url}: {exc}"
-                    ) from exc
+                        f"Microsoft Graph {kind} failed for {method} {url}: {exc}") from exc
                 await self._sleep(self._retry_delay(None, attempt))
                 attempt += 1
                 continue
@@ -224,29 +205,20 @@ class MicrosoftGraphClient:
         except ValueError as exc:
             raise MicrosoftGraphClientError(
                 "Microsoft Graph response was not valid JSON for "
-                f"{response.request.method} {response.request.url}"
-            ) from exc
+                f"{response.request.method} {response.request.url}") from exc
 
     @staticmethod
     def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
-        if response is not None:
-            retry_after = parse_retry_after_seconds(response.headers)
-            if retry_after is not None:
-                return retry_after
-        return min(8.0, 0.5 * (2 ** attempt))
+        retry_after = parse_retry_after_seconds(response.headers) if response is not None else None
+        return min(8.0, 0.5 * (2 ** attempt)) if retry_after is None else retry_after
 
     @staticmethod
     def _build_api_error(method: str, url: str, response: httpx.Response) -> MicrosoftGraphAPIError:
-        message = response.text.strip() or "unknown error"
         try:
             payload: Any = response.json()
         except ValueError:
             payload = None
-        if isinstance(payload, dict):
-            detail = format_graph_error(payload.get("error"))
-            if detail is not None:
-                message = detail
+        detail = format_graph_error(payload.get("error")) if isinstance(payload, dict) else None
         return MicrosoftGraphAPIError(
-            response.status_code, method, url, message,
-            retry_after_seconds=parse_retry_after_seconds(response.headers), payload=payload,
-        )
+            response.status_code, method, url, detail if detail is not None else (response.text.strip() or "unknown error"),
+            retry_after_seconds=parse_retry_after_seconds(response.headers), payload=payload)
