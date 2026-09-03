@@ -142,18 +142,15 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
     # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}"
     # and re-fire the original after a correction settles.
     _drop_queued_duplicates_of_inflight_user(session)
+    text_only = not image_paths and isinstance(text, str)
     # Never queue a text-only self-copy of the live prompt: draining it would restart it.
-    if not image_paths and isinstance(text, str):
-        original = _ac_inflight_original(session)
-        if original and text.strip() == original:
-            return
-    queued = {"text": text, "transport": transport}
-    if image_paths:
-        queued["image_paths"] = image_paths
+    if text_only and text.strip() == _ac_inflight_original(session) != "":
+        return
+    queued = {"text": text, "transport": transport, **({"image_paths": image_paths} if image_paths else {})}
     existing = session.get("queued_prompt")
     if (
-        existing and isinstance(existing.get("text"), str) and isinstance(text, str)
-        and not existing.get("image_paths") and not image_paths and not session.get("queued_prompts")
+        existing and text_only and isinstance(existing.get("text"), str)
+        and not existing.get("image_paths") and not session.get("queued_prompts")
     ):
         prev = existing["text"]
         existing["text"] = f"{prev}\n\n{text}" if prev and text else (prev or text)
@@ -297,16 +294,11 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
     """Fire a queued next-turn prompt if one is waiting and the session is idle. True when dispatched: the
     caller skips lower-priority follow-ups this cycle (the user's message wins)."""
     with session["history_lock"]:
-        if session.get("_closing"):
-            return False
         queued = session.get("queued_prompt")
-        if not queued or session.get("running"):
+        if session.get("_closing") or not queued or session.get("running"):
             return False
         queue_generation = int(session.get("_queued_prompt_generation", 0))
-        queued_prompts = session.get("queued_prompts") or []
-        session["queued_prompt"] = queued_prompts.pop(0) if queued_prompts else None
-        if not queued_prompts:
-            session.pop("queued_prompts", None)
+        _ac_set_queue(session, session.get("queued_prompts") or [])
         session["running"] = True
         if queued.get("transport") is not None:
             session["transport"] = queued["transport"]
