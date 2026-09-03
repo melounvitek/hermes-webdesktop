@@ -278,7 +278,8 @@ class XAIImageGenProvider(ImageGenProvider):
         for index, source in enumerate(source_images):
             if source.lower().startswith(_REMOTE_PREFIXES) or Path(source).expanduser().is_file():
                 continue
-            field = "image_url" if index == 0 and image_url and image_url.strip() == source else "reference_image_urls"
+            is_primary = index == 0 and image_url and image_url.strip() == source
+            field = "image_url" if is_primary else "reference_image_urls"
             return edit_fail(
                 f"{field} must be a public HTTPS URL or data URI "
                 "(e.g. the `image`/`public_url` from a prior Imagine result)",
@@ -292,7 +293,9 @@ class XAIImageGenProvider(ImageGenProvider):
             "User-Agent": hermes_xai_user_agent(),
         }
         base_url = _base_url(creds)
-        storage_options = build_xai_storage_options("image_gen", filename_prefix="hermes-xai-image", extension="png")
+        storage_options = build_xai_storage_options(
+            "image_gen", filename_prefix="hermes-xai-image", extension="png",
+        )
         storage_notice = maybe_mark_xai_storage_notice_seen("image_gen")
         storage_cfg = read_xai_imagine_storage_config("image_gen")
 
@@ -319,7 +322,9 @@ class XAIImageGenProvider(ImageGenProvider):
             payload["storage_options"] = storage_options
 
         fail = error_factory(provider_name, aspect, model=model_id, prompt=prompt)
-        result, failure = post_json(endpoint_url, headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT, label="xAI")
+        result, failure = post_json(
+            endpoint_url, headers=headers, payload=payload, timeout=_REQUEST_TIMEOUT, label="xAI",
+        )
         if failure:
             if failure.kind == "http":
                 logger.error("xAI image gen failed (%d): %s", failure.status, failure.message)

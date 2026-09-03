@@ -1,13 +1,10 @@
-"""Firecrawl cloud browser provider (plugin form).
-
-Cloud-browser path only (``/v2/browser``) — distinct from the firecrawl WEB
-plugin at ``plugins/web/firecrawl/`` (search/extract/crawl on ``/v2/*``); both
-share ``FIRECRAWL_API_KEY``.
+"""Firecrawl cloud browser provider (``/v2/browser`` only — the firecrawl WEB
+plugin under ``plugins/web/firecrawl/`` shares ``FIRECRAWL_API_KEY``).
 
 Config: ``browser.cloud_provider: "firecrawl"`` (explicit selection only — not
-in the legacy auto-detect walk). Env: ``FIRECRAWL_API_KEY``
-(https://firecrawl.dev), ``FIRECRAWL_API_URL`` (default
-https://api.firecrawl.dev), ``FIRECRAWL_BROWSER_TTL`` (default 300 seconds).
+in the legacy auto-detect walk). Env: ``FIRECRAWL_API_KEY``,
+``FIRECRAWL_API_URL`` (default https://api.firecrawl.dev), ``FIRECRAWL_BROWSER_TTL``
+(default 300 seconds).
 """
 
 from __future__ import annotations
@@ -65,11 +62,9 @@ class FirecrawlBrowserProvider(CloudBrowserProvider):
 
         response = self._post_create(f"{self._api_url()}/v2/browser", self._headers(), {"ttl": ttl})
         self._check_created(response)
-
         data = response.json()
         session_name = self._session_name(task_id)
         logger.info("Created Firecrawl browser session %s", session_name)
-
         return {
             "session_name": session_name,
             "bb_session_id": data["id"],

@@ -1,9 +1,8 @@
 """Shared helpers for the bundled ``image_gen`` provider plugins.
 
-Every provider under ``plugins/image_gen/`` is loaded by path (module name
-``hermes_plugins.image_gen__<name>``) and resolves this module through the
-repo root on ``sys.path`` — the same way they import ``agent.image_gen_provider``.
-Nothing here is a plugin: the scanner only looks at directories.
+Providers are loaded by path (``hermes_plugins.image_gen__<name>``) and resolve
+this module through the repo root on ``sys.path``. Not a plugin itself: the
+scanner only looks at directories.
 """
 
 from __future__ import annotations
@@ -22,18 +21,12 @@ from agent.image_gen_provider import (
 
 logger = logging.getLogger(__name__)
 
-# OpenAI-style ``size`` strings for the three semantic aspect ratios. Shared by
-# every OpenAI-compatible ``images.generations`` backend so aspect_ratio means
-# the same thing across providers.
-OPENAI_SIZES: Dict[str, str] = {
-    "landscape": "1536x1024",
-    "square": "1024x1024",
-    "portrait": "1024x1536",
-}
+# OpenAI-style ``size`` strings for the three semantic aspect ratios, shared by
+# every OpenAI-compatible ``images.generations`` backend.
+OPENAI_SIZES: Dict[str, str] = {"landscape": "1536x1024", "square": "1024x1024", "portrait": "1024x1536"}
 
-# gpt-image-2 quality tiers, exposed as three virtual model ids so the picker
-# and ``image_gen.model`` behave like any other multi-model backend. All three
-# hit the same API model with a different ``quality`` knob.
+# gpt-image-2 quality tiers as three virtual model ids (same API model,
+# different ``quality`` knob) so the picker works like any multi-model backend.
 GPT_IMAGE_2_API_MODEL = "gpt-image-2"
 GPT_IMAGE_2_DEFAULT = "gpt-image-2-medium"
 GPT_IMAGE_2_TIERS: Dict[str, Dict[str, Any]] = {
@@ -102,11 +95,9 @@ def resolve_static_model(
     """
     if isinstance(explicit, str) and explicit.strip() in models:
         return explicit.strip(), models[explicit.strip()]
-
     env_override = os.environ.get(env_var)
     if env_override and env_override in models:
         return env_override, models[env_override]
-
     cfg = load_image_gen_config() if config is None else config
     scoped = cfg.get(config_key)
     candidates = [scoped.get("model") if isinstance(scoped, dict) else None]
@@ -115,14 +106,11 @@ def resolve_static_model(
     for candidate in candidates:
         if isinstance(candidate, str) and candidate in models:
             return candidate, models[candidate]
-
     return default, models[default]
 
 
 def collect_source_images(
-    image_url: Optional[str],
-    reference_image_urls: Optional[List[str]],
-    limit: Optional[int] = None,
+    image_url: Optional[str], reference_image_urls: Optional[List[str]], limit: Optional[int] = None
 ) -> List[str]:
     """Primary ``image_url`` first, then normalized references, clamped to ``limit``."""
     sources: List[str] = []
@@ -138,11 +126,8 @@ def catalog_rows(
     *,
     price: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Picker rows for a catalog: ``id`` plus ``fields`` read from each meta.
-
-    A missing ``display`` falls back to the model id, other missing fields to
-    ``""``; ``price`` (when given) overrides the per-model value.
-    """
+    """Picker rows: ``id`` plus ``fields`` from each meta (missing ``display`` →
+    model id, other fields → ``""``); ``price`` overrides the per-model value."""
     rows = []
     for model_id, meta in models.items():
         row: Dict[str, Any] = {"id": model_id}
@@ -159,10 +144,7 @@ def api_key_setup_schema(
 ) -> Dict[str, Any]:
     """``get_setup_schema()`` dict for a provider authenticated by one env var."""
     return {
-        "name": name,
-        "badge": badge,
-        "tag": tag,
-        "env_vars": [{"key": key, "prompt": prompt, "url": url}],
+        "name": name, "badge": badge, "tag": tag, "env_vars": [{"key": key, "prompt": prompt, "url": url}],
     }
 
 
@@ -178,20 +160,11 @@ def error_factory(provider: str, aspect: str, *, model: str = "", prompt: str = 
 
 
 def prompt_required_error(provider: str, aspect: str) -> Dict[str, Any]:
-    return error_response(
-        error=PROMPT_REQUIRED,
-        error_type="invalid_argument",
-        provider=provider,
-        aspect_ratio=aspect,
-    )
+    return error_factory(provider, aspect)(PROMPT_REQUIRED, "invalid_argument")
 
 
 def openai_importable() -> bool:
-    try:
-        import openai  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return import_openai("", "")[0] is not None
 
 
 def import_openai(provider: str, aspect: str) -> Tuple[Any, Optional[Dict[str, Any]]]:
@@ -199,12 +172,7 @@ def import_openai(provider: str, aspect: str) -> Tuple[Any, Optional[Dict[str, A
     try:
         import openai
     except ImportError:
-        return None, error_response(
-            error=OPENAI_MISSING,
-            error_type="missing_dependency",
-            provider=provider,
-            aspect_ratio=aspect,
-        )
+        return None, error_factory(provider, aspect)(OPENAI_MISSING, "missing_dependency")
     return openai, None
 
 
@@ -220,12 +188,11 @@ def materialize_image(
     aspect: str,
     log: logging.Logger = logger,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """Turn a ``(b64_json, url)`` result pair into a local image reference.
+    """``(image_ref, None)`` or ``(None, error_dict)`` for a ``(b64_json, url)`` pair.
 
-    Returns ``(image_ref, None)`` or ``(None, error_dict)``. Base64 is always
-    cached (a write failure is an ``io_error``); a URL is cached best-effort
-    because provider URLs are often ephemeral, falling back to the bare URL so
-    a cache hiccup never destroys a successful generation.
+    Base64 is always cached (write failure → ``io_error``); a URL is cached
+    best-effort, falling back to the bare URL so a cache hiccup never destroys
+    a successful generation.
     """
     fail = error_factory(provider, aspect, model=model, prompt=prompt)
     if b64:
@@ -243,9 +210,7 @@ def cache_url_best_effort(url: str, *, prefix: str, label: str, log: logging.Log
     try:
         return str(save_url_image(url, prefix=prefix))
     except Exception as exc:  # noqa: BLE001
-        log.warning(
-            "%s image URL %s could not be cached (%s); falling back to bare URL.", label, url, exc,
-        )
+        log.warning("%s image URL %s could not be cached (%s); falling back to bare URL.", label, url, exc)
         return url
 
 
@@ -260,10 +225,9 @@ def requests_error_message(response: Any, exc: Exception) -> str:
 @dataclass
 class HttpFailure:
     """One failed ``post_json`` attempt, pre-shaped as ``(error, error_type)``.
-
-    ``kind`` is ``http`` / ``timeout`` / ``connection`` / ``request`` /
-    ``invalid_json``; ``status`` and ``response`` are set for ``http`` only.
-    """
+    ``kind`` ∈ http / timeout / connection / request / invalid_json; ``message``
+    is the extracted HTTP error text or ``str(exc)``; ``status`` / ``response``
+    are set for ``http`` only."""
 
     kind: str
     error: str
@@ -303,20 +267,21 @@ def post_json(
             "http", f"{label} image generation failed ({status}): {message}", "api_error",
             status=status, message=message, response=resp,
         )
-    except requests.Timeout:
+    except requests.Timeout as exc:
         return None, HttpFailure(
-            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout"
+            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout", message=str(exc),
         )
     except requests.ConnectionError as exc:
-        return None, HttpFailure("connection", f"{label} connection error: {exc}", "connection_error")
+        return None, HttpFailure(
+            "connection", f"{label} connection error: {exc}", "connection_error", message=str(exc),
+        )
     except requests.RequestException as exc:
         if not catch_request_exception:
             raise
-        return None, HttpFailure("request", f"{label} request failed: {exc}", "api_error")
-
+        return None, HttpFailure("request", f"{label} request failed: {exc}", "api_error", message=str(exc))
     try:
         return response.json(), None
     except Exception as exc:  # noqa: BLE001
         return None, HttpFailure(
-            "invalid_json", f"{label} returned invalid JSON: {exc}", "invalid_response"
+            "invalid_json", f"{label} returned invalid JSON: {exc}", "invalid_response", message=str(exc),
         )

@@ -88,7 +88,9 @@ def _summarize_error_body(body: str) -> str:
 
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
-    return resolve_static_model(_MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai-codex")
+    return resolve_static_model(
+        _MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai-codex"
+    )
 
 
 def _read_codex_access_token() -> Optional[str]:
@@ -306,7 +308,9 @@ def _collect_image_b64(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     })
-    payload = _build_responses_payload(prompt=prompt, size=size, quality=quality, input_images=input_images)
+    payload = _build_responses_payload(
+        prompt=prompt, size=size, quality=quality, input_images=input_images,
+    )
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
 
     final_b64: Optional[str] = None
@@ -409,7 +413,8 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
             collected: Optional[Dict[str, str]] = None
             for attempt in range(attempts):
                 collected = _collect_image_b64(
-                    token, prompt=prompt, size=size, quality=meta["quality"], input_images=input_images or None,
+                    token, prompt=prompt, size=size, quality=meta["quality"],
+                    input_images=input_images or None,
                 )
                 if collected and collected.get("source") == "final" and collected.get("b64"):
                     break
@@ -420,7 +425,8 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
                         else "no image_generation_call result"
                     )
                     logger.warning(
-                        "Codex image stream ended with %s (attempt %s/%s); retrying once before failing closed.",
+                        "Codex image stream ended with %s (attempt %s/%s); "
+                        "retrying once before failing closed.",
                         kind, attempt + 1, attempts,
                     )
         except Exception as exc:
@@ -459,8 +465,8 @@ class OpenAICodexImageGenProvider(ImageGenProvider):
         except Exception as exc:
             return fail(f"Could not save image to cache: {exc}", "io_error")
         return success_response(
-            image=str(saved_path), model=tier_id, prompt=prompt, aspect_ratio=aspect, provider="openai-codex",
-            modality="image" if input_images else "text",
+            image=str(saved_path), model=tier_id, prompt=prompt, aspect_ratio=aspect,
+            provider="openai-codex", modality="image" if input_images else "text",
             extra={
                 "size": size,
                 "quality": meta["quality"],

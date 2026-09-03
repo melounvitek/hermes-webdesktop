@@ -1,14 +1,10 @@
-"""Meta Model API image generation backend.
+"""Meta Model API image generation backend (``muse-image``).
 
-Exposes Meta's ``muse-image`` model(s) as an :class:`ImageGenProvider`.
-The Meta Model API (https://api.meta.ai/v1) is OpenAI-compatible, so we reuse
-the OpenAI Python SDK pointed at Meta's base URL and authenticate with
-``META_MODEL_API_KEY``. Output is base64 JSON (WebP) → ``$HERMES_HOME/cache/images/``.
-
-Selection precedence (first hit wins): ``model`` kwarg forwarded by the
-dispatcher (the ``hermes tools`` pick) → ``META_IMAGE_MODEL`` env →
-``image_gen.meta-ai.model`` → ``image_gen.model`` (when it's one of our IDs)
-→ :data:`DEFAULT_MODEL`.
+The Meta Model API (https://api.meta.ai/v1) is OpenAI-compatible, so the OpenAI
+SDK is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64
+WebP → ``$HERMES_HOME/cache/images/``. Selection: ``model`` kwarg →
+``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model`` →
+:data:`DEFAULT_MODEL`.
 """
 
 from __future__ import annotations
@@ -40,9 +36,8 @@ from plugins.image_gen._common import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
-# Auth env vars, in priority order. Mirrors the bundled ``meta-ai`` chat
-# provider (plugins/model-providers/meta-ai): MODEL_API_KEY is Meta's
-# documented var; the rest are accepted aliases.
+# Auth env vars, in priority order (mirrors the ``meta-ai`` chat provider):
+# MODEL_API_KEY is Meta's documented var; the rest are accepted aliases.
 API_KEY_ENVS = ("MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY")
 # Primary key shown in setup prompts / error messages.
 API_KEY_ENV = "META_MODEL_API_KEY"
@@ -51,20 +46,15 @@ BASE_URL_ENV = "META_BASE_URL"
 
 
 def _resolve_api_key() -> Optional[str]:
-    """First non-empty auth env var, checked in priority order."""
-    for env in API_KEY_ENVS:
-        val = get_secret(env)
-        if val:
-            return val
-    return None
+    """First non-empty auth env var, in priority order."""
+    return next((val for val in map(get_secret, API_KEY_ENVS) if val), None)
 
 
 def _resolve_base_url() -> str:
     return (os.environ.get(BASE_URL_ENV) or "").strip() or DEFAULT_BASE_URL
 
 
-# Catalog shown in `hermes tools` and matched against `image_gen.model`.
-# The model id is sent verbatim to the Meta Model API (`/v1/images/generations`).
+# Model ids are sent verbatim to ``/v1/images/generations``.
 _MODELS: Dict[str, Dict[str, Any]] = {
     "muse-image-1.0": {
         "display": "Muse Image 1.0",
@@ -77,10 +67,8 @@ DEFAULT_MODEL = "muse-image-1.0"
 
 
 def _resolve_model(caller_model: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
-    """Return (model_id, metadata); ``caller_model`` is the dispatcher's ``model`` kwarg."""
     return resolve_static_model(
-        _MODELS, DEFAULT_MODEL, env_var="META_IMAGE_MODEL", config_key="meta-ai",
-        explicit=caller_model,
+        _MODELS, DEFAULT_MODEL, env_var="META_IMAGE_MODEL", config_key="meta-ai", explicit=caller_model,
     )
 
 
@@ -111,7 +99,7 @@ class MetaImageGenProvider(ImageGenProvider):
         )
 
     def capabilities(self) -> Dict[str, Any]:
-        # Text-to-image only until image-to-image is verified against the Meta endpoint.
+        # Text-to-image only until image-to-image is verified against Meta.
         return {"modalities": ["text"], "max_reference_images": 0}
 
     def generate(
@@ -125,10 +113,8 @@ class MetaImageGenProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
-
         if not prompt:
             return prompt_required_error("meta-ai", aspect)
-
         api_key = _resolve_api_key()
         if not api_key:
             return error_factory("meta-ai", aspect)(
@@ -140,12 +126,10 @@ class MetaImageGenProvider(ImageGenProvider):
         openai, err = import_openai("meta-ai", aspect)
         if err:
             return err
-
         model_id, _meta = _resolve_model(kwargs.get("model"))
         size = size_for(aspect)
         fail = error_factory("meta-ai", aspect, model=model_id, prompt=prompt)
         client = openai.OpenAI(api_key=api_key, base_url=_resolve_base_url())
-
         try:
             response = client.images.generate(model=model_id, prompt=prompt, size=size, n=1)
         except Exception as exc:
@@ -168,20 +152,12 @@ class MetaImageGenProvider(ImageGenProvider):
                 return fail("Meta response contained neither b64_json nor URL", "empty_response")
         except Exception as exc:
             return fail(f"Failed to save Meta image: {exc}", "io_error")
-
         extra: Dict[str, Any] = {"size": size}
-        revised_prompt = getattr(first, "revised_prompt", None)
-        if revised_prompt:
-            extra["revised_prompt"] = revised_prompt
-
+        if getattr(first, "revised_prompt", None):
+            extra["revised_prompt"] = first.revised_prompt
         return success_response(
-            image=image_ref,
-            model=model_id,
-            prompt=prompt,
-            aspect_ratio=aspect,
-            provider="meta-ai",
-            modality="text",
-            extra=extra,
+            image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="meta-ai",
+            modality="text", extra=extra,
         )
 
 

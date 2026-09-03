@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 
@@ -33,6 +33,7 @@ from plugins.image_gen._common import (
     collect_source_images,
     error_factory,
     load_image_gen_config,
+    post_json,
     prompt_required_error,
     resolve_static_model,
 )
@@ -98,6 +99,17 @@ _TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _ENHANCE_PATH = "/generate/enhance/krea/enhance"
 _ENHANCE_SCALE_FACTOR = 2
 _USER_AGENT = "Hermes-Agent/1.0 (krea-image-gen)"
+
+# Fatal poll outcome (``_poll_krea_job`` ``kind``) → (error_type, message builder).
+_POLL_FAILURES: Dict[str, Tuple[str, Callable[[str, Any], str]]] = {
+    "http": ("api_error", lambda job_id, detail: f"Krea poll failed ({detail}) for job {job_id}"),
+    "timeout": ("timeout", lambda job_id, detail: f"Krea poll timed out for job {job_id}: {detail}"),
+    "invalid_json": ("invalid_response", lambda job_id, detail: f"Krea poll returned invalid JSON: {detail}"),
+    "deadline": ("timeout", lambda job_id, detail: (
+        f"Krea job {job_id} did not complete within "
+        f"{int(_POLL_TIMEOUT_SECONDS)}s (last status: {detail or 'unknown'})"
+    )),
+}
 
 
 def _load_krea_config() -> Dict[str, Any]:
@@ -418,7 +430,9 @@ class KreaImageGenProvider(ImageGenProvider):
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
         krea_ar = _ASPECT_MAP.get(aspect, "1:1")
-        style_refs = _collect_style_refs(image_url, reference_image_urls, kwargs.get("image_style_references"))
+        style_refs = _collect_style_refs(
+            image_url, reference_image_urls, kwargs.get("image_style_references")
+        )
         if not prompt:
             return prompt_required_error("krea", aspect)
 
@@ -460,45 +474,39 @@ class KreaImageGenProvider(ImageGenProvider):
                     )
 
         # 1. Submit job.
-        try:
-            response = requests.post(
-                f"{base_url}/generate/image/krea/krea-2/{meta['path']}",
-                headers=_headers(auth_token, managed=managed is not None, json_body=True),
-                json=payload, timeout=30,
-            )
-            response.raise_for_status()
-        except requests.HTTPError as exc:
-            resp = exc.response
-            status = resp.status_code if resp is not None else 0
-            err_msg = _submit_error_message(resp, exc)
-            logger.error("Krea submit failed (%d): %s", status, err_msg)
-            # Managed 4xx: the model may not be enabled/priced on the Nous
-            # Portal, or the gateway's shared key hit its concurrency cap (429).
-            if managed is not None and 400 <= status < 500:
-                hint = (
-                    "Krea's shared-key concurrency cap was hit — retry shortly."
-                    if status == 429
-                    else (
-                        f"Model '{model_id}' may not be enabled/priced on the "
-                        "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
-                        "Krea directly, or pick a different model via "
-                        "`hermes tools` → Image Generation."
+        submit_body, failure = post_json(
+            f"{base_url}/generate/image/krea/krea-2/{meta['path']}",
+            headers=_headers(auth_token, managed=managed is not None, json_body=True),
+            payload=payload, timeout=30, label="Krea", error_message=_submit_error_message,
+        )
+        if failure is not None:
+            if failure.kind == "http":
+                status, err_msg = failure.status, failure.message
+                logger.error("Krea submit failed (%d): %s", status, err_msg)
+                # Managed 4xx: the model may not be enabled/priced on the Nous
+                # Portal, or the gateway's shared key hit its concurrency cap (429).
+                if managed is not None and 400 <= status < 500:
+                    hint = (
+                        "Krea's shared-key concurrency cap was hit — retry shortly."
+                        if status == 429
+                        else (
+                            f"Model '{model_id}' may not be enabled/priced on the "
+                            "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
+                            "Krea directly, or pick a different model via "
+                            "`hermes tools` → Image Generation."
+                        )
                     )
-                )
-                return fail(
-                    f"Nous Subscription Krea gateway rejected '{model_id}' "
-                    f"(HTTP {status}): {err_msg}. {hint}",
-                    "api_error",
-                )
-            return fail(f"Krea image generation failed ({status}): {err_msg}", "api_error")
-        except requests.Timeout:
-            return fail("Krea submit timed out (30s)", "timeout")
-        except requests.ConnectionError as exc:
-            return fail(f"Krea connection error: {exc}", "connection_error")
-        try:
-            submit_body = response.json()
-        except Exception as exc:  # noqa: BLE001
-            return fail(f"Krea returned invalid JSON on submit: {exc}", "invalid_response")
+                    return fail(
+                        f"Nous Subscription Krea gateway rejected '{model_id}' "
+                        f"(HTTP {status}): {err_msg}. {hint}",
+                        "api_error",
+                    )
+                return fail(failure.error, "api_error")
+            if failure.kind == "timeout":
+                return fail("Krea submit timed out (30s)", "timeout")
+            if failure.kind == "invalid_json":
+                return fail(f"Krea returned invalid JSON on submit: {failure.message}", "invalid_response")
+            return fail(failure.error, failure.error_type)
         job_id = submit_body.get("job_id")
         if not isinstance(job_id, str) or not job_id:
             return fail("Krea submit response missing job_id", "invalid_response")
@@ -508,20 +516,9 @@ class KreaImageGenProvider(ImageGenProvider):
         poll_errors: List[Dict[str, Any]] = []
 
         def poll_error(kind: str, detail: Any) -> Dict[str, Any]:
-            if kind == "http":
-                err = fail(f"Krea poll failed ({detail}) for job {job_id}", "api_error")
-            elif kind == "timeout":
-                err = fail(f"Krea poll timed out for job {job_id}: {detail}", "timeout")
-            elif kind == "invalid_json":
-                err = fail(f"Krea poll returned invalid JSON: {detail}", "invalid_response")
-            else:
-                err = fail(
-                    f"Krea job {job_id} did not complete within "
-                    f"{int(_POLL_TIMEOUT_SECONDS)}s (last status: {detail or 'unknown'})",
-                    "timeout",
-                )
-            poll_errors.append(err)
-            return err
+            error_type, build = _POLL_FAILURES.get(kind, _POLL_FAILURES["deadline"])
+            poll_errors.append(fail(build(job_id, detail), error_type))
+            return poll_errors[-1]
 
         job = _poll_krea_job(base_url, auth_token, job_id, on_error=poll_error)
         if poll_errors:
@@ -549,9 +546,13 @@ class KreaImageGenProvider(ImageGenProvider):
         upscale_requested = kwargs.get("upscale")
         if not isinstance(upscale_requested, bool):
             cfg_upscale = _krea_section().get("upscale")
-            upscale_requested = cfg_upscale if isinstance(cfg_upscale, bool) else bool(meta.get("upscale", False))
+            upscale_requested = (
+                cfg_upscale if isinstance(cfg_upscale, bool) else bool(meta.get("upscale", False))
+            )
         if upscale_requested:
-            enhanced_url = _enhance_image(base_url, auth_token, result_image_url, prompt, managed=managed is not None)
+            enhanced_url = _enhance_image(
+                base_url, auth_token, result_image_url, prompt, managed=managed is not None,
+            )
             if enhanced_url:
                 result_image_url = enhanced_url
                 upscaled = True
@@ -563,7 +564,8 @@ class KreaImageGenProvider(ImageGenProvider):
             image_ref = str(save_url_image(result_image_url, prefix=f"krea_{model_id}"))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "Krea image URL %s could not be cached (%s); falling back to bare URL.", result_image_url, exc,
+                "Krea image URL %s could not be cached (%s); falling back to bare URL.",
+                result_image_url, exc,
             )
             image_ref = result_image_url
 

@@ -1,19 +1,14 @@
 """DeepInfra image generation backend.
 
 Exposes DeepInfra's image-gen catalog (FLUX, Qwen-Image-Edit, …) through the
-OpenAI-compatible ``/v1/openai/images/generations`` endpoint.
+OpenAI-compatible ``/v1/openai/images/generations`` endpoint. Model discovery
+is fully dynamic: ``list_models()`` filters the tagged catalog via
+:func:`hermes_cli.models._fetch_deepinfra_models_by_tag` (``image-gen``), so
+no model ids are hardcoded here.
 
-**Fully dynamic model discovery.** DeepInfra publishes one tagged catalog at
-``https://api.deepinfra.com/v1/openai/models?filter=true&sort_by=hermes``
-where each entry's ``metadata.tags`` declares its surface (``image-gen``
-here). ``list_models()`` filters it via
-:func:`hermes_cli.models._fetch_deepinfra_models_by_tag`, so no model ids are
-hardcoded here: new models appear in ``hermes tools`` automatically and
-retired ones disappear on the next fetch.
-
-Model selection (first hit wins): ``DEEPINFRA_IMAGE_MODEL`` env →
-``image_gen.deepinfra.model`` → first model from the live catalog. When all
-three are absent ``generate()`` returns an error rather than guessing.
+Model selection: ``DEEPINFRA_IMAGE_MODEL`` env → ``image_gen.deepinfra.model``
+→ first model from the live catalog; when all are absent ``generate()`` errors
+rather than guessing.
 """
 
 from __future__ import annotations
@@ -54,7 +49,7 @@ def _live_models() -> Optional[List[Dict[str, Any]]]:
 
 
 def _format_catalog_row(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Format a catalog item into the picker row shape."""
+    """Picker row for a catalog item."""
     mid = item.get("id", "")
     metadata = item.get("metadata") or {}
     if not isinstance(metadata, dict):
@@ -77,22 +72,16 @@ def _format_catalog_row(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_model(catalog: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Optional[str]:
-    """Pick the model id (env > config > first live result, else None).
-
-    Takes the already-loaded ``image_gen.deepinfra`` config so ``generate()``
-    reads config once instead of via a second ``load_config`` deepcopy.
-    """
+    """Model id: env > config > first live result, else None. Takes the loaded
+    ``image_gen.deepinfra`` config so ``generate()`` reads config once."""
     env_override = os.environ.get("DEEPINFRA_IMAGE_MODEL", "").strip()
     if env_override:
         return env_override
     cfg_model = cfg.get("model") if isinstance(cfg, dict) else None
     if isinstance(cfg_model, str) and cfg_model.strip():
         return cfg_model.strip()
-    if catalog:
-        first = catalog[0].get("id")
-        if isinstance(first, str) and first:
-            return first
-    return None
+    first = catalog[0].get("id") if catalog else None
+    return first if isinstance(first, str) and first else None
 
 
 class DeepInfraImageGenProvider(ImageGenProvider):
@@ -127,26 +116,18 @@ class DeepInfraImageGenProvider(ImageGenProvider):
             url="https://deepinfra.com/dash/api_keys",
         )
 
-    def generate(
-        self,
-        prompt: str,
-        aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
+    def generate(self, prompt: str, aspect_ratio: str = DEFAULT_ASPECT_RATIO, **kwargs: Any) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
         fail = error_factory("deepinfra", aspect)
-
         if kwargs.get("image_url") or kwargs.get("reference_image_urls"):
             return fail(
                 "DeepInfra image generation is text-to-image only in this "
                 "backend; image_url and reference_image_urls are unsupported.",
                 "modality_unsupported", prompt=prompt,
             )
-
         if not prompt:
             return prompt_required_error("deepinfra", aspect)
-
         api_key = (get_secret("DEEPINFRA_API_KEY", "") or "").strip()
         if not api_key:
             return fail(
@@ -155,7 +136,6 @@ class DeepInfraImageGenProvider(ImageGenProvider):
                 "to add the key.",
                 "auth_required",
             )
-
         di_cfg = load_image_gen_config("deepinfra")
         model_id = _resolve_model(_live_models() or [], di_cfg)
         if not model_id:
@@ -169,12 +149,10 @@ class DeepInfraImageGenProvider(ImageGenProvider):
         size = size_for(aspect)
         from hermes_cli.models import deepinfra_base_url
 
-        # OpenAI-compatible endpoint — the openai SDK supplies retry, timeout
-        # and error mapping (mirrors the OpenAI image-gen plugin).
+        # OpenAI-compatible endpoint — the openai SDK supplies retry, timeout and error mapping.
         openai, err = import_openai("deepinfra", aspect)
         if err:
             return err
-
         fail = error_factory("deepinfra", aspect, model=model_id, prompt=prompt)
         client = openai.OpenAI(api_key=api_key, base_url=deepinfra_base_url(di_cfg))
         try:
@@ -190,23 +168,19 @@ class DeepInfraImageGenProvider(ImageGenProvider):
         data = getattr(response, "data", None) or []
         if not data:
             return fail("DeepInfra returned no image data", "empty_response")
-
         first = data[0]
         b64 = getattr(first, "b64_json", None)
         url = getattr(first, "url", None)
         # Drop the ``vendor/`` prefix and any colons so the saved filename
         # stays a single path component on every OS.
         prefix = f"deepinfra_{model_id.split('/', 1)[-1].replace(':', '_')}"
-
         if b64:
             try:
                 image_ref = str(save_b64_image(b64, prefix=prefix))
             except Exception as exc:
                 return fail(f"Could not save image to cache: {exc}", "io_error")
         elif url:
-            # Delivery URLs are often short-lived; materialise locally so downstream
-            # consumers (Telegram send_photo, browser fetch) don't get a dead link.
-            # Best-effort: fall back to the bare URL if the download fails.
+            # Delivery URLs are often short-lived; materialise locally, best-effort.
             try:
                 image_ref = str(save_url_image(url, prefix=prefix))
             except Exception as exc:
@@ -214,13 +188,8 @@ class DeepInfraImageGenProvider(ImageGenProvider):
                 image_ref = url
         else:
             return fail("DeepInfra response contained neither b64_json nor URL", "empty_response")
-
         return success_response(
-            image=image_ref,
-            model=model_id,
-            prompt=prompt,
-            aspect_ratio=aspect,
-            provider="deepinfra",
+            image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="deepinfra",
             extra={"size": size},
         )
 

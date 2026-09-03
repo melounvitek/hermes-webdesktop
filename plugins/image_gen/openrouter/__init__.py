@@ -258,6 +258,26 @@ def _access_error_hint(
     )
 
 
+def _get_catalog(base_url: str, path: str, api_key: str, timeout: Any) -> List[Tuple[str, Dict[str, Any]]]:
+    """``(model_id, entry)`` pairs from ``GET {base_url}{path}``'s ``data[]``; raises on HTTP failure."""
+    import requests
+
+    response = requests.get(
+        f"{base_url}{path}",
+        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    body = response.json()
+    entries = body.get("data") if isinstance(body, dict) else None
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    for entry in entries if isinstance(entries, list) else []:
+        model_id = entry.get("id") if isinstance(entry, dict) else None
+        if isinstance(model_id, str) and model_id.strip():
+            out.append((model_id.strip(), entry))
+    return out
+
+
 def _fetch_catalog(
     base_url: str, api_key: str, *, path: str, meta: Dict[str, Dict[str, Any]],
     generic: str, image_output_only: bool,
@@ -268,20 +288,8 @@ def _fetch_catalog(
     includes ``image`` and drops router pseudo-models. Curated ``meta`` wins
     for known ids; unknown ones get the API name and ``generic`` strengths.
     """
-    import requests
-
-    response = requests.get(
-        f"{base_url}{path}",
-        headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-        timeout=_LIVE_TIMEOUT,
-    )
-    response.raise_for_status()
     out: List[Dict[str, Any]] = []
-    for entry in response.json().get("data") or []:
-        model_id = entry.get("id") if isinstance(entry, dict) else None
-        if not isinstance(model_id, str) or not model_id.strip():
-            continue
-        model_id = model_id.strip()
+    for model_id, entry in _get_catalog(base_url, path, api_key, _LIVE_TIMEOUT):
         arch_raw = entry.get("architecture")
         arch: Dict[str, Any] = arch_raw if isinstance(arch_raw, dict) else {}
         if image_output_only and (
@@ -311,25 +319,13 @@ def _fetch_image_api_catalog(base_url: str, api_key: str) -> frozenset:
     call to chat-completions — guessing the other way would send a
     chat-completions id to ``/images/generations`` and 404 a working setup.
     """
-    import requests
-
     cached = _CATALOG_CACHE.get(base_url)
     if cached and (time.monotonic() - cached[0]) < _CATALOG_TTL_SECONDS:
         return cached[1]
     ids: set = set()
     try:
-        response = requests.get(
-            f"{base_url}/images/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=(_IMAGE_API_CONNECT_TIMEOUT, 30.0),
-        )
-        response.raise_for_status()
-        body = response.json()
-        entries = body.get("data") if isinstance(body, dict) else None
-        for entry in entries if isinstance(entries, list) else []:
-            model_id = entry.get("id") if isinstance(entry, dict) else None
-            if isinstance(model_id, str) and model_id.strip():
-                ids.add(model_id.strip())
+        catalog = _get_catalog(base_url, "/images/models", api_key, (_IMAGE_API_CONNECT_TIMEOUT, 30.0))
+        ids = {model_id for model_id, _entry in catalog}
     except Exception as exc:  # noqa: BLE001 - probe must never break generation
         logger.debug("image API catalog probe failed for %s: %s", base_url, exc)
     resolved = frozenset(ids)
@@ -550,7 +546,9 @@ def _image_api_extra(
     payload: Dict[str, Any], saved: List[str], usable_refs: List[str], notes: List[str], body: Any
 ) -> Dict[str, Any]:
     """Success ``extra`` for an Image API result (knobs sent, extra images, usage)."""
-    extra: Dict[str, Any] = {"endpoint": "images/generations", "exact_aspect_ratio": payload.get("aspect_ratio")}
+    extra: Dict[str, Any] = {
+        "endpoint": "images/generations", "exact_aspect_ratio": payload.get("aspect_ratio"),
+    }
     extra.update({key: payload[key] for key in _IMAGE_API_EXTRA_KEYS if key in payload})
     if len(saved) > 1:
         extra["additional_images"] = saved[1:]
@@ -777,7 +775,9 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
             if failure.kind != "http":
                 return _fail(failure.error, failure.error_type, retryable=failure.kind == "timeout")
             status, message = failure.status, failure.message
-            logger.error("%s image API generation failed (%s) on %s: %s", self._name, status, model_id, message)
+            logger.error(
+                "%s image API generation failed (%s) on %s: %s", self._name, status, model_id, message,
+            )
             # 401/403 first so one account-level rejection does not get two
             # different error_types depending on where in the chain it landed.
             if status in (401, 403):
@@ -794,7 +794,9 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         entries = body.get("data") if isinstance(body, dict) else None
         entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
         if not entries:
-            return _fail(f"{self._display} returned no image data for '{model_id}'.", "empty_response", retryable=True)
+            return _fail(
+                f"{self._display} returned no image data for '{model_id}'.", "empty_response", retryable=True,
+            )
         prefix = f"{self._name}_{_model_slug(model_id)}"
         try:
             saved = [p for p in (_save_image_api_entry(e, prefix) for e in entries) if p]
@@ -833,7 +835,9 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
                 hint = _access_error_hint(
                     self._display, model_id, self._model_env_var, failure.status, failure.message
                 )
-                return fail(hint or failure.error, "model_access" if hint else "api_error"), "unavailable" if hint else None
+                if hint:
+                    return fail(hint, "model_access"), "unavailable"
+                return fail(failure.error, "api_error"), None
             return fail(failure.error, failure.error_type), "timed out" if failure.kind == "timeout" else None
 
         images = _extract_images(result)
@@ -846,7 +850,8 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         first = images[0]
         try:
             if first.startswith("data:"):
-                saved_path = save_b64_image(first.split(",", 1)[1] if "," in first else "", prefix=f"{self._name}_gen")
+                b64 = first.split(",", 1)[1] if "," in first else ""
+                saved_path = save_b64_image(b64, prefix=f"{self._name}_gen")
             else:
                 saved_path = save_url_image(first, prefix=f"{self._name}_gen")
         except Exception as exc:  # noqa: BLE001
@@ -901,7 +906,10 @@ class OpenRouterCompatImageProvider(ImageGenProvider):
         for i, model_id in enumerate(model_chain):
             # An Image API model cannot be served by /chat/completions (and vice
             # versa), so this is a routing decision, not a preference.
-            if self._supports_image_api and _select_surface(model_id, base_url, api_key, self._config_key) == "images":
+            surface = "chat"
+            if self._supports_image_api:
+                surface = _select_surface(model_id, base_url, api_key, self._config_key)
+            if surface == "images":
                 outcome = self._generate_via_image_api(
                     model_id=model_id, prompt=prompt, semantic_aspect=aspect,
                     references=references, base_url=base_url, headers=headers, kwargs=kwargs,

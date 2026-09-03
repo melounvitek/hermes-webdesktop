@@ -1,13 +1,9 @@
-"""Browser Use cloud browser provider (plugin form).
+"""Browser Use cloud browser provider.
 
-Browser Use is the only browser backend with dual auth: a direct
-``BROWSER_USE_API_KEY`` for self-billed users, or the managed Nous tool gateway
-(bills sessions to a Nous subscription). Dispatch order: direct key first,
-managed gateway second, unless ``tool_gateway.browser: gateway`` flips it.
-
-Config: ``browser.cloud_provider: "browser-use"``; ``tool_gateway.browser``.
-Auth: ``BROWSER_USE_API_KEY`` (https://browser-use.com) or a managed Nous
-gateway entry configured via ``hermes setup``.
+The only browser backend with dual auth: a direct ``BROWSER_USE_API_KEY``
+(https://browser-use.com) or the managed Nous tool gateway (bills to a Nous
+subscription). Direct key first, managed second, unless ``tool_gateway.browser:
+gateway`` flips it. Config: ``browser.cloud_provider: "browser-use"``.
 """
 
 from __future__ import annotations
@@ -25,7 +21,7 @@ from plugins.browser._common import CloudBrowserProvider
 logger = logging.getLogger(__name__)
 
 # Idempotency keys for managed-mode session creation: the gateway returns 409
-# "already in progress" on retried POSTs, so we forward the original key.
+# "already in progress" on retried POSTs, so the original key is forwarded.
 # Cleared on success or terminal failure.
 _pending_create_keys: Dict[str, str] = {}
 _pending_create_keys_lock = threading.Lock()
@@ -62,12 +58,8 @@ def _should_preserve_pending_create_key(response: requests.Response) -> bool:
         payload = response.json()
     except Exception:
         return False
-    if not isinstance(payload, dict):
-        return False
-    error = payload.get("error")
-    if not isinstance(error, dict):
-        return False
-    return "already in progress" in str(error.get("message") or "").lower()
+    error = payload.get("error") if isinstance(payload, dict) else None
+    return isinstance(error, dict) and "already in progress" in str(error.get("message") or "").lower()
 
 
 class BrowserUseBrowserProvider(CloudBrowserProvider):
@@ -77,16 +69,16 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
     label = "Browser Use"
     release_method = "patch"
     release_path = "/browsers/{session_id}"
-    # Hidden from the hermes tools picker: the "Browser Use" row activates the
-    # CLI backend (tools/browser_use_cli.py). This provider stays registered for
-    # the Nous gateway path and un-migrated legacy cloud_provider configs.
+    # Hidden from the picker: the "Browser Use" row activates the CLI backend
+    # (tools/browser_use_cli.py). This provider stays registered for the Nous
+    # gateway path and un-migrated legacy cloud_provider configs.
     setup_tag = None
 
     def is_available(self) -> bool:
         return self._get_config_or_none(refresh_token=False) is not None
 
     def _get_config_or_none(self, *, refresh_token: bool = True) -> Optional[Dict[str, Any]]:
-        # Lazy import: managed_tool_gateway pulls in the Nous auth stack, which
+        # Lazy: managed_tool_gateway pulls in the Nous auth stack, which
         # direct-API-key users never need.
         from tools.managed_tool_gateway import peek_nous_access_token, resolve_managed_tool_gateway
         from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection
@@ -108,8 +100,8 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
         selected = read_selection("browser")
         direct = {"api_key": api_key, "base_url": _BASE_URL, "managed_mode": False}
 
-        # Strict selection: "nous" (or legacy use_gateway: true) → managed gateway
-        # ONLY; any other stored selection → direct key ONLY (no silent managed
+        # Strict selection: "nous" (or legacy use_gateway: true) → managed ONLY;
+        # any other stored selection → direct key ONLY (no silent managed
         # fallback); never-configured → direct key when present, else managed.
         if selected == NOUS_MANAGED_PROVIDER:
             return _managed_config()
@@ -153,14 +145,12 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
         headers = self._headers(config)
         if managed_mode:
             headers["X-Idempotency-Key"] = _get_or_create_pending_create_key(task_id)
-
         # Keep gateway-backed sessions short so billing authorization does not
         # default to a long Browser-Use timeout for a task-scoped browser.
         payload = (
             {"timeout": _DEFAULT_MANAGED_TIMEOUT_MINUTES, "proxyCountryCode": _DEFAULT_MANAGED_PROXY_COUNTRY_CODE}
             if managed_mode else {}
         )
-
         # Managed mode propagates network errors raw so callers can retry with
         # the preserved idempotency key; direct mode wraps them.
         response = self._post_create(
@@ -175,7 +165,6 @@ class BrowserUseBrowserProvider(CloudBrowserProvider):
             _clear_pending_create_key(task_id)
         session_name = self._session_name(task_id)
         logger.info("Created Browser Use session %s", session_name)
-
         return {
             "session_name": session_name,
             "bb_session_id": session_data["id"],

@@ -1,13 +1,7 @@
-"""OpenAI image generation backend.
-
-Exposes OpenAI's ``gpt-image-2`` model at three quality tiers
-(``gpt-image-2-low`` ~15s, ``-medium`` ~40s default, ``-high`` ~2min) as
-virtual model ids so the picker and ``image_gen.model`` behave like any other
-multi-model backend. Output is base64 JSON → saved under
-``$HERMES_HOME/cache/images/``.
-
-Selection precedence: ``OPENAI_IMAGE_MODEL`` env → ``image_gen.openai.model``
-→ ``image_gen.model`` (when it is one of our tier ids) → :data:`DEFAULT_MODEL`.
+"""OpenAI image generation backend: ``gpt-image-2`` at three quality tiers
+(``gpt-image-2-low/-medium/-high``) exposed as virtual model ids. Output is
+base64 → ``$HERMES_HOME/cache/images/``. Selection: ``OPENAI_IMAGE_MODEL`` →
+``image_gen.openai.model`` → ``image_gen.model`` → :data:`DEFAULT_MODEL`.
 """
 
 from __future__ import annotations
@@ -45,10 +39,7 @@ _MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
 
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
-    """Decide which tier to use and return ``(model_id, meta)``."""
-    return resolve_static_model(
-        _MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai"
-    )
+    return resolve_static_model(_MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai")
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
@@ -66,9 +57,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         import base64
 
         header, _, b64 = ref.partition(",")
-        ext = "png"
-        if "image/" in header:
-            ext = header.split("image/", 1)[1].split(";", 1)[0] or "png"
+        ext = (header.split("image/", 1)[1].split(";", 1)[0] if "image/" in header else "") or "png"
         return base64.b64decode(b64), f"image.{ext}"
     # Local file path — enforce the shared credential-read guard before reading.
     from agent.file_safety import raise_if_read_blocked
@@ -122,10 +111,8 @@ class OpenAIImageGenProvider(ImageGenProvider):
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
-
         if not prompt:
             return prompt_required_error("openai", aspect)
-
         api_key = get_secret("OPENAI_API_KEY")
         if not api_key:
             return error_factory("openai", aspect)(
@@ -138,7 +125,6 @@ class OpenAIImageGenProvider(ImageGenProvider):
         openai, err = import_openai("openai", aspect)
         if err:
             return err
-
         tier_id, meta = _resolve_model()
         size = size_for(aspect)
         sources = collect_source_images(image_url, reference_image_urls, limit=16)
@@ -159,15 +145,11 @@ class OpenAIImageGenProvider(ImageGenProvider):
                     files.append(bio)
             except Exception as exc:
                 return fail(f"Could not load source image for editing: {exc}", "io_error")
-
             try:
                 response = client.images.edit(
-                    model=API_MODEL,
-                    image=files if len(files) > 1 else files[0],
-                    prompt=prompt,
+                    model=API_MODEL, image=files if len(files) > 1 else files[0], prompt=prompt,
                     size=size,  # type: ignore[arg-type]  # OPENAI_SIZES values are valid gpt-image sizes
-                    quality=meta["quality"],
-                    n=1,
+                    quality=meta["quality"], n=1,
                 )
             except Exception as exc:
                 logger.debug("OpenAI image edit failed", exc_info=True)
@@ -186,7 +168,6 @@ class OpenAIImageGenProvider(ImageGenProvider):
         data = getattr(response, "data", None) or []
         if not data:
             return fail("OpenAI returned no image data", "empty_response")
-
         first = data[0]
         image_ref, err = materialize_image(
             getattr(first, "b64_json", None), getattr(first, "url", None),
@@ -195,20 +176,12 @@ class OpenAIImageGenProvider(ImageGenProvider):
         )
         if err:
             return err
-
         extra: Dict[str, Any] = {"size": size, "quality": meta["quality"]}
-        revised_prompt = getattr(first, "revised_prompt", None)
-        if revised_prompt:
-            extra["revised_prompt"] = revised_prompt
-
+        if getattr(first, "revised_prompt", None):
+            extra["revised_prompt"] = first.revised_prompt
         return success_response(
-            image=image_ref,
-            model=tier_id,
-            prompt=prompt,
-            aspect_ratio=aspect,
-            provider="openai",
-            modality="image" if is_edit else "text",
-            extra=extra,
+            image=image_ref, model=tier_id, prompt=prompt, aspect_ratio=aspect, provider="openai",
+            modality="image" if is_edit else "text", extra=extra,
         )
 
 
