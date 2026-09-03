@@ -853,9 +853,8 @@ class GatewayAdapterLifecycleMixin:
         one account polled once; listener: one bind+port). A queued retryable primary owns both."""
         claimed: Dict[tuple, str] = {}
         for _plat, _ad in self.adapters.items():
-            for claim in (
-                self._adapter_credential_claim(_plat, _ad), self._adapter_listener_claim(_plat, _ad)
-            ):
+            fp = self._adapter_credential_fingerprint(_ad)
+            for claim in ((_plat, fp) if fp is not None else None, self._adapter_listener_claim(_plat, _ad)):
                 if claim is not None:
                     claimed[claim] = active
         for retry_info in getattr(self, "_failed_platforms", {}).values():
