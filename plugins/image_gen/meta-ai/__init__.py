@@ -1,11 +1,7 @@
-"""Meta Model API image generation backend (``muse-image``).
-
-The Meta Model API (https://api.meta.ai/v1) is OpenAI-compatible, so the OpenAI
-SDK is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64
-WebP → ``$HERMES_HOME/cache/images/``. Selection: ``model`` kwarg →
-``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model`` →
-:data:`DEFAULT_MODEL`.
-"""
+"""Meta Model API (``muse-image``): OpenAI-compatible (https://api.meta.ai/v1), so the OpenAI SDK
+is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64 WebP → image cache.
+Selection: ``model`` kwarg → ``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model``
+→ :data:`DEFAULT_MODEL`."""
 
 from __future__ import annotations
 
@@ -23,13 +19,11 @@ from plugins.image_gen._common import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
-# Auth env vars, in priority order (mirrors the ``meta-ai`` chat provider):
-# MODEL_API_KEY is Meta's documented var; the rest are accepted aliases.
+# Auth env vars in priority order (mirrors the ``meta-ai`` chat provider); MODEL_API_KEY is Meta's
+# documented var, the rest are aliases. ``API_KEY_ENV`` is the one shown in setup/errors.
 API_KEY_ENVS = ("MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY")
-# Primary key shown in setup prompts / error messages.
 API_KEY_ENV = "META_MODEL_API_KEY"
-# Optional base-url override (same var the chat provider honors).
-BASE_URL_ENV = "META_BASE_URL"
+BASE_URL_ENV = "META_BASE_URL"  # optional override, same var the chat provider honors
 
 
 def _resolve_api_key() -> Optional[str]:

@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 _MAX_ERROR_BODY_CHARS = 500
 _MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
 
-_CODEX_CHAT_MODEL = "gpt-5.5"  # hosts the ``image_generation`` tool call; ``API_MODEL`` does the image work
+# Hosts the ``image_generation`` tool call; ``API_MODEL`` does the image work.
+_CODEX_CHAT_MODEL = "gpt-5.5"
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_INSTRUCTIONS = (
     "You are an assistant that must fulfill image generation and image editing "

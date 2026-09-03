@@ -189,7 +189,8 @@ def import_openai(provider: str, aspect: str) -> Tuple[Any, Optional[Dict[str, A
 
 def materialize_image(
     b64: Optional[str], url: Optional[str], *, prefix: str, label: str, provider: str, model: str,
-    prompt: str, aspect: str, log: logging.Logger = logger, on_url_fail: Optional[Callable[[Exception], None]] = None,
+    prompt: str, aspect: str, log: logging.Logger = logger,
+    on_url_fail: Optional[Callable[[Exception], None]] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
     """``(image_ref, None)`` or ``(None, error)`` for a ``(b64_json, url)`` pair. Base64 is always
     cached (write failure → ``io_error``); a URL is cached best-effort, falling back to the bare URL."""

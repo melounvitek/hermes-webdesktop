@@ -1,12 +1,6 @@
-"""xAI image generation backend.
-
-Exposes xAI's ``grok-imagine-image`` models as an :class:`ImageGenProvider`:
-text-to-image (``/v1/images/generations``) and image editing
-(``/v1/images/edits``), base64 output saved to cache.
-
-Selection: ``model`` kwarg → ``XAI_IMAGE_MODEL`` → ``image_gen.xai.model`` →
-:data:`DEFAULT_MODEL`.
-"""
+"""xAI ``grok-imagine-image`` backend: text-to-image (``/v1/images/generations``) and editing
+(``/v1/images/edits``), base64 output saved to cache. Selection: ``model`` kwarg →
+``XAI_IMAGE_MODEL`` → ``image_gen.xai.model`` → :data:`DEFAULT_MODEL`."""
 
 from __future__ import annotations
 
@@ -46,9 +40,8 @@ DEFAULT_MODEL = "grok-imagine-image"
 # xAI documents the quality model as the edit-capable baseline.
 _EDIT_FALLBACK_MODEL = "grok-imagine-image-quality"
 
-# Live catalog cache: (models_dict, fetched_monotonic). ``/image-generation-models``
-# is the source of truth so new Imagine models appear without a code change;
-# ``_MODELS`` is the offline fallback and supplies curated text for known ids.
+# Live catalog cache ``(models, fetched_monotonic)``: ``/image-generation-models`` is the source of
+# truth (new models need no code change); ``_MODELS`` is the offline fallback + curated text.
 _LIVE_CACHE: Optional[Tuple[Dict[str, Dict[str, Any]], float]] = None
 _LIVE_CACHE_TTL = 300.0
 _LIVE_TIMEOUT = 10.0
@@ -72,8 +65,7 @@ def _base_url(creds: Dict[str, Any]) -> str:
 
 
 def _fetch_live_models() -> Dict[str, Dict[str, Any]]:
-    """``{model_id: {"input_modalities", "aliases"}}`` from ``/image-generation-models``;
-    raises on any failure (callers fall back to the static table)."""
+    """``{model_id: {"input_modalities", "aliases"}}`` from the live endpoint; raises on failure."""
     creds = resolve_xai_http_credentials()
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
@@ -109,9 +101,8 @@ def _live_models() -> Dict[str, Dict[str, Any]]:
 
 
 def _catalog() -> Dict[str, Dict[str, Any]]:
-    """Merged catalog: live ids + curated static metadata. Unknown live models get
-    generic text; curated entries the live list omits are kept; static table
-    alone when the API is unreachable."""
+    """Live ids + curated metadata (unknown live models get generic text; curated entries the live
+    list omits are kept); the static table alone when the API is unreachable."""
     live = _live_models()
     if not live:
         return dict(_MODELS)
@@ -132,8 +123,7 @@ def _configured_model() -> Optional[str]:
 
 
 def _resolve_model(caller_model: Optional[str] = None) -> Tuple[str, Dict[str, Any]]:
-    """``(model_id, meta)``: caller kwarg → ``XAI_IMAGE_MODEL`` → config → default,
-    each validated against the merged live+static catalog."""
+    """caller kwarg → ``XAI_IMAGE_MODEL`` → config → default, validated against the merged catalog."""
     catalog = _catalog()
     for candidate in (caller_model, os.environ.get("XAI_IMAGE_MODEL"), _configured_model()):
         if candidate and candidate in catalog:
@@ -142,8 +132,7 @@ def _resolve_model(caller_model: Optional[str] = None) -> Tuple[str, Dict[str, A
 
 
 def _resolve_edit_model(caller_model: Optional[str] = None) -> str:
-    """Model for ``/v1/images/edits``: an explicitly selected model that accepts
-    image input is honored; otherwise the documented quality baseline."""
+    """Edit model: an explicit selection that accepts image input, else the documented quality baseline."""
     catalog = _catalog()
     explicit = caller_model or os.environ.get("XAI_IMAGE_MODEL") or _configured_model()
     if explicit and explicit in catalog and "image" in (catalog[explicit].get("input_modalities") or []):
@@ -157,15 +146,13 @@ def _resolve_resolution() -> str:
 
 
 def _xai_image_field(source: str) -> Dict[str, str]:
-    """xAI ``image`` field for an edit request: public HTTPS URL or base64 data
-    URI; local paths are read and encoded into a ``data:`` URI."""
+    """Edit ``image`` field: URL / data URI pass through; local paths are inlined as ``data:`` URIs."""
     source = source.strip()
     if source.lower().startswith(_REMOTE_PREFIXES):
         return {"url": source, "type": "image_url"}
     import base64
 
-    # Shared credential-read guard before reading local bytes.
-    from agent.file_safety import raise_if_read_blocked
+    from agent.file_safety import raise_if_read_blocked  # credential-read guard before local bytes
 
     raise_if_read_blocked(source)
     with open(os.path.expanduser(source), "rb") as fh:  # windows-footgun: ok
@@ -213,20 +200,21 @@ class XAIImageGenProvider(StaticImageGenProvider):
         return next(iter(_catalog()), None)
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        # Auth resolution is delegated to the shared ``xai_grok`` post_setup hook
-        # so every xAI service shows the same OAuth-or-API-key choice.
+        # Auth goes through the shared ``xai_grok`` post_setup hook (same OAuth-or-key choice everywhere).
         storage_notice = xai_storage_notice_text("image_gen")
         tag = "grok-imagine-image - text-to-image & image editing; uses xAI Grok OAuth or XAI_API_KEY"
         if storage_notice:
             tag += f". {storage_notice}"
         return {
-            "name": "xAI Grok Imagine (image)", "badge": "paid", "tag": tag, "env_vars": [], "post_setup": "xai_grok",
+            "name": "xAI Grok Imagine (image)", "badge": "paid", "tag": tag, "env_vars": [],
+            "post_setup": "xai_grok",
         }
 
     def capabilities(self) -> Dict[str, Any]:
         # /v1/images/edits accepts up to 3 total source images.
         return {
-            "modalities": ["text", "image"], "max_reference_images": 2, "max_source_images": _MAX_SOURCE_IMAGES,
+            "modalities": ["text", "image"], "max_reference_images": 2,
+            "max_source_images": _MAX_SOURCE_IMAGES,
         }
 
     def generate(
@@ -234,9 +222,8 @@ class XAIImageGenProvider(StaticImageGenProvider):
         image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Text-to-image, or image editing via ``/v1/images/edits`` (JSON body —
-        xAI does not support the SDK's multipart ``images.edit()``) when source
-        images are supplied."""
+        """Text-to-image, or editing via ``/v1/images/edits`` (JSON body — xAI does not support the
+        SDK's multipart ``images.edit()``) when source images are supplied."""
         creds = resolve_xai_http_credentials()
         api_key = str(creds.get("api_key") or "").strip()
         provider_name = str(creds.get("provider") or "xai").strip() or "xai"
@@ -308,8 +295,7 @@ class XAIImageGenProvider(StaticImageGenProvider):
         if public_url:
             image_ref = public_url
         else:
-            # grok-imagine-image URLs (``imgen.x.ai/xai-tmp-*``) 404 within minutes;
-            # materialise locally so downstream consumers get a stable path.
+            # ``imgen.x.ai/xai-tmp-*`` URLs 404 within minutes; materialise locally for a stable path.
             image_ref, err = materialize_image(
                 first.get("b64_json"), first.get("url"), prefix=f"xai_{model_id}", label="xAI", provider="xai",
                 model=model_id, prompt=prompt, aspect=aspect, log=logger)

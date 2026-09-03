@@ -1,8 +1,6 @@
-"""OpenAI image generation backend: ``gpt-image-2`` at three quality tiers
-(``gpt-image-2-low/-medium/-high``) exposed as virtual model ids. Output is
-base64 → ``$HERMES_HOME/cache/images/``. Selection: ``OPENAI_IMAGE_MODEL`` →
-``image_gen.openai.model`` → ``image_gen.model`` → :data:`DEFAULT_MODEL`.
-"""
+"""OpenAI ``gpt-image-2`` at three quality tiers (virtual ids ``gpt-image-2-low/-medium/-high``);
+base64 output → image cache. Selection: ``OPENAI_IMAGE_MODEL`` → ``image_gen.openai.model`` →
+``image_gen.model`` → :data:`DEFAULT_MODEL`."""
 
 from __future__ import annotations
 
@@ -44,8 +42,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         header, _, b64 = ref.partition(",")
         ext = (header.split("image/", 1)[1].split(";", 1)[0] if "image/" in header else "") or "png"
         return base64.b64decode(b64), f"image.{ext}"
-    # Local file path — enforce the shared credential-read guard before reading.
-    from agent.file_safety import raise_if_read_blocked
+    from agent.file_safety import raise_if_read_blocked  # credential-read guard before local bytes
 
     raise_if_read_blocked(ref)
     with open(ref, "rb") as fh:
@@ -110,7 +107,9 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
 
         # gpt-image-2 returns b64_json unconditionally and REJECTS
         # ``response_format`` as an unknown parameter. Don't send it.
-        request: Dict[str, Any] = dict(model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"])
+        request: Dict[str, Any] = dict(
+            model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"],
+        )
         if is_edit:
             try:
                 files = [_named_bytes_io(ref) for ref in sources]

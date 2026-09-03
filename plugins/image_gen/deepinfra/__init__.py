@@ -1,15 +1,8 @@
-"""DeepInfra image generation backend.
-
-Exposes DeepInfra's image-gen catalog (FLUX, Qwen-Image-Edit, …) through the
-OpenAI-compatible ``/v1/openai/images/generations`` endpoint. Model discovery
-is fully dynamic: ``list_models()`` filters the tagged catalog via
-:func:`hermes_cli.models._fetch_deepinfra_models_by_tag` (``image-gen``), so
-no model ids are hardcoded here.
-
-Model selection: ``DEEPINFRA_IMAGE_MODEL`` env → ``image_gen.deepinfra.model``
-→ first model from the live catalog; when all are absent ``generate()`` errors
-rather than guessing.
-"""
+"""DeepInfra image generation (FLUX, Qwen-Image-Edit, …) via the OpenAI-compatible
+``/v1/openai/images/generations`` endpoint. The catalog is fully dynamic (``image-gen``-tagged
+models from :func:`hermes_cli.models._fetch_deepinfra_models_by_tag`; no ids hardcoded).
+Selection: ``DEEPINFRA_IMAGE_MODEL`` → ``image_gen.deepinfra.model`` → first live model;
+when all are absent ``generate()`` errors rather than guessing."""
 
 from __future__ import annotations
 
@@ -57,8 +50,7 @@ def _format_catalog_row(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_model(catalog: List[Dict[str, Any]], cfg: Dict[str, Any]) -> Optional[str]:
-    """Model id: env > config > first live result, else None. Takes the loaded
-    ``image_gen.deepinfra`` config so ``generate()`` reads config once."""
+    """env > config > first live result, else None (``cfg`` = loaded ``image_gen.deepinfra``)."""
     env_override = os.environ.get("DEEPINFRA_IMAGE_MODEL", "").strip()
     if env_override:
         return env_override
@@ -123,7 +115,7 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
         size = size_for(aspect)
         from hermes_cli.models import deepinfra_base_url
 
-        # OpenAI-compatible endpoint — the openai SDK supplies retry, timeout and error mapping.
+        # The openai SDK supplies retry, timeout and error mapping.
         openai, err = import_openai("deepinfra", aspect)
         if err:
             return err
@@ -143,14 +135,15 @@ class DeepInfraImageGenProvider(StaticImageGenProvider):
         if not data:
             return fail("DeepInfra returned no image data", "empty_response")
         first = data[0]
-        # Drop the ``vendor/`` prefix and any colons so the saved filename
-        # stays a single path component on every OS. Delivery URLs are often
-        # short-lived; materialise locally, best-effort.
+        # Prefix drops ``vendor/`` and colons (single path component on every OS); delivery URLs
+        # are short-lived, so materialise locally best-effort.
         image_ref, err = materialize_image(
             getattr(first, "b64_json", None), getattr(first, "url", None),
             prefix=f"deepinfra_{model_id.split('/', 1)[-1].replace(':', '_')}", label="DeepInfra",
             provider="deepinfra", model=model_id, prompt=prompt, aspect=aspect,
-            on_url_fail=lambda exc: logger.debug("DeepInfra: caching delivery URL failed (%s); returning URL", exc),
+            on_url_fail=lambda exc: logger.debug(
+                "DeepInfra: caching delivery URL failed (%s); returning URL", exc,
+            ),
         )
         if err:
             return err
