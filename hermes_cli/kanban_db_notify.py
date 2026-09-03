@@ -25,11 +25,8 @@ if TYPE_CHECKING:
 # Notification subscriptions (used by the gateway kanban-notifier)
 # ---------------------------------------------------------------------------
 
-# How the gateway kanban-notifier reacts to a terminal event for a
-# subscription:
-#   "notify"       -> passive ``adapter.send`` only (default)
-#   "notify+wake"  -> passive send AND wake the destination gateway agent
-#   "wake"         -> wake the agent only; no passive message is sent
+# Notifier reaction to a terminal event: "notify" = passive adapter.send only
+# (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 
 
@@ -82,40 +79,26 @@ def add_notify_sub(
     delivery_mode: Optional[str] = None,
     delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    """Register a gateway source that wants terminal-state notifications
-    for ``task_id``. Idempotent on (task, platform, chat, thread).
+    """Register a gateway source wanting terminal-state notifications for
+    ``task_id``. Idempotent on (task, platform, chat, thread).
 
-    ``user_id_alt`` records the originating source's platform-specific stable
-    alt ID (Signal UUID, Feishu union_id, ...) alongside ``user_id``. Active-wake
-    replay must reproduce it so the woken turn's ``build_session_key`` matches
-    the original event's — ``build_session_key`` prefers ``user_id_alt`` over
-    ``user_id`` (gateway/session.py), so replaying only ``user_id`` would key a
-    wake into a different session whenever the two diverge for this source.
+    ``user_id_alt`` (Signal UUID, Feishu union_id, ...) must be replayed on
+    active wake: ``build_session_key`` prefers it over ``user_id``, so replaying
+    only ``user_id`` would key the wake into a different session when they
+    diverge. ``chat_type`` is likewise replayed so the woken turn resolves the
+    operator's real channel; ``None`` keeps an existing row's value.
 
-    ``chat_type`` records the originating source's chat type; the active-wake
-    delivery modes replay it so the woken turn resolves the operator's real
-    channel. ``None`` keeps an existing row's value.
-
-    ``delivery_mode`` (see ``_NOTIFY_DELIVERY_MODES``) selects how the
-    kanban-notifier reacts to a terminal event for this subscription. ``None``
-    leaves an existing row's mode untouched (and inserts the ``"notify"``
-    default for a fresh row); an explicit value is last-write-wins, so an
-    operator can intentionally re-subscribe to change the mode (e.g.
-    ``notify`` -> ``wake``). An unknown value falls back to ``"notify"``.
-    New subscriptions start "caught up": ``last_event_id`` snaps to the task's
-    current ``MAX(task_events.id)`` instead of the schema default 0, which made
-    the notifier replay every historical terminal event on its next tick (a
-    boot-time burst of 100+ messages with many stale subs). Subscribers only
-    want events AFTER they subscribe; auto-subscribe at task creation snapshots
-    0 anyway.
+    ``delivery_mode`` (``_NOTIFY_DELIVERY_MODES``): ``None`` leaves an existing
+    row untouched (fresh rows get ``"notify"``); an explicit value is
+    last-write-wins so re-subscribing can change the mode; unknown values fall
+    back to ``"notify"``. New subs start "caught up" (``last_event_id`` =
+    current ``MAX(task_events.id)``, not 0) — otherwise the notifier replays
+    every historical terminal event on its next tick (boot-time bursts).
     """
     insert_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else (
-        # api_server is stateless: the adapter has no send() — the wake
-        # self-post IS the delivery on that path (see gateway/wake.py and
-        # test_kanban_notifier_apiserver_wake). A plain-'notify' default
-        # would leave those subscriptions with no delivery mechanism at
-        # all, regressing the pre-delivery_mode behavior where a task
-        # carrying a session_id always woke. Explicit modes still win.
+        # api_server is stateless: the adapter has no send(), the wake self-post
+        # IS the delivery. A plain 'notify' default would leave those subs with
+        # no delivery mechanism at all. Explicit modes still win.
         "notify+wake" if platform == "api_server" else "notify"
     )
     insert_chat_type = chat_type or "dm"
@@ -146,9 +129,8 @@ def add_notify_sub(
                 task_id,
             ),
         )
-        # Re-subscribe semantics per column: chat_type / delivery_mode /
-        # delivery_metadata are last-write-wins; user_id_alt and
-        # notifier_profile only self-heal legacy rows that never had one.
+        # chat_type / delivery_mode / delivery_metadata are last-write-wins;
+        # user_id_alt and notifier_profile only self-heal legacy rows lacking one.
         key = (task_id, platform, chat_id, thread_id or "")
         for column, value, fill_only in (
             ("chat_type", chat_type, False),
@@ -207,10 +189,9 @@ def list_notify_subs(
 ) -> list[dict]:
     """List subscriptions, optionally restricted to notifier profile owners.
 
-    Passing no ``notifier_profiles`` preserves the historical all-subscriptions
-    result. Gateway notifier processes pass the profiles whose adapters they
-    own so they cannot claim another gateway's events. ``include_unowned`` is
-    used by the dispatch owner for legacy rows created before profile stamping.
+    No ``notifier_profiles`` -> all subscriptions. Gateway notifiers pass the
+    profiles they own so they cannot claim another gateway's events;
+    ``include_unowned`` (dispatch owner) covers legacy rows without a stamp.
     """
     owner_where, owner_params = _notify_profile_filter(
         notifier_profiles, include_unowned=include_unowned,
@@ -250,23 +231,15 @@ def count_notify_subs(
 ) -> int:
     """Count ``kanban_notify_subs`` rows via a read-only connection.
 
-    Cheap probe for the gateway notifier's zero-subscription early exit:
-    unlike :func:`connect`, this never creates the DB file, never runs
-    schema init/migration, and never opens the database writable (no
-    write locks, no checkpoints — though a read-only open of a WAL
-    database may still create the ``-shm``/``-wal`` sidecars, it cannot
-    write table content). Rows in a not-yet-checkpointed WAL are
-    visible, so a freshly added subscription is never missed. A missing
-    DB, or a legacy DB that predates the subscriptions table, counts as
-    zero. When ``notifier_profiles`` is supplied, only subscriptions owned
-    by those profiles are counted; ``include_unowned`` also includes legacy
-    rows without an owner stamp. Optional platform/chat/thread filters narrow
-    the probe to one notification owner without changing the unfiltered count.
-    Platform matching is case-insensitive, matching notifier routing; chat and
-    thread identifiers are exact. Path resolution matches :func:`connect`
-    (explicit ``db_path``, else ``board`` via :func:`kanban_db_path`). Raises
-    :class:`sqlite3.Error` when the DB exists but cannot be read
-    (locked, corrupt); callers choose their own fallback.
+    Cheap probe for the notifier's zero-subscription early exit: unlike
+    :func:`connect` it never creates the DB file, runs schema init/migration,
+    or opens writable (a read-only WAL open may still create ``-shm``/``-wal``
+    sidecars but cannot write table content). Rows in a not-yet-checkpointed
+    WAL are visible, so a fresh subscription is never missed. A missing DB or
+    a legacy DB without the table counts as zero. Platform matching is
+    case-insensitive (matching notifier routing); chat/thread are exact.
+    Path resolution matches :func:`connect`. Raises :class:`sqlite3.Error`
+    when the DB exists but cannot be read; callers choose their own fallback.
     """
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     if not path.exists():
@@ -326,26 +299,17 @@ def purge_stale_done_notify_subs(
     *,
     max_age_days: int = 30,
 ) -> int:
-    """Delete notify subscriptions whose task has sat in ``done`` or
-    ``blocked`` untouched for longer than ``max_age_days``.
+    """Delete notify subs whose task has sat in ``done``/``blocked`` untouched
+    for longer than ``max_age_days``.
 
-    The notifier keeps subscriptions alive through ``done`` because a
-    completed task can be reopened (review corrections, continuation) and
-    the reopened cycle must still notify its origin session. On boards
-    that never archive, that retention would otherwise accumulate
-    subscription rows forever — each one scanned every notifier tick.
-    This GC bounds that: a task that has been ``done`` with no new events
-    for the retention window is treated as settled and its subscriptions
-    are purged. ``blocked`` tasks (circuit-breaker trips, dead workers)
-    are reaped on the same clock — they are abandoned, not idle, unlike a
-    ``backlog``/``ready`` card that is merely waiting for pickup (#100955).
-    Age is measured from the task's most recent event
-    (falling back to ``completed_at`` then ``created_at``), so ANY
-    activity — including a reopen, which also moves the task off
-    ``done`` — resets or exempts it.
-
-    ``max_age_days <= 0`` disables the sweep entirely. Returns the number
-    of subscription rows deleted.
+    Subs survive ``done`` because a completed task can be reopened and must
+    still notify its origin; on never-archiving boards that would accumulate
+    rows forever, each scanned every notifier tick. ``blocked`` tasks are
+    reaped on the same clock — they are abandoned, not merely waiting like
+    ``backlog``/``ready``. Age is measured from the most recent event
+    (falling back to ``completed_at`` then ``created_at``), so ANY activity —
+    including a reopen — resets or exempts it. ``max_age_days <= 0`` disables
+    the sweep. Returns the number of rows deleted.
     """
     try:
         days = int(max_age_days)
@@ -390,11 +354,8 @@ def unseen_events_for_sub(
     thread_id: Optional[str] = None,
     kinds: Optional[Iterable[str]] = None,
 ) -> tuple[int, list[Event]]:
-    """Return ``(new_cursor, events)`` for a given subscription.
-
-    Only events with ``id > last_event_id`` are returned. The subscription's
-    cursor is NOT advanced here; call :func:`advance_notify_cursor` after
-    the gateway has successfully delivered the notifications.
+    """Return ``(new_cursor, events)`` with ``id > last_event_id``. The cursor
+    is NOT advanced here; call :func:`advance_notify_cursor` after delivery.
     """
     cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
     if cursor is None:
@@ -426,19 +387,14 @@ def claim_unseen_events_for_sub(
     thread_id: Optional[str] = None,
     kinds: Optional[Iterable[str]] = None,
 ) -> tuple[int, int, list[Event]]:
-    """Atomically claim unseen notification events for one subscription.
+    """Atomically claim unseen events for one subscription.
 
-    Returns ``(old_cursor, new_cursor, events)``. When events are returned,
-    ``kanban_notify_subs.last_event_id`` has already been advanced to
-    ``new_cursor`` inside a ``BEGIN IMMEDIATE`` transaction. That makes the
-    notifier's read/claim step single-owner across multiple gateway watcher
-    processes pointed at the same board DB: concurrent watchers serialize on
-    SQLite's writer lock, and only the first process sees and claims a given
-    event range.
-
-    Callers should send the claimed events, then either leave the cursor at
-    ``new_cursor`` on success or call :func:`rewind_notify_cursor` if delivery
-    failed before any terminal unsubscribe removed the row.
+    Returns ``(old_cursor, new_cursor, events)``; when events are returned the
+    row's ``last_event_id`` has already been advanced inside ``BEGIN IMMEDIATE``,
+    so concurrent gateway watchers on the same board DB serialize on SQLite's
+    writer lock and only the first claims a given event range. Callers send the
+    events, then leave the cursor or call :func:`rewind_notify_cursor` on
+    delivery failure.
     """
     with _kb.write_txn(conn):
         old_cursor = _notify_cursor(conn, task_id, platform, chat_id, thread_id)
@@ -490,11 +446,8 @@ def rewind_notify_cursor(
     claimed_cursor: int,
     old_cursor: int,
 ) -> bool:
-    """Undo a notification claim when delivery fails.
-
-    The CAS guard only rewinds if no later notifier advanced the row after our
-    claim. This keeps retry behavior for transient send failures without
-    clobbering newer progress.
+    """Undo a claim when delivery fails. The CAS guard only rewinds if no later
+    notifier advanced the row, so retries never clobber newer progress.
     """
     with _kb.write_txn(conn):
         cur = conn.execute(
