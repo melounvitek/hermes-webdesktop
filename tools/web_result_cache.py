@@ -265,10 +265,10 @@ def extract_cache_get(url: str, format: Optional[str] = None, provider: str = ""
     try:
         file_path, cache_root = Path(entry["file"]), _cache_dir()
         # The index is plain JSON on disk; never let a tampered entry read outside cache/web.
-        if cache_root is None or cache_root.resolve() not in file_path.resolve().parents:
+        if cache_root.resolve() not in file_path.resolve().parents:
             return None
         content = file_path.read_text(encoding="utf-8")
-    except Exception:  # noqa: BLE001 — evicted/pruned file == miss
+    except Exception:  # noqa: BLE001 — evicted/pruned file == miss (or no cache dir)
         return None
     logger.info("web_extract cache hit: %s", url)
     return {"url": url, "title": entry.get("title", ""), "content": content, "error": None, "cached": True}

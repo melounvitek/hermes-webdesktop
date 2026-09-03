@@ -27,11 +27,7 @@ from plugins.web.parallel.provider import _get_async_parallel_client, _get_paral
 from plugins.web.exa.provider import _get_exa_client  # noqa: F401
 
 # Per-vendor client cache slots; plugins read/write these via tools.web_tools (tests reset them to None).
-_firecrawl_client: Optional[Any] = None
-_firecrawl_client_config: Optional[Any] = None
-_parallel_client: Optional[Any] = None
-_async_parallel_client: Optional[Any] = None
-_exa_client: Optional[Any] = None
+_firecrawl_client = _firecrawl_client_config = _parallel_client = _async_parallel_client = _exa_client = None
 
 from tools.debug_helpers import DebugSession
 from tools.managed_tool_gateway import (  # noqa: F401 — backward-compat names for tests
@@ -137,15 +133,11 @@ def _get_backend() -> str:
     # token's tier may not grant web access; the gateway then fails at runtime with no fallback).
     # Free tiers trail paid.
     backend_candidates = (
-        ("tavily", _has_env("TAVILY_API_KEY")),
-        ("exa", _has_env("EXA_API_KEY")),
-        ("parallel", _has_env("PARALLEL_API_KEY")),
-        ("keenable", _has_env("KEENABLE_API_KEY")),
+        ("tavily", _has_env("TAVILY_API_KEY")), ("exa", _has_env("EXA_API_KEY")),
+        ("parallel", _has_env("PARALLEL_API_KEY")), ("keenable", _has_env("KEENABLE_API_KEY")),
         ("firecrawl", _has_env("FIRECRAWL_API_KEY") or _has_env("FIRECRAWL_API_URL")),
-        ("firecrawl", _is_tool_gateway_ready()),
-        ("searxng", _has_env("SEARXNG_URL")),
-        ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
-        ("ddgs", _ddgs_package_importable()),
+        ("firecrawl", _is_tool_gateway_ready()), ("searxng", _has_env("SEARXNG_URL")),
+        ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")), ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
         if available:
