@@ -130,10 +130,8 @@ def _record_codex_app_server_compaction(agent, turn, *, approx_tokens: int | Non
     if not force and not getattr(turn, "compacted", False):
         return False
     thread_id, turn_id = getattr(turn, "thread_id", None) or "", getattr(turn, "turn_id", None) or ""
-    logger.info(
-        "codex app-server compaction observed: session=%s thread=%s turn=%s force=%s",
-        getattr(agent, "session_id", None) or "none", thread_id, turn_id, force,
-    )
+    logger.info("codex app-server compaction observed: session=%s thread=%s turn=%s force=%s",
+                getattr(agent, "session_id", None) or "none", thread_id, turn_id, force)
     if not force:
         with suppress(Exception):
             from agent.conversation_compression import COMPACTION_STATUS
@@ -149,16 +147,14 @@ def _record_codex_app_server_compaction(agent, turn, *, approx_tokens: int | Non
         elif hasattr(compressor, "_verify_compaction_cleared_threshold"):
             compressor._verify_compaction_cleared_threshold = True
         if not getattr(turn, "token_usage_last", None):
-            compressor.last_prompt_tokens = -1
-            compressor.last_completion_tokens = 0
+            compressor.last_prompt_tokens, compressor.last_completion_tokens = -1, 0
             compressor.awaiting_real_usage_after_compression = True
     # Provider-side context was rewritten; the usage anchor's transcript snapshot no longer matches.
     agent._usage_anchor = agent._turn_base_usage_anchor = None
     agent._last_compaction_in_place = False
     _call_guarded(getattr(agent, "event_callback", None) or None, "event_callback error on codex session:compress",
                   args=("session:compress", {
-                      "platform": getattr(agent, "platform", None) or "",
-                      "session_id": getattr(agent, "session_id", None) or "",
+                      "platform": getattr(agent, "platform", None) or "", "session_id": getattr(agent, "session_id", None) or "",
                       "old_session_id": "", "in_place": False,
                       "compression_count": getattr(compressor, "compression_count", 0) if compressor is not None else 0,
                       "runtime": "codex_app_server", "thread_id": thread_id, "turn_id": turn_id,
@@ -403,11 +399,8 @@ def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> 
         logger.warning("codex app-server projected-message flush failed", exc_info=True)
     if flush_ok is False:
         # Output already streamed and agent_persisted cannot flip to False: surface the gap loudly.
-        logger.warning(
-            "codex app-server turn was delivered but could NOT be persisted to the session DB "
-            "(session=%s) — this turn will be missing after restart/resume",
-            getattr(agent, "session_id", None),
-        )
+        logger.warning("codex app-server turn was delivered but could NOT be persisted to the session DB "
+                       "(session=%s) — this turn will be missing after restart/resume", getattr(agent, "session_id", None))
 
 
 def _finish_codex_turn(agent, turn, messages: List[Dict[str, Any]], *, original_user_message: Any,
@@ -443,10 +436,8 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
     # api_mode is mutable. Explicit-True check matches compress_context().
     if getattr(agent, "compression_checkpoint_required", False) is True:
         from agent.conversation_compression import _checkpoint_blocked
-        raise _checkpoint_blocked(
-            "codex_app_server owns the authoritative thread and compacts it "
-            "without a truthful pre-compaction transcript boundary"
-        )
+        raise _checkpoint_blocked("codex_app_server owns the authoritative thread and compacts it "
+                                  "without a truthful pre-compaction transcript boundary")
     _ensure_codex_session(agent)
     try:
         turn = agent._codex_session.run_turn(user_input=user_message)
@@ -720,8 +711,7 @@ class _CodexResponseAssembler:
         return SimpleNamespace(
             output=output, output_text="".join(self.text_deltas), usage=self.terminal_usage, status=self.terminal_status,
             id=self.terminal_response_id, model=self.model, incomplete_details=self.terminal_incomplete_details,
-            error=self.terminal_error,
-        )
+            error=self.terminal_error)
 
 
 def _consume_codex_event_stream(
@@ -772,10 +762,8 @@ def _sanitize_consumer_codex_request(agent: Any, request: dict[str, Any]) -> dic
             sanitized.pop("extra_body")
         dropped_from.append("extra_body")
     if dropped_from:
-        logger.warning(
-            "Dropped unsupported prompt_cache_retention at consumer Codex wire boundary (model=%s, via %s).",
-            sanitized.get("model", getattr(agent, "model", "unknown")), ", ".join(dropped_from),
-        )
+        logger.warning("Dropped unsupported prompt_cache_retention at consumer Codex wire boundary (model=%s, via %s).",
+                       sanitized.get("model", getattr(agent, "model", "unknown")), ", ".join(dropped_from))
     return sanitized
 
 
