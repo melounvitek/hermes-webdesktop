@@ -50,12 +50,11 @@ class _AsyncBridge:
 
     def run(self, coro, timeout: Optional[float] = 30.0) -> Any:
         from agent.async_utils import safe_schedule_threadsafe
-        if not self._loop or not self._thread or not self._thread.is_alive():
-            if asyncio.iscoroutine(coro):
-                coro.close()
-            raise RuntimeError("cua-driver bridge not started")
-        fut = safe_schedule_threadsafe(coro, self._loop)
+        alive = self._loop is not None and self._thread is not None and self._thread.is_alive()
+        fut = safe_schedule_threadsafe(coro, self._loop) if alive else None  # closes the coroutine on failure
         if fut is None:
+            if asyncio.iscoroutine(coro):
+                coro.close()  # no-op when safe_schedule_threadsafe already closed it
             raise RuntimeError("cua-driver bridge not started")
         return fut.result(timeout=timeout)
 
@@ -146,6 +145,27 @@ def _cli_result(parsed: Any, shot_file: Optional[str]) -> Dict[str, Any]:
     return _tool_envelope(data, [shot] if shot else [], parsed, is_error)
 
 
+def _logical_error_text(result: Dict[str, Any]) -> str:
+    """Flatten a logical MCP error into text for narrow classification."""
+    chunks: List[str] = []
+    for value in (result.get("data"), result.get("structuredContent")):
+        if value is None:
+            continue
+        try:
+            chunks.append(value if isinstance(value, str) else json.dumps(value, sort_keys=True))
+        except (TypeError, ValueError):
+            chunks.append(str(value))
+    return "\n".join(chunks)
+
+def _is_ended_session_result(result: Any) -> bool:
+    """Recognise cua-driver's explicit recoverable ended-session result."""
+    if not isinstance(result, dict) or result.get("isError") is not True:
+        return False
+    message = _logical_error_text(result).lower()
+    return ("session" in message and "start_session" in message
+            and ("has ended" in message or "session ended" in message))
+
+
 class _CuaDriverSession:
     """Holds the mcp ClientSession. Spawned lazily; re-entered on drop. Lifecycle ownership: one long-running
     coroutine (`_lifecycle_coro`) opens the stdio_client + ClientSession contexts, populates capabilities, sets
@@ -178,13 +198,6 @@ class _CuaDriverSession:
         # Declared via start_session; revives an ended-session rejection non-re-entrantly.
         self._declared_session_id: Optional[str] = None
         self._transport_generation, self._transport_reset_callback = 0, None
-
-    def _require_started(self) -> None:
-        if not self._started:
-            raise RuntimeError("cua-driver session not started")
-
-    def _reset_capability_state(self) -> None:
-        self._capabilities, self._tool_schemas, self._capability_version = {}, {}, ""
 
     async def _lifecycle_coro(self) -> None:
         """Owns the stdio MCP contexts: open, signal ready, block on shutdown, clean up — all in one task."""
@@ -236,7 +249,7 @@ class _CuaDriverSession:
     async def _populate_capabilities(self, session: Any) -> None:
         """Cache per-tool capability sets, input schemas and capability_version from tools/list. Soft
         prerequisite: on failure the map stays empty (capability False)."""
-        self._reset_capability_state()
+        self._capabilities, self._tool_schemas, self._capability_version = {}, {}, ""
         try:
             tools_list = await session.list_tools()
             for tool in getattr(tools_list, "tools", []) or []:
@@ -294,9 +307,8 @@ class _CuaDriverSession:
         self._transport_reset_callback = callback
 
     def _notify_transport_reset(self) -> None:
-        callback = getattr(self, "_transport_reset_callback", None)
         try:
-            if callback is not None:
+            if (callback := getattr(self, "_transport_reset_callback", None)) is not None:
                 callback()
         except Exception as exc:
             logger.debug("cua-driver transport reset callback failed: %s", exc)
@@ -321,9 +333,6 @@ class _CuaDriverSession:
 
     async def _call_tool_async(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         return _extract_tool_result(await self._session.call_tool(name, args))
-
-    def _run_call(self, name: str, args: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-        return self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
 
     # ── Capability detection ─────────────────────────────────────────
     def supports_capability(self, capability: str, tool: Optional[str] = None) -> bool:
@@ -352,29 +361,7 @@ class _CuaDriverSession:
         """Driver-advertised capability vocabulary version ("" on old builds)."""
         return self._capability_version
 
-    # ── Error classification ─────────────────────────────────────────
-    @staticmethod
-    def _logical_error_text(result: Dict[str, Any]) -> str:
-        """Flatten a logical MCP error into text for narrow classification."""
-        chunks: List[str] = []
-        for value in (result.get("data"), result.get("structuredContent")):
-            if value is None:
-                continue
-            try:
-                chunks.append(value if isinstance(value, str) else json.dumps(value, sort_keys=True))
-            except (TypeError, ValueError):
-                chunks.append(str(value))
-        return "\n".join(chunks)
-
-    @classmethod
-    def _is_ended_session_result(cls, result: Any) -> bool:
-        """Recognise cua-driver's explicit recoverable ended-session result."""
-        if not isinstance(result, dict) or result.get("isError") is not True:
-            return False
-        message = cls._logical_error_text(result).lower()
-        return ("session" in message and "start_session" in message
-                and ("has ended" in message or "session ended" in message))
-
+    # ── Error classification (instance-patchable seams; result-shape checks live at module level) ──
     @staticmethod
     def _is_closed_session_error(exc: Exception) -> bool:
         """True for MCP/stdio failures that are recoverable by reconnecting."""
@@ -393,23 +380,12 @@ class _CuaDriverSession:
                                                 "daemon transport error", "daemon proxy"))
 
     # ── Recovery ─────────────────────────────────────────────────────
-    def _revive_declared_session_once(self, name: str, args: Dict[str, Any],
-                                      first_result: Dict[str, Any], timeout: float) -> Dict[str, Any]:
-        """Revive the stable session, replay the rejected call once; a 2nd rejection surfaces as-is."""
-        session_id = self._declared_session_id
-        if not session_id or name in self._LIFECYCLE_CALLS:
-            return first_result
-        logger.warning("cua-driver session %s ended during %s; reviving and retrying once", session_id, name)
-        if not self._redeclare_session(timeout, "cua-driver session %s could not be revived: %s"):
-            return first_result
-        return self._run_call(name, args, timeout)
-
     def _redeclare_session(self, timeout: float, failure_msg: str) -> bool:
         """start_session with the declared id; log *failure_msg* and return False on rejection."""
         session_id = self._declared_session_id
-        result = self._run_call("start_session", {"session": session_id}, timeout)
+        result = self._bridge.run(self._call_tool_async("start_session", {"session": session_id}), timeout=timeout)
         if result.get("isError") is True:
-            logger.warning(failure_msg, session_id, self._logical_error_text(result))
+            logger.warning(failure_msg, session_id, _logical_error_text(result))
         return result.get("isError") is not True
 
     def _recreate_session(self, name: str, timeout: float, log_msg: str, *, restart: bool = True,
@@ -428,7 +404,7 @@ class _CuaDriverSession:
                 except Exception as e:
                     logger.debug("cua-driver session cleanup before reconnect failed: %s", e)
                 self._started = False
-                self._reset_capability_state()
+                self._capabilities, self._tool_schemas, self._capability_version = {}, {}, ""
                 self._start_lifecycle_locked()
                 self._started = True
             if clear_timeout_suspect:
@@ -479,16 +455,17 @@ class _CuaDriverSession:
             if not self._started:
                 self._recreate_session(
                     name, timeout, "cua-driver session not active on %s; (re)starting before call", restart=False)
-        self._require_started()
+        if not self._started:
+            raise RuntimeError("cua-driver session not started")
         try:
-            result = self._run_call(name, args, timeout)
+            result = self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
+        except concurrent.futures.TimeoutError as e:
+            # Fail closed: the action may have landed, so never replay it.
+            self._timeout_suspect = True
+            logger.warning("cua-driver MCP timed out on %s; marking session suspect "
+                           "for recreation before the next call", name)
+            return _outcome_unknown(name, e, "timeout_outcome_unknown")
         except Exception as e:
-            if isinstance(e, concurrent.futures.TimeoutError):
-                # Fail closed: the action may have landed, so never replay it.
-                self._timeout_suspect = True
-                logger.warning("cua-driver MCP timed out on %s; marking session suspect "
-                               "for recreation before the next call", name)
-                return _outcome_unknown(name, e, "timeout_outcome_unknown")
             if self._is_transient_daemon_error(e):
                 if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                     self._notify_transport_reset()
@@ -501,13 +478,19 @@ class _CuaDriverSession:
             self._recreate_session(name, timeout, "cua-driver MCP session closed during %s; reconnecting once")
             if name not in self._TRANSPORT_REPLAY_SAFE_TOOLS:
                 return _outcome_unknown(name, e, "transport_outcome_unknown")
-            result = self._run_call(name, args, timeout)
+            result = self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
         # Remember only a SUCCESSFULLY declared identity: no stale recovery state.
         declared_id, ok = args.get("session"), result.get("isError") is not True
         if name == "start_session" and ok and isinstance(declared_id, str) and declared_id:
             self._declared_session_id = declared_id
-        if self._is_ended_session_result(result):  # never re-runs lifecycle calls -> end_session result is final
-            result = self._revive_declared_session_once(name, args, result, timeout)
+        if _is_ended_session_result(result):
+            # Revive the stable session and replay the rejected call once; a 2nd rejection surfaces as-is.
+            # Never re-runs lifecycle calls -> an end_session result is final.
+            session_id = self._declared_session_id
+            if session_id and name not in self._LIFECYCLE_CALLS:
+                logger.warning("cua-driver session %s ended during %s; reviving and retrying once", session_id, name)
+                if self._redeclare_session(timeout, "cua-driver session %s could not be revived: %s"):
+                    result = self._bridge.run(self._call_tool_async(name, args), timeout=timeout)
         elif name == "end_session" and ok and declared_id == self._declared_session_id:
             self._declared_session_id = None
         return result

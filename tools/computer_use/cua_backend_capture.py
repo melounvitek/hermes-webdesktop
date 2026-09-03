@@ -31,8 +31,6 @@ _DESKTOP_SHELL_SENTINELS = {"desktop"}
 # desktop, Shell_TrayWnd = taskbar; macOS: Finder/Dock. The backdrop subset is preferred over the taskbar.
 _DESKTOP_WINDOW_NAMES = ("progman", "workerw", "program manager", "shell_traywnd", "taskbar", "finder", "desktop", "dock")
 _DESKTOP_BACKDROP_NAMES = ("progman", "workerw", "program manager", "finder", "desktop")
-_WINDOW_TITLE_RE = re.compile(r'AXWindow\s+"([^"]+)"')
-_LEGACY_APP_LINE_RE = re.compile(r'(.+?)\s+\(pid\s+(\d+)\)')
 _NO_DESKTOP_WINDOW_MSG = ("<no desktop/shell window found for app={app!r}; cua-driver captures one window at a time "
                           "and exposes no whole-virtual-desktop or per-monitor capture. Call list_apps / "
                           "capture(app='<AppName>') to target a specific window instead. On Windows the taskbar is "
@@ -79,7 +77,7 @@ def _sorted_windows(out: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _tree_and_title(out: Dict[str, Any]) -> Tuple[str, str]:
     """``(tree_markdown, window_title)`` from a get_window_state result."""
     tree = _split_tree_text(data if isinstance((data := out.get("data")), str) else "")[1]
-    return tree, (match.group(1) if (match := _WINDOW_TITLE_RE.search(tree)) else "")
+    return tree, (match.group(1) if (match := re.search(r'AXWindow\s+"([^"]+)"', tree)) else "")
 
 def _gws_is_empty(out: Dict[str, Any]) -> bool:
     """True when a get_window_state result carries neither a screenshot nor a parseable tree. Modern
@@ -153,7 +151,7 @@ class _CaptureMixin:
         cli_out = self._cli_refetch(name, args, timeout, what, warning, *warning_args) if empty(out) else None
         return cli_out if cli_out is not None and not empty(cli_out) else out
 
-    def _load_windows(self) -> List[Dict[str, Any]]:
+    def list_windows(self) -> List[Dict[str, Any]]:
         """Visible windows frontmost-first, re-fetching over the CLI transport when MCP returns nothing."""
         return _sorted_windows(self._fetch_or_refetch(
             "list_windows", {"on_screen_only": True, "session": self._session_id}, 20.0, "list_windows",
@@ -207,7 +205,7 @@ class _CaptureMixin:
             return [{"app_name": app or "", "pid": target_pid, "window_id": target_window_id, "off_screen": False,
                      "title": "", "z_index": 0}]
         with self._disarming():
-            windows = self._load_windows()
+            windows = self.list_windows()
         if not windows:
             # Diagnose instead of a bare 0x0: the dominant real-world cause on Linux is a locked desktop session.
             from tools.computer_use import cua_backend as _cb
@@ -329,9 +327,6 @@ class _CaptureMixin:
                              window_title="Full screen (composited)", png_bytes_len=png_bytes_len,
                              image_mime_type=image_mime_type, note=_FULL_SCREEN_NOTE)
 
-    def list_windows(self) -> List[Dict[str, Any]]:
-        return self._load_windows()
-
     def list_apps(self) -> List[Dict[str, Any]]:
         out = self._session.call_tool("list_apps", {"session": self._session_id})
         structured, data = out.get("structuredContent"), out.get("data")
@@ -345,14 +340,14 @@ class _CaptureMixin:
                 return apps
         # Old text-only drivers retain a small, name/PID-only fallback.
         return [{"name": m.group(1).strip(), "pid": int(m.group(2))}
-                for m in map(_LEGACY_APP_LINE_RE.search, data.splitlines()) if m] if isinstance(data, str) else []
+                for m in map(re.compile(r'(.+?)\s+\(pid\s+(\d+)\)').search, data.splitlines()) if m] if isinstance(data, str) else []
 
     def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
         """Pure window-selector (store pid/window_id so later input hits the right process) — background
         automation never needs to raise a window. ``raise_window=True`` is explicit, separately approved,
         and uses the standalone ``bring_to_front`` tool."""
         with self._disarming():
-            matched = self._match_windows_for_app(self._load_windows(), app)
+            matched = self._match_windows_for_app(self.list_windows(), app)
         # No silent fallback to the frontmost window: that hides the real failure (often a localized macOS
         # app-name mismatch).
         if not matched:
