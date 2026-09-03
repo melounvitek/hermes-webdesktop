@@ -109,7 +109,7 @@ def _lookup_server(
 def _remove_mcp_server(name: str) -> bool:
     """Remove a server from config.yaml.  Returns True if it existed."""
     config = load_config()
-    servers = config.get("mcp_servers", {})
+    servers = config.get("mcp_servers") or {}
     if name not in servers:
         return False
     del servers[name]

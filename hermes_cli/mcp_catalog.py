@@ -311,8 +311,9 @@ def get_entry(name: str) -> Optional[CatalogEntry]:
 
 def installed_servers() -> Dict[str, dict]:
     """Return current ``mcp_servers`` block from config.yaml."""
-    servers = load_config().get("mcp_servers") or {}
-    return servers if isinstance(servers, dict) else {}
+    from hermes_cli.mcp_config import _get_mcp_servers
+
+    return _get_mcp_servers()
 
 
 def is_installed(name: str) -> bool:
@@ -334,17 +335,9 @@ def is_enabled(name: str) -> bool:
 
 def remove_server(name: str) -> bool:
     """Drop ``mcp_servers.<name>`` from config.yaml (pruning an empty block). True if it existed."""
-    cfg = load_config()
-    servers = cfg.get("mcp_servers") or {}
-    if name not in servers:
-        return False
-    del servers[name]
-    if not servers:
-        cfg.pop("mcp_servers", None)
-    else:
-        cfg["mcp_servers"] = servers
-    save_config(cfg)
-    return True
+    from hermes_cli.mcp_config import _remove_mcp_server
+
+    return _remove_mcp_server(name)
 
 
 def _say(msg: str, colour: str = Colors.GREEN) -> None:
