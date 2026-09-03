@@ -52,14 +52,10 @@ def _exec_profile(ctx: CommandContext) -> CommandReply:
     A multiplexed gateway may pre-resolve the per-source profile/home via ``options``
     (``profile_name`` / ``home_display``); otherwise process-level values are used.
     """
-    profile_name = str(ctx.options.get("profile_name") or "").strip()
-    home_display = str(ctx.options.get("home_display") or "").strip()
-    if not profile_name:
-        from hermes_cli.profiles import get_active_profile_name
-        profile_name = get_active_profile_name()
-    if not home_display:
-        from hermes_constants import display_hermes_home
-        home_display = display_hermes_home()
+    from hermes_cli.profiles import get_active_profile_name
+    from hermes_constants import display_hermes_home
+    profile_name = str(ctx.options.get("profile_name") or "").strip() or get_active_profile_name()
+    home_display = str(ctx.options.get("home_display") or "").strip() or display_hermes_home()
     # Presentation-only display name (profile.yaml); `data.profile` stays the canonical id.
     label = profile_name
     try:
@@ -88,10 +84,10 @@ def _exec_bundles(ctx: CommandContext) -> CommandReply:
             data={"bundles": [], "dir": bundles_dir})
     lines = [f"Skill Bundles ({len(bundles)} installed):"]
     for info in bundles:
-        skill_count = len(info.get("skills", []))
-        desc = info.get("description") or f"Load {skill_count} skills"
-        lines.append(f"/{info['slug']} — {desc} ({skill_count} skills)")
-        lines.extend(f"    · {s}" for s in info.get("skills", []))
+        skills = info.get("skills", [])
+        desc = info.get("description") or f"Load {len(skills)} skills"
+        lines.append(f"/{info['slug']} — {desc} ({len(skills)} skills)")
+        lines.extend(f"    · {s}" for s in skills)
     lines.append("Invoke a bundle with /<slug> to load all its skills.")
     return CommandReply("\n".join(lines), data={"bundles": bundles, "dir": bundles_dir})
 
@@ -131,14 +127,10 @@ def _exec_commands(ctx: CommandContext) -> CommandReply:
     """
     from agent.i18n import t
     from hermes_cli.commands import gateway_help_lines
-    raw_args = (ctx.args or "").strip()
-    if raw_args:
-        try:
-            requested_page = int(raw_args)
-        except ValueError:
-            return CommandReply(t("gateway.commands.usage"), format="markdown")
-    else:
-        requested_page = 1
+    try:
+        requested_page = int((ctx.args or "").strip() or 1)
+    except ValueError:
+        return CommandReply(t("gateway.commands.usage"), format="markdown")
 
     entries = list(gateway_help_lines())
     skill_cmds = _skill_commands()
@@ -155,21 +147,17 @@ def _exec_commands(ctx: CommandContext) -> CommandReply:
         return CommandReply(t("gateway.commands.none"), format="markdown")
 
     try:
-        page_size = int(ctx.options.get("page_size", 20))
+        page_size = max(1, int(ctx.options.get("page_size", 20)))
     except (TypeError, ValueError):
         page_size = 20
-    page_size = max(1, page_size)
     total_pages = max(1, (len(entries) + page_size - 1) // page_size)
     page = max(1, min(requested_page, total_pages))
     start = (page - 1) * page_size
     lines = [t("gateway.commands.header", total=len(entries), page=page, total_pages=total_pages),
              "", *entries[start:start + page_size]]
     if total_pages > 1:
-        nav_parts = []
-        if page > 1:
-            nav_parts.append(t("gateway.commands.nav_prev", page=page - 1))
-        if page < total_pages:
-            nav_parts.append(t("gateway.commands.nav_next", page=page + 1))
+        nav_parts = ([t("gateway.commands.nav_prev", page=page - 1)] if page > 1 else []) + (
+            [t("gateway.commands.nav_next", page=page + 1)] if page < total_pages else [])
         lines.extend(["", " | ".join(nav_parts)])
     if page != requested_page:
         lines.append(t("gateway.commands.out_of_range", requested=requested_page, page=page))
