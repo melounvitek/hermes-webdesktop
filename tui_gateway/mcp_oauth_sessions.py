@@ -1,12 +1,9 @@
-"""Session-backed MCP OAuth flows for the gateway (mcp.servers.oauth.*).
-
-``start`` kicks off a background worker and returns ``{session_id, auth_url, flow}``;
-``poll`` reports ``{status: pending|approved|error}`` until tokens land on disk. No OAuth
-logic is reimplemented: ``hermes mcp login``'s probe under ``force_interactive_oauth``
-plus ``DashboardOAuthFlow`` as the bridge; the only new piece is a loopback listener
-feeding ``deliver_callback``. Remote backends: the client hosts the listener, passes
-``client_redirect_uri`` and relays via ``deliver_callback_flow`` (state check stays here).
-"""
+"""Session-backed MCP OAuth flows for the gateway (mcp.servers.oauth.*): ``start`` spawns a
+worker and returns ``{session_id, auth_url, flow}``; ``poll`` reports ``{status}`` until tokens
+land. Reuses ``hermes mcp login``'s probe under ``force_interactive_oauth`` plus
+``DashboardOAuthFlow``; the only new piece is a loopback listener feeding ``deliver_callback``.
+Remote backends host the listener (``client_redirect_uri``) and relay via
+``deliver_callback_flow``."""
 
 from __future__ import annotations
 
@@ -23,18 +20,8 @@ from urllib.parse import parse_qs, urlparse
 _sessions: Dict[str, Dict[str, Any]] = {}
 _sessions_lock = threading.Lock()
 
-# How long a completed/abandoned session lingers before GC (seconds).
-_SESSION_TTL_SECONDS = 900
-# Cap concurrent in-flight flows so a runaway client can't exhaust ports/threads.
-_MAX_PENDING = 12
-
-
-def _gc_sessions() -> None:
-    """Drop expired sessions. Called opportunistically on start."""
-    cutoff = time.time() - _SESSION_TTL_SECONDS
-    with _sessions_lock:
-        for sid in [sid for sid, rec in _sessions.items() if rec["created_at"] < cutoff]:
-            _shutdown_listener(_sessions.pop(sid))
+_SESSION_TTL_SECONDS = 900  # completed/abandoned session lingers this long before GC
+_MAX_PENDING = 12  # cap in-flight flows so a runaway client can't exhaust ports/threads
 
 
 def _shutdown_listener(rec: Dict[str, Any]) -> None:
@@ -48,24 +35,20 @@ def _shutdown_listener(rec: Dict[str, Any]) -> None:
 
 
 def _validate_client_redirect_uri(uri: str) -> str:
-    """Accept only plain-http loopback URLs (RFC 8252 native-app rules) so the
-    gateway can't pin an attacker-controlled redirect into a DCR registration."""
+    """Accept only plain-http loopback URLs (RFC 8252) so the gateway can't pin an
+    attacker-controlled redirect into a DCR registration."""
     parsed = urlparse(str(uri or "").strip())
     host = (parsed.hostname or "").lower()
     if (parsed.scheme != "http" or host not in ("127.0.0.1", "localhost", "::1") or not parsed.port
             or parsed.username is not None or parsed.password is not None):
         raise ValueError(
-            "client_redirect_uri must be a loopback http URL like "
-            "http://127.0.0.1:<port>/callback"
-        )
+            "client_redirect_uri must be a loopback http URL like http://127.0.0.1:<port>/callback")
     return f"http://{'[' + host + ']' if ':' in host else host}:{parsed.port}{parsed.path or '/callback'}"
 
 
 def _start_loopback_listener(flow) -> "http.server.HTTPServer":
     """Bind a loopback callback listener feeding ``flow.deliver_callback``; returns the
-    HTTPServer already serving on a daemon thread. The caller pins ``flow.redirect_uri``
-    from ``server_address`` BEFORE the worker starts (fixed at authorization)."""
-
+    HTTPServer already serving on a daemon thread (caller pins ``flow.redirect_uri`` from it)."""
     class _Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 — stdlib naming
             parsed = urlparse(self.path)
@@ -74,11 +57,11 @@ def _start_loopback_listener(flow) -> "http.server.HTTPServer":
                 self.end_headers()
                 return
             qs = parse_qs(parsed.query)
-            code, state, error = ((qs.get(k) or [None])[0] for k in ("code", "state", "error"))
             body = b"<h1>Authorization received</h1><p>You can close this tab and return to Hermes.</p>"
             status = 200
             try:
-                flow.deliver_callback(code=code, state=state, error=error)
+                flow.deliver_callback(
+                    **{k: (qs.get(k) or [None])[0] for k in ("code", "state", "error")})
             except Exception:
                 body = b"<h1>OAuth callback rejected</h1><p>The callback was invalid or already used.</p>"
                 status = 400
@@ -129,9 +112,9 @@ def _probe_with_rollback(
         raise
 
 
-def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reconnect_live: bool) -> None:
-    """Drive the interactive MCP OAuth probe under the shared dashboard bridge (same
-    HERMES_HOME + secret-scope + force_interactive_oauth + dashboard_oauth_flow wrapping
+def _worker(
+        session_id: str, hermes_home: str, server_name: str, cfg: dict, reconnect_live: bool) -> None:
+    """Drive the interactive MCP OAuth probe under the shared dashboard bridge (same wrapping
     as ``web_server._run_dashboard_mcp_oauth``), keyed to our session record."""
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     rec = _sessions.get(session_id)
@@ -166,23 +149,18 @@ def _worker(session_id: str, hermes_home: str, server_name: str, cfg: dict, reco
 
 
 def start_flow(
-    hermes_home: str,
-    server_name: str,
-    cfg: dict,
-    *,
-    reconnect_live: bool = False,
-    url_timeout: float = 30.0,
-    client_redirect_uri: Optional[str] = None) -> Dict[str, Any]:
-    """Begin an MCP OAuth flow and return ``{session_id, auth_url, flow}``; blocks up
-    to ``url_timeout`` for the authorization URL. With ``client_redirect_uri`` (remote
-    backend; invalid values raise ``ValueError``) no gateway-side listener is bound and
-    the client relays ``code``/``state`` via ``deliver_callback_flow``."""
+    hermes_home: str, server_name: str, cfg: dict, *, reconnect_live: bool = False,
+    url_timeout: float = 30.0, client_redirect_uri: Optional[str] = None) -> Dict[str, Any]:
+    """Begin an MCP OAuth flow and return ``{session_id, auth_url, flow}``; blocks up to
+    ``url_timeout`` for the authorization URL. With ``client_redirect_uri`` (invalid values
+    raise ``ValueError``) no gateway-side listener is bound."""
     from tools.mcp_dashboard_oauth import DashboardOAuthFlow
     if client_redirect_uri is not None:
         client_redirect_uri = _validate_client_redirect_uri(client_redirect_uri)
-
-    _gc_sessions()
-
+    cutoff = time.time() - _SESSION_TTL_SECONDS  # opportunistic GC of expired sessions
+    with _sessions_lock:
+        for sid in [sid for sid, rec in _sessions.items() if rec["created_at"] < cutoff]:
+            _shutdown_listener(_sessions.pop(sid))
     with _sessions_lock:
         active = [r for r in _sessions.values() if not r["flow"].worker_done]
         if len(active) >= _MAX_PENDING:
@@ -199,18 +177,14 @@ def start_flow(
     httpd = None if client_redirect_uri else _start_loopback_listener(flow)
     flow.redirect_uri = (
         client_redirect_uri or f"http://127.0.0.1:{httpd.server_address[1]}/callback")
-
     rec = {
         "session_id": session_id, "server_name": server_name, "hermes_home": hermes_home,
-        "flow": flow, "httpd": httpd, "created_at": time.time(),
-    }
+        "flow": flow, "httpd": httpd, "created_at": time.time()}
     with _sessions_lock:
         _sessions[session_id] = rec
-
     threading.Thread(
         target=_worker, args=(session_id, hermes_home, server_name, dict(cfg), reconnect_live),
         daemon=True, name=f"mcp-oauth-{server_name}").start()
-
     try:
         auth_url = None
         # wait_for_authorization_url is async; run its wait synchronously.
@@ -220,7 +194,8 @@ def start_flow(
             if auth_url := snap.get("authorization_url"):
                 break
             if snap.get("status") == "error":
-                raise RuntimeError(snap.get("error") or "MCP OAuth flow failed before authorization")
+                raise RuntimeError(
+                    snap.get("error") or "MCP OAuth flow failed before authorization")
             time.sleep(0.1)
         if not auth_url:
             raise TimeoutError("Timed out waiting for MCP authorization URL")
@@ -228,9 +203,7 @@ def start_flow(
         flow.mark_error("Timed out waiting for MCP authorization URL")
         _shutdown_listener(rec)
         raise
-
-    # ``flow`` mirrors the provider-OAuth discriminator: open a URL then poll
-    # (no user_code to type, unlike device_code).
+    # ``flow`` mirrors the provider-OAuth discriminator: open a URL then poll (no user_code).
     return {"session_id": session_id, "auth_url": auth_url, "flow": "pkce"}
 
 
@@ -246,21 +219,19 @@ def _lookup(session_id: str, server_name: str) -> "tuple[Dict[str, Any] | None, 
 
 
 def poll_flow(session_id: str, server_name: str) -> Dict[str, Any]:
-    """Poll a session → ``{status, error_message?, auth_url?, tools?}``; ``status``
-    is ``pending`` | ``approved`` | ``error`` (the bridge's ``authorization_required``
-    maps to ``pending`` — the client only needs to know whether to keep waiting)."""
+    """Poll a session → ``{status, error_message?, auth_url?, tools?}``; ``status`` is
+    ``pending`` | ``approved`` | ``error`` (the bridge's ``authorization_required`` maps to
+    ``pending``)."""
     rec, err = _lookup(session_id, server_name)
     if rec is None:
         return {"status": "error", "error_message": err}
-
     flow = rec["flow"]
     snap = flow.snapshot()
     raw = snap.get("status")
     status = raw if raw in ("approved", "error") else "pending"
     out: Dict[str, Any] = {
         "session_id": session_id, "status": status, "error_message": snap.get("error"),
-        "auth_url": snap.get("authorization_url"),
-    }
+        "auth_url": snap.get("authorization_url")}
     if status == "approved":
         out["tools"] = list(getattr(flow, "tools", []) or [])
     return out
@@ -268,12 +239,10 @@ def poll_flow(session_id: str, server_name: str) -> Dict[str, Any]:
 
 def deliver_callback_flow(
     session_id: str, server_name: str, *, code: Optional[str], state: Optional[str],
-    error: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Relay a client-captured OAuth redirect into a session's flow (remote-backend
-    companion to ``start_flow(client_redirect_uri=...)``). Security is unchanged:
-    ``DashboardOAuthFlow.deliver_callback`` verifies ``state`` (constant-time) and
-    rejects replays. Returns ``{ok: true}`` or ``{ok: false, error_message}``."""
+    error: Optional[str] = None) -> Dict[str, Any]:
+    """Relay a client-captured OAuth redirect into a session's flow (remote-backend companion
+    to ``start_flow(client_redirect_uri=...)``); ``deliver_callback`` still verifies ``state``
+    and rejects replays. Returns ``{ok: true}`` or ``{ok: false, error_message}``."""
     rec, err = _lookup(session_id, server_name)
     if rec is None:
         return {"ok": False, "error_message": err}
