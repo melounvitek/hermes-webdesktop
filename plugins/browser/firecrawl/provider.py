@@ -1,11 +1,7 @@
-"""Firecrawl cloud browser provider (``/v2/browser`` only — the firecrawl WEB
-plugin under ``plugins/web/firecrawl/`` shares ``FIRECRAWL_API_KEY``).
-
-Config: ``browser.cloud_provider: "firecrawl"`` (explicit selection only — not
-in the legacy auto-detect walk). Env: ``FIRECRAWL_API_KEY``,
-``FIRECRAWL_API_URL`` (default https://api.firecrawl.dev), ``FIRECRAWL_BROWSER_TTL``
-(default 300 seconds).
-"""
+"""Firecrawl cloud browser (``/v2/browser`` only; the web plugin under ``plugins/web/firecrawl/``
+shares ``FIRECRAWL_API_KEY``). Config ``browser.cloud_provider: "firecrawl"`` (explicit only — not
+in the legacy auto-detect walk). Env: ``FIRECRAWL_API_KEY``, ``FIRECRAWL_API_URL`` (default
+https://api.firecrawl.dev), ``FIRECRAWL_BROWSER_TTL`` (default 300 s)."""
 
 from __future__ import annotations
 
@@ -41,8 +37,8 @@ class FirecrawlBrowserProvider(CloudBrowserProvider):
         return {"base_url": self._api_url()} if get_secret("FIRECRAWL_API_KEY") else None
 
     def _get_config(self) -> Dict[str, Any]:
-        # Never raises: a missing key surfaces from _headers() inside the request
-        # try-block, so close_session logs it as an exception (legacy behaviour).
+        # Never raises: a missing key surfaces from _headers() inside the request try-block, so
+        # close_session logs it as an exception (legacy behaviour).
         return {"base_url": self._api_url()}
 
     def _headers(self, config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
@@ -50,8 +46,7 @@ class FirecrawlBrowserProvider(CloudBrowserProvider):
         if not api_key:
             raise ValueError(
                 "FIRECRAWL_API_KEY environment variable is required. "
-                "Get your key at https://firecrawl.dev"
-            )
+                "Get your key at https://firecrawl.dev")
         return {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
 
     def create_session(self, task_id: str) -> Dict[str, object]:

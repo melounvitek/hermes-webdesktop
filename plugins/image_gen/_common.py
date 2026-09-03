@@ -1,9 +1,6 @@
-"""Shared helpers for the bundled ``image_gen`` provider plugins.
-
-Providers are loaded by path (``hermes_plugins.image_gen__<name>``) and resolve
-this module through the repo root on ``sys.path``. Not a plugin itself: the
-scanner only looks at directories.
-"""
+"""Shared helpers for the bundled ``image_gen`` provider plugins. Providers are loaded by path
+(``hermes_plugins.image_gen__<name>``) and resolve this via the repo root on ``sys.path``;
+not a plugin itself (the scanner only looks at directories)."""
 
 from __future__ import annotations
 
@@ -13,17 +10,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from agent.image_gen_provider import (
-    ImageGenProvider, error_response, normalize_reference_images, save_b64_image, save_url_image
-)
+    ImageGenProvider, error_response, normalize_reference_images, save_b64_image, save_url_image)
 
 logger = logging.getLogger(__name__)
 
-# OpenAI-style ``size`` strings for the three semantic aspect ratios, shared by
-# every OpenAI-compatible ``images.generations`` backend.
+# OpenAI-style ``size`` per semantic aspect, shared by every OpenAI-compatible backend.
 OPENAI_SIZES: Dict[str, str] = {"landscape": "1536x1024", "square": "1024x1024", "portrait": "1024x1536"}
 
-# gpt-image-2 quality tiers as three virtual model ids (same API model,
-# different ``quality`` knob) so the picker works like any multi-model backend.
+# gpt-image-2 quality tiers as virtual model ids (same API model, different ``quality`` knob).
 GPT_IMAGE_2_API_MODEL = "gpt-image-2"
 GPT_IMAGE_2_DEFAULT = "gpt-image-2-medium"
 GPT_IMAGE_2_TIERS: Dict[str, Dict[str, Any]] = {
@@ -79,12 +73,8 @@ def resolve_static_model(
     explicit: Optional[str] = None, include_top_level: bool = True,
     config: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """Pick ``(model_id, meta)`` from a fixed catalog.
-
-    Precedence (first *known* id wins; unknown ids fall through rather than
-    error): explicit caller override → ``env_var`` → ``image_gen.<config_key>.model``
-    → top-level ``image_gen.model`` (when ``include_top_level``) → ``default``.
-    """
+    """``(model_id, meta)`` from a fixed catalog; first *known* id wins (unknown ids fall through):
+    explicit → ``env_var`` → ``image_gen.<config_key>.model`` → ``image_gen.model`` → ``default``."""
     if isinstance(explicit, str) and explicit.strip() in models:
         return explicit.strip(), models[explicit.strip()]
     env_override = os.environ.get(env_var)
@@ -117,8 +107,7 @@ def catalog_rows(
     fields: Iterable[str] = ("display", "speed", "strengths", "price"), *,
     price: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Picker rows: ``id`` plus ``fields`` from each meta (missing ``display`` →
-    model id, other fields → ``""``); ``price`` overrides the per-model value."""
+    """Picker rows: ``id`` + ``fields`` (missing ``display`` → id, else ``""``); ``price`` overrides."""
     rows = []
     for model_id, meta in models.items():
         row: Dict[str, Any] = {"id": model_id}
@@ -140,13 +129,9 @@ def api_key_setup_schema(
 
 
 class StaticImageGenProvider(ImageGenProvider):
-    """Identity + picker surface driven by class attributes.
-
-    Subclasses set ``provider_id`` / ``label``; a fixed catalog sets ``models``
-    (+ ``default_model_id``, optional ``price`` override and ``catalog_fields``);
-    single-env-var auth sets ``setup`` (kwargs for :func:`api_key_setup_schema`).
-    Dynamic-catalog or custom-setup providers override the relevant method.
-    """
+    """Identity + picker surface from class attributes: ``provider_id``/``label``; fixed catalog via
+    ``models`` (+ ``default_model_id``, ``price``, ``catalog_fields``); single-env-var auth via
+    ``setup`` (kwargs for :func:`api_key_setup_schema`). Dynamic providers override methods."""
 
     provider_id: str
     label: str
@@ -205,13 +190,10 @@ def import_openai(provider: str, aspect: str) -> Tuple[Any, Optional[Dict[str, A
 def materialize_image(
     b64: Optional[str], url: Optional[str], *, prefix: str, label: str, provider: str, model: str,
     prompt: str, aspect: str, log: logging.Logger = logger,
+    on_url_fail: Optional[Callable[[Exception], None]] = None,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """``(image_ref, None)`` or ``(None, error_dict)`` for a ``(b64_json, url)`` pair.
-
-    Base64 is always cached (write failure → ``io_error``); a URL is cached
-    best-effort, falling back to the bare URL so a cache hiccup never destroys
-    a successful generation.
-    """
+    """``(image_ref, None)`` or ``(None, error)`` for a ``(b64_json, url)`` pair. Base64 is always
+    cached (write failure → ``io_error``); a URL is cached best-effort, falling back to the bare URL."""
     fail = error_factory(provider, aspect, model=model, prompt=prompt)
     if b64:
         try:
@@ -219,16 +201,22 @@ def materialize_image(
         except Exception as exc:  # noqa: BLE001
             return None, fail(f"Could not save image to cache: {exc}", "io_error")
     if url:
-        return cache_url_best_effort(url, prefix=prefix, label=label, log=log), None
+        return cache_url_best_effort(url, prefix=prefix, label=label, log=log, on_fail=on_url_fail), None
     return None, fail(f"{label} response contained neither b64_json nor URL", "empty_response")
 
 
-def cache_url_best_effort(url: str, *, prefix: str, label: str, log: logging.Logger = logger) -> str:
-    """Cache ``url`` locally; on failure warn and return the bare URL."""
+def cache_url_best_effort(
+    url: str, *, prefix: str, label: str, log: logging.Logger = logger,
+    on_fail: Optional[Callable[[Exception], None]] = None,
+) -> str:
+    """Cache ``url`` locally; on failure warn (or call ``on_fail``) and return the bare URL."""
     try:
         return str(save_url_image(url, prefix=prefix))
     except Exception as exc:  # noqa: BLE001
-        log.warning("%s image URL %s could not be cached (%s); falling back to bare URL.", label, url, exc)
+        if on_fail is not None:
+            on_fail(exc)
+        else:
+            log.warning("%s image URL %s could not be cached (%s); falling back to bare URL.", label, url, exc)
         return url
 
 
@@ -242,9 +230,8 @@ def requests_error_message(response: Any, exc: Exception) -> str:
 
 @dataclass
 class HttpFailure:
-    """One failed ``post_json`` attempt, pre-shaped as ``(error, error_type)``.
-    ``kind`` ∈ http / timeout / connection / request / invalid_json; ``message``
-    carries the HTTP error text (``http``) or the decode error (``invalid_json``);
+    """One failed ``post_json`` attempt as ``(error, error_type)``. ``kind`` ∈ http / timeout /
+    connection / request / invalid_json; ``message`` = HTTP error text or decode error;
     ``status`` / ``response`` are set for ``http`` only."""
 
     kind: str
@@ -260,12 +247,9 @@ def post_json(
     error_message: Callable[[Any, Exception], str] = requests_error_message,
     catch_request_exception: bool = False,
 ) -> Tuple[Optional[Any], Optional[HttpFailure]]:
-    """POST ``payload`` and parse the JSON body: ``(body, None)`` or ``(None, failure)``.
-
-    ``timeout`` is passed to ``requests`` verbatim; the timeout message reports
-    its read component. ``error_message(response, exc)`` extracts the HTTP error
-    text so each backend can keep its own body shape.
-    """
+    """POST ``payload`` → ``(json_body, None)`` or ``(None, failure)``. ``timeout`` goes to ``requests``
+    verbatim (message reports the read component); ``error_message(response, exc)`` extracts the
+    backend-specific HTTP error text."""
     import requests
 
     read_timeout = timeout[1] if isinstance(timeout, tuple) else timeout
@@ -278,12 +262,10 @@ def post_json(
         message = error_message(resp, exc)
         return None, HttpFailure(
             "http", f"{label} image generation failed ({status}): {message}", "api_error",
-            status=status, message=message, response=resp,
-        )
+            status=status, message=message, response=resp)
     except requests.Timeout:
         return None, HttpFailure(
-            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout"
-        )
+            "timeout", f"{label} image generation timed out ({int(read_timeout)}s)", "timeout")
     except requests.ConnectionError as exc:
         return None, HttpFailure("connection", f"{label} connection error: {exc}", "connection_error")
     except requests.RequestException as exc:

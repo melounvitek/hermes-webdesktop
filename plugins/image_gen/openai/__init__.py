@@ -1,11 +1,10 @@
-"""OpenAI image generation backend: ``gpt-image-2`` at three quality tiers
-(``gpt-image-2-low/-medium/-high``) exposed as virtual model ids. Output is
-base64 → ``$HERMES_HOME/cache/images/``. Selection: ``OPENAI_IMAGE_MODEL`` →
-``image_gen.openai.model`` → ``image_gen.model`` → :data:`DEFAULT_MODEL`.
-"""
+"""OpenAI ``gpt-image-2`` at three quality tiers (virtual ids ``gpt-image-2-low/-medium/-high``);
+base64 output → image cache. Selection: ``OPENAI_IMAGE_MODEL`` → ``image_gen.openai.model`` →
+``image_gen.model`` → :data:`DEFAULT_MODEL`."""
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,16 +14,13 @@ from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio,
 from plugins.image_gen._common import (
     GPT_IMAGE_2_API_MODEL as API_MODEL, GPT_IMAGE_2_DEFAULT as DEFAULT_MODEL, GPT_IMAGE_2_TIERS,
     StaticImageGenProvider, collect_source_images, error_factory, import_openai, materialize_image,
-    openai_importable, prompt_required_error, resolve_static_model, size_for,
-)
+    openai_importable, prompt_required_error, resolve_static_model, size_for)
 
 logger = logging.getLogger(__name__)
 
-_MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
-
-
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
-    return resolve_static_model(_MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai")
+    return resolve_static_model(
+        GPT_IMAGE_2_TIERS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai")
 
 
 def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
@@ -44,8 +40,7 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
         header, _, b64 = ref.partition(",")
         ext = (header.split("image/", 1)[1].split(";", 1)[0] if "image/" in header else "") or "png"
         return base64.b64decode(b64), f"image.{ext}"
-    # Local file path — enforce the shared credential-read guard before reading.
-    from agent.file_safety import raise_if_read_blocked
+    from agent.file_safety import raise_if_read_blocked  # credential-read guard before local bytes
 
     raise_if_read_blocked(ref)
     with open(ref, "rb") as fh:
@@ -53,19 +48,26 @@ def _load_image_bytes(ref: str) -> Tuple[bytes, str]:
     return data, os.path.basename(ref) or "image.png"
 
 
+def _named_bytes_io(ref: str) -> io.BytesIO:
+    """``images.edit()`` expects named file-like objects for correct multipart."""
+    data, fname = _load_image_bytes(ref)
+    bio = io.BytesIO(data)
+    bio.name = fname
+    return bio
+
+
 class OpenAIImageGenProvider(StaticImageGenProvider):
     """OpenAI ``images.generate`` / ``images.edit`` backend — gpt-image-2."""
 
     provider_id = "openai"
     label = "OpenAI"
-    models = _MODELS
+    models = GPT_IMAGE_2_TIERS
     default_model_id = DEFAULT_MODEL
     price = "varies"
     setup = dict(
         name="OpenAI", badge="paid",
         tag="gpt-image-2 at low/medium/high quality tiers — text-to-image & image editing",
-        key="OPENAI_API_KEY", prompt="OpenAI API key", url="https://platform.openai.com/api-keys",
-    )
+        key="OPENAI_API_KEY", prompt="OpenAI API key", url="https://platform.openai.com/api-keys")
 
     def is_available(self) -> bool:
         return bool(get_secret("OPENAI_API_KEY")) and openai_importable()
@@ -89,8 +91,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
                 "OPENAI_API_KEY not set. Run `hermes tools` → Image "
                 "Generation → OpenAI to configure, or `hermes setup` "
                 "to add the key.",
-                "auth_required",
-            )
+                "auth_required")
 
         openai, err = import_openai("openai", aspect)
         if err:
@@ -102,38 +103,22 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
         fail = error_factory("openai", aspect, model=tier_id, prompt=prompt)
         client = openai.OpenAI(api_key=api_key)
 
+        # gpt-image-2 returns b64_json unconditionally and REJECTS
+        # ``response_format`` as an unknown parameter. Don't send it.
+        request: Dict[str, Any] = dict(
+            model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"])
         if is_edit:
-            # images.edit() expects named file-like objects for correct multipart.
-            import io
-
             try:
-                files = []
-                for ref in sources:
-                    data, fname = _load_image_bytes(ref)
-                    bio = io.BytesIO(data)
-                    bio.name = fname
-                    files.append(bio)
+                files = [_named_bytes_io(ref) for ref in sources]
             except Exception as exc:
                 return fail(f"Could not load source image for editing: {exc}", "io_error")
-            try:
-                response = client.images.edit(
-                    model=API_MODEL, image=files if len(files) > 1 else files[0], prompt=prompt,
-                    size=size,  # type: ignore[arg-type]  # OPENAI_SIZES values are valid gpt-image sizes
-                    quality=meta["quality"], n=1,
-                )
-            except Exception as exc:
-                logger.debug("OpenAI image edit failed", exc_info=True)
-                return fail(f"OpenAI image editing failed: {exc}", "api_error")
-        else:
-            # gpt-image-2 returns b64_json unconditionally and REJECTS
-            # ``response_format`` as an unknown parameter. Don't send it.
-            try:
-                response = client.images.generate(
-                    model=API_MODEL, prompt=prompt, size=size, n=1, quality=meta["quality"],
-                )
-            except Exception as exc:
-                logger.debug("OpenAI image generation failed", exc_info=True)
-                return fail(f"OpenAI image generation failed: {exc}", "api_error")
+            request["image"] = files if len(files) > 1 else files[0]
+        verb, call = ("edit", client.images.edit) if is_edit else ("generation", client.images.generate)
+        try:
+            response = call(**request)
+        except Exception as exc:
+            logger.debug("OpenAI image %s failed", verb, exc_info=True)
+            return fail(f"OpenAI image {'editing' if is_edit else 'generation'} failed: {exc}", "api_error")
 
         data = getattr(response, "data", None) or []
         if not data:
@@ -142,8 +127,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
         image_ref, err = materialize_image(
             getattr(first, "b64_json", None), getattr(first, "url", None),
             prefix=f"openai_{tier_id}", label="OpenAI", provider="openai",
-            model=tier_id, prompt=prompt, aspect=aspect, log=logger,
-        )
+            model=tier_id, prompt=prompt, aspect=aspect, log=logger)
         if err:
             return err
         extra: Dict[str, Any] = {"size": size, "quality": meta["quality"]}
@@ -151,8 +135,7 @@ class OpenAIImageGenProvider(StaticImageGenProvider):
             extra["revised_prompt"] = first.revised_prompt
         return success_response(
             image=image_ref, model=tier_id, prompt=prompt, aspect_ratio=aspect, provider="openai",
-            modality="image" if is_edit else "text", extra=extra,
-        )
+            modality="image" if is_edit else "text", extra=extra)
 
 
 def register(ctx) -> None:

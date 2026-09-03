@@ -1,10 +1,6 @@
-"""FAL.ai image generation backend — registration adapter.
-
-Catalog, payload construction, submission, managed-Nous-gateway selection and
-Clarity Upscaler chaining live in :mod:`tools.image_generation_tool`; this
-plugin reaches into it at call time (``import tools.image_generation_tool as
-_it``) so tests keep patching ``image_tool.*`` and there is one FAL code path.
-"""
+"""FAL.ai registration adapter. Catalog, payload, submission, managed-gateway selection and
+Clarity Upscaler chaining live in :mod:`tools.image_generation_tool`; this plugin imports it at
+call time so tests keep patching ``image_tool.*`` and there is one FAL code path."""
 
 from __future__ import annotations
 
@@ -18,8 +14,7 @@ from plugins.image_gen._common import StaticImageGenProvider, catalog_rows
 logger = logging.getLogger(__name__)
 
 _PASSTHROUGH_KWARGS = (
-    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale",
-)
+    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale")
 
 
 class FalImageGenProvider(StaticImageGenProvider):
@@ -30,8 +25,7 @@ class FalImageGenProvider(StaticImageGenProvider):
     setup = dict(
         name="FAL.ai", badge="paid",
         tag="Pick from flux-2-klein, flux-2-pro, gpt-image, nano-banana-2, nano-banana-pro, etc. — text-to-image & image editing",
-        key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys",
-    )
+        key="FAL_KEY", prompt="FAL API key", url="https://fal.ai/dashboard/keys")
 
     def is_available(self) -> bool:
         # Direct FAL_KEY or a managed Nous fal-queue origin, per the legacy module.
@@ -51,8 +45,7 @@ class FalImageGenProvider(StaticImageGenProvider):
         return _it.DEFAULT_MODEL
 
     def capabilities(self) -> Dict[str, Any]:
-        # Image-to-image depends on the selected FAL model (``edit_endpoint``);
-        # Clarity Upscaler chains on request for any model.
+        # Image-to-image depends on the selected model (``edit_endpoint``); upscale works for any.
         import tools.image_generation_tool as _it
 
         try:
@@ -72,8 +65,7 @@ class FalImageGenProvider(StaticImageGenProvider):
         image_url: Optional[str] = None, reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Forward to :func:`tools.image_generation_tool.image_generate_tool` and
-        reshape its JSON-string response into the provider-ABC dict."""
+        """Forward to ``image_generate_tool`` and reshape its JSON-string response into the ABC dict."""
         import tools.image_generation_tool as _it
 
         aspect = resolve_aspect_ratio(aspect_ratio)
@@ -103,8 +95,7 @@ class FalImageGenProvider(StaticImageGenProvider):
                 "success": False, "image": None, "error": "FAL pipeline returned a non-dict response",
                 "error_type": "provider_contract",
             }
-        # Stamp the uniform provider shape; the legacy pipeline resolves the
-        # model internally, so query it after the fact.
+        # Stamp the uniform shape; the legacy pipeline resolves the model internally.
         response.setdefault("provider", "fal")
         response.setdefault("prompt", prompt)
         response.setdefault("aspect_ratio", aspect)

@@ -1,11 +1,7 @@
-"""Shared base for the bundled cloud-browser provider plugins.
-
-Every vendor (Browserbase, Browser Use, Firecrawl) speaks the same REST shape:
-POST to create a session, one request to release it. :class:`CloudBrowserProvider`
-owns that lifecycle; subclasses supply class attributes and small hooks. Log
-messages carry the vendor label and go to the subclass module's logger so the
-emitted text matches the pre-refactor per-vendor modules.
-"""
+"""Shared base for the bundled cloud-browser plugins. Every vendor speaks the same REST shape
+(POST to create a session, one request to release it); :class:`CloudBrowserProvider` owns that
+lifecycle, subclasses supply attributes + hooks. Logs go to the subclass module's logger with the
+vendor label so emitted text matches the pre-refactor per-vendor modules."""
 
 from __future__ import annotations
 
@@ -21,26 +17,19 @@ _CLOSE_OK = {200, 201, 204}
 
 
 class CloudBrowserProvider(BrowserProvider):
-    """REST cloud-browser provider driven by class attributes + hooks.
-
-    Subclasses set ``provider_id`` / ``label``, ``release_method`` / ``release_path``
-    (``{session_id}`` placeholder, appended to ``config["base_url"]``), implement
-    ``_get_config_or_none()`` and ``_headers(config)``, and write ``create_session``
-    on top of :meth:`_post_create` / :meth:`_check_created` / :meth:`_session_name`.
-    """
+    """Subclasses set ``provider_id``/``label``, ``release_method``/``release_path`` (``{session_id}``
+    placeholder appended to ``config["base_url"]``), implement ``_get_config_or_none()`` and
+    ``_headers(config)``, and build ``create_session`` on ``_post_create``/``_check_created``."""
 
     provider_id: str
     label: str
     release_method: str
     release_path: str
     missing_credentials_error: str = ""
-    # Setup-picker metadata; ``setup_tag=None`` hides the provider from the picker.
-    setup_tag: Optional[str] = None
+    setup_tag: Optional[str] = None  # ``None`` hides the provider from the setup picker
     setup_env_vars: List[Dict[str, str]] = []
-    # Rendered noun in "Failed to create <label> session"; Firecrawl says "browser session".
-    create_label_suffix: str = ""
-    # Browserbase's close warning historically omits the vendor name.
-    close_fail_fmt: Optional[str] = None
+    create_label_suffix: str = ""  # "Failed to create <label><suffix> session"; Firecrawl: " browser"
+    close_fail_fmt: Optional[str] = None  # Browserbase's close warning historically omits the vendor
 
     @property
     def name(self) -> str:
@@ -90,8 +79,8 @@ class CloudBrowserProvider(BrowserProvider):
     def _post_create(
         self, url: str, headers: Dict[str, str], payload: Dict[str, object], *, wrap_errors: bool = True
     ) -> requests.Response:
-        """POST the create request; network failures become RuntimeError unless
-        the caller (managed gateway) needs the raw exception to retry."""
+        """POST the create request; network failures → RuntimeError unless the managed gateway
+        caller needs the raw exception to retry."""
         try:
             return requests.post(url, headers=headers, json=payload, timeout=30)
         except requests.RequestException as exc:
@@ -103,8 +92,7 @@ class CloudBrowserProvider(BrowserProvider):
         if not response.ok:
             raise RuntimeError(
                 f"Failed to create {self.label}{self.create_label_suffix} session: "
-                f"{response.status_code} {response.text}"
-            )
+                f"{response.status_code} {response.text}")
 
     def close_session(self, session_id: str) -> bool:
         try:
@@ -119,8 +107,7 @@ class CloudBrowserProvider(BrowserProvider):
                 return True
             self._log.warning(
                 self.close_fail_fmt or f"Failed to close {self.label} session %s: HTTP %s - %s",
-                session_id, response.status_code, response.text[:200],
-            )
+                session_id, response.status_code, response.text[:200])
             return False
         except Exception as e:
             self._log.error("Exception closing %s session %s: %s", self.label, session_id, e)

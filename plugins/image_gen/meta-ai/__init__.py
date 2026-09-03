@@ -1,11 +1,7 @@
-"""Meta Model API image generation backend (``muse-image``).
-
-The Meta Model API (https://api.meta.ai/v1) is OpenAI-compatible, so the OpenAI
-SDK is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64
-WebP → ``$HERMES_HOME/cache/images/``. Selection: ``model`` kwarg →
-``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model`` →
-:data:`DEFAULT_MODEL`.
-"""
+"""Meta Model API (``muse-image``): OpenAI-compatible (https://api.meta.ai/v1), so the OpenAI SDK
+is pointed at Meta's base URL with ``META_MODEL_API_KEY``. Output is base64 WebP → image cache.
+Selection: ``model`` kwarg → ``META_IMAGE_MODEL`` → ``image_gen.meta-ai.model`` → ``image_gen.model``
+→ :data:`DEFAULT_MODEL`."""
 
 from __future__ import annotations
 
@@ -15,23 +11,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import (
-    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response
-)
+    DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_b64_image, save_url_image, success_response)
 from plugins.image_gen._common import (
     StaticImageGenProvider, error_factory, import_openai, openai_importable, prompt_required_error,
-    resolve_static_model, size_for,
-)
+    resolve_static_model, size_for)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://api.meta.ai/v1"
-# Auth env vars, in priority order (mirrors the ``meta-ai`` chat provider):
-# MODEL_API_KEY is Meta's documented var; the rest are accepted aliases.
+# Auth env vars in priority order (mirrors the ``meta-ai`` chat provider); MODEL_API_KEY is Meta's
+# documented var, the rest are aliases. ``API_KEY_ENV`` is the one shown in setup/errors.
 API_KEY_ENVS = ("MODEL_API_KEY", "META_API_KEY", "META_MODEL_API_KEY")
-# Primary key shown in setup prompts / error messages.
 API_KEY_ENV = "META_MODEL_API_KEY"
-# Optional base-url override (same var the chat provider honors).
-BASE_URL_ENV = "META_BASE_URL"
+BASE_URL_ENV = "META_BASE_URL"  # optional override, same var the chat provider honors
 
 
 def _resolve_api_key() -> Optional[str]:
@@ -70,8 +62,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
     default_model_id = DEFAULT_MODEL
     setup = dict(
         name="Meta Model API", badge="paid", tag="Muse Image via Meta Model API (api.meta.ai)",
-        key=API_KEY_ENV, prompt="Meta Model API key (LLM|... token)", url="https://api.meta.ai",
-    )
+        key=API_KEY_ENV, prompt="Meta Model API key (LLM|... token)", url="https://api.meta.ai")
 
     def is_available(self) -> bool:
         return bool(_resolve_api_key()) and openai_importable()
@@ -94,8 +85,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
             return error_factory("meta-ai", aspect)(
                 f"{API_KEY_ENV} not set. Run `hermes tools` -> Image "
                 "Generation -> Meta Model API to configure.",
-                "auth_required",
-            )
+                "auth_required")
 
         openai, err = import_openai("meta-ai", aspect)
         if err:
@@ -131,8 +121,7 @@ class MetaImageGenProvider(StaticImageGenProvider):
             extra["revised_prompt"] = first.revised_prompt
         return success_response(
             image=image_ref, model=model_id, prompt=prompt, aspect_ratio=aspect, provider="meta-ai",
-            modality="text", extra=extra,
-        )
+            modality="text", extra=extra)
 
 
 def register(ctx) -> None:

@@ -1,14 +1,13 @@
-"""OpenAI image generation backend — ChatGPT/Codex OAuth variant.
+"""OpenAI image generation — ChatGPT/Codex OAuth variant.
 
-Same catalog and tier semantics as the ``openai`` plugin (``gpt-image-2`` at
-low/medium/high), routed through the Codex Responses API ``image_generation``
-tool, so Codex/ChatGPT users need no separate ``OPENAI_API_KEY``. Output is
-saved as PNG; source images travel as Responses ``input_image`` parts.
+Same catalog/tiers as the ``openai`` plugin (``gpt-image-2`` low/medium/high), routed
+through the Codex Responses API ``image_generation`` tool, so no ``OPENAI_API_KEY`` is
+needed. Output is PNG; source images travel as Responses ``input_image`` parts.
 
 Do NOT reintroduce an "account capability" classifier keyed on ``Tool choice
-'image_generation' not found in 'tools' parameter``: that HTTP 400 is a
-request-shape rejection for every account, fixed by omitting tool_choice (see
-``_build_responses_payload``); any remaining HTTP error must surface verbatim.
+'image_generation' not found in 'tools' parameter``: that 400 is a request-shape
+rejection for every account, fixed by omitting tool_choice (``_build_responses_payload``);
+any remaining HTTP error must surface verbatim.
 """
 
 from __future__ import annotations
@@ -24,45 +23,36 @@ from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio,
 from plugins.image_gen._common import (
     GPT_IMAGE_2_API_MODEL as API_MODEL, GPT_IMAGE_2_DEFAULT as DEFAULT_MODEL, GPT_IMAGE_2_TIERS,
     StaticImageGenProvider, collect_source_images, error_factory, prompt_required_error,
-    resolve_static_model, size_for,
-)
+    resolve_static_model, size_for)
 
 logger = logging.getLogger(__name__)
 
 _MAX_ERROR_BODY_CHARS = 500
-_MODELS: Dict[str, Dict[str, Any]] = dict(GPT_IMAGE_2_TIERS)
 
-# The chat model only hosts the ``image_generation`` tool call; the image work
-# is done by ``API_MODEL``.
+# Hosts the ``image_generation`` tool call; ``API_MODEL`` does the image work.
 _CODEX_CHAT_MODEL = "gpt-5.5"
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _CODEX_INSTRUCTIONS = (
     "You are an assistant that must fulfill image generation and image editing "
-    "requests by using the image_generation tool when provided."
-)
+    "requests by using the image_generation tool when provided.")
 
 _MAX_REFERENCE_IMAGES = 16
 _MAX_INPUT_IMAGE_BYTES = 25 * 1024 * 1024
-# gpt-image-2's ``input_image`` accepts raster formats only; the shared sniffer
-# also recognizes SVG/TIFF/ICO, which the API rejects server-side.
+# ``input_image`` accepts raster only; the shared sniffer also knows SVG/TIFF/ICO, which the API rejects.
 _ACCEPTED_INPUT_MIME = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 
-# Progressive preview frames (partial_image_b64) are intermediate renders;
-# saving them as finals produced the "smear" failure mode. Request 0 partials,
-# never let a partial overwrite a final, and only deliver source=final.
+# Progressive frames (partial_image_b64) saved as finals produced the "smear" failure mode:
+# request 0 partials, never let a partial overwrite a final, only deliver source=final.
 _PARTIAL_IMAGES_REQUESTED = 0
-# Content-agnostic retries when the stream yields no final result.
-_NONFINAL_RETRIES = 1
+_NONFINAL_RETRIES = 1  # content-agnostic retries when the stream yields no final result
 
 _NO_AUTH = (
     "No Codex/ChatGPT OAuth credentials available. Run "
-    "`hermes auth codex` (or `hermes setup` → Codex) to sign in."
-)
+    "`hermes auth codex` (or `hermes setup` → Codex) to sign in.")
 
 
 def _summarize_error_body(body: str) -> str:
-    """Bounded error summary preferring parsed ``error.message`` (Codex error
-    payloads can carry hundreds of bytes of leading metadata)."""
+    """Bounded summary preferring parsed ``error.message`` (Codex bodies carry leading metadata)."""
     text = body or ""
     try:
         payload = json.loads(text)
@@ -77,13 +67,11 @@ def _summarize_error_body(body: str) -> str:
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     return resolve_static_model(
-        _MODELS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai-codex"
-    )
+        GPT_IMAGE_2_TIERS, DEFAULT_MODEL, env_var="OPENAI_IMAGE_MODEL", config_key="openai-codex")
 
 
 def _read_codex_access_token() -> Optional[str]:
-    """Usable Codex OAuth token or None; ``agent.auxiliary_client`` owns expiry,
-    pool selection and JWT decoding."""
+    """Usable Codex OAuth token or None (``agent.auxiliary_client`` owns expiry/pool/JWT)."""
     try:
         from agent.auxiliary_client import _read_codex_access_token as _reader
 
@@ -92,6 +80,14 @@ def _read_codex_access_token() -> Optional[str]:
     except Exception as exc:
         logger.debug("Could not resolve Codex access token: %s", exc)
         return None
+
+
+def _httpx_available() -> bool:
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _sniff_image_mime(raw: bytes) -> Optional[str]:
@@ -121,8 +117,7 @@ def _data_url_to_input_image_url(value: str) -> str:
     return _encode_input_image(
         base64.b64decode(data, validate=True),
         "Image data URL exceeds 25MB cap",
-        "Image data URL does not contain supported image bytes",
-    )
+        "Image data URL does not contain supported image bytes")
 
 
 def _local_image_to_data_url(value: str) -> str:
@@ -144,8 +139,7 @@ def _local_image_to_data_url(value: str) -> str:
     return _encode_input_image(
         path.read_bytes(),
         f"Image input path exceeds 25MB cap: {value}",
-        f"Image input path is not a supported image: {value}",
-    )
+        f"Image input path is not a supported image: {value}")
 
 
 def _to_input_image_part(value: str) -> Dict[str, str]:
@@ -173,13 +167,9 @@ def _normalize_input_images(
 def _build_responses_payload(
     *, prompt: str, size: str, quality: str, input_images: Optional[List[Dict[str, str]]] = None
 ) -> Dict[str, Any]:
-    """Codex Responses body for an image_generation call.
-
-    No ``tool_choice`` is sent: the Codex backend rejects every shape for
-    forcing the hosted tool (it looks tool_choice up as a *function* name), so
-    letting the host model decide — nudged by ``instructions`` — is the only
-    accepted shape.
-    """
+    """Responses body for an image_generation call. No ``tool_choice``: Codex rejects every shape
+    for forcing the hosted tool (looks it up as a *function* name), so the host model decides,
+    nudged by ``instructions``."""
     content: List[Dict[str, Any]] = [{"type": "input_text", "text": prompt}, *(input_images or [])]
     return {
         "model": _CODEX_CHAT_MODEL,
@@ -200,26 +190,22 @@ def _build_responses_payload(
 
 
 def _extract_image_candidates(value: Any) -> Tuple[Optional[str], Optional[str]]:
-    """``(final_result_b64, latest_partial_b64)`` from a payload tree, tracked
-    separately so a partial can never overwrite a genuine final."""
+    """``(final_result_b64, latest_partial_b64)`` from a payload tree; a partial never overwrites
+    a final."""
     result_b64: Optional[str] = None
     partial_b64: Optional[str] = None
 
     def walk(node: Any) -> None:
         nonlocal result_b64, partial_b64
         if isinstance(node, dict):
-            if node.get("type") == "image_generation_call":
-                result = node.get("result")
-                if isinstance(result, str) and result:
-                    result_b64 = result
+            result = node.get("result") if node.get("type") == "image_generation_call" else None
+            if isinstance(result, str) and result:
+                result_b64 = result
             partial = node.get("partial_image_b64")
             if isinstance(partial, str) and partial:
                 partial_b64 = partial
-            for child in node.values():
-                walk(child)
-        elif isinstance(node, list):
-            for child in node:
-                walk(child)
+        for child in node.values() if isinstance(node, dict) else node if isinstance(node, list) else ():
+            walk(child)
 
     walk(value)
     return result_b64, partial_b64
@@ -227,8 +213,7 @@ def _extract_image_candidates(value: Any) -> Tuple[Optional[str], Optional[str]]
 
 def _extract_image_b64(value: Any) -> Optional[str]:
     """Image b64 from a payload, preferring a final result over a partial."""
-    result_b64, partial_b64 = _extract_image_candidates(value)
-    return result_b64 or partial_b64
+    return next((b64 for b64 in _extract_image_candidates(value) if b64), None)
 
 
 def _png_pixel_size(raw: bytes) -> Optional[str]:
@@ -242,8 +227,7 @@ def _png_pixel_size(raw: bytes) -> Optional[str]:
 
 
 def _iter_sse_json(response: Any):
-    """Yield JSON payloads from an SSE response without OpenAI SDK parsing, so
-    image-generation events newer than the pinned SDK still parse."""
+    """JSON payloads from an SSE response, without SDK parsing (events newer than the SDK still parse)."""
     event_name: Optional[str] = None
     data_lines: List[str] = []
 
@@ -281,12 +265,8 @@ def _iter_sse_json(response: Any):
 def _collect_image_b64(
     token: str, *, prompt: str, size: str, quality: str, input_images: Optional[List[Dict[str, str]]] = None
 ) -> Optional[Dict[str, str]]:
-    """Stream a Codex Responses image_generation call.
-
-    Returns ``{"b64": ..., "source": "final"|"partial"}`` or ``None``. A partial
-    is retained only when no final ever arrives; callers must not treat
-    partial-only as success.
-    """
+    """Stream a Codex Responses image_generation call → ``{"b64", "source": "final"|"partial"}`` or
+    ``None``. A partial is kept only when no final arrives; callers must not treat it as success."""
     import httpx
     from agent.codex_headers import codex_cloudflare_headers
 
@@ -297,8 +277,7 @@ def _collect_image_b64(
         "Content-Type": "application/json",
     })
     payload = _build_responses_payload(
-        prompt=prompt, size=size, quality=quality, input_images=input_images,
-    )
+        prompt=prompt, size=size, quality=quality, input_images=input_images)
     timeout = httpx.Timeout(300.0, connect=30.0, read=300.0, write=30.0, pool=30.0)
 
     final_b64: Optional[str] = None
@@ -319,9 +298,7 @@ def _collect_image_b64(
                 partial_b64 = event_partial or partial_b64
     if final_b64:
         return {"b64": final_b64, "source": "final"}
-    if partial_b64:
-        return {"b64": partial_b64, "source": "partial"}
-    return None
+    return {"b64": partial_b64, "source": "partial"} if partial_b64 else None
 
 
 class OpenAICodexImageGenProvider(StaticImageGenProvider):
@@ -329,18 +306,12 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
 
     provider_id = "openai-codex"
     label = "OpenAI (Codex auth)"
-    models = _MODELS
+    models = GPT_IMAGE_2_TIERS
     default_model_id = DEFAULT_MODEL
     price = "varies"
 
     def is_available(self) -> bool:
-        if not _read_codex_access_token():
-            return False
-        try:
-            import httpx  # noqa: F401
-        except ImportError:
-            return False
-        return True
+        return bool(_read_codex_access_token()) and _httpx_available()
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -350,8 +321,7 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
             "env_vars": [],
             "post_setup_hint": (
                 "Sign in with `hermes auth codex` (or `hermes setup` → Codex) "
-                "if you haven't already. No API key needed."
-            ),
+                "if you haven't already. No API key needed."),
         }
 
     def capabilities(self) -> Dict[str, Any]:
@@ -369,12 +339,9 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
         token = _read_codex_access_token()
         if not token:
             return error_factory("openai-codex", aspect)(_NO_AUTH, "auth_required")
-        try:
-            import httpx  # noqa: F401
-        except ImportError:
+        if not _httpx_available():
             return error_factory("openai-codex", aspect)(
-                "httpx Python package not installed (pip install httpx)", "missing_dependency"
-            )
+                "httpx Python package not installed (pip install httpx)", "missing_dependency")
 
         tier_id, meta = _resolve_model()
         size = size_for(aspect)
@@ -390,21 +357,16 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
             for attempt in range(attempts):
                 collected = _collect_image_b64(
                     token, prompt=prompt, size=size, quality=meta["quality"],
-                    input_images=input_images or None,
-                )
+                    input_images=input_images or None)
                 if collected and collected.get("source") == "final" and collected.get("b64"):
                     break
                 if attempt < _NONFINAL_RETRIES:
-                    kind = (
-                        "progressive-only partial frame"
-                        if collected and collected.get("source") == "partial"
-                        else "no image_generation_call result"
-                    )
+                    partial = collected and collected.get("source") == "partial"
                     logger.warning(
                         "Codex image stream ended with %s (attempt %s/%s); "
                         "retrying once before failing closed.",
-                        kind, attempt + 1, attempts,
-                    )
+                        "progressive-only partial frame" if partial else "no image_generation_call result",
+                        attempt + 1, attempts)
         except Exception as exc:
             logger.debug("Codex image generation failed", exc_info=True)
             return fail(f"OpenAI image generation via Codex auth failed: {exc}", "api_error")
@@ -412,8 +374,7 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
         if not collected or not collected.get("b64"):
             return fail(
                 f"Codex response contained no image_generation_call result after {attempts} attempt(s)",
-                "empty_response",
-            )
+                "empty_response")
         image_source = collected.get("source") or "unknown"
         b64 = collected["b64"]
         # Never deliver a progressive-only frame as success (smeared previews).
@@ -424,16 +385,13 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
                 pixel_hint = None
             detail = (
                 "Codex returned only a progressive partial image frame after "
-                f"{attempts} attempt(s); refusing to save it as a final deliverable."
-            )
+                f"{attempts} attempt(s); refusing to save it as a final deliverable.")
             if pixel_hint:
                 detail = f"{detail} partial_pixel_size={pixel_hint}."
-            err = fail(detail, "incomplete_image")
-            err.update(
-                image_source=image_source, requested_size=size,
-                partial_pixel_size=pixel_hint, nonfinal_retries=_NONFINAL_RETRIES,
-            )
-            return err
+            return {
+                **fail(detail, "incomplete_image"), "image_source": image_source, "requested_size": size,
+                "partial_pixel_size": pixel_hint, "nonfinal_retries": _NONFINAL_RETRIES,
+            }
 
         try:
             pixel_size = _png_pixel_size(base64.b64decode(b64))
@@ -444,14 +402,9 @@ class OpenAICodexImageGenProvider(StaticImageGenProvider):
             image=str(saved_path), model=tier_id, prompt=prompt, aspect_ratio=aspect,
             provider="openai-codex", modality="image" if input_images else "text",
             extra={
-                "size": size,
-                "quality": meta["quality"],
-                "input_image_count": len(input_images),
-                "image_source": image_source,
-                "requested_size": size,
-                "pixel_size": pixel_size,
-            },
-        )
+                "size": size, "quality": meta["quality"], "input_image_count": len(input_images),
+                "image_source": image_source, "requested_size": size, "pixel_size": pixel_size,
+            })
 
 
 def register(ctx) -> None:
