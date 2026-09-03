@@ -370,9 +370,9 @@ def _thinking_requests_output_headroom(thinking_config: Any) -> bool:
 
 
 def _effective_gemini_max_output_tokens(max_tokens: Optional[int], thinking_config: Any) -> int:
-    """Native ``maxOutputTokens``: an omitted/invalid cap becomes the published ceiling
-    (Gemini truncates on its low internal default); an explicit cap is raised to the
-    ceiling when thinking is enabled so thoughts don't starve the answer."""
+    """Native ``maxOutputTokens``: an omitted/invalid cap becomes the published ceiling (Gemini
+    truncates on its low internal default); an explicit cap is raised to the ceiling when
+    thinking is enabled so thoughts don't starve the answer."""
     try:
         requested = int(max_tokens)
     except (TypeError, ValueError):
@@ -622,9 +622,9 @@ class GeminiNativeClient:
     ) -> None:
         if not (api_key or "").strip():
             raise RuntimeError(
-                "Gemini native client requires an API key, but none was provided. Set GOOGLE_API_KEY or "
-                "GEMINI_API_KEY in your environment / ~/.hermes/.env (get one at https://aistudio.google.com/app/apikey), "
-                "or run `hermes setup` to configure the Google provider."
+                "Gemini native client requires an API key, but none was provided. Set GOOGLE_API_KEY or GEMINI_API_KEY in your "
+                "environment / ~/.hermes/.env (get one at https://aistudio.google.com/app/apikey), or run `hermes setup` to "
+                "configure the Google provider."
             )
         self.api_key = api_key
         self.base_url = (base_url or DEFAULT_GEMINI_BASE_URL).rstrip("/").removesuffix("/openai")

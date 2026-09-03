@@ -198,10 +198,9 @@ def _render_message_content(content: Any) -> str:
 
 
 def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
-    candidate = Path(path_text)
-    if not candidate.is_absolute():
+    if not Path(path_text).is_absolute():
         raise PermissionError("ACP file-system paths must be absolute.")
-    resolved, root = candidate.resolve(), Path(cwd).resolve()
+    resolved, root = Path(path_text).resolve(), Path(cwd).resolve()
     try:
         resolved.relative_to(root)
     except ValueError as exc:
@@ -308,9 +307,9 @@ class CopilotACPClient:
         if _acp_supported(self._acp_command, self._acp_args) is False:
             preview = " ".join(self._acp_args[:3]) if self._acp_args else "(none)"
             raise RuntimeError(
-                f"ACP transport not supported by '{self._acp_command}': `{preview}` is rejected as an unknown option. "
-                "This usually means the CLI is an older release (e.g. Claude Code v2.x) or a different tool than expected. "
-                "Either install a CLI that ships with --acp support (e.g. `@github/copilot` late 2025+), or set "
+                f"ACP transport not supported by '{self._acp_command}': `{preview}` is rejected as an unknown option. This "
+                "usually means the CLI is an older release (e.g. Claude Code v2.x) or a different tool than expected. Either "
+                "install a CLI that ships with --acp support (e.g. `@github/copilot` late 2025+), or set "
                 "HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS to a working pair."
             )
         try:
@@ -417,15 +416,12 @@ class CopilotACPClient:
             update = (msg.get("params") or {}).get("update") or {}
             content = update.get("content") or {}
             chunk_text = str(content.get("text") or "") if isinstance(content, dict) else ""
-            sink = {"agent_message_chunk": text_parts, "agent_thought_chunk": reasoning_parts}.get(
-                str(update.get("sessionUpdate") or "").strip()
-            )
-            if chunk_text and sink is not None:
+            sinks = {"agent_message_chunk": text_parts, "agent_thought_chunk": reasoning_parts}
+            if chunk_text and (sink := sinks.get(str(update.get("sessionUpdate") or "").strip())) is not None:
                 sink.append(chunk_text)
             return True
         if process.stdin is None:
             return True
-
         message_id = msg.get("id")
         if method == "session/request_permission":
             response = _jsonrpc_result(message_id, {"outcome": {"outcome": "cancelled"}})

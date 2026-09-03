@@ -367,17 +367,16 @@ def _credits_state_from_account(info) -> Optional[CreditsState]:
         def _money(dollars) -> tuple[int, str]:  # (micros, display usd); (0, "") when absent
             return (int(round(dollars * 1_000_000)), f"{dollars:.2f}") if isinstance(dollars, (int, float)) else (0, "")
         fields: dict[str, Any] = {}
-        for prefix, obj, attr in (("remaining", acc, "total_usable_credits"), ("subscription", acc, "subscription_credits_remaining"),
-                                  ("purchased", acc, "purchased_credits_remaining")):
-            fields[f"{prefix}_micros"], fields[f"{prefix}_usd"] = _money(getattr(obj, attr, None))
+        for prefix, attr in (("remaining", "total_usable_credits"), ("subscription", "subscription_credits_remaining"),
+                             ("purchased", "purchased_credits_remaining")):
+            fields[f"{prefix}_micros"], fields[f"{prefix}_usd"] = _money(getattr(acc, attr, None))
         monthly = getattr(sub, "monthly_credits", None)
         cap = _money(monthly) if isinstance(monthly, (int, float)) and monthly > 0 else (None, None)
         paid = getattr(info, "paid_service_access", None)
         return CreditsState(
-            **fields, subscription_limit_micros=cap[0], subscription_limit_usd=cap[1],
-            rollover_micros=_money(getattr(sub, "rollover_credits", None))[0],
+            **fields, subscription_limit_micros=cap[0], subscription_limit_usd=cap[1], from_header=False, captured_at=time.time(),
+            rollover_micros=_money(getattr(sub, "rollover_credits", None))[0], paid_access=paid if isinstance(paid, bool) else True,
             denominator_kind="subscription_cap" if cap[0] is not None else "none",
-            paid_access=paid if isinstance(paid, bool) else True, from_header=False, captured_at=time.time(),
         )
     except Exception:
         logger.debug("credits ▸ seed account→state mapping failed", exc_info=True)
