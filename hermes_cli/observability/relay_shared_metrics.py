@@ -150,16 +150,16 @@ class _Runtime:
             raise RuntimeError("Hermes core Relay runtime is unavailable")
         self.host: relay_runtime.RelayRuntime = resolved_host
         self.relay = self.host.relay
-        self._sessions_lock = threading.RLock()
         self._active = True
         self._sessions: dict[str, _MetricsSession] = {}
+        self._task_sessions: dict[tuple[str, str], _MetricsSession] = {}
+        self._turn_sessions: dict[tuple[str, str], _MetricsSession] = {}
+        self._sessions_lock = threading.RLock()
         self._task_creation_lock = threading.RLock()
         self._task_sessions_lock = threading.RLock()
         # Guards the opt-in send pass: at most one in flight per process.
         self._send_lock = threading.RLock()
         self._send_thread: threading.Thread | None = None
-        self._task_sessions: dict[tuple[str, str], _MetricsSession] = {}
-        self._turn_sessions: dict[tuple[str, str], _MetricsSession] = {}
         self._subscriber_name = f"{SUBSCRIBER_NAME}.{self.host.runtime_id}"
         self.subscriber = SharedMetricsSubscriber(
             SharedMetricsStore(), __version__, runtime_id=self.host.runtime_id
@@ -958,17 +958,10 @@ def start_task_run(
     *, session_id: str, task_id: str, platform: str, parent_session_id: str = ""
 ) -> None:
     """Start task metrics at the outer Hermes execution boundary."""
-    if not enabled():
-        return
-    runtime = _get_runtime(retry_failed=True)
-    if runtime is not None:
-        runtime._safe(
-            runtime.start_task,
-            {
-                "session_id": session_id, "task_id": task_id, "platform": platform,
-                "parent_session_id": parent_session_id,
-            },
-        )
+    _run_task_hook(
+        "start_task", retry_failed=True, session_id=session_id, task_id=task_id,
+        platform=platform, parent_session_id=parent_session_id,
+    )
 
 
 def finish_task_run(
@@ -976,19 +969,18 @@ def finish_task_run(
     result: dict[str, Any] | None = None, error: BaseException | None = None,
 ) -> None:
     """Finish task metrics for every return or exception path."""
+    _run_task_hook(
+        "finish_task", session_id=session_id, task_id=task_id, platform=platform,
+        **_terminal_flags(result, error),
+    )
+
+
+def _run_task_hook(method: str, *, retry_failed: bool = False, **event: Any) -> None:
     if not enabled():
         return
-    runtime = _get_runtime()
-    if runtime is None:
-        return
-
-    runtime._safe(
-        runtime.finish_task,
-        {
-            "session_id": session_id, "task_id": task_id, "platform": platform,
-            **_terminal_flags(result, error),
-        },
-    )
+    runtime = _get_runtime(retry_failed=retry_failed)
+    if runtime is not None:
+        runtime._safe(getattr(runtime, method), event)
 
 
 def _terminal_flags(result: dict[str, Any] | None, error: BaseException | None) -> dict[str, Any]:
