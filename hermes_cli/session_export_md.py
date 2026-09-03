@@ -64,23 +64,19 @@ def _message_count(session: dict[str, Any]) -> int:
 
 
 def _render_messages(session: dict[str, Any]) -> str:
-    parts: list[str] = ["## Messages\n"]
     segments = _segments(session)
     if _message_count(session) == 0:
-        parts.append("_No messages in this session._\n")
-        return "\n".join(parts).rstrip() + "\n"
-
-    multi_segment = len(segments) > 1
+        return "## Messages\n\n_No messages in this session._\n"
+    parts: list[str] = ["## Messages\n"]
     for segment in segments:
-        if multi_segment:
+        if len(segments) > 1:
             parts.append(f"## Compression segment: {_session_id(segment)}\n")
         for message in list(segment.get("messages") or []):
             parts.append(_message_heading(message) + "\n")
             content = message.get("content")
-            if content is not None:
-                rendered = content.rstrip() if isinstance(content, str) else _json_block(content)
-                if rendered:
-                    parts.append(rendered + "\n")
+            rendered = "" if content is None else content.rstrip() if isinstance(content, str) else _json_block(content)
+            if rendered:
+                parts.append(rendered + "\n")
             if tool_calls := message.get("tool_calls"):
                 parts.append("\n\n## Tool calls\n\n" + _json_block(tool_calls) + "\n")
             parts.append("")
@@ -91,7 +87,6 @@ def _export_body_without_hash(session: dict[str, Any], *, fmt: str, exported_at:
     session_id = _session_id(session)
     exported_iso = _iso_timestamp(exported_at)
     message_count = _message_count(session)
-
     fields = [
         ("session_id", session_id),
         ("title", session.get("title")),
@@ -105,18 +100,14 @@ def _export_body_without_hash(session: dict[str, Any], *, fmt: str, exported_at:
         ("archived", bool(session.get("archived"))),
         ("message_count", message_count),
         ("tool_call_count", session.get("tool_call_count") or 0),
+        *([("lineage_session_ids", session["lineage_session_ids"])] if session.get("lineage_session_ids") else []),
+        ("format", fmt), ("exported_at", exported_iso), ("exporter", EXPORTER_VERSION),
     ]
-    if session.get("lineage_session_ids"):
-        fields.append(("lineage_session_ids", session.get("lineage_session_ids")))
-    fields += [("format", fmt), ("exported_at", exported_iso), ("exporter", EXPORTER_VERSION)]
-    frontmatter = ["---", *(_frontmatter_line(k, v) for k, v in fields), "---", ""]
-
-    parts = ["\n".join(frontmatter), f"# {session.get('title') or session_id}\n", f"Session ID: `{session_id}`\n"]
-    if session.get("source"):
-        parts.append(f"Source: `{session.get('source')}`\n")
-    if session.get("cwd"):
-        parts.append(f"Working directory: `{session.get('cwd')}`\n")
-    parts += [
+    parts = [
+        "\n".join(["---", *(_frontmatter_line(k, v) for k, v in fields), "---", ""]),
+        f"# {session.get('title') or session_id}\n", f"Session ID: `{session_id}`\n",
+        *([f"Source: `{session.get('source')}`\n"] if session.get("source") else []),
+        *([f"Working directory: `{session.get('cwd')}`\n"] if session.get("cwd") else []),
         _render_messages(session),
         f"{_VERIFICATION_HEADING}\n",
         f"- Session id: `{session_id}`",
@@ -192,11 +183,7 @@ def redact_session_data(session: dict[str, Any]) -> dict[str, Any]:
             return {k: _clean(v) for k, v in value.items()}
         return value
 
-    redacted = dict(session)
-    for key in ("messages", "segments"):
-        if redacted.get(key) is not None:
-            redacted[key] = _clean(redacted[key])
-    return redacted
+    return {**session, **{k: _clean(session[k]) for k in ("messages", "segments") if session.get(k) is not None}}
 
 
 def _export_dir(output_dir: Path | str) -> Path:

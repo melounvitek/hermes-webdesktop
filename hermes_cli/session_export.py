@@ -51,20 +51,27 @@ def render_sessions_export(sessions: Iterable[Dict[str, Any]], *, fmt: str = "js
         rows = iter_user_prompt_records(session_list) if prompts_only else session_list
         lines = [json.dumps(row, ensure_ascii=False) for row in rows]
         return ("\n".join(lines) + "\n") if lines else ""
+    # One session → its own H1 with body at H2; several → a shared H1, each session H2/H3.
     if prompts_only:
-        lines = _render_sessions_markdown(
-            session_list, "User prompts export",
-            lambda session: f"User prompts for session {_heading_text(_session_id(session))}",
-            lambda session: f"Session {_heading_text(_session_id(session))}",
-            _append_prompt_records,
-        )
-        if not session_list:
-            lines += ["_No user prompts found._", ""]
-        return _finish_markdown(lines)
-    heading = lambda session: f"Session: {_heading_text(_session_title_or_id(session))}"  # noqa: E731
-    return _finish_markdown(_render_sessions_markdown(
-        session_list, "Hermes sessions export", heading, heading, _append_session_messages,
-    ))
+        multi_title, append_body = "User prompts export", _append_prompt_records
+        headings = (lambda s: f"User prompts for session {_heading_text(_session_id(s))}",
+                    lambda s: f"Session {_heading_text(_session_id(s))}")
+    else:
+        multi_title, append_body = "Hermes sessions export", _append_session_messages
+        headings = (lambda s: f"Session: {_heading_text(_session_title_or_id(s))}",) * 2
+    lines: List[str] = []
+    single = len(session_list) == 1
+    if not single:
+        lines += [f"# {multi_title}", ""]
+    for session in session_list:
+        level = 1 if single else 2
+        lines += [f"{'#' * level} {headings[level - 1](session)}", *_session_metadata_lines(session), ""]
+        append_body(lines, session, heading_level=level + 1)
+    if prompts_only and not session_list:
+        lines += ["_No user prompts found._", ""]
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
 
 
 def export_record_count(sessions: Iterable[Dict[str, Any]], *, only: Optional[str] = None) -> Tuple[int, str]:
@@ -79,11 +86,8 @@ def iter_user_prompt_records(sessions: Iterable[Dict[str, Any]]) -> Iterator[Dic
     """Yield one normalized record for each user-authored prompt."""
     for session in sessions:
         session_id = str(session.get("id") or session.get("session_id") or "")
-        index = 0
-        for message in _messages(session):
-            if message.get("role") != "user":
-                continue
-            index += 1
+        prompts = [m for m in _messages(session) if m.get("role") == "user"]
+        for index, message in enumerate(prompts, start=1):
             record: Dict[str, Any] = {
                 "session_id": session_id,
                 "index": index,
@@ -96,21 +100,6 @@ def iter_user_prompt_records(sessions: Iterable[Dict[str, Any]]) -> Iterator[Dic
             if event_id := message.get("platform_message_id") or message.get("event_id"):
                 record["event_id"] = event_id
             yield record
-
-
-def _render_sessions_markdown(sessions, multi_title, single_heading, multi_heading, append_body) -> List[str]:
-    """One session → its own H1 with body at H2; several → a shared H1, each session H2/H3."""
-    lines: List[str] = []
-    if len(sessions) == 1:
-        session = sessions[0]
-        lines += [f"# {single_heading(session)}", *_session_metadata_lines(session), ""]
-        append_body(lines, session, heading_level=2)
-    else:
-        lines += [f"# {multi_title}", ""]
-        for session in sessions:
-            lines += [f"## {multi_heading(session)}", *_session_metadata_lines(session), ""]
-            append_body(lines, session, heading_level=3)
-    return lines
 
 
 def _append_prompt_records(lines: List[str], session: Dict[str, Any], *, heading_level: int) -> None:
@@ -211,12 +200,6 @@ def _fenced_text(text: str, *, language: str = "text") -> str:
     while fence in text:
         fence += "`"
     return f"{fence}{language}\n{text}\n{fence}"
-
-
-def _finish_markdown(lines: List[str]) -> str:
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines) + "\n"
 
 
 # --- Current-session save helper (shared by CLI /save and gateway /save) ---

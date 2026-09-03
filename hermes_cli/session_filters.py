@@ -23,8 +23,6 @@ def parse_duration_seconds(value: str) -> Optional[float]:
     """Parse ``5h`` / ``30m`` / ``2d`` / ``1w`` / ``90`` (bare = days, backward compatible with
     ``--older-than 90``) into seconds. Returns None when the value doesn't look like a duration."""
     s = str(value).strip().lower()
-    if not s:
-        return None
     if re.fullmatch(r"\d+(?:\.\d+)?", s):
         return float(s) * 86400
     m = _DURATION_RE.match(s)
@@ -99,11 +97,10 @@ def build_prune_filters(args: Any) -> Dict[str, Any]:
     ``--older-than`` / ``--newer-than`` bound last activity (latest message timestamp, falling back
     to ``started_at`` for empty sessions); ``--before`` / ``--after`` bound session start time.
     """
-    bounds: Dict[str, Optional[float]] = {}
-    for key, attr, flag, _ in _TIME_BOUNDS:
-        raw = getattr(args, attr, None)
-        bounds[key] = None if raw is None else parse_point_in_time(raw, flag)
-
+    bounds: Dict[str, Optional[float]] = {
+        key: None if (raw := getattr(args, attr, None)) is None else parse_point_in_time(raw, flag)
+        for key, attr, flag, _ in _TIME_BOUNDS
+    }
     for lo, hi, label, lo_flag, hi_flag in _WINDOWS:
         if bounds[hi] is not None and bounds[lo] is not None and bounds[lo] >= bounds[hi]:
             raise ValueError(
@@ -114,20 +111,16 @@ def build_prune_filters(args: Any) -> Dict[str, Any]:
 
     # older_than_days=None: the epoch bounds are the whole story; otherwise prune_sessions' default
     # 90-day cutoff would silently cap an --after/--newer-than-only window.
-    filters: Dict[str, Any] = {"older_than_days": None, **bounds}
-    for key, attr, _ in _ARG_FILTERS:
-        filters[key] = getattr(args, attr, None)
-    return filters
+    return {"older_than_days": None, **bounds, **{key: getattr(args, attr, None) for key, attr, _ in _ARG_FILTERS}}
 
 
 def describe_filters(filters: Dict[str, Any]) -> str:
     """Human-readable summary of active filters for confirmation prompts."""
-    parts = []
-    for key, _, _, template in _TIME_BOUNDS:
-        if (value := filters.get(key)) is not None:
-            parts.append(template.format(v=format_epoch(value)))
-    for key, _, template in _ARG_FILTERS:
-        value = filters.get(key)
-        if (value is not None) if key.startswith(("min_", "max_")) else bool(value):
-            parts.append(template.format(v=value))
+    parts = [
+        template.format(v=format_epoch(filters[key])) for key, _, _, template in _TIME_BOUNDS
+        if filters.get(key) is not None
+    ] + [
+        template.format(v=filters[key]) for key, _, template in _ARG_FILTERS
+        if ((filters.get(key) is not None) if key.startswith(("min_", "max_")) else bool(filters.get(key)))
+    ]
     return ", ".join(parts) if parts else "no filters (all ended sessions)"
