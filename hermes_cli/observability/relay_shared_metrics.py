@@ -72,6 +72,19 @@ def _forget(index: dict[Any, _MetricsSession], key: Any, owner: _MetricsSession)
         index.pop(key, None)
 
 
+def _task_parent_handle(session: _MetricsSession, task_id: str) -> Any:
+    """The active turn's handle when it owns this exact task, else the session handle."""
+    active_turn = relay_runtime.active_turn(session.session_id)
+    if (
+        active_turn is not None
+        and active_turn.lease.session_id == session.session_id
+        and active_turn.task_id == task_id
+        and active_turn.handle is not None
+    ):
+        return active_turn.handle
+    return session.relay_session.handle
+
+
 def _sole(items: Any) -> Any:
     """The single distinct element of ``items`` (identity-deduplicated), else None."""
     unique = {id(item): item for item in items}
@@ -225,20 +238,11 @@ class _Runtime:
                 self._emit_client_active(session)
                 task_context = session.relay_session.context.copy()
                 start_fields = task_start_fields(event)
-                active_turn = relay_runtime.active_turn(session.session_id)
-                parent_handle = session.relay_session.handle
-                if (
-                    active_turn is not None
-                    and active_turn.lease.session_id == session.session_id
-                    and active_turn.task_id == task_id
-                    and active_turn.handle is not None
-                ):
-                    parent_handle = active_turn.handle
-
                 handle = task_context.run(
                     self._with_scope_stack, self.relay.scope.push,
                     TASK_SCOPE, self.relay.ScopeType.Function,
-                    handle=parent_handle, input=start_fields, metadata=self._event_metadata(),
+                    handle=_task_parent_handle(session, task_id), input=start_fields,
+                    metadata=self._event_metadata(),
                 )
                 task = _TaskRun(
                     task_id=task_id,
@@ -892,9 +896,9 @@ def enabled() -> bool:
     except Exception:
         logger.debug("Unable to read Hermes shared-metrics policy", exc_info=True)
         config = None
-    telemetry = config.get("telemetry") if isinstance(config, dict) else None
-    shared_metrics = telemetry.get("shared_metrics") if isinstance(telemetry, dict) else None
-    if isinstance(shared_metrics, dict) and shared_metrics.get("enabled") is True:
+    for key in ("telemetry", "shared_metrics"):
+        config = config.get(key) if isinstance(config, dict) else None
+    if isinstance(config, dict) and config.get("enabled") is True:
         return True
     with _RUNTIME_LOCK:
         runtime = _RUNTIMES.pop(profile_key, None)
@@ -923,6 +927,7 @@ def _reconcile_send_consent_once() -> None:
         return
     _consent_reconcile_done = True
     try:
+        # Lazy: tests patch ``shared_metrics.SharedMetricsStore`` at its origin.
         from hermes_cli.observability.shared_metrics import SharedMetricsStore
         from hermes_constants import get_hermes_home
 
@@ -1014,12 +1019,8 @@ def start_task_run(
 
 
 def finish_task_run(
-    *,
-    session_id: str,
-    task_id: str,
-    platform: str,
-    result: dict[str, Any] | None = None,
-    error: BaseException | None = None,
+    *, session_id: str, task_id: str, platform: str,
+    result: dict[str, Any] | None = None, error: BaseException | None = None,
 ) -> None:
     """Finish task metrics for every return or exception path."""
     if not enabled():
@@ -1028,33 +1029,39 @@ def finish_task_run(
     if runtime is None:
         return
 
-    terminal = result if isinstance(result, dict) else {}
-    interrupted = terminal.get("interrupted") is True
-    completed = terminal.get("completed") is True
-    failed = terminal.get("failed") is True
-    reason = str(terminal.get("turn_exit_reason") or terminal.get("failure_reason") or "")
+    runtime._safe(
+        runtime.finish_task,
+        {
+            "session_id": session_id, "task_id": task_id, "platform": platform,
+            **_terminal_flags(result, error),
+        },
+    )
+
+
+def _terminal_flags(result: dict[str, Any] | None, error: BaseException | None) -> dict[str, Any]:
+    """Bounded completed/failed/interrupted/turn_exit_reason for a task's return or raise."""
     if error is not None:
         interrupted = (
             isinstance(error, (KeyboardInterrupt, InterruptedError))
             or type(error).__name__ == "CancelledError"
         )
-        completed = False
-        failed = not interrupted
         if interrupted:
             reason = "interrupted_by_user"
         else:
             reason = "timed_out" if isinstance(error, TimeoutError) else "system_aborted"
-    elif not reason:
-        reason = "failed" if failed else "unknown"
-
-    runtime._safe(
-        runtime.finish_task,
-        {
-            "session_id": session_id, "task_id": task_id, "platform": platform,
-            "completed": completed, "failed": failed, "interrupted": interrupted,
+        return {
+            "completed": False, "failed": not interrupted, "interrupted": interrupted,
             "turn_exit_reason": reason,
-        },
-    )
+        }
+    terminal = result if isinstance(result, dict) else {}
+    failed = terminal.get("failed") is True
+    reason = str(terminal.get("turn_exit_reason") or terminal.get("failure_reason") or "")
+    return {
+        "completed": terminal.get("completed") is True,
+        "failed": failed,
+        "interrupted": terminal.get("interrupted") is True,
+        "turn_exit_reason": reason or ("failed" if failed else "unknown"),
+    }
 
 
 def _get_runtime(
@@ -1067,18 +1074,14 @@ def _get_runtime(
             if host is None or runtime.host is host:
                 return runtime
             runtime.deactivate()
-            _RUNTIMES.pop(profile_key, None)
-        elif runtime is _RUNTIME_FAILED:
-            if not retry_failed:
-                return None
-            _RUNTIMES.pop(profile_key, None)
+        elif runtime is _RUNTIME_FAILED and not retry_failed:
+            return None
         try:
-            runtime = _Runtime(host=host)
+            _RUNTIMES[profile_key] = runtime = _Runtime(host=host)
         except Exception:
             logger.warning("Hermes shared metrics initialization failed", exc_info=True)
             _RUNTIMES[profile_key] = _RUNTIME_FAILED
             return None
-        _RUNTIMES[profile_key] = runtime
         return runtime
 
 
