@@ -5952,26 +5952,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         finally:
             self._active_session_lease = None
 
-    # ── Per-turn accounting (display.turn_summary / spinner_token_flow) ──
-    #
-    # Both features are CLI-only chrome. The tally is observed from the
-    # tool-progress callback this class already receives on every tool call,
-    # so nothing is threaded through the agent loop. Token flow reads the
-    # agent's cumulative session counters (bumped per API call in
-    # agent/conversation_loop.py) and subtracts a per-turn baseline.
-
-    # ── Petdex mascot (base-CLI pet pane) ───────────────────────────────
-    #
-    # Parity with the TUI: a sprite in a prompt_toolkit window above the
-    # prompt. Kitty/Ghostty use Unicode placeholders — prompt_toolkit owns
-    # the measurable grid; image bytes go out-of-band as a virtual placement
-    # via after_render + write_raw (cursor untouched). WezTerm/iTerm/sixel
-    # stay on half-blocks: they are not placeholder-capable.
-
+    # Petdex pet pane cadence (see CLIStatusBarMixin).
     _PET_FRAME_INTERVAL = 0.16
     _PET_CFG_INTERVAL = 2.5
-
-    # ── Streaming display ────────────────────────────────────────────────
 
     def _install_tool_callbacks(self) -> None:
         """Install tool callbacks that need the live prompt UI."""
@@ -6192,21 +6175,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         print(f"  Config File: {config_path} {config_status}")
         print()
     
-    @staticmethod
-    def _resolve_personality_prompt(value) -> str:
-        """Accept string or dict personality value; return system prompt string.
-
-        Delegates to hermes_cli.personality (single owner of rendering).
-        """
-        from hermes_cli.personality import render_personality_prompt
-
-        return render_personality_prompt(value)
-
-
-    
-
-
-
     # Slash dispatch: canonical command -> (method name, pass cmd_original?).
     # Commands absent here resolve by convention to ``_handle_<name>_command(cmd)``
     # (dashes -> underscores). Resolved via getattr at dispatch time so
@@ -6587,55 +6555,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._reasoning_preview_buf = getattr(self, "_reasoning_preview_buf", "") + reasoning_text
         self._flush_reasoning_preview(force=False)
 
-            # NOTE: We deliberately do NOT raise per-logger levels for
-            # tools/run_agent/etc. in quiet mode. Setting logger.setLevel
-            # above the file handler level filters records before they
-            # reach handlers, so agent.log / errors.log lose visibility
-            # into stream-retry events, credential rotations, etc.
-            # Console quietness is enforced by hermes_logging not
-            # installing a console StreamHandler in non-verbose mode.
-
-        # Do NOT join here — process_loop calls this from its idle branch, so a
-        # blocking join would freeze input consumption for up to 30s (and a hung
-        # MCP server could block far longer). The reload runs purely in the
-        # background daemon thread, which reports its own progress/completion
-        # status via print() inside _reload_mcp().
-
     # Inline-skip tokens that bypass the destructive-slash confirmation modal.
     # A general escape hatch for non-interactive use (scripting/automation) and
     # for the degraded path where the modal can't be marshaled onto the app loop
     # — lets users self-serve without flipping approvals.destructive_slash_confirm
     # in config. (Native Windows now drives the modal normally — see #33961.)
     _DESTRUCTIVE_SKIP_TOKENS = frozenset({"now", "--yes", "-y"})
-
-    # ====================================================================
-    # Tool-call generation indicator (shown during streaming)
-    # ====================================================================
-
-    # ====================================================================
-    # Tool progress callback (audio cues for voice mode)
-    # ====================================================================
-
-    # ====================================================================
-    # Voice mode methods
-    # ====================================================================
-
-    # ── Wake word ("Hey Hermes") ─────────────────────────────────────────
-    #
-    # An always-on hotword listener (tools/wake_word.py) that, on detecting
-    # the wake phrase, starts a fresh session and captures one utterance via
-    # the existing voice pipeline — the "Hey Siri" pattern, fully on-device.
-    #
-    # The detector holds the microphone, so it must be paused while a voice
-    # turn records (two input streams on one device is unreliable). On wake we
-    # pause it and mark the system suspended; a lightweight watchdog resumes it
-    # once the turn finishes and the CLI is idle again — covering every exit
-    # path (transcript submitted, no speech, or transcription error) without
-    # threading resume logic through the voice machinery.
-
-            # Leave _wake_suspended set; the watchdog resumes once idle.
-
-    # --- Batch clarify (multi-question, issue #18450) -----------------------
 
     def chat(self, message, images: list = None, voice_input: bool = False) -> Optional[str]:
         """
@@ -7499,8 +7424,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self._pending_input.put(_leftover_steer)
 
         return response
-    
-    # --- Protected TUI extension hooks for wrapper CLIs ---
 
     def _tui_process_loop(self):
         while not self._should_exit:
