@@ -160,10 +160,8 @@ def _ensure_lazy_server_connected(server_name: str) -> bool:
         for tool_name in phantom_names:
             registry.deregister(tool_name, scope=_core._server_registry_scope(server_name))
             _core._forget_mcp_tool_server(tool_name)
-        logger.info(
-            "MCP server '%s': deregistered %d phantom cached tool(s) not served live (stale "
-            "schema-cache fingerprint %s): %s",
-            server_name, len(phantom_names), stale_fingerprint, ", ".join(phantom_names))
+        logger.info("MCP server '%s': deregistered %d phantom cached tool(s) not served live (stale schema-cache "
+                    "fingerprint %s): %s", server_name, len(phantom_names), stale_fingerprint, ", ".join(phantom_names))
     return server is not None and server.session is not None
 
 
@@ -304,8 +302,8 @@ def _run_discovery_pass(new_servers: Dict[str, dict]) -> None:
         with _core._lock:
             stale = [n for n in new_servers if n in _core._server_connecting]
             if stale:
-                logger.warning("MCP discovery %s while %d server(s) were still connecting; "
-                               "clearing stale connecting set: %s", how, len(stale), ", ".join(stale))
+                logger.warning("MCP discovery %s while %d server(s) were still connecting; clearing stale "
+                               "connecting set: %s", how, len(stale), ", ".join(stale))
                 _core._server_connecting.difference_update(stale)
                 for _sn in stale:
                     _core._server_connect_errors.setdefault(_sn, f"Connection attempt {how} during discovery")

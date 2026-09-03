@@ -34,8 +34,8 @@ def _normalize_server_trust(value: Any) -> str:
     text = str(value).strip().lower()
     if text in (_core._TRUST_FULL, _core._TRUST_UNTRUSTED):
         return text
-    logger.warning(
-        "MCP trust: unrecognized trust value %r — treating as 'untrusted' (valid values: full, untrusted)", value)
+    logger.warning("MCP trust: unrecognized trust value %r — treating as 'untrusted' (valid values: full, untrusted)",
+                   value)
     return _core._TRUST_UNTRUSTED
 
 
@@ -226,17 +226,14 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
         if len(native_origins) == 1 and utility_origins:
             shadowed.update((registry_name, o) for o in utility_origins)
             logger.info(
-                "MCP server '%s': generated utility %s normalizes onto server-native %s — keeping the "
-                "native tool and dropping the utility (the utility only applies when the server has no "
-                "such tool of its own)",
+                "MCP server '%s': generated utility %s normalizes onto server-native %s — keeping the native tool "
+                "and dropping the utility (the utility only applies when the server has no such tool of its own)",
                 name, ", ".join(utility_origins), native_origins[0])
             continue
         ambiguous[registry_name] = sorted(origins)
     for registry_name, origins in sorted(ambiguous.items()):
-        logger.error(
-            "MCP server '%s': name normalization collision for '%s' from %s; skipping every colliding "
-            "entry instead of choosing an arbitrary handler",
-            name, registry_name, ", ".join(origins))
+        logger.error("MCP server '%s': name normalization collision for '%s' from %s; skipping every colliding "
+                     "entry instead of choosing an arbitrary handler", name, registry_name, ", ".join(origins))
     return [c for c in unique if c.registry_name not in ambiguous and (c.registry_name, c.origin) not in shadowed]
 
 
@@ -248,13 +245,11 @@ def _log_foreign_owner(name: str, c: _Candidate, existing_toolset: str, lazy: bo
                            name, c.registry_name, existing_toolset)
         return
     if existing_toolset.startswith("mcp-"):
-        log, fmt = logger.error, (
-            "MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' "
-            "— skipping to preserve the existing owner")
+        logger.error("MCP server '%s': %s normalizes to '%s', already owned by MCP toolset '%s' — skipping to "
+                     "preserve the existing owner", name, c.origin, c.registry_name, existing_toolset)
     else:
-        log, fmt = logger.warning, (
-            "MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to preserve built-in")
-    log(fmt, name, c.origin, c.registry_name, existing_toolset)
+        logger.warning("MCP server '%s': %s (→ '%s') collides with built-in tool in toolset '%s' — skipping to "
+                       "preserve built-in", name, c.origin, c.registry_name, existing_toolset)
 
 
 def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: Callable,

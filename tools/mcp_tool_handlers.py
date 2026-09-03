@@ -178,11 +178,11 @@ def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retr
     srv = _lookup_reconnectable_server(server_name, require_loop=True)
     if srv is None:
         return None
-    logger.info("MCP server '%s': %s failed with session-expired error (%s); "
-                "signalling transport reconnect and retrying once.", server_name, op_description, exc)
+    logger.info("MCP server '%s': %s failed with session-expired error (%s); signalling transport reconnect "
+                "and retrying once.", server_name, op_description, exc)
     if not _core._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=15):
-        logger.warning("MCP server '%s': reconnect did not ready within 15s after "
-                       "session-expired error; falling through to error response.", server_name)
+        logger.warning("MCP server '%s': reconnect did not ready within 15s after session-expired error; "
+                       "falling through to error response.", server_name)
         return None
     return _retry_once(server_name, retry_call, op_description, "session reconnect")
 
@@ -200,8 +200,8 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
     reconnected = False
     srv = _lookup_reconnectable_server(server_name)
     if srv is not None:
-        logger.info("MCP server '%s': %s found the stdio subprocess dead (%s); "
-                    "respawning and retrying once.", server_name, op_description, exc)
+        logger.info("MCP server '%s': %s found the stdio subprocess dead (%s); respawning and retrying once.",
+                    server_name, op_description, exc)
         if _mcp_loop_running():
             reconnected = _core._signal_reconnect_and_wait(
                 server_name, srv, op_description=op_description, timeout=_core._STDIO_RESPAWN_WAIT_SEC)
@@ -219,8 +219,8 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
         return _record_call_outcome(server_name, retry_call())
     except _StdioChildExited as retry_exc:
         # Died again right after respawn: broken server; run()'s budget takes it to the park.
-        logger.warning("MCP server '%s': %s stdio subprocess exited again right "
-                       "after respawn (%s); not retrying further.", server_name, op_description, retry_exc)
+        logger.warning("MCP server '%s': %s stdio subprocess exited again right after respawn (%s); not retrying "
+                       "further.", server_name, op_description, retry_exc)
         return _strike(
             server_name,
             f"MCP server '{server_name}' respawned its stdio subprocess and it exited again "
@@ -389,8 +389,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
     op = f"tools/call {tool_name}"
 
     def _handler(args: dict, **kwargs) -> str:
-        # Security boundary: untrusted-server write tools need approval before ANY transport
-        # work, including the lazy first-use spawn below.
+        # Security boundary: untrusted-server write tools need approval before ANY transport work
+        # (including the lazy first-use spawn).
         error = _trust_gate_check(server_name, tool_name) or _check_circuit_breaker(server_name)
         if error is not None:
             return error
@@ -401,8 +401,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         async def _call():
             _mark_server_call_started(server)
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op):
-                # Snapshot contextvars so an elicitation callback (fired on the MCP recv loop,
-                # which doesn't inherit them) can replay them for gateway platform / session routing.
+                # Snapshot contextvars for the elicitation callback (MCP recv loop doesn't inherit them).
                 server._pending_call_context = contextvars.copy_context()
                 try:
                     result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
