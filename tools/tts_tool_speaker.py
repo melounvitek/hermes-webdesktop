@@ -93,9 +93,8 @@ class _SyncSentencePipeline:
 
     def speak(self, cleaned: str) -> None:
         """Queue one sentence. Blocks only when the lookahead bound is full."""
-        if self._stop.is_set():
-            return
-        self._queue.put((cleaned, self._executor.submit(self._synthesize_to_tmp, cleaned)))
+        if not self._stop.is_set():
+            self._queue.put((cleaned, self._executor.submit(self._synthesize_to_tmp, cleaned)))
 
     def close(self) -> None:
         """Flush queued sentences in order (skipped if stopped), then join."""
@@ -208,8 +207,7 @@ class _StreamerPlayback:
             self._prefetch_sem.release()
 
     def _play_sentence_via_tempfile(self, chunk_queue) -> None:
-        _play_via_tempfile(
-            iter(_drain_chunks(chunk_queue)), self.stop_event, self.streamer.sample_rate)
+        _play_via_tempfile(_drain_chunks(chunk_queue), self.stop_event, self.streamer.sample_rate)
 
     def _for_each_sentence(self, play: Callable[[queue.Queue], None]) -> None:
         """Feed queued sentences to *play* in order until the end sentinel; stopped sentences are skipped."""

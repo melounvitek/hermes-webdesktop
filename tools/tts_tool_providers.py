@@ -194,13 +194,13 @@ def _rewrite_with_auxiliary_model(
 
 # --- Edge TTS (free default) ---
 async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    _edge_tts = _origin()._import_edge_tts()
+    edge_tts = _origin()._import_edge_tts()
     edge_config = tts_config.get("edge") or {}
     speed = float(edge_config.get("speed", tts_config.get("speed", 1.0)))
     kwargs = {"voice": edge_config.get("voice", DEFAULT_EDGE_VOICE)}
     if speed != 1.0:
         kwargs["rate"] = f"{round((speed - 1.0) * 100):+d}%"
-    await _edge_tts.Communicate(text, **kwargs).save(output_path)
+    await edge_tts.Communicate(text, **kwargs).save(output_path)
     return output_path
 
 
@@ -211,8 +211,8 @@ def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
     base_url = (el_config.get("base_url") or "").rstrip("/")
     if not base_url:
         return {}
-    wss_url = (el_config.get("wss_url") or "").rstrip("/") or re.sub(r"^http", "ws", base_url)
     from elevenlabs.environment import ElevenLabsEnvironment
+    wss_url = (el_config.get("wss_url") or "").rstrip("/") or re.sub(r"^http", "ws", base_url)
     return {"environment": ElevenLabsEnvironment(base=base_url, wss=wss_url)}
 
 

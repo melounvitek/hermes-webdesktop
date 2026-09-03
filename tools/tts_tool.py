@@ -161,10 +161,9 @@ def _load_tts_config() -> Dict[str, Any]:
         return load_config().get("tts") or {}
     except ImportError:
         logger.debug("hermes_cli.config not available, using default TTS config")
-        return {}
     except Exception as e:
         logger.warning("Failed to load TTS config: %s", e, exc_info=True)
-        return {}
+    return {}
 
 
 def _get_provider(tts_config: Dict[str, Any]) -> str:
@@ -269,10 +268,9 @@ def _finalize_voice_delivery(
     elif want_opus and provider in _FFMPEG_OPUS_PROVIDERS and not file_str.endswith(".ogg"):
         opus_path = _convert_to_opus(file_str)
         return (opus_path, True) if opus_path else (file_str, False)
-    elif provider in _NATIVE_OPUS_PROVIDERS:
-        return file_str, want_opus and file_str.endswith(".ogg")
     else:
-        return file_str, False
+        native = provider in _NATIVE_OPUS_PROVIDERS
+        return file_str, native and want_opus and file_str.endswith(".ogg")
     if not opted_in:
         return file_str, False
     if not file_str.endswith(".ogg"):
@@ -282,12 +280,11 @@ def _finalize_voice_delivery(
 
 # --- Main tool function ---
 def _apply_call_overrides(tts_config: Dict[str, Any], speed: Optional[float], provider: Optional[str]):
-    """Apply per-call ``speed`` (clamped, on a shallow copy) and resolve the provider name."""
+    """Apply per-call ``speed`` (clamped, on a shallow copy so the cached config isn't mutated) and
+    resolve the provider name."""
     if speed is not None:
-        tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
-        tts_config["speed"] = max(0.25, min(4.0, float(speed)))
-    provider = provider.lower().strip() if provider else _get_provider(tts_config)
-    return tts_config, provider
+        tts_config = {**tts_config, "speed": max(0.25, min(4.0, float(speed)))}
+    return tts_config, provider.lower().strip() if provider else _get_provider(tts_config)
 
 
 def _session_platform() -> tuple:
