@@ -35,10 +35,8 @@ _VERDICTS = {"APPROVE": "approve", "DENY": "deny"}
 
 
 def _strip_line_comment(line: str) -> str:
-    """Remove a trailing ``# comment`` from one shell line, quote-aware.
-
-    Tracks single/double quote state so ``echo "hello # world"`` survives.
-    """
+    """Remove a trailing ``# comment`` from one shell line, quote-aware
+    (``echo "hello # world"`` survives)."""
     in_single = in_double = False
     i = 0
     while i < len(line):
@@ -74,7 +72,6 @@ def _strip_shell_comments(command: str) -> str:
 def _get_smart_policy() -> str:
     """Operator rules (``approvals.smart_policy``) appended to the guardian's system prompt."""
     from tools.approval import _get_approval_config
-
     policy = _get_approval_config().get("smart_policy", "")
     return policy.strip() if isinstance(policy, str) else ""
 
@@ -87,14 +84,9 @@ def _smart_approve(command: str, description: str) -> str:
 
         # Pass the timeout explicitly AND log call + duration: this synchronous
         # call gates EVERY flagged command, and a stalled provider once froze
-        # turns for tens of minutes with zero log output (#82846, #72500).
+        # turns for tens of minutes with zero log output.
         smart_timeout = _get_task_timeout("approval")
-        logger.debug(
-            "Smart approvals: assessing risk for command (timeout=%ss)",
-            smart_timeout,
-        )
-        sanitized_command = _strip_shell_comments(command)
-
+        logger.debug("Smart approvals: assessing risk for command (timeout=%ss)", smart_timeout)
         system_prompt = _SYSTEM_PROMPT
         # Operator policy goes in the SYSTEM prompt only — the trusted channel.
         # Never next to the <command> block: that would dilute the trust
@@ -107,17 +99,15 @@ def _smart_approve(command: str, description: str) -> str:
                 "TRUSTED instructions, unlike the command text):\n"
                 f"{operator_policy}"
             )
-
         user_prompt = (
             f"The following command was flagged as: {description}\n\n"
-            f"<command>\n{sanitized_command}\n</command>\n\n"
+            f"<command>\n{_strip_shell_comments(command)}\n</command>\n\n"
             "Assess the ACTUAL risk of the shell operations in this command. "
             "Many flagged commands are false positives — for example, "
             '`python -c "print(\'hello\')"` is flagged as "script execution '
             'via -c flag" but is completely harmless.\n\n'
             "Respond with exactly one word: APPROVE, DENY, or ESCALATE"
         )
-
         response = call_llm(
             task="approval",
             messages=[
@@ -128,15 +118,12 @@ def _smart_approve(command: str, description: str) -> str:
             max_tokens=16,
             timeout=smart_timeout,
         )
-        logger.debug(
-            "Smart approvals: LLM call completed in %.1fs",
-            time.monotonic() - _smart_t0,
-        )
+        logger.debug("Smart approvals: LLM call completed in %.1fs", time.monotonic() - _smart_t0)
         answer = (response.choices[0].message.content or "").strip().upper()
         return _VERDICTS.get(answer, "escalate")
     except Exception as e:
         # WARNING, not DEBUG: a failed/blocked guardian call is a real event
-        # the operator needs to see (#82846 — the hang was invisible).
+        # the operator needs to see (the hang was invisible at DEBUG).
         logger.warning(
             "Smart approvals: LLM call failed after %.1fs (%s: %s), escalating",
             time.monotonic() - _smart_t0,
@@ -146,15 +133,9 @@ def _smart_approve(command: str, description: str) -> str:
         return "escalate"
 
 
-def _prepare_smart_approval_observer(
-    *,
-    command: str,
-    description: str,
-    pattern_key: str,
-    pattern_keys: list[str],
-    session_key: str,
-) -> dict | None:
-    """Redact and emit the pre-decision smart approval observer hook.
+def _smart_verdict(command: str, description: str, pattern_key: str,
+                   pattern_keys: list[str], session_key: str) -> str:
+    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'.
 
     Redaction is observer-payload preparation, not approval policy: if it fails,
     skip observability rather than leak raw data or block the LLM decision.
@@ -162,50 +143,22 @@ def _prepare_smart_approval_observer(
     from tools import approval as _a
     try:
         from agent.redact import redact_sensitive_text
-
-        hook_command = redact_sensitive_text(command, force=True)
-        hook_description = redact_sensitive_text(description, force=True)
+        payload = {
+            "command": redact_sensitive_text(command, force=True),
+            "description": redact_sensitive_text(description, force=True),
+            "pattern_key": pattern_key,
+            "pattern_keys": list(pattern_keys),
+            "session_key": session_key,
+            "surface": "smart",
+        }
     except Exception as exc:
         logger.debug("Smart approval hook redaction failed: %s", exc)
-        return None
-
-    payload = {
-        "command": hook_command,
-        "description": hook_description,
-        "pattern_key": pattern_key,
-        "pattern_keys": list(pattern_keys),
-        "session_key": session_key,
-        "surface": "smart",
-    }
-    _a._fire_approval_hook("pre_approval_request", **payload)
-    return payload
-
-
-def _observe_smart_approval_verdict(payload: dict | None, verdict: str) -> None:
-    """Emit a smart verdict after the auxiliary LLM decision, if safe."""
-    from tools import approval as _a
-    if payload is None or verdict not in {"approve", "deny"}:
-        return
-    _a._fire_approval_hook(
-        "post_approval_response",
-        **payload,
-        choice=f"smart_{verdict}",
-        decided_by="aux_llm",
-    )
-
-
-def _smart_verdict(command: str, description: str, pattern_key: str,
-                   pattern_keys: list[str], session_key: str) -> str:
-    """Run the guardian LLM with observer hooks; 'approve' | 'deny' | 'escalate'."""
-    from tools import approval as _a
-
-    observer_payload = _prepare_smart_approval_observer(
-        command=command,
-        description=description,
-        pattern_key=pattern_key,
-        pattern_keys=pattern_keys,
-        session_key=session_key,
-    )
+        payload = None
+    else:
+        _a._fire_approval_hook("pre_approval_request", **payload)
     verdict = _a._smart_approve(command, description)
-    _observe_smart_approval_verdict(observer_payload, verdict)
+    if payload is not None and verdict in {"approve", "deny"}:
+        _a._fire_approval_hook(
+            "post_approval_response", **payload, choice=f"smart_{verdict}", decided_by="aux_llm",
+        )
     return verdict

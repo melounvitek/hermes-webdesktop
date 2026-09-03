@@ -12,7 +12,6 @@ import logging
 import re
 import time
 import uuid
-from typing import Optional
 from tools.approval_detection import _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION
 
 logger = logging.getLogger("tools.approval")
@@ -32,8 +31,7 @@ def _match_user_deny_rule(command: str) -> str | None:
         deny_patterns = _a._get_approval_config().get("deny") or []
     except Exception:
         return None
-    globs = [p.strip() for p in deny_patterns
-             if isinstance(p, str) and p.strip()]
+    globs = [p.strip() for p in deny_patterns if isinstance(p, str) and p.strip()]
     if not globs:
         return None
     for command_variant in _a._command_detection_variants(command):
@@ -59,7 +57,7 @@ def _user_deny_block_result(pattern: str) -> dict:
     }
 
 
-def _save_blocked_payload(command: str) -> Optional[str]:
+def _save_blocked_payload(command: str) -> str | None:
     """Persist a parser-limit-blocked command as a runnable script.
 
     The parser-limit block fires on payload SIZE/shape, not the operation —
@@ -86,15 +84,21 @@ def _save_blocked_payload(command: str) -> Optional[str]:
             "#!/bin/bash\n"
             "# Auto-saved by Hermes: this command exceeded the inline command\n"
             "# parser limit and was blocked from direct execution. Review it,\n"
-            "# then run it via: bash " + str(path) + "\n"
-            + command
-            + ("\n" if not command.endswith("\n") else ""),
+            f"# then run it via: bash {path}\n"
+            + command + ("" if command.endswith("\n") else "\n"),
             encoding="utf-8", errors="replace",
         )
         return str(path)
     except Exception:
         logger.debug("failed to save blocked payload", exc_info=True)
         return None
+
+
+_RECOVERY_PREFIX = (
+    " RECOVERY: this block fires on oversized/unparseable inline "
+    "command payloads (heredocs, giant one-liners), not on the "
+    "operation itself. "
+)
 
 
 def _hardline_block_result(description: str, command: str = "") -> dict:
@@ -114,26 +118,18 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
     if description in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
         saved = _a._save_blocked_payload(command) if command else None
         if saved:
-            message += (
-                " RECOVERY: this block fires on oversized/unparseable inline "
-                "command payloads (heredocs, giant one-liners), not on the "
-                f"operation itself. Your command was saved to {saved} — "
+            message += _RECOVERY_PREFIX + (
+                f"Your command was saved to {saved} — "
                 f"review it, then run: terminal(command=\"bash {saved}\"). "
                 "Do not retry inline."
             )
         else:
-            message += (
-                " RECOVERY: this block fires on oversized/unparseable inline "
-                "command payloads (heredocs, giant one-liners), not on the "
-                "operation itself. Write the script to a file with write_file, "
+            message += _RECOVERY_PREFIX + (
+                "Write the script to a file with write_file, "
                 "then run it: terminal(command=\"bash /path/script.sh\") or "
                 "\"python3 /path/script.py\". Do not retry inline."
             )
-    return {
-        "approved": False,
-        "hardline": True,
-        "message": message,
-    }
+    return {"approved": False, "hardline": True, "message": message}
 
 
 def _sudo_stdin_block_result(description: str) -> dict:
@@ -179,40 +175,27 @@ def _has_allowlist_shell_operator(command: str) -> bool:
     n = len(command)
     while i < n:
         ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            elif ch in _SHELL_CONTROL_CHARS:
-                has_reinterpretable = True
-            i += 1
-            continue
-        if ch == "\\":
+        if ch == "\\" and quote != "'":
             nxt = command[i + 1] if i + 1 < n else ""
             if nxt in _SHELL_CONTROL_CHARS:
                 has_reinterpretable = True
             i += 2
             continue
-        if quote == '"':
-            if ch == '"':
+        if quote is not None:
+            if ch == quote:
                 quote = None
-            elif ch in ("`", "$"):
+            elif quote == '"' and ch in ("`", "$"):
                 return True  # expansion is active inside double quotes
             elif ch in _SHELL_CONTROL_CHARS:
                 has_reinterpretable = True
-            i += 1
-            continue
-        if ch in ("'", '"'):
+        elif ch in ("'", '"'):
             quote = ch
-            i += 1
-            continue
-        if ch == "$":
+        elif ch == "$":
             # Unquoted $ is only compound when it opens a substitution
             # ("$HOME" stays simple, matching the historical `\$\(` behavior).
             if i + 1 < n and command[i + 1] == "(":
                 return True
-            i += 1
-            continue
-        if ch in _SHELL_CONTROL_CHARS and ch not in "()":
+        elif ch in _SHELL_CONTROL_CHARS and ch not in "()":
             return True
         i += 1
     # An unterminated quote means we can't reason about the command shape.
@@ -232,14 +215,10 @@ def _command_matches_permanent_allowlist(command: str) -> bool:
     command = (command or "").strip()
     if not command or _a._has_allowlist_shell_operator(command):
         return False
-
     with _a._lock:
         patterns = tuple(_a._permanent_approved)
-
     for pattern in patterns:
-        if not isinstance(pattern, str):
-            continue
-        pattern = pattern.strip()
+        pattern = pattern.strip() if isinstance(pattern, str) else ""
         if not pattern:
             continue
         if command == pattern:
