@@ -705,9 +705,9 @@ def _reap_orphaned_desktop_local_serves(
 
     signal_term = _signal.SIGTERM if signal_term is None else signal_term
     signal_kill = getattr(_signal, "SIGKILL", _signal.SIGTERM) if signal_kill is None else signal_kill
-    sleep_fn = _time.sleep if sleep_fn is None else sleep_fn
-    lock_owned_pids_fn = _lock_owned_serve_pids if lock_owned_pids_fn is None else lock_owned_pids_fn
-    process_age_seconds_fn = _process_age_seconds if process_age_seconds_fn is None else process_age_seconds_fn
+    sleep_fn = sleep_fn or _time.sleep
+    lock_owned_pids_fn = lock_owned_pids_fn or _lock_owned_serve_pids
+    process_age_seconds_fn = process_age_seconds_fn or _process_age_seconds
 
     if sys.platform == "win32":
         # Windows desktop uses taskkill tree teardown; orphan scan is POSIX.
@@ -771,11 +771,9 @@ def _reap_orphaned_desktop_local_serves(
     for pid, _cmd in targets:
         if pid in failed:
             continue
-        if not psutil.pid_exists(pid):
-            killed.append(pid)
-            continue
         try:
-            os.kill(pid, signal_kill)
+            if psutil.pid_exists(pid):
+                os.kill(pid, signal_kill)
             killed.append(pid)
         except ProcessLookupError:
             killed.append(pid)
