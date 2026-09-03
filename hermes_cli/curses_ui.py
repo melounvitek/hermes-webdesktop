@@ -715,7 +715,6 @@ def _search_hint(search, searchable: bool, confirm: str, cancel: str, back_enabl
 
 def _simple_header(title: str, confirm: str, cancel: str, searchable: bool):
     """``draw_header`` callback: title on row 0, key hint on row 1, items start on row 3."""
-
     def _draw_header(stdscr, max_y, max_x, search=None, back_enabled=False):
         hint = _search_hint(search, searchable, confirm, cancel, back_enabled)
         _draw_title_and_hint(stdscr, title, hint, max_x)

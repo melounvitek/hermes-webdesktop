@@ -6,6 +6,7 @@ stays prompt_toolkit-free for the gateway.
 
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import subprocess
@@ -91,27 +92,34 @@ def _split_args(sub_text: str) -> tuple[list[str], str]:
 # Dynamic argument completers: (sub_text, sub_lower) -> Completion iterator
 
 
+def _quiet(gen_fn):
+    """Generator decorator: any exception while producing completions just ends the stream."""
+    @functools.wraps(gen_fn)
+    def wrapper(*args):
+        try:
+            yield from gen_fn(*args)
+        except Exception:
+            return
+    return wrapper
+
+
+@_quiet
 def _skin_completions(sub_text: str, sub_lower: str):
     """/skin — available skins."""
-    try:
-        from hermes_cli.skin_engine import list_skins
-        rows = ((s["name"], s.get("description", "") or s.get("source", "")) for s in list_skins())
-        yield from _prefix_completions(rows, sub_text)
-    except Exception:
-        pass
+    from hermes_cli.skin_engine import list_skins
+    rows = ((s["name"], s.get("description", "") or s.get("source", "")) for s in list_skins())
+    yield from _prefix_completions(rows, sub_text)
 
 
+@_quiet
 def _personality_completions(sub_text: str, sub_lower: str):
     """/personality — ``none`` plus configured personalities."""
-    try:
-        from hermes_cli.personality import describe_personality
-        personalities = _personalities_from_cli_config()
-        rows = chain(
-            [("none", "clear personality overlay")],
-            ((name, describe_personality(prompt)) for name, prompt in personalities.items()))
-        yield from _prefix_completions(rows, sub_text)
-    except Exception:
-        pass
+    from hermes_cli.personality import describe_personality
+    personalities = _personalities_from_cli_config()
+    rows = chain(
+        [("none", "clear personality overlay")],
+        ((name, describe_personality(prompt)) for name, prompt in personalities.items()))
+    yield from _prefix_completions(rows, sub_text)
 
 
 def _tools_completions(sub_text: str, sub_lower: str):

@@ -50,7 +50,6 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
         if cmd == "profile" and info["subcommands"]:
             # Complete actions, then profile names for actions that accept a profile argument.
             subcmds = " ".join(sorted(info["subcommands"]))
-            profile_actions = " ".join(_PROFILE_NAME_ACTIONS)
             cases.append(
                 f"        profile)\n"
                 f"            case \"$prev\" in\n"
@@ -58,7 +57,7 @@ def generate_bash(parser: argparse.ArgumentParser) -> str:
                 f"                    COMPREPLY=($(compgen -W \"{subcmds}\" -- \"$cur\"))\n"
                 f"                    return\n"
                 f"                    ;;\n"
-                f"                {profile_actions.replace(' ', '|')})\n"
+                f"                {'|'.join(_PROFILE_NAME_ACTIONS)})\n"
                 f"                    COMPREPLY=($(compgen -W \"$(_hermes_profiles)\" -- \"$cur\"))\n"
                 f"                    return\n"
                 f"                    ;;\n"
