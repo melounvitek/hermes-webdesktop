@@ -2,6 +2,7 @@
     transport = get_transport("anthropic_messages")
     result = transport.normalize_response(raw_response)"""
 
+import contextlib
 import importlib
 
 from agent.transports.types import (  # noqa: F401
@@ -24,13 +25,10 @@ def register_transport(api_mode: str, transport_cls: type) -> None:
 
 def get_transport(api_mode: str):
     """Return a transport instance for ``api_mode``, or None so callers can fall back to the legacy path."""
-    if not _discovered:
+    # A directly-imported transport leaves the registry partial; (re)discover on first use and on misses.
+    if not _discovered or api_mode not in _REGISTRY:
         _discover_transports()
     cls = _REGISTRY.get(api_mode)
-    if cls is None:
-        # A directly-imported transport leaves the registry partial; rediscover on misses.
-        _discover_transports()
-        cls = _REGISTRY.get(api_mode)
     return None if cls is None else cls()
 
 
@@ -39,7 +37,5 @@ def _discover_transports() -> None:
     global _discovered
     _discovered = True
     for name in _TRANSPORT_MODULES:
-        try:
+        with contextlib.suppress(ImportError):
             importlib.import_module(f"agent.transports.{name}")
-        except ImportError:
-            pass
