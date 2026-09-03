@@ -53,12 +53,12 @@ def _(rid, params: dict) -> dict:
     policy = _repo_discovery_policy()
     policy_key = _repo_discovery_policy_key(policy)
     incoming_raw = params.get("discovery_policy")
-    incoming_policy = (
-        _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None)
-    incoming_matches = (incoming_policy is not None
-                        and _repo_discovery_policy_key(incoming_policy) == policy_key)
-    accept_legacy_default = (incoming_policy is None
-                             and _repo_discovery_policy_is_default(policy))
+    incoming_policy = _repo_discovery_policy(incoming_raw) if isinstance(incoming_raw, dict) else None
+    if incoming_policy is not None:
+        accepted = _repo_discovery_policy_key(incoming_policy) == policy_key
+    else:
+        accepted = _repo_discovery_policy_is_default(policy)  # legacy client without a policy
+    accepted = bool(policy["enabled"] and accepted)
     pairs: list[tuple[str, str | None]] = []
     for item in params.get("repos") or []:
         if isinstance(item, str):
@@ -67,14 +67,12 @@ def _(rid, params: dict) -> dict:
             pairs.append((str(item["root"]), item.get("label")))
     with pdb.connect_closing() as conn:
         _reconcile_repo_discovery(pdb, conn, policy, policy_key)
-        accepted = bool(policy["enabled"] and (incoming_matches or accept_legacy_default))
         if accepted:
             pdb.record_discovered_repos(conn, pairs, replace=True, policy_key=policy_key)
         elif not policy["enabled"]:
             pdb.clear_discovered_repos(conn, policy_key=policy_key)
     with _profile_db(params) as db:
-        repos = ([] if db is None
-                 else _discover_repos_payload(db, include_cached=policy["enabled"]))
+        repos = [] if db is None else _discover_repos_payload(db, include_cached=policy["enabled"])
         return _ok(rid, {"repos": repos, "accepted": accepted, "discovery_policy": policy})
 
 
@@ -97,9 +95,8 @@ def _(rid, params: dict) -> dict:
         tree, active_id = _stamped_project_tree(
             db, params, preview_limit=int(params.get("preview_limit") or 3), hydrate=False,
             session_limit=int(params.get("session_limit") or 2000), include_discovered=True)
-        return _ok(rid, {
-            "projects": tree["projects"], "active_id": active_id,
-            "scoped_session_ids": tree["scoped_session_ids"]})
+        return _ok(rid, {"projects": tree["projects"], "active_id": active_id,
+                         "scoped_session_ids": tree["scoped_session_ids"]})
 
 
 @_projects_handler("projects.project_sessions")
@@ -115,61 +112,51 @@ def _(rid, params: dict) -> dict:
         tree, _active = _stamped_project_tree(
             db, params, preview_limit=0, hydrate=True,
             session_limit=int(params.get("session_limit") or 5000), include_discovered=False)
-        proj = next((p for p in tree["projects"] if p["id"] == project_id), None)
-        return _ok(rid, {"project": proj})
+        return _ok(rid, {"project": next((p for p in tree["projects"] if p["id"] == project_id), None)})
 
 
-# ── config.get — one getter per key; returns the result payload or a full ``_err`` response
-# (dicts containing "error" pass through untouched).
+# ── config.get — one getter per key returning the result payload.
+
+def _display_raw() -> dict:
+    return _load_cfg().get("display") or {}
 
 
-def _display_mode(cfg: dict, key: str, allowed: frozenset, default: str) -> str:
-    raw = str((cfg.get("display") or {}).get(key, default) or default).strip().lower()
+def _display_word(key: str, default: str, allowed) -> str:
+    """Normalised ``display.<key>``; unknown/garbage values read back as ``default``."""
+    raw = str(_display_raw().get(key, default) or "").strip().lower()
     return raw if raw in allowed else default
 
 
 _THINKING_MODES = frozenset({"collapsed", "truncated", "full"})
 
 
-def _cfg_get_provider(rid, params):
-    try:
-        from hermes_cli.models import list_available_providers, normalize_provider
-        model = _resolve_model()
-        parts = model.split("/", 1)
-        return {
-            "model": model,
-            "provider": normalize_provider(parts[0]) if len(parts) > 1 else "unknown",
+def _cfg_get_provider(params):
+    from hermes_cli.models import list_available_providers, normalize_provider
+    model = _resolve_model()
+    parts = model.split("/", 1)
+    return {"model": model, "provider": normalize_provider(parts[0]) if len(parts) > 1 else "unknown",
             "providers": list_available_providers()}
-    except Exception as e:
-        return _err(rid, 5013, str(e))
 
 
-def _cfg_get_profile(rid, params):
+def _cfg_get_profile(params):
     from hermes_constants import display_hermes_home
     return {"home": str(_hermes_home), "display": display_hermes_home()}
 
 
-def _cfg_get_project(rid, params):
+def _cfg_get_project(params):
     cfg_terminal = _load_cfg().get("terminal") or {}
     raw = str(params.get("cwd", "") or cfg_terminal.get("cwd", "") or "").strip()
     cwd = _completion_cwd({"cwd": raw} if raw else {})
     return {"cwd": cwd, "branch": _git_branch_for_cwd(cwd)}
 
 
-def _cfg_get_indicator(rid, params):
-    # Normalize so a hand-edited config.yaml (stray casing / unknown value) reads back the SAME
-    # value the TUI rendered (frontend falls back to DEFAULT_INDICATOR_STYLE for the same inputs).
-    norm = str((_load_cfg().get("display") or {}).get("tui_status_indicator", "")).strip().lower()
-    return {"value": norm if norm in INDICATOR_STYLES else DEFAULT_INDICATOR_STYLE}
-
-
-def _cfg_get_personality(rid, params):
+def _cfg_get_personality(params):
     # EFFECTIVE personality via the single owner — a stale/unknown name must not show as active.
     from hermes_cli.personality import active_personality_name
     return {"value": active_personality_name(_load_cfg()) or "none"}
 
 
-def _cfg_get_reasoning(rid, params):
+def _cfg_get_reasoning(params):
     cfg = _load_cfg()
     session = _sessions.get(params.get("session_id", ""))
     reasoning_config = None
@@ -188,7 +175,7 @@ def _cfg_get_reasoning(rid, params):
     return {"value": effort, "display": display}
 
 
-def _cfg_get_fast(rid, params):
+def _cfg_get_fast(params):
     # `config.set fast` is session-scoped: prefer the session's live/pinned value over the
     # global key (a pre-build session keeps its pin in create_service_tier_override).
     session = _sessions.get(params.get("session_id", ""))
@@ -204,28 +191,15 @@ def _cfg_get_fast(rid, params):
     return {"value": "fast" if tier == "priority" else "normal"}
 
 
-def _cfg_get_approval_mode(rid, params):
-    try:
-        return {"value": _load_approval_mode()}
-    except Exception as e:
-        return _err(rid, 5001, str(e))
-
-
-def _cfg_get_thinking_mode(rid, params):
-    cfg = _load_cfg()
-    raw = str((cfg.get("display") or {}).get("thinking_mode", "") or "").strip().lower()
-    if raw in _THINKING_MODES:
+def _cfg_get_thinking_mode(params):
+    raw = _display_word("thinking_mode", "", _THINKING_MODES)
+    if raw:
         return {"value": raw}
-    dm = _display_mode(cfg, "details_mode", _DETAIL_MODES, "collapsed")
+    dm = _display_word("details_mode", "collapsed", _DETAIL_MODES)
     return {"value": "full" if dm == "expanded" else "collapsed"}
 
 
-def _cfg_get_theme(rid, params):
-    raw = str(_display_cfg().get("tui_theme", "auto")).strip().lower()
-    return {"value": raw if raw in {"auto", "light", "dark"} else "auto"}
-
-
-def _cfg_get_mtime(rid, params):
+def _cfg_get_mtime(params):
     cfg_path = _hermes_home / "config.yaml"
     try:
         mtime = cfg_path.stat().st_mtime if cfg_path.exists() else 0
@@ -236,54 +210,52 @@ def _cfg_get_mtime(rid, params):
     return {"mtime": mtime, "mcp_rev": _compute_mcp_rev()}
 
 
-def _config_getters() -> dict:
-    """key -> getter(rid, params). Built per call so, once rebound onto server.py, every entry
-    resolves to the rebound helper copies rather than this module's originals."""
-    return {
-        "provider": _cfg_get_provider,
-        "profile": _cfg_get_profile,
-        "project": _cfg_get_project,
-        "full": lambda rid, params: {"config": _load_cfg()},
-        "prompt": lambda rid, params: {"prompt": _load_cfg().get("custom_prompt", "")},
-        "skin": lambda rid, params: {"value": (_load_cfg().get("display") or {}).get("skin", "default")},
-        "indicator": _cfg_get_indicator,
-        "personality": _cfg_get_personality,
-        "reasoning": _cfg_get_reasoning,
-        "fast": _cfg_get_fast,
-        "busy": lambda rid, params: {"value": _load_busy_input_mode()},
-        "approval_mode": _cfg_get_approval_mode,
-        "approvals.mode": _cfg_get_approval_mode,
-        "details_mode": lambda rid, params: {
-            "value": _display_mode(_load_cfg(), "details_mode", _DETAIL_MODES, "collapsed")},
-        "thinking_mode": _cfg_get_thinking_mode,
-        "density": lambda rid, params: {
-            "value": "on" if bool((_load_cfg().get("display") or {}).get("tui_compact", False)) else "off"
-        },
-        "theme": _cfg_get_theme,
-        "statusbar": lambda rid, params: {
-            "value": _coerce_statusbar(_display_cfg().get("tui_statusbar", "top"))},
-        "focus": lambda rid, params: {
-            "value": "on" if bool(_display_cfg().get("focus_view", False)) else "off",
-            "tool_progress": _load_tool_progress_mode()},
-        "mouse": lambda rid, params: {"value": _display_mouse_tracking(_load_cfg().get("display"))},
-        "mtime": _cfg_get_mtime}
+# key -> getter(params); bind_module rebinds the table's functions onto server.py's globals.
+_CONFIG_GETTERS = {
+    "provider": _cfg_get_provider,
+    "profile": _cfg_get_profile,
+    "project": _cfg_get_project,
+    "full": lambda params: {"config": _load_cfg()},
+    "prompt": lambda params: {"prompt": _load_cfg().get("custom_prompt", "")},
+    "skin": lambda params: {"value": _display_raw().get("skin", "default")},
+    # Normalised like the TUI renders it (frontend falls back to the default for the same inputs).
+    "indicator": lambda params: {
+        "value": _display_word("tui_status_indicator", DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES)},
+    "personality": _cfg_get_personality,
+    "reasoning": _cfg_get_reasoning,
+    "fast": _cfg_get_fast,
+    "busy": lambda params: {"value": _load_busy_input_mode()},
+    "approval_mode": lambda params: {"value": _load_approval_mode()},
+    "approvals.mode": lambda params: {"value": _load_approval_mode()},
+    "details_mode": lambda params: {"value": _display_word("details_mode", "collapsed", _DETAIL_MODES)},
+    "thinking_mode": _cfg_get_thinking_mode,
+    "density": lambda params: {"value": "on" if bool(_display_raw().get("tui_compact", False)) else "off"},
+    "theme": lambda params: {"value": _display_word("tui_theme", "auto", {"auto", "light", "dark"})},
+    "statusbar": lambda params: {"value": _coerce_statusbar(_display_cfg().get("tui_statusbar", "top"))},
+    "focus": lambda params: {"value": "on" if bool(_display_cfg().get("focus_view", False)) else "off",
+                             "tool_progress": _load_tool_progress_mode()},
+    "mouse": lambda params: {"value": _display_mouse_tracking(_load_cfg().get("display"))},
+    "mtime": _cfg_get_mtime}
+# Getters whose failure is a JSON-RPC error of this code (others propagate to dispatch).
+_CONFIG_GET_ERR = {"provider": 5013, "approval_mode": 5001, "approvals.mode": 5001}
 
 
 @method("config.get")
 @_profile_scoped
 def _(rid, params: dict) -> dict:
     key = params.get("key", "")
-    getter = _config_getters().get(key)
+    getter = _CONFIG_GETTERS.get(key)
     if getter is None:
         return _err(rid, 4002, f"unknown config key: {key}")
-    payload = getter(rid, params)
-    if "error" in payload:
-        return payload
-    return _ok(rid, payload)
+    try:
+        return _ok(rid, getter(params))
+    except Exception as e:
+        if key not in _CONFIG_GET_ERR:
+            raise
+        return _err(rid, _CONFIG_GET_ERR[key], str(e))
 
 
 # ── setup readiness
-
 
 def _readiness_profile_scope(params: dict):
     """``(profile, scope)`` for the readiness RPCs' optional ``profile`` param: ``scope`` binds
@@ -344,8 +316,7 @@ def _(rid, params: dict) -> dict:
 
         def probe(profile):
             runtime = resolve_runtime_provider(requested=requested)
-            provider_configured = bool(
-                _has_any_provider_configured(strict_profile_scope=bool(profile)))
+            provider_configured = bool(_has_any_provider_configured(strict_profile_scope=bool(profile)))
             scoped = {"profile": profile} if profile else {}
             provider = runtime.get("provider") or "provider"
             source = str(runtime.get("source") or "")
@@ -368,6 +339,14 @@ def _(rid, params: dict) -> dict:
         return _readiness_check(rid, params, probe)
     except Exception as e:
         return _ok(rid, {"ok": False, "error": str(e)})
+
+
+def _safe_client_label(label: str) -> str:
+    """Alnum/._- () only, ≤64 chars, dot-runs and leading dots collapsed (no traversal shapes)."""
+    safe = "".join(ch for ch in label if ch.isalnum() or ch in "._- ()").strip()[:64]
+    while ".." in safe:
+        safe = safe.replace("..", ".")
+    return safe.lstrip(".").strip()
 
 
 @method("diagnostics.share_nous")
@@ -396,24 +375,17 @@ def _(rid, params: dict) -> dict:
             for label, text in list(extra_files.items())[:4]:
                 if not isinstance(label, str) or not isinstance(text, str):
                     continue
-                safe_label = "".join(ch for ch in label if ch.isalnum() or ch in "._- ()").strip()[:64]
-                # Collapse dot-runs / leading dots so traversal-shaped labels can't survive.
-                while ".." in safe_label:
-                    safe_label = safe_label.replace("..", ".")
-                safe_label = safe_label.lstrip(".").strip()
-                if not safe_label or not text.strip():
-                    continue
-                bundle[f"client/{safe_label}"] = _redact_log_text(text[:524_288])
+                safe_label = _safe_client_label(label)
+                if safe_label and text.strip():
+                    bundle[f"client/{safe_label}"] = _redact_log_text(text[:524_288])
         res = share_to_nous(build_nous_bundle(bundle, redact=True))
         view_url = res.get("viewUrl") or res.get("view_url")
         upload_id = res.get("id")
         if not view_url and not upload_id:
             # An upload the user can't reference is useless to support.
-            return _ok(rid, {"ok": False,
-                             "error": "upload succeeded but returned no view URL or id"})
-        return _ok(rid, {
-            "ok": True, "view_url": view_url, "upload_id": upload_id,
-            "expires_at": res.get("expiresAt") or res.get("expires_at")})
+            return _ok(rid, {"ok": False, "error": "upload succeeded but returned no view URL or id"})
+        return _ok(rid, {"ok": True, "view_url": view_url, "upload_id": upload_id,
+                         "expires_at": res.get("expiresAt") or res.get("expires_at")})
     except Exception as e:
         return _ok(rid, {"ok": False, "error": str(e)})
 

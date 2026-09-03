@@ -39,11 +39,6 @@ def _pin_profile_model(profile_dir, provider, model) -> None:
     _lazy("hermes_cli.web_routers.profiles", "_write_profile_model")(profile_dir, provider, model)
 
 
-def _launch_mcp_catalog() -> dict:
-    mcp = (_lazy("hermes_cli.config", "load_config_readonly")() or {}).get("mcp_servers")
-    return mcp if isinstance(mcp, dict) else {}
-
-
 def _try(fn, default):
     """``fn()`` or ``default`` on any exception — best-effort sections must never fail each other."""
     try:
@@ -111,15 +106,6 @@ def _latest_message_preview(db, session_id):
     return text[:80] + "..." if len(text) > 80 else text
 
 
-def _open_profile_session_db_readonly(profile_path):
-    """Read-only attach for roster previews, or None (a writable ``SessionDB()`` waits up to 20s
-    for the write lock + runs DDL and stalled the 5s roster poll)."""
-    db_path = Path(profile_path) / "state.db"
-    if not _try(db_path.exists, False):
-        return None
-    return _try(lambda: _lazy("hermes_state", "SessionDB")(db_path=db_path, read_only=True), None)
-
-
 def _resurrect_recoverable_canonical(db, profile_path, session_id):
     """Un-archive an accidentally archived canonical row (judged read-only, written via a
     short-lived writable handle), or False."""
@@ -145,13 +131,9 @@ def _canonical_session_row(db, profile_path):
     """Summary of the profile's canonical "Bot Chat" row (identity is the NAME), or None.
     Lineages via ``get_compression_tip`` (NOT the resume walker's unmarked-child fallback);
     worker sources count as absent. ``id`` is the registry row, ``resolved_id`` the live tip."""
-    if db is None:
-        return None
     try:
         row = db.get_session_by_title("Bot Chat")
-        if not row:
-            return None
-        session_id = str(row.get("id") or "").strip()
+        session_id = str((row or {}).get("id") or "").strip()
         if not session_id or _denied_source(row):
             return None
         # Archived = retired (absent), except accidental reaper archives: resurrect those.
@@ -173,8 +155,6 @@ def _canonical_session_row(db, profile_path):
 def _latest_profile_session_rows(db):
     """(newest human-facing session, newest worker session). The worker row lets rosters show
     a profile as working (workers heartbeat ``last_activity_at`` every ≤60s)."""
-    if db is None:
-        return None, None
     try:
         human = worker = None
         for s in db.list_sessions_rich(source=None, limit=20, order_by_last_active=True, compact_rows=True):
@@ -184,29 +164,32 @@ def _latest_profile_session_rows(db):
                 if worker is None:
                     src = (s.get("source") or "").strip().lower()
                     worker = {"id": s["id"], "source": src, "title": title, "last_active": last_active}
-                continue
-            if human is not None:
-                continue
-            # Rosters want "where the conversation IS": prefer the newest text.
-            human = {
-                "id": s["id"], "title": title,
-                "preview": _latest_message_preview(db, s["id"]) or s.get("preview") or "",
-                "started_at": s.get("started_at") or 0, "last_active": last_active,
-                "message_count": s.get("message_count") or 0}
-            if worker is not None:
-                break
+            elif human is None:
+                # Rosters want "where the conversation IS": prefer the newest text.
+                human = {
+                    "id": s["id"], "title": title,
+                    "preview": _latest_message_preview(db, s["id"]) or s.get("preview") or "",
+                    "started_at": s.get("started_at") or 0, "last_active": last_active,
+                    "message_count": s.get("message_count") or 0}
+                if worker is not None:
+                    break
         return human, worker
     except Exception:
         return None, None
 
 
 def _profile_session_fields(row, profile_path):
-    """Attach last_session / worker_session / canonical_session to a roster row."""
-    db = _open_profile_session_db_readonly(profile_path)
+    """Attach last_session / worker_session / canonical_session to a roster row. The DB is a
+    read-only attach (a writable ``SessionDB()`` waits up to 20s for the write lock + runs DDL
+    and stalled the 5s roster poll); no DB -> every field None."""
+    db_path = Path(profile_path) / "state.db"
+    db = None
+    if _try(db_path.exists, False):
+        db = _try(lambda: _lazy("hermes_state", "SessionDB")(db_path=db_path, read_only=True), None)
     try:
-        row["last_session"], row["worker_session"] = _latest_profile_session_rows(db)
+        row["last_session"], row["worker_session"] = _latest_profile_session_rows(db) if db else (None, None)
         # Resolved server-side on every listing so no client carries a session pointer.
-        row["canonical_session"] = _canonical_session_row(db, profile_path)
+        row["canonical_session"] = _canonical_session_row(db, profile_path) if db else None
     finally:
         if db is not None:
             _best_effort(db.close)
@@ -250,12 +233,6 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {"profiles": out, "bot_mode_protocol": True})
 
 
-def _has_real_env_content(env_path) -> bool:
-    """True when .env has any non-comment, non-blank line."""
-    lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    return any(s and not s.startswith("#") for s in map(str.strip, lines))
-
-
 def _copy_secret_file(src, dst, wanted: bool) -> bool:
     """Copy ``src`` -> ``dst`` (0600) when ``src`` exists and ``wanted``; True if copied."""
     if not (src.is_file() and wanted):
@@ -269,9 +246,11 @@ def _copy_secret_file(src, dst, wanted: bool) -> bool:
 
 def _mirror_env(path, launch_home) -> bool:
     """Copy the launch .env only over the seeded comment-only stub (never a clone's secrets)."""
+    def has_content(env_path) -> bool:
+        lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return any(s and not s.startswith("#") for s in map(str.strip, lines))
     src, dst = launch_home / ".env", path / ".env"
-    return _copy_secret_file(
-        src, dst, _has_real_env_content(src) and not _try(lambda: _has_real_env_content(dst), False))
+    return _copy_secret_file(src, dst, has_content(src) and not _try(lambda: has_content(dst), False))
 
 
 def _mirror_auth(path, launch_home) -> bool:
@@ -408,22 +387,10 @@ def _describe_toolsets(cfg):
     return toolsets_out, pinned_set
 
 
-def _describe_mcp_servers(cfg):
-    """``[{name, enabled, transport}]`` for the profile's ``mcp_servers`` (best-effort)."""
-    mcp_cfg = cfg.get("mcp_servers")
-    if not isinstance(mcp_cfg, dict):
-        return []
-    return _try(lambda: [
-        {"name": str(srv_name), "enabled": not is_truthy_value(entry.get("disabled", False)),
-         "transport": str(entry.get("transport") or "http") if entry.get("url") else "stdio"}
-        for srv_name in sorted(mcp_cfg.keys()) for entry in (mcp_cfg[srv_name],)
-        if isinstance(entry, dict)
-    ], [])
-
-
 @_profile_handler("profiles.describe", 5063)
 def _(rid, params: dict) -> dict:
-    """Editor snapshot; installed skills are enabled unless in ``skills.disabled``."""
+    """Editor snapshot; installed skills are enabled unless in ``skills.disabled``; ``mcp_servers``
+    is ``[{name, enabled, transport}]`` (best-effort)."""
     name, profile_dir, err = _resolve_profile(rid, params)
     if err is not None:
         return err
@@ -439,7 +406,13 @@ def _(rid, params: dict) -> dict:
         toolsets_out, pinned_set = _describe_toolsets(cfg)
         soul_path = profile_dir / "SOUL.md"
         soul = _try(lambda: soul_path.read_text(encoding="utf-8", errors="replace") if soul_path.is_file() else "", "")
-        mcp_out = _describe_mcp_servers(cfg)
+        mcp_cfg = cfg.get("mcp_servers")
+        mcp_out = _try(lambda: [
+            {"name": str(srv_name), "enabled": not is_truthy_value(entry.get("disabled", False)),
+             "transport": str(entry.get("transport") or "http") if entry.get("url") else "stdio"}
+            for srv_name in sorted(mcp_cfg.keys()) for entry in (mcp_cfg[srv_name],)
+            if isinstance(entry, dict)
+        ], []) if isinstance(mcp_cfg, dict) else []
         model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
         meta = _try(lambda: _lazy("hermes_cli.profiles", "read_profile_meta")(profile_dir), {})
         return _ok(rid, {
@@ -513,31 +486,6 @@ def _configure_model(profile_dir, params, applied):
     return confirm_message
 
 
-def _configure_cfg_sections(profile_dir, params, applied) -> None:
-    """Apply ``disabled_skills`` / ``enabled_toolsets`` / ``enabled_mcp_servers`` (replace
-    semantics; empty toolsets clears the pin). An undefined MCP server is copied from the LAUNCH
-    catalog (unknown names skipped); credentials stay in .env/auth."""
-    want_mcp = isinstance(params.get("enabled_mcp_servers"), list)
-    # Launch catalog read BEFORE the home override flips config resolution.
-    launch_mcp = _try(_launch_mcp_catalog, {}) if want_mcp else {}
-    with _hermes_home_scope(profile_dir):
-        from hermes_cli.config import load_config, save_config
-        cfg = load_config() or {}
-        if isinstance(params.get("disabled_skills"), list):
-            try:
-                from hermes_cli.skills_config import save_disabled_skills
-                save_disabled_skills(cfg, _clean_names(params["disabled_skills"]))
-                applied["skills"] = True
-                cfg = load_config() or {}
-            except Exception:
-                applied["skills"] = False
-        if isinstance(params.get("enabled_toolsets"), list):
-            applied["toolsets"] = _best_effort(lambda: _save_toolset_pin(cfg, params["enabled_toolsets"], save_config))
-        if want_mcp:
-            applied["mcp_servers"] = _best_effort(lambda: _save_mcp_toggles(
-                load_config() or {}, params["enabled_mcp_servers"], launch_mcp, save_config))
-
-
 def _clean_names(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
@@ -570,6 +518,34 @@ def _save_mcp_toggles(cfg, enabled, launch_mcp, save_config) -> None:
     save_config(cfg)
 
 
+def _configure_cfg_sections(profile_dir, params, applied) -> None:
+    """Apply ``disabled_skills`` / ``enabled_toolsets`` / ``enabled_mcp_servers`` (replace
+    semantics; empty toolsets clears the pin). An undefined MCP server is copied from the LAUNCH
+    catalog (unknown names skipped); credentials stay in .env/auth."""
+    want_mcp = isinstance(params.get("enabled_mcp_servers"), list)
+    # Launch catalog read BEFORE the home override flips config resolution.
+    launch_mcp = {}
+    if want_mcp:
+        launch_mcp = _try(lambda: (_lazy("hermes_cli.config", "load_config_readonly")() or {}).get("mcp_servers"), {})
+        launch_mcp = launch_mcp if isinstance(launch_mcp, dict) else {}
+    with _hermes_home_scope(profile_dir):
+        from hermes_cli.config import load_config, save_config
+        cfg = load_config() or {}
+        if isinstance(params.get("disabled_skills"), list):
+            try:
+                from hermes_cli.skills_config import save_disabled_skills
+                save_disabled_skills(cfg, _clean_names(params["disabled_skills"]))
+                applied["skills"] = True
+                cfg = load_config() or {}
+            except Exception:
+                applied["skills"] = False
+        if isinstance(params.get("enabled_toolsets"), list):
+            applied["toolsets"] = _best_effort(lambda: _save_toolset_pin(cfg, params["enabled_toolsets"], save_config))
+        if want_mcp:
+            applied["mcp_servers"] = _best_effort(lambda: _save_mcp_toggles(
+                load_config() or {}, params["enabled_mcp_servers"], launch_mcp, save_config))
+
+
 @_profile_handler("profiles.configure", 5064)
 def _(rid, params: dict) -> dict:
     """Editor Save: ``name`` plus any of ``ui_meta`` (+ ``ui_meta_expected_revisions``), ``soul``,
@@ -598,15 +574,6 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, result)
 
 
-def _sniff_asset_ext(blob):
-    """Extension for a PNG/JPEG/WebP blob by magic bytes (never trust declared mime), or None."""
-    if blob[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if blob[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    return "webp" if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP" else None
-
-
 def _unlink_asset_files(assets_dir, asset) -> int:
     """Delete every ``<asset>.<ext>`` in ``assets_dir``; returns how many existed."""
     present = [t for t in (assets_dir / f"{asset}.{ext}" for ext in _ASSET_EXTS) if t.is_file()]
@@ -618,7 +585,8 @@ def _unlink_asset_files(assets_dir, asset) -> int:
 @_profile_handler("profiles.set_asset", 5065)
 def _(rid, params: dict) -> dict:
     """Store ``assets/<asset>.<ext>`` atomically. Params: ``name``, ``asset`` (``"avatar"`` only),
-    ``data`` (data URL or base64; PNG/JPEG/WebP ≤2MB) or ``clear: true``."""
+    ``data`` (data URL or base64; PNG/JPEG/WebP ≤2MB, sniffed by magic bytes — never the declared
+    mime) or ``clear: true``."""
     asset = str(params.get("asset") or "avatar").strip().lower()
     if not str(params.get("name") or "").strip():
         return _err(rid, 4063, "name required")
@@ -643,8 +611,13 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 4068, "data is not valid base64")
     if len(blob) > 2_000_000:
         return _err(rid, 4069, f"asset too large ({len(blob)} bytes; max 2MB)")
-    ext = _sniff_asset_ext(blob)
-    if ext is None:
+    if blob[:8] == b"\x89PNG\r\n\x1a\n":
+        ext = "png"
+    elif blob[:3] == b"\xff\xd8\xff":
+        ext = "jpg"
+    elif blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        ext = "webp"
+    else:
         return _err(rid, 4070, "unsupported image format (PNG/JPEG/WebP only)")
     assets_dir.mkdir(parents=True, exist_ok=True)
     _unlink_asset_files(assets_dir, asset)  # one canonical file per asset
