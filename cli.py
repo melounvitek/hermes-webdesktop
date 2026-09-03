@@ -1558,6 +1558,7 @@ def _replay_output_history() -> None:
     try:
         rendered_lines = []
         for entry in tuple(_OUTPUT_HISTORY):
+            lines = [entry]
             if callable(entry):
                 try:
                     lines = entry()
@@ -1565,8 +1566,6 @@ def _replay_output_history() -> None:
                     continue
                 if isinstance(lines, str):
                     lines = lines.splitlines()
-            else:
-                lines = [entry]
             rendered_lines.extend(str(line) for line in lines)
         if rendered_lines:
             # One payload: per-line pt prints each force a sync redraw (a waterfall of old output).
@@ -1583,10 +1582,8 @@ def _pt_print_ansi(text: str) -> None:
         _pt_print(_PT_ANSI(text))
     except Exception:
         # NoConsoleScreenBufferError (Windows) / OSError when stdout is e.g. a worker log file.
-        try:
+        with suppress(Exception):
             print(text)
-        except Exception:
-            pass
 
 
 def _cprint(text: str):
@@ -1631,14 +1628,11 @@ def _cprint(text: str):
         # run_in_terminal() returns an awaitable (pt >= 3.0) that must be scheduled or the
         # output is dropped, or None (mocks / older pt) when it already ran synchronously.
         # Never fall back to a bare print on error: the sync path already printed.
-        try:
-            import asyncio as _aio
+        with suppress(Exception):
             import inspect as _inspect
             coro = run_in_terminal(lambda: _pt_print(_PT_ANSI(text)))
             if coro is not None and (_inspect.isawaitable(coro) or _inspect.iscoroutine(coro)):
-                _aio.ensure_future(coro)
-        except Exception:
-            pass  # best-effort; the line may already have been printed
+                _asyncio.ensure_future(coro)
 
     try:
         loop.call_soon_threadsafe(_schedule)
@@ -1661,10 +1655,8 @@ def _prepend_note_to_message(message, note: str):
         parts = list(message)
         for i, part in enumerate(parts):
             if isinstance(part, dict) and part.get("type") == "text":
-                merged = dict(part)
-                text = merged.get("text", "")
-                merged["text"] = f"{note}\n\n{text}" if text else note
-                parts[i] = merged
+                text = part.get("text", "")
+                parts[i] = {**part, "text": f"{note}\n\n{text}" if text else note}
                 return parts
         return [{"type": "text", "text": note}, *parts]
     return message
