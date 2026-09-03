@@ -149,10 +149,9 @@ def build_root_tree(node: Dict[str, Any], objects: ObjectSet, *, manifest_hash: 
     adds the root ``sync-manifest`` BLOB entry (cannot collide with a skill dir: those are trees)."""
     entries: List[Dict[str, str]] = []
     for name, child in node.items():
-        if isinstance(child, dict) and "__tree__" in child and len(child) == 1:
-            entries.append(_entry(name, KIND_TREE, child["__tree__"], MODE_DIR))
-        else:
-            entries.append(_entry(name, KIND_TREE, build_root_tree(child, objects), MODE_DIR))
+        leaf = isinstance(child, dict) and "__tree__" in child and len(child) == 1
+        entries.append(_entry(name, KIND_TREE, child["__tree__"] if leaf else build_root_tree(child, objects),
+                              MODE_DIR))
     if manifest_hash is not None:
         entries.append(_entry(SYNC_MANIFEST_ENTRY_NAME, KIND_BLOB, manifest_hash, MODE_FILE))
     return _add_tree(entries, objects)
@@ -190,18 +189,16 @@ class SyncConflict(RuntimeError):
 
     def __init__(self, actual: Optional[str]):
         self.actual: Optional[str] = actual or None
-        super().__init__(
-            f"CAS conflict; actual head {self.actual}" if self.actual else "CAS conflict; the ref does not exist yet"
-        )
+        super().__init__(f"CAS conflict; actual head {self.actual}" if self.actual
+                         else "CAS conflict; the ref does not exist yet")
 
 
 def _check_version(caps: Dict[str, Any]) -> None:
     """Reject an incompatible server major version."""
     ver = str(caps.get("hsp_version") or "")  # wire field name
     if ver.split(".", 1)[0] != WIRE_VERSION:
-        raise SyncError(
-            f"this server speaks sync version {ver!r}, but this Hermes speaks "
-            f"{WIRE_VERSION} — update Hermes to sync with it")
+        raise SyncError(f"this server speaks sync version {ver!r}, but this Hermes speaks "
+                        f"{WIRE_VERSION} — update Hermes to sync with it")
 
 
 def _body(r) -> Dict[str, Any]:
@@ -276,7 +273,8 @@ class SyncClient:
         hashes are no-ops. ``org_scope`` adds ``?scope=org`` (required before an org CAS/propose)."""
         files = [(h, (kind, data, "application/octet-stream")) for h, (kind, data) in objects.items()]
         return _body(self._request(
-            "POST", "objects", "put_objects", ok=(200, 201), files=files, params={"scope": "org"} if org_scope else None,
+            "POST", "objects", "put_objects", ok=(200, 201), files=files,
+            params={"scope": "org"} if org_scope else None,
             errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"}))
 
     def cas_ref(self, name: str, from_hash: Optional[str], to_hash: str) -> Dict[str, Any]:

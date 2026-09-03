@@ -164,8 +164,7 @@ def _clear_install_failed():
 def _disk_marker_blocks_install() -> bool:
     """Apply a still-valid disk marker to module state; True if install must be skipped.
     Keeps the marker's real reason so in-process retry can detect cosign_missing."""
-    disk_reason = _read_failure_reason()
-    if disk_reason is None or not _is_install_failed_on_disk():
+    if (disk_reason := _read_failure_reason()) is None or not _is_install_failed_on_disk():
         return False
     _set_failed(disk_reason)
     return True
@@ -220,11 +219,11 @@ def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool |
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("cosign execution failed: %s", exc)
         return None
-    if result.returncode == 0:
-        logger.info("cosign provenance verification passed")
-        return True
-    logger.warning("cosign verification failed (exit %d): %s", result.returncode, result.stderr.strip())
-    return False
+    if result.returncode:
+        logger.warning("cosign verification failed (exit %d): %s", result.returncode, result.stderr.strip())
+        return False
+    logger.info("cosign provenance verification passed")
+    return True
 
 
 def _verify_release_provenance(base_url: str, tmpdir: str, checksums_path: str, log) -> tuple[bool, str]:
@@ -234,8 +233,7 @@ def _verify_release_provenance(base_url: str, tmpdir: str, checksums_path: str, 
         logger.info("cosign not on PATH — installing tirith with SHA-256 verification only "
                     "(install cosign for full supply chain verification)")
         return False, ""
-    sig_path = os.path.join(tmpdir, "checksums.txt.sig")
-    cert_path = os.path.join(tmpdir, "checksums.txt.pem")
+    sig_path, cert_path = os.path.join(tmpdir, "checksums.txt.sig"), os.path.join(tmpdir, "checksums.txt.pem")
     try:
         _download_file(f"{base_url}/checksums.txt.sig", sig_path)
         _download_file(f"{base_url}/checksums.txt.pem", cert_path)
@@ -303,8 +301,7 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
         log("tirith install failed: cannot create temp dir: %s", exc)
         return None, "no_space"
     try:
-        archive_path = os.path.join(tmpdir, archive_name)
-        checksums_path = os.path.join(tmpdir, "checksums.txt")
+        archive_path, checksums_path = os.path.join(tmpdir, archive_name), os.path.join(tmpdir, "checksums.txt")
         logger.info("tirith not found — downloading latest release for %s...", target)
         try:
             _download_file(f"{base_url}/{archive_name}", archive_path)
