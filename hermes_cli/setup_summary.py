@@ -1,8 +1,5 @@
-"""Setup-completion summary (tool availability + "Setup Complete!" banner).
-
-Names originating in setup.py are imported lazily inside function bodies so test patches on
-``hermes_cli.setup.<name>`` take effect.
-"""
+"""Setup-completion summary (tool availability + "Setup Complete!" banner). setup.py names are
+resolved through the module object so test patches on ``hermes_cli.setup.<name>`` take effect."""
 
 import logging
 
@@ -13,17 +10,14 @@ logger = logging.getLogger("hermes_cli.setup")
 _TTS_SUMMARY_ROWS = {
     "elevenlabs": ("ElevenLabs", ("ELEVENLABS_API_KEY",)),
     "openai": ("OpenAI", ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY")),
-    "minimax": ("MiniMax", ("MINIMAX_API_KEY",)),
-    "mistral": ("Mistral Voxtral", ("MISTRAL_API_KEY",)),
+    "minimax": ("MiniMax", ("MINIMAX_API_KEY",)), "mistral": ("Mistral Voxtral", ("MISTRAL_API_KEY",)),
     "gemini": ("Google Gemini", ("GEMINI_API_KEY", "GOOGLE_API_KEY")),
     "neutts": ("NeuTTS", "neutts", "run 'hermes setup tts'"),
     "kittentts": ("KittenTTS", "kittentts", "run 'hermes setup tts'")}
 _TTS_SUMMARY_DEFAULT = ("Edge TTS", ())
 _STT_SUMMARY_ROWS = {
-    "openai": ("OpenAI", ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY")),
-    "groq": ("Groq Whisper", ("GROQ_API_KEY",)),
-    "elevenlabs": ("ElevenLabs Scribe", ("ELEVENLABS_API_KEY",)),
-    "xai": ("xAI", ()),
+    "openai": ("OpenAI", ("VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY")), "groq": ("Groq Whisper", ("GROQ_API_KEY",)),
+    "elevenlabs": ("ElevenLabs Scribe", ("ELEVENLABS_API_KEY",)), "xai": ("xAI", ()),
     "deepinfra": ("DeepInfra", ("DEEPINFRA_API_KEY",))}
 _STT_SUMMARY_DEFAULT = ("Local Whisper", "faster_whisper", "run 'hermes tools' → Speech-to-Text")
 
@@ -43,14 +37,11 @@ _DONE_BANNER = (
     "└─────────────────────────────────────────────────────────┘")
 # (command, description) rows; the description carries its own alignment padding.
 _EDIT_WIZARD_ROWS = (
-    ("hermes setup", "          Re-run the full wizard"),
-    ("hermes setup model", "    Change model/provider"),
-    ("hermes setup terminal", " Change terminal backend"),
-    ("hermes setup gateway", "  Configure messaging"),
+    ("hermes setup", "          Re-run the full wizard"), ("hermes setup model", "    Change model/provider"),
+    ("hermes setup terminal", " Change terminal backend"), ("hermes setup gateway", "  Configure messaging"),
     ("hermes setup tools", "    Configure tool providers"))
 _EDIT_CONFIG_ROWS = (
-    ("hermes config", "         View current settings"),
-    ("hermes config edit", "    Open config in your editor"),
+    ("hermes config", "         View current settings"), ("hermes config edit", "    Open config in your editor"),
     ("hermes config set <key> <value>", ""))
 _READY_ROWS = (
     ("hermes", "              Start chatting"), ("hermes gateway", "      Start messaging gateway"),
@@ -246,11 +237,9 @@ def _print_setup_summary(config: dict, hermes_home):
     available_count = sum(1 for _, avail, _ in tool_status if avail)
     _setup._info(f"{available_count}/{len(tool_status)} tool categories available:", None)
     for name, available, missing_var in tool_status:
-        if available:
-            print(f"   {_setup.color('✓', _setup.Colors.GREEN)} {name}")
-        else:
-            print(f"   {_setup.color('✗', _setup.Colors.RED)} {name} "
-                  f"{_setup.color(f'(missing {missing_var})', _setup.Colors.DIM)}")
+        print(f"   {_setup.color('✓', _setup.Colors.GREEN)} {name}" if available else
+              f"   {_setup.color('✗', _setup.Colors.RED)} {name} "
+              f"{_setup.color(f'(missing {missing_var})', _setup.Colors.DIM)}")
     print()
 
     if available_count < len(tool_status):

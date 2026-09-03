@@ -1,7 +1,6 @@
-"""Credential sections of `hermes status` (API keys, OAuth providers, Nous Tool Gateway, API-key
-providers), run through ``status._SECTIONS`` with the shared ``_StatusContext``. Origin helpers
-(``_row``, ``_first_env_value``, ...) are imported lazily from ``hermes_cli.status`` so tests that
-monkeypatch that module keep working."""
+"""Credential sections of `hermes status`, run through ``status._SECTIONS`` with its shared context.
+Origin helpers (``_row``, ``_first_env_value``, ...) are resolved through the ``hermes_cli.status``
+module object so tests that monkeypatch that module keep working."""
 
 from hermes_cli.auth import AuthError
 from hermes_cli.nous_account import (
@@ -46,26 +45,15 @@ def _oauth_block(name: str, status: dict, hint: str, rows) -> None:
 
 # Values may be a single env var name (str) or a tuple of alternates (first found wins).
 _API_KEYS: dict[str, str | tuple[str, ...]] = {
-    "OpenRouter": "OPENROUTER_API_KEY",
-    "OpenAI": "OPENAI_API_KEY",
-    "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-    "DeepSeek": "DEEPSEEK_API_KEY",
-    "xAI / Grok": "XAI_API_KEY",
-    "NVIDIA NIM": "NVIDIA_API_KEY",
-    "Z.AI / GLM": "GLM_API_KEY",
-    "Kimi": "KIMI_API_KEY",
-    "StepFun Step Plan": "STEPFUN_API_KEY",
-    "MiniMax": "MINIMAX_API_KEY",
-    "MiniMax-CN": "MINIMAX_CN_API_KEY",
-    "DeepInfra": "DEEPINFRA_API_KEY",
-    "Firecrawl": "FIRECRAWL_API_KEY",
-    "Tavily": "TAVILY_API_KEY",
-    "Keenable": "KEENABLE_API_KEY",
+    "OpenRouter": "OPENROUTER_API_KEY", "OpenAI": "OPENAI_API_KEY",
+    "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "DeepSeek": "DEEPSEEK_API_KEY",
+    "xAI / Grok": "XAI_API_KEY", "NVIDIA NIM": "NVIDIA_API_KEY", "Z.AI / GLM": "GLM_API_KEY",
+    "Kimi": "KIMI_API_KEY", "StepFun Step Plan": "STEPFUN_API_KEY", "MiniMax": "MINIMAX_API_KEY",
+    "MiniMax-CN": "MINIMAX_CN_API_KEY", "DeepInfra": "DEEPINFRA_API_KEY", "Firecrawl": "FIRECRAWL_API_KEY",
+    "Tavily": "TAVILY_API_KEY", "Keenable": "KEENABLE_API_KEY",
     "Browser Use": "BROWSER_USE_API_KEY",  # Optional — local browser works without this
     "Browserbase": "BROWSERBASE_API_KEY",  # Optional — direct credentials only
-    "FAL": "FAL_KEY",
-    "ElevenLabs": "ELEVENLABS_API_KEY",
-    "GitHub": "GITHUB_TOKEN"}
+    "FAL": "FAL_KEY", "ElevenLabs": "ELEVENLABS_API_KEY", "GitHub": "GITHUB_TOKEN"}
 
 # OAuth detail rows: (label, status key, formatter, gate) — see _oauth_block.
 _FILE_REFRESH_ROWS = (
@@ -86,12 +74,9 @@ _OAUTH_BLOCKS = (
     ("xAI OAuth", "get_xai_oauth_auth_status", "hermes auth add xai-oauth", _FILE_REFRESH_ROWS))
 
 _APIKEY_PROVIDERS = {
-    "Z.AI / GLM":       ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
-    "Kimi / Moonshot":  ("KIMI_API_KEY",),
-    "StepFun Step Plan": ("STEPFUN_API_KEY",),
-    "MiniMax":          ("MINIMAX_API_KEY",),
-    "MiniMax (China)":  ("MINIMAX_CN_API_KEY",),
-    "DeepInfra":        ("DEEPINFRA_API_KEY",)}
+    "Z.AI / GLM": ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "Kimi / Moonshot": ("KIMI_API_KEY",),
+    "StepFun Step Plan": ("STEPFUN_API_KEY",), "MiniMax": ("MINIMAX_API_KEY",),
+    "MiniMax (China)": ("MINIMAX_CN_API_KEY",), "DeepInfra": ("DEEPINFRA_API_KEY",)}
 
 
 # Nous Tool Gateway per-feature state: first matching (predicate(feature, nous_auth), text(feature)).

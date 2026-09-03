@@ -1,12 +1,9 @@
-"""Interactive setup wizard for the WhatsApp Cloud API adapter.
+"""Interactive setup wizard for the WhatsApp Cloud API adapter: the 6 Meta credentials + recipient
+allowlist, an auto-generated verify token, and exact follow-up instructions for what can't happen
+inside the wizard process (cloudflared, gateway, Meta's webhook dashboard, recipient list).
 
-Walks the user through the 6 credentials Meta requires + recipient allowlist, auto-generates the
-verify token, and prints exact follow-up instructions for the parts that can't happen inside the
-wizard process (cloudflared, gateway, Meta's webhook dashboard, recipient list).
-
-The wizard intentionally does NOT smoke-test the webhook: the gateway and the tunnel both run in
-separate processes the user starts AFTER this wizard exits, so any in-wizard probe would fail.
-"""
+Intentionally does NOT smoke-test the webhook: the gateway and the tunnel both run in separate
+processes the user starts AFTER this wizard exits, so any in-wizard probe would fail."""
 
 from __future__ import annotations
 from hermes_cli.cli_output import line_input
@@ -99,7 +96,6 @@ def _prompt(message: str, default: Optional[str] = None, secret: bool = False) -
         suffix = f" [{default}]" if default else ""
         if secret and sys.stdin.isatty():
             import getpass
-
             return getpass.getpass(f"{message}{suffix} (input hidden): ").strip()
         return line_input(f"{message}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -127,10 +123,9 @@ def _prompt_validated(
         print(f"    ✗ {reason}")
         if attempts >= 3:
             try:
-                cont = input("    Try again, or press Enter to skip: ").strip()
+                if not input("    Try again, or press Enter to skip: ").strip():
+                    return None
             except (EOFError, KeyboardInterrupt):
-                return None
-            if not cont:
                 return None
             attempts = 0
 

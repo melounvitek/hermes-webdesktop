@@ -83,9 +83,9 @@ def _effective_provider_label() -> str:
         # the legacy OPENAI_BASE_URL env var; either way labeling it "OpenRouter" is misleading.
         try:
             model_cfg = load_config().get("model")
-            config_base_url = (model_cfg.get("base_url") or "").strip() if isinstance(model_cfg, dict) else ""
         except Exception:
-            config_base_url = ""
+            model_cfg = None
+        config_base_url = (model_cfg.get("base_url") or "").strip() if isinstance(model_cfg, dict) else ""
         if config_base_url or get_env_value("OPENAI_BASE_URL"):
             effective = "custom"
     return provider_label(effective)
@@ -115,19 +115,13 @@ _TERMINAL_ENV_ROWS = {
 
 _PLATFORMS = {  # name -> (token env var, home-channel env var or None)
     "Telegram": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_HOME_CHANNEL"),
-    "Discord": ("DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL"),
-    "WhatsApp": ("WHATSAPP_ENABLED", None),
+    "Discord": ("DISCORD_BOT_TOKEN", "DISCORD_HOME_CHANNEL"), "WhatsApp": ("WHATSAPP_ENABLED", None),
     "Signal": ("SIGNAL_HTTP_URL", "SIGNAL_HOME_CHANNEL"),
-    "Slack": ("SLACK_BOT_TOKEN", None),
-    "Email": ("EMAIL_ADDRESS", "EMAIL_HOME_ADDRESS"),
-    "SMS": ("TWILIO_ACCOUNT_SID", "SMS_HOME_CHANNEL"),
-    "DingTalk": ("DINGTALK_CLIENT_ID", None),
-    "Feishu": ("FEISHU_APP_ID", "FEISHU_HOME_CHANNEL"),
-    "WeCom": ("WECOM_BOT_ID", "WECOM_HOME_CHANNEL"),
-    "WeCom Callback": ("WECOM_CALLBACK_CORP_ID", None),
-    "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
-    "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
-    "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
+    "Slack": ("SLACK_BOT_TOKEN", None), "Email": ("EMAIL_ADDRESS", "EMAIL_HOME_ADDRESS"),
+    "SMS": ("TWILIO_ACCOUNT_SID", "SMS_HOME_CHANNEL"), "DingTalk": ("DINGTALK_CLIENT_ID", None),
+    "Feishu": ("FEISHU_APP_ID", "FEISHU_HOME_CHANNEL"), "WeCom": ("WECOM_BOT_ID", "WECOM_HOME_CHANNEL"),
+    "WeCom Callback": ("WECOM_CALLBACK_CORP_ID", None), "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
+    "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"), "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
     "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL")}
 
 # Gateway manager label when the runtime snapshot is unavailable, keyed by platform.
@@ -169,7 +163,6 @@ def _render_terminal(ctx):
     terminal_cfg = ctx.config.get("terminal", {}) if isinstance(ctx.config.get("terminal"), dict) else {}
     terminal_env = os.getenv("TERMINAL_ENV", "") or terminal_cfg.get("backend", "local")
     _kv("Backend:", terminal_env)
-
     if terminal_env in _TERMINAL_ENV_ROWS:
         for label, var, default, empty_is_unset in _TERMINAL_ENV_ROWS[terminal_env]:
             value = (os.getenv(var, "") or default) if empty_is_unset else os.getenv(var, default)
@@ -200,7 +193,6 @@ def _render_terminal(ctx):
                     print(f"  {label}: {check_mark(bool(ok))} {text}")
         except Exception:
             pass
-
     _kv_flag("Sudo:", os.getenv("SUDO_PASSWORD", ""), "enabled", "disabled")
 
 
@@ -229,7 +221,6 @@ def _render_gateway(ctx):
     _section("Gateway Service")
     try:
         from hermes_cli.gateway import get_gateway_runtime_snapshot, _format_gateway_pids
-
         snapshot = get_gateway_runtime_snapshot()
         _kv_flag("Status:", snapshot.running, "running", "stopped")
         _kv("Manager:", snapshot.manager)

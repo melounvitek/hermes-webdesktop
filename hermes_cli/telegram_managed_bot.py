@@ -135,9 +135,8 @@ def poll_pairing_result_once(
         return None
     bot_username = data.get("bot_username")
     return TelegramBotSetupResult(
-        token=token,
-        bot_username=bot_username if isinstance(bot_username, str) and bot_username else None,
-        owner_user_id=_parse_owner_user_id(data.get("owner_user_id")))
+        token, bot_username if isinstance(bot_username, str) and bot_username else None,
+        _parse_owner_user_id(data.get("owner_user_id")))
 
 
 def _try_poll(api_url: str | None, pairing: TelegramPairing) -> TelegramBotSetupResult | None:
@@ -169,10 +168,9 @@ def auto_setup_telegram_bot_result(
     profile_name: Optional[str] = None, poll_timeout: float = DEFAULT_POLL_TIMEOUT,
 ) -> Optional[TelegramBotSetupResult]:
     """Run the full automatic Telegram bot creation flow."""
-    _ = manager_bot, profile_name
+    _ = manager_bot, profile_name  # accepted for callers; the service decides both
     resolved_api_url = _api_url(api_url)
-    print()
-    print(f"  Contacting Hermes Telegram onboarding service: {resolved_api_url}")
+    print(f"\n  Contacting Hermes Telegram onboarding service: {resolved_api_url}")
     sys.stdout.flush()
     pairing = create_pairing(resolved_api_url)
     if not pairing:
@@ -180,8 +178,7 @@ def auto_setup_telegram_bot_result(
               "    Try the manual setup instead, or check your network.")
         return None
 
-    print("  ✓ Pairing created")
-    print("  Rendering QR code...")
+    print("  ✓ Pairing created\n  Rendering QR code...")
     sys.stdout.flush()
     print("\n  Scan this QR code with your phone, or open the link below:\n")
     print_qr_code(pairing.qr_payload, include_link=False)

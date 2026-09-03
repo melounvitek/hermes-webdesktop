@@ -1,8 +1,6 @@
 """Text-to-speech provider setup (provider picker, API-key prompts, local engine installs, xAI OAuth).
-
-Names from setup.py are imported lazily inside bodies so test patches on
-``hermes_cli.setup.<name>`` take effect; setup.py re-exports the public entry points.
-"""
+setup.py names are resolved through the module object so test patches on ``hermes_cli.setup.<name>``
+take effect; setup.py re-exports the public entry points."""
 
 import logging
 import shutil
@@ -81,11 +79,9 @@ def _xai_oauth_logged_in_for_setup() -> bool:
 
 
 def _run_xai_oauth_login_from_setup() -> bool:
-    """Run the xAI Grok OAuth device-code login from inside the setup wizard.
-
-    Saves OAuth tokens only — does **not** switch the active provider or rewrite ``model.provider``
-    (callers only need credentials for side tools). False on any failure (caller falls back).
-    """
+    """Run the xAI Grok OAuth device-code login from inside the setup wizard. Saves OAuth tokens
+    only — does **not** switch the active provider or rewrite ``model.provider`` (callers only need
+    credentials for side tools). False on any failure (caller falls back)."""
     try:
         from hermes_cli.auth import (
             _is_remote_session, _save_xai_oauth_tokens, _xai_oauth_device_code_login,
@@ -93,11 +89,9 @@ def _run_xai_oauth_login_from_setup() -> bool:
     except Exception as exc:
         _setup.print_warning(f"xAI Grok OAuth helpers unavailable: {exc}")
         return False
-
-    open_browser = not _is_remote_session()
     _setup._info(None, "Signing in to xAI Grok OAuth (SuperGrok / Premium+)...")
     try:
-        creds = _xai_oauth_device_code_login(open_browser=open_browser)
+        creds = _xai_oauth_device_code_login(open_browser=not _is_remote_session())
         _save_xai_oauth_tokens(
             creds["tokens"], discovery=creds.get("discovery"), redirect_uri=creds.get("redirect_uri", ""),
             last_refresh=creds.get("last_refresh"), auth_mode="oauth_device_code", set_active=False)
@@ -213,15 +207,13 @@ def _tts_xai_step(config: dict) -> str:
         choice_idx = _setup.prompt_choice(
             "How do you want xAI TTS to authenticate?",
             choices=["Sign in with xAI Grok OAuth (SuperGrok / Premium+) — browser login",
-                     "Paste an xAI API key (console.x.ai)", "Skip → fallback to Edge TTS"],
-            default=0)
+                     "Paste an xAI API key (console.x.ai)", "Skip → fallback to Edge TTS"], default=0)
         # Each path returns the fallback warning (result is then "edge") or None on success.
         fallback = (_xai_oauth_path, _xai_api_key_path, lambda: "xAI TTS skipped. Falling back to Edge TTS.")[
             choice_idx if choice_idx in (0, 1) else 2]()
         if fallback:
             _setup.print_warning(fallback)
             return "edge"
-
     print()
     voice_id = (_setup.prompt("xAI voice_id (Enter for 'eve', or paste a custom voice ID)") or "").strip()
     if voice_id:
@@ -234,11 +226,9 @@ def _setup_tts_provider(config: dict):
     """Interactive TTS provider selection with install flow for local engines."""
     current_provider = config.get("tts", {}).get("provider", "edge")
     current_label = _TTS_PROVIDER_LABELS.get(current_provider, current_provider)
-
     print()
     _setup.print_header("Text-to-Speech Provider (optional)")
     _setup._info(f"Current: {current_label}", None)
-
     options = list(_TTS_PROVIDER_CHOICES)
     if _setup.managed_nous_tools_enabled() and _setup.get_nous_subscription_features(config).nous_auth_present:
         options.insert(0, ("nous-openai",
@@ -248,7 +238,6 @@ def _setup_tts_provider(config: dict):
     idx = _setup.prompt_choice("Select TTS provider:", choices, keep_current_idx)
     if idx == keep_current_idx:
         return
-
     selected = options[idx][0]
     if selected == "nous-openai":
         selected = "openai"
@@ -262,7 +251,6 @@ def _setup_tts_provider(config: dict):
         selected = _tts_api_key_step(selected)
     elif selected == "xai":
         selected = _tts_xai_step(config)
-
     config.setdefault("tts", {})["provider"] = selected
     _setup.save_config(config)
     _setup.print_success(f"TTS provider set to: {_TTS_PROVIDER_LABELS.get(selected, selected)}")
