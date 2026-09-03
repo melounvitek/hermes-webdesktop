@@ -70,14 +70,11 @@ _API_KEYS: dict[str, str | tuple[str, ...]] = {
     "GitHub": "GITHUB_TOKEN",
 }
 
-
 # OAuth detail rows: (label, status key, formatter, gate) — see _oauth_block.
 _FILE_REFRESH_ROWS = (
     ("Auth file:", "auth_store", None, None),
-    ("Refreshed:", "last_refresh", _format_iso_timestamp, None),
-    ("Error:", "error", None, False),
+    ("Refreshed:", "last_refresh", _format_iso_timestamp, None), ("Error:", "error", None, False),
 )
-
 
 _OAUTH_BLOCKS = (
     # (row name, auth getter, login hint, detail rows)
@@ -92,7 +89,6 @@ _OAUTH_BLOCKS = (
         ("Error:", "error", None, False))),
     ("xAI OAuth", "get_xai_oauth_auth_status", "hermes auth add xai-oauth", _FILE_REFRESH_ROWS),
 )
-
 
 _APIKEY_PROVIDERS = {
     "Z.AI / GLM":       ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),

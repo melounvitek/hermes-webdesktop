@@ -12,7 +12,6 @@ import sys
 
 __all__ = ["configure_windows_stdio", "is_windows"]
 
-
 _CONFIGURED = False
 
 

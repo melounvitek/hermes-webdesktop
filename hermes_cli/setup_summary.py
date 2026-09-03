@@ -58,8 +58,7 @@ _EDIT_CONFIG_ROWS = (
     ("hermes config set <key> <value>", ""),
 )
 _READY_ROWS = (
-    ("hermes", "              Start chatting"),
-    ("hermes gateway", "      Start messaging gateway"),
+    ("hermes", "              Start chatting"), ("hermes gateway", "      Start messaging gateway"),
     ("hermes doctor", "       Check for issues"),
 )
 
