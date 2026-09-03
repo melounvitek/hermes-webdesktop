@@ -316,8 +316,8 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
             return None, "checksum_failed"
         with tarfile.open(archive_path, "r:gz") as tar:
             src, reason = _extract_tirith_binary(tar, tmpdir, log)
-            if src is None:
-                return None, reason
+        if src is None:
+            return None, reason
         dest = os.path.join(_hermes_bin_dir(), "tirith")
         try:
             shutil.move(src, dest)

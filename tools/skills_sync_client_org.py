@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import shutil
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 
@@ -225,10 +226,9 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     # Provenance for the skill_view header: the HEAD author is token-verified by the plane at
     # push time, so it is trustworthy to display.
     author = head_commit.get("author") or {}
-    _write_org_provenance(org_id, {
-        "org_id": org_id, "head": head, "author_user_id": author.get("owner", ""),
-        "author_device": author.get("device", ""), "ts": head_commit.get("ts", ""), "skills": updated,
-    })
+    _write_org_provenance(org_id, {"org_id": org_id, "head": head, "author_user_id": author.get("owner", ""),
+                                   "author_device": author.get("device", ""), "ts": head_commit.get("ts", ""),
+                                   "skills": updated})
     _write_org_baseline(org_id, baseline)
     if conflicted:
         logger.warning("skills_sync_client: %d org skill(s) have local edits AND upstream "
@@ -260,10 +260,9 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
             client, root_tree_of_commit(client, base_head, org_scope=True), org_scope=True)
         skill_map[str(rel)] = skill_tree
         root_hash = assemble_root_from_skill_trees(skill_map, objects)
-        commit_hash = build_commit(
-            root_hash, [base_head] if base_head else [], owner=identity["owner"],
-            device=ssc.stable_device_id(), message=message or f"propose {skill_name}", objects=objects,
-        )
+        commit_hash = build_commit(root_hash, [base_head] if base_head else [], owner=identity["owner"],
+                                   device=ssc.stable_device_id(), message=message or f"propose {skill_name}",
+                                   objects=objects)
         client.put_objects(objects.objects, org_scope=True)
         try:
             result = client.cas_ref(org_head_ref(org_id), base_head, commit_hash)
@@ -290,11 +289,9 @@ def maybe_pull_org_skills() -> Optional[Dict[str, Any]]:
     try:
         identity = resolve_org_identity()
     except ssc.SyncInertError:
-        try:
+        with suppress(Exception):
             if not (ssc.resolve_identity().get("claims") or {}).get("org_role"):
                 _clear_active_org_marker()
-        except Exception:
-            pass
         return None
     except Exception as e:
         logger.debug("skills_sync_client: maybe_pull_org_skills inert/failed: %s", e)
