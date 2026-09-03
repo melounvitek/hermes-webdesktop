@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 from hermes_cli import web_server
+from hermes_cli import web_server_sessions
 from hermes_cli.web_routers import analytics as web_analytics
 from hermes_cli.web_routers import sessions as web_sessions
 
@@ -32,11 +33,12 @@ def _call_name(call: ast.Call) -> str | None:
 
 def test_sessiondb_handlers_open_connections_inside_executor_helpers():
     # The session and analytics route handlers were extracted to
-    # web_routers/{sessions,analytics}.py; the executor helpers still live in
-    # web_server.py — scan all three modules' top-level bodies.
+    # web_routers/{sessions,analytics}.py; the executor helpers live in
+    # web_server_sessions.py (and any left in web_server.py) — scan all
+    # four modules' top-level bodies.
     handlers: dict[str, ast.AsyncFunctionDef] = {}
     top_level_helpers: dict[str, ast.FunctionDef] = {}
-    for mod in (web_server, web_sessions, web_analytics):
+    for mod in (web_server, web_server_sessions, web_sessions, web_analytics):
         tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
         for node in tree.body:
             if isinstance(node, ast.AsyncFunctionDef) and node.name in TARGET_HANDLERS:
@@ -76,7 +78,7 @@ def test_sessiondb_handlers_open_connections_inside_executor_helpers():
 
 
 def test_sessiondb_opens_declare_access_mode():
-    for mod in (web_server, web_sessions):
+    for mod in (web_server_sessions, web_sessions):
         tree = ast.parse(Path(mod.__file__).read_text(encoding="utf-8"))
         calls = [
             node

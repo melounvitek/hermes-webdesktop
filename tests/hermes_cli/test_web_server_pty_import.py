@@ -48,10 +48,13 @@ def test_web_server_uses_posix_pty_bridge_on_posix():
 
 def test_pty_bridge_import_block_is_platform_branched():
     """Source-level guard: a future refactor must not collapse the branch
-    back to a single POSIX import.  Reads web_server.py directly so this
-    fails the same way on every OS — the runtime symbol checks above can
-    pass even when the branch shape is wrong on the current platform."""
-    src = pytest.importorskip("inspect").getsource(web_server)
+    back to a single POSIX import.  Reads the module that owns the import
+    block (``web_server_chat``) directly so this fails the same way on every
+    OS — the runtime symbol checks above can pass even when the branch shape
+    is wrong on the current platform."""
+    from hermes_cli import web_server_chat
+
+    src = pytest.importorskip("inspect").getsource(web_server_chat)
     # The shape we expect (from PR #39913):
     #
     #   if sys.platform.startswith("win"):

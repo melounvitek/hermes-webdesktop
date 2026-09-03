@@ -366,10 +366,10 @@ class TestWebServerPtyBridgeGuard:
 
     def test_import_guard_present_in_source(self):
         root = Path(__file__).resolve().parents[2]
-        source = (root / "hermes_cli" / "web_server.py").read_text(encoding="utf-8")
+        source = (root / "hermes_cli" / "web_server_chat.py").read_text(encoding="utf-8")
         assert "_PTY_BRIDGE_AVAILABLE" in source
         assert "except ImportError" in source, (
-            "web_server.py must wrap the pty_bridge import in try/except ImportError"
+            "web_server_chat.py must wrap the pty_bridge import in try/except ImportError"
         )
 
     def test_pty_handler_checks_availability_flag(self):
