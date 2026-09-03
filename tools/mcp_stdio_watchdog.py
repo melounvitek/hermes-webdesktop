@@ -45,8 +45,7 @@ def _terminate_process_group(proc: subprocess.Popen) -> None:
         pgid = os.getpgid(proc.pid)
     except (ProcessLookupError, OSError):
         return
-    sigkill = getattr(signal, "SIGKILL", signal.SIGTERM)
-    for sig in (signal.SIGTERM, sigkill):
+    for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
         try:
             killpg(pgid, sig)
         except (ProcessLookupError, PermissionError, OSError):
@@ -71,30 +70,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ppid", type=int, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
-
-    real_argv = list(args.command)
-    if real_argv and real_argv[0] == "--":
-        real_argv = real_argv[1:]
+    real_argv = args.command[1:] if args.command[:1] == ["--"] else list(args.command)
     if not real_argv:
         print("mcp_stdio_watchdog: no command given after '--'", file=sys.stderr)
         return 2
-
     # New process group: killpg() reaches the whole tree the real command may spawn without
     # touching our own group or the original parent's.
     proc = subprocess.Popen(real_argv, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, start_new_session=True)
-
     # The server lives in its OWN group, so the parent's shutdown killpg of *our* group no
     # longer reaches it: forward SIGTERM/SIGINT to the child's group so graceful teardown
     # still kills a wedged server that ignores stdin EOF.
     def _forward_shutdown(signum, frame):  # noqa: ARG001
         _terminate_process_group(proc)
         sys.exit(128 + signum)
-
     signal.signal(signal.SIGTERM, _forward_shutdown)
     signal.signal(signal.SIGINT, _forward_shutdown)
-
     threading.Thread(target=_watchdog_loop, args=(proc, args.ppid), daemon=True).start()
-
     try:
         return proc.wait()
     except KeyboardInterrupt:

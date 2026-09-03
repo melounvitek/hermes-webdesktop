@@ -66,7 +66,8 @@ _SAFE_ENV_KEYS_CASE_INSENSITIVE = frozenset({
     "LOCALAPPDATA", "NUMBER_OF_PROCESSORS", "OS", "PATHEXT", "PROCESSOR_ARCHITECTURE",
     "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "PUBLIC",
     "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "USERDOMAIN", "USERNAME",
-    "USERPROFILE", "WINDIR"})
+    "USERPROFILE", "WINDIR",
+})
 
 # ${VAR_NAME} interpolation; any non-} chars allowed so MY-VAR / my.var work.
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
@@ -77,7 +78,6 @@ def _workspace_folder() -> str:
     (terminal cwd / task override / $TERMINAL_CWD), else cwd."""
     try:
         from tools.file_tools import _authoritative_workspace_root
-
         root = _authoritative_workspace_root()
         if root:
             return root
@@ -97,7 +97,8 @@ _CONTEXT_VAR_RESOLVERS = {
     "workspaceFolder": lambda: _core._workspace_folder(),
     "workspaceFolderBasename": _workspace_basename,
     "pathSeparator": lambda: os.sep,
-    "/": lambda: os.sep}
+    "/": lambda: os.sep,
+}
 
 
 def _build_safe_env(user_env: Optional[dict]) -> dict:
@@ -142,9 +143,8 @@ def _node_fallback(command: str) -> str:
     candidates = [
         os.path.join(hermes_home, "node", "bin", command),
         os.path.join(home, ".local", "bin", command),
-        # Canonical Node location for from-source Linux builds, the Hermes Docker image and
-        # Intel Homebrew. Needed when a hand-authored env.PATH omits it: npx's shebang re-execs
-        # /usr/bin/env node, so a symlink workaround fails one layer deeper.
+        # Canonical Node location (from-source Linux, Hermes Docker image, Intel Homebrew). Needed
+        # when a hand-authored env.PATH omits it: npx's shebang re-execs /usr/bin/env node.
         os.path.join(os.sep, "usr", "local", "bin", command)]
     for candidate in candidates:
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -189,18 +189,14 @@ def _wrap_command_with_watchdog(command: str, args: list) -> tuple[str, list]:
 
 
 def _interpolate_env_vars(value):
-    """Recursively resolve ``${VAR}`` / Cursor ``${env:VAR}`` placeholders plus the Cursor
-    context vars. Env refs resolve from the active profile's secret scope when multiplexing
-    (so ``${API_KEY}`` picks up the routed profile's value, not another profile's in
-    ``os.environ``). Unset vars keep the literal placeholder."""
+    """Recursively resolve ``${VAR}`` / Cursor ``${env:VAR}`` placeholders and context vars. Env
+    refs resolve from the active profile's secret scope when multiplexing (the routed profile's
+    value, not another profile's in ``os.environ``). Unset vars keep the literal placeholder."""
     from agent.secret_scope import get_secret as _get_secret
-
     if isinstance(value, str):
         def _replace(m):
             resolver = _CONTEXT_VAR_RESOLVERS.get(m.group(1).strip())
-            if resolver is not None:
-                return resolver()
-            return _get_secret(_env_ref_name(m.group(1)), m.group(0)) or m.group(0)
+            return resolver() if resolver is not None else (_get_secret(_env_ref_name(m.group(1)), m.group(0)) or m.group(0))
         return _ENV_VAR_PATTERN.sub(_replace, value)
     if isinstance(value, dict):
         return {k: _interpolate_env_vars(v) for k, v in value.items()}
@@ -215,16 +211,14 @@ _whitespace_warned: Set[Tuple[str, str]] = set()
 
 
 def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
-    """Warn once per (server, key path) about string values with leading/trailing whitespace —
-    a pasted newline causes opaque auth/connect failures and is invisible in config.yaml.
-    Advisory only: values are never mutated (whitespace could be intentional) and never
-    logged (often secrets). Returns the flagged key paths."""
+    """Warn once per (server, key path) about string values with leading/trailing whitespace (a
+    pasted newline causes opaque auth failures, invisible in config.yaml). Advisory only: values
+    are never mutated (could be intentional) nor logged (often secrets). Returns flagged paths."""
     flagged: List[str] = []
 
     def _walk(value: Any, path: str) -> None:
-        if isinstance(value, str):
-            if value != value.strip():
-                flagged.append(path)
+        if isinstance(value, str) and value != value.strip():
+            flagged.append(path)
         elif isinstance(value, dict):
             for k, v in value.items():
                 _walk(v, f"{path}.{k}" if path else str(k))
@@ -234,10 +228,9 @@ def _warn_hidden_whitespace(server_name: str, config: dict) -> List[str]:
 
     _walk(config, "")
     for key_path in flagged:
-        dedupe_key = (server_name, key_path)
-        if dedupe_key in _whitespace_warned:
+        if (server_name, key_path) in _whitespace_warned:
             continue
-        _whitespace_warned.add(dedupe_key)
+        _whitespace_warned.add((server_name, key_path))
         logger.warning(
             "MCP server '%s': config value '%s' has hidden leading or "
             "trailing whitespace — this often causes authentication or "
@@ -269,7 +262,6 @@ def _portable_mcp_servers(safe_servers: Dict[str, dict]) -> None:
     on a name clash. Never raises."""
     try:
         from hermes_cli.plugins import discover_plugins, get_plugin_manager
-
         discover_plugins()
         portable = get_plugin_manager().get_portable_mcp_servers()
         for name, cfg in _core._filter_suspicious_mcp_servers(portable).items():
@@ -283,25 +275,20 @@ def _portable_mcp_servers(safe_servers: Dict[str, dict]) -> None:
 
 def _load_mcp_config() -> Dict[str, dict]:
     """Read ``mcp_servers`` from config.yaml as ``{name: config}`` (empty on error or in safe
-    mode). Entries carry ``command``/``args``/``env`` (stdio) or ``url``/``headers`` (HTTP)
-    plus optional timeout/auth keys; ``${VAR}`` placeholders are interpolated after ``.env``
-    is loaded."""
+    mode); ``${VAR}`` placeholders are interpolated after ``.env`` is loaded."""
     try:
         from hermes_cli.config import load_config
         from utils import env_var_enabled as _env_enabled
-
         if _env_enabled("HERMES_SAFE_MODE"):
             return {}
         servers = load_config().get("mcp_servers")
-        if not isinstance(servers, dict):
-            servers = {}
         try:  # ensure .env vars are available for interpolation
             from hermes_cli.env_loader import load_hermes_dotenv
             load_hermes_dotenv()
         except Exception:
             pass
         safe_servers: Dict[str, dict] = {}
-        for name, cfg in _core._filter_suspicious_mcp_servers(servers).items():
+        for name, cfg in _core._filter_suspicious_mcp_servers(servers if isinstance(servers, dict) else {}).items():
             interpolated = _interpolate_env_vars(cfg)
             if isinstance(interpolated, dict):
                 _warn_hidden_whitespace(name, interpolated)

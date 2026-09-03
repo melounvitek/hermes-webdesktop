@@ -13,25 +13,19 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from tools.mcp_oauth import HermesTokenStorage
-
 logger = logging.getLogger(__name__)
 
 
 class HermesProviderMixin:
-    """Token-endpoint fixes layered over the SDK's ``OAuthClientProvider``.
+    """Token-endpoint fixes layered over the SDK's ``OAuthClientProvider`` (must precede it in
+    the MRO; subclasses set ``_hermes_logger`` to keep their own logger name).
 
     - Supabase-style dynamic registration returns a ``client_secret`` but omits
-      ``token_endpoint_auth_method``; the SDK then treats the client as public, omits the
-      secret, and the token endpoint rejects the exchange (looping the browser authorization
-      page). Coerce the in-memory client info to ``client_secret_post`` before token requests.
-    - ``token_user_agent`` (``oauth.user_agent``) is stamped onto token-endpoint requests
-      only — some authorization servers and WAFs reject httpx's default.
-    - Any 2xx token/refresh response is accepted, and token bodies never leak into
-      exception text or log output.
-
-    Must precede the SDK class in the MRO. Subclasses set ``_hermes_logger`` so warnings
-    keep their origin module's logger name.
-    """
+      ``token_endpoint_auth_method``; the SDK then treats the client as public and the token
+      endpoint rejects the exchange (looping the browser page) — coerce ``client_secret_post``.
+    - ``token_user_agent`` (``oauth.user_agent``) is stamped onto token-endpoint requests only
+      (some authorization servers/WAFs reject httpx's default).
+    - Any 2xx token/refresh response is accepted; token bodies never leak into errors/logs."""
 
     _hermes_logger: logging.Logger = logger
 
@@ -54,7 +48,6 @@ class HermesProviderMixin:
             return
         from mcp.shared.auth import OAuthClientInformationFull
         from tools.mcp_oauth import HermesTokenStorage
-
         data = info.model_dump(mode="json", exclude_none=True)
         if HermesTokenStorage._coerce_secret_auth_method(data):
             self.context.client_info = OAuthClientInformationFull.model_validate(data)
@@ -75,12 +68,10 @@ class HermesProviderMixin:
     async def _handle_token_response(self, response):
         """Accept any 2xx token response; never echo the body into errors."""
         from mcp.client.auth.oauth2 import OAuthTokenError
-
         if not (200 <= response.status_code < 300):
             raise OAuthTokenError(f"Token exchange failed ({response.status_code})")
         from httpx import HTTPError
         from mcp.client.auth.utils import handle_token_response_scopes
-
         try:
             token_response = await handle_token_response_scopes(response)
         except (HTTPError, OAuthTokenError):
@@ -96,7 +87,6 @@ class HermesProviderMixin:
         from httpx import HTTPError
         from mcp.shared.auth import OAuthToken
         from pydantic import ValidationError
-
         try:
             token_response = OAuthToken.model_validate_json(await response.aread())
         except (HTTPError, ValidationError):
@@ -112,21 +102,17 @@ def prepare_oauth_config(server_name: str, server_url: str, oauth_config: dict |
     matters: later steps record ``_resolved_port`` / ``_cimd_url`` in the dict, which must
     never leak back into the caller's config."""
     from tools import mcp_oauth as mo
-
     cfg = dict(oauth_config or {})
     mo.apply_oauth_provider_defaults(cfg, server_name=server_name, server_url=server_url)
     return cfg, mo.HermesTokenStorage(server_name)
 
 
 def build_provider_kwargs(cfg: dict, storage: "HermesTokenStorage", *, ssh_proxy_hint: bool) -> dict[str, Any]:
-    """Resolve the callback port and return the shared provider constructor kwargs.
-
-    Runs port → client-metadata → pre-registration (order matters: metadata needs the
-    resolved port, pre-registration needs the metadata). ``ssh_proxy_hint`` lets the redirect
-    handler tailor its remote-session hint to a configured proxy ``redirect_uri``. Helpers are
-    looked up on ``tools.mcp_oauth`` at call time so tests can patch them there."""
+    """Resolve the callback port and return the shared provider constructor kwargs. Order
+    matters: metadata needs the resolved port, pre-registration needs the metadata.
+    ``ssh_proxy_hint`` lets the redirect handler tailor its remote-session hint to a configured
+    proxy ``redirect_uri``. Helpers are looked up on ``tools.mcp_oauth`` so tests can patch them."""
     from tools import mcp_oauth as mo
-
     port = mo._configure_callback_port(cfg, storage)
     client_metadata = mo._build_client_metadata(cfg)
     mo._maybe_preregister_client(storage, cfg, client_metadata)
