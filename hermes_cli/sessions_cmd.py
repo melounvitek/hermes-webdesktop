@@ -850,7 +850,6 @@ def _cmd_optimize_storage(db, args):
         return
     before_bytes = os.path.getsize(db_path) if db_path.exists() else 0
     before_mb = before_bytes / (1024 * 1024)
-
     # Disk preflight: the new index is built before the old is torn down, and VACUUM needs a full
     # second copy — require headroom ≈ current file size.
     do_vacuum = not getattr(args, "no_vacuum", False)
@@ -859,14 +858,12 @@ def _cmd_optimize_storage(db, args):
     except Exception:
         free_bytes = None
     need_bytes = before_bytes if do_vacuum else int(before_bytes * 0.3)
-    print(f"Search-index optimization for {db_path}")
-    print(f"  Current database size: {before_mb:.1f} MB")
+    print(f"Search-index optimization for {db_path}\n  Current database size: {before_mb:.1f} MB")
     if free_bytes is not None:
         print(f"  Free disk: {free_bytes / (1024*1024):.0f} MB "
               f"(need ~{need_bytes / (1024*1024):.0f} MB to complete{' incl. VACUUM' if do_vacuum else ''})")
         if free_bytes < need_bytes:
-            print()
-            print("⚠ Not enough free disk to complete safely. Free up space, or run with --no-vacuum "
+            print("\n⚠ Not enough free disk to complete safely. Free up space, or run with --no-vacuum "
                   "(rebuilds the index but doesn't reclaim space until a later VACUUM).")
             return
     if before_mb > 500:
@@ -881,6 +878,7 @@ def _cmd_optimize_storage(db, args):
             print("Cancelled.")
             return
     _last = {"phase": None}
+    labels = {"teardown": "Reclaiming old index", "vacuum": "Compacting database (VACUUM)", "done": "Done"}
 
     def _progress(info):
         phase = info.get("phase")
@@ -888,15 +886,13 @@ def _cmd_optimize_storage(db, args):
             print(f"\r  Rebuilding index: {info.get('percent', 0):3d}% "
                   f"({info.get('indexed',0):,}/{info.get('total',0):,})", end="", flush=True)
         elif phase != _last["phase"]:
-            label = {"teardown": "Reclaiming old index", "vacuum": "Compacting database (VACUUM)", "done": "Done"}
-            print(f"\n  {label.get(phase, phase)}…", flush=True)
+            print(f"\n  {labels.get(phase, phase)}…", flush=True)
         _last["phase"] = phase
     print("Optimizing search-index storage…")
     try:
         result = db.optimize_fts_storage(progress_cb=_progress, vacuum=do_vacuum)
     except Exception as e:
-        print(f"\nError: optimization failed: {e}")
-        print("No data was lost. Re-run to resume.")
+        print(f"\nError: optimization failed: {e}\nNo data was lost. Re-run to resume.")
         return
     if not result.get("ok"):
         print(f"\nCould not optimize: {result.get('reason', 'unknown')}")
@@ -944,8 +940,7 @@ def _cmd_repair_routing(db, args):
 def _cmd_stats(db, args):
     print(f"Total sessions: {db.session_count()}\nTotal messages: {db.message_count()}")
     for src in ("cli", "telegram", "discord", "whatsapp", "slack"):
-        c = db.session_count(source=src)
-        if c > 0:
+        if (c := db.session_count(source=src)) > 0:
             print(f"  {src}: {c} sessions")
     if db.db_path.exists():
         print(f"Database size: {_size_mb(db.db_path):.1f} MB")
@@ -956,22 +951,12 @@ def _cmd_stats(db, args):
 _PRE_DB_HANDLERS = {"repair": _cmd_repair, "recover": _cmd_recover, "import": _cmd_import}
 
 _DB_HANDLERS = {
-    "list": _cmd_list,
-    "export": _cmd_export,
-    "delete": _cmd_delete,
-    "prune": partial(_cmd_prune_or_archive, action="prune"),
-    "archive": partial(_cmd_prune_or_archive, action="archive"),
-    "rename": _cmd_rename,
-    "pin": partial(_cmd_pin, pinning=True),
-    "unpin": partial(_cmd_pin, pinning=False),
-    "pinned": _cmd_pinned,
-    "retitle-skills": _cmd_retitle_skills,
-    "browse": _cmd_browse,
-    "optimize": _cmd_optimize,
-    "clean-markers": _cmd_clean_markers,
-    "optimize-storage": _cmd_optimize_storage,
-    "repair-routing": _cmd_repair_routing,
-    "stats": _cmd_stats,
+    "list": _cmd_list, "export": _cmd_export, "delete": _cmd_delete, "rename": _cmd_rename, "pinned": _cmd_pinned,
+    "prune": partial(_cmd_prune_or_archive, action="prune"), "pin": partial(_cmd_pin, pinning=True),
+    "archive": partial(_cmd_prune_or_archive, action="archive"), "unpin": partial(_cmd_pin, pinning=False),
+    "retitle-skills": _cmd_retitle_skills, "browse": _cmd_browse, "optimize": _cmd_optimize,
+    "clean-markers": _cmd_clean_markers, "optimize-storage": _cmd_optimize_storage,
+    "repair-routing": _cmd_repair_routing, "stats": _cmd_stats,
 }
 
 
