@@ -1,18 +1,12 @@
 """Unified removal contract for every credential source Hermes reads from.
 
-The pool is seeded from many sources (``env:<VAR>``, ``claude_code``,
-``hermes_pkce``, ``device_code``, ``qwen-cli``, ``gh_cli``, ``config:<name>``,
-``model_config``, ``manual``).  Readers live in ``agent.credential_pool``; what
-is unified here is **removal**: ``hermes auth remove <provider> <N>`` must make
-the entry stay gone across ``load_pool()`` calls.
-
-Every source registers a ``RemovalStep`` whose ``remove_fn`` does three things:
-clean the external state the source reads from, suppress ``(provider,
-source_id)`` in auth.json so the seeding branch skips the upsert, and return a
-``RemovalResult`` with user-facing ``cleaned``/``hints`` lines.
-
-Adding a source: wire a reader branch in ``_seed_from_*``, gate it behind
-``is_source_suppressed(provider, source_id)``, register a ``RemovalStep`` here.
+Readers live in ``agent.credential_pool``; what is unified here is **removal**:
+``hermes auth remove <provider> <N>`` must make the entry stay gone across
+``load_pool()`` calls. Each source registers a ``RemovalStep`` whose
+``remove_fn`` cleans the external state the source reads from, and the
+dispatcher suppresses ``(provider, source_id)`` in auth.json so the seeding
+branch skips the upsert. Adding a source: wire a reader branch in
+``_seed_from_*``, gate it behind ``is_source_suppressed``, register a step here.
 """
 
 from __future__ import annotations
@@ -27,10 +21,9 @@ class RemovalResult:
     """Outcome of removing a credential source.
 
     ``cleaned``: external state actually mutated (printed to the user).
-    ``hints``: non-destructive diagnostics about state left intact or that the
-    user must clean up themselves.  ``suppress``: call
-    ``suppress_credential_source`` afterwards so ``load_pool`` skips the source;
-    only ``manual`` entries (never seeded externally) legitimately use False.
+    ``hints``: diagnostics about state left intact or that the user must clean
+    up. ``suppress``: call ``suppress_credential_source`` afterwards so
+    ``load_pool`` skips the source; only ``manual`` entries legitimately use False.
     """
 
     cleaned: List[str] = field(default_factory=list)
@@ -42,7 +35,7 @@ class RemovalResult:
 class RemovalStep:
     """How to remove one credential source.
 
-    ``provider`` ``"*"`` matches any provider.  ``match_fn`` overrides literal
+    ``provider`` ``"*"`` matches any provider. ``match_fn`` overrides literal
     ``source_id`` matching (prefix patterns like ``env:*`` / ``config:*``).
     ``remove_fn(provider, removed_entry) -> RemovalResult``.
     """
@@ -62,15 +55,8 @@ class RemovalStep:
 
 
 def find_removal_step(provider: str, source: str) -> Optional[RemovalStep]:
-    """First matching RemovalStep, or None.
-
-    Unregistered sources (``manual``) fall through to the caller's default:
-    the pool entry is already gone, nothing external to clean, no suppression.
-    """
-    for step in _REGISTRY:
-        if step.matches(provider, source):
-            return step
-    return None
+    """First matching RemovalStep, or None (``manual``: nothing external to clean)."""
+    return next((step for step in _REGISTRY if step.matches(provider, source)), None)
 
 
 def _remove_env_source(provider: str, removed) -> RemovalResult:
@@ -82,9 +68,9 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
     if not env_var:
         return result
 
-    # Detect shell vs .env BEFORE remove_env_value pops os.environ.  Read the
-    # .env as utf-8-sig like hermes_cli/config.py: a locale/BOM-sensitive read
-    # would misreport a Notepad-edited .env var as a shell export.
+    # Detect shell vs .env BEFORE remove_env_value pops os.environ. Read the
+    # .env as utf-8-sig like hermes_cli/config.py: a BOM-sensitive read would
+    # misreport a Notepad-edited .env var as a shell export.
     env_in_process = bool(os.getenv(env_var))
     env_in_dotenv = False
     try:
@@ -92,18 +78,15 @@ def _remove_env_source(provider: str, removed) -> RemovalResult:
         if env_path.exists():
             env_in_dotenv = any(
                 line.strip().startswith(f"{env_var}=")
-                for line in env_path.read_text(
-                    encoding="utf-8-sig", errors="replace"
-                ).splitlines()
+                for line in env_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
             )
     except OSError:
         pass
-    shell_exported = env_in_process and not env_in_dotenv
 
     if remove_env_value(env_var):
         result.cleaned.append(f"Cleared {env_var} from .env")
 
-    if shell_exported:
+    if env_in_process and not env_in_dotenv:
         result.hints.extend([
             f"Note: {env_var} is still set in your shell environment "
             f"(not in ~/.hermes/.env).",
@@ -135,28 +118,22 @@ def _remove_hermes_pkce(provider: str, removed) -> RemovalResult:
     return result
 
 
-def _clear_auth_store_provider(provider: str) -> bool:
-    """Delete auth_store.providers[provider].  Returns True if deleted."""
+def _remove_auth_store_oauth(provider: str, removed) -> RemovalResult:
+    """Clear auth.json ``providers.<provider>`` (nous, minimax-oauth, xai-oauth, openai-codex).
+
+    Suppression by the dispatcher is still required — otherwise
+    ``_seed_from_singletons`` re-seeds from any path that rewrites the block.
+    """
     from hermes_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store
 
+    result = RemovalResult()
     with _auth_store_lock():
         auth_store = _load_auth_store()
         providers_dict = auth_store.get("providers")
         if isinstance(providers_dict, dict) and provider in providers_dict:
             del providers_dict[provider]
             _save_auth_store(auth_store)
-            return True
-    return False
-
-
-def _remove_auth_store_oauth(provider: str, removed) -> RemovalResult:
-    """OAuth state in auth.json ``providers.<provider>`` (nous, minimax-oauth,
-    xai-oauth, openai-codex): clear it.  Suppression (by the dispatcher) is
-    still required — otherwise ``_seed_from_singletons`` re-seeds from any
-    path that rewrites the block before the user re-adds it deliberately."""
-    result = RemovalResult()
-    if _clear_auth_store_provider(provider):
-        result.cleaned.append(f"Cleared {provider} OAuth tokens from auth store")
+            result.cleaned.append(f"Cleared {provider} OAuth tokens from auth store")
     return result
 
 
@@ -172,8 +149,7 @@ def _remove_codex_device_code(provider: str, removed) -> RemovalResult:
     """Codex tokens also live in ~/.codex/auth.json (Codex CLI's file, kept).
 
     Suppress the canonical ``device_code`` key — not just ``removed.source`` —
-    so a ``manual:device_code`` removal still blocks the ``device_code``
-    re-seed path.  Idempotent with the dispatcher's own suppression.
+    so a ``manual:device_code`` removal still blocks the re-seed path.
     """
     from hermes_cli.auth import suppress_credential_source
 
@@ -188,9 +164,9 @@ def _remove_codex_device_code(provider: str, removed) -> RemovalResult:
 
 
 def _remove_copilot_gh(provider: str, removed) -> RemovalResult:
-    """The same Copilot token is seeded as gh_cli AND env:<VAR> rows, so
-    suppress every variant or the duplicates resurrect the entry.  gh CLI and
-    shell state are left untouched."""
+    """The same Copilot token is seeded as gh_cli AND env:<VAR> rows, so suppress
+    every variant or the duplicates resurrect the entry. gh CLI and shell state
+    are left untouched."""
     from hermes_cli.auth import suppress_credential_source
 
     suppress_credential_source(provider, "gh_cli")
@@ -206,13 +182,13 @@ def _remove_copilot_gh(provider: str, removed) -> RemovalResult:
 def _suppress_only(*hints: str) -> Callable[..., RemovalResult]:
     """remove_fn for sources whose backing file/config belongs to another tool
     (Claude Code, Qwen CLI, config.yaml): never delete it, just suppress and
-    explain.  ``{source}`` in a hint is the removed entry's source string."""
+    explain. ``{source}`` in a hint is the removed entry's source string."""
     def remove_fn(provider: str, removed) -> RemovalResult:
         return RemovalResult(hints=[h.format(source=removed.source) for h in hints])
     return remove_fn
 
 
-# ORDER MATTERS — ``find_removal_step`` returns the first match.  Provider-
+# ORDER MATTERS — ``find_removal_step`` returns the first match. Provider-
 # specific steps precede the generic ``env:*`` step so copilot's ``env:GH_TOKEN``
 # takes the copilot path (no .env edits) rather than the generic env-var removal.
 _REGISTRY: List[RemovalStep] = [

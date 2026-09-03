@@ -1,10 +1,7 @@
-"""Credential-pool disk-boundary sanitization helpers.
-
-Decide which pool entries are references to *borrowed* runtime secrets and
-strip raw values before those entries reach ``auth.json``.  Deliberately free
-of ``hermes_cli.auth`` imports so the pool model and the auth-store write
-boundary share one policy without import cycles.
-"""
+"""Credential-pool disk-boundary sanitization: strip raw secrets from *borrowed*
+pool entries before they reach ``auth.json``. Deliberately free of
+``hermes_cli.auth`` imports so the pool model and the auth-store write boundary
+share one policy without import cycles."""
 
 from __future__ import annotations
 
@@ -78,9 +75,7 @@ def fingerprint_secret_value(value: Any) -> str | None:
     Callers comparing a live secret against the ``secret_fingerprint`` left on
     a sanitized (borrowed) pool row need exactly the digest this module writes.
     """
-    if value is None:
-        return None
-    text = str(value)
+    text = "" if value is None else str(value)
     if not text:
         return None
     digest = hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
@@ -88,15 +83,13 @@ def fingerprint_secret_value(value: Any) -> str | None:
 
 
 def _credential_secret_fingerprint(payload: Mapping[str, Any]) -> str | None:
-    for key in ("agent_key", "access_token", "refresh_token", "api_key", "token", "secret"):
-        fingerprint = fingerprint_secret_value(payload.get(key))
+    preferred = ("agent_key", "access_token", "refresh_token", "api_key", "token", "secret")
+    candidates = [payload.get(k) for k in preferred]
+    candidates += [v for k, v in payload.items() if _is_secret_payload_key(k)]
+    for value in candidates:
+        fingerprint = fingerprint_secret_value(value)
         if fingerprint:
             return fingerprint
-    for key, value in payload.items():
-        if _is_secret_payload_key(key):
-            fingerprint = fingerprint_secret_value(value)
-            if fingerprint:
-                return fingerprint
     existing = payload.get("secret_fingerprint")
     if isinstance(existing, str) and existing.startswith("sha256:"):
         return existing
