@@ -80,9 +80,7 @@ def _print_unmanaged_summary() -> None:
     print("  never auto-staled or archived — `hermes curator adopt <name>` hands one over")
 
 
-def _cmd_status(args) -> int:
-    from agent import curator
-    from tools import skill_usage
+def _print_curator_config(curator) -> None:
     state = curator.load_state()
     paused = state.get("paused", False)
     summary = state.get("last_run_summary") or "(none)"
@@ -108,6 +106,11 @@ def _cmd_status(args) -> int:
         f"  consolidate:    {'on' if consolidate else 'off'}"
         f"{'' if consolidate else ' (prune-only; LLM merge pass opt-in)'}")
 
+
+def _cmd_status(args) -> int:
+    from agent import curator
+    from tools import skill_usage
+    _print_curator_config(curator)
     rows = skill_usage.curated_report()
     if not rows:
         print("\nno curator-managed skills")

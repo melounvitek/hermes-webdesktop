@@ -186,9 +186,9 @@ def _noop_console_command(_args: argparse.Namespace) -> None:
 class _CliSurface:
     """How a CLI subcommand module hangs its argparse tree off a root subparsers action.
 
-    ``kind``: ``extracted`` = ``builder(subparsers, <handler>=fn)`` (fn from hermes_cli.main);
-    ``registered`` = ``register(subparsers.add_parser(root))`` with optional module ``handler``;
-    ``builder`` = ``top = builder(subparsers)``, func from hermes_cli.main; ``adder`` wires itself.
+    ``extracted``: ``builder(subparsers, <handler>=fn)``, fn from hermes_cli.main.
+    ``registered``: ``register(subparsers.add_parser(root))``, optional module-level ``handler``.
+    ``builder``: ``top = builder(subparsers)``, func from hermes_cli.main. ``adder``: self-wiring.
     """
 
     kind: Literal["extracted", "registered", "builder", "adder"]
