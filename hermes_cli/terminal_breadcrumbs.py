@@ -29,7 +29,6 @@ _SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]")
 
 def _breadcrumbs_dir() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "terminal-sessions"
 
 

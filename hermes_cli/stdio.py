@@ -87,7 +87,6 @@ def _default_windows_editor() -> str:
     window closes). The bare name keeps prompt_toolkit's shlex split away from paths with spaces;
     "" when even notepad is missing (WinPE, Nano Server) so prompt_toolkit's no-op applies."""
     import shutil
-
     return "notepad" if shutil.which("notepad") else ""
 
 

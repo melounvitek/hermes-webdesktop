@@ -175,7 +175,6 @@ def _lines(*lines: str) -> None:
 
 def _save_optional(key: str, value: Optional[str], current: Optional[str]) -> None:
     from hermes_cli.config import save_env_value
-
     if value:
         save_env_value(key, value)
         print(f"  ✓ Saved: {value}")
@@ -244,7 +243,6 @@ _OPTIONAL_ID_STEPS = (
 def _credential_step(step) -> tuple[Optional[str], bool]:
     """Run one _CREDENTIAL_STEPS entry. Returns (effective value, abort)."""
     from hermes_cli.config import get_env_value, save_env_value
-
     title, env_var, label, validator, secret, preview, saved, kept, missing, required, help_text = step
     _header(title)
     current = get_env_value(env_var) or None
@@ -271,7 +269,6 @@ def run_whatsapp_cloud_setup() -> int:
     user bailed before finishing).
     """
     from hermes_cli.config import get_env_value, save_env_value
-
     _lines(
         "", "⚕ WhatsApp Business Cloud API Setup", "=" * 50, "",
         "This wizard configures Hermes to talk to WhatsApp via Meta's",

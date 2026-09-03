@@ -24,7 +24,6 @@ def _prompt_vercel_sandbox_settings(config: dict):
           "  Snapshots restore files only; live processes do not continue after sandbox recreation.")
 
     from tools.terminal_tool import _SUPPORTED_VERCEL_RUNTIMES
-
     current_runtime = terminal.get("vercel_runtime") or "node24"
     supported_label = ", ".join(_SUPPORTED_VERCEL_RUNTIMES)
     runtime = _setup.prompt(f"  Runtime ({supported_label})", current_runtime).strip() or current_runtime
@@ -101,7 +100,6 @@ def _pip_install_vercel(package):
     bootstrapping mid-wizard is fine), else pip — a `uv venv` venv may not even have pip."""
     import subprocess
     from hermes_cli.managed_uv import ensure_uv
-
     uv_bin = ensure_uv()
     cmd = ([uv_bin, "pip", "install", "--python", sys.executable, package] if uv_bin
            else [sys.executable, "-m", "pip", "install", package])
@@ -175,7 +173,6 @@ def _setup_backend_modal(config: dict) -> None:
     _setup.print_info("Serverless cloud sandboxes. Each session gets its own container.")
     from tools.managed_tool_gateway import is_managed_tool_gateway_ready
     from tools.tool_backend_helpers import normalize_modal_mode
-
     managed_modal_available = bool(
         _setup.managed_nous_tools_enabled()
         and _setup.get_nous_subscription_features(config).nous_auth_present
