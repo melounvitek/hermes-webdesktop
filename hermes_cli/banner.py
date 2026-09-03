@@ -230,8 +230,7 @@ def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
 
         # api.github.com 403s requests without a User-Agent.
         req = urllib.request.Request(
-            url, headers={"Accept": "application/vnd.github+json", "User-Agent": "hermes-cli-update-check"},
-        )
+            url, headers={"Accept": "application/vnd.github+json", "User-Agent": "hermes-cli-update-check"})
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
@@ -382,8 +381,7 @@ def check_for_updates() -> Optional[int]:
     # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:
         _quiet(lambda: cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}), encoding="utf-8",
-        ))
+            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}), encoding="utf-8"))
 
     return behind
 
@@ -630,8 +628,7 @@ def load_banner_snapshot(enabled_toolsets: List[str] = None) -> Optional[Dict[st
     if blob.get("enabled_toolsets") != sorted(enabled_toolsets or []):
         return None
     if not isinstance(blob.get("tools"), list) or not all(
-        isinstance(blob.get(k), dict) for k in ("toolset_map", "availability", "skills_by_category")
-    ):
+        isinstance(blob.get(k), dict) for k in ("toolset_map", "availability", "skills_by_category")):
         return None
     return blob
 
@@ -686,8 +683,7 @@ def compute_toolset_availability(enabled_toolsets: List[str] = None) -> Dict[str
     _enabled_ts = {str(t) for t in enabled_toolsets}
     if _enabled_ts:
         unavailable_toolsets = [
-            item for item in unavailable_toolsets if str(item.get("id", item.get("name", ""))) in _enabled_ts
-        ]
+            item for item in unavailable_toolsets if str(item.get("id", item.get("name", ""))) in _enabled_ts]
     # Toolsets with a check_fn are lazy-initialized (e.g. honcho): unavailable at banner time
     # because the check hasn't run yet, but not misconfigured.
     lazy_tools, disabled_tools = set(), set()
@@ -974,8 +970,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         version_label = f"[link={release_info[1]}]{version_label}[/link]"
     outer_panel = Panel(
         layout_table, title=f"[bold {_skin_color('banner_title', '#FFD700')}]{version_label}[/]",
-        border_style=_skin_color("banner_border", "#CD7F32"), padding=(0, 2),
-    )
+        border_style=_skin_color("banner_border", "#CD7F32"), padding=(0, 2))
 
     console.print()
     if shutil.get_terminal_size().columns >= 95:

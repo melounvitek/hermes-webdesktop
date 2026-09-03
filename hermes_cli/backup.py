@@ -898,8 +898,7 @@ def _import_members(
     new_file_mode = _default_new_file_mode()
 
     def _restore_member(
-        member: str, rel: str, target: Path, root: Path, tighten: bool, *, strict_chmod: bool
-    ) -> bool:
+        member: str, rel: str, target: Path, root: Path, tighten: bool, *, strict_chmod: bool) -> bool:
         """Publish one member under *root*; False when blocked or failed (recorded in errors)."""
         if not _is_within(target, root):
             errors.append(f"{rel}: path traversal blocked")
@@ -1483,8 +1482,7 @@ def create_pre_update_snapshots_all_profiles(
     for name, profile_home in _sibling_profile_homes(home):
         try:
             snap_id = create_quick_snapshot(
-                label="pre-update", hermes_home=profile_home, keep=keep, max_file_size=max_file_size
-            )
+                label="pre-update", hermes_home=profile_home, keep=keep, max_file_size=max_file_size)
             if snap_id:
                 results[name] = snap_id
         except Exception as exc:
@@ -1617,8 +1615,7 @@ def _restore_all_sibling_profiles(
 
 
 def restore_config_model_settings_all_profiles(
-    profile_snapshots: Dict[str, str], invoking_home: Optional[Path] = None
-) -> list[Dict[str, Any]]:
+    profile_snapshots: Dict[str, str], invoking_home: Optional[Path] = None) -> list[Dict[str, Any]]:
     """Run the config model-settings safety net for every sibling profile (see ``_restore_all_sibling_profiles``)."""
     return _restore_all_sibling_profiles(
         profile_snapshots, invoking_home, restore_config_model_settings_if_rewritten,
@@ -1626,8 +1623,7 @@ def restore_config_model_settings_all_profiles(
 
 
 def restore_cron_jobs_all_profiles(
-    profile_snapshots: Dict[str, str], invoking_home: Optional[Path] = None
-) -> list[Dict[str, Any]]:
+    profile_snapshots: Dict[str, str], invoking_home: Optional[Path] = None) -> list[Dict[str, Any]]:
     """Run the cron-jobs safety net for every sibling profile (#66140).
 
     ``profile_snapshots`` comes from :func:`create_pre_update_snapshots_all_profiles`, so
@@ -1759,8 +1755,7 @@ def _prune_prefixed_zips(backup_dir: Path, prefix: str, keep: int, what: str) ->
 
 
 def _create_prefixed_full_backup(
-    hermes_home: Optional[Path], prefix: str, keep: int, what: str, prune_what: str
-) -> Optional[Path]:
+    hermes_home: Optional[Path], prefix: str, keep: int, what: str, prune_what: str) -> Optional[Path]:
     """Write ``<HERMES_HOME>/backups/<prefix><timestamp>.zip`` and prune older same-prefix zips.
 
     Returns the created path, or ``None`` if nothing was found to back up or the write failed.
