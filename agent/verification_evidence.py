@@ -205,19 +205,14 @@ def _split_shell_segments(command: str, *, posix: bool = True) -> list[_ShellSeg
     trailing = command[start:].strip()
     if trailing:
         raw_segments.append((trailing, None))
-    elif raw_segments and raw_segments[-1][1] not in {";"}:
+    elif raw_segments and raw_segments[-1][1] != ";":
         return []
 
-    segments: list[_ShellSegment] = []
-    for raw, operator in raw_segments:
-        try:
-            tokens = shlex.split(raw, posix=posix)
-        except ValueError:
-            return []
-        if not tokens:
-            return []
-        segments.append(_ShellSegment(tokens=tokens, following_operator=operator))
-    return segments
+    try:
+        segments = [_ShellSegment(shlex.split(raw, posix=posix), operator) for raw, operator in raw_segments]
+    except ValueError:
+        return []
+    return segments if all(s.tokens for s in segments) else []
 
 
 def _exit_status_is_attributable(segments: list[_ShellSegment], match_index: int, exit_code: int) -> bool:
@@ -235,13 +230,10 @@ def _exit_status_is_attributable(segments: list[_ShellSegment], match_index: int
     if match_index < sequence_start:
         return False
 
-    sequence = segments[sequence_start:]
-    operators = [segment.following_operator for segment in sequence[:-1]]
-    if any(operator in {"|", "|&", "||"} for operator in operators):
+    operators = {segment.following_operator for segment in segments[sequence_start:-1]}
+    if operators & {"|", "|&", "||"}:
         return False
-    if len(sequence) == 1:
-        return True
-    return int(exit_code) == 0 and all(operator == "&&" for operator in operators)
+    return not operators or (int(exit_code) == 0 and operators == {"&&"})
 
 
 def _canonical_tokens(canonical: str) -> list[str]:
@@ -268,9 +260,9 @@ def _equivalent_needles(needle: list[str]) -> list[list[str]]:
     if len(needle) >= 3 and needle[1] == "run" and needle[0] in {"npm", "pnpm", "yarn", "bun"}:
         candidates.append([needle[0], needle[2]])
     if len(needle) == 1 and "/" in needle[0]:
-        candidates.extend([["bash", needle[0]], ["sh", needle[0]]])
+        candidates += [["bash", needle[0]], ["sh", needle[0]]]
     if needle == ["pytest"]:
-        candidates.extend(_PYTEST_SPELLINGS)
+        candidates += _PYTEST_SPELLINGS
     return candidates
 
 
@@ -291,18 +283,14 @@ def _find_canonical_match(command: str, canonical_commands: list[str], exit_code
 
 def _kind_for_command(canonical: str) -> str:
     lowered = canonical.lower()
-    for words, kind in _KIND_KEYWORDS:
-        if any(word in lowered for word in words):
-            return kind
-    if "check" in lowered and "test" not in lowered:
-        return "check"
-    return "test"
+    kind = next((k for words, k in _KIND_KEYWORDS if any(w in lowered for w in words)), None)
+    return kind or ("check" if "check" in lowered and "test" not in lowered else "test")
 
 
 def _looks_like_target(arg: str) -> bool:
-    if not arg or arg.startswith("-") or "=" in arg:
-        return False
-    return any(m in arg for m in ("/", "\\", "::")) or arg.endswith(_TARGET_EXTENSIONS) or arg.startswith(_TARGET_PREFIXES)
+    return bool(arg) and not arg.startswith("-") and "=" not in arg and (
+        any(m in arg for m in ("/", "\\", "::")) or arg.endswith(_TARGET_EXTENSIONS) or arg.startswith(_TARGET_PREFIXES)
+    )
 
 
 def _is_under(token: str, base: str | Path | None) -> bool:
@@ -361,8 +349,10 @@ def _summarize_output(output: str) -> str:
     if len(text) <= _MAX_OUTPUT_SUMMARY_CHARS:
         return text
     head = _MAX_OUTPUT_SUMMARY_CHARS // 3
-    omitted = len(text) - _MAX_OUTPUT_SUMMARY_CHARS
-    return f"{text[:head]}\n... [{omitted} chars omitted] ...\n{text[head - _MAX_OUTPUT_SUMMARY_CHARS:]}"
+    return (
+        f"{text[:head]}\n... [{len(text) - _MAX_OUTPUT_SUMMARY_CHARS} chars omitted] ...\n"
+        f"{text[head - _MAX_OUTPUT_SUMMARY_CHARS:]}"
+    )
 
 
 def _prune_old_events(conn: sqlite3.Connection, *, session_id: str, root: str) -> None:
@@ -571,8 +561,9 @@ def verification_status(*, session_id: str | None, cwd: str | Path | None) -> di
         if state["last_event_id"] is not None:
             event = conn.execute("SELECT * FROM verification_events WHERE id = ?", (state["last_event_id"],)).fetchone()
 
-    result = {"evidence": None, "root": root, "session_id": sid,
-              "changed_paths": _load_changed_paths(state["changed_paths_json"])}
+    result = {
+        "evidence": None, "root": root, "session_id": sid, "changed_paths": _load_changed_paths(state["changed_paths_json"])
+    }
     if event is None:
         return {"status": "unverified", **result}
 

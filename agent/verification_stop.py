@@ -33,9 +33,7 @@ def _is_non_code_path(raw: str) -> bool:
     except Exception:
         return False
     suffix = p.suffix.lower()
-    return suffix in _NON_CODE_VERIFY_EXTENSIONS or (
-        not suffix and p.name.lower() in _NON_CODE_VERIFY_FILENAMES
-    )
+    return suffix in _NON_CODE_VERIFY_EXTENSIONS or (not suffix and p.name.lower() in _NON_CODE_VERIFY_FILENAMES)
 
 
 def _session_is_messaging_surface() -> bool:
@@ -81,9 +79,7 @@ def verify_on_stop_enabled(config: dict[str, Any] | None = None) -> bool:
 def _candidate_cwds(paths: Iterable[str]) -> list[Path]:
     """Distinct resolved directories (a file's parent) for the edited paths, in order."""
     seen: dict[str, None] = {}
-    for raw in paths:
-        if not raw:
-            continue
+    for raw in filter(None, paths):
         try:
             path = Path(raw).expanduser()
             seen.setdefault(str((path if path.is_dir() else path.parent).resolve()))
