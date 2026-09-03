@@ -12,17 +12,8 @@ import os
 from typing import Any, Dict, List
 
 from plugins.web._common import (
-    SEARCH_LIMIT_CAP,
-    BaseWebSearchProvider,
-    cached_sdk_client,
-    document,
-    keyless_variant_schema,
-    provider_env,
-    run_extract_async,
-    run_search,
-    search_ok,
-    use_keyless,
-    web_hit,
+    SEARCH_LIMIT_CAP, BaseWebSearchProvider, cached_sdk_client, document, keyless_extract, keyless_search,
+    keyless_variant_schema, page_error, provider_env, run_extract_async, run_search, search_ok, use_keyless, web_hit,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,7 +24,6 @@ _MISSING_KEY = "PARALLEL_API_KEY environment variable not set. Get your API key 
 def _client(slot: str, cls_name: str) -> Any:
     def _factory(api_key: str) -> Any:
         import parallel  # deliberately lazy
-
         return getattr(parallel, cls_name)(api_key=api_key)
 
     return cached_sdk_client(slot, "PARALLEL_API_KEY", _MISSING_KEY, "search.parallel", _factory)
@@ -48,8 +38,7 @@ def _get_async_client() -> Any:
 
 
 # Names re-exported by tools.web_tools for existing tests/callers.
-_get_parallel_client = _get_sync_client
-_get_async_parallel_client = _get_async_client
+_get_parallel_client, _get_async_parallel_client = _get_sync_client, _get_async_client
 
 
 def _resolve_search_mode() -> str:
@@ -68,17 +57,11 @@ class ParallelWebSearchProvider(BaseWebSearchProvider):
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         def _body() -> Dict[str, Any]:
-            from plugins.web.keyless_mcp import search_with_failover
-
             if use_keyless("parallel", provider_env("PARALLEL_API_KEY")):
-                logger.info("Parallel keyless search: '%s' (limit=%d)", query, limit)
-                return search_with_failover("parallel", query, limit)
-
+                return keyless_search("Parallel", "parallel", query, limit, logger)
             mode = _resolve_search_mode()
             logger.info("Parallel search: '%s' (mode=%s, limit=%d)", query, mode, limit)
-            response = _get_sync_client().beta.search(
-                search_queries=[query], objective=query, mode=mode, max_results=min(limit, SEARCH_LIMIT_CAP)
-            )
+            response = _get_sync_client().beta.search(search_queries=[query], objective=query, mode=mode, max_results=min(limit, SEARCH_LIMIT_CAP))
             return search_ok([
                 web_hit(r.url or "", r.title or "", " ".join(r.excerpts or []), i + 1)
                 for i, r in enumerate(response.results or [])
@@ -88,27 +71,16 @@ class ParallelWebSearchProvider(BaseWebSearchProvider):
 
     async def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
         async def _body() -> List[Dict[str, Any]]:
-            from plugins.web.keyless_mcp import extract_with_failover
-
             if use_keyless("parallel", provider_env("PARALLEL_API_KEY")):
                 # Keyless ring is blocking HTTP — hop off the event loop.
-                logger.info("Parallel keyless extract: %d URL(s)", len(urls))
-                return await asyncio.to_thread(extract_with_failover, "parallel", list(urls))
-
+                return await asyncio.to_thread(keyless_extract, "Parallel", "parallel", urls, logger)
             logger.info("Parallel extract: %d URL(s)", len(urls))
             response = await _get_async_client().beta.extract(urls=urls, full_content=True)
-
-            results = [
-                document(r.url or "", r.title or "", r.full_content or "\n\n".join(r.excerpts or []))
-                for r in response.results or []
+            results = [document(r.url or "", r.title or "", r.full_content or "\n\n".join(r.excerpts or [])) for r in response.results or []]
+            return results + [
+                {**page_error(e.url or "", e.content or e.error_type or "extraction failed"), "metadata": {"sourceURL": e.url or ""}}
+                for e in response.errors or []
             ]
-            for error in response.errors or []:
-                results.append({
-                    "url": error.url or "", "title": "", "content": "",
-                    "error": error.content or error.error_type or "extraction failed",
-                    "metadata": {"sourceURL": error.url or ""},
-                })
-            return results
 
         return await run_extract_async("Parallel", logger, urls, _body, sdk=True)
 

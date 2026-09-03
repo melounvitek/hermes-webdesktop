@@ -138,25 +138,18 @@ def _rule(name, reminder, **triggers):
     return {"ruleName": name, "reminder": reminder, **triggers}
 
 
-# Security patterns configuration. Regex notes:
-#  - eval / exec lookbehinds exclude `.` so method calls (model.eval(), redis.eval()) don't match.
-#  - pickle matches deserialization only (load/loads/Unpickler); pickle.dump is not the RCE
-#    surface, and `pkl_load` needs a word boundary so similarly named safe loaders don't match.
-#  - script_src_without_sri: negative lookahead after `<script` checks for integrity= anywhere
-#    in the remaining tag.
-#  - torch_unsafe_load is suppressed by weights_only=True on the same line (within 200 chars);
-#    weights_only=False still triggers. Multi-line calls false-positive — same known limitation
-#    as unsafe_yaml_load.
-#  - yaml_unsafe_load_variants covers yaml.unsafe_load plus unsafe wrapper method names seen in
-#    the wild; bare yaml.load() is unsafe_yaml_load's job.
-#  - pickle_wrapper_load: library APIs that unpickle without saying "pickle". numpy.load only
-#    triggers when allow_pickle=True is explicit (defaults to False since numpy 1.16.3).
+# Regex notes: eval/exec lookbehinds exclude `.` so method calls (model.eval()) don't match; pickle
+# matches deserialization only (load/loads/Unpickler) and `pkl_load` needs a word boundary;
+# script_src_without_sri's negative lookahead after `<script` checks for integrity= anywhere in the
+# tag; torch_unsafe_load is suppressed by weights_only=True on the same line (200 chars) — multi-line
+# calls false-positive, same known limitation as unsafe_yaml_load; yaml_unsafe_load_variants covers
+# yaml.unsafe_load plus wrapper names seen in the wild (bare yaml.load() is unsafe_yaml_load's job);
+# pickle_wrapper_load: APIs that unpickle without saying "pickle" — numpy.load only with an explicit
+# allow_pickle=True (default False since numpy 1.16.3).
 SECURITY_PATTERNS = [
     _rule("github_actions_workflow", _GITHUB_ACTIONS_REMINDER,
-          path_check=lambda path: ".github/workflows/" in path
-          and (path.endswith(".yml") or path.endswith(".yaml"))),
-    _rule("child_process_exec", _CHILD_PROCESS_EXEC_REMINDER, path_filter=_JS_ONLY,
-          substrings=["child_process.exec", "execSync("], regex=r"(?<![a-zA-Z0-9_\.])exec\("),
+          path_check=lambda path: ".github/workflows/" in path and (path.endswith(".yml") or path.endswith(".yaml"))),
+    _rule("child_process_exec", _CHILD_PROCESS_EXEC_REMINDER, path_filter=_JS_ONLY, substrings=["child_process.exec", "execSync("], regex=r"(?<![a-zA-Z0-9_\.])exec\("),
     _rule("new_function_injection",
           "\u26a0\ufe0f Security Warning: Using new Function() with string interpolation is a CODE INJECTION vulnerability. If any variable is concatenated or interpolated into the function body string, an attacker controlling that variable can execute arbitrary code. Use safe alternatives: for property access use obj[key] or array.reduce((o, k) => o[k], root); for computation use a safe expression parser. NEVER interpolate untrusted strings into new Function() bodies.",
           substrings=["new Function"]),
@@ -172,18 +165,14 @@ SECURITY_PATTERNS = [
     _rule("innerHTML_xss",
           "⚠️ Security Warning: Setting innerHTML with untrusted content can lead to XSS vulnerabilities. Use textContent for plain text or safe DOM methods for HTML content. If you need HTML support, consider using an HTML sanitizer library such as DOMPurify.",
           substrings=[".innerHTML =", ".innerHTML="]),
-    _rule("pickle_deserialization", _UNSAFE_DESERIALIZATION_REMINDER, path_filter=_PY_ONLY,
-          regex=r"(?<![a-zA-Z0-9_])pickle\.(loads?|Unpickler)\b|(?<![a-zA-Z0-9_])pkl_load\("),
+    _rule("pickle_deserialization", _UNSAFE_DESERIALIZATION_REMINDER, path_filter=_PY_ONLY, regex=r"(?<![a-zA-Z0-9_])pickle\.(loads?|Unpickler)\b|(?<![a-zA-Z0-9_])pkl_load\("),
     _rule("os_system_injection",
           "⚠️ Security Warning: os.system() runs a shell and is a command-injection sink. Use subprocess.run([...]) with a list of arguments instead. If this is safe or is explicitly needed, briefly document that in a comment before continuing.",
           path_filter=_PY_ONLY, regex=r"\bos\.system\s*\(", substrings=["from os import system"]),
-    _rule("python_subprocess_shell", _SUBPROCESS_SHELL_REMINDER,
-          regex=r"subprocess\.(?:run|call|Popen|check_output|check_call)\(.*shell\s*=\s*True"),
+    _rule("python_subprocess_shell", _SUBPROCESS_SHELL_REMINDER, regex=r"subprocess\.(?:run|call|Popen|check_output|check_call)\(.*shell\s*=\s*True"),
     # Go: exec.Command with a shell invocation (sh, bash, /bin/sh, /bin/bash)
-    _rule("go_exec_shell_injection", _GO_EXEC_SHELL_REMINDER,
-          regex=r'exec\.Command\(\s*"(?:sh|bash|/bin/sh|/bin/bash)"'),
-    _rule("unsafe_yaml_load", _UNSAFE_YAML_LOAD_REMINDER,
-          regex=r"\byaml\.load\s*\((?![^)\n]{0,80}\bSafe)"),
+    _rule("go_exec_shell_injection", _GO_EXEC_SHELL_REMINDER, regex=r'exec\.Command\(\s*"(?:sh|bash|/bin/sh|/bin/bash)"'),
+    _rule("unsafe_yaml_load", _UNSAFE_YAML_LOAD_REMINDER, regex=r"\byaml\.load\s*\((?![^)\n]{0,80}\bSafe)"),
     _rule("node_createcipher_no_iv",
           "⚠️ Security Warning: Use crypto.createCipheriv() / createDecipheriv(). createCipher was removed in Node 22 and derives the key insecurely (no IV, MD5-based KDF).",
           regex=r"\bcrypto\.(createCipher|createDecipher)\b"),
@@ -198,8 +187,7 @@ SECURITY_PATTERNS = [
     _rule("xml_unsafe_parse",
           "⚠️ Security Warning: Use defusedxml.ElementTree. Python's stdlib XML parsers are vulnerable to XXE (external entity) and billion-laughs attacks by default.",
           regex=r"\b(xml\.etree\.ElementTree|ElementTree|ET)\.(parse|fromstring|XML)\s*\(|\bminidom\.(parse|parseString)\s*\(|\bxml\.sax\.(parse|make_parser)\b"),
-    _rule("pickle_variants_load", _UNSAFE_DESERIALIZATION_REMINDER,
-          regex=r"\b(cPickle|cloudpickle|dill)\.(load|loads)\s*\("),
+    _rule("pickle_variants_load", _UNSAFE_DESERIALIZATION_REMINDER, regex=r"\b(cPickle|cloudpickle|dill)\.(load|loads)\s*\("),
     _rule("outerHTML_xss",
           "⚠️ Security Warning: Use textContent or sanitize with DOMPurify. outerHTML assignment is an XSS sink equivalent to innerHTML.",
           substrings=[".outerHTML =", ".outerHTML="]),
@@ -208,14 +196,9 @@ SECURITY_PATTERNS = [
           substrings=[".insertAdjacentHTML("]),
     _rule("script_src_without_sri",
           '⚠️ Security Warning: Add integrity="sha384-..." crossorigin="anonymous" to external script tags. Loading scripts without Subresource Integrity exposes you to CDN compromise.',
-          regex=(r"<script\s+(?![^>]{0,400}integrity\s*=)"
-                 r"[^>]{0,200}src\s*=\s*[\x22\x27](?:https?:)?//"
-                 r"[^\x22\x27]{1,300}[\x22\x27]"
-                 r"[^>]{0,100}>")),
-    _rule("torch_unsafe_load", _UNSAFE_TORCH_LOAD_REMINDER,
-          regex=r"(?:\btorch\.load|\.torch_load)\s*\((?![^)\n]{0,200}weights_only\s*=\s*True)"),
-    _rule("yaml_unsafe_load_variants", _UNSAFE_YAML_LOAD_REMINDER,
-          regex=r"(?:\byaml\.unsafe_load|\.yaml_unsafe_load)\s*\("),
+          regex=r"<script\s+(?![^>]{0,400}integrity\s*=)[^>]{0,200}src\s*=\s*[\x22\x27](?:https?:)?//[^\x22\x27]{1,300}[\x22\x27][^>]{0,100}>"),
+    _rule("torch_unsafe_load", _UNSAFE_TORCH_LOAD_REMINDER, regex=r"(?:\btorch\.load|\.torch_load)\s*\((?![^)\n]{0,200}weights_only\s*=\s*True)"),
+    _rule("yaml_unsafe_load_variants", _UNSAFE_YAML_LOAD_REMINDER, regex=r"(?:\byaml\.unsafe_load|\.yaml_unsafe_load)\s*\("),
     _rule("pickle_wrapper_load", _UNSAFE_DESERIALIZATION_REMINDER,
           regex=r"\bjoblib\.load\s*\(|\b(?:pd|pandas)\.read_pickle\s*\(|\.cloudpickle_load\s*\(|\b(?:np|numpy)\.load\s*\([^)\n]{0,200}allow_pickle\s*=\s*True"),
 ]

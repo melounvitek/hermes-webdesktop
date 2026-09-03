@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from plugins.web._common import BaseWebSearchProvider, http_get_json, provider_env, search_fail, search_ok
+from plugins.web._common import BaseWebSearchProvider, http_get_json, provider_env, search_fail, search_ok, setup_schema, titled_rows
 
 logger = logging.getLogger(__name__)
 
@@ -25,47 +25,21 @@ class SearXNGWebSearchProvider(BaseWebSearchProvider):
         base_url = provider_env("SEARXNG_URL").rstrip("/")
         if not base_url:
             return search_fail("SEARXNG_URL is not set")
-
         data, failure = http_get_json(
-            "SearXNG",
-            f"{base_url}/search",
-            params={"q": query, "format": "json", "pageno": 1},
-            headers={"Accept": "application/json"},
-            timeout=15,
-            logger=logger,
-            reach_target=f"SearXNG at {base_url}",
+            "SearXNG", f"{base_url}/search", params={"q": query, "format": "json", "pageno": 1},
+            headers={"Accept": "application/json"}, timeout=15, logger=logger, reach_target=f"SearXNG at {base_url}",
         )
         if failure is not None:
             return failure
-
         raw_results = data.get("results", [])
         # SearXNG may return a score field; sort descending and cap to limit.
         sorted_results = sorted(raw_results, key=lambda r: float(r.get("score", 0)), reverse=True)[:limit]
-        web_results = [
-            {
-                "title": str(r.get("title", "")),
-                "url": str(r.get("url", "")),
-                "description": str(r.get("content", "")),
-                "position": i + 1,
-            }
-            for i, r in enumerate(sorted_results)
-        ]
-        logger.info(
-            "SearXNG search '%s': %d results (from %d raw, limit %d)",
-            query, len(web_results), len(raw_results), limit,
-        )
+        web_results = titled_rows(sorted_results, "content")
+        logger.info("SearXNG search '%s': %d results (from %d raw, limit %d)", query, len(web_results), len(raw_results), limit)
         return search_ok(web_results)
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "SearXNG",
-            "badge": "free · self-hosted",
-            "tag": "Free, privacy-respecting metasearch. Point SEARXNG_URL at your instance.",
-            "env_vars": [
-                {
-                    "key": "SEARXNG_URL",
-                    "prompt": "SearXNG instance URL (e.g. http://localhost:8080)",
-                    "url": "https://searx.space/",
-                },
-            ],
-        }
+        return setup_schema(
+            "SearXNG", "free · self-hosted", "Free, privacy-respecting metasearch. Point SEARXNG_URL at your instance.",
+            "SEARXNG_URL", "SearXNG instance URL (e.g. http://localhost:8080)", "https://searx.space/",
+        )

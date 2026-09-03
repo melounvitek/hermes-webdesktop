@@ -10,16 +10,8 @@ import logging
 from typing import Any, Dict, List
 
 from plugins.web._common import (
-    BaseWebSearchProvider,
-    cached_sdk_client,
-    document,
-    keyless_variant_schema,
-    provider_env,
-    run_extract,
-    run_search,
-    search_ok,
-    use_keyless,
-    web_hit,
+    BaseWebSearchProvider, cached_sdk_client, document, keyless_extract, keyless_search, keyless_variant_schema,
+    provider_env, run_extract, run_search, search_ok, use_keyless, web_hit,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,7 +22,6 @@ _MISSING_KEY = "EXA_API_KEY environment variable not set. Get your API key at ht
 def _get_exa_client() -> Any:
     def _factory(api_key: str) -> Any:
         from exa_py import Exa  # deliberately lazy
-
         client = Exa(api_key=api_key)
         client.headers["x-exa-integration"] = "hermes-agent"
         return client
@@ -49,12 +40,8 @@ class ExaWebSearchProvider(BaseWebSearchProvider):
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         def _body() -> Dict[str, Any]:
-            from plugins.web.keyless_mcp import search_with_failover
-
             if use_keyless("exa", provider_env("EXA_API_KEY")):
-                logger.info("Exa keyless search: '%s' (limit=%d)", query, limit)
-                return search_with_failover("exa", query, limit)
-
+                return keyless_search("Exa", "exa", query, limit, logger)
             logger.info("Exa search: '%s' (limit=%d)", query, limit)
             response = _get_exa_client().search(query, num_results=limit, contents={"highlights": True})
             return search_ok([
@@ -66,12 +53,8 @@ class ExaWebSearchProvider(BaseWebSearchProvider):
 
     def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
         def _body() -> List[Dict[str, Any]]:
-            from plugins.web.keyless_mcp import extract_with_failover
-
             if use_keyless("exa", provider_env("EXA_API_KEY")):
-                logger.info("Exa keyless extract: %d URL(s)", len(urls))
-                return extract_with_failover("exa", list(urls))
-
+                return keyless_extract("Exa", "exa", urls, logger)
             logger.info("Exa extract: %d URL(s)", len(urls))
             response = _get_exa_client().get_contents(urls, text=True)
             return [document(r.url or "", r.title or "", r.text or "") for r in response.results or []]
