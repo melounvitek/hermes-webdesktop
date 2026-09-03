@@ -1,8 +1,7 @@
 """Syntax-lint and LSP-diagnostics tier for ``tools.file_operations``.
 
-Extracted from ``ShellFileOperations`` as ``LintMixin``; the class inherits it
-so every ``self._check_lint(...)`` call resolves unchanged via the MRO. Module
-constants are re-imported into ``tools.file_operations`` for back-compat.
+``ShellFileOperations`` inherits ``LintMixin``; module constants and in-process
+linters are pure and re-imported into ``tools.file_operations`` for back-compat.
 """
 
 import ast
@@ -26,16 +25,14 @@ LINTERS = {
 
 # Extensions whose per-file shell linter is structurally weaker than a real LSP
 # server and floods phantom errors on real projects: single-file ``tsc`` ignores
-# tsconfig (no-lib/ES5 → every ES2015+ stdlib name "missing"), ``go vet`` fails
-# outside a module, ``rustfmt --check`` is style-only and rejects non-Cargo files.
+# tsconfig, ``go vet`` fails outside a module, ``rustfmt --check`` is style-only.
 # When an LSP server claims the file, ``_check_lint`` skips the shell linter for
 # these; py_compile / node --check are file-local and correct so always run.
 _SHELL_LINTER_LSP_REDUNDANT = frozenset({'.ts', '.go', '.rs'})
 
 # Output substrings meaning the linter binary exists but could not actually run
-# (tooling gap, not a lint failure). ``_check_lint`` then returns ``skipped`` so
-# the write isn't flagged and the LSP tier (which gates on ok/skipped) still runs.
-# Matched case-insensitively.
+# (tooling gap, not a lint failure) → ``skipped`` so the write isn't flagged and
+# the LSP tier (which gates on ok/skipped) still runs. Matched case-insensitively.
 _LINTER_UNUSABLE_PATTERNS = {
     'npx': (
         'this is not the tsc command you are looking for',  # tsc not installed locally
@@ -77,10 +74,9 @@ def _lint_yaml_inproc(content: str) -> tuple[bool, str]:
     """In-process YAML syntax check; ``__SKIP__`` when PyYAML is missing.
 
     Syntax-only (``yaml.parse``), NOT ``safe_load``: loading rejects valid YAML
-    that isn't one plain document — multi-doc ``---`` streams (ComposerError) and
-    app tags like CloudFormation ``!Sub`` / Ansible ``!vault`` (ConstructorError).
-    This verdict is a fail-closed WRITE gate, so a false positive refuses a
-    legitimate write; ``parse`` still catches real scanner/parser errors.
+    that isn't one plain document — multi-doc ``---`` streams and app tags like
+    CloudFormation ``!Sub`` / Ansible ``!vault``. This verdict is a fail-closed
+    WRITE gate, so a false positive refuses a legitimate write.
     """
     try:
         import yaml as _yaml
@@ -144,7 +140,6 @@ class LintMixin:
         """Syntax-check ``path``: in-process linter when one matches the
         extension (``content`` avoids a re-read), else the shell linter table."""
         ext = os.path.splitext(path)[1].lower()
-
         inproc = LINTERS_INPROC.get(ext)
         if inproc is not None:
             if content is None:
@@ -156,94 +151,60 @@ class LintMixin:
             if err == "__SKIP__":
                 return LintResult(skipped=True, message=f"No linter available for {ext} (missing dependency)")
             return LintResult(success=ok, output="" if ok else err)
-
         if ext not in LINTERS:
             return LintResult(skipped=True, message=f"No linter for {ext} files")
-
         # Single-file tsc can't read the project's tsconfig.json, so for project
         # .ts files it floods phantom TS2307/TS2339 errors the delta filter then
         # misreports as "pre-existing"; skip and let the LSP tier speak.
         if ext == '.ts' and self._has_ancestor_tsconfig(path):
-            return LintResult(
-                skipped=True,
-                message=(
-                    "Project tsconfig.json detected — per-file tsc skipped "
-                    "(single-file tsc can't resolve project aliases/globals; "
-                    "use the LSP tier or `tsc -p tsconfig.json` for real "
-                    "diagnostics)."
-                ),
-            )
-
+            return LintResult(skipped=True, message=(
+                "Project tsconfig.json detected — per-file tsc skipped "
+                "(single-file tsc can't resolve project aliases/globals; "
+                "use the LSP tier or `tsc -p tsconfig.json` for real "
+                "diagnostics)."
+            ))
         if ext in _SHELL_LINTER_LSP_REDUNDANT and self._lsp_will_handle(path):
-            return LintResult(
-                skipped=True,
-                message=f"LSP server handles {ext} — shell linter skipped",
-            )
-
+            return LintResult(skipped=True, message=f"LSP server handles {ext} — shell linter skipped")
         linter_cmd = LINTERS[ext]
         base_cmd = linter_cmd.split()[0]
         if not self._has_command(base_cmd):
             return LintResult(skipped=True, message=f"{base_cmd} not available")
-
         # Linters are native Windows binaries on Windows: they need the C:/...
         # form, not MSYS /c/... (node would resolve it as C:\c\Users\... → phantom ENOENT).
-        cmd = linter_cmd.replace("{file}", self._escape_native_tool_arg(path))
-        result = self._exec(cmd, timeout=30)
-
+        result = self._exec(linter_cmd.replace("{file}", self._escape_native_tool_arg(path)), timeout=30)
         if result.exit_code != 0 and _looks_like_linter_unusable(base_cmd, result.stdout):
             from tools.ansi_strip import strip_ansi
             cleaned = strip_ansi(result.stdout).strip()
             # Collapse to one line — the npx banner is multi-line ASCII art.
-            first_line = next(
-                (ln.strip() for ln in cleaned.splitlines() if ln.strip()),
-                cleaned[:120],
-            )
-            return LintResult(
-                skipped=True,
-                message=f"{base_cmd} not usable: {first_line[:200]}",
-            )
-
-        return LintResult(
-            success=result.exit_code == 0,
-            output=result.stdout.strip() if result.stdout.strip() else ""
-        )
+            first_line = next((ln.strip() for ln in cleaned.splitlines() if ln.strip()), cleaned[:120])
+            return LintResult(skipped=True, message=f"{base_cmd} not usable: {first_line[:200]}")
+        return LintResult(success=result.exit_code == 0, output=result.stdout.strip())
 
     def _check_lint_delta(self, path: str, pre_content: Optional[str],
                           post_content: Optional[str] = None) -> LintResult:
-        """Post-write lint; when it fails and ``pre_content`` is known, report
-        only errors this edit introduced (pre-existing lines filtered out).
-
-        Semantic (LSP) diagnostics are a separate channel — see
-        ``_maybe_lsp_diagnostics`` — so syntax and semantic signals stay distinct.
-        """
+        """Post-write lint; when it fails and ``pre_content`` is known, report only
+        errors this edit introduced (pre-existing lines filtered out). Semantic
+        (LSP) diagnostics are a separate channel — see ``_maybe_lsp_diagnostics``."""
         post = self._check_lint(path, content=post_content)
         if post.success or post.skipped or pre_content is None:
             return post
-
         pre = self._check_lint(path, content=pre_content)
         if pre.success or pre.skipped or not pre.output:
             return post  # pre-write was clean (or unlintable): all post errors are new
-
         # Single-error parsers (ast.parse, json.loads) stop at the first error, so
         # if every post error already existed we can't prove the edit is clean —
         # report the file as still broken but say nothing new was introduced.
         pre_lines = {ln.strip() for ln in pre.output.splitlines() if ln.strip()}
         post_lines = [ln for ln in post.output.splitlines() if ln.strip() and ln.strip() not in pre_lines]
-
         if not post_lines:
             return LintResult(
-                success=False,
-                output=post.output,
+                success=False, output=post.output,
                 message="Pre-existing lint errors — this edit didn't introduce new ones but the file is still broken.",
             )
-
-        return LintResult(
-            success=False,
-            output=(
-                "New lint errors introduced by this edit "
-                "(pre-existing errors filtered out):\n" + "\n".join(post_lines)
-            )
-        )
+        return LintResult(success=False, output=(
+            "New lint errors introduced by this edit "
+            "(pre-existing errors filtered out):\n" + "\n".join(post_lines)
+        ))
 
     def _lsp_local_only(self) -> bool:
         """True iff wired to a local backend. LSP servers run on the host and
@@ -259,10 +220,7 @@ class LintMixin:
 
     def _lsp_service(self):
         """The active LSPService, or None on a non-local backend / any failure.
-
-        Shared best-effort probe: LSP is an enrichment layer and must never
-        break a write, so every failure path collapses to None.
-        """
+        LSP is an enrichment layer and must never break a write."""
         if not self._lsp_local_only():
             return None
         try:
@@ -327,13 +285,8 @@ class LintMixin:
         except Exception:  # noqa: BLE001
             pass
 
-    def _maybe_lsp_diagnostics(
-        self,
-        path: str,
-        *,
-        pre_content: Optional[str] = None,
-        post_content: Optional[str] = None,
-    ) -> str:
+    def _maybe_lsp_diagnostics(self, path: str, *, pre_content: Optional[str] = None,
+                               post_content: Optional[str] = None) -> str:
         """Formatted LSP diagnostics introduced by this edit, or "" when LSP is
         unavailable/disabled/clean. Never raises past the service probe.
 
@@ -344,7 +297,6 @@ class LintMixin:
         svc = self._lsp_service()
         if svc is None or not svc.enabled_for(path):
             return ""
-
         line_shift = None
         if pre_content is not None and post_content is not None and pre_content != post_content:
             try:
@@ -352,7 +304,6 @@ class LintMixin:
                 line_shift = build_line_shift(pre_content, post_content)
             except Exception:  # noqa: BLE001
                 line_shift = None
-
         try:
             diagnostics = svc.get_diagnostics_sync(path, delta=True, line_shift=line_shift)
         except Exception:  # noqa: BLE001
