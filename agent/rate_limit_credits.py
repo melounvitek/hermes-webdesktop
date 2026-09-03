@@ -13,17 +13,21 @@ from utils import is_truthy_value
 logger = logging.getLogger("run_agent")
 
 
+def _response_headers(http_response: Any):
+    """Headers of a response, or None when there is nothing to parse."""
+    return getattr(http_response, "headers", None) if http_response is not None else None
+
+
+def _pct(fraction) -> str:
+    return ("%.0f%%" % (fraction * 100)) if fraction is not None else "n/a"
+
+
 class RateLimitCreditsMixin:
     """Rate-limit + credits header capture and notices (see module docstring)."""
 
     def _capture_rate_limits(self, http_response: Any) -> None:
-        """Parse x-ratelimit-* headers from an HTTP response and cache the state.
-
-        Called after each streaming call; the httpx Response is available as ``stream.response``.
-        """
-        if http_response is None:
-            return
-        headers = getattr(http_response, "headers", None)
+        """Parse x-ratelimit-* headers from an HTTP response and cache the state (never raises)."""
+        headers = _response_headers(http_response)
         if not headers:
             return
         try:
@@ -39,11 +43,8 @@ class RateLimitCreditsMixin:
         return self._rate_limit_state
 
     def _capture_anthropic_response_headers(self, http_response: Any) -> None:
-        """Capture out-of-band state from Anthropic Messages response headers.
-
-        The SDK's aggregated ``Message`` drops headers, where Portal puts rate-limit and credits state. Fail-
-        open.
-        """
+        """Capture rate-limit + credits state from Anthropic Messages response headers (the SDK's
+        aggregated ``Message`` drops them). Fail-open."""
         self._capture_rate_limits(http_response)
         self._capture_credits(http_response)
 
@@ -54,77 +55,63 @@ class RateLimitCreditsMixin:
         on failure so a depletion-notice bug cannot vanish silently.
         """
         # Dev test fixture (HERMES_DEV_CREDITS_FIXTURE): inject a chosen notice state
-        # each turn for repeatable testing, bypassing real headers. Throwaway scaffolding.
+        # each turn for repeatable testing, bypassing real headers.
         try:
             from agent.credits_tracker import dev_fixture_credits_state
-            _fixture = dev_fixture_credits_state()
+            fixture = dev_fixture_credits_state()
         except Exception:
-            _fixture = None
-        if _fixture is not None:
-            self._credits_state = _fixture
+            fixture = None
+        if fixture is not None:
+            self._credits_state = fixture
             if self._credits_session_start_micros is None:
-                self._credits_session_start_micros = _fixture.remaining_micros
-            _latch = getattr(self, "_credits_latch", None)
-            if isinstance(_latch, dict):
+                self._credits_session_start_micros = fixture.remaining_micros
+            latch = getattr(self, "_credits_latch", None)
+            if isinstance(latch, dict):
                 # Only seen_below_90 — priming seen_grant_unspent would fire grant_spent on first observation.
-                _latch["seen_below_90"] = True  # let warn90 fire without a real crossing
-            _used = _fixture.used_fraction
+                latch["seen_below_90"] = True  # let warn90 fire without a real crossing
             logger.info(
                 "credits ▸ [FIXTURE] remaining=%d (%s) · paid=%s · denom=%s · used=%s "
                 "(real headers bypassed — `echo clear` / unset HERMES_DEV_CREDITS_FIXTURE to restore)",
-                _fixture.remaining_micros,
-                _fixture.remaining_usd or "?",
-                _fixture.paid_access,
-                _fixture.denominator_kind,
-                ("%.0f%%" % (_used * 100)) if _used is not None else "n/a",
+                fixture.remaining_micros, fixture.remaining_usd or "?", fixture.paid_access,
+                fixture.denominator_kind, _pct(fixture.used_fraction),
             )
             self._emit_credits_notices()
             return
-        if http_response is None:
-            return
-        headers = getattr(http_response, "headers", None)
+        headers = _response_headers(http_response)
         if not headers:
             return
-        _dev = is_truthy_value(os.environ.get("HERMES_DEV_CREDITS"))
+        dev = is_truthy_value(os.environ.get("HERMES_DEV_CREDITS"))
 
-        # ── Parse (fail-open → miss; never overwrite good state with None) ──
+        # Parse: fail-open → miss; never overwrite good state with None.
         try:
             from agent.credits_tracker import parse_credits_headers
             state = parse_credits_headers(headers, provider=self.provider)
         except Exception:
-            return  # parse error → treat as a miss, keep last-known
+            return
         if state is None:
-            if _dev:
+            if dev:
                 logger.info(
                     "credits ▸ response had no valid x-nous-credits-* headers "
                     "(miss — producer off / non-Nous path / >TTL stale)"
                 )
             return
 
-        # retain-last-known: only overwrite on a fresh valid parse
         self._credits_state = state
-        # Latch session-start remaining the first time we ever see a header
+        # Latch session-start remaining the first time we ever see a header.
         if self._credits_session_start_micros is None:
             self._credits_session_start_micros = state.remaining_micros
-        if _dev:
-            # HERMES_DEV_CREDITS: stream each capture to agent.log — watch live with
-            # `hermes logs -f` (grep 'credits ▸'). Dev-only; silent for normal users.
+        if dev:
+            # HERMES_DEV_CREDITS streams each capture to agent.log (`hermes logs -f`, grep 'credits ▸').
             spent = self.get_credits_spent_micros()
-            used = state.used_fraction
             logger.info(
                 "credits ▸ remaining=%d (%s) · paid=%s · denom=%s · used=%s "
                 "· Δspent=%s · age=%s%s",
-                state.remaining_micros,
-                state.remaining_usd or "?",
-                state.paid_access,
-                state.denominator_kind,
-                ("%.0f%%" % (used * 100)) if used is not None else "n/a",
+                state.remaining_micros, state.remaining_usd or "?", state.paid_access,
+                state.denominator_kind, _pct(state.used_fraction),
                 ("%.1f¢" % (spent / 10000)) if spent is not None else "n/a",
                 ("%.0fs" % state.age_seconds) if state.age_seconds != float("inf") else "n/a",
                 (" · disabled=%s" % state.disabled_reason) if state.disabled_reason else "",
             )
-
-        # Threshold notices — shared with the cold-start seed (see _emit_credits_notices).
         self._emit_credits_notices()
 
     def _emit_credits_notices(self) -> None:
@@ -132,7 +119,7 @@ class RateLimitCreditsMixin:
 
         Shared by the warm path and the cold-start seed so an already-depleted session warns immediately. Runs
         only when a notice consumer is bound. WARNS on failure. Emits clears FIRST so depleted lands last
-        (latest- wins slot).
+        (latest-wins slot).
         """
         if getattr(self, "notice_callback", None) is None and getattr(self, "notice_clear_callback", None) is None:
             return
@@ -152,18 +139,15 @@ class RateLimitCreditsMixin:
                 getattr(self, "base_url", "") or "",
             )
             to_show, to_clear = evaluate_credits_notices(state, latch, model_is_free=model_is_free)
-            for key in to_clear:        # clears FIRST …
+            for key in to_clear:
                 self._emit_notice_clear(key)
-            for notice in to_show:      # … then shows (depleted lands last in a latest-wins slot)
+            for notice in to_show:
                 self._emit_notice(notice)
         except Exception:
             logger.warning("credits notice evaluation/emit failed", exc_info=True)
 
     def _credits_notices_enabled(self) -> bool:
-        """Whether credits notices are enabled (``display.credits_notices``).
-
-        Read once per agent and cached (governs UI noise, not correctness); fail-open True.
-        """
+        """``display.credits_notices``, read once per agent and cached (UI noise, not correctness); fail-open True."""
         cached = getattr(self, "_credits_notices_enabled_cache", None)
         if cached is not None:
             return cached
@@ -190,10 +174,8 @@ class RateLimitCreditsMixin:
         return self._credits_session_start_micros - self._credits_state.remaining_micros
 
     def _check_openrouter_cache_status(self, http_response: Any) -> None:
-        """Read X-OpenRouter-Cache-Status from response headers and log it; HITs count in ``_or_cache_hits``."""
-        if http_response is None:
-            return
-        headers = getattr(http_response, "headers", None)
+        """Log X-OpenRouter-Cache-Status; HITs count in ``_or_cache_hits``. Never raises."""
+        headers = _response_headers(http_response)
         if not headers:
             return
         try:

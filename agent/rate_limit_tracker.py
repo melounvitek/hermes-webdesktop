@@ -164,7 +164,6 @@ def format_rate_limit_display(state: RateLimitState) -> str:
         freshness = f"{_fmt_seconds(age)} ago"
 
     provider_label = state.provider.title() if state.provider else "Provider"
-
     labeled = [
         ("Requests/min", state.requests_min),
         ("Requests/hr", state.requests_hour),
@@ -175,16 +174,13 @@ def format_rate_limit_display(state: RateLimitState) -> str:
     lines += [_bucket_line(label, bucket) for label, bucket in labeled[:2]]
     lines += [""] + [_bucket_line(label, bucket) for label, bucket in labeled[2:]]
 
-    warnings = []
-    for label, bucket in labeled:
-        if bucket.limit > 0 and bucket.usage_pct >= 80:
-            reset = _fmt_seconds(bucket.remaining_seconds_now)
-            warnings.append(f"  ⚠ {label.lower()} at {bucket.usage_pct:.0f}% — resets in {reset}")
-
+    warnings = [
+        f"  ⚠ {label.lower()} at {bucket.usage_pct:.0f}% — resets in {_fmt_seconds(bucket.remaining_seconds_now)}"
+        for label, bucket in labeled
+        if bucket.limit > 0 and bucket.usage_pct >= 80
+    ]
     if warnings:
-        lines.append("")
-        lines.extend(warnings)
-
+        lines += [""] + warnings
     return "\n".join(lines)
 
 
