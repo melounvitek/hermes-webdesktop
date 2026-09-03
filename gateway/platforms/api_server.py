@@ -2202,55 +2202,35 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return model, session_override, request_model, request_provider
 
     def _create_agent(
-        self,
-        ephemeral_system_prompt: Optional[str] = None,
-        session_id: Optional[str] = None,
-        stream_delta_callback=None,
-        tool_progress_callback=None,
-        tool_start_callback=None,
-        tool_complete_callback=None,
-        gateway_session_key: Optional[str] = None,
-        requested_model: Optional[str] = None,
-        requested_provider: Optional[str] = None,
-        model_options: Optional[Dict[str, Any]] = None,
-        route: Optional[Dict[str, Any]] = None,
-        session_model: Optional[str] = None,
-        confirmed_runtime_lock: bool = False,
+        self, ephemeral_system_prompt: Optional[str] = None, session_id: Optional[str] = None,
+        stream_delta_callback=None, tool_progress_callback=None, tool_start_callback=None,
+        tool_complete_callback=None, gateway_session_key: Optional[str] = None,
+        requested_model: Optional[str] = None, requested_provider: Optional[str] = None,
+        model_options: Optional[Dict[str, Any]] = None, route: Optional[Dict[str, Any]] = None,
+        session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[Dict[str, Any]] = None,
         room_execution_policy: Optional[Dict[str, Any]] = None) -> Any:
-        """Create an AIAgent using the gateway's runtime config + platform toolsets.
+        """Create an AIAgent from the gateway runtime config + platform toolsets.
 
-        ``gateway_session_key`` (X-Hermes-Session-Key) persists across
-        transcripts for long-term memory scoping, unlike ``session_id``.
-        ``route`` (model_routes alias) and ``session_model`` (raw model on the
-        session row) are mutually exclusive inputs; ``confirmed_runtime_lock``
-        beats the session ``/model`` override, disables the fallback chain and
-        fails closed. See ``_select_agent_runtime`` for the precedence chain.
+        ``gateway_session_key`` persists across transcripts (memory scope), unlike
+        ``session_id``. ``route`` and ``session_model`` are mutually exclusive;
+        ``confirmed_runtime_lock`` beats the session ``/model`` override, disables the
+        fallback chain and fails closed (see ``_select_agent_runtime``).
         """
         from run_agent import AIAgent
         from gateway.run import (
-            _checkpoint_agent_kwargs,
-            _current_max_iterations,
-            _resolve_runtime_agent_kwargs,
-            _resolve_gateway_model,
-            _load_gateway_config,
-            GatewayRunner)
+            _checkpoint_agent_kwargs, _current_max_iterations, _resolve_runtime_agent_kwargs,
+            _resolve_gateway_model, _load_gateway_config, GatewayRunner)
         from hermes_cli.tools_config import _get_platform_tools
-
-        # Catch RuntimeError ONLY around this call: it is the sole raiser for provider
-        # auth failure, and the typed subclass lets callers tell it apart from other
-        # RuntimeErrors in run_conversation().
+        # RuntimeError is caught ONLY around this call: it is the sole raiser for provider
+        # auth failure, and the typed subclass keeps run_conversation() errors distinct.
         try:
             runtime_kwargs = _resolve_runtime_agent_kwargs()
         except RuntimeError as exc:
             raise _ProviderAuthResolutionError(str(exc)) from exc
-        model = _resolve_gateway_model()
-
-        # A fallback-provider runtime carries its own ``model``; pop it so it overrides
-        # the config model instead of colliding with the ``**runtime_kwargs`` spread.
-        runtime_model = runtime_kwargs.pop("model", None)
-        if runtime_model:
-            model = runtime_model
+        # A fallback-provider runtime carries its own ``model``; pop it so it overrides the
+        # config model instead of colliding with the ``**runtime_kwargs`` spread.
+        model = runtime_kwargs.pop("model", None) or _resolve_gateway_model()
         request_reasoning_config = _request_reasoning_config(model_options)
         request_service_tier = _request_service_tier(model_options)
         model, session_override, request_model, request_provider = self._select_agent_runtime(
@@ -2266,18 +2246,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             policy = RoomExecutionPolicy.from_mapping(room_execution_policy or {})
             enabled_toolsets = list(policy.enabled_toolsets)
             max_iterations = policy.max_iterations
-
-        # Load fallback provider chain so the API server platform has the
-        # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
-        fallback_model = (None if confirmed_runtime_lock else GatewayRunner._load_fallback_model())
-
-        # Resolve reasoning against the model that will actually run (per-model
-        # reasoning_overrides key off it), so only after the precedence chain settles.
-        # An explicit per-request reasoning parameter still wins over config.
-        reasoning_config = (
-            request_reasoning_config
-            if request_reasoning_config is not None
-            else GatewayRunner._load_reasoning_config(model))
+        # Reasoning resolves against the model that will actually run (per-model overrides key
+        # off it), so only after the precedence chain settles; an explicit request wins.
+        if request_reasoning_config is None:
+            request_reasoning_config = GatewayRunner._load_reasoning_config(model)
         agent_kwargs = {
             "model": model,
             **runtime_kwargs,
@@ -2294,56 +2266,44 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "tool_start_callback": tool_start_callback,
             "tool_complete_callback": tool_complete_callback,
             "session_db": self._ensure_session_db(),
-            "fallback_model": fallback_model,
-            "reasoning_config": reasoning_config,
+            # Same fallback provider chain as Telegram/Discord/Slack.
+            "fallback_model": None if confirmed_runtime_lock else GatewayRunner._load_fallback_model(),
+            "reasoning_config": request_reasoning_config,
             "gateway_session_key": gateway_session_key}
         if request_service_tier is not _REQUEST_OPTION_MISSING:
             agent_kwargs["service_tier"] = request_service_tier
         agent = AIAgent(**agent_kwargs)
+        if confirmed_runtime_lock:
+            route_source = "session_model_lock"
+        elif session_override:
+            route_source = "session_model_override"
+        else:
+            route_source = "raw_request" if route or request_model or request_provider else "global"
         agent._hermes_api_runtime = {
             "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
             "model": getattr(agent, "model", None) or model,
-            "route_source": (
-                "session_model_lock"
-                if confirmed_runtime_lock
-                else "session_model_override"
-                if session_override
-                else "raw_request"
-                if route or request_model or request_provider
-                else "global")}
+            "route_source": route_source}
         return agent
 
-    # ------------------------------------------------------------------
-    # HTTP Handlers
-    # ------------------------------------------------------------------
+    # -- HTTP handlers ----------------------------------------------------------------
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
         """GET /health — simple health check."""
-        return web.json_response(
-            {"status": "ok", "platform": "hermes-agent", "version": _hermes_version()})
+        return web.json_response({"status": "ok", "platform": "hermes-agent", "version": _hermes_version()})
 
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
-        """GET /health/detailed — rich status for cross-container dashboard probing.
-
-        Returns gateway state, connected platforms, PID, and uptime so the
-        dashboard can display full status without needing a shared PID file or
-        /proc access.  Requires the same Bearer auth as other API routes.
-        """
+        """GET /health/detailed — gateway state, platforms, PID for dashboard probing (Bearer auth)."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
         from gateway.status import (
-            derive_gateway_busy,
-            derive_gateway_drainable,
-            normalize_updated_at,
-            parse_active_agents,
+            derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents,
             read_runtime_status)
         runtime = read_runtime_status() or {}
         gw_state = runtime.get("gateway_state")
         gw_active = parse_active_agents(runtime.get("active_agents", 0))
-        # This endpoint is served BY the gateway process, so it is by definition
-        # alive — gateway_running is True. Derive busy/drainable from the same
-        # shared contract /api/status uses so the two surfaces never disagree.
+        # Served BY the gateway process, so gateway_running is True by definition; busy/
+        # drainable use the same shared contract as /api/status so the two never disagree.
         active_api_runs, process_depth, active_delegations = self._readiness_work_counts()
         from gateway.run import _resolve_gateway_model
         readiness = collect_runtime_readiness(
@@ -2364,59 +2324,32 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "gateway_drainable": derive_gateway_drainable(
                 gateway_running=True, gateway_state=gw_state),
             "exit_reason": runtime.get("exit_reason"),
-            # Contract: updated_at is RFC3339 string | null, never a number —
-            # the state file may carry legacy epoch floats or hand-edited junk.
+            # Contract: RFC3339 string | null, never a number (legacy epoch floats exist).
             "updated_at": normalize_updated_at(runtime.get("updated_at")),
             "pid": os.getpid()})
 
     async def _handle_models(self, request: "web.Request") -> "web.Response":
-        """GET /v1/models — list hermes-agent and any configured model_routes aliases.
-
-        Under ``/p/<profile>/v1/models`` (multiplex on) the advertised primary
-        model id follows that profile's name/config, not the default adapter's
-        cached ``_model_name``.
-        """
+        """GET /v1/models — hermes-agent plus configured model_routes aliases (alias + resolved
+        model only, never credentials). Under /p/<profile>/ the primary id follows that profile."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
         now = int(time.time())
-        # Middleware already entered the profile runtime scope when a /p/
-        # prefix was present, so get_active_profile_name() resolves correctly.
-        model_name = (
-            self._resolve_model_name("") if _api_request_profile.get() else self._model_name)
-        models = [
-            {
-                "id": model_name,
-                "object": "model",
-                "created": now,
-                "owned_by": "hermes",
-                "permission": [],
-                "root": model_name,
-                "parent": None}]
-        # Expose configured model route aliases so clients can discover them.
-        # Only the alias and resolved model name are exposed — never provider
-        # credentials.
-        for alias, route_cfg in self._model_routes.items():
-            if alias == model_name:
-                continue  # already listed above
-            models.append({
-                "id": alias,
-                "object": "model",
-                "created": now,
-                "owned_by": "hermes",
-                "permission": [],
-                "root": route_cfg.get("model", alias),
-                "parent": model_name})
+        # The middleware already entered the profile scope, so get_active_profile_name() resolves.
+        model_name = self._resolve_model_name("") if _api_request_profile.get() else self._model_name
+
+        def _model(mid: str, root: str, parent) -> Dict[str, Any]:
+            return {"id": mid, "object": "model", "created": now, "owned_by": "hermes", "permission": [],
+                    "root": root, "parent": parent}
+        models = [_model(model_name, model_name, None)]
+        models.extend(
+            _model(alias, route_cfg.get("model", alias), model_name)
+            for alias, route_cfg in self._model_routes.items() if alias != model_name)
         return web.json_response({"object": "list", "data": models})
 
     async def _handle_model_options(self, request: "web.Request") -> "web.Response":
-        """GET /api/model/options — return Hermes provider/model inventory.
-
-        This mirrors the dashboard/TUI model picker inventory endpoint so
-        external clients using the API server can sync to the user's configured
-        Hermes provider catalog instead of scraping the single OpenAI-compatible
-        `/v1/models` alias.
-        """
+        """GET /api/model/options — the dashboard/TUI model-picker inventory, so external clients
+        can sync to the configured provider catalog instead of scraping /v1/models."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -2427,9 +2360,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             def _build_payload() -> Dict[str, Any]:
                 return build_model_options_payload(
                     load_picker_context(), include_unconfigured=True, refresh=refresh)
-
-            # Inventory enrichment can fetch pricing and provider catalogs.
-            # Keep all synchronous picker work off aiohttp's event loop.
+            # Enrichment can fetch pricing/provider catalogs: keep it off the event loop.
             payload = await asyncio.to_thread(_build_payload)
             return web.json_response(payload)
         except Exception:
@@ -2437,12 +2368,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response("Failed to list model options.", 500, code="model_options_failed")
 
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
-        """GET /v1/capabilities — advertise the stable API surface.
-
-        External UIs and orchestrators use this endpoint to discover the API
-        server's plugin-safe contract without scraping docs or assuming that
-        every Hermes version exposes the same endpoints.
-        """
+        """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -2468,8 +2394,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
                 **_STATIC_FEATURE_FLAGS,
                 "cors": bool(self._cors_origins),
-                # Always advertised for feature-detection; disabled until
-                # browser.extension_control.enabled is set.
+                # Always advertised for feature-detection; enabled follows config.
                 "browser_extension_control": {
                     "enabled": self._browser_control_enabled(),
                     "protocol_version": _BROWSER_CONTROL_PROTOCOL_VERSION,
@@ -2491,33 +2416,20 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "endpoints": {name: {"method": m, "path": p} for name, (m, p) in _CAPABILITY_ENDPOINTS},
         })
 
-    # ------------------------------------------------------------------
-    # Browser-extension control (authenticated local/VPS API)
-    # ------------------------------------------------------------------
+    # -- Browser-extension control (authenticated local/VPS API) ----------------------
 
     async def _handle_browser_control_register(self, request: "web.Request") -> "web.Response":
-        """POST /v1/browser-control/register — mint a controller ticket.
+        """POST /v1/browser-control/register — mint a short-lived single-use controller ticket.
 
-        The extension controller proves itself with the same Bearer API key
-        every other API-server client uses, then receives a short-lived,
-        single-use ticket to open the controller WebSocket. Identity is NOT
-        taken from the request body: the scope principal is derived
-        server-side from the authenticated key/profile as a non-reversible
-        digest, and the capability set is filtered to the shared browser
-        action allowlist, so a spoofed
-        ``principal_id`` or inflated capability list in the payload is
-        ignored rather than honored. The named session must already exist in
-        the active profile's server-owned SessionDB before a ticket is minted.
-
-        Status ladder: 404 when the feature is disabled, 403 when no API key
-        is configured at all (registration can never be authenticated), 401
-        for a missing/invalid Bearer token, 201 on success.
+        Identity is NOT taken from the body: the scope principal is a server-derived digest of
+        the authenticated key/profile and capabilities are filtered to the shared allowlist,
+        so a spoofed ``principal_id`` or inflated capability list is ignored. The named
+        session must already exist in the profile's SessionDB. Status ladder: 404 feature
+        disabled, 403 no API key configured, 401 bad Bearer, 201 success.
         """
         if not self._browser_control_enabled():
             return _error_response(
-                "Browser control is not enabled on this server.",
-                404,
-                code="browser_control_disabled")
+                "Browser control is not enabled on this server.", 404, code="browser_control_disabled")
         if not self._api_key:
             logger.warning(
                 "browser-control registration rejected: no API key configured; "
@@ -2537,43 +2449,33 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response("Request body must be a JSON object.", 400)
         if not browser_control_protocol_supported(payload.get("protocol_version")):
             return _error_response(
-                "Unsupported browser-control protocol version.",
-                400,
-                code="browser_control_protocol_unsupported")
+                "Unsupported browser-control protocol version.", 400, code="browser_control_protocol_unsupported")
         controller_id = str(payload.get("controller_id") or "").strip()
         browser_profile_id = str(payload.get("browser_profile_id") or "").strip()
         session_id = str(payload.get("session_id") or "").strip()
         if not controller_id or not browser_profile_id or not session_id:
             return _error_response(
-                "controller_id, browser_profile_id, and session_id are required.",
-                400,
+                "controller_id, browser_profile_id, and session_id are required.", 400,
                 code="browser_control_invalid_registration")
         db = await self._ensure_session_db_async()
         if db is None:
             return _error_response("Session database unavailable.", 503, code="session_db_unavailable")
-        session = await asyncio.to_thread(db.get_session, session_id)
-        if not session:
+        if not await asyncio.to_thread(db.get_session, session_id):
             return _error_response(
                 "Browser control may register only for an existing server session.", 403,
                 err_type="gateway_auth_error", code="browser_control_session_forbidden",
             )
         profile = _api_request_profile.get() or "default"
-        capabilities = filter_browser_control_capabilities(
-            payload.get("capabilities"), developer_mode=self._browser_control_developer_mode())
+        developer_mode = self._browser_control_developer_mode()
+        capabilities = filter_browser_control_capabilities(payload.get("capabilities"), developer_mode=developer_mode)
         if not capabilities:
             return _error_response(
-                "At least one permitted browser-control capability is required.",
-                400,
+                "At least one permitted browser-control capability is required.", 400,
                 code="browser_control_no_capabilities")
-        # Developer capabilities may only be negotiated while the broker
-        # itself runs in Developer Mode (fail closed even if a registration
-        # somehow slipped through the filter).
-        if (
-            capabilities & BROWSER_CONTROL_DEVELOPER_CAPABILITIES
-            and not self._browser_control_developer_mode()):
+        # Developer capabilities need broker Developer Mode (fail closed past the filter).
+        if capabilities & BROWSER_CONTROL_DEVELOPER_CAPABILITIES and not developer_mode:
             return _error_response(
-                "Developer Mode is required for browser_evaluate and raw CDP.",
-                403,
+                "Developer Mode is required for browser_evaluate and raw CDP.", 403,
                 code="browser_control_developer_mode_required")
         scope = ControllerScope(
             principal_id=self._derive_browser_control_principal(profile), profile_id=profile,
@@ -2588,9 +2490,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             {
                 "protocol_version": _BROWSER_CONTROL_PROTOCOL_VERSION,
                 "ticket": ticket.value,
-                # Best-effort wall-clock projection for clients; the broker
-                # enforces expiry on its monotonic clock, so after an NTP
-                # step trust ticket_expires_in_seconds, not this absolute.
+                # Best-effort wall-clock projection; the broker enforces expiry on its monotonic
+                # clock, so after an NTP step trust ticket_expires_in_seconds.
                 "ticket_expires_at": time.time() + ticket_ttl,
                 "ticket_expires_in_seconds": ticket_ttl,
                 "ws_path": "/v1/browser-control/ws",
@@ -2607,35 +2508,22 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _handle_browser_control_ws(self, request: "web.Request") -> "web.WebSocketResponse":
         """GET /v1/browser-control/ws — controller WebSocket (one-shot ticket).
 
-        A ticket-bearing ``Sec-WebSocket-Protocol`` token is exchanged exactly
-        once for the identity scope minted at registration; query-string,
-        unknown, already-consumed, or expired tickets are rejected with 401
-        before upgrade. The socket then attaches to the shared broker under
-        that scope, forwards broker command/cancel frames onto the aiohttp loop
-        thread-safely, and accepts controller result/cancel frames. Completion
-        is exact-scope checked, and owner-aware teardown cannot detach a newer
-        replacement controller generation.
+        The ticket rides in ``Sec-WebSocket-Protocol`` (never the query string: request targets
+        land in access logs) and is exchanged exactly once for the registration scope; bad,
+        consumed or expired tickets 401 before upgrade. The socket attaches to the broker under
+        that scope; owner-aware teardown cannot detach a newer controller generation.
         """
-        # Re-check at upgrade time so disabling the feature immediately closes
-        # the admission gate without consuming still-live one-shot tickets.
+        # Re-checked at upgrade so disabling the feature closes the gate immediately.
         if not self._browser_control_enabled():
             raise web.HTTPNotFound()
-
-        # Credentials in the request target are liable to appear in access
-        # logs. Accept the one-shot ticket only as a WebSocket subprotocol;
-        # reject the former query-string shape without consuming it.
         if request.query.get("ticket"):
             raise web.HTTPUnauthorized()
         requested_protocols = [
-            value.strip()
-            for value in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
+            value.strip() for value in request.headers.get("Sec-WebSocket-Protocol", "").split(",")
             if value.strip()]
         ticket_protocols = [
-            value
-            for value in requested_protocols
-            if value.startswith(_BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX)]
-        if (
-            _BROWSER_CONTROL_WS_PROTOCOL not in requested_protocols or len(ticket_protocols) != 1):
+            value for value in requested_protocols if value.startswith(_BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX)]
+        if _BROWSER_CONTROL_WS_PROTOCOL not in requested_protocols or len(ticket_protocols) != 1:
             raise web.HTTPUnauthorized()
         ticket_value = ticket_protocols[0][len(_BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX) :]
         if not ticket_value:
@@ -2675,30 +2563,24 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _handle_browser_control_frame(
         self, scope: "ControllerScope", frame: dict, *, owner: Any = None) -> Optional[dict]:
-        """Apply one controller→broker frame with exact-scope checks."""
+        """Apply one controller->broker frame with exact-scope checks."""
         method = frame.get("method")
         params = frame.get("params")
-        if not isinstance(params, dict):
-            return
-        if owner is None or not self._browser_control_broker.is_owner(scope, owner):
+        if not isinstance(params, dict) or owner is None or not self._browser_control_broker.is_owner(scope, owner):
             return
         if method == "browser.controller.heartbeat":
             nonce = str(params.get("nonce") or "").strip()
             if not nonce or len(nonce) > 128:
                 return
-            # Echo only the caller's opaque nonce on the already authenticated,
-            # exact-scope controller socket. This proves the socket path is live
-            # without granting a new capability or touching broker commands.
-            return {
-                "method": "browser.controller.heartbeat", "params": {"nonce": nonce, "ok": True}}
+            # Echoing the opaque nonce proves the socket is live without granting anything.
+            return {"method": "browser.controller.heartbeat", "params": {"nonce": nonce, "ok": True}}
         if method == "browser.controller.detach":
             self._browser_control_broker.detach(scope, owner=owner, notify_controller=False)
             return {"method": "browser.controller.detach", "params": {"ok": True}}
         if method == "browser.controller.result":
             command_id = params.get("command_id")
             if isinstance(command_id, str) and command_id:
-                # Broker resolves only the pending command whose scope equals
-                # this socket's scope; a stranger's command id is a no-op.
+                # The broker resolves only a pending command with this socket's exact scope.
                 ok = params.get("ok") is True
                 self._browser_control_broker.complete(
                     command_id, scope=scope, ok=ok,
@@ -2710,12 +2592,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 self._browser_control_broker.cancel(scope, tool_call_id=tool_call_id)
 
     def _browser_control_enabled(self) -> bool:
-        """Feature flag; False unless explicitly enabled.
-
-        Reads ``browser.extension_control.enabled`` from the global config
-        (defaults to False). Tests monkeypatch this method directly to force
-        the feature on/off without touching config.
-        """
+        """``browser.extension_control.enabled`` (default False); tests monkeypatch this."""
         try:
             from gateway.browser_control_broker import browser_control_enabled as _flag
             return _flag()
@@ -2723,26 +2600,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return False
 
     def _derive_browser_control_principal(self, profile: str) -> str:
-        """Server-derived controller principal (non-reversible digest).
-
-        The principal is bound to the credential that authenticated the
-        registration request — the expected API key for the request's
-        profile — so a client cannot impersonate another controller by
-        echoing an id in the registration body.
-        """
+        """Non-reversible principal digest bound to the profile's expected API key, so a client
+        cannot impersonate another controller by echoing an id."""
         key = self._expected_api_key() or self._api_key or ""
         digest = hashlib.sha256(f"{profile}\x00{key}".encode("utf-8")).hexdigest()
         return f"principal:{profile}:{digest[:32]}"
 
     def _browser_control_transport_family(self, request: "web.Request") -> str:
-        """Local vs remote API family, decided by the loopback peer.
-
-        A controller speaking to a localhost listener is in the same trust
-        domain as the host and gets the ``local-api`` family; anything else
-        is ``remote-api``. The broker treats the family as part of exact
-        identity, so a remote controller can never satisfy a local-only
-        dispatch (and vice versa).
-        """
+        """``local-api`` for a loopback peer, else ``remote-api``; the broker treats the family as
+        part of exact identity, so a remote controller never satisfies a local-only dispatch."""
         host = None
         try:
             transport = request.transport
@@ -2754,36 +2620,23 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     host = peer
         except Exception:
             host = None
-        if host in ("127.0.0.1", "::1", "localhost"):
-            return "local-api"
-        return "remote-api"
+        return "local-api" if host in ("127.0.0.1", "::1", "localhost") else "remote-api"
 
     def _browser_control_developer_mode(self) -> bool:
-        """Developer Mode flag; False unless explicitly enabled.
-
-        Mirrors the broker's gate for ``browser_evaluate`` and raw CDP.
-        Tests monkeypatch this method directly to force the gate on/off.
-        """
+        """Broker Developer Mode gate for ``browser_evaluate`` / raw CDP; tests monkeypatch this."""
         try:
             return browser_control_developer_mode()
         except Exception:
             return False
 
-    # ------------------------------------------------------------------
-    # One-shot artifact transport (Phase 8 Task 29)
-    # ------------------------------------------------------------------
+    # -- One-shot artifact transport --------------------------------------------------
 
     def _artifact_store_for(self, profile: str) -> ArtifactStore:
-        """Return the profile-scoped artifact store, creating it lazily.
+        """Profile-scoped artifact store, created lazily under the profile's data dir.
 
-        The store root lives under the profile's data directory
-        (``<HERMES_HOME>/plugin-data/.../artifacts``-style controlled root),
-        so artifacts never escape the profile boundary.  Stores are cached
-        BY RESOLVED PROFILE — on a multiplex listener, profile A touching
-        the artifact route first must never pin profile B to A's physical
-        root (same frozen-handle class as the per-profile session-storage
-        fix in #88734).  The root itself is created on first use; TTL
-        cleanup runs on every store/load/prune.
+        Cached BY RESOLVED PROFILE: on a multiplex listener, profile A touching the route
+        first must never pin profile B to A's physical root. TTL cleanup runs on every
+        store/load/prune.
         """
         profile_key = str(profile or "default")
         store = self._browser_control_artifacts.get(profile_key)
@@ -2791,12 +2644,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return store
         try:
             from hermes_cli.profiles import get_profile_dir
-            profile_root = get_profile_dir(profile or "default")
-            root = Path(profile_root) / "artifacts" / "browser-control"
+            root = Path(get_profile_dir(profile or "default")) / "artifacts" / "browser-control"
         except Exception:
-            # Unscoped fallback used only when profile resolution is
-            # unavailable (tests/manual wiring): keep the controlled root
-            # under the Hermes home.
+            # Unscoped fallback (tests/manual wiring): controlled root under the Hermes home.
             try:
                 from hermes_state import get_hermes_home
                 root = Path(get_hermes_home()) / "artifacts" / "browser-control"
@@ -2804,12 +2654,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 raise ArtifactError("no artifact root is resolvable") from None
         store = ArtifactStore(
             root, ttl_seconds=DEFAULT_ARTIFACT_TTL_SECONDS, max_bytes=DEFAULT_MAX_ARTIFACT_BYTES,
-            allowed_mime_types=DEFAULT_ALLOWED_MIME_TYPES,
-        )
+            allowed_mime_types=DEFAULT_ALLOWED_MIME_TYPES)
         store.prune_expired()
         self._browser_control_artifacts[profile_key] = store
-        # Share the store with the broker so artifact actions dispatched to a
-        # controller validate their artifact reference against the same
+        # Shared with the broker so dispatched artifact actions validate against the same
         # profile's controlled root ("approved artifact id only").
         try:
             self._browser_control_broker.attach_artifact_store(store, profile_id=profile_key)
@@ -2820,15 +2668,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _artifact_limiter(self) -> ArtifactRateLimiter:
         """Return the per-principal artifact route limiter (lazy)."""
         if self._browser_control_artifact_limiter is None:
-            self._browser_control_artifact_limiter = ArtifactRateLimiter(
-                window_seconds=60.0, max_requests=30)
+            self._browser_control_artifact_limiter = ArtifactRateLimiter(window_seconds=60.0, max_requests=30)
         return self._browser_control_artifact_limiter
 
     def _inject_browser_control_artifacts(
-        self,
-        store: Optional[ArtifactStore],
-        limiter: Optional[ArtifactRateLimiter] = None,
-        *,
+        self, store: Optional[ArtifactStore], limiter: Optional[ArtifactRateLimiter] = None, *,
         profile: str = "default") -> None:
         """Inject a store/limiter (tests, diagnostics)."""
         if store is None:
@@ -2846,14 +2690,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """
         if check_enabled and not self._browser_control_enabled():
             return None, _error_response(
-                "Browser control is not enabled on this server.",
-                404,
-                code="browser_control_disabled")
+                "Browser control is not enabled on this server.", 404, code="browser_control_disabled")
         if not self._api_key:
             return None, _error_response(
                 "Artifact transport requires a configured API key.", 403,
-                err_type="gateway_auth_error", code="browser_control_auth_required",
-            )
+                err_type="gateway_auth_error", code="browser_control_auth_required")
         auth_err = self._check_auth(request)
         if auth_err:
             return None, auth_err
@@ -2862,23 +2703,16 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         if not self._artifact_limiter().allow(f"{action}:{principal}"):
             return None, _error_response(
                 f"Artifact {action} rate limit exceeded.", 429, err_type="rate_limit_error",
-                code="rate_limit_exceeded", headers={"Retry-After": "1"},
-            )
+                code="rate_limit_exceeded", headers={"Retry-After": "1"})
         return (profile, principal), None
 
     async def _handle_artifact_upload(self, request: "web.Request") -> "web.Response":
-        """POST /v1/artifacts/upload — one-shot bounded artifact upload.
+        """POST /v1/artifacts/upload — one-shot bounded upload.
 
-        Authenticated with the same Bearer API key as every other API-server
-        route and gated on browser.extension_control.enabled.  The body is
-        read as raw bytes with an exact size cap; ``Content-Type`` must name
-        an allowed MIME type and ``X-Artifact-Filename`` supplies the
-        display-only name.  On success returns a provenance receipt carrying
-        the server-minted artifact id, SHA-256, size, TTL, and download path
-        — never a filesystem path.
-
-        Status ladder: 404 feature disabled, 403 no API key configured, 401
-        bad/missing Bearer, 429 rate limited, 413 too large, 415 MIME
+        Raw body with an exact size cap; ``Content-Type`` must be an allowed MIME type,
+        ``X-Artifact-Filename`` is display-only. Returns a provenance receipt (server-minted
+        id, SHA-256, size, TTL, download path — never a filesystem path). Status ladder: 404
+        disabled, 403 no API key, 401 bad Bearer, 429 rate limited, 413 too large, 415 MIME
         rejected, 400 missing filename/scope, 201 success.
         """
         ctx, err = self._artifact_route_prelude(request, "upload")
@@ -2889,15 +2723,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         filename = request.headers.get("X-Artifact-Filename", "").strip()
         if not filename:
             return _error_response("X-Artifact-Filename header is required.", 400)
-
-        # Bounded read: cap at the store's byte cap + 1 so an oversize body
-        # is detected and rejected without buffering unbounded data.
         try:
             store = self._artifact_store_for(profile)
         except ArtifactError as exc:
             return _error_response(str(exc), 500, code="artifact_rejected")
         max_bytes = store.max_bytes
         try:
+            # Read cap + 1 so an oversize body is rejected without unbounded buffering.
             data = await request.content.read(max_bytes + 1)
         except Exception:
             return _error_response("Failed to read request body.", 400)
@@ -2905,35 +2737,23 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(f"Artifact exceeds the {max_bytes}-byte cap.", 413, code="artifact_too_large")
         if not data:
             return _error_response("Empty artifact body.", 400)
+        scope = _ArtifactScopeFacade(principal, transport_family=self._browser_control_transport_family(request))
         try:
-            receipt = store.store(
-                data,
-                filename=filename,
-                content_type=content_type,
-                scope=_ArtifactScopeFacade(
-                    principal, transport_family=self._browser_control_transport_family(request)))
+            receipt = store.store(data, filename=filename, content_type=content_type, scope=scope)
         except ArtifactTooLarge as exc:
             return _error_response(str(exc), 413, code="artifact_too_large")
         except ArtifactError as exc:
-            code = "artifact_mime_rejected" if "allowlist" in str(exc) else "artifact_rejected"
-            status = 415 if "allowlist" in str(exc) else 400
-            return _error_response(str(exc), status, code=code)
+            if "allowlist" in str(exc):
+                return _error_response(str(exc), 415, code="artifact_mime_rejected")
+            return _error_response(str(exc), 400, code="artifact_rejected")
         return web.json_response(
-            receipt.to_dict(download_path=f"/v1/artifacts/download/{receipt.artifact_id}"),
-            status=201)
+            receipt.to_dict(download_path=f"/v1/artifacts/download/{receipt.artifact_id}"), status=201)
 
     async def _handle_artifact_download(self, request: "web.Request") -> "web.Response":
-        """GET /v1/artifacts/download/{artifact_id} — one-shot download.
-
-        Authenticated and gated identically to upload.  The artifact is
-        consumed on success: the second download of the same id returns 404.
-        The response streams the verified bytes with the recorded content
-        type and a ``X-Artifact-Sha256`` header for client-side validation.
-
-        Status ladder: 404 feature disabled / unknown artifact, 403 no API
-        key, 401 bad/missing Bearer, 429 rate limited, 410 expired, 400
-        invalid id / scope mismatch, 200 success.
-        """
+        """GET /v1/artifacts/download/{artifact_id} — one-shot download (consumed on success;
+        a second download 404s). Streams the verified bytes with ``X-Artifact-Sha256``. Status
+        ladder: 404 disabled/unknown, 403 no API key, 401 bad Bearer, 429 rate limited, 410
+        expired, 400 invalid id/scope mismatch, 200 success."""
         if not self._browser_control_enabled():
             raise web.HTTPNotFound()
         ctx, err = self._artifact_route_prelude(request, "download", check_enabled=False)
@@ -2941,12 +2761,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return err
         profile, principal = ctx
         artifact_id = request.match_info.get("artifact_id", "")
+        scope = _ArtifactScopeFacade(principal, transport_family=self._browser_control_transport_family(request))
         try:
-            store = self._artifact_store_for(profile)
-            data, receipt = store.load(
-                artifact_id,
-                scope=_ArtifactScopeFacade(
-                    principal, transport_family=self._browser_control_transport_family(request)))
+            data, receipt = self._artifact_store_for(profile).load(artifact_id, scope=scope)
         except ArtifactError as exc:
             message = str(exc)
             if "expired" in message:
@@ -2954,26 +2771,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             status = 400 if "scope" in message or "invalid" in message else 404
             return _error_response(message, status, code="artifact_not_found")
         return web.Response(
-            body=data,
-            status=200,
-            content_type=receipt.content_type,
+            body=data, status=200, content_type=receipt.content_type,
             headers={
                 "X-Artifact-Sha256": receipt.sha256,
                 "X-Artifact-Id": receipt.artifact_id,
                 "Content-Disposition": f'attachment; filename="{receipt.filename}"'})
 
     async def _handle_skills(self, request: "web.Request") -> "web.Response":
-        """GET /v1/skills — list installed skills visible to the API-server agent.
-
-        Read-only listing intended for external clients that need to know
-        which skills are available without sending a chat message and asking
-        the model. Mirrors what the gateway/CLI surfaces through
-        ``/skills list``, but as a deterministic JSON payload.
-
-        Returns the same skill metadata (name, description, category) the
-        skills hub uses internally. Disabled skills are excluded so the
-        listing matches what the agent actually loads.
-        """
+        """GET /v1/skills — deterministic JSON listing of installed skills (name, description,
+        category), the same set ``/skills list`` shows."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
@@ -2986,28 +2792,19 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         return web.json_response({"object": "list", "data": skills})
 
     async def _handle_toolsets(self, request: "web.Request") -> "web.Response":
-        """GET /v1/toolsets — list toolsets and their resolved tools.
-
-        Returns the toolset surface the api_server platform actually exposes
-        to its agent: each toolset's enabled/configured state plus the
-        concrete tool names it expands to. This is the deterministic
-        equivalent of what a client would otherwise have to recover by
-        asking the model what tools it can call.
-        """
+        """GET /v1/toolsets — each toolset the api_server agent exposes: enabled/configured state
+        plus the concrete tool names it expands to."""
         auth_err = self._check_auth(request)
         if auth_err:
             return auth_err
         try:
             from hermes_cli.config import load_config
             from hermes_cli.tools_config import (
-                _get_effective_configurable_toolsets,
-                _get_platform_tools,
-                _toolset_has_keys,
+                _get_effective_configurable_toolsets, _get_platform_tools, _toolset_has_keys,
                 get_nous_subscription_features)
             from toolsets import resolve_toolset
             config = load_config()
-            enabled_toolsets = _get_platform_tools(
-                config, "api_server", include_default_mcp_servers=False)
+            enabled_toolsets = _get_platform_tools(config, "api_server", include_default_mcp_servers=False)
             features = get_nous_subscription_features(config)
             data: List[Dict[str, Any]] = []
             for name, label, desc in _get_effective_configurable_toolsets():
@@ -3015,12 +2812,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     tools = sorted(set(resolve_toolset(name)))
                 except Exception:
                     tools = []
-                is_enabled = name in enabled_toolsets
                 data.append({
                     "name": name,
                     "label": label,
                     "description": desc,
-                    "enabled": is_enabled,
+                    "enabled": name in enabled_toolsets,
                     "configured": _toolset_has_keys(name, config, features=features),
                     "tools": tools})
         except Exception:
