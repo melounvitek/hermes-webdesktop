@@ -31,14 +31,9 @@ if TYPE_CHECKING:  # pragma: no cover
 
 logger = logging.getLogger("hermes_cli.plugins")
 
-
 _NS_PARENT = "hermes_plugins"
-
-
 _MODULE_NAMESPACE_LOCK = threading.RLock()
-
-
-_BARE_MODULE_SCOPE: Dict[str, str] = {}
+_BARE_MODULE_SCOPE: Dict[str, str] = {}  # bare module name -> owning scope_key
 
 
 def _evict_modules(module_name: str) -> None:
@@ -69,15 +64,14 @@ def _plugin_home_scope(home: Path):
 
 
 class PluginLoaderMixin:
-    def _platform_name_from_manifest(self, manifest: PluginManifest) -> str:
+    @staticmethod
+    def _platform_name_from_manifest(manifest: PluginManifest) -> str:
         """Derive the platform name without importing the adapter: strip a trailing ``-platform``
         from the manifest name, else the directory basename (the bundled convention)."""
         name = manifest.name or ""
         if name.endswith("-platform"):
             return name[: -len("-platform")]
-        if manifest.path:
-            return Path(manifest.path).name
-        return name
+        return Path(manifest.path).name if manifest.path else name
 
     @_serialized_replacement
     def _register_deferred_platform(self, manifest: PluginManifest) -> None:
@@ -87,14 +81,10 @@ class PluginLoaderMixin:
         from hermes_cli.plugins import LoadedPlugin
         lookup_key = manifest_key(manifest)
         platform_name = self._platform_name_from_manifest(manifest)
-
-        loaded = LoadedPlugin(manifest=manifest, enabled=True)
-        loaded.deferred = True
+        loaded = LoadedPlugin(manifest=manifest, enabled=True, deferred=True)
         self._plugins[lookup_key] = loaded
-
         try:
             from gateway.platform_registry import platform_registry
-
             scope = self.scope_key
 
             def _loader(_manifest: PluginManifest = manifest) -> None:
@@ -126,55 +116,55 @@ class PluginLoaderMixin:
             )
             self._load_plugin(manifest)
             return
-
         self._register_deferred_platform_tools(manifest, loaded)
 
     def _register_deferred_platform_tools(
         self, manifest: PluginManifest, loaded: LoadedPlugin
     ) -> None:
-        """Register a deferred platform's *client* tools without its adapter.
-
-        Deferring the plugin would otherwise defer its outbound tools too, so in CLI/TUI processes
-        (which never materialize platforms) they would be missing from ``hermes tools`` and dropped
-        from ``platform_toolsets``. Opt-in is explicit via ``provides_tools``; tools live in a
-        ``tools`` submodule so ``__init__`` stays import-light.
-        """
+        """Register a deferred platform's *client* tools without its adapter. Deferring the plugin
+        would otherwise defer its outbound tools too, so CLI/TUI processes (which never materialize
+        platforms) would miss them in ``hermes tools`` / ``platform_toolsets``. Opt-in is explicit via
+        ``provides_tools``; tools live in a ``tools`` submodule so ``__init__`` stays import-light."""
         from hermes_cli.plugins import PluginContext, _PLUGINS_DEBUG
         if not manifest.provides_tools:
             return
-
         lookup_key = manifest_key(manifest)
+        declared = list(manifest.provides_tools)
         plugin_dir = Path(manifest.path) if manifest.path else None
         if plugin_dir is None or not (plugin_dir / "tools.py").is_file():
             # Declared but undeliverable — staying quiet reproduces the very symptom this fixes.
             logger.warning(
                 "Plugin '%s' declares provides_tools %s but has no tools.py; "
-                "those tools will not be available in CLI/TUI sessions.", lookup_key,
-                list(manifest.provides_tools),
+                "those tools will not be available in CLI/TUI sessions.", lookup_key, declared,
             )
             return
-
         before = set(self._plugin_tool_names)  # lets the failure path credit partial registrations
+
+        def _credit() -> List[str]:
+            """Attribute every tool registered since ``before`` to this plugin."""
+            registered = [t for t in self._plugin_tool_names if t not in before]
+            if registered:
+                loaded.tools_registered = registered
+                self._predeclared_tools[lookup_key] = registered
+            return registered
+
         try:
             module = self._load_directory_module(manifest)
             # Record the module even if nothing registers: the package body has run, so
             # materializing the adapter later must reuse it rather than execute it twice.
             loaded.module = module
             self._predeclared_modules[lookup_key] = module
-
-            tools_module = importlib.import_module(f"{module.__name__}.tools")
-            register_tools = getattr(tools_module, "register_tools", None)
+            register_tools = getattr(importlib.import_module(f"{module.__name__}.tools"),
+                                     "register_tools", None)
             if register_tools is None:
                 logger.warning(
                     "Plugin '%s' declares provides_tools %s but its tools.py "
                     "has no register_tools(ctx); those tools will not be "
-                    "available in CLI/TUI sessions.", lookup_key, list(manifest.provides_tools),
+                    "available in CLI/TUI sessions.", lookup_key, declared,
                 )
                 return
-
             register_tools(PluginContext(manifest, self))
             registered = [t for t in self._plugin_tool_names if t not in before]
-
             loaded.tools_registered = registered
             self._predeclared_tools[lookup_key] = registered
             logger.debug(
@@ -183,24 +173,20 @@ class PluginLoaderMixin:
             )
         except Exception as exc:
             # Tools registered before the raise are live: credit them or `hermes plugins list`
-            # under-reports (and _load_plugin's later diff would miss them too).
-            partial = [t for t in self._plugin_tool_names if t not in before]
-            if partial:
-                loaded.tools_registered = partial
-                self._predeclared_tools[lookup_key] = partial
-
-            # Never break discovery (the platform stays deferred), but a broken tools.py IS the
-            # symptom, so warn — and say where it failed, which is what the operator needs first.
-            declared = len(manifest.provides_tools)
+            # under-reports (and _load_plugin's later diff would miss them too). Never break
+            # discovery (the platform stays deferred), but a broken tools.py IS the symptom, so warn
+            # — and say where it failed, which is what the operator needs first.
+            partial = _credit()
+            total = len(declared)
             if not partial:
-                scope = f"before registering any of its {declared} declared tool(s)"
-            elif len(partial) >= declared:
-                scope = f"after registering all {declared} declared tool(s)"
+                scope = f"before registering any of its {total} declared tool(s)"
+            elif len(partial) >= total:
+                scope = f"after registering all {total} declared tool(s)"
             else:
-                scope = f"after registering {len(partial)} of {declared} declared tool(s)"
+                scope = f"after registering {len(partial)} of {total} declared tool(s)"
             logger.warning(
                 "Plugin '%s': client-tool pre-registration failed %s (%s).%s", lookup_key, scope,
-                exc, "" if len(partial) >= declared else
+                exc, "" if len(partial) >= total else
                 " The remainder will be missing from CLI/TUI sessions.", exc_info=_PLUGINS_DEBUG,
             )
 
@@ -240,9 +226,7 @@ class PluginLoaderMixin:
         settings: Mapping[str, Any] = {}
         try:
             from hermes_cli.config import load_config
-
-            cfg = load_config() or {}
-            entries = (cfg.get("plugins") or {}).get("entries") or {}
+            entries = ((load_config() or {}).get("plugins") or {}).get("entries") or {}
             entry = entries.get(plugin_id) if isinstance(entries, Mapping) else None
             raw = entry.get("settings") if isinstance(entry, Mapping) else None
             if not isinstance(raw, Mapping):
@@ -263,29 +247,25 @@ class PluginLoaderMixin:
         """Load one plugin with the manager's home bound as current."""
         from hermes_cli.plugins import LoadedPlugin, PluginContext, _PLUGINS_DEBUG
         loaded = LoadedPlugin(manifest=manifest)
+        plugin_key = manifest_key(manifest)
         logger.debug(
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",
-            manifest_key(manifest), manifest.source, manifest.kind, manifest.path,
+            plugin_key, manifest.source, manifest.kind, manifest.path,
         )
-
         if manifest.portable:
             self._load_portable_plugin(manifest, loaded)
             return
-
         registration_start = len(self._registration_order)
-        plugin_key = manifest_key(manifest)
-        _module_name = self._policy_module_name(manifest)
-        self._track_tool_override_policy(manifest, _module_name)
+        module_name = self._policy_module_name(manifest)
+        self._track_tool_override_policy(manifest, module_name)
         try:
             # Reuse a deferred platform's already-imported package so its body doesn't run twice.
-            preloaded = self._predeclared_modules.pop(plugin_key, None)
-            if preloaded is not None:
-                module = preloaded
-            elif manifest.source in {"user", "project", "bundled"}:
-                module = self._load_directory_module(manifest, module_name=_module_name)
-            else:
-                module = self._load_entrypoint_module(manifest)
-
+            module = self._predeclared_modules.pop(plugin_key, None)
+            if module is None:
+                if manifest.source in {"user", "project", "bundled"}:
+                    module = self._load_directory_module(manifest, module_name=module_name)
+                else:
+                    module = self._load_entrypoint_module(manifest)
             loaded.module = module
             register_fn = getattr(module, "register", None)
             if register_fn is None:
@@ -295,12 +275,8 @@ class PluginLoaderMixin:
                 register_fn(PluginContext(manifest, self))
                 self._attribute_registrations(loaded, plugin_key, registration_start)
                 loaded.enabled = True
-
         except Exception as exc:
-            owned = [
-                registration for registration in self._registration_order
-                if registration.plugin_key == plugin_key
-            ]
+            owned = [r for r in self._registration_order if r.plugin_key == plugin_key]
             self._dispose_registrations(owned)
             self._forget_registrations(owned)
             loaded.error = str(exc)
@@ -314,26 +290,23 @@ class PluginLoaderMixin:
         # so discovery-time pre-registrations are gone too.
         if not loaded.enabled:
             self._predeclared_tools.pop(plugin_key, None)
-        self._plugins[manifest_key(manifest)] = loaded
+        self._plugins[plugin_key] = loaded
 
     def _track_tool_override_policy(self, manifest: PluginManifest, module_name: str) -> None:
         """Install the plugin's tool-override policy in tools.registry as a ledger-owned lease."""
         from hermes_cli.plugins import PluginContext
-
         from tools.registry import registry as _registry
+        scope = self.scope_key
         with replacement_coordinator.transaction():
-            previous_policy = _registry.snapshot_plugin_override_policy(
-                module_name, scope=self.scope_key
-            )
+            previous_policy = _registry.snapshot_plugin_override_policy(module_name, scope=scope)
             current_policy = _registry.register_plugin_override_policy(
-                module_name, PluginContext(manifest, self)._tool_override_allowed(""),
-                scope=self.scope_key,
+                module_name, PluginContext(manifest, self)._tool_override_allowed(""), scope=scope,
             )
             policy_lease = replacement_coordinator.acquire(
-                ("tool_override_policy", self.scope_key, module_name), current=current_policy,
+                ("tool_override_policy", scope, module_name), current=current_policy,
                 previous=previous_policy,
                 restore=lambda replacement: _registry.restore_plugin_override_policy(
-                    module_name, current_policy, replacement, scope=self.scope_key,
+                    module_name, current_policy, replacement, scope=scope,
                 ),
             )
             self._track_registration(
@@ -345,8 +318,8 @@ class PluginLoaderMixin:
     ) -> None:
         """Fill ``loaded.*_registered`` from the ledger slice this plugin's register() produced."""
         registrations = [
-            registration for registration in self._registration_order[registration_start:]
-            if registration.plugin_key == plugin_key and registration.active
+            r for r in self._registration_order[registration_start:]
+            if r.plugin_key == plugin_key and r.active
         ]
 
         def _keys(kind: str) -> List[str]:
@@ -354,12 +327,10 @@ class PluginLoaderMixin:
 
         # Discovery-time tools predate registration_start; credit them back or `hermes plugins
         # list` under-reports once the deferred adapter materializes.
-        _predeclared = [
+        predeclared = [
             t for t in self._predeclared_tools.pop(plugin_key, []) if t in self._plugin_tool_names
         ]
-        loaded.tools_registered = _predeclared + [
-            key for key in _keys("tool") if key not in _predeclared
-        ]
+        loaded.tools_registered = predeclared + [k for k in _keys("tool") if k not in predeclared]
         loaded.hooks_registered = _keys("hook")
         loaded.middleware_registered = _keys("middleware")
         loaded.commands_registered = _keys("command")
@@ -376,7 +347,6 @@ class PluginLoaderMixin:
         lookup_key = manifest_key(manifest)
         try:
             from hermes_cli.agent_plugins import load_agent_plugin
-
             package = load_agent_plugin(
                 Path(manifest.path), get_hermes_home() / "plugin-data" / manifest.skill_namespace,
             )
@@ -409,15 +379,12 @@ class PluginLoaderMixin:
         self._plugins[lookup_key] = loaded
 
     def _directory_module_name(self, manifest: PluginManifest) -> str:
-        """Return a profile-safe import namespace for a directory plugin."""
-        key = manifest_key(manifest)
-        slug = key.replace("/", "__").replace("-", "_")
+        """Profile-safe import namespace for a directory plugin: the bare ``hermes_plugins.<slug>``
+        for the first scope that claims it, a ``__home_<digest>`` suffix for any other scope."""
+        slug = manifest_key(manifest).replace("/", "__").replace("-", "_")
         bare_name = f"{_NS_PARENT}.{slug}"
         with _MODULE_NAMESPACE_LOCK:
-            owner = _BARE_MODULE_SCOPE.get(bare_name)
-            if owner is None:
-                _BARE_MODULE_SCOPE[bare_name] = self.scope_key
-                return bare_name
+            owner = _BARE_MODULE_SCOPE.setdefault(bare_name, self.scope_key)
             if owner == self.scope_key:
                 return bare_name
             digest = hashlib.sha256(self.scope_key.encode("utf-8")).hexdigest()[:12]
@@ -440,27 +407,22 @@ class PluginLoaderMixin:
         init_file = plugin_dir / "__init__.py"
         if not init_file.exists():
             raise FileNotFoundError(f"No __init__.py in {plugin_dir}")
-
         if _NS_PARENT not in sys.modules:
             ns_pkg = types.ModuleType(_NS_PARENT)
             ns_pkg.__path__ = []  # type: ignore[attr-defined]
             ns_pkg.__package__ = _NS_PARENT
             sys.modules[_NS_PARENT] = ns_pkg
-
         module_name = module_name or self._directory_module_name(manifest)
-
         # Evict stale entries for this slug (same slug cached from another Hermes home, or an
         # earlier force reload). Replacing only sys.modules[module_name] is not enough: the plugin's
         # relative imports are cached as "module_name.sub" and resolve from sys.modules first, so a
         # stale submodule would keep serving the previous load's code/state.
         _evict_modules(module_name)
-
         spec = importlib.util.spec_from_file_location(
             module_name, init_file, submodule_search_locations=[str(plugin_dir)],
         )
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot create module spec for {init_file}")
-
         module = importlib.util.module_from_spec(spec)
         module.__package__ = module_name
         module.__path__ = [str(plugin_dir)]  # type: ignore[attr-defined]
@@ -479,7 +441,6 @@ class PluginLoaderMixin:
         for ep in _select_entry_point_group(importlib.metadata.entry_points(), ENTRY_POINTS_GROUP):
             if ep.name == manifest.name:
                 return ep.load()
-
         raise ImportError(
             f"Entry point '{manifest.name}' not found in group '{ENTRY_POINTS_GROUP}'"
         )

@@ -24,10 +24,7 @@ from hermes_cli.relay_plugin_cutover import LEGACY_RELAY_PLUGIN_KEYS, RELAY_PLUG
 
 logger = logging.getLogger("hermes_cli.plugins")
 
-
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
-
-
 ENTRY_POINT_CAPABILITIES_GROUP = "hermes_agent.plugin_capabilities"
 
 
@@ -56,30 +53,24 @@ def discover_entrypoint_manifests() -> List["PluginManifest"]:
     except Exception as exc:
         logger.debug("Entry-point scan failed: %s", exc)
         return manifests
-
     for ep in group_eps:
         try:
-            capabilities = []
-            for capability in VALID_CAPABILITY_IDS:
-                declaration_name = f"{ep.name}.{capability}"
+            capabilities = [
+                capability for capability in VALID_CAPABILITY_IDS
                 if any(
-                    declaration.name == declaration_name and declaration.value == ep.value
+                    declaration.name == f"{ep.name}.{capability}" and declaration.value == ep.value
                     for declaration in capability_eps
-                ):
-                    capabilities.append(capability)
+                )
+            ]
             dist = getattr(ep, "dist", None)
             metadata = getattr(dist, "metadata", None)
-            manifest = PluginManifest(
+            manifests.append(PluginManifest(
                 name=ep.name, version=str(getattr(dist, "version", "") or ""),
-                description=(
-                    str(metadata.get("Summary", "") or "") if metadata is not None else ""
-                ), source="entrypoint", path=ep.value, key=ep.name,
-                capabilities=_parse_declared_capabilities(
-                    capabilities, ep.name
-                ),
-            )
-            manifest.kind = _classify_entrypoint_value_kind(ep.value)
-            manifests.append(manifest)
+                description=str(metadata.get("Summary", "") or "") if metadata is not None else "",
+                source="entrypoint", path=ep.value, key=ep.name,
+                kind=_classify_entrypoint_value_kind(ep.value),
+                capabilities=_parse_declared_capabilities(capabilities, ep.name),
+            ))
         except Exception as exc:
             logger.debug("Entry-point manifest for %r skipped: %s", getattr(ep, "name", "?"), exc)
     return manifests
@@ -100,8 +91,7 @@ def _get_disabled_plugins() -> set:
     """Read ``plugins.disabled`` — a deny-list that wins over ``plugins.enabled``."""
     try:
         from hermes_cli.config import load_config
-        config = load_config()
-        disabled = cfg_get(config, "plugins", "disabled", default=[])
+        disabled = cfg_get(load_config(), "plugins", "disabled", default=[])
         return set(disabled) if isinstance(disabled, list) else set()
     except Exception:
         return set()
@@ -115,8 +105,7 @@ def _get_enabled_plugins() -> Optional[set]:
     """
     try:
         from hermes_cli.config import load_config
-        plugins_cfg = load_config().get("plugins")
-        enabled = plugins_cfg.get("enabled") if isinstance(plugins_cfg, dict) else None
+        enabled = cfg_get(load_config(), "plugins", "enabled")
         return set(enabled) if isinstance(enabled, list) else None
     except Exception:
         return None
@@ -134,9 +123,7 @@ def scan_directory(
     if not path.is_dir():
         return manifests
     for child in sorted(path.iterdir()):
-        if not child.is_dir():
-            continue
-        if depth == 0 and skip_names and child.name in skip_names:
+        if not child.is_dir() or (depth == 0 and skip_names and child.name in skip_names):
             continue
         manifest_file = child / "plugin.yaml"
         if not manifest_file.exists():
@@ -167,31 +154,25 @@ def collect_directory_manifests() -> List[PluginManifest]:
     precedence/containment rules of the real discovery sweep."""
     from hermes_cli import plugins as _origin  # patched names resolve through the origin
     manifests: List[PluginManifest] = []
+
+    def _scan(label: str, directory: Path, source: str, skip_names: Optional[Set[str]] = None) -> None:
+        found = scan_directory(directory, source, skip_names=skip_names)
+        logger.debug("  %s: %d manifest(s)", label, len(found))
+        manifests.extend(found)
+
     # Excluded bundled top-level categories have their own discovery; platforms scan separately.
     repo_plugins = _origin.get_bundled_plugins_dir()
     logger.debug("Scanning bundled plugins: %s", repo_plugins)
-    bundled = scan_directory(
-        repo_plugins, "bundled",
-        skip_names={"memory", "context_engine", "platforms", "model-providers"},
-    )
-    logger.debug("  bundled (top-level): %d manifest(s)", len(bundled))
-    manifests.extend(bundled)
-    bundled_platforms = scan_directory(repo_plugins / "platforms", "bundled")
-    logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
-    manifests.extend(bundled_platforms)
-
+    _scan("bundled (top-level)", repo_plugins, "bundled",
+          {"memory", "context_engine", "platforms", "model-providers"})
+    _scan("bundled/platforms", repo_plugins / "platforms", "bundled")
     user_dir = get_hermes_home() / "plugins"
     logger.debug("Scanning user plugins: %s", user_dir)
-    user_manifests = scan_directory(user_dir, "user")
-    logger.debug("  user: %d manifest(s)", len(user_manifests))
-    manifests.extend(user_manifests)
-
+    _scan("user", user_dir, "user")
     if _origin._env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
         project_dir = Path.cwd() / ".hermes" / "plugins"
         logger.debug("Scanning project plugins: %s", project_dir)
-        project_manifests = scan_directory(project_dir, "project")
-        logger.debug("  project: %d manifest(s)", len(project_manifests))
-        manifests.extend(project_manifests)
+        _scan("project", project_dir, "project")
     else:
         logger.debug("Project plugins disabled (set HERMES_ENABLE_PROJECT_PLUGINS=1 to enable)")
     return manifests
@@ -214,9 +195,9 @@ def gate_manifest(
     disable, category-owned kinds (exclusive / model-provider), bundled auto-loads (backend now,
     platform deferred), then ``plugins.enabled`` opt-in (path-derived key or legacy bare name)."""
     lookup_key = manifest_key(manifest)
-    name = manifest.name
+    names = {lookup_key, manifest.name}
     # Relay lifecycle is core-owned; an old plugin copy would compete for its registries.
-    if lookup_key in LEGACY_RELAY_PLUGIN_KEYS or name in LEGACY_RELAY_PLUGIN_KEYS:
+    if names & LEGACY_RELAY_PLUGIN_KEYS:
         error = (
             "removed — Relay lifecycle is owned by Hermes core; configure "
             f"{RELAY_PLUGINS_CONFIG_ENV} instead"
@@ -225,7 +206,7 @@ def gate_manifest(
             "placeholder", error=error,
             log=(logging.WARNING, "Refusing to load removed Hermes Relay plugin '%s'; %s", lookup_key, error),
         )
-    if lookup_key in disabled or name in disabled:
+    if names & disabled:
         return ManifestGate(
             "placeholder", error="disabled via config",
             log=(logging.DEBUG, "Skipping disabled plugin '%s'", lookup_key),
@@ -243,14 +224,15 @@ def gate_manifest(
             "placeholder", enabled=True,
             log=(logging.DEBUG, "Skipping '%s' (model-provider, handled by providers/ discovery)", lookup_key),
         )
-    # Bundled backends auto-load; selection among them is ``<category>.provider`` config.
-    if manifest.source == "bundled" and manifest.kind == "backend":
-        return ManifestGate("load_now")
-    # Bundled platforms register LAZILY: eagerly importing ~20 heavy SDKs added seconds to every
-    # `hermes` invocation. A deferred loader keeps every platform available on first use.
-    if manifest.source == "bundled" and manifest.kind == "platform":
-        return ManifestGate("defer")
-    if enabled is None or not (lookup_key in enabled or name in enabled):
+    if manifest.source == "bundled":
+        # Bundled backends auto-load; selection among them is ``<category>.provider`` config.
+        if manifest.kind == "backend":
+            return ManifestGate("load_now")
+        # Bundled platforms register LAZILY: eagerly importing ~20 heavy SDKs added seconds to every
+        # `hermes` invocation. A deferred loader keeps every platform available on first use.
+        if manifest.kind == "platform":
+            return ManifestGate("defer")
+    if enabled is None or not names & enabled:
         return ManifestGate(
             "placeholder",
             error=f"not enabled in config (run `hermes plugins enable {lookup_key}` to activate)",

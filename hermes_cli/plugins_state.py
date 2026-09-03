@@ -13,22 +13,11 @@ from typing import Any, Dict, Mapping
 from hermes_constants import get_hermes_home
 from hermes_cli.plugins_manifest import _portable_skill_namespace
 
-
 _PLUGIN_SETTING_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
-
-
 _PLUGIN_SETTING_RESERVED_ROOTS = frozenset({"model", "plugins", "security", "settings"})
-
-
 _PLUGIN_STATE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-
-
 _PLUGIN_STATE_QUOTA_BYTES = 10 * 1024 * 1024
-
-
 _PLUGIN_STATE_LOCKS: Dict[str, threading.RLock] = {}
-
-
 _PLUGIN_STATE_LOCKS_GUARD = threading.Lock()
 
 
@@ -40,9 +29,8 @@ def _plugin_relative_segments(key: str) -> tuple[str, ...]:
     segments = tuple(key.split("."))
     if (
         not key or "/" in key or "\\" in key
-        or any(
-            not _PLUGIN_SETTING_SEGMENT_RE.fullmatch(segment) for segment in segments
-        ) or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
+        or not all(_PLUGIN_SETTING_SEGMENT_RE.fullmatch(segment) for segment in segments)
+        or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
     ):
         raise ValueError(
             "Expected a plugin-relative config key such as 'endpoint' or "
@@ -52,6 +40,7 @@ def _plugin_relative_segments(key: str) -> tuple[str, ...]:
 
 
 def _nested_plugin_value(root: object, segments: tuple[str, ...], default: Any) -> Any:
+    """Walk ``segments`` through nested mappings; ``default`` on the first miss."""
     current = root
     for segment in segments:
         if not isinstance(current, Mapping) or segment not in current:
@@ -61,6 +50,7 @@ def _nested_plugin_value(root: object, segments: tuple[str, ...], default: Any) 
 
 
 def _nested_plugin_mapping(segments: tuple[str, ...], value: Any) -> dict[str, Any]:
+    """Wrap ``value`` in nested single-key dicts, outermost first."""
     nested: Any = value
     for segment in reversed(segments):
         nested = {segment: nested}
@@ -80,24 +70,20 @@ def _plugin_data_namespace(plugin_id: str, skill_namespace: str) -> str:
     return _portable_skill_namespace(candidate)
 
 
-def _state_thread_lock(path: Path) -> threading.RLock:
-    key = str(path.resolve(strict=False))
-    with _PLUGIN_STATE_LOCKS_GUARD:
-        return _PLUGIN_STATE_LOCKS.setdefault(key, threading.RLock())
-
-
 @contextmanager
 def _locked_plugin_state(path: Path):
     """Serialize state read-modify-write across threads/processes (fcntl / msvcrt). The lock lives
     in a sibling file because atomic replacement changes the target's inode."""
     lock_path = path.with_name(f".{path.name}.lock")
-    thread_lock = _state_thread_lock(lock_path)
+    with _PLUGIN_STATE_LOCKS_GUARD:
+        thread_lock = _PLUGIN_STATE_LOCKS.setdefault(
+            str(lock_path.resolve(strict=False)), threading.RLock()
+        )
     with thread_lock:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "a+b") as handle:
             if os.name == "nt":  # pragma: no cover - exercised on Windows CI
                 import msvcrt
-
                 if handle.seek(0, os.SEEK_END) == 0:
                     handle.write(b"\0")
                     handle.flush()
@@ -105,7 +91,6 @@ def _locked_plugin_state(path: Path):
                 msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             else:
                 import fcntl
-
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
                 yield
@@ -138,7 +123,7 @@ class PluginState:
 
     @staticmethod
     def _validate_key(key: str) -> None:
-        if (not isinstance(key, str) or not _PLUGIN_STATE_KEY_RE.fullmatch(key) or ".." in key):
+        if not isinstance(key, str) or not _PLUGIN_STATE_KEY_RE.fullmatch(key) or ".." in key:
             raise ValueError(
                 "Plugin state keys must be 1-128 characters using letters, "
                 "numbers, '_', '-', '.', or ':' (without '..')"
@@ -180,5 +165,4 @@ class PluginState:
                     f"than the {self.quota_bytes}-byte per-plugin quota"
                 )
             from utils import atomic_json_write
-
             atomic_json_write(self.path, data, mode=0o600)
