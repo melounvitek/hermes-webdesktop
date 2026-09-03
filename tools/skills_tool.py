@@ -330,6 +330,7 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
     active_memory_provider = None
     try:
         from plugins.memory import _get_active_memory_provider, _prune_inactive_memory_provider_skills
+
         active_memory_provider = _get_active_memory_provider()
         _prune_inactive_memory_provider_skills(active_memory_provider)
     except Exception as exc:
@@ -356,8 +357,7 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
         return _serve_plugin_skill(
             plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id), None
 
-    available = pm.list_plugin_skills(namespace)
-    if available:  # plugin exists but this specific skill is missing
+    if available := pm.list_plugin_skills(namespace):  # plugin exists but this specific skill is missing
         return _fail(
             f"Skill '{bare}' not found in plugin '{namespace}'.",
             available_skills=[f"{namespace}:{s}" for s in available],
@@ -493,8 +493,7 @@ def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict
     setup_needed = bool(remaining)
 
     # Only vars actually set pass through to sandboxed execution (execute_code, terminal).
-    available_env_names = [e["name"] for e in required_env_vars if e["name"] not in remaining]
-    if available_env_names:
+    if available_env_names := [e["name"] for e in required_env_vars if e["name"] not in remaining]:
         try:
             from tools.env_passthrough import register_env_passthrough
 
@@ -515,6 +514,7 @@ def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict
         except Exception:
             logger.debug("Could not register credential files for skill %s", skill_name, exc_info=True)
 
+    status = SkillReadinessStatus.SETUP_NEEDED if setup_needed else SkillReadinessStatus.AVAILABLE
     fields = {
         "required_environment_variables": required_env_vars,
         "required_commands": [],
@@ -523,18 +523,15 @@ def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict
         "missing_required_commands": [],
         "setup_needed": setup_needed,
         "setup_skipped": capture_result["setup_skipped"],
-        "readiness_status": (
-            SkillReadinessStatus.SETUP_NEEDED if setup_needed else SkillReadinessStatus.AVAILABLE
-        ).value}
+        "readiness_status": status.value}
     extras: dict = {}
-    setup_help = next((e["help"] for e in required_env_vars if e.get("help")), None)
-    if setup_help:
+    if setup_help := next((e["help"] for e in required_env_vars if e.get("help")), None):
         extras["setup_help"] = setup_help
     if capture_result["gateway_setup_hint"]:
         extras["gateway_setup_hint"] = capture_result["gateway_setup_hint"]
     if setup_needed:
         missing_items = [f"env ${n}" for n in remaining] + [f"file {p}" for p in missing_cred_files]
-        setup_note = _build_setup_note(SkillReadinessStatus.SETUP_NEEDED, missing_items, setup_help)
+        setup_note = _build_setup_note(status, missing_items, setup_help)
         if _is_remote_env_backend(backend) and setup_note:
             setup_note = f"{setup_note} {backend.upper()}-backed skills need these requirements available inside the remote environment as well."
         if setup_note:
@@ -667,8 +664,8 @@ def skill_view(
         # tags/related_skills: metadata.hermes.* (agentskills.io) first, then top-level.
         metadata = frontmatter.get("metadata")
         hermes_meta = (metadata.get("hermes", {}) or {}) if isinstance(metadata, dict) else {}
-        tags = _parse_tags(hermes_meta.get("tags") or frontmatter.get("tags", ""))
-        related_skills = _parse_tags(hermes_meta.get("related_skills") or frontmatter.get("related_skills", ""))
+        tags, related_skills = (
+            _parse_tags(hermes_meta.get(k) or frontmatter.get(k, "")) for k in ("tags", "related_skills"))
         linked_files = _skill_linked_files(skill_dir)
 
         try:
@@ -678,10 +675,8 @@ def skill_view(
         skill_name = frontmatter.get("name", skill_md.stem if not skill_dir else skill_dir.name)
         readiness, readiness_extras = _skill_readiness(frontmatter, skill_name)
 
-        rendered_content = content
-        if preprocess:
-            rendered_content = _preprocess_skill(
-                content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name)
+        rendered_content = content if not preprocess else _preprocess_skill(
+            content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name)
         org_provenance = None
         if skill_dir:
             try:
