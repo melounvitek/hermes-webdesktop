@@ -1,9 +1,6 @@
-"""Codex API runtime — App Server and Responses-API streaming paths.
-
-Every entry point takes the parent AIAgent first. ``run_codex_app_server_turn``
-drives one ``codex app-server`` subprocess turn; ``run_codex_stream`` runs one
-streaming Codex Responses call (``run_codex_create_stream_fallback`` is its alias).
-"""
+"""Codex API runtime — App Server and Responses-API streaming paths. Every entry point takes the parent
+AIAgent first: ``run_codex_app_server_turn`` drives one ``codex app-server`` subprocess turn;
+``run_codex_stream`` runs one streaming Codex Responses call (``run_codex_create_stream_fallback`` aliases it)."""
 
 from __future__ import annotations
 
@@ -54,12 +51,10 @@ def _codex_request_failure_details(error: BaseException) -> tuple[int | None, st
 
 
 def _coerce_usage_int(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
-        return 0
-    try:
-        return max(int(value), 0)
-    except ValueError:
-        return 0
+    with suppress(ValueError):
+        if not isinstance(value, bool) and isinstance(value, (int, float, str)):
+            return max(int(value), 0)
+    return 0
 
 
 def _queue_token_counts(agent, fail_msg: str, *fail_extra: Any, counts: Callable[[], dict]) -> None:
@@ -99,10 +94,8 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     )
     prompt_tokens = canonical_usage.prompt_tokens
     total_tokens = _coerce_usage_int(usage.get("totalTokens")) or canonical_usage.total_tokens
-    token_counts = {
-        f: getattr(canonical_usage, f)
-        for f in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
-    }
+    token_counts = {f: getattr(canonical_usage, f) for f in
+                    ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")}
     usage_dict = {"prompt_tokens": prompt_tokens, "completion_tokens": canonical_usage.output_tokens,
                   "total_tokens": total_tokens, **token_counts}
     if compressor is not None:
@@ -211,9 +204,8 @@ def _codex_item_to_args(item: dict) -> dict:
     if item_type == "commandExecution":
         return {"command": item.get("command") or "", "cwd": item.get("cwd") or ""}
     if item_type == "fileChange":
-        return {"changes": [
-            {"kind": (c.get("kind") or {}).get("type") or "update", "path": c.get("path") or ""} for c in _item_changes(item)
-        ]}
+        return {"changes": [{"kind": (c.get("kind") or {}).get("type") or "update", "path": c.get("path") or ""}
+                            for c in _item_changes(item)]}
     if item_type in _MCP_LIKE_ITEM_TYPES:
         args = item.get("arguments") or {}
         return args if isinstance(args, dict) else {"arguments": args}
@@ -334,8 +326,7 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         "item/agentMessage/delta": lambda p: _fire_delta(p, "_fire_stream_delta"),
         "item/reasoning/delta": lambda p: _fire_delta(p, "_fire_reasoning_delta"),
         "item/reasoning/summaryDelta": lambda p: _fire_delta(p, "_fire_reasoning_delta"),
-        "item/started": lambda p: _on_item(p, completed=False),
-        "item/completed": lambda p: _on_item(p, completed=True),
+        "item/started": lambda p: _on_item(p, completed=False), "item/completed": lambda p: _on_item(p, completed=True),
     }
 
     def on_event(note: dict) -> None:
@@ -373,11 +364,10 @@ def _ensure_codex_session(agent) -> None:
     from agent.runtime_cwd import resolve_agent_cwd
     from agent.transports.codex_app_server_session import CodexAppServerSession, _ServerRequestRouting
     # Approval callback: Hermes' standard prompt flow when a CLI thread installed one.
-    try:
+    approval_callback = None
+    with suppress(Exception):
         from tools.terminal_tool import _get_approval_callback
         approval_callback = _get_approval_callback()
-    except Exception:
-        approval_callback = None
     # Gateway/cron have no UI for codex approval requests, so exec/apply_patch fail closed by default. Only an
     # explicit approval bypass (approvals.mode: off, /yolo, --yolo, HERMES_YOLO_MODE) hands policy to codex's sandbox.
     auto_approve_requests = False
@@ -406,10 +396,10 @@ def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> 
         append_message(messages, projected_message)
     if getattr(agent, "_session_db", None) is None:
         return
+    flush_ok = False
     try:
         flush_ok = agent._flush_messages_to_session_db(messages)
     except Exception:
-        flush_ok = False
         logger.warning("codex app-server projected-message flush failed", exc_info=True)
     if flush_ok is False:
         # Output already streamed and agent_persisted cannot flip to False: surface the gap loudly.
@@ -420,9 +410,8 @@ def _persist_projected_messages(agent, turn, messages: List[Dict[str, Any]]) -> 
         )
 
 
-def _finish_codex_turn(
-    agent, turn, messages: List[Dict[str, Any]], *, original_user_message: Any, should_review_memory: bool,
-) -> dict[str, Any]:
+def _finish_codex_turn(agent, turn, messages: List[Dict[str, Any]], *, original_user_message: Any,
+                       should_review_memory: bool) -> dict[str, Any]:
     """Post-turn bookkeeping mirroring the chat_completions loop; returns usage fields."""
     # run_conversation() already bumped _turns_since_memory / _user_turn_count; only _iters_since_skill is ours.
     agent._iters_since_skill = getattr(agent, "_iters_since_skill", 0) + turn.tool_iterations
@@ -446,10 +435,8 @@ def _finish_codex_turn(
     return usage_result
 
 
-def run_codex_app_server_turn(
-    agent, *, user_message: str, original_user_message: Any, messages: List[Dict[str, Any]], effective_task_id: str,
-    should_review_memory: bool = False,
-) -> Dict[str, Any]:
+def run_codex_app_server_turn(agent, *, user_message: str, original_user_message: Any, messages: List[Dict[str, Any]],
+                              effective_task_id: str, should_review_memory: bool = False) -> Dict[str, Any]:
     """Hand the turn to a ``codex app-server`` subprocess and project its events into ``messages``.
     Returns the chat_completions result shape. The user message is ALREADY in ``messages`` — never append it again."""
     # Defense in depth for compression.checkpoint_required: agent init refuses the combination, but
@@ -487,10 +474,8 @@ def run_codex_app_server_turn(
     )
 
 
-def _turn_result(
-    interrupt: tuple[bool, Any], messages: List[Dict[str, Any]], *,
-    api_calls: int, completed: bool, error: Any, final_response: Any, **extra: Any,
-) -> Dict[str, Any]:
+def _turn_result(interrupt: tuple[bool, Any], messages: List[Dict[str, Any]], *, api_calls: int, completed: bool,
+                 error: Any, final_response: Any, **extra: Any) -> Dict[str, Any]:
     """Result shape shared with the chat_completions path (``partial`` == ``not completed``)."""
     user_interrupted, interrupt_message = interrupt
     return {
@@ -753,10 +738,8 @@ def _consume_codex_event_stream(
     tool item; ``on_first_delta`` one-shot; ``on_event`` every event before any processing; ``interrupt_check()``
     True breaks the loop and may raise ``TimeoutError`` / ``InterruptedError`` for request retirement that
     must not become a partial final response."""
-    assembler = _CodexResponseAssembler(
-        model=model, on_text_delta=on_text_delta, on_reasoning_delta=on_reasoning_delta,
-        on_commentary_message=on_commentary_message, on_first_delta=on_first_delta,
-    )
+    assembler = _CodexResponseAssembler(model=model, on_text_delta=on_text_delta, on_reasoning_delta=on_reasoning_delta,
+                                        on_commentary_message=on_commentary_message, on_first_delta=on_first_delta)
     for event in event_iter:
         if on_event is not None:
             try:
@@ -784,10 +767,8 @@ def _sanitize_consumer_codex_request(agent: Any, request: dict[str, Any]) -> dic
     # Copy before editing (caller's mapping must not mutate); drop when emptied.
     extra_body = sanitized.get("extra_body")
     if isinstance(extra_body, dict) and "prompt_cache_retention" in extra_body:
-        extra_body = {k: v for k, v in extra_body.items() if k != "prompt_cache_retention"}
-        if extra_body:
-            sanitized["extra_body"] = extra_body
-        else:
+        sanitized["extra_body"] = {k: v for k, v in extra_body.items() if k != "prompt_cache_retention"}
+        if not sanitized["extra_body"]:
             sanitized.pop("extra_body")
         dropped_from.append("extra_body")
     if dropped_from:
@@ -880,12 +861,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
 
     def _log_failure(exc: BaseException) -> None:
         request_body_bytes, exception_chain = _codex_request_failure_details(exc)
-        logger.warning(
-            "Codex Responses request failed: serialized_request_body_bytes=%s stream_opened=%s "
-            "exception_chain=%s model=%s",
-            request_body_bytes if request_body_bytes is not None else "unknown",
-            str(writer_token["value"] is not None).lower(), exception_chain, getattr(agent, "model", "unknown"),
-        )
+        logger.warning("Codex Responses request failed: serialized_request_body_bytes=%s stream_opened=%s "
+                       "exception_chain=%s model=%s", "unknown" if request_body_bytes is None else request_body_bytes,
+                       str(writer_token["value"] is not None).lower(), exception_chain, getattr(agent, "model", "unknown"))
 
     def _codex_stream_created(_raw_stream: Any) -> None:
         # Claim the delta sink for THIS attempt; a newer attempt supersedes this token.
@@ -895,11 +873,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         token = writer_token["value"]
         if token is None or stream_writer_is_current(agent, token):
             return True
-        logger.warning(
-            "Codex streaming attempt superseded by a newer stream; stopping consumption to preserve "
-            "the single-writer invariant (model=%s).",
-            api_kwargs.get("model", "unknown"),
-        )
+        logger.warning("Codex streaming attempt superseded by a newer stream; stopping consumption to preserve "
+                       "the single-writer invariant (model=%s).", api_kwargs.get("model", "unknown"))
         return False
 
     def _drain_for_finalizer(event_stream: Any) -> None:
@@ -911,11 +886,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         except (*transport_errors, _APIConnectionError) as exc:
             if not isinstance(exc, transport_errors):
                 _log_failure(exc)
-            logger.warning(
-                "Codex Responses stream transport finalization failed after a terminal response was already "
-                "received; returning the completed response instead of retrying. %s error=%s",
-                agent._client_log_context(), exc,
-            )
+            logger.warning("Codex Responses stream transport finalization failed after a terminal response was already "
+                           "received; returning the completed response instead of retrying. %s error=%s",
+                           agent._client_log_context(), exc)
 
     def _close_event_stream(event_stream: Any) -> None:
         close_fn = getattr(event_stream, "close", None)  # None while connect never succeeded
@@ -948,10 +921,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     on_stream_created=_codex_stream_created, on_chunk=intercepted_events.append,
                     chunk_adapter=lambda chunk: chunk, accept_chunk=_accept_codex_chunk,
                     completed_response_predicate=lambda r: bool(hasattr(r, "output") and not hasattr(r, "__iter__")),
-                    metadata={
-                        "api_mode": "codex_responses", "call_role": call_role, "retry_count": attempt,
-                        "api_request_id": getattr(agent, "_current_api_request_id", None),
-                    },
+                    metadata={"api_mode": "codex_responses", "call_role": call_role, "retry_count": attempt,
+                              "api_request_id": getattr(agent, "_current_api_request_id", None)},
                     defer_logical_completion=True,
                 )
                 final = _consume_codex_event_stream(
@@ -965,8 +936,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     _log_failure(exc)
                     raise
                 logger.debug(
-                    "Codex Responses stream connect failed (attempt %s/%s); retrying. %s error=%s"
-                    if event_stream is None
+                    "Codex Responses stream connect failed (attempt %s/%s); retrying. %s error=%s" if event_stream is None
                     else "Codex Responses stream transport failed mid-iteration (attempt %s/%s); retrying. %s error=%s",
                     attempt + 1, max_stream_retries + 1, agent._client_log_context(), exc,
                 )
@@ -982,12 +952,10 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
             if not agent._interrupt_requested:
                 _drain_for_finalizer(event_stream)
             if final.status in {"incomplete", "failed"}:
-                logger.warning(
-                    "Codex Responses stream terminal status=%s "
-                    "(incomplete_details=%s, error=%s, streamed_chars=%d). %s",
-                    final.status, final.incomplete_details, final.error,
-                    sum(len(p) for p in agent._codex_streamed_text_parts), agent._client_log_context(),
-                )
+                logger.warning("Codex Responses stream terminal status=%s "
+                               "(incomplete_details=%s, error=%s, streamed_chars=%d). %s",
+                               final.status, final.incomplete_details, final.error,
+                               sum(len(p) for p in agent._codex_streamed_text_parts), agent._client_log_context())
             return final
         finally:
             _close_event_stream(event_stream)
