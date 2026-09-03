@@ -36,8 +36,7 @@ from urllib.parse import quote as _urlquote
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult,
-    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes, cache_video_from_bytes,
-)
+    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes, cache_video_from_bytes)
 from gateway.config import Platform
 
 logger = logging.getLogger(__name__)
@@ -334,8 +333,7 @@ def _coerce(cast: Callable[[Any], Any], value: Any, default: Any) -> Any:
 _OUTBOUND_MEDIA = {
     "image": (
         LINE_IMAGE_MAX_BYTES, "image exceeds 10 MB LINE limit",
-        "LINE_PUBLIC_URL must be set to send images (LINE only accepts publicly reachable HTTPS URLs)",
-    ),
+        "LINE_PUBLIC_URL must be set to send images (LINE only accepts publicly reachable HTTPS URLs)"),
     "audio": (LINE_AV_MAX_BYTES, "audio exceeds 200 MB LINE limit", "LINE_PUBLIC_URL must be set to send audio"),
     "video": (LINE_AV_MAX_BYTES, "video exceeds 200 MB LINE limit", "LINE_PUBLIC_URL must be set to send video"),
 }
@@ -377,8 +375,7 @@ class LineAdapter(BasePlatformAdapter):
             ("pending_text", "LINE_PENDING_TEXT", DEFAULT_PENDING_REPLY_TEXT),
             ("button_label", "LINE_BUTTON_LABEL", DEFAULT_BUTTON_LABEL),
             ("delivered_text", "LINE_DELIVERED_TEXT", DEFAULT_DELIVERED_TEXT),
-            ("interrupted_text", "LINE_INTERRUPTED_TEXT", DEFAULT_INTERRUPTED_TEXT),
-        ):
+            ("interrupted_text", "LINE_INTERRUPTED_TEXT", DEFAULT_INTERRUPTED_TEXT)):
             setattr(self, attr, env_or(env, attr, default))
         # Runtime state
         self._client: Optional[_LineClient] = None
@@ -727,8 +724,7 @@ class LineAdapter(BasePlatformAdapter):
         for failed, error in (
             (path.stat().st_size > max_bytes, size_error),
             (not self._client, "LINE adapter not connected"),
-            (self._missing_public_url(), url_error),
-        ):
+            (self._missing_public_url(), url_error)):
             if failed:
                 return None, SendResult(success=False, error=error)
         return path, None
@@ -903,8 +899,7 @@ _SETUP_PROMPTS = (  # (env var, prompt, masked)
     ("LINE_CHANNEL_ACCESS_TOKEN", "Channel access token", True),
     ("LINE_CHANNEL_SECRET", "Channel secret", True),
     ("LINE_PUBLIC_URL", "Public HTTPS base URL (optional, e.g. https://my-tunnel.example.com)", False),
-    ("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)", False),
-)
+    ("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)", False))
 
 
 def interactive_setup() -> None:

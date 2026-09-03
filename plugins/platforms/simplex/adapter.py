@@ -655,8 +655,7 @@ _SETUP_PROMPTS = (
     ("SIMPLEX_ALLOWED_USERS", "Allowed contactIds or display names (comma-separated; blank=skip)"),
     ("SIMPLEX_GROUP_ALLOWED", "Allowed group IDs (comma-separated, or '*' for any; blank=disable groups)"),
     ("SIMPLEX_AUTO_ACCEPT", "Auto-accept incoming contact requests? (true/false, default true)"),
-    ("SIMPLEX_HOME_CHANNEL", "Home channel contact/group ID (or empty)"),
-)
+    ("SIMPLEX_HOME_CHANNEL", "Home channel contact/group ID (or empty)"))
 
 
 def interactive_setup() -> None:

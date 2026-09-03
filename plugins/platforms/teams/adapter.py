@@ -198,8 +198,7 @@ async def _standalone_send(
         (not chat_id, "chat_id (conversation ID) is required"),
         (not _TEAMS_CONV_ID_RE.match(chat_id or ""), "chat_id contains characters outside the Bot Framework conversation ID set"),
         (not _TEAMS_CONV_ID_RE.match(tenant_id), "TEAMS_TENANT_ID contains characters outside the expected set"),
-        (not AIOHTTP_AVAILABLE, "aiohttp not installed"),
-    ):
+        (not AIOHTTP_AVAILABLE, "aiohttp not installed")):
         if failed:
             return {"error": f"Teams standalone send: {error}"}
     token_url, token_form = _bf_token_request(tenant_id, client_id, client_secret)
