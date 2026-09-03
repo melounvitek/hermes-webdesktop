@@ -24,73 +24,35 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from agent.message_sanitization import _sanitize_surrogates
-# Known-durable message marker (run_agent keeps a copy: circular import; a test pins them in sync).
-from agent.context_compressor import (  # noqa: F401  (re-exported; tests import it from here)
-    # Intrinsic persistence marker stamped on message dicts that are known-durable (#92231). One shared
-    # constant with agent.context_compressor (this module already imports agent.* at module level, and
-    # context_compressor is a transitive dependency via hermes_state_common). run_agent keeps its own
-    # predating copy — hermes_state cannot import run_agent (circular) — guarded by
-    # test_marker_constant_in_sync.
-    _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY,
-)
 from hermes_constants import get_hermes_home
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypeVar, cast
 
-from hermes_state_common import (  # noqa: F401  (re-exported; tests import from hermes_state)
-    AUTO_VACUUM_MIN_FREELIST_RATIO, _FTS_TRIGGERS, escape_like as _escape_like, FTS_CJK_STALE_KEY,
-    FTS_REBUILD_DEFERRAL_KEY, FTS_SQL, FTS_STALE_KEY, FTS_STORAGE_VERSION, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL,
-    LEGACY_FTS_TRIGRAM_SQL, SCHEMA_SQL, SCHEMA_VERSION, stat_db_file_identity as _stat_db_file_identity,
+from hermes_state_common import escape_like as _escape_like, stat_db_file_identity as _stat_db_file_identity
+from hermes_state_errors import (
+    _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY,
+    _STATE_DB_REPLACED_MSG, DeletedWalGenerationError, SessionCompressionInProgressError, StateDbCorruptError,
+    StateDbReplacedError, _is_no_more_rows, classify_persistence_error, is_malformed_db_error,
+    is_malformed_schema_error,
 )
-from hermes_state_errors import (  # noqa: F401  (re-exported; the historical import path)
-    _DELETED_WAL_GENERATION_MSG, _DISK_IO_ERROR_MARKER, _STATE_DB_APPLICATION_ID_OFFSET,
-    _STATE_DB_CORRUPT_MSG, _STATE_DB_GENERATION_KEY, _STATE_DB_REPLACED_MSG, PERSISTENCE_ERROR_CAUSES,
-    CompressionSessionBusyError, CompressionSessionClosedError, DeletedWalGenerationError,
-    SessionCompressionInProgressError, SessionTurnLeaseLostError, StateDbCorruptError,
-    StateDbReplacedError, _is_no_more_rows, classify_persistence_error, is_disk_full_error,
-    is_malformed_db_error, is_malformed_schema_error, is_transient_sqlite_error,
+from hermes_state_guard import (
+    _STATE_DB_GUARD_BYPASS_ENV, _in_test_context, _is_production_state_db, _real_platform_state_root,
+    _set_last_init_error, get_last_init_error,
 )
-from hermes_state_guard import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    _STATE_DB_GUARD_BYPASS_ENV, _in_test_context, _is_production_state_db, _process_looks_like_pytest,
-    _real_platform_state_root, _running_under_pytest, _set_last_init_error, get_last_init_error,
-)
-from hermes_state_readpool import (  # noqa: F401  (re-exported; tests import from hermes_state)
-    _READ_POOL_MAX, _proc_fd_targets, _process_read_permits, _read_budget_for,
-)
-from hermes_state_sessions import (  # noqa: F401  (re-exported; the historical import path)
-    SessionSessionsMixin, _cwd_prefix_clause, workspace_key,
-)
-from hermes_state_fts import SessionFtsSetupMixin, load_fts5_cjk_extension  # noqa: F401  (re-exported)
+from hermes_state_readpool import _READ_POOL_MAX, _proc_fd_targets, _read_budget_for
+from hermes_state_sessions import SessionSessionsMixin
+from hermes_state_fts import SessionFtsSetupMixin, load_fts5_cjk_extension
 from hermes_state_portability import SessionPortabilityMixin
 from hermes_state_telegram import SessionTelegramTopicsMixin
 from hermes_state_schema import SessionSchemaMixin
 import hermes_state_holders as _state_holders
-from hermes_state_dbfile import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    _canonical_sqlite_path, _concrete_state_db_holder_pids, _connect_tracked_db,
-    _is_inactive_orphan_desktop_holder, _read_sqlite_application_id, _stat_sqlite_sidecar_identity, _watched_sqlite_sidecar_paths,
-    collect_state_db_stats, count_db_holders, is_zeroed_state_db, iter_deleted_sqlite_sidecar_holders,
-    quarantine_cross_process_lock, quarantine_zeroed_state_db, refuse_deleted_wal_generation,
+from hermes_state_dbfile import (
+    _canonical_sqlite_path, _connect_tracked_db, _read_sqlite_application_id, _stat_sqlite_sidecar_identity,
+    _watched_sqlite_sidecar_paths, is_zeroed_state_db, quarantine_cross_process_lock, quarantine_zeroed_state_db,
+    refuse_deleted_wal_generation,
 )
 from hermes_state_messages import SessionMessagesMixin
-from hermes_state_wal import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    WalUnsupportedError, _WAL_INCOMPAT_MARKERS, _apply_macos_checkpoint_barrier, _apply_synchronous_pragma,
-    _database_has_content, _delete_overridden_warned_paths, _enforce_macos_synchronous_full,
-    _journal_upgrade_warned_paths, _on_disk_journal_mode, _wal_fallback_warned_paths,
-    _wal_reset_bug_warned_paths, _wal_reset_repair_hint, apply_database_pragmas, apply_wal_with_fallback,
-    is_sqlite_wal_reset_vulnerable, resolve_journal_mode, resolve_synchronous_level, sqlite_source_id,
-)
-from hermes_state_repair import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
-    _MAX_MALFORMED_BACKUPS, _MAX_PERSISTENT_REPAIR_ATTEMPTS, _REPAIR_BACKUP_MIN_FREE_BYTES,
-    _REPAIR_SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SECOND, _backup_content_identity, _backup_db_file,
-    _claim_repair_attempt, _connect_repair_durable, _copy_database_snapshot, _cross_process_repair_lock,
-    _db_fingerprint, _db_opens_cleanly, _existing_malformed_backups, _live_writer_holds_db,
-    _persistent_repair_attempts_exhausted, _probe_journal_mode_for_repair, _prune_malformed_backups,
-    _read_repair_ledger, _record_repair_outcome, _release_auto_maintenance_lock,
-    _repair_backup_headroom_bytes, _repair_ledger_path, _repair_scratch_space_error,
-    _repair_snapshot_timeout_seconds, _repair_state_db_schema_locked, _restore_journal_mode_after_repair,
-    _exclusive_repair_db_guard, _run_repair_strategies,
-    _try_acquire_auto_maintenance_lock, _unlink_db_triple, apply_durability_barriers,
-    preflight_db_writability, repair_state_db_schema,
-)
+from hermes_state_wal import _WAL_INCOMPAT_MARKERS, apply_database_pragmas, apply_wal_with_fallback
+from hermes_state_repair import _claim_repair_attempt, preflight_db_writability, repair_state_db_schema
 from hermes_state_titles import SessionTitlesMixin
 from hermes_state_usage import SessionUsageMixin
 from hermes_state_maintenance import SessionMaintenanceMixin
@@ -350,23 +312,16 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path
 
 
 # Process-wide shared SessionDB registry: long-lived in-process callers share ONE writer
-# connection per resolved path via get_shared_session_db(); one-shots use SessionDB() + close().
+# connection per resolved path via hermes_state_registry.acquire(); one-shots use SessionDB() + close().
 def _foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
     """Compatibility delegate to the state-holder authority."""
     return _state_holders.foreign_state_db_holders(db_path)
 
 
-# ── Process-wide shared SessionDB registry (#90837) ── The registry itself lives in
-# hermes_state_registry.py — a bounded module owning acquisition, generation identity, refcounting,
-# retirement, and teardown. These re-exports keep the historical import path (``from hermes_state import
-# get_shared_session_db``) working for every call site and test that imports from here. Routing rules (see
-# hermes_state_registry for the full lifecycle): - Long-lived in-process callers (gateway, tui_gateway,
-# cron, in-process tools) share ONE writer connection per resolved path via get_shared_session_db(). - CLI
-# one-shots, recovery flows, and read-only cross-profile opens keep using SessionDB() directly with their
-# own close().
-from hermes_state_registry import (  # noqa: F401  (re-export)
-    close_shared_session_dbs, get_shared_session_db, release_or_close,
-)
+# ── Process-wide shared SessionDB registry (#90837) ── lives in hermes_state_registry.py (acquire /
+# release / close_all / release_or_close). Long-lived in-process callers (gateway, tui_gateway, cron,
+# in-process tools) share ONE writer connection per resolved path via hermes_state_registry.acquire(); CLI
+# one-shots, recovery flows, and read-only cross-profile opens use SessionDB() directly with their own close().
 
 
 class SessionDB(
@@ -509,8 +464,8 @@ class SessionDB(
         self._token_writer_thread: Optional[threading.Thread] = None
         self._token_writer_stop = self._token_writer_busy = False
         self._token_atexit_hook: Optional[Callable[[], None]] = None
-        # Opened via get_shared_session_db(): close() releases a refcount instead.
-        # Set True when this instance is opened via get_shared_session_db(). Makes close() a no-op so the
+        # Opened via hermes_state_registry.acquire(): close() releases a refcount instead.
+        # Set True when this instance is opened via hermes_state_registry.acquire(). Makes close() a no-op so the
         # registry (not individual callers) controls the connection lifecycle (#90837).
         self._shared_registry_owned = False
         initialization_complete = False
@@ -1174,7 +1129,7 @@ class SessionDB(
 
         Drains queued token deltas first (the background writer needs the connection). Read-only connections
         never request a checkpoint. See #45383.
-        When this instance is shared (opened via ``get_shared_session_db``), ``close()`` RELEASES one
+        When this instance is shared (opened via ``hermes_state_registry.acquire``), ``close()`` RELEASES one
         refcount instead of tearing down the connection: the registry owns the lifecycle and only closes on
         the final release (#90837). This prevents one caller's close from tearing down the writer connection
         that other callers in the same process are still using — while still letting legacy ``close()`` call

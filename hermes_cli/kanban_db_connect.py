@@ -231,12 +231,12 @@ def _maybe_checkpoint_wal(conn: sqlite3.Connection, db_path: Path) -> None:
         key = str(db_path)
     now = time.monotonic()
     with _WAL_CHECKPOINT_LOCK:
-        last = _kb._LAST_WAL_CHECKPOINT.get(key)
+        last = _LAST_WAL_CHECKPOINT.get(key)
         if last is not None and (now - last) < _WAL_CHECKPOINT_INTERVAL_SECONDS:
             return
         # Claim the slot first so concurrent same-process ticks don't
         # double-checkpoint on the boundary.
-        _kb._LAST_WAL_CHECKPOINT[key] = now
+        _LAST_WAL_CHECKPOINT[key] = now
     try:
         row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
         _kb._log.debug(
@@ -582,7 +582,7 @@ def repair_db(db_path: Optional[Path] = None, *, board: Optional[str] = None) ->
     if _missing_or_empty(resolved):
         return RepairResult(status="missing", db_path=resolved)
 
-    with _kb._cross_process_init_lock(resolved):
+    with _cross_process_init_lock(resolved):
         messages, reason = _probe_for_corruption(resolved)
         if messages is None:
             # Same quarantine the connect-time guard takes when sqlite
@@ -641,8 +641,8 @@ def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
         conn.row_factory = sqlite3.Row
         with _INIT_LOCK:
             # WAL doesn't work on network filesystems; the helper falls back to
-            # DELETE with one ERROR log (see hermes_state._WAL_INCOMPAT_MARKERS).
-            from hermes_state import apply_wal_with_fallback
+            # DELETE with one ERROR log (see hermes_state_wal._WAL_INCOMPAT_MARKERS).
+            from hermes_state_wal import apply_wal_with_fallback
             apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
             # FULL (not NORMAL): fsync before each checkpoint to narrow the
             # crash window that can leave a b-tree page header torn.
@@ -699,7 +699,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
             path,
         )
 
-    with _kb._cross_process_init_lock(path):
+    with _cross_process_init_lock(path):
         # Read-only file/sidecar preflight first, so a stray read-only kanban.db
         # fails actionably instead of "attempt to write a readonly database".
         # See #12508.
@@ -1187,5 +1187,5 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
 
 
 # Late-bound origin namespace (see module docstring); imported LAST so this
-# module is fully populated before ``kanban_db`` re-exports from it.
+# module is fully populated before ``kanban_db`` imports from it.
 from hermes_cli import kanban_db as _kb  # noqa: E402

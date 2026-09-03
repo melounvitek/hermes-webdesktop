@@ -51,13 +51,14 @@ class SessionPersistenceMixin:
         Resolving here rather than once in ``__init__`` is the whole fix for #88532: it lets the scoping
         that the multiplexed inbound path already performs actually reach session storage.
         """
-        from hermes_state import _default_db_path, get_shared_session_db
+        from hermes_state import _default_db_path
+        from hermes_state_registry import acquire
 
         path = Path(db_path) if db_path is not None else Path(_default_db_path())
 
         def _open():
             try:
-                return get_shared_session_db(path)  # process-wide registry: one writer per path
+                return acquire(path)  # process-wide registry: one writer per path
             except Exception as e:
                 if not _is_live_system_guard(e):
                     print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
@@ -195,7 +196,7 @@ class SessionPersistenceMixin:
         would strand secondary profiles' handles with their WAL lock held ('database is locked' on
         restart). Drained under the lock, closed outside it; a pinned handle is the pinner's."""
         def _close(db) -> None:
-            from hermes_state import release_or_close  # shared instances no-op on close()
+            from hermes_state_registry import release_or_close  # shared instances no-op on close()
             try:
                 release_or_close(db)
             except Exception as exc:

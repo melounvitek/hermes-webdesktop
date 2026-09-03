@@ -26,6 +26,8 @@ from unittest.mock import patch
 
 import pytest
 
+import hermes_state_repair
+
 from hermes_cli.session_lost_and_found import (
     _parse_sqlite3_cli_version,
     _wal_reset_vulnerable,
@@ -245,7 +247,7 @@ class TestGuidanceNeverNamesLiveDb:
         must not embed a raw sqlite3 command against the live path."""
         import hermes_state
 
-        body = inspect.getsource(hermes_state._backup_db_file)
+        body = inspect.getsource(hermes_state_repair._backup_db_file)
         assert ".recover\"`" not in body
         assert "sessions recover --source" in body
         assert "--inspect-only" in body

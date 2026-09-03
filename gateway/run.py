@@ -3629,7 +3629,8 @@ class GatewayRunner(
         after recording that recoverable state so ``__init__`` can record ``_session_db_init_error`` for the
         #88235 broadcast.
         """
-        from hermes_state import AsyncSessionDB, _default_db_path, get_shared_session_db
+        from hermes_state import AsyncSessionDB, _default_db_path
+        from hermes_state_registry import acquire
         from gateway.session_db_recovery import RecoverableHandleCache
         path = Path(_default_db_path())
         cache = getattr(self, "_session_db_handle_cache", None)
@@ -3659,7 +3660,7 @@ class GatewayRunner(
                 # Store handle unavailable: opening our own would resurrect the duplicate borrowed away.
                 raise RuntimeError("SessionStore SQLite handle unavailable")
             try:
-                return AsyncSessionDB(get_shared_session_db())
+                return AsyncSessionDB(acquire())
             except Exception as exc:
                 logger.warning("SQLite session store not available: %s", exc)
                 raise
@@ -3698,7 +3699,7 @@ class GatewayRunner(
                 return
             # Shared instances no-op on close() (the registry owns the lifecycle). Release the refcount
             # instead (#90837).
-            from hermes_state import release_or_close
+            from hermes_state_registry import release_or_close
             try:
                 release_or_close(inner)
             except Exception as exc:
@@ -4447,10 +4448,10 @@ def _housekeeping_auto_archive() -> None:
     """Stale-session auto-archive on a live timer (the startup hook fires once); maybe_auto_archive()
     is gated by sessions.min_interval_hours. Opens its own SessionDB — SQLite connections are thread-bound."""
     from hermes_cli.config import load_config as _load_full_config
-    from hermes_state import get_shared_session_db, release_or_close
+    from hermes_state_registry import acquire, release_or_close
     _sess_cfg = (_load_full_config().get("sessions") or {})
     if _sess_cfg.get("auto_archive", False):
-        _adb = get_shared_session_db()
+        _adb = acquire()
         try:
             _adb.maybe_auto_archive(
                 idle_days=float(_sess_cfg.get("auto_archive_days", 3)),

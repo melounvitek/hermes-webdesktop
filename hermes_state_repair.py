@@ -1,7 +1,6 @@
 """state.db repair, backup and writability preflight (split from hermes_state).
 
-Every name is re-imported into ``hermes_state``; intra-module calls to patchable helpers go through a lazy
-``from hermes_state import ...`` at call time so monkeypatches there still intercept.
+Patchable helpers are looked up as module globals at call time, so tests patch ``hermes_state_repair.<name>``.
 """
 
 from __future__ import annotations
@@ -291,7 +290,7 @@ def _backup_free_space_error(db_path: Path) -> Optional[str]:
 def _repair_snapshot_timeout_seconds(source_path: Path) -> float:
     """Bound one SQLite snapshot by source size incl. sidecars (a WAL can hold committed rows not yet in the
     main file), so a healthy large-database copy is not cut off by the repair-lock timeout."""
-    from hermes_state import _REPAIR_LOCK_TIMEOUT_SECONDS, _REPAIR_SNAPSHOT_MIN_THROUGHPUT_BYTES_PER_SECOND
+    from hermes_state import _REPAIR_LOCK_TIMEOUT_SECONDS
     source_bytes = 0
     for candidate in (source_path, *_sidecars(source_path)):
         with contextlib.suppress(FileNotFoundError):  # a sidecar may vanish mid-walk
@@ -584,15 +583,14 @@ def _connect_repair_durable(db_path: Path, *, timeout: float = 5.0) -> sqlite3.C
 
 def _repair_conn(db_path: Path, *, timeout: float = 5.0):
     """A :func:`_connect_repair_durable` connection as a context manager, closed on exit."""
-    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
-    return contextlib.closing(_connect(db_path, timeout=timeout))
+    return contextlib.closing(_connect_repair_durable(db_path, timeout=timeout))
 
 
 def _reapply_durability_barriers(conn: sqlite3.Connection) -> bool:
     """Best-effort (re)application of the macOS write barriers; True if accepted.
     Call before ``VACUUM``/``REINDEX`` once the schema parses: a connection opened
     on a malformed schema could not take them at open time. Never raises."""
-    from hermes_state import _apply_macos_checkpoint_barrier, _enforce_macos_synchronous_full
+    from hermes_state_wal import _apply_macos_checkpoint_barrier, _enforce_macos_synchronous_full
     try:
         _apply_macos_checkpoint_barrier(conn)
         _enforce_macos_synchronous_full(conn)
@@ -605,7 +603,7 @@ def apply_durability_barriers(conn: sqlite3.Connection) -> bool:
     """Durability barriers for guest users of ``state.db`` that must inherit its owner's journal mode. Also
     applies the configured ``database.synchronous`` level, a per-connection pragma that otherwise only
     rides on the journal-mode setup path guests must not run."""
-    from hermes_state import _apply_synchronous_pragma
+    from hermes_state_wal import _apply_synchronous_pragma
     ok = _reapply_durability_barriers(conn)
     with contextlib.suppress(Exception):
         from hermes_cli.config import cfg_get, load_config_readonly  # local: avoids an import cycle
@@ -624,8 +622,7 @@ def _close_unpinned(conn: sqlite3.Connection) -> None:
 def _open_exclusive(db_path: Path, begin: str) -> sqlite3.Connection:
     """Zero-timeout connection holding ``locking_mode=EXCLUSIVE`` after a rolled-back
     *begin*; closed (unpinned) and re-raised when exclusion cannot be taken."""
-    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
-    conn = _connect(db_path, timeout=0.0)
+    conn = _connect_repair_durable(db_path, timeout=0.0)
     try:
         for statement in ("PRAGMA locking_mode=EXCLUSIVE", begin, "ROLLBACK"):
             conn.execute(statement)
@@ -702,8 +699,7 @@ def _db_opens_cleanly(db_path: Path) -> Optional[str]:
     # of entries in index" when a B-tree index (e.g. idx_sessions_handoff_state) falls out of sync with its
     # base table. REINDEX rewrites the index b-tree from the canonical table rows using the existing index
     # definition, fixing the mismatch without touching data or FTS schema.
-    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
-    conn = _connect(db_path)
+    conn = _connect_repair_durable(db_path)
     try:
         with contextlib.closing(conn):
             # Best-effort tokenizer load: messages_fts_cjk needs cjk_unicode61 before any statement can touch it;
@@ -766,8 +762,7 @@ def _live_writer_holds_db(db_path: Path) -> bool:
     repair is then serialised only by the cross-process repairer lock. Before probing, the foreign-holder scan
     (``hermes_state_holders``) fails closed on deleted-WAL-generation, uninspectable, or unknown holders."""
     import hermes_state_holders as _state_holders
-    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
-    return _state_holders.live_writer_holds_db(db_path, connect_repair_durable=_connect)
+    return _state_holders.live_writer_holds_db(db_path, connect_repair_durable=_connect_repair_durable)
 
 
 def _repair_skip(report: Dict[str, Any], verb: str, error: str, exc: Optional[BaseException] = None) -> Dict[str, Any]:
@@ -794,9 +789,6 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
 
     See #50502.
     """
-    from hermes_state import (_cross_process_repair_lock, _db_opens_cleanly, _live_writer_holds_db,
-                              _persistent_repair_attempts_exhausted, _probe_journal_mode_for_repair,
-                              _record_repair_outcome, _repair_state_db_schema_locked)
     report: Dict[str, Any] = {"repaired": False, "strategy": None, "backup_path": None, "error": None}
     # Startup-watchdog lease: repair is I/O-bound (near-zero CPU), which the watchdog's CPU fallback would
     # misread as a parked deadlock. One lease (clamped to _MAX_LEASE_S=900) beats per-chunk renewal complexity.
@@ -858,7 +850,7 @@ def _probe_journal_mode_for_repair(db_path: Path) -> Optional[str]:
     """Best-effort journal-mode probe: ``wal``/``delete``, or ``None`` when the file cannot be opened or
     probed (malformed header, concurrent opener's locks — both expected on the repair path); callers then
     fall back to ``database.journal_mode``."""
-    from hermes_state import _on_disk_journal_mode
+    from hermes_state_wal import _on_disk_journal_mode
     try:
         with _repair_conn(db_path) as conn:
             return _on_disk_journal_mode(conn)
@@ -885,7 +877,7 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
     The transactional promotion already leaves the destination in its pre-repair mode, so on that path this
     is mostly the WAL-companion re-assertion; the reopen is the hazard, not the mode. See #101064.
     """
-    from hermes_state import apply_wal_with_fallback
+    from hermes_state_wal import apply_wal_with_fallback
     try:
         if conn is None:
             with _repair_conn(db_path) as owned:
@@ -917,9 +909,6 @@ def _repair_state_db_schema_locked(
     so recovery still depends on a human noticing a ``.malformed-backup-*`` file and knowing what to do with
     it. Not mutating the original in the first place is the property that holds without a human in the loop.
     """
-    from hermes_state import (_backup_db_file, _copy_database_snapshot, _db_opens_cleanly, _exclusive_repair_db_guard,
-                              _repair_scratch_space_error, _restore_journal_mode_after_repair, _run_repair_strategies,
-                              _unlink_db_triple)
     scratch = db_path.with_name(f"{db_path.name}.repair-scratch")
     if (cleanup_error := _unlink_db_triple(scratch)) is not None:
         return _repair_skip(report, "aborted", f"could not remove a stale repair snapshot before probing state.db: {cleanup_error}")
@@ -1074,7 +1063,7 @@ _REPAIR_STRATEGIES = (
 def _run_repair_strategies(db_path: Path, report: Dict[str, Any]) -> Dict[str, Any]:
     """Escalating repair attempts, applied to *db_path* IN PLACE — only ever a scratch copy nothing else holds open,
     never the user's database. The "could not recover" log lives in the caller so it names the user's database."""
-    from hermes_state import _db_opens_cleanly
+
     for name, body, success_msg, failure_msg in _REPAIR_STRATEGIES:
         try:
             with _repair_conn(db_path) as conn:

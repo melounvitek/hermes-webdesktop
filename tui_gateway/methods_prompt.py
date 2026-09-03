@@ -451,7 +451,7 @@ def _persist_session_row_for_submit(rid, session):
                 "was not saved; repair state.db and try again")
         _persist_branch_seed(session)
     except Exception as exc:
-        from hermes_state import is_disk_full_error
+        from hermes_state_errors import is_disk_full_error
         with session["history_lock"]:
             session["running"] = False
             session["last_active"] = time.time()

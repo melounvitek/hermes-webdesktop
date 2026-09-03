@@ -2,10 +2,9 @@
 
 Header probes (application_id / zeroed-file detection), deleted-WAL-sidecar
 holder scans, quarantine of zeroed databases, ``collect_state_db_stats`` and
-holder-process classification.  Every name is re-imported into ``hermes_state``
-so ``hermes_state.<name>`` keeps resolving — and tests that monkeypatch it keep
-intercepting, because intra-module calls to patched helpers go through a lazy
-``from hermes_state import ...`` at call time.
+holder-process classification.  Helpers that hermes_state itself imports and
+calls (``_connect_tracked_db`` & co) are looked up lazily from ``hermes_state`` at
+call time, so tests that monkeypatch ``hermes_state.<name>`` keep intercepting.
 """
 
 from __future__ import annotations
@@ -81,7 +80,7 @@ def _pread_db_header(db_path: Path, length: int) -> "Optional[bytes]":
 
 def _read_sqlite_application_id(db_path: Path) -> "Optional[int]":
     """application_id from the SQLite header, via the lock-safe :func:`_pread_db_header`."""
-    from hermes_state import _STATE_DB_APPLICATION_ID_OFFSET
+    from hermes_state_errors import _STATE_DB_APPLICATION_ID_OFFSET
     end = _STATE_DB_APPLICATION_ID_OFFSET + 4
     header = _pread_db_header(db_path, end)
     if header is None or len(header) < end or header[:16] != b"SQLite format 3\x00":
@@ -142,7 +141,8 @@ def iter_deleted_sqlite_sidecar_holders(db_path) -> List[Tuple[int, str]]:
 def refuse_deleted_wal_generation(db_path) -> None:
     """Raise if any process holds a deleted WAL/SHM generation for *db_path*; called
     *before* ``sqlite3.connect`` so a second opener cannot mint a replacement WAL inode."""
-    from hermes_state import DeletedWalGenerationError, _DELETED_WAL_GENERATION_MSG
+    from hermes_state import DeletedWalGenerationError
+    from hermes_state_errors import _DELETED_WAL_GENERATION_MSG
     if not iter_deleted_sqlite_sidecar_holders(db_path):
         return
     logger.error(_DELETED_WAL_GENERATION_MSG)

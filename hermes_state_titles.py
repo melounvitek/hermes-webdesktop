@@ -127,10 +127,6 @@ class SessionTitlesMixin:
             raise ValueError(f"invalid automatic title source: {source!r}")
         return self._set_session_title(session_id, title, source=source)
 
-    def set_auto_title_if_empty(self, session_id: str, title: str) -> bool:
-        """Back-compat shim (third-party plugins reference it by name)."""
-        return self.set_auto_title(session_id, title, source=self.TITLE_SOURCE_LLM)
-
     def get_session_title(self, session_id: str) -> Optional[str]:
         """Get the title for a session, or None."""
         row = self._read_one("SELECT title FROM sessions WHERE id = ?", (session_id,))

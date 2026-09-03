@@ -147,7 +147,8 @@ class SessionGatewayMixin:
 
         Fails closed: anything whose parent, age, argv, or network connections
         cannot be proved safe remains a repair-blocking holder."""
-        from hermes_state import _concrete_state_db_holder_pids, _is_inactive_orphan_desktop_holder, psutil
+        from hermes_state import psutil
+        from hermes_state_dbfile import _concrete_state_db_holder_pids, _is_inactive_orphan_desktop_holder
         if not sys.platform.startswith("linux") or psutil is None:
             return []
         try:

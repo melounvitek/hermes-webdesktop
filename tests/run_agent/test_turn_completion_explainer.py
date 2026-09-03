@@ -17,6 +17,7 @@ suite (we patch ``agent.process_bootstrap.OpenAI`` and drive ``agent.client``), 
 pass identically in CI and locally.
 """
 
+import hermes_state_errors
 import os
 import uuid
 from types import SimpleNamespace
@@ -249,7 +250,7 @@ def test_classify_persistence_error_corruption_beats_disk_bucket():
 
 
 def test_classify_persistence_error_reuses_disk_full_markers():
-    """The disk bucket delegates to hermes_state.is_disk_full_error, so
+    """The disk bucket delegates to hermes_state_errors.is_disk_full_error, so
     every marker that helper recognizes (ENOSPC, 'not enough space', ...)
     must classify as 'disk' — the two classifiers can never drift apart."""
     import errno
@@ -270,10 +271,8 @@ def test_classify_persistence_error_compression_busy_is_distinct():
     storage damage — but its message contains neither 'locked' nor 'busy',
     so it must classify by exception type (and by phrase for RPC-wrapped
     strings). This is the exact failure mode of issue #81227."""
-    from hermes_state import (
-        CompressionSessionBusyError,
-        SessionCompressionInProgressError,
-    )
+    from hermes_state import SessionCompressionInProgressError
+    from hermes_state_errors import CompressionSessionBusyError
     from hermes_state import classify_persistence_error
 
     assert classify_persistence_error(
@@ -294,7 +293,8 @@ def test_classify_persistence_error_compression_busy_is_distinct():
 
 
 def test_classify_persistence_error_turn_lease_lost_is_distinct():
-    from hermes_state import SessionTurnLeaseLostError, classify_persistence_error
+    from hermes_state import classify_persistence_error
+    from hermes_state_errors import SessionTurnLeaseLostError
 
     assert classify_persistence_error(
         SessionTurnLeaseLostError(
@@ -309,7 +309,8 @@ def test_classify_persistence_error_turn_lease_lost_is_distinct():
 def test_persistence_error_causes_tuple_matches_classifier():
     """PERSISTENCE_ERROR_CAUSES must cover every value the classifier can
     return (consumers like cron suppression iterate it)."""
-    from hermes_state import PERSISTENCE_ERROR_CAUSES, classify_persistence_error
+    from hermes_state import classify_persistence_error
+    from hermes_state_errors import PERSISTENCE_ERROR_CAUSES
 
     probes = (
         "database is locked",

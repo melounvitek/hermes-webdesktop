@@ -534,10 +534,11 @@ def session_search(query: str = "", role_filter: str = None, limit: int = 3, db=
                    current_session_id: str = None, session_id: str = None, around_message_id: int = None,
                    window: int = 5, sort: str = None, profile: str = None, detail: str = "adaptive") -> str:
     """Run session search, closing DBs opened here. Positional order is frozen for old callers."""
-    from hermes_state import format_session_db_unavailable, get_shared_session_db, release_or_close
+    from hermes_state import format_session_db_unavailable
+    from hermes_state_registry import acquire, release_or_close
     owned_dbs: List[Any] = []
     if db is None:
-        db = _quiet(get_shared_session_db, None, "SessionDB unavailable for session_search")
+        db = _quiet(acquire, None, "SessionDB unavailable for session_search")
         if db is None:
             return tool_error(format_session_db_unavailable(), success=False)
         owned_dbs.append(db)

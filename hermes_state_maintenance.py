@@ -28,7 +28,7 @@ def _like(value: str) -> str:
 
 
 def _cwd_prefix_filter(value: str) -> Tuple[List[str], list]:
-    from hermes_state import _cwd_prefix_clause
+    from hermes_state_sessions import _cwd_prefix_clause
     clause, params = _cwd_prefix_clause(value)
     return [clause], list(params)
 
@@ -107,7 +107,8 @@ class SessionMaintenanceMixin:
     def _write_guards_reject(self, conn, sid: str, **kwargs) -> bool:
         """True when a live turn lease / compression lock protects ``sid``; expired or
         dead-holder guards are reclaimed and fenced as a side effect."""
-        from hermes_state import SessionCompressionInProgressError, SessionTurnLeaseLostError
+        from hermes_state import SessionCompressionInProgressError
+        from hermes_state_errors import SessionTurnLeaseLostError
         try:
             self._check_transcript_write_guards(
                 conn, sid, compression_lock_holder=None, turn_lease_holder=None,
@@ -376,7 +377,7 @@ class SessionMaintenanceMixin:
         ``request_dump_*``) for pruned sessions are removed as part of the same sweep (issue #3015).
         Messaging and UI sources are never touched here. See #54189.
         """
-        from hermes_state import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
+        from hermes_state_repair import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
         result: Dict[str, Any] = {"skipped": False, "pruned": 0, "closed": 0, "vacuumed": False}
         maintenance_lock = _try_acquire_auto_maintenance_lock(self.db_path)
         if maintenance_lock is None:

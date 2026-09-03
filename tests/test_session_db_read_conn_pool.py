@@ -35,6 +35,7 @@ holds POSIX locks on that inode, so raw descriptor counts lag the real
 connection count and make such assertions flaky.
 """
 
+import hermes_state_readpool
 import queue
 import threading
 
@@ -540,10 +541,10 @@ def test_peak_is_bounded_across_many_database_files(tmp_path):
     finally:
         for d in dbs:
             d.close()
-        assert hermes_state._process_read_permits.acquire(blocking=False), (
+        assert hermes_state_readpool._process_read_permits.acquire(blocking=False), (
             "close() stranded a process permit"
         )
-        hermes_state._process_read_permits.release()
+        hermes_state_readpool._process_read_permits.release()
 
 
 @pytest.mark.requires_wal

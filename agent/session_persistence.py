@@ -242,10 +242,8 @@ def _db_flush_failed(agent, e: Exception, batch_rows: List[Dict[str, Any]], adop
     agent._db_flush_scan_prefix = None  # full re-scan next flush: an exception mid-loop leaves mixed dispositions
     # The only place the SQLite error is visible before it becomes a bare False — classify it so the turn-end
     # explanation can distinguish lock contention from disk-full/read-only.
-    from hermes_state import (
-        CompressionSessionClosedError, StateDbCorruptError, StateDbReplacedError, classify_persistence_error,
-        divert_session_transcript_jsonl,
-    )
+    from hermes_state import StateDbCorruptError, StateDbReplacedError, classify_persistence_error, divert_session_transcript_jsonl
+    from hermes_state_errors import CompressionSessionClosedError
     agent._last_persistence_error_cause = classify_persistence_error(e)
     if isinstance(e, (StateDbReplacedError, StateDbCorruptError)):
         # A replaced/quarantined handle will not take this batch again — keep it on disk.

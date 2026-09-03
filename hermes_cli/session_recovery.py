@@ -16,7 +16,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from hermes_state import (FTS_STORAGE_VERSION, SCHEMA_VERSION, SessionDB, _db_opens_cleanly)
+from hermes_state import SessionDB
+from hermes_state_common import FTS_STORAGE_VERSION, SCHEMA_VERSION
+from hermes_state_repair import _db_opens_cleanly
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
@@ -180,7 +182,7 @@ def _copy_source_bundle(source: Path, snapshot_dir: Path) -> tuple[Path, list[st
 
     The whole copy runs inside ``offline_file_access`` (holds the connection-lifecycle lock). Recovery
     normally runs as its own CLI process against an offline file, so the refusal should never fire; the
-    guard keeps this path consistent with ``hermes_state._backup_db_file``.
+    guard keeps this path consistent with ``hermes_state_repair._backup_db_file``.
 
     Checking for a live connection and *then* copying would be a check/use race: a connection could open in
     that window, and the copy's ``close()`` would cancel its POSIX advisory locks -- the failure class

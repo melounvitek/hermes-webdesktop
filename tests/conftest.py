@@ -99,7 +99,7 @@ if _hermes_home_points_at_production(os.environ.get("HERMES_HOME", "")):
 # the child at the same moment the child lost the HERMES_HOME redirect.
 # HERMES_TEST_ISOLATION is OUR marker: exported here (before any test module
 # imports), inherited by every child by default, and honored by
-# hermes_state._running_under_pytest() as a test-context signal. A child
+# hermes_state_guard._running_under_pytest() as a test-context signal. A child
 # that carries it and still resolves the production state.db fails hard.
 # Tests that legitimately need a child to look like a non-test process AND
 # open a real DB must export HERMES_STATE_DB_GUARD_BYPASS=1 in that child's
@@ -647,7 +647,7 @@ def _neutralize_macos_keychain_creds(request, monkeypatch):
 # ── Kanban write guard (#69283) ─────────────────────────────────────────────
 # When hermetic isolation is bypassed (stale checkout, wrong rootdir, direct
 # invocation), kanban writes silently pollute the real ~/.hermes. This autouse
-# fixture patches ``kanban_db.connect`` to refuse writes whose resolved DB
+# fixture patches ``kanban_db_connect.connect`` to refuse writes whose resolved DB
 # path lands under the REAL kanban root (captured at import time, before any
 # fixture rewires the environment). A deny-list is used instead of an
 # allow-list because test-level fixtures legitimately move HERMES_HOME to
@@ -711,8 +711,8 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
     # doesn't exist yet (AttributeError flake, caught in a full-suite run).
     # A half-imported module has no callers yet either — nothing to guard
     # this round; the next test's fixture will patch the completed module.
-    _orig_connect = getattr(_kdb, "connect", None)
-    if _orig_connect is None:
+    _orig_connect = getattr(_kdbc, "connect", None)
+    if _orig_connect is None or getattr(_kdb, "kanban_db_path", None) is None:
         return
 
     def _guarded_connect(db_path=None, *args, **kwargs):
@@ -736,7 +736,7 @@ def _kanban_write_guard(_hermetic_environment, monkeypatch):
             f"to the real ~/.hermes. See #69283."
         )
 
-    monkeypatch.setattr(_kdb, "connect", _guarded_connect)
+    monkeypatch.setattr(_kdbc, "connect", _guarded_connect)
 
 
 # ── Live state.db write guard ───────────────────────────────────────────────

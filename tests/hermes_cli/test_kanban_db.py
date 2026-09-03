@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 
 import hermes_state
+import hermes_state_wal
 from hermes_cli import kanban_db as kb
 
 
@@ -74,7 +75,7 @@ def test_cross_process_init_lock_uses_windows_byte_range_lock(tmp_path, monkeypa
     monkeypatch.setitem(sys.modules, "msvcrt", fake_msvcrt)
 
     db_path = tmp_path / "kanban.db"
-    with kb._cross_process_init_lock(db_path):
+    with kbc._cross_process_init_lock(db_path):
         # Acquired exactly once via the non-blocking byte-range lock.
         assert [call[1:] for call in calls] == [(fake_msvcrt.LK_NBLCK, 1)]
 
@@ -873,7 +874,7 @@ class TestSharedBoardPaths:
 
 
 # ---------------------------------------------------------------------------
-# NFS / network-filesystem fallback (see hermes_state.apply_wal_with_fallback)
+# NFS / network-filesystem fallback (see hermes_state_wal.apply_wal_with_fallback)
 # ---------------------------------------------------------------------------
 
 def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch, caplog):
@@ -903,16 +904,16 @@ def test_connect_falls_back_to_delete_on_locking_protocol(tmp_path, monkeypatch,
 
     # These tests exercise the WAL-attempt path; assume a fixed SQLite so the
     # WAL-reset vulnerability gate doesn't short-circuit before the pragma.
-    import hermes_state as _hermes_state
+    import hermes_state_wal as _hermes_state_wal
     monkeypatch.setattr(
-        _hermes_state, "is_sqlite_wal_reset_vulnerable",
+        _hermes_state_wal, "is_sqlite_wal_reset_vulnerable",
         lambda version_info=None: False,
     )
-    _hermes_state._wal_fallback_warned_paths.clear()
+    _hermes_state_wal._wal_fallback_warned_paths.clear()
 
     # Clear module cache so a fresh connect() is attempted
     kb._INITIALIZED_PATHS.clear()
-    hermes_state._wal_fallback_warned_paths.clear()
+    hermes_state_wal._wal_fallback_warned_paths.clear()
 
     real_connect = _sqlite3.connect
 
@@ -963,10 +964,10 @@ def test_connect_works_when_wal_is_silently_refused(tmp_path, monkeypatch, caplo
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
     kb._INITIALIZED_PATHS.clear()
-    hermes_state._wal_fallback_warned_paths.clear()
+    hermes_state_wal._wal_fallback_warned_paths.clear()
     # Assume a fixed SQLite so the WAL-reset gate doesn't short-circuit.
     monkeypatch.setattr(
-        hermes_state, "is_sqlite_wal_reset_vulnerable",
+        hermes_state_wal, "is_sqlite_wal_reset_vulnerable",
         lambda version_info=None: False,
     )
 
@@ -1033,7 +1034,7 @@ def test_sqlite_connect_closes_tracked_conn_on_setup_failure(tmp_path, monkeypat
     monkeypatch.setattr(kb.sqlite3, "connect", failing_connect)
 
     with pytest.raises(sqlite3.OperationalError, match="simulated setup failure"):
-        kb._sqlite_connect(db_path)
+        kbc._sqlite_connect(db_path)
 
     with sqlite_safe_read._live_lock:
         after = sqlite_safe_read._live_connections.get(key, 0)
@@ -1627,7 +1628,7 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 # connect_closing(): context manager that actually closes the FD
 # Regression coverage for #33159 (kanban.db FD leak — gateway crashes after
 # ~4 days). sqlite3.Connection's built-in __exit__ commits/rollbacks but
-# does NOT close, so `with kb.connect() as conn:` leaks the FD in
+# does NOT close, so `with kbc.connect() as conn:` leaks the FD in
 # long-lived processes (gateway run_slash, dashboard decompose handler).
 # `connect_closing()` is the leak-safe replacement.
 # ---------------------------------------------------------------------------

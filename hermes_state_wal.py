@@ -1,7 +1,6 @@
 """SQLite journal-mode and PRAGMA policy for state.db (split from hermes_state).
 
-Every name is re-imported into ``hermes_state``; intra-module calls to patchable helpers go through a lazy
-``from hermes_state import ...`` at call time so monkeypatches there still intercept.
+Patchable helpers are looked up as module globals at call time, so tests patch ``hermes_state_wal.<name>``.
 """
 
 from __future__ import annotations
@@ -30,7 +29,7 @@ _WAL_INCOMPAT_MARKERS = ("locking protocol", "not authorized", "disk i/o error")
 _WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 # Once-per-process-per-db_label dedup sets (kanban_db.connect() runs on every kanban operation, so an undeduped
-# line would repeat per connection). Tests clear these via ``hermes_state.<name>``; ``_log_once`` resolves them there.
+# line would repeat per connection). Tests clear these via ``hermes_state_wal.<name>``.
 _wal_fallback_warned_paths: set[str] = set()
 _wal_fallback_warned_lock = threading.Lock()
 _wal_reset_bug_warned_paths: set[str] = set()
@@ -174,7 +173,7 @@ def _verify_configured_delete(actual: str) -> str:
 def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.db", require_wal: bool = False) -> str:
     """Set ``journal_mode=WAL`` on ``conn``, falling back to DELETE on failure.
 
-    Returns the mode actually set. Shared by :class:`SessionDB` and ``hermes_cli.kanban_db.connect``.
+    Returns the mode actually set. Shared by :class:`SessionDB` and ``hermes_cli.kanban_db_connect.connect``.
     WAL-incompatible filesystems either raise ``OperationalError`` ("locking protocol" / "disk I/O error") or —
     macOS NFS / SMB / AgentFS — silently refuse and stay in DELETE; either way log ERROR once per process per
     ``db_label`` and fall back. ``require_wal=True`` raises :class:`WalUnsupportedError` instead. WAL-reset-bug
@@ -193,7 +192,6 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
     still documents the WAL-reset bug as real through 3.51.2 with serious consequences. Until a fixed
     runtime is delivered, keep new databases out of WAL.
     """
-    from hermes_state import is_sqlite_wal_reset_vulnerable, resolve_journal_mode
     configured = resolve_journal_mode()
 
     # Vulnerable SQLite: never enable WAL on non-WAL files (configured mode resolved first so an explicit DELETE
@@ -397,9 +395,8 @@ _ONCE_LOGS = {
 def _log_once(kind: str, db_label: str, *args: Any) -> None:
     """Emit ``_ONCE_LOGS[kind]`` once per (process, db_label). Callable *args* are
     resolved only after the dedupe check, so install-method probes run once."""
-    import hermes_state
     lock, set_name, level, message = _ONCE_LOGS[kind]
-    seen = getattr(hermes_state, set_name)
+    seen = globals()[set_name]
     with lock:
         if db_label in seen:
             return

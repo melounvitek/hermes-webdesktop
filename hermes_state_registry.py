@@ -214,12 +214,6 @@ def stats() -> Dict[str, int]:
         }
 
 
-# Backwards-compatible aliases (hermes_state re-exports them).
-get_shared_session_db = acquire
-release_shared_session_db = release
-close_shared_session_dbs = close_all
-
-
 def release_or_close(db: "SessionDB") -> None:
     """Release a shared instance, or close it when it is not registry-managed. Drop-in for a
     plain ``db.close()``: read-only opens, CLI one-shots and test fakes fall back."""

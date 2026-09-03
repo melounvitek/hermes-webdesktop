@@ -289,9 +289,9 @@ class AIAgent(
         if self._session_db is not None:
             return self._session_db
         try:
-            from hermes_state import get_shared_session_db
+            from hermes_state_registry import acquire
 
-            self._session_db = get_shared_session_db()
+            self._session_db = acquire()
             self._owns_session_db = True  # we opened it, so close() must release it
             return self._session_db
         except Exception:
@@ -998,7 +998,7 @@ class AIAgent(
             self._owns_session_db = False
             # Shared instances no-op on close(); release the refcount so the registry closes on the last caller.
             # See #90837.
-            from hermes_state import release_or_close
+            from hermes_state_registry import release_or_close
             release_or_close(session_db)
 
     def _hydrate_todo_store(self, history: List[Dict[str, Any]]) -> None:

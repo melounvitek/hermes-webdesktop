@@ -374,9 +374,9 @@ _start_idle_reaper()
 def _get_db():
     global _db, _db_error
     if _db is None:
-        from hermes_state import get_shared_session_db
+        from hermes_state_registry import acquire
         try:
-            _db, _db_error = get_shared_session_db(), None
+            _db, _db_error = acquire(), None
         except Exception as exc:
             _db_error = str(exc)
             logger.warning("TUI session store unavailable — continuing without state.db features: %s", exc)
@@ -409,10 +409,10 @@ def _open_profile_session_db(profile_home):
     """Open a DEDICATED handle on ``profile_home``'s ``state.db`` — FAIL CLOSED: a silent fallback to the
     launch ``state.db`` would bleed rows into the wrong profile's store exactly when the profile store is
     briefly unopenable (locked, mid-restore); callers let the error abort the build (→ ``agent_error``)."""
-    from hermes_state import get_shared_session_db
+    from hermes_state_registry import acquire
     db_path = Path(profile_home) / "state.db"
     try:
-        return get_shared_session_db(db_path)
+        return acquire(db_path)
     except Exception as exc:
         raise RuntimeError(f"profile session store unavailable: {db_path}: {exc}") from exc
 
@@ -428,8 +428,8 @@ def _profile_db(params: dict | None = None):
         db, owns = _get_db(), False
     else:
         try:
-            from hermes_state import get_shared_session_db
-            db, owns = get_shared_session_db(Path(profile_home) / "state.db"), True
+            from hermes_state_registry import acquire
+            db, owns = acquire(Path(profile_home) / "state.db"), True
         except Exception as exc:
             logger.warning("TUI profile session store unavailable for %s: %s", profile, exc)
             db, owns = None, False

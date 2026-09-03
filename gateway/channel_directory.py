@@ -342,8 +342,8 @@ def _entries_from_origins(platform_name: str, source: str, origins_fn) -> List[D
 def _build_from_sessions_db(platform_name: str) -> List[Dict[str, str]]:
     """Pull channels/contacts from state.db gateway session rows."""
     def _origins() -> Iterable[Tuple[Dict[str, Any], Any]]:
-        from hermes_state import get_shared_session_db, release_or_close
-        db = get_shared_session_db()
+        from hermes_state_registry import acquire, release_or_close
+        db = acquire()
         try:
             lister = getattr(db, "list_gateway_sessions", None)
             if not callable(lister):

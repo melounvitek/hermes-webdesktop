@@ -189,7 +189,8 @@ class SessionMessagesMixin:
         #74478 patience note below). User-initiated transcript mutations may opt in to rejecting an active
         unowned turn lease in that same transaction.
         """
-        from hermes_state import CompressionSessionClosedError, SessionCompressionInProgressError, SessionTurnLeaseLostError
+        from hermes_state import SessionCompressionInProgressError
+        from hermes_state_errors import CompressionSessionClosedError, SessionTurnLeaseLostError
         # NOTE (#75316 redesign): appends do NOT check compression_locks. The lock's job is to stop two
         # COMPRESSIONS colliding, not to fence ordinary transcript writes. Concurrent appends during a
         # compression are safe by construction: archive_and_compact() commits against a watermark captured
@@ -410,15 +411,6 @@ class SessionMessagesMixin:
             (session_id, role, int(offset)))
         return row[0] if row else None
 
-    def latest_user_message_row_id(self, session_id: str) -> Optional[int]:
-        """Row id of the most recent active user message, or ``None``.
-
-        The agent's default reaction target: "the message that triggered me",
-        so the model never has to thread row ids through a tool call (mirrors
-        the photon adapter's ``_record_last_inbound``).
-        """
-        return self.latest_message_row_id(session_id, role="user")
-
     def get_message_role(self, session_id: str, row_id: int) -> Optional[str]:
         """Role of the active message at *row_id* in *session_id*, or ``None``."""
         if not session_id:
@@ -461,7 +453,7 @@ class SessionMessagesMixin:
         is inserted as fresh active rows exactly as in the destructive path, so the live view is identical
         either way; only the durability of the dropped turns differs.
         """
-        from hermes_state import CompressionSessionClosedError
+        from hermes_state_errors import CompressionSessionClosedError
         def _do(conn):
             if reject_active_turn_lease:
                 self._check_transcript_write_guards(

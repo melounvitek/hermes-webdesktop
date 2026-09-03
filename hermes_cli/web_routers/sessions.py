@@ -21,7 +21,8 @@ from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
     BulkDeleteSessions, SessionImport, SessionOwnerBackfill, SessionPrune, SessionRename)
 from hermes_cli.web_routers._common import log as _log, http_failure
-from hermes_state import is_malformed_db_error, is_transient_sqlite_error
+from hermes_state import is_malformed_db_error
+from hermes_state_errors import is_transient_sqlite_error
 
 list_router = APIRouter()
 search_router = APIRouter()

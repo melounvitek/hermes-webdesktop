@@ -171,7 +171,7 @@ def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, kind: st
     ok_label, not_fixed_label, failed_issue, fix_hint = _STATE_DB_REPAIRS[kind]
     if not should_fix:
         return f.issues.append(fix_hint)
-    from hermes_state import repair_state_db_schema
+    from hermes_state_repair import repair_state_db_schema
     report = repair_state_db_schema(state_db_path)
     if not report.get("repaired"):
         check_warn(not_fixed_label, f"({report.get('error')}; backup: {report.get('backup_path')})")
@@ -192,7 +192,7 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
         check_ok(f"{_DHH}/state.db exists ({_session_count(state_db_path)} sessions)")
         # COUNT(*) succeeds even when the FTS index is corrupt and every write fails through the triggers;
         # _db_opens_cleanly drives a rolled-back write to surface that.
-        from hermes_state import _db_opens_cleanly
+        from hermes_state_repair import _db_opens_cleanly
         # `_db_opens_cleanly` now drives a rolled-back write so this otherwise-silent corruption class is
         # surfaced (and repaired in place with --fix). See #50502.
         _write_reason = _db_opens_cleanly(state_db_path)
@@ -213,7 +213,7 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
     """Health/stats snapshot: strictly read-only (mode=ro) so it is safe against a live DB held by
     the gateway; any failure degrades to one info line rather than failing doctor."""
     with warn_on_error("state.db stats unavailable ({e})", "", report=lambda t, _d: check_info(t)):
-        from hermes_state import collect_state_db_stats, count_db_holders
+        from hermes_state_dbfile import collect_state_db_stats, count_db_holders
         rows = _render_state_db_stats(collect_state_db_stats(state_db_path), holders=count_db_holders(state_db_path))
         for _kind, _text, _detail in rows:
             if _kind != "warn":

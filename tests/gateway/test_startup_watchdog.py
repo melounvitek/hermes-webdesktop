@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+import hermes_state_repair
+
 import hermes_startup_watchdog as sw
 from hermes_startup_watchdog import (
     SERVICE_RESTART_EXIT_CODE,
@@ -453,7 +455,7 @@ class TestProgressLease:
 
         import hermes_state
 
-        src = inspect.getsource(hermes_state.repair_state_db_schema)
+        src = inspect.getsource(hermes_state_repair.repair_state_db_schema)
         assert "report_startup_progress" in src
 
 

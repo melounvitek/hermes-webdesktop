@@ -209,8 +209,8 @@ def recover_pending_to_db(session_db=None) -> int:
         return 0
     own_db = session_db is None
     if own_db:
-        from hermes_state import get_shared_session_db
-        session_db = get_shared_session_db()
+        from hermes_state_registry import acquire
+        session_db = acquire()
     recovered = 0
     try:
         for path in flush_files:
@@ -224,7 +224,7 @@ def recover_pending_to_db(session_db=None) -> int:
     finally:
         if own_db:  # shutdown cancellation/interrupt must not strand an owned DB
             with contextlib.suppress(Exception):
-                from hermes_state import release_or_close
+                from hermes_state_registry import release_or_close
                 release_or_close(session_db)
     if recovered:
         logger.info("Recovered %d pending message(s) from shutdown flush", recovered)

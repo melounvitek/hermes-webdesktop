@@ -1475,7 +1475,7 @@ class TestGatewaySessionDbRecovery:
     def test_transcript_reroute_migrates_remaining_backlog_to_child(self):
         import threading
         from types import SimpleNamespace
-        from hermes_state import CompressionSessionClosedError
+        from hermes_state_errors import CompressionSessionClosedError
 
         class FakeDb:
             def get_compression_tip(self, session_id):

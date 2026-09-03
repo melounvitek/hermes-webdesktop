@@ -94,14 +94,14 @@ def _make_agent_in_context(sid: str, key: str, **kwargs):
 def _profile_session_db(profile_home):
     """``(db, owns)``: a DEDICATED handle on ``profile_home``'s state.db, else the shared launch db."""
     if profile_home:
-        from hermes_state import get_shared_session_db
-        return get_shared_session_db(Path(profile_home) / "state.db"), True
+        from hermes_state_registry import acquire
+        return acquire(Path(profile_home) / "state.db"), True
     return _get_db(), False
 
 
 def _release_db(db) -> None:
     with contextlib.suppress(Exception):
-        from hermes_state import release_or_close
+        from hermes_state_registry import release_or_close
         release_or_close(db)
 
 
@@ -249,7 +249,7 @@ def _persist_branch(db, new_key: str, parent_key: str, title: str, history: list
                        **{field: msg.get(field) for field in copy_fields}} for msg in history], chunk_rows=500)
         db.set_session_title(new_key, title)
     except Exception as exc:
-        from hermes_state import is_disk_full_error
+        from hermes_state_errors import is_disk_full_error
         if compensate and not is_disk_full_error(exc):
             try:
                 db.delete_session(new_key)

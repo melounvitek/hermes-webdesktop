@@ -82,7 +82,7 @@ def _surface(layer: str, code: str, retryable: bool, provider: str = "", model: 
 
 def _disk_full(candidate: Any) -> bool:
     try:
-        from hermes_state import is_disk_full_error
+        from hermes_state_errors import is_disk_full_error
 
         return bool(is_disk_full_error(candidate))
     except Exception:  # pragma: no cover - defensive import guard

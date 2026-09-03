@@ -44,7 +44,7 @@ def prepare_ledger(
     conn: sqlite3.Connection, *, db_label: str, synchronous_full: bool = True
 ) -> None:
     """Row factory + busy timeout + WAL (with fallback) + optional ``synchronous=FULL``."""
-    from hermes_state import apply_wal_with_fallback
+    from hermes_state_wal import apply_wal_with_fallback
 
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")

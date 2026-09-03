@@ -198,7 +198,7 @@ class SessionCompressionMixin:
         See #75316.
         ``None`` = unbounded (no internal flush happened). See #47202.
         """
-        from hermes_state import CompressionSessionBusyError
+        from hermes_state_errors import CompressionSessionBusyError
         def _do(conn):
             if require_lease_refresh and compression_lock_holder:
                 conn.execute(

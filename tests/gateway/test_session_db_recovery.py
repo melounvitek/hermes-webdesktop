@@ -108,6 +108,7 @@ def test_runtime_health_is_sanitized_and_recovers() -> None:
 
 def test_session_store_and_runner_reopen_after_failed_construction(monkeypatch, tmp_path) -> None:
     import hermes_state
+    import hermes_state_registry
     from gateway.run import GatewayRunner, _SESSION_DB_UNPINNED
     from gateway.session import SessionStore
     from gateway.session_persistence import _DB_UNPINNED
@@ -124,7 +125,7 @@ def test_session_store_and_runner_reopen_after_failed_construction(monkeypatch, 
         opened.append(handle)
         return handle
 
-    monkeypatch.setattr(hermes_state, "get_shared_session_db", fail_once_session_db)
+    monkeypatch.setattr(hermes_state_registry, "acquire", fail_once_session_db)
     monkeypatch.setattr(hermes_state, "_default_db_path", lambda: db_path)
 
     store = object.__new__(SessionStore)
@@ -153,7 +154,7 @@ def test_session_store_and_runner_reopen_after_failed_construction(monkeypatch, 
         runner_opened.append(handle)
         return handle
 
-    monkeypatch.setattr(hermes_state, "get_shared_session_db", runner_fail_once)
+    monkeypatch.setattr(hermes_state_registry, "acquire", runner_fail_once)
     monkeypatch.setattr(hermes_state, "AsyncSessionDB", lambda db: ("async", db))
     runner = object.__new__(GatewayRunner)
     runner._session_db_pinned = _SESSION_DB_UNPINNED

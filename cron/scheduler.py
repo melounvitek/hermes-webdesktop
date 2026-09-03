@@ -60,7 +60,7 @@ def _close_late_session_db_result(future: "concurrent.futures.Future") -> None:
     with contextlib.suppress(Exception):
         db = future.result()
         if db is not None:
-            from hermes_state import release_or_close
+            from hermes_state_registry import release_or_close
             release_or_close(db)
 
 
@@ -1684,15 +1684,15 @@ def _open_cron_session_db(job: dict):
     # timeout proceeds without a session store instead of blocking the run forever.
     _session_db_timeout = _get_session_db_timeout()
     try:
-        from hermes_state import get_shared_session_db
+        from hermes_state_registry import acquire
 
         if _session_db_timeout <= 0:
-            return get_shared_session_db()
+            return acquire()
         _session_db_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         # Copy the context so a profile run resolves ITS OWN home/state.db on the worker thread
         # instead of the process-global default.
         _session_db_context = contextvars.copy_context()
-        _session_db_future = _session_db_pool.submit(_session_db_context.run, get_shared_session_db)
+        _session_db_future = _session_db_pool.submit(_session_db_context.run, acquire)
         try:
             return _session_db_future.result(timeout=_session_db_timeout)
         except concurrent.futures.TimeoutError:
@@ -1884,7 +1884,7 @@ def _final_response_from_result(result: dict, job_id: str, job_name: str, AIAgen
         # Render every persistence-cause variant or cause-refined text slips through.
         _explainer_variants = []
         try:
-            from hermes_state import PERSISTENCE_ERROR_CAUSES as _causes
+            from hermes_state_errors import PERSISTENCE_ERROR_CAUSES as _causes
         except Exception:
             _causes = ("locked", "disk", "unknown")
         for _cause in (None, *_causes):
@@ -1982,7 +1982,7 @@ def _finalize_cron_session(session_db, agent, job_id: str, job_name: str, cron_s
     except (Exception, KeyboardInterrupt) as e:
         logger.debug("Job '%s': failed to end session: %s", job_id, e)
     try:
-        from hermes_state import release_or_close
+        from hermes_state_registry import release_or_close
         release_or_close(_session_db)
     except (Exception, KeyboardInterrupt) as e:
         logger.debug("Job '%s': failed to close SQLite session store: %s", job_id, e)

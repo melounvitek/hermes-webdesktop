@@ -74,8 +74,8 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
     for pre-migration databases.
     """
     try:
-        from hermes_state import get_shared_session_db, release_or_close
-        db = get_shared_session_db()
+        from hermes_state_registry import acquire, release_or_close
+        db = acquire()
         try:
             finder = getattr(db, "find_session_by_origin", None)
             session_id = finder(platform=platform, chat_id=chat_id, thread_id=thread_id, user_id=user_id) if callable(finder) else None
@@ -117,9 +117,9 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
 def _append_to_sqlite(session_id: str, message: dict) -> None:
     """Append a message to the SQLite session database."""
     try:
-        from hermes_state import get_shared_session_db, release_or_close
+        from hermes_state_registry import acquire, release_or_close
 
-        db = get_shared_session_db()
+        db = acquire()
         try:
             db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
         finally:

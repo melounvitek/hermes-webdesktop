@@ -112,7 +112,7 @@ def _db_path() -> Path:
 
 
 def _connect() -> sqlite3.Connection:
-    from hermes_state import apply_wal_with_fallback
+    from hermes_state_wal import apply_wal_with_fallback
 
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
