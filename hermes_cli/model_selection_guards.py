@@ -29,36 +29,23 @@ def _wrap(kind: str, title: str, warning, model_name: str, provider: Optional[st
     if warning is None:
         return None
     return SelectionWarning(
-        kind=kind,
-        title=title,
-        model=getattr(warning, "model", model_name),
-        provider=getattr(warning, "provider", provider or ""),
-        message=warning.message,
-    )
+        kind=kind, title=title, model=getattr(warning, "model", model_name),
+        provider=getattr(warning, "provider", provider or ""), message=warning.message)
 
 
 def _cost_guard(
-    model_name: str,
-    provider: Optional[str],
-    base_url: Optional[str],
-    api_key: Optional[str],
-    model_info: Optional[ModelInfo],
-) -> Optional[SelectionWarning]:
+    model_name: str, provider: Optional[str], base_url: Optional[str], api_key: Optional[str],
+    model_info: Optional[ModelInfo]) -> Optional[SelectionWarning]:
     from hermes_cli.model_cost_guard import expensive_model_warning
 
     warning = expensive_model_warning(
-        model_name, provider=provider, base_url=base_url, api_key=api_key, model_info=model_info
-    )
+        model_name, provider=provider, base_url=base_url, api_key=api_key, model_info=model_info)
     return _wrap("cost", "Expensive Model Warning", warning, model_name, provider)
 
 
 def _data_policy_guard(
-    model_name: str,
-    provider: Optional[str],
-    base_url: Optional[str],
-    api_key: Optional[str],
-    model_info: Optional[ModelInfo],
-) -> Optional[SelectionWarning]:
+    model_name: str, provider: Optional[str], base_url: Optional[str], api_key: Optional[str],
+    model_info: Optional[ModelInfo]) -> Optional[SelectionWarning]:
     from hermes_cli.model_data_policy_guard import data_training_warning
 
     warning = data_training_warning(model_name, provider=provider, base_url=base_url)
@@ -71,14 +58,9 @@ _GUARDS = (_cost_guard, _data_policy_guard)
 
 
 def selection_warnings(
-    model_name: str,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    model_info: Optional[ModelInfo] = None,
-    include_kinds: Optional[Iterable[str]] = None,
-) -> List[SelectionWarning]:
+    model_name: str, *, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_key: Optional[str] = None, model_info: Optional[ModelInfo] = None,
+    include_kinds: Optional[Iterable[str]] = None) -> List[SelectionWarning]:
     """Warnings from every registered guard (empty in the common case). ``include_kinds`` restricts
     which kinds are returned. Guard exceptions are swallowed — never break model selection."""
     wanted = set(include_kinds) if include_kinds is not None else None
@@ -99,26 +81,17 @@ def combined_message(warnings: List[SelectionWarning]) -> str:
 
 
 def combined_selection_warning(
-    model_name: str,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    model_info: Optional[ModelInfo] = None,
+    model_name: str, *, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_key: Optional[str] = None, model_info: Optional[ModelInfo] = None,
 ) -> Optional[SelectionWarning]:
     """Drop-in for ``expensive_model_warning`` call sites: ``None``, the single warning, or a merged
     ``kind="multiple"`` warning stacking every message."""
     warnings = selection_warnings(
-        model_name, provider=provider, base_url=base_url, api_key=api_key, model_info=model_info
-    )
+        model_name, provider=provider, base_url=base_url, api_key=api_key, model_info=model_info)
     if not warnings:
         return None
     if len(warnings) == 1:
         return warnings[0]
     return SelectionWarning(
-        kind="multiple",
-        title="Model Selection Warning",
-        model=warnings[0].model,
-        provider=warnings[0].provider,
-        message=combined_message(warnings),
-    )
+        kind="multiple", title="Model Selection Warning", model=warnings[0].model,
+        provider=warnings[0].provider, message=combined_message(warnings))

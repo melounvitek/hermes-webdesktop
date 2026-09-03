@@ -23,8 +23,7 @@ from utils import atomic_replace
 logger = logging.getLogger(__name__)
 
 DEFAULT_CATALOG_URL = (
-    "https://hermes-agent.nousresearch.com/docs/api/model-catalog.json"
-)
+    "https://hermes-agent.nousresearch.com/docs/api/model-catalog.json")
 # The Docusaurus site sits behind Vercel, which occasionally 403s non-browser clients (bot
 # challenge); the raw GitHub copy is the same manifest and is not bot-gated.
 DEFAULT_CATALOG_FALLBACK_URLS: tuple[str, ...] = (
@@ -73,8 +72,7 @@ def _load_catalog_config() -> dict[str, Any]:
         "enabled": bool(raw.get("enabled", True)),
         "url": str(raw.get("url") or DEFAULT_CATALOG_URL),
         "ttl_hours": ttl_minutes / 60.0,
-        "providers": raw.get("providers") if isinstance(raw.get("providers"), dict) else {},
-    }
+        "providers": raw.get("providers") if isinstance(raw.get("providers"), dict) else {}}
 
 
 def _cache_path() -> Path:
@@ -102,9 +100,7 @@ def _fetch_manifest(url: str, timeout: float) -> dict[str, Any] | None:
 
 
 def _fetch_manifest_with_fallback(
-    primary_url: str,
-    timeout: float,
-    fallback_urls: tuple[str, ...] = DEFAULT_CATALOG_FALLBACK_URLS,
+    primary_url: str, timeout: float, fallback_urls: tuple[str, ...] = DEFAULT_CATALOG_FALLBACK_URLS
 ) -> dict[str, Any] | None:
     """First manifest that fetches and validates from ``primary_url`` then ``fallback_urls`` (skipping
     any equal to the primary so a raw-GitHub-configured operator doesn't double-fetch), or None."""
@@ -284,12 +280,14 @@ def _get_provider_block(provider: str) -> dict[str, Any] | None:
 
 def _block_ids(block: dict[str, Any] | None) -> list[tuple[str, dict[str, Any]]]:
     """``(id, entry)`` for every model entry of ``block`` with a non-empty id."""
-    return [(mid, m) for m in (block or {}).get("models", []) if isinstance(m, dict) and (mid := str(m.get("id") or "").strip())]
+    models = (block or {}).get("models", [])
+    return [(mid, m) for m in models if isinstance(m, dict) and (mid := str(m.get("id") or "").strip())]
 
 
 def get_curated_openrouter_models() -> list[tuple[str, str]] | None:
     """OpenRouter's curated ``[(id, description), ...]`` from the manifest."""
-    return [(mid, str(m.get("description") or "")) for mid, m in _block_ids(_get_provider_block("openrouter"))] or None
+    rows = _block_ids(_get_provider_block("openrouter"))
+    return [(mid, str(m.get("description") or "")) for mid, m in rows] or None
 
 
 def get_curated_nous_models() -> list[str] | None:

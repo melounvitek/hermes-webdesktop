@@ -25,33 +25,23 @@ _VENDOR_PREFIXES: dict[str, str] = {
     "trinity": "arcee-ai",
     "nemotron": "nvidia",
     "llama": "meta-llama",
-    "step": "stepfun",
-}
+    "step": "stepfun"}
 
 # Providers whose APIs consume vendor/model slugs.
 _AGGREGATOR_PROVIDERS: frozenset[str] = frozenset({
-    "openrouter",
-    "nous",
-    "ai-gateway",
-    "kilocode",
-})
+    "openrouter", "nous", "ai-gateway", "kilocode"})
 
 # Providers that want bare names with dots replaced by hyphens.
 _DOT_TO_HYPHEN_PROVIDERS: frozenset[str] = frozenset({
-    "anthropic",
-})
+    "anthropic"})
 
 # Providers that want bare names with dots preserved.
 _STRIP_VENDOR_ONLY_PROVIDERS: frozenset[str] = frozenset({
-    "copilot",
-    "copilot-acp",
-    "openai-codex",
-})
+    "copilot", "copilot-acp", "openai-codex"})
 
 # Providers whose native naming is authoritative -- pass through unchanged.
 _AUTHORITATIVE_NATIVE_PROVIDERS: frozenset[str] = frozenset({
-    "huggingface",
-})
+    "huggingface"})
 
 # Direct providers that accept bare native names but should repair a matching
 # provider/ prefix when users copy the aggregator form into config.yaml.
@@ -70,8 +60,7 @@ _MATCHING_PREFIX_STRIP_PROVIDERS: frozenset[str] = frozenset({
     "nebius-token-factory",
     "custom",
     "gemini",
-    "xai",
-})
+    "xai"})
 
 # Providers whose API serves ``vendor/model`` ids but whose endpoint can also
 # front arbitrary self-hosted models, so a bare name cannot be prefixed
@@ -83,27 +72,21 @@ _MATCHING_PREFIX_STRIP_PROVIDERS: frozenset[str] = frozenset({
 # Without this repair a bare ``nemotron-3-ultra-550b-a55b`` reaches the API
 # and returns a bare ``404 page not found`` that never names the model (#78796).
 _CATALOGUE_PREFIX_REPAIR_PROVIDERS: frozenset[str] = frozenset({
-    "nvidia",
-})
+    "nvidia"})
 
 # Providers whose APIs require lowercase model IDs (Xiaomi rejects ``MiMo-V2.5-Pro`` copied from
 # marketing docs; only ``mimo-v2.5-pro`` works). Applied after matching-prefix stripping.
 _LOWERCASE_MODEL_PROVIDERS: frozenset[str] = frozenset({
-    "xiaomi",
-})
+    "xiaomi"})
 
 # DeepSeek's direct API only accepts first-class V-series IDs after the 2026-07-24 cut-off (HTTP 400
 # otherwise). Both retired aliases map to deepseek-v4-flash per the official docs (thinking mode is
 # controlled by extra_body.thinking on the profile), so saved configs can't keep sending them.
 _DEEPSEEK_RETIRED_ALIASES: frozenset[str] = frozenset({
-    "deepseek-chat",
-    "deepseek-reasoner",
-})
+    "deepseek-chat", "deepseek-reasoner"})
 
 _DEEPSEEK_CANONICAL_MODELS: frozenset[str] = frozenset({
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-})
+    "deepseek-v4-pro", "deepseek-v4-flash"})
 
 # First-class V-series IDs incl. future ``deepseek-v5-*`` and dated variants
 # (``deepseek-v4-flash-20260423``): verified real model ids, NOT aliases of ``deepseek-chat``.
@@ -195,7 +178,8 @@ def _repair_prefix_from_catalogue(model_name: str, provider: str) -> str:
     # Compare against the catalogue's own suffix, tag included: a bare ``…:free`` id must resolve to
     # the ``:free`` entry, not its paid sibling.
     needle = model_name.strip().lower()
-    matches = {e for e in _PROVIDER_MODELS.get(provider) or [] if "/" in e and e.split("/", 1)[1].strip().lower() == needle}
+    catalogue = _PROVIDER_MODELS.get(provider) or []
+    matches = {e for e in catalogue if "/" in e and e.split("/", 1)[1].strip().lower() == needle}
     return matches.pop() if len(matches) == 1 else model_name
 
 

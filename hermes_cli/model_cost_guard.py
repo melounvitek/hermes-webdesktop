@@ -39,8 +39,7 @@ def _format_money(value: Optional[Decimal]) -> str:
 
 
 def _pricing_from_model_info(
-    model_info: Optional[ModelInfo],
-) -> tuple[Optional[Decimal], Optional[Decimal], str]:
+    model_info: Optional[ModelInfo]) -> tuple[Optional[Decimal], Optional[Decimal], str]:
     if model_info is None or not model_info.has_cost_data():
         return None, None, ""
     return _to_decimal(model_info.cost_input), _to_decimal(model_info.cost_output), "models.dev"
@@ -52,9 +51,7 @@ def _known_models_dev_provider(provider: Optional[str]) -> Optional[str]:
 
 
 def _can_trust_model_info_pricing(
-    provider: Optional[str],
-    model_info: Optional[ModelInfo],
-) -> bool:
+    provider: Optional[str], model_info: Optional[ModelInfo]) -> bool:
     expected_provider = _known_models_dev_provider(provider)
     if not expected_provider or model_info is None:
         return False
@@ -63,11 +60,7 @@ def _can_trust_model_info_pricing(
 
 
 def _can_trust_pricing_lookup(
-    model_name: str,
-    *,
-    provider: Optional[str],
-    base_url: Optional[str],
-) -> bool:
+    model_name: str, *, provider: Optional[str], base_url: Optional[str]) -> bool:
     try:
         from agent.usage_pricing import resolve_billing_route
 
@@ -78,12 +71,8 @@ def _can_trust_pricing_lookup(
 
 
 def expensive_model_warning(
-    model_name: str,
-    *,
-    provider: Optional[str] = None,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    model_info: Optional[ModelInfo] = None,
+    model_name: str, *, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_key: Optional[str] = None, model_info: Optional[ModelInfo] = None,
 ) -> Optional[ExpensiveModelWarning]:
     """Warning payload when KNOWN pricing exceeds the safety thresholds (never fires on unknown
     pricing). Call after model resolution so aliases / provider-specific ids have settled."""
@@ -116,7 +105,9 @@ def expensive_model_warning(
         except Exception:
             entry = None
         if entry is not None:
-            input_cost, output_cost, source = entry.input_cost_per_million, entry.output_cost_per_million, entry.source
+            input_cost = entry.input_cost_per_million
+            output_cost = entry.output_cost_per_million
+            source = entry.source
 
     is_known_gpt55_pro_confusion = model.lower() == GPT55_PRO_OPENROUTER_ID
     over_input = input_cost is not None and input_cost > INPUT_COST_WARNING_THRESHOLD
@@ -130,8 +121,7 @@ def expensive_model_warning(
         f"{model} has known pricing above Hermes' safety threshold.",
         f"Input tokens: {_format_money(input_cost)}",
         f"Output tokens: {_format_money(output_cost)}",
-        "Threshold: more than $20/M input tokens or more than $100/M output tokens.",
-    ]
+        "Threshold: more than $20/M input tokens or more than $100/M output tokens."]
     if source:
         lines.append(f"Pricing source: {source}.")
     if is_known_gpt55_pro_confusion:
@@ -139,10 +129,5 @@ def expensive_model_warning(
     lines.append("Confirm only if you intend to use this model.")
 
     return ExpensiveModelWarning(
-        model=model,
-        provider=(provider or "").strip(),
-        input_cost_per_million=input_cost,
-        output_cost_per_million=output_cost,
-        source=source or "unknown",
-        message="\n".join(lines),
-    )
+        model=model, provider=(provider or "").strip(), input_cost_per_million=input_cost,
+        output_cost_per_million=output_cost, source=source or "unknown", message="\n".join(lines))
