@@ -46,8 +46,7 @@ def _warn_if_malformed(source: str, raw: str) -> None:
         "scheme behind a reverse proxy.",
         source,
         cleaned,
-        cleaned.split("://")[-1] or "hermes.example.com",
-    )
+        cleaned.split("://")[-1] or "hermes.example.com")
 
 
 def _warn_if_malformed_prefix(raw: Optional[str], reason: str) -> None:
@@ -60,8 +59,7 @@ def _warn_if_malformed_prefix(raw: Optional[str], reason: str) -> None:
         "X-Forwarded-Prefix header %r was ignored because %s. "
         "Dashboard URLs will be generated without a reverse-proxy path prefix.",
         cleaned,
-        reason,
-    )
+        reason)
 
 
 def normalise_prefix(raw: Optional[str]) -> str:
@@ -123,8 +121,7 @@ def _load_dashboard_section() -> dict:
         _log.debug(
             "dashboard-auth.prefix: load_config() raised %s; "
             "falling back to env-only configuration",
-            exc,
-        )
+            exc)
         return {}
     section = cfg.get("dashboard") if isinstance(cfg, dict) else None
     return section if isinstance(section, dict) else {}

@@ -165,8 +165,7 @@ class DashboardAuthProvider(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support password login "
             "(set supports_password = True and override "
-            "complete_password_login)"
-        )
+            "complete_password_login)")
 
     def verify_token(self, *, token: str) -> "Optional[TokenPrincipal]":
         """Verify a non-interactive bearer token; return its principal.
@@ -180,8 +179,7 @@ class DashboardAuthProvider(ABC):
         """
         raise NotImplementedError(
             f"{type(self).__name__} does not support token auth "
-            "(set supports_token = True and override verify_token)"
-        )
+            "(set supports_token = True and override verify_token)")
 
 
 def assert_protocol_compliance(cls: type) -> None:
@@ -198,5 +196,4 @@ def assert_protocol_compliance(cls: type) -> None:
             raise TypeError(f"{cls.__name__} missing method: {method}")
     if getattr(cls, "__abstractmethods__", None):
         raise TypeError(
-            f"{cls.__name__} has unimplemented abstract methods: {sorted(cls.__abstractmethods__)}"
-        )
+            f"{cls.__name__} has unimplemented abstract methods: {sorted(cls.__abstractmethods__)}")

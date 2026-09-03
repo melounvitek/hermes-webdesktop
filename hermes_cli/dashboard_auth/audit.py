@@ -21,8 +21,7 @@ _write_lock = threading.Lock()
 # Field names that must never appear in the log raw; matching kwargs are dropped.
 _REDACTED_FIELDS: frozenset = frozenset({
     "access_token", "refresh_token", "code", "code_verifier",
-    "state", "ticket", "cookie", "Authorization", "authorization",
-})
+    "state", "ticket", "cookie", "Authorization", "authorization"})
 
 
 class AuditEvent(enum.Enum):
@@ -64,8 +63,7 @@ def audit_log(event: AuditEvent, **fields: Any) -> None:
     entry = {
         "ts": _dt.datetime.now(_dt.timezone.utc).isoformat(),
         "event": event.value,
-        **{k: v for k, v in fields.items() if k not in _REDACTED_FIELDS},
-    }
+        **{k: v for k, v in fields.items() if k not in _REDACTED_FIELDS}}
     line = json.dumps(entry, separators=(",", ":")) + "\n"
     path = _resolve_log_path()
     try:

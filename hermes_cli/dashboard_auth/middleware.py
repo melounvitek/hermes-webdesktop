@@ -22,8 +22,7 @@ from hermes_cli.dashboard_auth.base import ProviderError, RefreshExpiredError
 from hermes_cli.dashboard_auth.cookies import (
     clear_session_cookies, clear_sso_attempt_cookie, detect_https, read_session_cookies,
     read_session_provider, read_sso_attempt_cookie, set_session_cookies,
-    set_session_provider_cookie, set_sso_attempt_cookie,
-)
+    set_session_provider_cookie, set_sso_attempt_cookie)
 from hermes_cli.dashboard_auth.prefix import prefix_from_request
 from hermes_cli.dashboard_auth.public_paths import PUBLIC_API_PATHS
 from hermes_cli.dashboard_auth.request_utils import (
@@ -32,8 +31,7 @@ from hermes_cli.dashboard_auth.request_utils import (
     extract_bearer as _extract_bearer,
     is_safe_next_path,
     scan_session_providers,
-    unreachable_response,
-)
+    unreachable_response)
 
 _log = logging.getLogger(__name__)
 
@@ -55,8 +53,7 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/favicon.ico",
     "/ds-assets/",
     "/fonts/",
-    "/fonts-terminal/",
-)
+    "/fonts-terminal/")
 
 
 def _path_is_public(path: str) -> bool:
@@ -67,8 +64,7 @@ def _path_is_public(path: str) -> bool:
     :data:`_GATE_PUBLIC_PREFIXES` is prefix-matched.
     """
     return path in PUBLIC_API_PATHS or any(
-        path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES
-    )
+        path == p or path.startswith(p) for p in _GATE_PUBLIC_PREFIXES)
 
 
 def _safe_next_target(request: Request) -> str:
@@ -99,13 +95,11 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
     login_url = f"{prefix}/login?next={next_param}" if next_param else f"{prefix}/login"
     if request.url.path.startswith("/api/"):
         error_code = (
-            "session_expired" if reason == "invalid_or_expired_session" else "unauthenticated"
-        )
+            "session_expired" if reason == "invalid_or_expired_session" else "unauthenticated")
         return JSONResponse(
             {"error": error_code, "detail": "Unauthorized", "reason": reason,
              "login_url": login_url},
-            status_code=401,
-        )
+            status_code=401)
     return RedirectResponse(url=login_url, status_code=302)
 
 
@@ -143,8 +137,7 @@ def _auto_sso_response(request: Request) -> Response | None:
 
 
 def _verify_access_token(
-    request: Request, *, access_token: str, provider_hint: str | None = None, audit: bool = True,
-):
+    request: Request, *, access_token: str, provider_hint: str | None = None, audit: bool = True):
     """Run ``verify_session`` across the provider stack; Session or ``None``.
 
     ``audit=False`` is the native-app bearer path (no cookie, no server-side
@@ -155,18 +148,15 @@ def _verify_access_token(
         if audit:
             audit_log(
                 AuditEvent.SESSION_VERIFY_FAILURE, provider=provider.name,
-                reason="provider_unreachable", ip=_client_ip(request),
-            )
+                reason="provider_unreachable", ip=_client_ip(request))
 
     return scan_session_providers(
         provider_hint, lambda p: p.verify_session(access_token=access_token),
-        phase="verify" if audit else "bearer verify", log=_log, on_unreachable=_audit_unreachable,
-    )
+        phase="verify" if audit else "bearer verify", log=_log, on_unreachable=_audit_unreachable)
 
 
 async def gated_auth_middleware(
-    request: Request, call_next: Callable[[Request], Awaitable[Response]],
-) -> Response:
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     """Engaged only when ``app.state.auth_required is True``."""
     if not getattr(request.app.state, "auth_required", False):
         return await call_next(request)
@@ -228,12 +218,10 @@ async def gated_auth_middleware(
                 refresh_token=new_session.refresh_token,
                 access_token_expires_in=_expires_in_seconds(new_session),
                 use_https=detect_https(request), prefix=prefix_from_request(request),
-                provider=refreshing_provider,
-            )
+                provider=refreshing_provider)
             audit_log(
                 AuditEvent.REFRESH_SUCCESS, provider=refreshing_provider,
-                user_id=new_session.user_id, ip=_client_ip(request),
-            )
+                user_id=new_session.user_id, ip=_client_ip(request))
             return response
 
         audit_log(AuditEvent.SESSION_VERIFY_FAILURE, reason="no_provider_recognises",
@@ -249,8 +237,7 @@ async def gated_auth_middleware(
     if not provider_hint and session.provider:
         set_session_provider_cookie(
             response, provider=session.provider, use_https=detect_https(request),
-            prefix=prefix_from_request(request),
-        )
+            prefix=prefix_from_request(request))
     return response
 
 
@@ -268,8 +255,7 @@ def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | No
     def _audit_failure(reason):
         return lambda provider: audit_log(
             AuditEvent.REFRESH_FAILURE, provider=provider.name, reason=reason,
-            ip=_client_ip(request),
-        )
+            ip=_client_ip(request))
 
     def _refresh(provider):
         new_session = provider.refresh_session(refresh_token=refresh_token)
@@ -278,5 +264,4 @@ def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | No
     return scan_session_providers(
         provider_hint, _refresh, phase="refresh", log=_log, swallow=(RefreshExpiredError,),
         on_swallow=_audit_failure("refresh_expired"),
-        on_unreachable=_audit_failure("provider_unreachable"),
-    )
+        on_unreachable=_audit_failure("provider_unreachable"))

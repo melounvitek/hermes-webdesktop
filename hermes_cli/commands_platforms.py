@@ -12,11 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from hermes_cli.commands import (
-    COMMAND_REGISTRY,
-    _is_gateway_available,
-    _iter_plugin_command_entries,
-    _resolve_config_gates,
-)
+    COMMAND_REGISTRY, _is_gateway_available, _iter_plugin_command_entries, _resolve_config_gates)
 
 # Logger name parity with the origin module (tests capture "hermes_cli.commands").
 logger = logging.getLogger("hermes_cli.commands")
@@ -51,8 +47,7 @@ def _truncate_desc(desc: str, limit: int) -> str:
 
 
 def _clamp_command_names(
-    entries: Sequence[tuple[str, ...]], reserved: set[str],
-) -> list[tuple[str, ...]]:
+    entries: Sequence[tuple[str, ...]], reserved: set[str]) -> list[tuple[str, ...]]:
     """Enforce the 32-char Telegram/Discord name limit with collision avoidance.
 
     Over-long names are truncated; if that collides with *reserved* or an
@@ -109,8 +104,7 @@ _TELEGRAM_BOT_API_MAX_COMMANDS = 100
 _TELEGRAM_PRIORITY_TIERS: dict[str, tuple[str, ...]] = {
     "prepend": ("configured", "default"),
     "append": ("default", "configured"),
-    "replace": ("configured",),
-}
+    "replace": ("configured",)}
 
 # Built-ins that must survive Telegram's small visible menu cap; everything
 # else stays dispatchable when typed manually. Order = rank.
@@ -122,8 +116,7 @@ _TELEGRAM_MENU_PRIORITY = (
     # Mid-turn session control.
     "approve", "deny", "queue", "steer", "bg", "btw",
     # Lower-priority but still useful operational built-ins.
-    "reasoning", "usage", "platforms", "platform", "profile", "whoami",
-)
+    "reasoning", "usage", "platforms", "platform", "profile", "whoami")
 
 
 def _telegram_command_menu_config() -> dict[str, Any]:
@@ -150,8 +143,7 @@ def _telegram_command_menu_config() -> dict[str, Any]:
     return {
         "max_commands": max(1, min(_TELEGRAM_BOT_API_MAX_COMMANDS, max_commands)),
         "priority_mode": priority_mode if priority_mode in _TELEGRAM_PRIORITY_TIERS else "prepend",
-        "priority": priority,
-    }
+        "priority": priority}
 
 
 def telegram_menu_max_commands() -> int:
@@ -170,8 +162,7 @@ def _sanitized_rank(raw_names: Sequence[str]) -> dict[str, int]:
 
 
 def _prioritize_telegram_menu_candidates(
-    candidates: list[tuple[str, str, str, str]],
-) -> list[tuple[str, str, str, str]]:
+    candidates: list[tuple[str, str, str, str]]) -> list[tuple[str, str, str, str]]:
     """Order ``(final_name, description, source, raw_name)`` candidates; the default
     priority applies to core only, "replace" mode ignores it entirely. ``raw_name``
     is the pre-clamp name so a configured long command stays addressable."""
@@ -187,8 +178,7 @@ def _prioritize_telegram_menu_candidates(
         final_name, _desc, source, raw_name = candidate
         indexes = {
             "configured": configured_rank.get(raw_name, configured_rank.get(final_name)),
-            "default": default_rank.get(final_name) if source == "core" else None,
-        }
+            "default": default_rank.get(final_name) if source == "core" else None}
         for tier, table in enumerate(tiers):
             if indexes[table] is not None:
                 return (tier, indexes[table], stable_index)
@@ -215,8 +205,7 @@ def _iter_gateway_skills(platform: str):
 
     from agent.skill_commands import get_skill_commands
     from agent.skill_utils import (
-        get_disabled_skill_names, get_external_skills_dirs, get_project_skills_dirs,
-    )
+        get_disabled_skill_names, get_external_skills_dirs, get_project_skills_dirs)
     from tools.skills_tool import SKILLS_DIR
 
     try:
@@ -251,10 +240,7 @@ def _iter_gateway_skills(platform: str):
 
 
 def _collect_gateway_skill_entries(
-    platform: str,
-    max_slots: int | None,
-    reserved_names: set[str],
-    desc_limit: int = 100,
+    platform: str, max_slots: int | None, reserved_names: set[str], desc_limit: int = 100,
     sanitize_name: "Callable[[str], str] | None" = None,
 ) -> tuple[list[tuple[str, str, str, str]], int]:
     """Collect plugin + skill entries for a gateway platform.
@@ -324,8 +310,7 @@ def telegram_menu_commands(max_commands: int = 100) -> tuple[list[tuple[str, str
         max_slots=None,
         reserved_names={n for n, _ in core_commands},
         desc_limit=40,
-        sanitize_name=_sanitize_telegram_name,
-    )
+        sanitize_name=_sanitize_telegram_name)
     candidates = [(name, desc, "core", name) for name, desc in core_commands]
     candidates += [(name, desc, "skill" if cmd_key else "plugin", raw)
                    for name, desc, cmd_key, raw in entries]
@@ -370,8 +355,7 @@ def discord_skill_commands_by_category(
                     "skill will not appear in the /skill autocomplete. "
                     "Rename the skill's frontmatter ``name:`` to differ "
                     "in its first 32 chars.",
-                    discord_name, cmd_key, discord_name,
-                )
+                    discord_name, cmd_key, discord_name)
             elif prior is not None:
                 logger.warning(
                     "Discord /skill: %r and %r both clamp to %r on "
@@ -379,8 +363,7 @@ def discord_skill_commands_by_category(
                     "will appear in the /skill autocomplete. Rename "
                     "one skill's frontmatter ``name:`` to differ in "
                     "its first 32 chars.",
-                    prior, cmd_key, discord_name, prior,
-                )
+                    prior, cmd_key, discord_name, prior)
             if prior is not None:
                 hidden += 1
                 continue
@@ -408,8 +391,7 @@ _SLACK_RESERVED_COMMANDS = frozenset({
     # https://slack.com/help/articles/201259356-Use-built-in-slash-commands
     "me", "status", "away", "dnd", "shrug", "remind", "msg", "feed",
     "who", "collapse", "expand", "leave", "join", "open", "search",
-    "topic", "mute", "pro", "shortcuts",
-})
+    "topic", "mute", "pro", "shortcuts"})
 
 # Canonical commands intentionally NOT given a native Slack slash slot: Slack caps
 # apps at 50 and the registry is at that ceiling, so rather than let the clamp
@@ -422,8 +404,7 @@ _SLACK_RESERVED_COMMANDS = frozenset({
 # canonicals (/bg and /btw became canonical so they win first-pass slots).
 _SLACK_VIA_HERMES_ONLY = frozenset({
     "topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat",
-    "refine", "review", "pause", "whoami", "platform", "insights",
-})
+    "refine", "review", "pause", "whoami", "platform", "insights"})
 
 
 def _sanitize_slack_name(raw: str) -> str:
@@ -448,8 +429,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     wanted += [(name, desc, hint or "") for name, desc, hint in _iter_plugin_command_entries()]
 
     entries: list[tuple[str, str, str]] = [
-        ("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]"),
-    ]
+        ("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]")]
     seen = {"hermes"}
     for name, desc, hint in wanted:
         slack_name = _sanitize_slack_name(name)
@@ -458,8 +438,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             or slack_name in seen
             or slack_name in _SLACK_RESERVED_COMMANDS
             or slack_name in _SLACK_VIA_HERMES_ONLY
-            or len(entries) >= _SLACK_MAX_SLASH_COMMANDS
-        ):
+            or len(entries) >= _SLACK_MAX_SLASH_COMMANDS):
             continue
         # Slack description cap is 2000 chars; keep it short.
         entries.append((slack_name, desc[:140], hint[:100]))
@@ -468,8 +447,7 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
 
 
 def slack_app_manifest(
-    request_url: str = "https://hermes-agent.local/slack/commands",
-) -> dict[str, Any]:
+    request_url: str = "https://hermes-agent.local/slack/commands") -> dict[str, Any]:
     """Return the ``features.slash_commands`` manifest portion for all gateway slashes.
 
     ``request_url`` is schema-required but ignored in Socket Mode (a placeholder is
@@ -490,8 +468,7 @@ def slack_subcommand_map() -> dict[str, str]:
     """name/alias -> "/command" for the Slack ``/hermes`` handler, plugin commands included."""
     mapping: dict[str, str] = {
         name: f"/{name}"
-        for cmd in _gateway_available_commands() for name in (cmd.name, *cmd.aliases)
-    }
+        for cmd in _gateway_available_commands() for name in (cmd.name, *cmd.aliases)}
     for name, _description, _args_hint in _iter_plugin_command_entries():
         mapping.setdefault(name, f"/{name}")
     return mapping

@@ -25,10 +25,7 @@ from hermes_cli.dashboard_auth import list_token_providers
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import ProviderError, TokenPrincipal
 from hermes_cli.dashboard_auth.request_utils import (
-    client_ip as _client_ip,
-    extract_bearer as extract_bearer_token,
-    unreachable_response,
-)
+    client_ip as _client_ip, extract_bearer as extract_bearer_token, unreachable_response)
 
 _log = logging.getLogger(__name__)
 
@@ -86,8 +83,7 @@ def authenticate_token(request: Request) -> Tuple[Optional[TokenPrincipal], Opti
 
 
 async def token_auth_middleware(
-    request: Request, call_next: Callable[[Request], Awaitable[Response]],
-) -> Response:
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     """Outermost auth seam: pass-through for unregistered paths; for a token
     route, valid token -> attach principal + flag, unreachable -> 503, else 401."""
     path = request.url.path
@@ -103,12 +99,10 @@ async def token_auth_middleware(
     if unreachable:
         audit_log(
             AuditEvent.TOKEN_AUTH_FAILURE, provider=unreachable, reason="provider_unreachable",
-            path=path, ip=_client_ip(request),
-        )
+            path=path, ip=_client_ip(request))
         return unreachable_response(unreachable)
 
     audit_log(
         AuditEvent.TOKEN_AUTH_FAILURE, reason="no_provider_recognises_token", path=path,
-        ip=_client_ip(request),
-    )
+        ip=_client_ip(request))
     return JSONResponse({"error": "unauthenticated", "detail": "Unauthorized"}, status_code=401)

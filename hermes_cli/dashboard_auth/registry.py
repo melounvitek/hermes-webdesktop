@@ -60,16 +60,14 @@ def get_provider(name: str, *, scope: Optional[str] = None) -> Optional[Dashboar
 
 
 def snapshot_registration(
-    name: str, *, scope: Optional[str] = None,
-) -> Optional[DashboardAuthProvider]:
+    name: str, *, scope: Optional[str] = None) -> Optional[DashboardAuthProvider]:
     with _lock:
         return _target(scope, create=False).get(name)
 
 
 def restore_registration(
     name: str, current: DashboardAuthProvider, previous: Optional[DashboardAuthProvider],
-    *, scope: Optional[str] = None,
-) -> bool:
+    *, scope: Optional[str] = None) -> bool:
     """Restore a host-owned provider registration if it is still current."""
     with _lock:
         target = _target(scope, create=True)

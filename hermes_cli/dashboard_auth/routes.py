@@ -29,22 +29,18 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from hermes_cli.dashboard_auth import (
-    get_provider, list_providers, list_session_providers, native_flow,
-)
+    get_provider, list_providers, list_session_providers, native_flow)
 from hermes_cli.dashboard_auth import prefix as _prefix_mod
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import (
-    InvalidCodeError, InvalidCredentialsError, ProviderError, RefreshExpiredError, Session,
-)
+    InvalidCodeError, InvalidCredentialsError, ProviderError, RefreshExpiredError, Session)
 from hermes_cli.dashboard_auth.cookies import (
     clear_pkce_cookie, clear_session_cookies, clear_sso_attempt_cookie, detect_https,
     parse_pkce_payload, read_pkce_cookie, read_session_cookies, set_pkce_cookie,
-    set_session_cookies,
-)
+    set_session_cookies)
 from hermes_cli.dashboard_auth.login_page import render_login_html
 from hermes_cli.dashboard_auth.request_utils import (
-    access_token_max_age, client_ip as _client_ip, is_safe_next_path, scan_session_providers,
-)
+    access_token_max_age, client_ip as _client_ip, is_safe_next_path, scan_session_providers)
 
 _log = logging.getLogger(__name__)
 
@@ -113,8 +109,7 @@ def _set_session(resp, request: Request, session: Session) -> None:
     set_session_cookies(
         resp, access_token=session.access_token, refresh_token=session.refresh_token,
         access_token_expires_in=access_token_max_age(session), use_https=detect_https(request),
-        prefix=_prefix(request), provider=session.provider,
-    )
+        prefix=_prefix(request), provider=session.provider)
 
 
 def _bearer_payload(session: Session) -> dict[str, Any]:
@@ -122,13 +117,11 @@ def _bearer_payload(session: Session) -> dict[str, Any]:
     return {
         "access_token": session.access_token, "refresh_token": session.refresh_token,
         "token_type": "Bearer", "expires_at": session.expires_at,
-        "provider": session.provider, "user_id": session.user_id,
-    }
+        "provider": session.provider, "user_id": session.user_id}
 
 
 def _finish_native_login(
-    request: Request, *, broker_state: str, session: Session, provider: str,
-) -> str:
+    request: Request, *, broker_state: str, session: Session, provider: str) -> str:
     """Mint the one-time loopback code for a pending native authorization.
 
     Shared tail of ``/auth/callback`` and ``/auth/password-login``: returns the
@@ -158,8 +151,7 @@ def _login_failure(request: Request, provider: str, reason: str, **extra) -> Non
 def _login_success(request: Request, session: Session, provider: str) -> None:
     audit_log(
         AuditEvent.LOGIN_SUCCESS, provider=provider, user_id=session.user_id,
-        email=session.email, org_id=session.org_id, ip=_client_ip(request),
-    )
+        email=session.email, org_id=session.org_id, ip=_client_ip(request))
 
 
 def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkce: dict[str, str]):
@@ -202,8 +194,7 @@ async def api_auth_providers() -> Any:
     return {"providers": [
         {"name": p.name, "display_name": p.display_name,
          "supports_password": bool(getattr(p, "supports_password", False))}
-        for p in providers
-    ]}
+        for p in providers]}
 
 
 # --- Public: OAuth round trip ----------------------------------------------
@@ -223,8 +214,7 @@ async def auth_login(request: Request, provider: str, next: str = ""):
             login_url = f"{login_url}?next={quote(safe_next, safe='')}"
         return RedirectResponse(url=login_url, status_code=302)
     resp = _start_upstream_login(
-        request, p, audit_failure=True, extra_pkce={"next": safe_next} if safe_next else {},
-    )
+        request, p, audit_failure=True, extra_pkce={"next": safe_next} if safe_next else {})
     audit_log(AuditEvent.LOGIN_START, provider=provider, ip=_client_ip(request))
     return resp
 
@@ -272,8 +262,7 @@ def _select_native_provider(provider: str):
 @router.get("/auth/native/authorize", name="auth_native_authorize")
 async def auth_native_authorize(
     request: Request, provider: str = "", code_challenge: str = "",
-    code_challenge_method: str = "", redirect_uri: str = "", state: str = "",
-):
+    code_challenge_method: str = "", redirect_uri: str = "", state: str = ""):
     """Begin an RFC 8252 native-app login for the desktop app.
 
     Stashes a pending broker authorization keyed by an opaque ``broker_state``
@@ -297,8 +286,7 @@ async def auth_native_authorize(
     try:
         broker_state = native_flow.register_pending(
             code_challenge=code_challenge, redirect_uri=redirect_uri, client_state=state,
-            client_ip=_client_ip(request),
-        )
+            client_ip=_client_ip(request))
     except native_flow.NativeFlowError as e:
         raise _http(503, str(e))
 
@@ -309,8 +297,7 @@ async def auth_native_authorize(
         return resp
 
     resp = _start_upstream_login(
-        request, p, audit_failure=False, extra_pkce={"broker": broker_state},
-    )
+        request, p, audit_failure=False, extra_pkce={"broker": broker_state})
     audit_log(AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name, ip=_client_ip(request))
     return resp
 
@@ -343,8 +330,7 @@ async def auth_callback(
     try:
         session = p.complete_login(
             code=code, state=state, code_verifier=parts.get("verifier", ""),
-            redirect_uri=_redirect_uri(request),
-        )
+            redirect_uri=_redirect_uri(request))
     except InvalidCodeError as e:
         _login_failure(request, provider_name, "invalid_code")
         raise _http(400, f"Invalid code: {e}")
@@ -358,8 +344,7 @@ async def auth_callback(
     prefix = _prefix(request)
     if broker_state:
         loopback = _finish_native_login(
-            request, broker_state=broker_state, session=session, provider=provider_name,
-        )
+            request, broker_state=broker_state, session=session, provider=provider_name)
         resp = RedirectResponse(url=loopback, status_code=302)
     else:
         landing = _validate_post_login_target(parts.get("next", "")) or "/"
@@ -465,8 +450,7 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
 
     if broker_state:
         loopback = _finish_native_login(
-            request, broker_state=broker_state, session=session, provider=body.provider,
-        )
+            request, broker_state=broker_state, session=session, provider=body.provider)
         resp = JSONResponse({"ok": True, "next": loopback})
         clear_pkce_cookie(resp, use_https=detect_https(request), prefix=_prefix(request))
         return resp
@@ -490,8 +474,7 @@ async def auth_logout(request: Request):
     sess = getattr(request.state, "session", None)
     audit_log(
         AuditEvent.LOGOUT, provider=(sess.provider if sess else "unknown"),
-        user_id=(sess.user_id if sess else ""), ip=_client_ip(request),
-    )
+        user_id=(sess.user_id if sess else ""), ip=_client_ip(request))
     prefix = _prefix(request)
     resp = RedirectResponse(url=f"{prefix}/login", status_code=302)
     clear_session_cookies(resp, prefix=prefix)
@@ -515,8 +498,7 @@ async def api_auth_me(request: Request):
     sess = _require_session(request)
     return {
         "user_id": sess.user_id, "email": sess.email, "display_name": sess.display_name,
-        "org_id": sess.org_id, "provider": sess.provider, "expires_at": sess.expires_at,
-    }
+        "org_id": sess.org_id, "provider": sess.provider, "expires_at": sess.expires_at}
 
 
 @router.post("/api/auth/ws-ticket", name="auth_ws_ticket")
@@ -557,8 +539,7 @@ async def auth_native_token(request: Request, body: _NativeTokenBody):
         raise _http(400, "Invalid or expired authorization code.")
     audit_log(
         AuditEvent.NATIVE_TOKEN_SUCCESS, provider=session.provider, user_id=session.user_id,
-        ip=_client_ip(request),
-    )
+        ip=_client_ip(request))
     return _bearer_payload(session)
 
 
@@ -580,20 +561,17 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
     try:
         session = scan_session_providers(
             body.provider, lambda p: p.refresh_session(refresh_token=body.refresh_token),
-            phase="native refresh", log=_log, swallow=(RefreshExpiredError,),
-        )
+            phase="native refresh", log=_log, swallow=(RefreshExpiredError,))
     except ProviderError as e:
         raise _http(503, f"Auth provider {str(e)!r} unreachable")
     if session is not None:
         audit_log(
             AuditEvent.REFRESH_SUCCESS, provider=session.provider, user_id=session.user_id,
-            ip=_client_ip(request),
-        )
+            ip=_client_ip(request))
         return _bearer_payload(session)
     audit_log(AuditEvent.REFRESH_FAILURE, reason="all_providers_rejected_rt",
               ip=_client_ip(request))
     return JSONResponse(
         {"error": "session_expired",
          "detail": "Refresh token expired or invalid; start a new sign-in."},
-        status_code=401,
-    )
+        status_code=401)

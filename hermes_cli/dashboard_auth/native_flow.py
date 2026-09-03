@@ -97,8 +97,7 @@ def _now(now: Optional[int]) -> int:
 
 def register_pending(
     *, code_challenge: str, redirect_uri: str, client_state: str, client_ip: str = "",
-    now: Optional[int] = None,
-) -> str:
+    now: Optional[int] = None) -> str:
     """Stash a pending native authorization; return an opaque ``broker_state``.
 
     ``code_challenge`` is the DESKTOP's cc_d (the verifier is never seen until
@@ -116,8 +115,7 @@ def register_pending(
             raise NativeFlowError("too many pending native authorizations from this address")
         _pending[broker_state] = _Pending(
             code_challenge=code_challenge, redirect_uri=redirect_uri, client_state=client_state,
-            client_ip=client_ip, expires_at=now + _PENDING_TTL_SECONDS,
-        )
+            client_ip=client_ip, expires_at=now + _PENDING_TTL_SECONDS)
     return broker_state
 
 
@@ -149,8 +147,7 @@ def complete_pending(broker_state: str, *, session: Session, now: Optional[int] 
         gw_code = secrets.token_urlsafe(32)
         _issued[gw_code] = _IssuedCode(
             code_challenge=pending.code_challenge, session=session,
-            expires_at=now + _CODE_TTL_SECONDS,
-        )
+            expires_at=now + _CODE_TTL_SECONDS)
     return gw_code
 
 

@@ -64,8 +64,7 @@ def scan_session_providers(
     log: logging.Logger,
     swallow: tuple[type[BaseException], ...] = (),
     on_swallow: Optional[Callable[[DashboardAuthProvider], None]] = None,
-    on_unreachable: Optional[Callable[[DashboardAuthProvider], None]] = None,
-):
+    on_unreachable: Optional[Callable[[DashboardAuthProvider], None]] = None):
     """Run ``call`` across the session providers; first non-``None`` result or ``None``.
 
     The hinted provider goes first (stable sort; a stale/unknown hint leaves
