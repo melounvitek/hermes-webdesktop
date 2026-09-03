@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -170,11 +170,7 @@ def _atomic_output_path(final_path: Path):
 
 def _is_within(path: Path, root: Path) -> bool:
     """True when *path* resolves inside the already-resolved *root* (traversal / symlink guard)."""
-    try:
-        path.resolve().relative_to(root)
-    except ValueError:
-        return False
-    return True
+    return path.resolve().is_relative_to(root)
 
 
 def _collect_memory_provider_external_paths() -> List[Path]:
@@ -193,18 +189,13 @@ def _collect_memory_provider_external_paths() -> List[Path]:
     except Exception as exc:
         logger.warning("backup_paths() failed for memory provider %r: %s", active, exc)
         return []
-    out: List[Path] = []
-    seen: set = set()
+    out: Dict[Path, Path] = {}  # resolved -> first declared spelling
     for raw in declared:
-        try:
+        with suppress(Exception):
             p = Path(raw).expanduser()
-            resolved = p.resolve() if p.exists() else None
-        except Exception:
-            continue
-        if resolved is not None and resolved not in seen:
-            seen.add(resolved)
-            out.append(p)
-    return out
+            if p.exists():
+                out.setdefault(p.resolve(), p)
+    return list(out.values())
 
 
 def _iter_external_files(base: Path) -> List[Path]:
@@ -215,13 +206,10 @@ def _iter_external_files(base: Path) -> List[Path]:
         return []
     files: List[Path] = []
     for dirpath, dirnames, filenames in os.walk(base, followlinks=False):
-        dp = Path(dirpath)
         dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
-        for fname in filenames:
-            fpath = dp / fname
-            if fpath.is_symlink() or fname in _EXCLUDED_NAMES or fname.endswith(_EXCLUDED_SUFFIXES):
-                continue
-            files.append(fpath)
+        files.extend(fp for fp in (Path(dirpath) / f for f in filenames)
+                     if not (fp.is_symlink() or fp.name in _EXCLUDED_NAMES
+                             or fp.name.endswith(_EXCLUDED_SUFFIXES)))
     return files
 
 
@@ -448,11 +436,8 @@ def _safe_restore_db(src: Path, dst: Path) -> bool:
         # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
         with suppress(Exception):
             dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        src_conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
-        try:
+        with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
             src_conn.backup(dst_conn)
-        finally:
-            src_conn.close()
         dst_conn.close()
         with suppress(Exception):
             dst.chmod(src.stat().st_mode)
@@ -474,10 +459,8 @@ def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
     try:
         holders = _foreign_db_holder_pids(dst)
         if holders:
-            logger.error(
-                "Refusing unlink+move restore of %s: process(es) %s still "
-                "hold the database or its WAL open. Stop them and retry.",
-                dst, holders)
+            logger.error("Refusing unlink+move restore of %s: process(es) %s still "
+                         "hold the database or its WAL open. Stop them and retry.", dst, holders)
             return False
         with offline_file_access(dst, what="unlink+move restore of"):
             tmp = dst.parent / f".{dst.name}.snap_restore"
@@ -491,10 +474,8 @@ def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
             shutil.move(str(tmp), str(dst))
         return True
     except LiveConnectionError as exc2:
-        logger.error(
-            "Refusing unlink+move restore of %s: %s Close the in-process "
-            "database handles (or restart Hermes) and retry.",
-            dst, exc2)
+        logger.error("Refusing unlink+move restore of %s: %s Close the in-process "
+                     "database handles (or restart Hermes) and retry.", dst, exc2)
         return False
     except Exception as exc2:
         logger.error("Fallback restore also failed for %s -> %s: %s", src, dst, exc2)
@@ -592,11 +573,9 @@ def _collect_external_entries() -> tuple[list[tuple[Path, str]], list[str]]:
             skipped_external.append(str(base))
             continue
         for fpath in _iter_external_files(base):
-            try:
+            with suppress(ValueError, OSError):
                 rel_to_home = fpath.resolve().relative_to(home_dir)
-            except (ValueError, OSError):
-                continue
-            external_to_add.append((fpath, _EXTERNAL_PREFIX + rel_to_home.as_posix()))
+                external_to_add.append((fpath, _EXTERNAL_PREFIX + rel_to_home.as_posix()))
     return external_to_add, skipped_external
 
 
@@ -694,8 +673,6 @@ def _validate_backup_zip(zf: zipfile.ZipFile) -> tuple[bool, str]:
 def _detect_prefix(zf: zipfile.ZipFile) -> str:
     """Detect if the zip has a common directory prefix wrapping all entries."""
     names = [n for n in zf.namelist() if not n.endswith("/")]
-    if not names:
-        return ""
     first_parts = {Path(n).parts[0] for n in names if len(Path(n).parts) > 1}
     if len(first_parts) == 1 and first_parts <= {".hermes", "hermes"}:
         return first_parts.pop() + "/"
@@ -954,16 +931,8 @@ def _revive_gateway_after_import(hermes_root: Path) -> None:
 # directories (recursive); missing entries are skipped. Pairing data lives in platform JSON blobs
 # outside state.db, so it is listed explicitly — ``hermes update`` snapshots this set (#15733).
 _QUICK_STATE_FILES = (
-    "state.db",
-    "config.yaml",
-    ".env",
-    "auth.json",
-    "cron/jobs.json",
-    "cron/executions.db",
-    "gateway_state.json",
-    "channel_directory.json",
-    "channel_aliases.json",
-    "processes.json",
+    "state.db", "config.yaml", ".env", "auth.json", "cron/jobs.json", "cron/executions.db",
+    "gateway_state.json", "channel_directory.json", "channel_aliases.json", "processes.json",
     "gateway/discord_message_recovery.db",  # Discord reconnect replay ledger
     # Per-profile user stores, destroyed if the update flow replaces the file and the post-update
     # schema-init re-creates an empty one (#52889). Skipped when outside HERMES_HOME.
@@ -1058,14 +1027,13 @@ def _copy_quick_snapshot_files(
 
 
 def _create_quick_snapshot_locked(
-    label: Optional[str], hermes_home: Optional[Path], keep: Optional[int], max_file_size: Optional[int]
+    label: Optional[str], home: Path, keep: Optional[int], max_file_size: Optional[int]
 ) -> Optional[str]:
     """Copy the quick-snapshot set to a timestamped dir under state-snapshots/ and prune old ones.
 
     ``max_file_size`` skips (with a warning) larger files: the pre-update snapshot uses it so a
     multi-GB ``state.db`` never stalls ``hermes update`` while the small files are always captured.
     """
-    home = hermes_home or get_hermes_home()
     root = _quick_snapshot_root(home)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     base_snap_id = f"{ts}-{label}" if label else ts
@@ -1073,7 +1041,6 @@ def _create_quick_snapshot_locked(
     while (root / snap_id).exists():
         snap_id = f"{base_snap_id}-{suffix}"
         suffix += 1
-    snap_dir = root / snap_id
     staging_dir = root / f".{snap_id}.{os.getpid()}.partial"
     shutil.rmtree(staging_dir, ignore_errors=True)
     staging_dir.mkdir(parents=True, exist_ok=False)
@@ -1098,7 +1065,7 @@ def _create_quick_snapshot_locked(
     }
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    os.replace(staging_dir, snap_dir)
+    os.replace(staging_dir, root / snap_id)
     # Auto-prune (pre-update callers pass a smaller keep so state.db copies don't accumulate).
     # Skip when a DB failed to capture OR was skipped for size (#68805): the snapshot is
     # incomplete and the older one may hold the only recoverable database.

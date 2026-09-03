@@ -152,9 +152,8 @@ def _canonical_github_remote(url: str | None) -> str:
 
 
 def _is_official_ssh_remote(url: str | None) -> bool:
-    if not url or not url.strip().lower().startswith(("git@", "ssh://")):
-        return False
-    return _canonical_github_remote(url) == _OFFICIAL_REPO_CANONICAL
+    return bool(url) and url.strip().lower().startswith(("git@", "ssh://")) and (
+        _canonical_github_remote(url) == _OFFICIAL_REPO_CANONICAL)
 
 
 _GIT_TEXT_KW = {"text": True, "encoding": "utf-8", "errors": "replace"}
@@ -464,11 +463,8 @@ def prefetch_banner_data():
     if _banner_data_prefetch_started:
         return
     _banner_data_prefetch_started = True
-
-    def _run() -> None:
-        for warm in (get_git_banner_state, get_latest_release_tag, get_available_skills):
-            _quiet(warm)
-    _daemon("banner-data-prefetch", _run)
+    _daemon("banner-data-prefetch", lambda: [_quiet(warm) for warm in (
+        get_git_banner_state, get_latest_release_tag, get_available_skills)])
 
 
 def get_update_result(timeout: float = 0.5) -> Optional[int]:

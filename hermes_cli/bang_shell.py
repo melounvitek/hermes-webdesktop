@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from contextlib import suppress
 from typing import Optional
 
 USAGE_HINT = "Usage: !<command> — run a shell command without spending a model turn (e.g. !git status)"
@@ -34,9 +35,7 @@ def parse_bang_command(text: str) -> str:
     ``!  ls -la`` -> ``ls -la``; ``!!`` -> ``!`` — a literal second bang belongs to the user's shell
     (history expansion), not to Hermes.
     """
-    if not is_bang_command(text):
-        return ""
-    return text.strip()[1:].strip()
+    return text.strip()[1:].strip() if is_bang_command(text) else ""
 
 
 def bang_shell_enabled() -> bool:
@@ -52,11 +51,8 @@ def bang_shell_enabled() -> bool:
         def env_var_enabled(name, default=""):  # type: ignore[misc]
             return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
-    return not (
-        env_var_enabled("HERMES_GATEWAY_SESSION")
-        or env_var_enabled("HERMES_CRON_SESSION")
-        or (os.getenv("HERMES_SESSION_PLATFORM") or "").strip()
-    )
+    return not (env_var_enabled("HERMES_GATEWAY_SESSION") or env_var_enabled("HERMES_CRON_SESSION")
+                or (os.getenv("HERMES_SESSION_PLATFORM") or "").strip())
 
 
 def resolve_bang_cwd(session_key: Optional[str] = None) -> Optional[str]:
@@ -67,7 +63,6 @@ def resolve_bang_cwd(session_key: Optional[str] = None) -> Optional[str]:
     """
     try:
         from tools.terminal_tool import _get_env_config, get_session_cwd
-
         return get_session_cwd(session_key) or (_get_env_config() or {}).get("cwd") or None
     except Exception:
         return None
@@ -99,7 +94,6 @@ def _bang_env() -> dict:
     """
     try:
         from tools.environments.local import _sanitize_subprocess_env
-
         return _sanitize_subprocess_env(os.environ.copy())
     except Exception:
         return os.environ.copy()
@@ -111,29 +105,23 @@ def run_bang_command(command: str, *, cwd: Optional[str] = None, timeout: int = 
     Output exists only on the user's terminal — nothing is returned for insertion into history.
     """
     emit = writer or (lambda line: print(line, end="" if line.endswith("\n") else "\n"))
-
     run_cwd = os.path.expanduser(cwd) if cwd else None
     if run_cwd and not os.path.isdir(run_cwd):
         run_cwd = None
-
     try:
         from hermes_cli._subprocess_compat import windows_hide_flags
-
         creationflags = windows_hide_flags()
     except Exception:
         creationflags = 0
-
     try:
         # shell=True is intentional (matches quick_commands): the human typed this, not the model.
         proc = subprocess.Popen(
-            command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace",
-            cwd=run_cwd, env=_bang_env(), creationflags=creationflags,
-        )
+            command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace", cwd=run_cwd, env=_bang_env(),
+            creationflags=creationflags)
     except Exception as exc:
         emit(f"!: failed to run command: {exc}")
         return 127
-
     try:
         if proc.stdout is not None:
             for line in proc.stdout:
@@ -149,10 +137,7 @@ def run_bang_command(command: str, *, cwd: Optional[str] = None, timeout: int = 
         emit("!: interrupted")
         return 130
     finally:
-        try:
-            if proc.stdout is not None:
+        if proc.stdout is not None:
+            with suppress(Exception):
                 proc.stdout.close()
-        except Exception:
-            pass
-
     return int(proc.returncode or 0)
