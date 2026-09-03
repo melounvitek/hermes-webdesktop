@@ -21,27 +21,30 @@ if TYPE_CHECKING:
     from hermes_cli.kanban_db import Event
 
 
-# ---------------------------------------------------------------------------
-# Notification subscriptions (used by the gateway kanban-notifier)
-# ---------------------------------------------------------------------------
-
 # Notifier reaction to a terminal event: "notify" = passive adapter.send only
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 
+_SCALAR_TYPES = (str, int, float, bool)
 
-def _encode_notify_delivery_metadata(
-    metadata: Optional[Mapping[str, Any]],
-) -> Optional[str]:
+# Subscription primary key predicate; every per-row statement below binds
+# ``(task_id, platform, chat_id, thread_id or "")`` against it.
+_SUB_KEY_WHERE = "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?"
+
+
+def _sub_key(task_id: str, platform: str, chat_id: str, thread_id: Optional[str]) -> tuple:
+    return (task_id, platform, chat_id, thread_id or "")
+
+
+def _encode_notify_delivery_metadata(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
     """Serialize platform send metadata stored on notification subscriptions."""
     if not isinstance(metadata, Mapping):
         return None
-    clean: dict[str, Any] = {}
-    for key, value in metadata.items():
-        if value is None:
-            continue
-        if isinstance(value, (str, int, float, bool)):
-            clean[str(key)] = value
+    clean = {
+        str(key): value
+        for key, value in metadata.items()
+        if value is not None and isinstance(value, _SCALAR_TYPES)
+    }
     if not clean:
         return None
     return json.dumps(clean, sort_keys=True, separators=(",", ":"))
@@ -58,11 +61,7 @@ def _decode_notify_delivery_metadata(raw: Any) -> dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {
-        str(key): value
-        for key, value in data.items()
-        if isinstance(value, (str, int, float, bool))
-    }
+    return {str(key): value for key, value in data.items() if isinstance(value, _SCALAR_TYPES)}
 
 
 def add_notify_sub(
@@ -80,30 +79,23 @@ def add_notify_sub(
     delivery_metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Register a gateway source wanting terminal-state notifications for
-    ``task_id``. Idempotent on (task, platform, chat, thread).
+    ``task_id``; idempotent on (task, platform, chat, thread).
 
-    ``user_id_alt`` (Signal UUID, Feishu union_id, ...) must be replayed on
-    active wake: ``build_session_key`` prefers it over ``user_id``, so replaying
-    only ``user_id`` would key the wake into a different session when they
-    diverge. ``chat_type`` is likewise replayed so the woken turn resolves the
-    operator's real channel; ``None`` keeps an existing row's value.
-
-    ``delivery_mode`` (``_NOTIFY_DELIVERY_MODES``): ``None`` leaves an existing
-    row untouched (fresh rows get ``"notify"``); an explicit value is
-    last-write-wins so re-subscribing can change the mode; unknown values fall
-    back to ``"notify"``. New subs start "caught up" (``last_event_id`` =
-    current ``MAX(task_events.id)``, not 0) — otherwise the notifier replays
-    every historical terminal event on its next tick (boot-time bursts).
+    ``user_id_alt`` (Signal UUID, Feishu union_id, ...) and ``chat_type`` are
+    replayed on active wake: ``build_session_key`` prefers the alt id, so
+    omitting it would key the wake into a different session. ``None`` keeps an
+    existing row's value. ``delivery_mode``: ``None`` leaves an existing row
+    untouched, an explicit valid value is last-write-wins, unknown falls back
+    to ``"notify"``. New subs start caught up (``last_event_id`` =
+    ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
-    insert_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else (
-        # api_server is stateless: the adapter has no send(), the wake self-post
-        # IS the delivery. A plain 'notify' default would leave those subs with
-        # no delivery mechanism at all. Explicit modes still win.
-        "notify+wake" if platform == "api_server" else "notify"
-    )
-    insert_chat_type = chat_type or "dm"
-    now = int(time.time())
+    valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
+    # api_server is stateless: the adapter has no send(), the wake self-post IS
+    # the delivery. A plain 'notify' default would leave those subs with no
+    # delivery mechanism at all. Explicit modes still win.
+    insert_mode = valid_mode or ("notify+wake" if platform == "api_server" else "notify")
     metadata_json = _encode_notify_delivery_metadata(delivery_metadata)
+    key = _sub_key(task_id, platform, chat_id, thread_id)
     with _kb.write_txn(conn):
         conn.execute(
             """
@@ -115,37 +107,24 @@ def add_notify_sub(
                     COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
-                task_id,
-                platform,
-                chat_id,
-                thread_id or "",
-                user_id,
-                user_id_alt,
-                insert_chat_type,
-                notifier_profile,
-                insert_mode,
-                metadata_json,
-                now,
-                task_id,
+                *key, user_id, user_id_alt, chat_type or "dm", notifier_profile,
+                insert_mode, metadata_json, int(time.time()), task_id,
             ),
         )
         # chat_type / delivery_mode / delivery_metadata are last-write-wins;
         # user_id_alt and notifier_profile only self-heal legacy rows lacking one.
-        key = (task_id, platform, chat_id, thread_id or "")
         for column, value, fill_only in (
             ("chat_type", chat_type, False),
             ("user_id_alt", user_id_alt, True),
             ("notifier_profile", notifier_profile, True),
-            ("delivery_mode", delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None, False),
+            ("delivery_mode", valid_mode, False),
             ("delivery_metadata", metadata_json, False),
         ):
             if not value:
                 continue
             guard = f" AND ({column} IS NULL OR {column} = '')" if fill_only else ""
             conn.execute(
-                f"UPDATE kanban_notify_subs SET {column} = ? "
-                "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?"
-                + guard,
+                f"UPDATE kanban_notify_subs SET {column} = ? " + _SUB_KEY_WHERE + guard,
                 (value, *key),
             )
 
@@ -159,19 +138,11 @@ def _notify_profile_filter(
     if notifier_profiles is None:
         return "", []
 
-    profiles = sorted(
-        {
-            str(profile).strip()
-            for profile in notifier_profiles
-            if str(profile).strip()
-        }
-    )
+    profiles = sorted({str(p).strip() for p in notifier_profiles if str(p).strip()})
     clauses: list[str] = []
     params: list[str] = []
     if profiles:
-        clauses.append(
-            "notifier_profile IN (" + ",".join("?" for _ in profiles) + ")"
-        )
+        clauses.append("notifier_profile IN (" + ",".join("?" for _ in profiles) + ")")
         params.extend(profiles)
     if include_unowned:
         clauses.append("notifier_profile IS NULL OR notifier_profile = ''")
@@ -207,14 +178,11 @@ def list_notify_subs(
     sql = "SELECT * FROM kanban_notify_subs"
     if where:
         sql += " WHERE " + " AND ".join(f"({clause})" for clause in where)
-    rows = conn.execute(sql, params).fetchall()
     out: list[dict] = []
-    for row in rows:
+    for row in conn.execute(sql, params).fetchall():
         item = dict(row)
         if "delivery_metadata" in item:
-            item["delivery_metadata"] = _decode_notify_delivery_metadata(
-                item.get("delivery_metadata")
-            )
+            item["delivery_metadata"] = _decode_notify_delivery_metadata(item.get("delivery_metadata"))
         out.append(item)
     return out
 
@@ -229,44 +197,39 @@ def count_notify_subs(
     chat_id: Optional[str] = None,
     thread_id: Optional[str] = None,
 ) -> int:
-    """Count ``kanban_notify_subs`` rows via a read-only connection.
-
-    Cheap probe for the notifier's zero-subscription early exit: unlike
-    :func:`connect` it never creates the DB file, runs schema init/migration,
-    or opens writable (a read-only WAL open may still create ``-shm``/``-wal``
-    sidecars but cannot write table content). Rows in a not-yet-checkpointed
-    WAL are visible, so a fresh subscription is never missed. A missing DB or
-    a legacy DB without the table counts as zero. Platform matching is
-    case-insensitive (matching notifier routing); chat/thread are exact.
-    Path resolution matches :func:`connect`. Raises :class:`sqlite3.Error`
-    when the DB exists but cannot be read; callers choose their own fallback.
+    """Count ``kanban_notify_subs`` rows via a read-only connection — the
+    notifier's cheap zero-subscription early exit. Unlike :func:`connect` it
+    never creates the file, runs init/migration or opens writable; WAL rows are
+    still visible so a fresh sub is never missed. Missing DB / missing table
+    counts as zero; platform matches case-insensitively (as notifier routing),
+    chat/thread exactly. Raises :class:`sqlite3.Error` if the DB exists but is
+    unreadable — callers pick their own fallback.
     """
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     if not path.exists():
         return 0
+    owner_where, owner_params = _notify_profile_filter(
+        notifier_profiles, include_unowned=include_unowned,
+    )
+    clauses: list[str] = []
+    params: list[Any] = []
+    if owner_where:
+        clauses.append(f"({owner_where})")
+        params.extend(owner_params)
+    for clause, value in (
+        ("LOWER(platform) = LOWER(?)", platform),
+        ("chat_id = ?", chat_id),
+        ("thread_id = ?", thread_id),
+    ):
+        if value is not None:
+            clauses.append(clause)
+            params.append(value)
+    query = "SELECT COUNT(*) FROM kanban_notify_subs"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
     conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
     try:
         try:
-            owner_where, owner_params = _notify_profile_filter(
-                notifier_profiles, include_unowned=include_unowned,
-            )
-            clauses: list[str] = []
-            params: list[Any] = []
-            if owner_where:
-                clauses.append(f"({owner_where})")
-                params.extend(owner_params)
-            if platform is not None:
-                clauses.append("LOWER(platform) = LOWER(?)")
-                params.append(platform)
-            if chat_id is not None:
-                clauses.append("chat_id = ?")
-                params.append(chat_id)
-            if thread_id is not None:
-                clauses.append("thread_id = ?")
-                params.append(thread_id)
-            query = "SELECT COUNT(*) FROM kanban_notify_subs"
-            if clauses:
-                query += " WHERE " + " AND ".join(clauses)
             row = conn.execute(query, params).fetchone()
         except sqlite3.OperationalError as exc:
             if "no such table" in str(exc).lower():
@@ -287,29 +250,21 @@ def remove_notify_sub(
 ) -> bool:
     with _kb.write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM kanban_notify_subs WHERE task_id = ? "
-            "AND platform = ? AND chat_id = ? AND thread_id = ?",
-            (task_id, platform, chat_id, thread_id or ""),
+            "DELETE FROM kanban_notify_subs " + _SUB_KEY_WHERE,
+            _sub_key(task_id, platform, chat_id, thread_id),
         )
     return cur.rowcount > 0
 
 
-def purge_stale_done_notify_subs(
-    conn: sqlite3.Connection,
-    *,
-    max_age_days: int = 30,
-) -> int:
-    """Delete notify subs whose task has sat in ``done``/``blocked`` untouched
-    for longer than ``max_age_days``.
+def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:
+    """Delete notify subs whose task sat in ``done``/``blocked`` untouched for
+    longer than ``max_age_days`` (``<= 0`` disables); returns rows deleted.
 
-    Subs survive ``done`` because a completed task can be reopened and must
-    still notify its origin; on never-archiving boards that would accumulate
-    rows forever, each scanned every notifier tick. ``blocked`` tasks are
-    reaped on the same clock — they are abandoned, not merely waiting like
-    ``backlog``/``ready``. Age is measured from the most recent event
-    (falling back to ``completed_at`` then ``created_at``), so ANY activity —
-    including a reopen — resets or exempts it. ``max_age_days <= 0`` disables
-    the sweep. Returns the number of rows deleted.
+    Subs survive ``done`` because a reopened task must still notify its origin,
+    which accumulates forever on never-archiving boards. ``blocked`` is
+    abandoned (unlike ``backlog``/``ready``) so it reaps on the same clock. Age
+    = latest event, else ``completed_at``, else ``created_at`` — any activity,
+    including a reopen, exempts the sub.
     """
     try:
         days = int(max_age_days)
@@ -338,9 +293,8 @@ def _notify_cursor(
 ) -> Optional[int]:
     """``last_event_id`` of one subscription row, or ``None`` when unsubscribed."""
     row = conn.execute(
-        "SELECT last_event_id FROM kanban_notify_subs "
-        "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
-        (task_id, platform, chat_id, thread_id or ""),
+        "SELECT last_event_id FROM kanban_notify_subs " + _SUB_KEY_WHERE,
+        _sub_key(task_id, platform, chat_id, thread_id),
     ).fetchone()
     return None if row is None else int(row["last_event_id"])
 
@@ -370,11 +324,8 @@ def unseen_events_for_sub(
     if kind_list:
         params.extend(kind_list)
     rows = conn.execute(q, params).fetchall()
-    out: list[Event] = []
-    max_id = cursor
-    for r in rows:
-        out.append(_kb.Event.from_row(r))
-        max_id = max(max_id, int(r["id"]))
+    out = [_kb.Event.from_row(r) for r in rows]
+    max_id = max([cursor, *(int(r["id"]) for r in rows)])
     return max_id, out
 
 
@@ -401,22 +352,21 @@ def claim_unseen_events_for_sub(
         if old_cursor is None:
             return 0, 0, []
         new_cursor, events = unseen_events_for_sub(
-            conn,
-            task_id=task_id,
-            platform=platform,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            kinds=kinds,
+            conn, task_id=task_id, platform=platform, chat_id=chat_id,
+            thread_id=thread_id, kinds=kinds,
         )
         if not events:
             return old_cursor, old_cursor, []
-        conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? "
-            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
-            "AND last_event_id = ?",
-            (int(new_cursor), task_id, platform, chat_id, thread_id or "", int(old_cursor)),
-        )
+        _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), new_cursor, old_cursor)
         return old_cursor, new_cursor, events
+
+
+def _cas_cursor(conn: sqlite3.Connection, key: tuple, new_cursor: int, expected: int) -> sqlite3.Cursor:
+    """Move ``last_event_id`` only if it still equals ``expected``."""
+    return conn.execute(
+        "UPDATE kanban_notify_subs SET last_event_id = ? " + _SUB_KEY_WHERE + " AND last_event_id = ?",
+        (int(new_cursor), *key, int(expected)),
+    )
 
 
 def advance_notify_cursor(
@@ -430,9 +380,8 @@ def advance_notify_cursor(
 ) -> None:
     with _kb.write_txn(conn):
         conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? "
-            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ?",
-            (int(new_cursor), task_id, platform, chat_id, thread_id or ""),
+            "UPDATE kanban_notify_subs SET last_event_id = ? " + _SUB_KEY_WHERE,
+            (int(new_cursor), *_sub_key(task_id, platform, chat_id, thread_id)),
         )
 
 
@@ -450,18 +399,10 @@ def rewind_notify_cursor(
     notifier advanced the row, so retries never clobber newer progress.
     """
     with _kb.write_txn(conn):
-        cur = conn.execute(
-            "UPDATE kanban_notify_subs SET last_event_id = ? "
-            "WHERE task_id = ? AND platform = ? AND chat_id = ? AND thread_id = ? "
-            "AND last_event_id = ?",
-            (
-                int(old_cursor), task_id, platform, chat_id, thread_id or "",
-                int(claimed_cursor),
-            ),
-        )
+        cur = _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), old_cursor, claimed_cursor)
     return cur.rowcount > 0
 
 
-# Late-bound origin namespace (see module docstring). Imported LAST so this
+# Late-bound origin namespace (see module docstring); imported LAST so this
 # module is fully populated before ``kanban_db`` re-exports from it.
 from hermes_cli import kanban_db as _kb  # noqa: E402
