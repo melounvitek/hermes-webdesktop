@@ -668,12 +668,88 @@ def _record_forced_release(job_id: str, name: str, age_seconds: float, allowance
         logger.debug("Could not append forced-release record: %s", e)
 
 
+def _latest_executions_for_releasable_claims() -> dict:
+    """Latest durable execution per releasable-looking claim, one indexed query.
+
+    Two-phase so the healthy path pays no DB work: only claims with a missing/pending/done future
+    are queried. Snapshot under _running_lock — iterating the set while try_register/release mutate
+    it raises RuntimeError.
+    """
+    with _running_lock:
+        claim_futures = {job_id: _running_futures.get(job_id) for job_id in _running_job_ids}
+    candidates = [
+        job_id for job_id, fut in claim_futures.items()
+        if fut is None or fut is _FUTURE_PENDING or fut.done()
+    ]
+    if not candidates:
+        return {}
+    try:
+        from cron.executions import latest_executions as _latest_execs
+        return _latest_execs(candidates)
+    except Exception:
+        return {}
+
+
+def _row_belongs_to_claim(row: dict, claim_started: float) -> bool:
+    """True when the ledger row was claimed at/after this in-memory claim.
+
+    A terminal row older than the claim is the PREVIOUS run's (common for recurring jobs in the
+    try_register->create_execution window); releasing on it would double-dispatch. Unparseable
+    timestamps fail closed (treated as previous-run; the age path still bounds the claim).
+    """
+    claimed_at = row.get("claimed_at")
+    if not claimed_at:
+        return False
+    try:
+        from cron.jobs import _ensure_aware as _ensure_aware_ts
+        row_ts = _ensure_aware_ts(datetime.fromisoformat(claimed_at))
+        return row_ts.timestamp() >= claim_started
+    except (ValueError, TypeError, OSError):
+        return False
+
+
+def _record_stale_release(job: dict, job_id: str, age: float, allowance: float, fut, reason: str) -> None:
+    """WARNING log + probe record for one forced release, then ``last_error`` unless the ledger
+    already holds the run's real outcome or the job has a finite repeat budget."""
+    name = job.get("name") or job_id
+    future_state = "pending" if fut is _FUTURE_PENDING else "missing" if fut is None else "finished"
+    logger.warning(
+        "cron.inflight.forced_release event=forced_release reason=%s job='%s' "
+        "id=%s age=%.0fs allowance=%.0fs future=%s — stale in-flight claim "
+        "released; the job was skipping every fire with 'already running'",
+        reason, name, job_id, age, allowance, future_state)
+    _record_forced_release(job_id, name, age, allowance)
+    # Ledger already records how the run ended: mark_job_run here would clobber an honest
+    # ok status with a synthetic failure or double-write a failure.
+    if reason == "ledger-terminal":
+        return
+    # Age release may lack a ledger row, so last_error is how it surfaces. But a forced release
+    # is NOT a real run: never consume a finite repeat budget or let mark_job_run auto-delete.
+    repeat = job.get("repeat") or {}
+    if isinstance(repeat, dict) and repeat.get("times") is not None:
+        logger.warning(
+            "cron.inflight.forced_release.job_untouched job='%s' id=%s — "
+            "finite-repeat job released without mark_job_run (repeat budget "
+            "preserved); row left in place so it re-fires normally",
+            name, job_id)
+        return
+    try:
+        mark_job_run(
+            job_id, False,
+            f"Stale in-flight claim force-released after {age / 60:.1f}m "
+            f"(allowance {allowance / 60:.1f}m); previous run never released "
+            f"the scheduler in-flight guard")
+    except Exception as e:
+        logger.warning("Could not record forced release for job %s: %s", job_id, e)
+
+
 def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
     """Force-release in-flight claims that can no longer be making progress; returns released ids.
 
     Stale = older than ``max(2 * interval, floor)`` AND (no live future — submit path hung before
-    ``pool.submit`` returned — or finished without discarding the id). Each release logs WARNING
-    ``event=forced_release``, bumps the probe counter, mirrors JSONL, and writes ``last_error``.
+    ``pool.submit`` returned — or finished without discarding the id) — or the claim's OWN ledger
+    row is terminal regardless of age. Each release logs WARNING ``event=forced_release``, bumps
+    the probe counter, mirrors JSONL, and writes ``last_error``.
     """
     global _forced_release_count
 
@@ -681,45 +757,9 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
     floor_seconds = _inflight_min_allowance_minutes() * 60.0
     now = time.time()
     stale: list = []
-
-    # Latest durable execution per releasable-looking claim, one indexed query. A claim whose OWN
-    # run's row is terminal is stale regardless of age. Two-phase so the healthy path pays no DB
-    # work: only claims with a missing/pending/done future are queried. Snapshot under
-    # _running_lock — iterating the set while try_register/release mutate it raises RuntimeError.
     from cron.executions import _TERMINAL_STATES as _terminal_states
 
-    with _running_lock:
-        _claim_futures = {job_id: _running_futures.get(job_id) for job_id in _running_job_ids}
-    _ledger_candidates = [
-        job_id
-        for job_id, fut in _claim_futures.items()
-        if fut is None or fut is _FUTURE_PENDING or fut.done()
-    ]
-    _latest: dict = {}
-    if _ledger_candidates:
-        try:
-            from cron.executions import latest_executions as _latest_execs
-            _latest = _latest_execs(_ledger_candidates)
-        except Exception:
-            _latest = {}
-
-    def _row_belongs_to_claim(row: dict, claim_started: float) -> bool:
-        """True when the ledger row was claimed at/after this in-memory claim.
-
-        A terminal row older than the claim is the PREVIOUS run's (common for recurring jobs in the
-        try_register->create_execution window); releasing on it would double-dispatch. Unparseable
-        timestamps fail closed (treated as previous-run; the age path still bounds the claim).
-        """
-        claimed_at = row.get("claimed_at")
-        if not claimed_at:
-            return False
-        try:
-            from cron.jobs import _ensure_aware as _ensure_aware_ts
-            row_ts = _ensure_aware_ts(datetime.fromisoformat(claimed_at))
-            return row_ts.timestamp() >= claim_started
-        except (ValueError, TypeError, OSError):
-            return False
-
+    _latest = _latest_executions_for_releasable_claims()
     # Compute intervals OUTSIDE _running_lock so croniter doesn't block try_register/release.
     _intervals = {jid: _job_interval_minutes(j) for jid, j in by_id.items()}
 
@@ -762,50 +802,7 @@ def sweep_stale_inflight(due_jobs: Optional[list] = None) -> list:
             stale.append((job_id, age, allowance, fut, reason))
 
     for job_id, age, allowance, fut, _reason in stale:
-        job = by_id.get(job_id) or {}
-        name = job.get("name") or job_id
-        if fut is _FUTURE_PENDING:
-            future_state = "pending"
-        elif fut is None:
-            future_state = "missing"
-        else:
-            future_state = "finished"
-        logger.warning(
-            "cron.inflight.forced_release event=forced_release reason=%s job='%s' "
-            "id=%s age=%.0fs allowance=%.0fs future=%s — stale in-flight claim "
-            "released; the job was skipping every fire with 'already running'",
-            _reason,
-            name,
-            job_id,
-            age,
-            allowance,
-            future_state)
-        _record_forced_release(job_id, name, age, allowance)
-        # Ledger already records how the run ended: mark_job_run here would clobber an honest
-        # ok status with a synthetic failure or double-write a failure.
-        if _reason == "ledger-terminal":
-            continue
-        # Age release may lack a ledger row, so last_error is how it surfaces. But a forced release
-        # is NOT a real run: never consume a finite repeat budget or let mark_job_run auto-delete.
-        repeat = job.get("repeat") or {}
-        if isinstance(repeat, dict) and repeat.get("times") is not None:
-            logger.warning(
-                "cron.inflight.forced_release.job_untouched job='%s' id=%s — "
-                "finite-repeat job released without mark_job_run (repeat budget "
-                "preserved); row left in place so it re-fires normally",
-                name,
-                job_id)
-            continue
-        try:
-            mark_job_run(
-                job_id,
-                False,
-                f"Stale in-flight claim force-released after {age / 60:.1f}m "
-                f"(allowance {allowance / 60:.1f}m); previous run never released "
-                f"the scheduler in-flight guard")
-        except Exception as e:
-            logger.warning("Could not record forced release for job %s: %s", job_id, e)
-
+        _record_stale_release(by_id.get(job_id) or {}, job_id, age, allowance, fut, _reason)
     return [s[0] for s in stale]
 
 
