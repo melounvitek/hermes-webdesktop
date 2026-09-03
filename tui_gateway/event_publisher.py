@@ -1,13 +1,11 @@
 """Best-effort WebSocket publisher transport for the PTY-side gateway.
 
-The dashboard's `/api/pty` spawns `hermes --tui`, which spawns its own
-``tui_gateway.entry`` — three processes removed from the dashboard server. To surface
-tool/reasoning/status events in the sidebar (`/api/events`), that gateway opens a
-back-WS to the dashboard at startup and mirrors every emit through this transport as
-newline-framed JSON (no JSON-RPC envelope; ``/api/pub`` rebroadcasts bytes verbatim).
-Failure mode: silent. The agent loop must never block on the sidecar — ``send`` runs on
-a daemon thread, ``write`` returns after enqueueing (drop when full), a dead WS
-short-circuits all subsequent writes.
+The dashboard's `/api/pty` spawns `hermes --tui`, which spawns ``tui_gateway.entry`` — three
+processes from the dashboard server. To surface events in the sidebar (`/api/events`), that gateway
+opens a back-WS to the dashboard at startup and mirrors every emit through this transport as
+newline-framed JSON (no JSON-RPC envelope; ``/api/pub`` rebroadcasts bytes verbatim). Failure mode:
+silent — the agent loop must never block on the sidecar: ``send`` runs on a daemon thread, ``write``
+returns after enqueueing (drop when full), a dead WS short-circuits all later writes.
 """
 
 from __future__ import annotations
@@ -37,18 +35,16 @@ class WsPublisherTransport:
         self._url = url
         self._lock = threading.Lock()
         self._ws: Optional[object] = None
-        self._dead = False
+        self._dead = ws_connect is None
         self._q: queue.Queue[object] = queue.Queue(maxsize=_QUEUE_MAX)
         self._worker: Optional[threading.Thread] = None
-        if ws_connect is None:
-            self._dead = True
+        if self._dead:
             return
         try:
             self._ws = ws_connect(url, open_timeout=connect_timeout, max_size=None)
         except Exception as exc:
             _log.debug("event publisher connect failed: %s", exc)
             self._dead = True
-            self._ws = None
             return
         self._worker = threading.Thread(target=self._drain, name="hermes-ws-pub", daemon=True)
         self._worker.start()

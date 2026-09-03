@@ -1,13 +1,11 @@
 """Per-session event sequencing + bounded replay for WS reconnects.
 
-Every event frame through :func:`server.write_json` (hence ``_emit``) is stamped with
-a per-session monotonic ``seq`` and appended to a small ring per session id; a
-reconnecting client calls ``session.events.since`` with its last seen seq and gets
-everything newer, then live events resume. Invariants: stdio TUI unaffected (``seq``
-only on event frames; Ink ignores unknown keys); one module lock guards counters +
-buffers, and write_json already serializes per-transport writes so stamping cannot
-reorder frames; memory bound = _REPLAY_BUFFER_MAX events x _REPLAY_SESSIONS_MAX
-sessions, oldest session evicted FIFO.
+Every event frame through :func:`server.write_json` (hence ``_emit``) gets a per-session monotonic
+``seq`` and lands in a small ring per session; a reconnecting client calls ``session.events.since``
+with its last seen seq and gets everything newer. Invariants: stdio TUI unaffected (``seq`` only on
+event frames; Ink ignores unknown keys); one lock guards counters + buffers, and write_json already
+serializes per-transport writes so stamping cannot reorder frames; memory bound =
+_REPLAY_BUFFER_MAX events x _REPLAY_SESSIONS_MAX sessions, oldest session evicted FIFO.
 """
 
 from __future__ import annotations
@@ -63,7 +61,7 @@ def _stamp_event(obj: dict) -> None:
 
 
 def events_since(sid: str, last_seen: int) -> list[dict]:
-    """Recorded EVENT OBJECTS (each frame's ``params`` dict) with seq > last_seen for *sid*, in order.
+    """Recorded EVENT OBJECTS (each frame's ``params`` dict) with seq > last_seen for *sid*.
 
     Returning the full JSON-RPC envelope would make every replayed event fail the
     client's ``event.type`` gate and be silently dropped.

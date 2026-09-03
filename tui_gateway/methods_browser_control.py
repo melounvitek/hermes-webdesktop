@@ -1,15 +1,12 @@
 """Browser controller registration and result routing for the dashboard.
 
-The dashboard's browser controller (the extension driving a browser) registers over
-the authenticated ``/api/ws`` gateway. Everything binds to the SERVER-MINTED identity
-(``WSTransport.auth_identity``, stamped by ``hermes_cli.web_server`` from the single-use
-ticket); a client-supplied ``principal_id`` is ignored and replaced by a digest of it.
-Broker command/cancel frames are re-enveloped as standard Gateway ``event`` frames;
-``browser.controller.result`` resolves a command only on the owning transport and only
-for the exact attached scope (the broker's exact-scope ``complete`` is the backstop).
-Both transports share the broker's explicit capability allowlist (no raw CDP/eval/uploads).
-Handler bodies are rebound onto server.py's globals (method_ctx.bind_module publishes
-this module's helpers/constants there too), so they reference both bare.
+The controller extension registers over the authenticated ``/api/ws`` gateway. Everything
+binds to the SERVER-MINTED identity (``WSTransport.auth_identity``, stamped from the single-use
+ticket); a client-supplied ``principal_id`` is ignored and replaced by a digest of it. Broker
+frames are re-enveloped as Gateway ``event`` frames; ``result`` resolves a command only on the
+owning transport for the exact attached scope (the broker's exact-scope ``complete`` is the
+backstop). Capabilities come from the broker's explicit allowlist (no raw CDP/eval/uploads).
+Bodies are rebound onto server.py's globals (bind_module publishes this module's helpers too).
 """
 
 from __future__ import annotations
@@ -49,7 +46,7 @@ def _is_authenticated_identity(identity: object) -> bool:
 
 
 def _principal_digest(identity: dict) -> str:
-    """Server-derived principal id: stable per user, unspoofable without the authenticated identity."""
+    """Server-derived principal id: stable per user, unspoofable without the minted identity."""
     raw = f"{identity.get('provider')}\x00{identity.get('user_id')}"
     return f"principal:dashboard:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]}"
 
@@ -63,11 +60,13 @@ def _broker_event_writer(transport: object, session_id: str):
             accepted = transport.write({
                 "jsonrpc": "2.0", "method": "event",
                 "params": {
-                    "type": frame.get("method"), "session_id": session_id, "payload": frame.get("params"),
+                    "type": frame.get("method"), "session_id": session_id,
+                    "payload": frame.get("params"),
                 }})
         except Exception:
             logger.exception(
-                "browser controller event write failed session=%s frame=%s", session_id, frame.get("method")
+                "browser controller event write failed session=%s frame=%s",
+                session_id, frame.get("method"),
             )
             raise
         if accepted is False:
@@ -130,9 +129,13 @@ def _register_precheck(rid, params: dict):
 
     if not browser_control_broker.browser_control_enabled():
         return _err(rid, _ERR_FORBIDDEN, "browser.extension_control.enabled is not set")
-    if not browser_control_broker.browser_control_protocol_supported(params.get("protocol_version")):
-        expected = browser_control_broker.BROWSER_CONTROL_PROTOCOL_VERSION
-        return _err(rid, _ERR_FORBIDDEN, f"unsupported browser-control protocol version; expected {expected}")
+    broker_mod = browser_control_broker
+    if not broker_mod.browser_control_protocol_supported(params.get("protocol_version")):
+        expected = broker_mod.BROWSER_CONTROL_PROTOCOL_VERSION
+        return _err(
+            rid, _ERR_FORBIDDEN,
+            f"unsupported browser-control protocol version; expected {expected}",
+        )
     return None
 
 
@@ -141,12 +144,8 @@ def _register_precheck(rid, params: dict):
     identity_message="browser.controller.register requires an authenticated non-internal identity",
     lookup_scope=False, precheck=_register_precheck)
 def _(rid, params: dict, transport, identity, session_id, broker, _scope, session) -> dict:
-    """Attach this connection as the browser controller for one session.
-
-    Fails closed (4403) unless the ``browser.extension_control.enabled`` flag is on, the
-    protocol version is supported, the identity/session gates pass, and at least one
-    requested capability survives the allowlist.
-    """
+    """Attach this connection as the browser controller for one session; fails closed (4403) unless
+    the flag is on, the protocol version is supported, the gates pass and a capability survives."""
     from gateway import browser_control_broker
 
     controller_id = str(params.get("controller_id") or "").strip()
@@ -154,9 +153,12 @@ def _(rid, params: dict, transport, identity, session_id, broker, _scope, sessio
     profile_id = str(session.get("profile") or "").strip()
     if not controller_id or not browser_profile_id or not profile_id:
         return _err(
-            rid, _ERR_FORBIDDEN, "controller_id, browser_profile_id, and server session profile are required"
+            rid, _ERR_FORBIDDEN,
+            "controller_id, browser_profile_id, and server session profile are required",
         )
-    capabilities = browser_control_broker.filter_browser_control_capabilities(params.get("capabilities"))
+    capabilities = browser_control_broker.filter_browser_control_capabilities(
+        params.get("capabilities")
+    )
     if not capabilities:
         return _err(rid, _ERR_FORBIDDEN, "no permitted controller capabilities requested")
     scope = browser_control_broker.ControllerScope(
@@ -166,10 +168,8 @@ def _(rid, params: dict, transport, identity, session_id, broker, _scope, sessio
     broker.attach(scope, _broker_event_writer(transport, session_id), owner=transport)
     return _ok(rid, {
         "scope": {
-            "principal_id": scope.principal_id,
-            "profile_id": scope.profile_id,
-            "session_id": scope.session_id,
-            "controller_id": scope.controller_id,
+            "principal_id": scope.principal_id, "profile_id": scope.profile_id,
+            "session_id": scope.session_id, "controller_id": scope.controller_id,
             "browser_profile_id": scope.browser_profile_id,
             "transport_family": scope.transport_family,
             "capabilities": sorted(scope.capabilities)}})
@@ -177,11 +177,8 @@ def _(rid, params: dict, transport, identity, session_id, broker, _scope, sessio
 
 @_controller_method("browser.controller.result")
 def _(rid, params: dict, _transport, _identity, _session_id, broker, scope, _session) -> dict:
-    """Deliver one controller command result back to the broker.
-
-    ``accepted`` is ``False`` for unknown / already-resolved / cancelled command ids —
-    the broker's idempotent answer, surfaced verbatim.
-    """
+    """Deliver one command result to the broker; ``accepted`` is False for unknown / resolved /
+    cancelled command ids (the broker's idempotent answer, surfaced verbatim)."""
     command_id = str(params.get("command_id") or "")
     if not command_id:
         return _err(rid, _ERR_FORBIDDEN, "command_id required")

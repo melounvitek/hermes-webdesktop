@@ -1,12 +1,10 @@
-"""Git working-tree probing for the gateway: run git, resolve repo roots, fold linked
-worktrees under their common root.
+"""Git working-tree probing for the gateway: run git, resolve repo roots, fold linked worktrees.
 
-Probing runs where the gateway runs, so it covers local and remote backends. Roots go
-through a thread-safe single-flight cache: concurrent identical probes from worker
-threads share one ``git`` spawn. Positives are cached for the process lifetime;
-negatives (not a repo / deleted dir) only for ``_NEG_TTL`` — ``build_tree`` resolves a
-cwd once *per session*, so hundreds of non-git cwds would otherwise re-spawn ``git`` on
-every sidebar open, while the TTL keeps a not-yet-``git init``-ed folder re-probable.
+Probing runs where the gateway runs (covers remote backends). Roots go through a thread-safe
+single-flight cache so concurrent identical probes share one ``git`` spawn. Positives are cached
+for the process lifetime; negatives (not a repo / deleted dir) only for ``_NEG_TTL`` —
+``build_tree`` resolves a cwd once *per session*, so hundreds of non-git cwds would otherwise
+re-spawn ``git`` on every sidebar open, while the TTL keeps a fresh ``git init`` re-probable.
 """
 
 from __future__ import annotations
@@ -29,12 +27,11 @@ _NEG_TTL = 30.0
 def run_git(cwd: str, *args: str) -> str:
     """``git -C <cwd> <args>`` → stripped stdout, or ``""`` on any failure.
 
-    ``bounded_git_probe`` bounds post-kill cleanup on Windows — a plain
-    ``subprocess.run(timeout=...)`` deadlocked Desktop readiness when a killed git left
-    a suspended descendant holding the pipe handles.
+    ``bounded_git_probe`` bounds post-kill cleanup on Windows — a plain ``subprocess.run(timeout)``
+    deadlocked Desktop readiness when a killed git left a suspended descendant holding the pipes.
     """
-    # `git -C` on a missing dir can only fail, at the price of a fork; deleted
-    # worktrees dominate a long session history's cwds, so the stat pays off.
+    # `git -C` on a missing dir can only fail, at the price of a fork; deleted worktrees
+    # dominate a long session history's cwds, so the stat pays off.
     if not cwd or not os.path.isdir(cwd):
         return ""
     return bounded_git_probe(["git", "-C", cwd, *args], timeout=_GIT_TIMEOUT)
@@ -112,13 +109,12 @@ def common_repo_root(cwd: str) -> str:
     """The MAIN (common) repo root for ``cwd``, folding linked worktrees.
 
     ``--show-toplevel`` returns a linked worktree's OWN root; the parent of the shared
-    ``--git-common-dir`` is the one true root (fallback: the toplevel root). Normalized
-    to git's forward-slash spelling so it compares equal to :func:`repo_root` — with
-    native ``\\`` on Windows the main checkout was misread as a linked worktree and the
-    desktop sidebar rendered it twice.
+    ``--git-common-dir`` is the one true root (fallback: the toplevel root). Normalized to git's
+    forward-slash spelling so it compares equal to :func:`repo_root` — with native ``\\`` on
+    Windows the main checkout was misread as a linked worktree and the sidebar rendered it twice.
     """
-    # Not a repo: nothing to fold. Checking the (warmed, negative-cached) toplevel
-    # first spares every non-repo cwd a second `git` spawn the parallel warm can't absorb.
+    # Not a repo: nothing to fold. Checking the (warmed, negative-cached) toplevel first spares
+    # every non-repo cwd a second `git` spawn the parallel warm can't absorb.
     if not cwd or not repo_root(cwd):
         return ""
 

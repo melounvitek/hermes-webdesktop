@@ -14,14 +14,14 @@ _registry = HandlerRegistry()
 
 
 def _persist_model_switch(result) -> None:
-    # Targeted key writes: a full `model:` block rewrite via save_config() would
-    # destroy sibling keys the user set there (`model_slots`, `model_fallback`, ...).
+    # Targeted key writes: a full `model:` block rewrite via save_config() would destroy
+    # sibling keys the user set there (`model_slots`, `model_fallback`, ...).
     from cli import save_config_value
 
     save_config_value("model.default", result.new_model)
     save_config_value("model.provider", result.target_provider)
-    # A provider without a base_url must clear the stale one (custom endpoint ->
-    # native) or the new model routes at the old host; reads coalesce null to absent.
+    # A provider without a base_url must clear the stale one (custom endpoint -> native)
+    # or the new model routes at the old host; reads coalesce null to absent.
     save_config_value("model.base_url", result.base_url or None)
 
 
@@ -104,9 +104,10 @@ def _restart_completed_failed_agent_build(sid: str, session: dict, failed_ready:
 
 
 def _switch_request(raw_input: str, parsed_flags, persist_override) -> tuple[str, str, bool, bool]:
-    """Normalize /model flags → (model_input, explicit_provider, one_turn, persist_global); raises on conflict."""
+    """Normalize /model flags → (model_input, explicit_provider, one_turn, persist_global)."""
     from hermes_cli.model_switch import (
-        MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL, MODEL_SWITCH_ERROR_TEXT, parse_model_switch_args, resolve_persist_behavior
+        MODEL_SWITCH_ERR_ONCE_WITH_GLOBAL, MODEL_SWITCH_ERROR_TEXT, parse_model_switch_args,
+        resolve_persist_behavior,
     )
 
     if parsed_flags is None:
@@ -130,9 +131,11 @@ def _switch_request(raw_input: str, parsed_flags, persist_override) -> tuple[str
 
 
 def _current_model_runtime(agent, explicit_provider: str) -> tuple:
-    """(provider, model, base_url, api_key) the switch starts from: the live agent's, else the configured runtime."""
+    """(provider, model, base_url, api_key) to switch from: live agent, else configured runtime."""
     if agent:
-        return tuple(getattr(agent, k, "") or "" for k in ("provider", "model", "base_url", "api_key"))
+        return tuple(
+            getattr(agent, k, "") or "" for k in ("provider", "model", "base_url", "api_key")
+        )
     current_model = _resolve_model()
     if explicit_provider:
         return explicit_provider.strip(), current_model, "", ""
@@ -149,7 +152,7 @@ def _current_model_runtime(agent, explicit_provider: str) -> tuple:
 
 
 def _provider_context() -> tuple:
-    """(user providers, compatible custom providers, cfg) from config; all None when config fails to load."""
+    """(user providers, compatible custom providers, cfg) from config; all None on load failure."""
     user_provs = custom_provs = cfg = None
     try:
         from hermes_cli.config import get_compatible_custom_providers, load_config
@@ -199,17 +202,16 @@ def _expensive_model_confirm(result, current_base_url: str, current_api_key) -> 
     return {"value": result.new_model, "warning": confirm_msg, "confirm_required": True, "confirm_message": confirm_msg}
 
 
-def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: str, restore_snapshot):
-    """Swap the live agent in place, then restart/persist/mark/announce; a failed swap aborts it all."""
+def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: str, snapshot):
+    """Swap the live agent in place, then restart/persist/mark/announce; a failed swap aborts."""
     try:
         agent.switch_model(
             new_model=result.new_model, new_provider=result.target_provider, api_key=result.api_key,
             base_url=result.base_url, api_mode=result.api_mode,
             capabilities=getattr(result, "runtime_capabilities", None))
     except Exception as exc:
-        # The in-place swap rolled the agent back and re-raised. Abort the whole
-        # commit (worker restart, persist, marker, override, config write) or the
-        # session stays pinned to a broken model. A failed switch is a no-op.
+        # The in-place swap rolled the agent back and re-raised. Abort the whole commit (worker
+        # restart, persist, marker, override, config write) or the session pins a broken model.
         logger.warning("In-place model switch failed for TUI agent: %s", exc)
         raise ValueError(
             f"Model switch to {result.new_model} failed ({exc}); "
@@ -220,8 +222,8 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
     _persist_live_session_system_prompt(session)
     _append_model_switch_marker(session, model=result.new_model, provider=result.target_provider)
     _emit_session_info(sid, session)
-    if restore_snapshot is not None:
-        session["one_turn_model_restore"] = restore_snapshot
+    if snapshot is not None:
+        session["one_turn_model_restore"] = snapshot
     else:
         session.pop("one_turn_model_restore", None)
 
@@ -258,10 +260,9 @@ def _apply_model_switch(
             return confirm
     if agent:
         _commit_agent_switch(sid, session, agent, result, current_model, restore_snapshot)
-    # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives
-    # the chosen model. Deliberately NOT written to process-global env vars
-    # (HERMES_MODEL & co.): the desktop hosts every same-profile session in one
-    # process, so os.environ would leak the switch into every other session.
+    # PER-SESSION override so a rebuild of THIS session (/new, resume) re-derives the model.
+    # Deliberately NOT written to process-global env (HERMES_MODEL & co.): the desktop hosts
+    # every same-profile session in one process, so os.environ would leak the switch to all.
     if pin_session_override and isinstance(session, dict) and not one_turn:
         session["model_override"] = {
             "model": result.new_model, "provider": result.target_provider,
@@ -269,8 +270,7 @@ def _apply_model_switch(
     if persist_global:
         _persist_model_switch(result)
     return {
-        "value": result.new_model,
-        "warning": result.warning_message or "",
+        "value": result.new_model, "warning": result.warning_message or "",
         "confirm_required": False,
         "scope": "once" if one_turn else ("global" if persist_global else "session")}
 
@@ -278,10 +278,9 @@ def _apply_model_switch(
 def _sync_bot_capabilities(sid: str, session: dict) -> None:
     """Rebuild a Bot Chat session's agent when its capability surface changed.
 
-    Bot Chats are eternal sessions with toolsets/MCP baked in at construction, so a
-    capability edit would otherwise wait for /new. At turn start, fingerprint the
-    profile's capabilities and on change swap in a fresh agent for the SAME session
-    (history is DB-backed). One rebuild per change; identical state is a no-op.
+    Bot Chats are eternal sessions with toolsets/MCP baked in at construction, so a capability
+    edit would otherwise wait for /new. At turn start, fingerprint the profile's capabilities
+    and on change swap in a fresh agent for the SAME session (history is DB-backed).
     """
     agent = session.get("agent")
     if agent is None:
@@ -289,8 +288,7 @@ def _sync_bot_capabilities(sid: str, session: dict) -> None:
     try:
         title = str(getattr(agent, "_session_title_hint", "") or "").strip()
         if not title:
-            db = getattr(agent, "_session_db", None)
-            key = session.get("session_key") or ""
+            db, key = getattr(agent, "_session_db", None), session.get("session_key") or ""
             title = str((db.get_session_title(key) if (db and key) else None) or "").strip()
         if title != "Bot Chat":
             return
@@ -340,14 +338,14 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
     if target == seen:
         return
     model, provider = target
-    # Already on the configured model (resumed before first sync, or a config
-    # revert after a failed switch): adopt without switching.
+    # Already on the configured model (resumed before first sync, or a config revert after
+    # a failed switch): adopt without switching.
     if model == getattr(agent, "model", "") and (not provider or provider == getattr(agent, "provider", "")):
         return
     raw = f"{model} --provider {provider}" if provider else model
     try:
-        # This sync ADOPTS a config.yaml change; it must never write config back
-        # (that is how `hermes --tui -m` once leaked into config.yaml).
+        # This sync ADOPTS a config.yaml change; it must never write config back (that is
+        # how `hermes --tui -m` once leaked into config.yaml).
         _apply_model_switch(
             sid, session, raw, confirm_expensive_model=True, pin_session_override=False, persist_override=False
         )
@@ -358,9 +356,9 @@ def _sync_agent_model_with_config(sid: str, session: dict) -> None:
 def _pending_switch_selection_warning(model: str, provider: str) -> str | None:
     """Selection-guard message for a model queued mid-turn, or ``None``.
 
-    Runs BEFORE the pick is stashed, while the client can still turn the response
-    into a confirm prompt. Only pre-resolution inputs exist here, so this can only
-    under-fire; ``_apply_model_switch`` is the backstop. Exceptions mean "no warning".
+    Runs BEFORE the pick is stashed, while the client can still turn the response into a
+    confirm prompt. Only pre-resolution inputs exist, so this can only under-fire;
+    ``_apply_model_switch`` is the backstop. Exceptions mean "no warning".
     """
     if not model:
         return None
