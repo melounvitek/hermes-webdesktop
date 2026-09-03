@@ -265,8 +265,7 @@ def recover_empty_response(
     if _truly_empty and agent._fallback_chain:
         logger.warning(
             "Empty response after %d retries — attempting fallback (model=%s, provider=%s)",
-            agent._empty_content_retries, agent.model,
-            agent.provider,
+            agent._empty_content_retries, agent.model, agent.provider,
         )
         agent._buffer_status("⚠️ Model returning empty responses — " "switching to fallback provider...")
         if agent._try_activate_fallback():
