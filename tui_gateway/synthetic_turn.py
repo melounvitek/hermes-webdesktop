@@ -45,26 +45,17 @@ def synth_turn_armed() -> bool:
 
 
 class SyntheticHeavyAgent:
-    """An AIAgent-shaped object whose turn is a GIL-holding CPU burn.
-
-    Presents only the surface ``tui_gateway.server``'s turn path and status helpers read
-    (``run_conversation``/``interrupt``/``clear_interrupt`` plus the ``model``/``provider``/
-    ``session_*`` attributes consumed by ``_get_usage`` and ``_session_info``). Never opens a socket
-    or spawns a subprocess.
-    """
+    """An AIAgent-shaped object whose turn is a GIL-holding CPU burn. Presents only the surface
+    ``tui_gateway.server``'s turn path and status helpers read (``run_conversation``/``interrupt``/
+    ``clear_interrupt`` plus the ``model``/``provider``/``session_*`` attributes consumed by
+    ``_get_usage`` and ``_session_info``). Never opens a socket or spawns a subprocess."""
 
     def __init__(self, session_id: str, *, model: str = "synthetic-heavy") -> None:
-        self.session_id = session_id
-        self.model = model
-        self.provider = "synthetic"
-        self.api_mode = "chat_completions"
-        self.base_url = self.api_key = self.platform = ""
+        self.session_id, self.model, self.provider, self.api_mode = session_id, model, "synthetic", "chat_completions"
+        self.base_url = self.api_key = self.platform = self._cached_system_prompt = ""
         self.tools: list[Any] = []
-        self.reasoning_config: dict | None = None
-        self.service_tier: str | None = None
-        self.context_compressor = None
+        self.reasoning_config = self.service_tier = self.context_compressor = None
         self._config_context_length = 200_000
-        self._cached_system_prompt = ""
         # Cumulative session counters (read by _get_usage → status bar).
         self.session_input_tokens = self.session_output_tokens = self.session_prompt_tokens = 0
         self.session_completion_tokens = self.session_reasoning_tokens = self.session_total_tokens = 0
@@ -72,19 +63,17 @@ class SyntheticHeavyAgent:
         self.history: list[dict[str, str]] = []
         self._interrupt = threading.Event()
 
-    # interrupt contract (mirrors AIAgent)
+    # interrupt contract (mirrors AIAgent); close() is a no-op teardown that also stops the burn
     def clear_interrupt(self) -> None:
         self._interrupt.clear()
 
     def interrupt(self) -> None:
         self._interrupt.set()
 
+    close = interrupt
+
     def _has_stream_consumers(self) -> bool:  # defensive; not used by our loop
         return True
-
-    def close(self) -> None:
-        """No-op teardown (session lifecycle calls agent.close() on some paths)."""
-        self._interrupt.set()
 
     @staticmethod
     def _parse_spec(message: Any) -> dict[str, Any]:
@@ -96,35 +85,17 @@ class SyntheticHeavyAgent:
         return {key: cast(spec.get(key, default())) for key, cast, default in _SPEC_FIELDS}
 
     def run_conversation(
-        self,
-        message: Any,
-        *,
-        conversation_history: Optional[list[dict[str, str]]] = None,
-        stream_callback: Optional[Callable[[str], None]] = None,
-        task_id: Optional[str] = None,
-        **_kwargs: Any,
+        self, message: Any, *, conversation_history: Optional[list[dict[str, str]]] = None,
+        stream_callback: Optional[Callable[[str], None]] = None, task_id: Optional[str] = None, **_kwargs: Any,
     ) -> dict[str, Any]:
         spec = self._parse_spec(message)
-        duration = max(0.0, spec["duration_s"])
-        chunk = max(1, spec["chunk"])
-        interval = max(0.001, spec["delta_interval_s"])
-        tokens_per_delta = max(0, spec["tokens_per_delta"])
-        sleep_s = max(0.0, spec["sleep_s"])
-
+        duration, chunk = max(0.0, spec["duration_s"]), max(1, spec["chunk"])
+        interval, tokens_per_delta, sleep_s = max(0.001, spec["delta_interval_s"]), max(0, spec["tokens_per_delta"]), max(0.0, spec["sleep_s"])
         base_history = list(conversation_history if conversation_history is not None else self.history)
         start = last_delta = time.monotonic()
         acc = deltas = 0
-        interrupted = False
-
-        while True:
-            if self._interrupt.is_set():
-                interrupted = True
-                break
-            now = time.monotonic()
-            if now - start >= duration:
-                break
-            # A tight integer loop never releases the GIL — the exact contention that starves the
-            # serving loop.
+        while not (interrupted := self._interrupt.is_set()) and (now := time.monotonic()) - start < duration:
+            # A tight integer loop never releases the GIL — the exact contention that starves the serving loop.
             for _ in range(chunk):
                 acc = (acc * 1_000_003 + 12_345) & 0xFFFFFFFFFFFFFFFF
             if sleep_s:
@@ -137,13 +108,10 @@ class SyntheticHeavyAgent:
                 if stream_callback is not None:
                     stream_callback(f"synthtok-{deltas:05d} ")
                 last_delta = now
-
         self.session_api_calls += 1
-        # Fold the checksum into the reply so the loop can't be eliminated and the turn is
-        # deterministic and inspectable.
+        # Fold the checksum into the reply so the loop can't be eliminated and the turn is deterministic.
         final = (
-            f"[synthetic heavy turn] deltas={deltas} "
-            f"out_tokens={self.session_output_tokens} "
+            f"[synthetic heavy turn] deltas={deltas} out_tokens={self.session_output_tokens} "
             f"interrupted={interrupted} checksum={acc & 0xFFFF:04x}"
         )
         self.history = [*base_history, {"role": "user", "content": str(message)[:200]}, {"role": "assistant", "content": final}]
@@ -155,12 +123,9 @@ def maybe_build_synthetic_agent(session_id: str, model_override: Any = None) -> 
     (dict or str) only influences the reported ``model`` label; it never changes the compute."""
     if not synth_turn_armed():
         return None
-    model = "synthetic-heavy"
-    if isinstance(model_override, dict) and model_override.get("model"):
-        model = str(model_override["model"])
-    elif isinstance(model_override, str) and model_override:
-        model = model_override
-    return SyntheticHeavyAgent(session_id, model=model)
+    if isinstance(model_override, dict):
+        model_override = str(model_override["model"]) if model_override.get("model") else ""
+    return SyntheticHeavyAgent(session_id, model=model_override if isinstance(model_override, str) and model_override else "synthetic-heavy")
 
 
 __all__ = ["SyntheticHeavyAgent", "maybe_build_synthetic_agent", "synth_turn_armed"]
