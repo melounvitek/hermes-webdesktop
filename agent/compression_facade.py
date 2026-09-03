@@ -19,9 +19,8 @@ logger = logging.getLogger("run_agent")
 def _timeout_fallback_prompt(agent, system_message: str) -> str:
     """Cached prompt, else a fresh build, else the raw ``system_message`` (never raises).
 
-    Resolved lazily by the timeout wrapper: an eager rebuild would raise before
-    compress_context runs when ``_cached_system_prompt`` is unset and the builder fails.
-    """
+    Resolved lazily by the timeout wrapper: an eager rebuild would raise before compress_context runs when
+    ``_cached_system_prompt`` is unset and the builder fails."""
     if cached := getattr(agent, "_cached_system_prompt", None):
         return cached
     try:
@@ -95,10 +94,9 @@ def _warn_commit_overrun(agent, waited: float, ceiling: float) -> None:
 def _sync_persisted_markers(target_messages, source_messages) -> None:
     """Mirror ``_DB_PERSISTED_MARKER`` stamps from the worker's snapshot onto a live list.
 
-    Matched by scoped identity; timestamp-less repeated content is ambiguous, so every
-    scoped match is stamped. Imported UNCONDITIONALLY: a silent fallback literal would
-    split the stamping key from the flush's and resurrect the duplicate-row bug.
-    """
+    Matched by scoped identity; timestamp-less repeated content is ambiguous, so every scoped match is
+    stamped. Imported UNCONDITIONALLY: a silent fallback literal would split the stamping key from the flush's
+    and resurrect the duplicate-row bug."""
     from agent.context_compressor import _DB_PERSISTED_MARKER
     from agent.conversation_compression import _stamp_scoped_twins
     if not isinstance(target_messages, list) or not isinstance(source_messages, list):
@@ -113,10 +111,9 @@ def _run_under_progress_timeout(
 ):
     """Run ``run(fence, target_messages=snapshot)`` on the pool under the progress-aware timeout.
 
-    The pooled worker must NEVER share the caller's live transcript — a late engine after a host timeout could rewrite
-    it. It deep-snapshots on the worker and publishes only via an ADMITTED commit; a no-op/abort returns the snapshot
-    unchanged, so the ORIGINAL list is handed back to keep identity semantics.
-    """
+    The pooled worker must NEVER share the caller's live transcript — a late engine after a host timeout could
+    rewrite it. It deep-snapshots on the worker and publishes only via an ADMITTED commit; a no-op/abort
+    returns the snapshot unchanged, so the ORIGINAL list is handed back to keep identity semantics."""
     from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
     def _snapshot_worker(fence=None):
         snapshot = copy.deepcopy(messages)
@@ -168,9 +165,8 @@ def _mirror_result_onto_live_lists(agent, result, messages, *, direct_path: bool
 def _rebind_caller_session_context(agent) -> None:
     """Propagate a rotated session id to the CALLER's thread/ContextVar (idempotent otherwise).
 
-    The worker thread rotated hermes_logging's thread-local id; post-compression tools must
-    resolve HERMES_SESSION_ID to the child id.
-    """
+    The worker thread rotated hermes_logging's thread-local id; post-compression tools must resolve
+    HERMES_SESSION_ID to the child id."""
     with contextlib.suppress(Exception):
         from hermes_logging import set_session_context
         set_session_context(agent.session_id)
@@ -193,8 +189,7 @@ class CompressionFacadeMixin:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
 
         ``force=True`` (manual /compress) bypasses the summary-failure cooldown; ``bypass_cooldown=True``
-        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed.
-        """
+        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed."""
         # Per-attempt timeout signal for turn-start preflight and in-loop consumers: a stalled
         # compression must not be mistaken for a structural no-op. Thread-local + per-agent lock.
         from agent.conversation_compression import (
