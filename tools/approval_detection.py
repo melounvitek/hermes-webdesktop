@@ -22,49 +22,27 @@ logger = logging.getLogger("tools.approval")
 # would go stale when HERMES_HOME is set after import) lives in the patterns.
 _SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
 _HERMES_ENV_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
-    r'\.env\b'
+    r'(?:~\/\.hermes/|(?:\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/)' r'\.env\b'
 )
 # ~/.hermes/config.yaml IS the security policy (approvals.mode, yolo, allowlist)
 # and the config cache is mtime-keyed, so a write takes effect mid-session.
 # Terminal-side coverage (sed -i, tee, >, cp) pairs the file_tools deny.
 _HERMES_CONFIG_PATH = (
-    r'(?:~\/\.hermes/|'
-    r'(?:\$home|\$\{home\})/\.hermes/|'
-    r'(?:\$hermes_home|\$\{hermes_home\})/)'
-    r'config\.yaml\b'
+    r'(?:~\/\.hermes/|(?:\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/)' r'config\.yaml\b'
 )
 _PROJECT_ENV_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*\.env(?:\.[^/\s"\'`]+)*)'
 _PROJECT_CONFIG_PATH = r'(?:(?:/|\.{1,2}/)?(?:[^\s/"\'`]+/)*config\.yaml)'
-_SHELL_RC_FILES = (
-    r'(?:~|\$home|\$\{home\})/\.'
-    r'(?:bashrc|zshrc|profile|bash_profile|zprofile)\b'
-)
-_CREDENTIAL_FILES = (
-    r'(?:~|\$home|\$\{home\})/\.'
-    r'(?:netrc|pgpass|npmrc|pypirc)\b'
-)
+_SHELL_RC_FILES = r'(?:~|\$home|\$\{home\})/\.' r'(?:bashrc|zshrc|profile|bash_profile|zprofile)\b'
+_CREDENTIAL_FILES = r'(?:~|\$home|\$\{home\})/\.' r'(?:netrc|pgpass|npmrc|pypirc)\b'
 # macOS: /etc, /var, /tmp, /home are symlinks to /private/*, so /private/etc/sudoers
 # would bypass a plain "/etc/" check. Match both forms.
 _MACOS_PRIVATE_SYSTEM_PATH = r'/private/(?:etc|var|tmp|home)/'
-_SYSTEM_CONFIG_PATH = (
-    rf'(?:/etc/|{_MACOS_PRIVATE_SYSTEM_PATH})'
-)
+_SYSTEM_CONFIG_PATH = rf'(?:/etc/|{_MACOS_PRIVATE_SYSTEM_PATH})'
 _SENSITIVE_WRITE_TARGET = (
-    rf'(?:{_SYSTEM_CONFIG_PATH}|/dev/sd|'
-    rf'{_SSH_SENSITIVE_PATH}|'
-    rf'{_HERMES_ENV_PATH}|'
-    rf'{_HERMES_CONFIG_PATH}|'
-    rf'{_SHELL_RC_FILES}|'
-    rf'{_CREDENTIAL_FILES})'
+    rf'(?:{_SYSTEM_CONFIG_PATH}|/dev/sd|{_SSH_SENSITIVE_PATH}|{_HERMES_ENV_PATH}|{_HERMES_CONFIG_PATH}|'
+    rf'{_SHELL_RC_FILES}|{_CREDENTIAL_FILES})'
 )
-_USER_SENSITIVE_WRITE_TARGET = (
-    rf'(?:{_SSH_SENSITIVE_PATH}|'
-    rf'{_SHELL_RC_FILES}|'
-    rf'{_CREDENTIAL_FILES})'
-)
+_USER_SENSITIVE_WRITE_TARGET = rf'(?:{_SSH_SENSITIVE_PATH}|{_SHELL_RC_FILES}|{_CREDENTIAL_FILES})'
 _PROJECT_SENSITIVE_WRITE_TARGET = rf'(?:{_PROJECT_ENV_PATH}|{_PROJECT_CONFIG_PATH})'
 # cp/mv/install: the sensitive path is a write target only as the LAST argument
 # (destination), so `cp config.yaml backup.yaml` (config.yaml as SOURCE) stays out.
@@ -156,8 +134,7 @@ _RE_FLAGS = re.IGNORECASE | re.DOTALL
 _QUOTE_MASKED_HARDLINE_DESCRIPTIONS = frozenset({"redirect to raw block device", "fork bomb"})
 
 HARDLINE_PATTERNS_COMPILED = [
-    (re.compile(pattern, _RE_FLAGS), description, description in _QUOTE_MASKED_HARDLINE_DESCRIPTIONS)
-    for pattern, description in HARDLINE_PATTERNS
+    (re.compile(p, _RE_FLAGS), d, d in _QUOTE_MASKED_HARDLINE_DESCRIPTIONS) for p, d in HARDLINE_PATTERNS
 ]
 
 
@@ -193,9 +170,7 @@ def _mask_quoted_prose(command: str) -> str:
 # =========================================================================
 # Without SUDO_PASSWORD configured, an explicit "sudo -S" is the LLM piping a
 # guessed password via stdin (brute-force vector). Unconditional block.
-_SUDO_STDIN_RE = re.compile(
-    r'(?:^|[;&|`\n]|&&|\|\||\$\()\s*sudo\s+-S\b',
-    re.IGNORECASE)
+_SUDO_STDIN_RE = re.compile(r'(?:^|[;&|`\n]|&&|\|\||\$\()\s*sudo\s+-S\b', re.IGNORECASE)
 
 
 def _check_sudo_stdin_guard(command: str) -> tuple:
@@ -248,8 +223,7 @@ DANGEROUS_PATTERNS = [
     # is not attributed to rm), a quote, or a bare ` -- ` end-of-options (after
     # which `-rf` is a literal filename). The flag token must follow whitespace
     # so the `r` in long options like `--registry` does not count.
-    (r'\brm\s+(?!--(?:\s|$))(?:(?!\s--(?:\s|$))[^\n"\';|&])*\s'
-     r'(?:-[a-z]*r[a-z]*\b|--recursive\b)',
+    (r'\brm\s+(?!--(?:\s|$))(?:(?!\s--(?:\s|$))[^\n"\';|&])*\s' r'(?:-[a-z]*r[a-z]*\b|--recursive\b)',
      "recursive delete (flags after operands)"),
     # Windows cmd/powershell destructive built-ins: gate only when executed
     # through the shell so prose/filenames containing "del"/"rd" do not trip.
@@ -332,14 +306,11 @@ DANGEROUS_PATTERNS = [
     (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
     # Decode-and-execute: `echo <base64> | base64 -d | bash` carries no dangerous
     # keywords in the raw text yet runs arbitrary commands.
-    (r'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
-     "pipe decoded content to shell (possible command obfuscation)"),
+    (r'\b(base64|base32|base16)\s+(?:-[dD]|--decode)\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b', "pipe decoded content to shell (possible command obfuscation)"),
     # xxd uses -r for decode, not -d.
-    (r'\bxxd\s+-r\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
-     "pipe xxd-decoded content to shell (possible command obfuscation)"),
+    (r'\bxxd\s+-r\b.*\|\s*\b(bash|sh|zsh|ksh|dash)\b', "pipe xxd-decoded content to shell (possible command obfuscation)"),
     # `echo 'eq -pe v/' | tr 'eqv' 'rmf' | bash` decodes to `rm -rf /`.
-    (r'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
-     "pipe tr-transformed output to shell (possible command obfuscation)"),
+    (r'\becho\b[^|]*\|\s*\btr\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b', "pipe tr-transformed output to shell (possible command obfuscation)"),
     (r'\bopenssl\b.*\b(?:base64|enc)\b[^|]*\s+-[dD]\b[^|]*\|\s*\b(bash|sh|zsh|ksh|dash)\b',
      "pipe openssl-decoded content to shell (possible command obfuscation)"),
     (rf'\btee\b.*["\']?{_SENSITIVE_WRITE_TARGET}', "overwrite system file via tee"),
@@ -362,25 +333,17 @@ DANGEROUS_PATTERNS = [
     # subcommand) and -H/--host/--context must carry a value, keeping `docker -h`
     # and `docker run -h <hostname>` out. Listed BEFORE the lifecycle rules so a
     # redirected lifecycle command surfaces the more specific reason.
-    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-h|--host)[=\s]+\S+',
-     "docker with remote daemon redirect (-H/--host)"),
-    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-c|--context)[=\s]+\S+',
-     "docker with daemon redirect (--context: alternate daemon)"),
-    (r'\bdocker\s+context\s+use\b',
-     "docker context use (switches default daemon for future commands)"),
-    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:--url|--connection|--identity)[=\s]+\S+',
-     "podman with remote daemon redirect (--url/--connection/--identity)"),
-    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-r\b|--remote\b)',
-     "podman remote mode (-r/--remote: remote daemon)"),
-    (r'\b(?:docker_host|docker_context|container_host|container_connection)=\S+',
-     "docker/podman daemon redirect via environment (DOCKER_HOST/CONTAINER_HOST)"),
+    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-h|--host)[=\s]+\S+', "docker with remote daemon redirect (-H/--host)"),
+    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-c|--context)[=\s]+\S+', "docker with daemon redirect (--context: alternate daemon)"),
+    (r'\bdocker\s+context\s+use\b', "docker context use (switches default daemon for future commands)"),
+    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:--url|--connection|--identity)[=\s]+\S+', "podman with remote daemon redirect (--url/--connection/--identity)"),
+    (r'\bpodman\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-r\b|--remote\b)', "podman remote mode (-r/--remote: remote daemon)"),
+    (r'\b(?:docker_host|docker_context|container_host|container_connection)=\S+', "docker/podman daemon redirect via environment (DOCKER_HOST/CONTAINER_HOST)"),
     # Container lifecycle (docker.sock mounts let the agent stop/kill containers)
     # always needs consent. Global flags between docker/compose and the verb and
     # the legacy `docker-compose` binary are allowed so a flag can't slip past.
-    (r'\bdocker(?:-compose|\s+compose)\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill|down)\b',
-     "docker compose restart/stop/kill/down (container lifecycle)"),
-    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill)\b',
-     "docker restart/stop/kill (container lifecycle)"),
+    (r'\bdocker(?:-compose|\s+compose)\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill|down)\b', "docker compose restart/stop/kill/down (container lifecycle)"),
+    (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(restart|stop|kill)\b', "docker restart/stop/kill (container lifecycle)"),
     # Gateway protection: never start gateway outside systemd management
     (r'gateway\s+run\b.*(&\s*$|&\s*;|\bdisown\b|\bsetsid\b)', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
     (r'\bnohup\b.*gateway\s+run\b', "start gateway outside systemd (use 'systemctl --user restart hermes-gateway')"),
@@ -448,38 +411,25 @@ DANGEROUS_PATTERNS = [
     # Lazy `[^;|&\n]*?` allows flag args without spanning separators. sudo
     # resolves unambiguous long-flag prefixes: `--stdin` is the only long option
     # starting with "st", `--askpass` the only one starting with "a".
-    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--st[a-z]*\b|-a\b|--a[a-z]*\b)',
-     "sudo with privilege flag (stdin/askpass/shell/list)"),
+    (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--st[a-z]*\b|-a\b|--a[a-z]*\b)', "sudo with privilege flag (stdin/askpass/shell/list)"),
     # Combined short-flag form (-nS, -sa, -las).
-    (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b',
-     "sudo with combined-flag privilege escalation"),
+    (r'\bsudo\b[^;|&\n]*?\s+-[a-z]*[sa][a-z]*\b', "sudo with combined-flag privilege escalation"),
 ]
 
 
-DANGEROUS_PATTERNS_COMPILED = [
-    (re.compile(pattern, _RE_FLAGS), description)
-    for pattern, description in DANGEROUS_PATTERNS
-]
-
-
-def _legacy_pattern_key(pattern: str) -> str:
-    """Reproduce the old regex-derived approval key for backwards compatibility."""
-    return pattern.split(r'\b')[1] if r'\b' in pattern else pattern[:20]
-
-
-_PATTERN_KEY_ALIASES: dict[str, set[str]] = {}
-for _pattern, _description in DANGEROUS_PATTERNS:
-    _legacy_key = _legacy_pattern_key(_pattern)
-    _canonical_key = _description
-    _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update({_canonical_key, _legacy_key})
-    _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update({_legacy_key, _canonical_key})
+DANGEROUS_PATTERNS_COMPILED = [(re.compile(p, _RE_FLAGS), d) for p, d in DANGEROUS_PATTERNS]
 
 # Preserve approvals stored under the removed interpreter regex rules.
 _REMOVED_PATTERN_KEY_ALIASES = {
     "script execution via -e/-c flag": "(python[23]?|perl|ruby|node)\\s+-[ec]\\s+",
     "script execution via heredoc": "(python[23]?|perl|ruby|node)\\s+<<",
 }
-for _canonical_key, _legacy_key in _REMOVED_PATTERN_KEY_ALIASES.items():
+# description <-> legacy regex-derived key (the old approval key, kept for
+# backwards compatibility with stored allowlist/session entries), both ways.
+_PATTERN_KEY_ALIASES: dict[str, set[str]] = {}
+for _canonical_key, _legacy_key in [
+    (d, p.split(r'\b')[1] if r'\b' in p else p[:20]) for p, d in DANGEROUS_PATTERNS
+] + list(_REMOVED_PATTERN_KEY_ALIASES.items()):
     _PATTERN_KEY_ALIASES.setdefault(_canonical_key, set()).update({_canonical_key, _legacy_key})
     _PATTERN_KEY_ALIASES.setdefault(_legacy_key, set()).update({_legacy_key, _canonical_key})
 
@@ -589,27 +539,19 @@ _PARAM_DEFAULT_RE = re.compile(r"\$\{[^}:}\s]+:-(?P<default>[^}]*)\}")
 _SIMPLE_SHELL_LITERAL_RE = re.compile(r"^[A-Za-z0-9_./:@%+=,-]+$")
 _ENV_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 _COMMAND_WRAPPER_WORDS = {"sudo", "env", "exec", "nohup", "setsid", "time", "command", "builtin"}
-_SUDO_OPTIONS_WITH_ARG = {
-    "-c", "--close-from", "-g", "--group", "-h", "--host", "-p", "--prompt", "-u", "--user",
-}
+_SUDO_OPTIONS_WITH_ARG = {"-c", "--close-from", "-g", "--group", "-h", "--host", "-p", "--prompt", "-u", "--user"}
 
 _INTERPRETER_EXEC_FLAGS = {
-    "python": {"-c"},
-    "node": {"-e", "--eval", "-p", "--print"},
-    "perl": {"-e", "--eval"},
-    "ruby": {"-e"},
-    "php": {"-r"},
-    "powershell": {"-command", "-c", "-file", "-f"},
+    "python": {"-c"}, "node": {"-e", "--eval", "-p", "--print"}, "perl": {"-e", "--eval"}, "ruby": {"-e"},
+    "php": {"-r"}, "powershell": {"-command", "-c", "-file", "-f"},
 }
 _INTERPRETER_WITH_ARG = {
     "python": {"-W", "-X", "--check-hash-based-pycs"},
-    "node": {"-C", "--conditions", "--cpu-prof-dir", "--diagnostic-dir", "--icu-data-dir",
-             "--import", "--loader", "--openssl-config", "--require", "--title"},
-    "perl": {"-0", "-F", "-I", "-M", "-m", "-x"},
-    "ruby": {"-C", "-E", "-F", "-I", "-K", "-r"},
-    "php": {"-c", "-d", "-z"},
-    "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat",
-                   "-outputformat", "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
+    "node": {"-C", "--conditions", "--cpu-prof-dir", "--diagnostic-dir", "--icu-data-dir", "--import", "--loader",
+             "--openssl-config", "--require", "--title"},
+    "perl": {"-0", "-F", "-I", "-M", "-m", "-x"}, "ruby": {"-C", "-E", "-F", "-I", "-K", "-r"}, "php": {"-c", "-d", "-z"},
+    "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat", "-outputformat",
+                   "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
 }
 _READ_TOOL_EXEC_FLAGS = {
     "sort": {"--compress-program"}, "rg": {"--pre", "--hostname-bin"},
@@ -620,31 +562,24 @@ _READ_TOOL_EXEC_FLAGS = {
 # of the supported binaries (ripgrep 14, GNU sort, man-db, and ag 2.2).
 _READ_TOOL_LONG_OPTIONS_WITH_ARG = {
     "rg": {
-        "--after-context", "--before-context", "--color", "--colors",
-        "--context", "--context-separator", "--dfa-size-limit", "--encoding",
-        "--engine", "--field-context-separator", "--field-match-separator",
-        "--file", "--generate", "--glob", "--hostname-bin",
-        "--hyperlink-format", "--iglob", "--ignore-file", "--max-columns",
-        "--max-count", "--max-depth", "--max-filesize", "--path-separator",
-        "--pre", "--pre-glob", "--regex-size-limit", "--regexp", "--replace",
-        "--sort", "--sortr", "--threads", "--type", "--type-add",
-        "--type-clear", "--type-not",
+        "--after-context", "--before-context", "--color", "--colors", "--context", "--context-separator",
+        "--dfa-size-limit", "--encoding", "--engine", "--field-context-separator", "--field-match-separator", "--file",
+        "--generate", "--glob", "--hostname-bin", "--hyperlink-format", "--iglob", "--ignore-file", "--max-columns",
+        "--max-count", "--max-depth", "--max-filesize", "--path-separator", "--pre", "--pre-glob", "--regex-size-limit",
+        "--regexp", "--replace", "--sort", "--sortr", "--threads", "--type", "--type-add", "--type-clear", "--type-not",
     },
     "sort": {
-        "--batch-size", "--buffer-size", "--compress-program",
-        "--field-separator", "--files0-from", "--key", "--output",
-        "--parallel", "--random-source", "--sort", "--temporary-directory",
+        "--batch-size", "--buffer-size", "--compress-program", "--field-separator", "--files0-from", "--key",
+        "--output", "--parallel", "--random-source", "--sort", "--temporary-directory",
     },
     "man": {
-        "--config-file", "--encoding", "--extension", "--locale",
-        "--manpath", "--pager", "--preprocessor", "--prompt", "--recode",
-        "--sections", "--systems",
+        "--config-file", "--encoding", "--extension", "--locale", "--manpath", "--pager", "--preprocessor", "--prompt",
+        "--recode", "--sections", "--systems",
     },
     "ag": {
-        "--ackmate-dir-filter", "--color-line-number", "--color-match",
-        "--color-path", "--depth", "--filename-pattern", "--file-search-regex",
-        "--ignore", "--ignore-dir", "--max-count", "--pager",
-        "--path-to-ignore", "--width", "--workers",
+        "--ackmate-dir-filter", "--color-line-number", "--color-match", "--color-path", "--depth", "--filename-pattern",
+        "--file-search-regex", "--ignore", "--ignore-dir", "--max-count", "--pager", "--path-to-ignore", "--width",
+        "--workers",
     },
 }
 _READ_TOOL_SHORT_OPTIONS_WITH_ARG = {
@@ -716,9 +651,8 @@ def _shell_tokens_with_spans(segment: str, start: int):
 
 
 _GREP_OPTIONS_WITH_ARG = {
-    "--after-context", "--before-context", "--binary-files", "--context", "--directories",
-    "--devices", "--exclude", "--exclude-dir", "--exclude-from", "--include", "--label",
-    "--max-count", "--regexp", "--file",
+    "--after-context", "--before-context", "--binary-files", "--context", "--directories", "--devices", "--exclude",
+    "--exclude-dir", "--exclude-from", "--include", "--label", "--max-count", "--regexp", "--file",
 }
 _GREP_SHORT_OPTIONS_WITH_ARG = {"A", "B", "C", "D", "d", "e", "f", "m"}
 
@@ -1096,19 +1030,13 @@ def _replace_simple_command_substitutions(word: str) -> str:
     chars: list[str] = []
     i = 0
     while i < len(word):
-        end = opener = None
-        if word.startswith("$(", i):
-            end, opener = _scan_dollar_paren_end(word, i), 2
-        elif word[i] == "`":
-            end, opener = _scan_backtick_end(word, i), 1
-        if end is not None:
-            replacement = _literal_command_substitution_output(word[i + opener:end - 1])
-            if replacement is not None:
-                chars.append(replacement)
-                i = end
-                continue
-        chars.append(word[i])
-        i += 1
+        opener = 2 if word.startswith("$(", i) else 1 if word[i] == "`" else 0
+        end = (_scan_dollar_paren_end if opener == 2 else _scan_backtick_end)(word, i) if opener else None
+        replacement = _literal_command_substitution_output(word[i + opener:end - 1]) if end is not None else None
+        if replacement is None:
+            replacement, end = word[i], i + 1
+        chars.append(replacement)
+        i = end
     return "".join(chars)
 
 
@@ -1129,14 +1057,12 @@ def _deobfuscate_shell_word_for_detection(word: str) -> str:
     """Approximate how shell syntax can spell a command word: collapses
     quoting/escaping plus simple literal command substitutions in the word
     itself. Intentionally narrow and non-executing."""
-    deobfuscated = word
     for _ in range(2):
-        previous = deobfuscated
-        deobfuscated = _replace_simple_shell_expansions(deobfuscated)
-        deobfuscated = _strip_shell_word_syntax(deobfuscated)
-        if deobfuscated == previous:
+        previous = word
+        word = _strip_shell_word_syntax(_replace_simple_shell_expansions(word))
+        if word == previous:
             break
-    return deobfuscated
+    return word
 
 
 def _iter_shell_command_starts(command: str):
@@ -1239,6 +1165,13 @@ def _command_detection_variants(command: str):
     grep_safe, _ = _grep_safe_detection_variant(normalized)
     seen = {grep_safe}
     yield grep_safe
+
+    def fresh(variant: str) -> bool:
+        if not variant or variant in seen:
+            return False
+        seen.add(variant)
+        return True
+
     # Windows-path variant: normalization strips backslashes as shell escapes,
     # so `del C:\Users\me\.ssh\id_rsa` reaches the patterns as `del
     # C:Usersme.sshid_rsa`. When the RAW command has a drive-letter or UNC
@@ -1246,27 +1179,21 @@ def _command_detection_variants(command: str):
     # BEFORE normalization. Gated on a real path shape so POSIX escape
     # semantics (`echo a\"b`) are untouched elsewhere.
     if re.search(r"(?:[A-Za-z]:|\\\\)[\\\\]", command) or re.search(r"[A-Za-z]:\\", command):
-        win_variant = _normalize_command_for_detection(
-            _mask_quoted_newlines(command.replace("\\", "/"))
-        )
-        if win_variant not in seen:
-            seen.add(win_variant)
+        win_variant = _normalize_command_for_detection(_mask_quoted_newlines(command.replace("\\", "/")))
+        if fresh(win_variant):
             yield win_variant
     # Program-bearing options are parsed in their owning command's context;
     # surfacing only the payload lets the hardline floor inspect what will
     # actually run without promoting similar flags or quoted prose.
     pending = [normalized]
     while pending:
-        variant = pending.pop()
-        for _, payload in _execution_flag_findings(variant):
-            if payload and payload not in seen:
-                seen.add(payload)
+        for _, payload in _execution_flag_findings(pending.pop()):
+            if fresh(payload):
                 yield payload
                 # A payload may start with an option-looking program and then
                 # invoke a hardline command after a separator; mark its starts.
                 marked_payload = _mark_command_starts(payload)
-                if marked_payload != payload and marked_payload not in seen:
-                    seen.add(marked_payload)
+                if marked_payload != payload and fresh(marked_payload):
                     yield marked_payload
                 pending.append(payload)
     # Subshell `(cmd)` / brace-group `{ cmd; }` openers put `cmd` at a real
@@ -1275,20 +1202,16 @@ def _command_detection_variants(command: str):
     # newline at each start the QUOTE-AWARE tokenizer found instead; this
     # covers every `_CMDPOS` rule in one place.
     marked = _mark_command_starts(grep_safe)
-    if marked != grep_safe and marked not in seen:
-        seen.add(marked)
+    if marked != grep_safe and fresh(marked):
         yield marked
     # Quoting/escaping can spell an executable in pieces (r\m, r''m). Keep that
     # deobfuscation scoped to command words so arguments don't false-positive.
     for word_start, word_end, word in _iter_shell_command_word_spans(normalized):
         deobfuscated = _deobfuscate_shell_word_for_detection(word)
-        if not deobfuscated or deobfuscated == word:
-            continue
-        variant = normalized[:word_start] + deobfuscated + normalized[word_end:]
-        if variant in seen:
-            continue
-        seen.add(variant)
-        yield variant
+        if deobfuscated and deobfuscated != word:
+            variant = normalized[:word_start] + deobfuscated + normalized[word_end:]
+            if fresh(variant):
+                yield variant
 
 
 def _is_verification_artifact_cleanup(command: str) -> bool:
@@ -1309,9 +1232,7 @@ def _is_verification_artifact_cleanup(command: str) -> bool:
     )
 
 
-_GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION = (
-    "stop/restart hermes gateway via shell-spliced verb (kills running agents)"
-)
+_GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION = "stop/restart hermes gateway via shell-spliced verb (kills running agents)"
 
 
 def _is_shell_token_spliced_gateway_lifecycle(command: str) -> bool:
