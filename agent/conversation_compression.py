@@ -1691,6 +1691,22 @@ def _mark_compression_blocked_transient(agent: Any, compressor: Any) -> None:
             pass
 
 
+def _rebind_session_context(session_id: str) -> None:
+    """Point the worker thread's session ContextVar and log context at ``session_id``."""
+    try:
+        from gateway.session_context import set_current_session_id
+
+        set_current_session_id(session_id)
+    except Exception:
+        os.environ["HERMES_SESSION_ID"] = session_id
+    try:
+        from hermes_logging import set_session_context
+
+        set_session_context(session_id)
+    except Exception:
+        pass
+
+
 def _adopt_live_compression_child(
     agent: Any,
     session_db: Any,
@@ -1724,18 +1740,7 @@ def _adopt_live_compression_child(
         return None
 
     agent.session_id = child_session_id
-    try:
-        from gateway.session_context import set_current_session_id
-
-        set_current_session_id(child_session_id)
-    except Exception:
-        os.environ["HERMES_SESSION_ID"] = child_session_id
-    try:
-        from hermes_logging import set_session_context
-
-        set_session_context(child_session_id)
-    except Exception:
-        pass
+    _rebind_session_context(child_session_id)
 
     agent._session_db_created = True
     if child.get("system_prompt"):
@@ -1840,7 +1845,6 @@ def _compression_lock_holder(agent: Any) -> str:
     pid+tid tell crashed holders apart in diagnostics; instance id and per-acquire
     uuid disambiguate co-resident agents on one thread or pooled compressions.
     """
-    import threading
     return (
         f"pid={os.getpid()}"
         f":tid={threading.get_ident()}"
@@ -2688,6 +2692,43 @@ def _messages_match_scoped_identity(left: Any, right: Any) -> bool:
     if left_timestamp is not None and right_timestamp is not None:
         return left_timestamp == right_timestamp
     return True
+
+
+def _stamp_scoped_twins(
+    targets: list, source: dict, *, exact_counts_stamped: bool = False
+) -> None:
+    """Stamp ``_db_persisted`` on every unstamped scoped twin of ``source`` in ``targets``.
+
+    Exact-timestamp twins are preferred: when the source carries a timestamp and any
+    exact twin was stamped (or, with ``exact_counts_stamped``, merely exists), the
+    broad scoped pass is skipped so a content-equal old duplicate is left alone.
+    """
+    from agent.context_compressor import _DB_PERSISTED_MARKER
+
+    source_timestamp = source.get("timestamp")
+    exact_hit = False
+    if source_timestamp is not None:
+        for target in targets:
+            if (
+                not isinstance(target, dict)
+                or target.get("timestamp") != source_timestamp
+                or not _messages_match_scoped_identity(target, source)
+            ):
+                continue
+            if target.get(_DB_PERSISTED_MARKER):
+                exact_hit = exact_hit or exact_counts_stamped
+                continue
+            target[_DB_PERSISTED_MARKER] = True
+            exact_hit = True
+        if exact_hit:
+            return
+    for target in targets:
+        if (
+            isinstance(target, dict)
+            and not target.get(_DB_PERSISTED_MARKER)
+            and _messages_match_scoped_identity(target, source)
+        ):
+            target[_DB_PERSISTED_MARKER] = True
 
 
 _PENDING_CONTEXT_ENGINE_NOTIFICATION = (
@@ -3715,64 +3756,17 @@ def _publish_rotated_compaction(
             ):
                 # Adoption may leave _session_messages on the pre-adoption list with an out-of-
                 # range idx; stamp every scoped twin against the ANCHOR SOURCE, as the wrapper.
-                _anchor_timestamp = _compressed_anchor_source.get(
-                    "timestamp"
+                # An already-stamped exact twin still suppresses the broad pass here, or a
+                # content-equal old duplicate would get stamped.
+                _stamp_scoped_twins(
+                    _session_messages, _compressed_anchor_source, exact_counts_stamped=True
                 )
-                _found_exact_timestamp_candidate = False
-                if _anchor_timestamp is not None:
-                    for _twin_message in _session_messages:
-                        if (
-                            isinstance(_twin_message, dict)
-                            and _twin_message.get("timestamp")
-                            == _anchor_timestamp
-                            and _messages_match_scoped_identity(
-                                _twin_message,
-                                _compressed_anchor_source,
-                            )
-                        ):
-                            # Count an exact scoped twin REGARDLESS of marker: an already-stamped twin must
-                            # still suppress the broad fallback or a content-equal old dup gets stamped.
-                            _found_exact_timestamp_candidate = True
-                            if not _twin_message.get(
-                                _DB_PERSISTED_MARKER
-                            ):
-                                _twin_message[
-                                    _DB_PERSISTED_MARKER
-                                ] = True
-                if not _found_exact_timestamp_candidate:
-                    # No exact twin anywhere (or timestamp-less anchor): stamp every scoped match.
-                    # An already-stamped exact hit never opens this branch.
-                    for _twin_message in _session_messages:
-                        if (
-                            isinstance(_twin_message, dict)
-                            and not _twin_message.get(
-                                _DB_PERSISTED_MARKER
-                            )
-                            and _messages_match_scoped_identity(
-                                _twin_message,
-                                _compressed_anchor_source,
-                            )
-                        ):
-                            _twin_message[
-                                _DB_PERSISTED_MARKER
-                            ] = True
     for _handoff_message in compressed:
         if isinstance(_handoff_message, dict):
             _handoff_message[_DB_PERSISTED_MARKER] = True
     agent.session_id = new_session_id
     agent._db_flush_scan_prefix = None
-    try:
-        from gateway.session_context import set_current_session_id
-
-        set_current_session_id(agent.session_id)
-    except Exception:
-        os.environ["HERMES_SESSION_ID"] = agent.session_id
-    try:
-        from hermes_logging import set_session_context
-
-        set_session_context(agent.session_id)
-    except Exception:
-        pass
+    _rebind_session_context(agent.session_id)
     agent._session_db_created = True
     # Carry /goal to the child: load_goal is a flat per-session lookup with no
     # parent walk, so the goal would silently die at the boundary.
