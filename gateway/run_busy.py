@@ -42,9 +42,7 @@ class GatewayBusySessionMixin:
 
     def _enqueue_fifo(self, session_key: str, queued_event: "MessageEvent", adapter: Any) -> None:
         """Append a /queue event to the FIFO chain for a session."""
-        if adapter is None:
-            return
-        pending_slot = getattr(adapter, "_pending_messages", None)
+        pending_slot = getattr(adapter, "_pending_messages", None) if adapter is not None else None
         if pending_slot is None:
             return
         if session_key in pending_slot:
@@ -63,14 +61,11 @@ class GatewayBusySessionMixin:
         overflow = self._overflow_queue(session_key)
         if not overflow:
             return pending_event
-        next_queued = overflow.pop(0)
         if pending_event is None:
-            return next_queued
+            return overflow.pop(0)
         if adapter is not None and hasattr(adapter, "_pending_messages"):
-            adapter._pending_messages[session_key] = next_queued
-        else:
-            # No adapter — push back so we don't silently drop the item.
-            overflow.insert(0, next_queued)
+            adapter._pending_messages[session_key] = overflow.pop(0)
+        # else: no adapter — leave the head in place so we don't silently drop it.
         return pending_event
 
     def _queue_depth(self, session_key: str, *, adapter: Any = None) -> int:
@@ -162,9 +157,7 @@ class GatewayBusySessionMixin:
     def _active_session_limit_message(self, session_key: str) -> Optional[str]:
         """Return a user-facing rejection when starting a new session exceeds the cap."""
         max_sessions = self._get_max_concurrent_sessions()
-        if max_sessions is None:
-            return None
-        if self._is_session_running(session_key):
+        if max_sessions is None or self._is_session_running(session_key):
             return None
         active_count = self._running_agent_count()
         if active_count < max_sessions:
@@ -837,7 +830,7 @@ class GatewayBusySessionMixin:
             return "Usage: /queue <prompt>"
         adapter = self._adapter_for_source(source)
         if adapter:
-            queued_event = MessageEvent(
+            self._enqueue_fifo(quick_key, MessageEvent(
                 text=queued_text,
                 message_type=event.message_type if has_media else MessageType.TEXT,
                 source=event.source, raw_message=event.raw_message, message_id=event.message_id,
@@ -850,12 +843,9 @@ class GatewayBusySessionMixin:
                 reply_to_is_own_message=event.reply_to_is_own_message, auto_skill=event.auto_skill,
                 channel_prompt=event.channel_prompt, channel_context=event.channel_context,
                 internal=event.internal, timestamp=event.timestamp,
-            )
-            self._enqueue_fifo(quick_key, queued_event, adapter)
+            ), adapter)
         depth = self._queue_depth(quick_key, adapter=adapter)
-        if depth <= 1:
-            return "Queued for the next turn."
-        return f"Queued for the next turn. ({depth} queued)"
+        return "Queued for the next turn." + (f" ({depth} queued)" if depth > 1 else "")
 
     async def _busy_steer_command(self, event: MessageEvent, quick_key: str, source):
         # /steer lands BETWEEN tool-call iterations of the same run (appended to the last tool
@@ -871,40 +861,37 @@ class GatewayBusySessionMixin:
             # Turn-boundary fallback: queue the steer text as its own follow-up turn.
             adapter = self._adapter_for_source(source)
             if adapter:
-                queued_event = MessageEvent(
+                self._enqueue_fifo(quick_key, MessageEvent(
                     text=steer_text, message_type=MessageType.TEXT, source=event.source,
                     message_id=event.message_id, channel_prompt=event.channel_prompt,
                     channel_context=event.channel_context,
-                )
-                self._enqueue_fifo(quick_key, queued_event, adapter)
+                ), adapter)
             return reply
 
         if running_agent is _AGENT_PENDING_SENTINEL:
             return _queue_fallback("Agent still starting — /steer queued for the next turn.")
-        if running_agent and hasattr(running_agent, "steer"):
-            try:
-                accepted = running_agent.steer(steer_text)
-            except Exception as exc:
-                logger.warning("Steer failed for session %s: %s", quick_key, exc)
-                return f"⚠️ Steer failed: {exc}"
-            if accepted:
-                preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
-                return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
+        if not running_agent or not hasattr(running_agent, "steer"):
+            return _queue_fallback("No active agent — /steer queued for the next turn.")
+        try:
+            accepted = running_agent.steer(steer_text)
+        except Exception as exc:
+            logger.warning("Steer failed for session %s: %s", quick_key, exc)
+            return f"⚠️ Steer failed: {exc}"
+        if not accepted:
             return "Steer rejected (empty payload)."
-        # Running agent is missing or lacks steer().
-        return _queue_fallback("No active agent — /steer queued for the next turn.")
+        preview = steer_text[:60] + ("..." if len(steer_text) > 60 else "")
+        return f"⏩ Steer queued — arrives after the next tool call: '{preview}'"
 
     async def _busy_goal_command(self, event: MessageEvent, quick_key: str, source):
         # Control verbs are safe mid-run (state only); setting new goal text is rejected so we don't
         # race a second continuation against the current turn. wait/gate take an argument.
         _goal_arg = (event.get_command_args() or "").strip().lower()
         _goal_verb = _goal_arg.split(None, 1)[0] if _goal_arg else ""
-        _is_control = (
+        if (
             not _goal_arg
             or _goal_arg in {"status", "pause", "resume", "clear", "stop", "done", "unwait"}
             or _goal_verb in {"wait", "gate"}
-        )
-        if _is_control:
+        ):
             return await self._handle_goal_command(event)
         return "Agent is running — use /goal status / pause / clear / wait mid-run, or /stop before setting a new goal."
 
@@ -975,10 +962,9 @@ class GatewayBusySessionMixin:
         if event is None or event.source is None or event.platform_update_id is None:
             return False
         try:
-            platform_value = event.source.platform.value
+            if event.source.platform.value != "telegram":
+                return False
         except Exception:
-            return False
-        if platform_value != "telegram":
             return False
 
         try:
@@ -1000,7 +986,7 @@ class GatewayBusySessionMixin:
 
         recorded_uid = data.get("update_id")
         if (
-            data.get("platform") != platform_value
+            data.get("platform") != "telegram"
             or not isinstance(recorded_uid, int)
             or event.platform_update_id > recorded_uid
         ):
