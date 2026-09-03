@@ -382,12 +382,7 @@ class ManagedLlmStream(Iterator[Any]):
 
         self._runtime_lease = attempt.runtime.acquire_operation_lease()
         try:
-            loop = asyncio.new_event_loop()
-        except BaseException:
-            self._release_runtime_lease()
-            raise
-        self._loop = loop
-        try:
+            self._loop = loop = asyncio.new_event_loop()
             self._stream = loop.run_until_complete(
                 attempt.run_managed(
                     attempt.runtime.relay.llm.stream_execute, partial(self._provider_stream, attempt),
@@ -395,12 +390,13 @@ class ManagedLlmStream(Iterator[Any]):
                 )
             )
         except BaseException as exc:
-            if self._recoverable_relay_failure(exc):
+            if self._loop is not None and self._recoverable_relay_failure(exc):
                 self._preserve_pending_provider_chunks()
                 return
-            self._finish_logical("cancelled" if _is_cancellation(exc) else "failed")
             try:
-                loop.close()
+                if self._loop is not None:
+                    self._finish_logical("cancelled" if _is_cancellation(exc) else "failed")
+                    self._loop.close()
             finally:
                 self._loop = None
                 self._release_runtime_lease()
@@ -497,12 +493,8 @@ class ManagedLlmStream(Iterator[Any]):
         """Switch a failed Relay stream to its undelivered provider chunks."""
         pending = [raw for _encoded, raw in self._raw_chunks]
         self._raw_chunks.clear()
-        loop = self._loop
-        relay_stream = self._stream
-        self._loop = None
-        self._stream = iter(pending)
-        self._raw_stream_resource = None
-        self._accept_chunk = None
+        loop, relay_stream = self._loop, self._stream
+        self._loop, self._stream, self._raw_stream_resource, self._accept_chunk = None, iter(pending), None, None
         try:
             if loop is not None:
                 try:
@@ -897,8 +889,8 @@ def _namespace(value: Any) -> Any:
     return value
 
 
-def _canonical_json(value: Any) -> str:
-    return json.dumps(_jsonable(value), sort_keys=True, separators=(",", ":"))
+def _canonical_json(value: Any, encode: Callable[[Any], Any] = _jsonable) -> str:
+    return json.dumps(encode(value), sort_keys=True, separators=(",", ":"))
 
 
 def _json_equal(left: Any, right: Any) -> bool:

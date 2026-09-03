@@ -95,9 +95,7 @@ def _jsonable(value: Any) -> Any:
 
 def _json_equal(left: Any, right: Any) -> bool:
     try:
-        return json.dumps(
-            _jsonable(left), sort_keys=True, separators=(",", ":")
-        ) == json.dumps(_jsonable(right), sort_keys=True, separators=(",", ":"))
+        return relay_llm._canonical_json(left, _jsonable) == relay_llm._canonical_json(right, _jsonable)
     except (TypeError, ValueError):
         return left == right
 
