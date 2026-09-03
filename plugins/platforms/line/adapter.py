@@ -36,8 +36,7 @@ from urllib.parse import quote as _urlquote
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult,
-    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes, cache_video_from_bytes,
-)
+    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes, cache_video_from_bytes)
 from gateway.config import Platform
 
 logger = logging.getLogger(__name__)
@@ -105,24 +104,18 @@ def split_for_line(text: str, max_chars: int = LINE_SAFE_BUBBLE_CHARS) -> List[s
         return [text] if text else []
     chunks: List[str] = []
     remaining = text
-    while remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL:
-        if len(remaining) <= max_chars:
-            chunks.append(remaining)
-            remaining = ""
-            break
-        for sep in ("\n\n", "\n", " "):  # prefer paragraph, then line, then word breaks
-            cut = remaining.rfind(sep, 0, max_chars)
-            if cut >= int(max_chars * 0.5):
-                break
+    while remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL and len(remaining) > max_chars:
+        # Prefer paragraph, then line, then word breaks past the half-way mark; else a hard cut.
+        cuts = [remaining.rfind(sep, 0, max_chars) for sep in ("\n\n", "\n", " ")]
+        cut = next((c for c in cuts if c >= int(max_chars * 0.5)), cuts[-1])
         if cut <= 0:
             cut = max_chars
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
-    if remaining:  # budget exhausted → ellipsis on the last bubble
-        tail = chunks[-1]
-        if len(tail) > max_chars - 1:
-            tail = tail[: max_chars - 1]
-        chunks[-1] = tail.rstrip() + "…"
+    if remaining and len(chunks) < LINE_MAX_MESSAGES_PER_CALL:
+        chunks.append(remaining)
+    elif remaining:  # budget exhausted → ellipsis on the last bubble
+        chunks[-1] = chunks[-1][: max_chars - 1].rstrip() + "…"
     return chunks
 
 
@@ -214,8 +207,7 @@ def _resolve_chat(source: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _allowed_for_source(
-    source: Dict[str, Any], *, allow_all: bool, user_ids: Set[str], group_ids: Set[str], room_ids: Set[str],
-) -> bool:
+    source: Dict[str, Any], *, allow_all: bool, user_ids: Set[str], group_ids: Set[str], room_ids: Set[str]) -> bool:
     """Three-list gate: users, groups, rooms."""
     if allow_all:
         return True
@@ -262,7 +254,6 @@ class _LineClient:
             logger.debug("LINE loading indicator failed: %s", exc)
 
     async def fetch_content(self, message_id: str) -> bytes:
-        """Download an inbound media message's binary content."""
         async with self._session(30.0) as session:
             url = LINE_CONTENT_URL_FMT.format(message_id=message_id)
             async with session.get(url, headers={"Authorization": f"Bearer {self._token}"}) as resp:
@@ -342,15 +333,16 @@ def _coerce(cast: Callable[[Any], Any], value: Any, default: Any) -> Any:
 _OUTBOUND_MEDIA = {
     "image": (
         LINE_IMAGE_MAX_BYTES, "image exceeds 10 MB LINE limit",
-        "LINE_PUBLIC_URL must be set to send images (LINE only accepts publicly reachable HTTPS URLs)",
-    ),
+        "LINE_PUBLIC_URL must be set to send images (LINE only accepts publicly reachable HTTPS URLs)"),
     "audio": (LINE_AV_MAX_BYTES, "audio exceeds 200 MB LINE limit", "LINE_PUBLIC_URL must be set to send audio"),
     "video": (LINE_AV_MAX_BYTES, "video exceeds 200 MB LINE limit", "LINE_PUBLIC_URL must be set to send video"),
 }
 
 # Inbound media kinds → cached file extension.
 _INBOUND_MEDIA_EXT = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": ".bin"}
+_INBOUND_AV_CACHERS = {"audio": cache_audio_from_bytes, "video": cache_video_from_bytes}
 _LIFECYCLE_EVENTS = frozenset({"follow", "unfollow", "join", "leave"})
+_ENV_SEED_KEYS = (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel"))
 
 
 class LineAdapter(BasePlatformAdapter):
@@ -380,10 +372,12 @@ class LineAdapter(BasePlatformAdapter):
         # Slow-LLM postback button threshold + user-overridable copy
         threshold = env_or("LINE_SLOW_RESPONSE_THRESHOLD", "slow_response_threshold", DEFAULT_SLOW_RESPONSE_THRESHOLD)
         self.slow_response_threshold = _coerce(float, threshold, DEFAULT_SLOW_RESPONSE_THRESHOLD)
-        self.pending_text = env_or("LINE_PENDING_TEXT", "pending_text", DEFAULT_PENDING_REPLY_TEXT)
-        self.button_label = env_or("LINE_BUTTON_LABEL", "button_label", DEFAULT_BUTTON_LABEL)
-        self.delivered_text = env_or("LINE_DELIVERED_TEXT", "delivered_text", DEFAULT_DELIVERED_TEXT)
-        self.interrupted_text = env_or("LINE_INTERRUPTED_TEXT", "interrupted_text", DEFAULT_INTERRUPTED_TEXT)
+        for attr, env, default in (
+            ("pending_text", "LINE_PENDING_TEXT", DEFAULT_PENDING_REPLY_TEXT),
+            ("button_label", "LINE_BUTTON_LABEL", DEFAULT_BUTTON_LABEL),
+            ("delivered_text", "LINE_DELIVERED_TEXT", DEFAULT_DELIVERED_TEXT),
+            ("interrupted_text", "LINE_INTERRUPTED_TEXT", DEFAULT_INTERRUPTED_TEXT)):
+            setattr(self, attr, env_or(env, attr, default))
         # Runtime state
         self._client: Optional[_LineClient] = None
         self._app = self._runner = self._site = None  # aiohttp web.Application / AppRunner / TCPSite
@@ -397,8 +391,7 @@ class LineAdapter(BasePlatformAdapter):
         self._media_ttl = MEDIA_TOKEN_TTL_SECONDS
         self._pending_buttons: Dict[str, str] = {}  # one outstanding button per chat: chat_id → request_id
 
-    def _fail(self, code: str, detail: str, *, retryable: bool = False) -> bool:
-        """Record a fatal connect error and return False."""
+    def _fail(self, code: str, detail: str, *, retryable: bool = False) -> bool:  # fatal connect error → False
         self._set_fatal_error(code, detail, retryable=retryable)
         return False
 
@@ -486,8 +479,7 @@ class LineAdapter(BasePlatformAdapter):
             return web.Response(status=400, text="bad request")
         if len(body) > WEBHOOK_BODY_MAX_BYTES:
             return web.Response(status=413, text="payload too large")
-        signature = request.headers.get("X-Line-Signature", "")
-        if not verify_line_signature(body, signature, self.channel_secret):
+        if not verify_line_signature(body, request.headers.get("X-Line-Signature", ""), self.channel_secret):
             return web.Response(status=401, text="invalid signature")
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -509,9 +501,8 @@ class LineAdapter(BasePlatformAdapter):
             return
         if self._bot_user_id and source.get("userId", "") == self._bot_user_id:
             return
-        if not _allowed_for_source(
-            source, allow_all=self.allow_all, user_ids=self.allowed_users,
-            group_ids=self.allowed_groups, room_ids=self.allowed_rooms):
+        if not _allowed_for_source(source, allow_all=self.allow_all, user_ids=self.allowed_users,
+                                   group_ids=self.allowed_groups, room_ids=self.allowed_rooms):
             logger.info("LINE: rejecting unauthorized source %s", source)
             return
         if event_type == "message":
@@ -525,8 +516,7 @@ class LineAdapter(BasePlatformAdapter):
 
     async def _handle_message_event(self, event: Dict[str, Any]) -> None:
         msg = event.get("message") or {}
-        msg_type = msg.get("type", "")
-        message_id = msg.get("id", "")
+        msg_type, message_id = msg.get("type", ""), msg.get("id", "")
         reply_token = event.get("replyToken", "")
         source = event.get("source") or {}
         chat_id, chat_type = _resolve_chat(source)
@@ -544,8 +534,7 @@ class LineAdapter(BasePlatformAdapter):
                 media_urls, media_types = [local_path], [media_type]
             text = f"[{msg_type}]"
         elif msg_type == "sticker":
-            keywords = msg.get("keywords") or []
-            text = f"[sticker: {', '.join(keywords)}]" if keywords else "[sticker]"
+            text = f"[sticker: {', '.join(msg['keywords'])}]" if msg.get("keywords") else "[sticker]"
         elif msg_type == "location":
             text = f"[location: {msg.get('title', '')} {msg.get('address', '')}]".strip()
         else:
@@ -596,8 +585,7 @@ class LineAdapter(BasePlatformAdapter):
             self._pending_buttons.pop(chat_id, None)
 
     async def _download_media(
-        self, message_id: str, msg_type: str, *, filename: Optional[str] = None
-    ) -> Tuple[Optional[str], str]:
+        self, message_id: str, msg_type: str, *, filename: Optional[str] = None) -> Tuple[Optional[str], str]:
         if not self._client or not message_id:
             return None, ""
         try:
@@ -609,9 +597,8 @@ class LineAdapter(BasePlatformAdapter):
         try:
             if msg_type == "image":
                 return cache_image_from_bytes(data, ext=ext), "image/jpeg"
-            if msg_type in ("audio", "video"):
-                cache_fn = cache_audio_from_bytes if msg_type == "audio" else cache_video_from_bytes
-                return cache_fn(data, ext=ext), mimetypes.guess_type(f"{msg_type}{ext}")[0] or f"{msg_type}/mp4"
+            if msg_type in _INBOUND_AV_CACHERS:
+                return _INBOUND_AV_CACHERS[msg_type](data, ext=ext), mimetypes.guess_type(f"{msg_type}{ext}")[0] or f"{msg_type}/mp4"
             document_name = filename or f"line_file{ext}"
             mime = mimetypes.guess_type(document_name)[0] or "application/octet-stream"
             return cache_document_from_bytes(data, document_name), mime
@@ -713,7 +700,6 @@ class LineAdapter(BasePlatformAdapter):
         return token
 
     def _media_url(self, token: str, filename: str) -> str:
-        """Build the public HTTPS URL for a media token."""
         if self.public_base_url:
             base = self.public_base_url
         else:
@@ -724,7 +710,6 @@ class LineAdapter(BasePlatformAdapter):
         return f"{base}{DEFAULT_MEDIA_PATH_PREFIX}/{token}/{_urlquote(filename, safe='')}"
 
     def _serve_file(self, path: Path) -> str:
-        """Register ``path`` for serving and return its public URL."""
         return self._media_url(self._register_media(str(path.resolve())), path.name)
 
     def _missing_public_url(self) -> bool:
@@ -735,14 +720,14 @@ class LineAdapter(BasePlatformAdapter):
         """Shared preflight for send_image_file/send_voice/send_video → ``(path, error)``."""
         max_bytes, size_error, url_error = _OUTBOUND_MEDIA[kind]
         path = Path(file_path)
-        if not path.exists() or not path.is_file():
+        if not path.is_file():
             return None, SendResult(success=False, error=f"{kind} file not found: {file_path}")
-        if path.stat().st_size > max_bytes:
-            return None, SendResult(success=False, error=size_error)
-        if not self._client:
-            return None, SendResult(success=False, error="LINE adapter not connected")
-        if self._missing_public_url():
-            return None, SendResult(success=False, error=url_error)
+        for failed, error in (
+            (path.stat().st_size > max_bytes, size_error),
+            (not self._client, "LINE adapter not connected"),
+            (self._missing_public_url(), url_error)):
+            if failed:
+                return None, SendResult(success=False, error=error)
         return path, None
 
     async def _handle_media(self, request) -> Any:
@@ -764,9 +749,8 @@ class LineAdapter(BasePlatformAdapter):
             hermes_home = Path(get_hermes_home()).resolve()
         except Exception:
             hermes_home = Path.home().joinpath(".hermes").resolve()
-        allowed_roots = {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(), hermes_home}
         resolved = path.resolve()
-        if not any(resolved.is_relative_to(r) for r in allowed_roots):
+        if not any(resolved.is_relative_to(r) for r in (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(), hermes_home)):
             logger.warning("LINE: refusing to serve outside allowed roots: %s", resolved)
             return web.Response(status=403, text="forbidden")
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
@@ -883,13 +867,9 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
         return None
     seeded: Dict[str, Any] = {}
     if os.getenv("LINE_PORT"):
-        try:
+        with contextlib.suppress(ValueError):
             seeded["port"] = int(os.environ["LINE_PORT"])
-        except ValueError:
-            pass
-    for env, key in (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel")):
-        if os.getenv(env):
-            seeded[key] = os.environ[env]
+    seeded.update({key: os.environ[env] for env, key in _ENV_SEED_KEYS if os.getenv(env)})
     return seeded
 
 
@@ -914,19 +894,24 @@ async def _standalone_send(
         return {"error": str(exc)}
 
 
+_SETUP_PROMPTS = (  # (env var, prompt, masked)
+    ("LINE_CHANNEL_ACCESS_TOKEN", "Channel access token", True),
+    ("LINE_CHANNEL_SECRET", "Channel secret", True),
+    ("LINE_PUBLIC_URL", "Public HTTPS base URL (optional, e.g. https://my-tunnel.example.com)", False),
+    ("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)", False))
+
+
 def interactive_setup() -> None:
     """Minimal stdin wizard for ``hermes setup line`` (writes ``~/.hermes/.env``)."""
-    print(
-        "\nLINE Messaging API setup\n------------------------\n"
-        "Create a Messaging API channel at https://developers.line.biz/console/\nthen copy the values below.\n"
-    )
+    print("\nLINE Messaging API setup\n------------------------\n"
+          "Create a Messaging API channel at https://developers.line.biz/console/\nthen copy the values below.\n")
     try:
         from hermes_cli.config import get_env_value as _get_env, save_env_value as _set_env
     except ImportError:
         print("hermes_cli.config not available; set LINE_* vars manually in ~/.hermes/.env")
         return
 
-    def _prompt(var: str, prompt: str, *, secret: bool = False) -> None:
+    for var, prompt, secret in _SETUP_PROMPTS:
         existing = _get_env(var) if callable(_get_env) else None
         suffix = " [keep current]" if existing else ""
         try:
@@ -937,19 +922,13 @@ def interactive_setup() -> None:
                 value = input(f"{prompt}{suffix}: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return
+            continue
         if value:
             _set_env(var, value)
-
-    _prompt("LINE_CHANNEL_ACCESS_TOKEN", "Channel access token", secret=True)
-    _prompt("LINE_CHANNEL_SECRET", "Channel secret", secret=True)
-    _prompt("LINE_PUBLIC_URL", "Public HTTPS base URL (optional, e.g. https://my-tunnel.example.com)")
-    _prompt("LINE_ALLOWED_USERS", "Allowed user IDs (comma-separated; blank=skip)")
     print("Done. Set the webhook URL in the LINE console to <your-public-url>/line/webhook and enable 'Use webhook'.")
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
         name="line", label="LINE", adapter_factory=lambda cfg: LineAdapter(cfg), check_fn=check_requirements,
         validate_config=validate_config, is_connected=is_connected,

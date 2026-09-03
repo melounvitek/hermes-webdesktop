@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from typing import Any, Dict, Iterator, Optional
 from urllib.parse import urlparse
 
@@ -34,9 +34,8 @@ def _probe_teams_sdk_available() -> bool:
     Sibling packages share the namespace, so probe the parent first — ``find_spec`` of the child
     raises on 3.11+ if the parent is absent."""
     try:
-        if importlib.util.find_spec("microsoft_teams") is None:
-            return False
-        return importlib.util.find_spec("microsoft_teams.apps") is not None
+        find_spec = importlib.util.find_spec
+        return find_spec("microsoft_teams") is not None and find_spec("microsoft_teams.apps") is not None
     except (ValueError, ModuleNotFoundError, ImportError):
         return "microsoft_teams.apps" in sys.modules  # test stubs may lack ``__spec__``
 
@@ -150,12 +149,10 @@ def _credentials(config) -> tuple[str, str, str]:
 
 
 def validate_config(config) -> bool:
-    """True when the config has the minimum required credentials."""
     return bool(all(_credentials(config)))
 
 
 def is_connected(config) -> bool:
-    """Check whether Teams is configured (env or config.yaml)."""
     return validate_config(config)
 
 
@@ -172,11 +169,9 @@ def _env_enablement() -> dict | None:
     port = coerce_port(os.getenv("TEAMS_PORT", "").strip(), None)
     if port is not None:
         seed["port"] = port
-    service_url = os.getenv("TEAMS_SERVICE_URL", "").strip()
-    if service_url:
+    if service_url := os.getenv("TEAMS_SERVICE_URL", "").strip():
         seed["service_url"] = service_url
-    home = os.getenv("TEAMS_HOME_CHANNEL", "").strip()
-    if home:
+    if home := os.getenv("TEAMS_HOME_CHANNEL", "").strip():
         seed["home_channel"] = {"chat_id": home, "name": os.getenv("TEAMS_HOME_CHANNEL_NAME", "Home")}
     return seed
 
@@ -201,8 +196,7 @@ async def _standalone_send(
         (not chat_id, "chat_id (conversation ID) is required"),
         (not _TEAMS_CONV_ID_RE.match(chat_id or ""), "chat_id contains characters outside the Bot Framework conversation ID set"),
         (not _TEAMS_CONV_ID_RE.match(tenant_id), "TEAMS_TENANT_ID contains characters outside the expected set"),
-        (not AIOHTTP_AVAILABLE, "aiohttp not installed"),
-    ):
+        (not AIOHTTP_AVAILABLE, "aiohttp not installed")):
         if failed:
             return {"error": f"Teams standalone send: {error}"}
     token_url, token_form = _bf_token_request(tenant_id, client_id, client_secret)
@@ -451,7 +445,6 @@ class TeamsAdapter(BasePlatformAdapter):
                 return await _read_httpx_body_with_limit(response, media_type="attachment")
 
     async def _on_message(self, ctx: ActivityContext[MessageActivity]) -> None:
-        """Process an incoming Teams message and dispatch to the gateway."""
         activity = ctx.activity
         bot_id = self._app.id if self._app else None
         if bot_id and getattr(activity.from_, "id", None) == bot_id:
@@ -475,12 +468,8 @@ class TeamsAdapter(BasePlatformAdapter):
             user_id=str(user_id),
             user_name=getattr(from_account, "name", None) or "",
             guild_id=getattr(conv, "tenant_id", None) or self._tenant_id)
-        media: list = []  # (path, media_type, kind)
-        for att in getattr(activity, "attachments", None) or []:
-            cached = await self._cache_attachment(att)
-            if cached:
-                media.append(cached)
-        media_kinds = [kind for _, _, kind in media]
+        media: list = [m for m in [await self._cache_attachment(a) for a in getattr(activity, "attachments", None) or []] if m]
+        media_kinds = [kind for _, _, kind in media]  # media items are (path, media_type, kind)
         msg_type = next((t for kind, t in _MEDIA_KIND_PRECEDENCE if kind in media_kinds), MessageType.TEXT)
         await self.handle_message(MessageEvent(
             text=text, source=source, message_type=msg_type, message_id=msg_id,
@@ -493,9 +482,7 @@ class TeamsAdapter(BasePlatformAdapter):
         att_name = getattr(att, "name", None) or ""
         # Skip non-file payloads: Teams mirrors the message body as a text/html attachment,
         # and cards arrive as application/vnd.microsoft.card.*
-        if content_type in ("text/html", "text/plain") and not content_url:
-            return None
-        if content_type.startswith("application/vnd.microsoft.card"):
+        if (content_type in ("text/html", "text/plain") and not content_url) or content_type.startswith("application/vnd.microsoft.card"):
             return None
         if content_type == "application/vnd.microsoft.teams.file.download.info":
             # Consent-free download: content carries a pre-authed SharePoint downloadUrl + file type.
@@ -570,7 +557,6 @@ class TeamsAdapter(BasePlatformAdapter):
     async def _on_card_action(
         self, ctx: "ActivityContext[AdaptiveCardInvokeActivity]"
     ) -> "InvokeResponse[AdaptiveCardActionMessageResponse]":
-        """Handle an Adaptive Card Action.Execute button click."""
         from tools.approval import resolve_gateway_approval, has_blocking_approval
 
         data = ctx.activity.value.action.data or {}
@@ -615,7 +601,6 @@ class TeamsAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str, description: str = "dangerous command",
         metadata: Optional[Dict[str, Any]] = None, allow_permanent: bool = True, allow_session: bool = True,
         smart_denied: bool = False) -> SendResult:
-        """Send an Adaptive Card approval prompt with Allow/Deny buttons."""
         if not self._app:
             return SendResult(success=False, error="Teams app not initialized")
         # Button data carries a truncated cmd — just enough to reconstruct the card body.
@@ -665,12 +650,9 @@ class TeamsAdapter(BasePlatformAdapter):
         return SendResult(success=True, message_id=last_message_id)
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-        if not self._app:
-            return
-        try:
-            await self._app.send(chat_id, TypingActivityInput())
-        except Exception:
-            pass
+        if self._app:
+            with suppress(Exception):
+                await self._app.send(chat_id, TypingActivityInput())
 
     async def _send_media_attachment(
         self, chat_id: str, source: str, default_mime: str, caption: Optional[str] = None, media_label: str = "media"
@@ -739,7 +721,6 @@ _SETUP_INTRO = (  # "" → blank line
 
 
 def interactive_setup() -> None:
-    """Guide the user through Teams setup using the Teams CLI."""
     from hermes_cli.config import get_env_value, save_env_value
     from hermes_cli.cli_output import prompt, prompt_yes_no, print_info, print_success, print_warning
     existing_id = get_env_value("TEAMS_CLIENT_ID")
@@ -787,7 +768,6 @@ def _install_hint() -> str:
 
 
 def register(ctx) -> None:
-    """Plugin entry point — called by the Hermes plugin system."""
     ctx.register_platform(
         name="teams", label="Microsoft Teams", adapter_factory=lambda cfg: TeamsAdapter(cfg),
         check_fn=check_requirements,  # PASSIVE probe — never installs
