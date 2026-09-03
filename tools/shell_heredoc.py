@@ -1,19 +1,18 @@
-"""Conservative heredoc masking for shell-command scanners (terminal '&' guard, blocked-command
-checks, cron lifecycle_guard) that false-positive on heredoc *bodies*. Stripping every body is
-unsafe the other way (a fake ``<<`` in quotes can swallow a real operator; unquoted bodies
-expand; ``bash <<'EOF'`` executes), so a body is masked ONLY when every delimiter is quoted,
-every heredoc has an exact terminator line, the opener is a single command (no ``;|&``,
-``$(...)``, backticks or process substitution) and the consumer is an allowlisted non-shell
-interpreter. Otherwise the command is returned untouched: a false positive is acceptable,
-hiding shell syntax from a guard is not. Masked bodies keep their newline count (re.MULTILINE)."""
+"""Conservative heredoc masking for shell-command scanners ('&' guard, blocked-command checks,
+cron lifecycle_guard) that false-positive on heredoc *bodies*. Stripping every body is unsafe the
+other way (a fake ``<<`` in quotes can swallow an operator; unquoted bodies expand; ``bash <<'EOF'``
+executes), so a body is masked ONLY when every delimiter is quoted, every heredoc has an exact
+terminator line, the opener is a single command (no ``;|&``, ``$(...)``, backticks, process
+substitution) and the consumer is an allowlisted non-shell interpreter. Otherwise the command is
+returned untouched: a false positive is acceptable, hiding shell syntax from a guard is not.
+Masked bodies keep their newline count (re.MULTILINE)."""
 
 from __future__ import annotations
 
 import re
 
-# Non-shell interpreters whose quoted heredoc bodies are program text/data for
-# THAT interpreter. Optional VAR=... assignments, ``env`` and a path prefix are
-# allowed. Deliberately narrow: anything unmatched keeps its body visible.
+# Non-shell interpreters whose quoted heredoc bodies are data for THAT interpreter; optional
+# VAR=... assignments, ``env`` and a path prefix allowed. Narrow on purpose: unmatched = visible.
 _INERT_HEREDOC_CONSUMER_RE = re.compile(
     r"^\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)*(?:env\s+)?(?:[A-Za-z0-9_./-]+/)?"
     r"(?:python(?:3(?:\.\d+)*)?|osascript|cat)(?=\s|$)",
@@ -24,12 +23,9 @@ def _span_end(command: str, cursor: int, closer: str) -> int:
     """Index just past the backslash-aware span opened at ``cursor``."""
     end = cursor + 1
     while end < len(command):
-        if command[end] == "\\" and end + 1 < len(command):
-            end += 2
-            continue
         if command[end] == closer:
             return end + 1
-        end += 1
+        end += 2 if command[end] == "\\" and end + 1 < len(command) else 1
     return end
 
 
@@ -39,20 +35,15 @@ def _mask_simple_quotes(command: str) -> str:
     cursor = 0
     while cursor < len(command):
         char = command[cursor]
-        if char == "'":
-            closing = command.find("'", cursor + 1)
-            if closing == -1:
-                result.append(command[cursor:])
-                break
-            result.append("''")
-            cursor = closing + 1
-        elif char == '"':
-            end = _span_end(command, cursor, '"')
-            if not command[cursor:end].endswith('"'):
-                result.append(command[cursor:])
-                break
+        if char in "'\"":  # single quotes have no escapes; double quotes are backslash-aware
+            end = (command.find("'", cursor + 1) + 1 if char == "'"
+                   else _span_end(command, cursor, '"'))
             segment = command[cursor:end]
-            result.append(segment if "$(" in segment or "`" in segment else '""')
+            if not segment.endswith(char):
+                result.append(command[cursor:])
+                break
+            keep = char == '"' and ("$(" in segment or "`" in segment)
+            result.append(segment if keep else char * 2)
             cursor = end
         elif char == "`":
             end = _span_end(command, cursor, "`")
@@ -68,118 +59,88 @@ def _parse_heredoc_operator(command: str, index: int):
     """Parse one ``<<`` opener -> ``(end_index, delimiter, strip_tabs, quoted)`` or None."""
     if not command.startswith("<<", index) or command.startswith("<<<", index):
         return None
-
-    cursor = index + 2
-    strip_tabs = cursor < len(command) and command[cursor] == "-"
-    if strip_tabs:
-        cursor += 1
+    strip_tabs = command.startswith("-", index + 2)
+    cursor = index + 3 if strip_tabs else index + 2
     while cursor < len(command) and command[cursor] in " \t":
         cursor += 1
     if cursor >= len(command) or command[cursor] in "\r\n":
         return None
-
     delimiter: list[str] = []
     quoted = False
-    while cursor < len(command):
+    while cursor < len(command) and not (command[cursor].isspace() or command[cursor] in ";&|<>()"):
         char = command[cursor]
-        if char.isspace() or char in ";&|<>()":
-            break
-        if char == "\\":
+        if char == "\\":  # backslash-escaped char: quoted, literal
             if cursor + 1 >= len(command) or command[cursor + 1] in "\r\n":
                 return None
             quoted = True
             delimiter.append(command[cursor + 1])
             cursor += 2
-            continue
-        if char in "'\"":
+        elif char in "'\"":
             quoted = True
-            quote = char
             cursor += 1
-            while cursor < len(command) and command[cursor] != quote:
+            while cursor < len(command) and command[cursor] != char:
                 current = command[cursor]
                 if current in "\r\n":
                     return None
-                if quote == '"' and current == "\\":
+                if char == '"' and current == "\\":
                     if cursor + 1 >= len(command):
                         return None
-                    following = command[cursor + 1]
-                    if following in {"$", "`", '"', "\\", "\n"}:
-                        delimiter.append(following)
-                        cursor += 2
-                        continue
-                    # In double quotes, backslash is literal before other chars.
+                    if command[cursor + 1] in '$`"\\\n':  # else backslash is literal in dquotes
+                        cursor += 1
+                        current = command[cursor]
                 delimiter.append(current)
                 cursor += 1
-            if cursor >= len(command):
+            if cursor >= len(command):  # unterminated quote
                 return None
             cursor += 1
-            continue
-        delimiter.append(char)
-        cursor += 1
-
+        else:
+            delimiter.append(char)
+            cursor += 1
     if not delimiter and not quoted:
         return None
     return cursor, "".join(delimiter), strip_tabs, quoted
 
 
 def _scan_heredoc_command_unit(command: str, start: int):
-    """Scan one logical command -> ``(end, specs, unknown_operator, has_list_operator)``:
-    an unparseable ``<<`` (caller must fail closed) / unquoted ``;|&`` on the opener."""
+    """Scan one logical command -> ``(end, specs, unknown_operator, has_list_operator)``: an
+    unparseable ``<<`` (caller must fail closed) / an unquoted ``;|&`` on the opener line."""
     cursor = start
     quote = None
     comment = False
     specs = []
     unknown_operator = False
     has_list_operator = False
-
     while cursor < len(command):
         char = command[cursor]
-        if comment:
-            if char == "\n":
-                return cursor, specs, unknown_operator, has_list_operator
-            cursor += 1
-            continue
-        if quote is not None:
-            if quote in {'"', "`"} and char == "\\" and cursor + 1 < len(command):
-                cursor += 2
-                continue
+        if char == "\n" and (comment or quote is None):
+            break
+        # Backslash escapes (incl. line continuations) outside single quotes skip the next char.
+        escaped = char == "\\" and quote != "'" and not comment and cursor + 1 < len(command)
+        if comment or quote is not None or escaped:
             if char == quote:
                 quote = None
-            cursor += 1
-            continue
-        if char == "\\" and cursor + 1 < len(command):
-            # Includes line continuations: the logical command keeps going.
-            cursor += 2
-            continue
-        if char in "'\"`":
+            cursor += 2 if escaped else 1
+        elif char in "'\"`":
             quote = char
             cursor += 1
-            continue
-        if char == "#":
-            previous = command[cursor - 1] if cursor > start else ""
-            if cursor == start or previous.isspace() or previous in ";&|()":
-                comment = True
-                cursor += 1
-                continue
-        if char == "\n":
-            return cursor, specs, unknown_operator, has_list_operator
-        if command.startswith("<<<", cursor):
+        elif char == "#" and (cursor == start or command[cursor - 1].isspace()
+                              or command[cursor - 1] in ";&|()"):
+            comment = True
+            cursor += 1
+        elif command.startswith("<<<", cursor):
             cursor += 3
-            continue
-        if command.startswith("<<", cursor):
+        elif command.startswith("<<", cursor):
             parsed = _parse_heredoc_operator(command, cursor)
             if parsed is None:
                 unknown_operator = True
                 cursor += 2
-                continue
-            cursor, delimiter, strip_tabs, quoted = parsed
-            specs.append((delimiter, strip_tabs, quoted))
-            continue
-        if char in ";|&":
-            has_list_operator = True
-        cursor += 1
-
-    return len(command), specs, unknown_operator, has_list_operator
+            else:
+                cursor, delimiter, strip_tabs, quoted = parsed
+                specs.append((delimiter, strip_tabs, quoted))
+        else:
+            has_list_operator = has_list_operator or char in ";|&"
+            cursor += 1
+    return cursor, specs, unknown_operator, has_list_operator
 
 
 def _find_heredoc_close(
@@ -200,14 +161,12 @@ def _find_heredoc_close(
 
 def strip_inert_heredoc_bodies(command: str) -> str:
     """Mask heredoc bodies that are provably inert data (see module docstring)."""
-    # Runs on every terminal call: skip the state machine when no '<<' exists,
-    # and stop scanning once past the last '<<'.
+    # Runs on every terminal call: skip the state machine when no '<<' exists; stop past the last.
     if "<<" not in command:
         return command
     last_opener_index = command.rfind("<<")
     ranges: list[tuple[int, int]] = []
     command_start = 0
-
     while command_start <= last_opener_index:
         command_end, specs, unknown_operator, has_list_operator = (
             _scan_heredoc_command_unit(command, command_start))
@@ -219,9 +178,7 @@ def strip_inert_heredoc_bodies(command: str) -> str:
             command_start = command_end + 1
             continue
         if command_end >= len(command):
-            # Opener with no body line: unterminated — leave visible.
-            return command
-
+            return command  # opener with no body line: unterminated — leave visible
         body_cursor = command_end + 1
         body_ranges: list[tuple[int, int]] = []
         for delimiter, strip_tabs, _quoted in specs:
@@ -230,22 +187,16 @@ def strip_inert_heredoc_bodies(command: str) -> str:
                 return command  # unterminated
             body_ranges.append((body_cursor, close_end))
             body_cursor = close_end
-
         if all(quoted for _delimiter, _strip_tabs, quoted in specs) and not has_list_operator:
             masked_opener = _mask_simple_quotes(command[command_start:command_end])
-            nested_scope = any(m in masked_opener for m in ("$(", "`", "<(", ">("))
-            if not nested_scope and _INERT_HEREDOC_CONSUMER_RE.search(masked_opener):
+            if (not any(m in masked_opener for m in ("$(", "`", "<(", ">("))
+                    and _INERT_HEREDOC_CONSUMER_RE.search(masked_opener)):
                 ranges.extend(body_ranges)
         command_start = body_cursor
-
-    if not ranges:
-        return command
-    # Single-pass rebuild: ranges are sorted and non-overlapping.
+    # Single-pass rebuild (ranges are sorted and non-overlapping), bodies -> their newlines only.
     parts: list[str] = []
     previous = 0
     for start, end in ranges:
-        parts.append(command[previous:start])
-        parts.append("\n" * command.count("\n", start, end))
+        parts += [command[previous:start], "\n" * command.count("\n", start, end)]
         previous = end
-    parts.append(command[previous:])
-    return "".join(parts)
+    return "".join(parts) + command[previous:]
