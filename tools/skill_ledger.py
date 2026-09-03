@@ -63,16 +63,16 @@ def derive_actor() -> str:
     return "agent"
 
 
+def _skills_dir() -> Path:
+    return get_hermes_home() / "skills"
+
+
 def ledger_path() -> Path:
-    return get_hermes_home() / "skills" / ".curator_ledger.jsonl"
+    return _skills_dir() / ".curator_ledger.jsonl"
 
 
 def blobs_dir() -> Path:
     return get_hermes_home() / ".curator_backups" / "blobs"
-
-
-def _skills_dir() -> Path:
-    return get_hermes_home() / "skills"
 
 
 def ledger_enabled() -> bool:
@@ -85,14 +85,10 @@ def ledger_enabled() -> bool:
         return True
 
 
-def _norm(path: Path | str) -> Path:
-    return Path(os.path.normpath(str(path)))
-
-
 def _rel_posix(path: Path | str, root: Path) -> Optional[str]:
     """POSIX path of ``path`` relative to ``root`` (both normalized), or None when outside."""
     try:
-        return _norm(path).relative_to(_norm(root)).as_posix()
+        return Path(os.path.normpath(str(path))).relative_to(os.path.normpath(str(root))).as_posix()
     except (ValueError, TypeError):
         return None
 
@@ -118,11 +114,9 @@ def read_blob(sha256: str) -> Optional[bytes]:
     """Return blob content or None when missing/invalid."""
     if not sha256 or not all(c in "0123456789abcdef" for c in sha256):
         return None
-    try:
-        p = blobs_dir() / sha256
-        return p.read_bytes() if p.exists() else None
-    except OSError:
-        return None
+    with suppress(OSError):
+        return (blobs_dir() / sha256).read_bytes() if (blobs_dir() / sha256).exists() else None
+    return None
 
 
 def snapshot_paths(root: Optional[Path], *, complete_package: bool = False) -> List[Dict[str, str]]:
@@ -132,15 +126,9 @@ def snapshot_paths(root: Optional[Path], *, complete_package: bool = False) -> L
     tarball's files (disk hashes win)."""
     if root is None:
         return []
-    root = Path(root)
-    if root.is_file():
-        files = [root]
-    elif root.is_dir():
-        files = sorted(p for p in root.rglob("*") if p.is_file())
-    elif complete_package:
-        files = []  # gone from disk; the backup fill below may still recover it
-    else:
-        return []
+    root = Path(root)  # gone from disk -> []; the complete_package fill may still recover it
+    files = ([root] if root.is_file()
+             else sorted(p for p in root.rglob("*") if p.is_file()) if root.is_dir() else [])
     out = [{"path": str(f), "sha256": _store_blob(f.read_bytes())} for f in files]
     return fill_snapshot_from_curator_backup(root, out) if complete_package else out
 
@@ -160,8 +148,7 @@ def _strip_archive_timestamp(name: str) -> str:
 
 
 def _skill_md_parents(items: Optional[List[Dict[str, str]]]) -> List[Path]:
-    paths = [Path(str(item.get("path", ""))) for item in items or []]
-    return [p.parent for p in paths if p.name == "SKILL.md"]
+    return [p.parent for p in (Path(str(i.get("path", ""))) for i in items or []) if p.name == "SKILL.md"]
 
 
 def package_prefixes(
@@ -310,9 +297,7 @@ def capture_before(
         return None
     try:
         captured = snapshot_paths(root)
-        if complete_package:
-            captured = fill_snapshot_from_curator_backup(root, captured, skill=skill)
-        return captured
+        return fill_snapshot_from_curator_backup(root, captured, skill=skill) if complete_package else captured
     except Exception as e:
         logger.warning("skill_ledger: before-capture failed (%s) — mutation unaffected", e)
         return None
@@ -328,18 +313,14 @@ def list_entries(skill: Optional[str] = None, limit: Optional[int] = None) -> Li
     for line in lines:
         with suppress(json.JSONDecodeError):
             row = json.loads(line) if line.strip() else None
-            if isinstance(row, dict):
+            if isinstance(row, dict) and (not skill or row.get("skill") == skill):
                 rows.append(row)
-    if skill:
-        rows = [r for r in rows if r.get("skill") == skill]
     rows.reverse()
     return rows[:limit] if limit is not None and limit >= 0 else rows
 
 
 def get_entry(entry_id: str) -> Optional[Dict[str, Any]]:
-    if not entry_id:
-        return None
-    return next((row for row in list_entries() if row.get("id") == entry_id), None)
+    return next((r for r in list_entries() if r.get("id") == entry_id), None) if entry_id else None
 
 
 def _validate_entry_paths(entry: Dict[str, Any]) -> Optional[str]:

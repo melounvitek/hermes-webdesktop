@@ -27,10 +27,9 @@ def _is_background_review() -> bool:
 
 
 def _resolved_str(path: Path) -> str:
-    try:
+    with suppress(Exception):
         return str(path.resolve())
-    except Exception:
-        return str(path)
+    return str(path)
 
 
 class _BackgroundReviewReadMarks:
@@ -59,8 +58,7 @@ def mark_background_review_skill_read(path: Path) -> None:
     the write guards require the mark."""
     if not _is_background_review():
         return
-    marks = _background_review_read_paths.get()
-    if marks is None:
+    if (marks := _background_review_read_paths.get()) is None:
         _background_review_read_paths.set(marks := _BackgroundReviewReadMarks())
     marks.add(_resolved_str(path))
 

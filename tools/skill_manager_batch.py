@@ -34,8 +34,7 @@ def _validate_batch_ops(operations, default_name, tool_error):
         names.append(nm)
         if act == "create" and nm in names[:-1]:
             return fail(i, f": create for '{nm}' must precede that skill's other ops.")
-        preflight = _background_review_preflight(act, nm)
-        if preflight is not None:
+        if (preflight := _background_review_preflight(act, nm)) is not None:
             return None, json.dumps(preflight, ensure_ascii=False)
     # Clobber guard: a DESTRUCTIVE op (create/write_file/remove_file/full rewrite) on
     # a file an earlier op touched would SILENTLY discard its work — reject it.
@@ -156,8 +155,8 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
     token = _smt._skill_gate_bypass.set(True)
     try:
         for i, op in enumerate(operations):
-            raw = _smt._skill_manage_from(
-                {**op, "name": names[i], "operations": None}, task_id=task_id, session_id=session_id)
+            raw = _smt._skill_manage_from({**op, "name": names[i], "operations": None},
+                                          task_id=task_id, session_id=session_id)
             try:
                 parsed = json.loads(raw)
             except Exception:  # noqa: BLE001
