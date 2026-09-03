@@ -19,9 +19,7 @@ _MISSING = object()
 
 
 def _stringify_filter_value(value: Any) -> str:
-    if value is _MISSING:
-        return ""
-    return json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
+    return "" if value is _MISSING else json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else str(value)
 
 
 def _resolve_profile_path(path_value: Any) -> Optional[Path]:
@@ -33,10 +31,8 @@ def _resolve_profile_path(path_value: Any) -> Optional[Path]:
         return None
     from hermes_constants import get_hermes_home
     hermes_home = get_hermes_home()
-    if raw == "~/.hermes":
-        return hermes_home
-    if raw.startswith("~/.hermes/"):
-        return hermes_home / raw.removeprefix("~/.hermes/")
+    if raw == "~/.hermes" or raw.startswith("~/.hermes/"):
+        return hermes_home / raw[len("~/.hermes/"):]
     path = Path(raw).expanduser()
     return path if path.is_absolute() else hermes_home / path
 
@@ -54,15 +50,11 @@ def _resolve_script_path(script_value: Any) -> tuple[Optional[Path], Optional[st
     else:
         raw = Path(raw_text).expanduser()
         candidate = raw.resolve() if raw.is_absolute() else (scripts_root / raw).resolve()
-    try:
-        candidate.relative_to(scripts_root)
-    except ValueError:
+    if not candidate.is_relative_to(scripts_root):
         return None, f"script path resolves outside {scripts_root}"
     if not candidate.exists():
         return None, f"script not found: {candidate}"
-    if not candidate.is_file():
-        return None, f"script path is not a file: {candidate}"
-    return candidate, None
+    return (candidate, None) if candidate.is_file() else (None, f"script path is not a file: {candidate}")
 
 
 def _load_filter_file_values(path_value: Any) -> list[Any]:
@@ -87,9 +79,7 @@ def _load_filter_file_values(path_value: Any) -> list[Any]:
 def _op_contains(value: Any, needle: Any) -> bool:
     if value is _MISSING:
         return False
-    if isinstance(value, (list, tuple, set, dict)):
-        return needle in value
-    return str(needle) in _stringify_filter_value(value)
+    return needle in value if isinstance(value, (list, tuple, set, dict)) else str(needle) in _stringify_filter_value(value)
 
 
 def _op_regex(value: Any, pattern: Any) -> bool:
@@ -127,10 +117,7 @@ class WebhookRouteProcessor:
         parts = [part for part in field.strip().split(".") if part]
         if not parts:
             return _MISSING
-        context = {
-            "payload": payload.get("payload", payload), "event": event_type, "event_type": event_type,
-            "headers": dict(headers or {}),
-        }
+        context = {"payload": payload.get("payload", payload), "event": event_type, "event_type": event_type, "headers": dict(headers or {})}
         value: Any = context[parts.pop(0)] if parts[0] in context else payload
         for part in parts:
             if isinstance(value, dict):
@@ -189,19 +176,16 @@ class WebhookRouteProcessor:
         if error or path is None:
             logger.warning("[webhook] script ignored webhook: %s", error)
             return False, None
-        if path.suffix.lower() in {".sh", ".bash"}:
-            bash = shutil.which("bash") or ("/bin/bash" if os.path.isfile("/bin/bash") else None)
-            if bash is None:
-                logger.warning("[webhook] script ignored webhook: bash not found")
-                return False, None
-            argv = [bash, str(path)]
-        else:
-            argv = [sys.executable, str(path)]
+        is_shell = path.suffix.lower() in {".sh", ".bash"}
+        interpreter = (shutil.which("bash") or ("/bin/bash" if os.path.isfile("/bin/bash") else None)) if is_shell else sys.executable
+        if interpreter is None:
+            logger.warning("[webhook] script ignored webhook: bash not found")
+            return False, None
         try:
             from tools.environments.local import build_subprocess_env
             popen_kwargs = {"creationflags": 0x08000000} if sys.platform == "win32" else {}
             result = subprocess.run(
-                argv, input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8", errors="replace",
+                [interpreter, str(path)], input=json.dumps(payload), capture_output=True, text=True, encoding="utf-8", errors="replace",
                 timeout=self.script_timeout_seconds, cwd=str(path.parent), env=build_subprocess_env(), **popen_kwargs,
             )
         except subprocess.TimeoutExpired:
@@ -219,8 +203,7 @@ class WebhookRouteProcessor:
             stdout = stderr = "[REDACTED - redaction failed]"
         if result.returncode != 0:
             logger.info("[webhook] script ignored webhook path=%s code=%s stderr=%s", path.name, result.returncode, stderr[:200])
-            return False, None
-        if not stdout or stdout == "[SILENT]":
+        if result.returncode != 0 or not stdout or stdout == "[SILENT]":
             return False, None
         try:
             transformed = json.loads(stdout)
@@ -229,6 +212,5 @@ class WebhookRouteProcessor:
         if not isinstance(transformed, dict):
             logger.warning("[webhook] script stdout must be a JSON object or text")
             return False, None
-        if transformed.get("[SILENT]") is True or transformed.get("__hermes_ignore__") is True:
-            return False, None
-        return True, transformed
+        silenced = transformed.get("[SILENT]") is True or transformed.get("__hermes_ignore__") is True
+        return (False, None) if silenced else (True, transformed)
