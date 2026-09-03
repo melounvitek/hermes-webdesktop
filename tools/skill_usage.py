@@ -125,13 +125,11 @@ def _now_iso() -> str:
 
 
 def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
-    if not value:
-        return None
     try:
-        parsed = datetime.fromisoformat(str(value))
+        parsed = datetime.fromisoformat(str(value)) if value else None
     except (TypeError, ValueError):
         return None
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    return parsed.replace(tzinfo=timezone.utc) if parsed is not None and parsed.tzinfo is None else parsed
 
 
 def latest_activity_at(record: Dict[str, Any]) -> Optional[str]:
@@ -142,15 +140,16 @@ def latest_activity_at(record: Dict[str, Any]) -> Optional[str]:
     return max(stamps, key=lambda t: t[0])[1] if stamps else None
 
 
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def activity_count(record: Dict[str, Any]) -> int:
     """Total observed use+view+patch events."""
-    total = 0
-    for key in ("use_count", "view_count", "patch_count"):
-        try:
-            total += int(record.get(key) or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
+    return sum(_int_or_zero(record.get(key)) for key in ("use_count", "view_count", "patch_count"))
 
 
 # --- Provenance — which skills are agent-created (and thus eligible for curation) ---
@@ -357,13 +356,12 @@ def adopt_skill(skill_name: str) -> Tuple[bool, str]:
         return False, f"'{skill_name}' is a protected built-in; the curator never manages it"
     if is_hub_installed(skill_name):
         return False, f"'{skill_name}' is hub-installed; its upstream owns it"
-    if is_bundled(skill_name):
-        # Bundled skills are governed by prune_builtins; stamping created_by=agent would change nothing.
+    if is_bundled(skill_name):  # governed by prune_builtins; stamping created_by=agent would change nothing
         return False, f"'{skill_name}' is a bundled built-in — it is governed by curator.prune_builtins, not by adoption"
     skill_dir = _find_skill_dir(skill_name)
+    if skill_dir is None and _find_external_skill_dir(skill_name) is not None:
+        return False, f"'{skill_name}' lives in skills.external_dirs and is read-only to the curator"
     if skill_dir is None:
-        if _find_external_skill_dir(skill_name) is not None:
-            return False, f"'{skill_name}' lives in skills.external_dirs and is read-only to the curator"
         return False, f"skill '{skill_name}' not found"
     if is_external_skill_path(skill_dir):
         return False, _external_read_only_message(skill_name)
@@ -478,12 +476,7 @@ def _set_field(skill_name: str, key: str, value: Any) -> bool:
 
 
 def _non_negative_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
+    return 0 if isinstance(value, bool) else max(0, _int_or_zero(value))
 
 
 def _bump(rec: Dict[str, Any], count_key: str, ts_key: str) -> None:
@@ -516,13 +509,11 @@ def _emit_skill_lifecycle(
     """Best-effort lifecycle hook after an authoritative state change; absent facts are sent as None."""
     try:
         from hermes_cli.lifecycle import has_hook, invoke_hook
-        if not has_hook("on_skill_lifecycle"):
-            return
-        invoke_hook(
-            "on_skill_lifecycle", action=action, skill_name=skill_name,
-            provenance=telemetry_provenance(skill_name, record), task_id=task_id or "", session_id=session_id or "",
-            use_count=facts.get("use_count"), reused=facts.get("reused"), reuse_after_patch=facts.get("reuse_after_patch"),
-        )
+        if has_hook("on_skill_lifecycle"):
+            invoke_hook("on_skill_lifecycle", action=action, skill_name=skill_name,
+                        provenance=telemetry_provenance(skill_name, record), task_id=task_id or "",
+                        session_id=session_id or "", use_count=facts.get("use_count"), reused=facts.get("reused"),
+                        reuse_after_patch=facts.get("reuse_after_patch"))
     except Exception:
         logger.debug("skill_usage lifecycle hook failed for %s/%s", skill_name, action, exc_info=True)
 
@@ -582,8 +573,10 @@ def record_created(
 
 def record_installed(skill_name: str) -> None:
     """Record a successful Skills Hub install without exporting its name."""
-    _mutate_and_emit(skill_name, "installed",
-                     lambda rec: rec.update(created_by="installed", state=STATE_ACTIVE, archived_at=None) or {"created_by": "installed"})
+    def _apply(rec: Dict[str, Any]) -> Dict[str, Any]:
+        rec.update(created_by="installed", state=STATE_ACTIVE, archived_at=None)
+        return {"created_by": "installed"}
+    _mutate_and_emit(skill_name, "installed", _apply)
 
 
 def mark_agent_created(skill_name: str) -> None:
@@ -648,7 +641,6 @@ def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwa
         _ledger_before = _ledger.capture_before(src, **capture_kwargs)
     except Exception:
         _ledger = _ledger_before = None  # type: ignore[assignment]
-
     try:
         src.rename(dest)
     except OSError:
@@ -657,7 +649,6 @@ def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwa
             shutil.move(str(src), str(dest))
         except Exception as e:
             return False, f"failed to {action}: {e}"
-
     if action == "archive":
         if is_bundled(skill_name):  # pruning a built-in only sticks if the re-seeder is told to leave it alone
             _toggle_suppressed_name(skill_name, add=True)
@@ -667,8 +658,7 @@ def _relocate(src: Path, dest: Path, skill_name: str, action: str, **capture_kwa
         set_state(skill_name, STATE_ACTIVE)
     with suppress(Exception):
         if _ledger is not None:
-            _ledger.record_mutation(
-                action, skill_name, before=_ledger_before if _ledger_before is not None else [], after_root=dest)
+            _ledger.record_mutation(action, skill_name, before=_ledger_before or [], after_root=dest)
     return True, f"{action}d to {dest}"
 
 
@@ -718,16 +708,13 @@ def restore_skill(skill_name: str) -> Tuple[bool, str]:
     # Exact name first (recursive: older archive paths left nested layouts), then the timestamped-duplicate
     # fallback. Only "<skill>-YYYYMMDDHHMMSS" (14 digits) counts — a bare startswith("<skill>-") would let
     # restoring "git" pull an archived "git-helpers" out and rename it, destroying the sibling's only copy.
-    candidates = [p for p in archive_root.rglob("*") if p.is_dir() and p.name == skill_name]
-    if not candidates:
-        prefix = f"{skill_name}-"
-        candidates = sorted(
-            (p for p in archive_root.rglob("*") if p.is_dir() and p.name.startswith(prefix)
-             and len(p.name) - len(prefix) == 14 and p.name[len(prefix):].isdigit()),
-            reverse=True)
+    dirs = [p for p in archive_root.rglob("*") if p.is_dir()]
+    prefix = f"{skill_name}-"
+    candidates = [p for p in dirs if p.name == skill_name] or sorted(
+        (p for p in dirs if p.name.startswith(prefix) and len(p.name) - len(prefix) == 14
+         and p.name[len(prefix):].isdigit()), reverse=True)
     if not candidates:
         return False, f"skill '{skill_name}' not found in archive"
-
     dest = _skills_dir() / skill_name
     if dest.exists():
         return False, f"destination already exists: {dest}"
@@ -790,9 +777,6 @@ def usage_report() -> List[Dict[str, Any]]:
     if not base.exists():
         return []
     data = load_usage()
-    rows: Dict[str, Dict[str, Any]] = {}
-    for name, _skill_md in _iter_skill_mds(base, local_only=False):
-        if name not in rows:
-            rows[name] = _report_row(name, data.get(name), provenance=provenance(name),
-                                     _persisted=isinstance(data.get(name), dict))
-    return [rows[name] for name in sorted(rows)]
+    names = sorted({name for name, _skill_md in _iter_skill_mds(base, local_only=False)})
+    return [_report_row(n, data.get(n), provenance=provenance(n), _persisted=isinstance(data.get(n), dict))
+            for n in names]
