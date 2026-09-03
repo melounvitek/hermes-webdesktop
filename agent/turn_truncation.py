@@ -99,10 +99,10 @@ class TruncationVerdict:
     compression_attempts: int
 
 
-@dataclass
-class _Trunc:
-    """Mutable working state for the truncation phases; rebound loop locals are handed
-    back through ``verdict()``."""
+@dataclass(kw_only=True)
+class _Trunc(TruncationVerdict):
+    """Working state for the truncation phases — the verdict itself, plus the read-only
+    call context; phases mutate the loop-local fields and ``done()`` stamps the action."""
 
     agent: Any
     response: Any
@@ -111,21 +111,12 @@ class _Trunc:
     api_call_count: int
     effective_task_id: Any
     current_turn_user_idx: Any
-    messages: List[Dict[str, Any]]
-    length_continue_retries: int
-    truncated_response_parts: List[str]
-    truncated_tool_call_retries: int
-    retry_count: int
-    compression_attempts: int
+    action: str = "fallthrough"
+    result: Optional[Dict[str, Any]] = None
 
-    def verdict(self, action: str, result: Optional[Dict[str, Any]] = None) -> TruncationVerdict:
-        return TruncationVerdict(
-            action=action, result=result, messages=self.messages,
-            length_continue_retries=self.length_continue_retries,
-            truncated_response_parts=self.truncated_response_parts,
-            truncated_tool_call_retries=self.truncated_tool_call_retries,
-            retry_count=self.retry_count, compression_attempts=self.compression_attempts,
-        )
+    def done(self, action: str, result: Optional[Dict[str, Any]] = None) -> TruncationVerdict:
+        self.action, self.result = action, result
+        return self
 
     def end_turn(
         self, final_response: str, error: Optional[str] = None, *,
@@ -137,7 +128,7 @@ class _Trunc:
         if cleanup:
             agent._cleanup_task_resources(self.effective_task_id)
         agent._persist_session(self.messages, self.conversation_history)
-        return self.verdict("return", partial_result(
+        return self.done("return", partial_result(
             self.messages if result_messages is None else result_messages, self.api_call_count,
             final_response, error, failed=failed,
         ))
@@ -194,7 +185,7 @@ def _content_filter_fallback(st: _Trunc, _retry: TurnRetryState) -> Optional[Tru
         st.compression_attempts = 0
         _retry.primary_recovery_attempted = False
         _retry.restart_with_rebuilt_messages = True
-        return st.verdict("break")
+        return st.done("break")
     agent._vprint(
         f"{agent.log_prefix}⚠️  No fallback provider "
         f"configured — retrying with same provider "
@@ -244,7 +235,7 @@ def _continue_text(st: _Trunc, _retry: TurnRetryState, assistant_message: Any) -
         })
         agent._session_messages = messages
         _retry.restart_with_length_continuation = True
-        return st.verdict("break")
+        return st.done("break")
 
     partial_response = agent._strip_think_blocks(_join_truncated_parts(st.truncated_response_parts)).strip()
     # The one-shot reasoning-off override must not leak into the next turn.
@@ -293,7 +284,7 @@ def _retry_truncated_tool_call(st: _Trunc, api_kwargs: Any) -> TruncationVerdict
         if _tc_requested_cap is not None:
             _tc_boost = max(_tc_boost, _tc_requested_cap)
         agent._ephemeral_max_output_tokens = min(_tc_boost, max(32768, _tc_requested_cap or 0))
-        return st.verdict("continue")  # don't append the broken response
+        return st.done("continue")  # don't append the broken response
     agent._flush_status_buffer()
     if st.is_stub:
         agent._vprint(

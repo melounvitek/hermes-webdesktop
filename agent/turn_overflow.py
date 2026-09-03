@@ -64,10 +64,11 @@ class OverflowVerdict:
     is_context_length_error: bool
 
 
-@dataclass
-class _Recovery:
-    """Mutable working state shared by the overflow sub-handlers; the loop locals
-    they may rebind live here and are handed back through ``verdict()``."""
+@dataclass(kw_only=True)
+class _Recovery(OverflowVerdict):
+    """Working state shared by the overflow sub-handlers — the verdict itself, plus the
+    read-only call context; handlers mutate the loop-local fields and ``done()`` stamps
+    the action."""
 
     agent: Any
     api_messages: Any
@@ -75,23 +76,14 @@ class _Recovery:
     effective_task_id: Any
     api_call_count: int
     max_compression_attempts: int
-    messages: List[Dict[str, Any]]
-    active_system_prompt: Any
-    conversation_history: Any
-    approx_tokens: int
-    compression_attempts: int
+    action: str = "fallthrough"
+    result: Optional[Dict[str, Any]] = None
     provider_overflow_recovery_pending: bool = False
     is_context_length_error: bool = False
 
-    def verdict(self, action: str, result: Optional[Dict[str, Any]] = None) -> OverflowVerdict:
-        return OverflowVerdict(
-            action=action, result=result, messages=self.messages,
-            active_system_prompt=self.active_system_prompt,
-            conversation_history=self.conversation_history, approx_tokens=self.approx_tokens,
-            compression_attempts=self.compression_attempts,
-            provider_overflow_recovery_pending=self.provider_overflow_recovery_pending,
-            is_context_length_error=self.is_context_length_error,
-        )
+    def done(self, action: str, result: Optional[Dict[str, Any]] = None) -> OverflowVerdict:
+        self.action, self.result = action, result
+        return self
 
     def fail_turn(
         self, final_response: str, *, notices: tuple = (), log: Optional[tuple] = None,
@@ -119,7 +111,7 @@ class _Recovery:
         if compression_exhausted:
             result["compression_exhausted"] = True
         result.update(extra)
-        return self.verdict("return", result)
+        return self.done("return", result)
 
     def count_attempt(self, *, payload_too_large: bool = False) -> Optional[OverflowVerdict]:
         """Bump ``compression_attempts``; the terminal verdict once the cap is exceeded."""
@@ -173,7 +165,7 @@ class _Recovery:
             if deferred is not None:
                 self.compression_attempts -= 1
                 agent._persist_session(self.messages, self.conversation_history)
-                return self.verdict("return", deferred)
+                return self.done("return", deferred)
         if fail_on_timeout and context_compression_timed_out(agent):
             return self.fail_turn(
                 _COMPRESSION_TIMEOUT_FINAL_RESPONSE, turn_exit_reason="context_compression_timeout"
@@ -250,14 +242,14 @@ def _recover_payload_too_large(st: _Recovery, _retry: TurnRetryState) -> Overflo
             )
         time.sleep(2)  # Brief pause between compression retries
         _retry.restart_with_compressed_messages = True
-        return st.verdict("break")
+        return st.done("break")
 
     if agent._try_strip_image_parts_from_tool_messages(st.api_messages, remember_model=False):
         agent._buffer_status(
             "📐 Compression could not reduce the request further — "
             "removed retained vision payloads and retrying..."
         )
-        return st.verdict("continue")
+        return st.done("continue")
 
     return st.fail_turn(
         "Request payload too large (413). Cannot compress further.",
@@ -302,7 +294,7 @@ def _clamp_output_cap(st: _Recovery, _retry: TurnRetryState, available_out: int,
             "%sOutput-cap compression hit an error; retrying on max_tokens only.", agent.log_prefix
         )
     _retry.restart_with_compressed_messages = True
-    return st.verdict("break")
+    return st.done("break")
 
 
 def _adopt_provider_context_limit(st: _Recovery, error_msg: str, old_ctx: int) -> Optional[int]:
@@ -397,7 +389,7 @@ def _recover_context_length(st: _Recovery, _retry: TurnRetryState, error_msg: st
         # count alone doesn't prove system/tool-inclusive pressure fell.
         st.provider_overflow_recovery_pending = True
         _retry.restart_with_compressed_messages = True
-        return st.verdict("break")
+        return st.done("break")
 
     # Can't compress further and already at minimum tier.
     return st.fail_turn(
@@ -454,4 +446,4 @@ def recover_from_overflow(
     )
     if st.is_context_length_error:
         return _recover_context_length(st, _retry, error_msg)
-    return st.verdict("fallthrough")
+    return st.done("fallthrough")
