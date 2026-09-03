@@ -225,9 +225,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                         self.server_url, self._private_api_enabled, self._helper_connected)
         except Exception as exc:
             logger.error("[bluebubbles] cannot reach server at %s: %s", self.server_url, exc)
-            if self.client:
-                await self.client.aclose()
-                self.client = None
+            await self._close_client()
             return False
         # client_max_size makes aiohttp enforce the cap on every read path,
         # including chunked requests with no Content-Length.
@@ -249,11 +247,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self._wire_plugin_handlers(None)
         return True
 
-    async def disconnect(self) -> None:
-        await self._unregister_webhook()
+    async def _close_client(self) -> None:
         if self.client:
             await self.client.aclose()
             self.client = None
+
+    async def disconnect(self) -> None:
+        await self._unregister_webhook()
+        await self._close_client()
         if self._runner:
             await self._runner.cleanup()
             self._runner = None

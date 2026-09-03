@@ -262,11 +262,14 @@ class SignalAdapter(BasePlatformAdapter):
             return True
         finally:
             if not self._running:
-                if self.client:
-                    await self.client.aclose()
-                    self.client = None
+                await self._close_client()
                 if lock_acquired:
                     self._release_platform_lock()
+
+    async def _close_client(self) -> None:
+        if self.client:
+            await self.client.aclose()
+            self.client = None
 
     @staticmethod
     async def _cancel_task(task: Optional[asyncio.Task]) -> None:
@@ -283,9 +286,7 @@ class SignalAdapter(BasePlatformAdapter):
         for task in self._typing_tasks.values():
             task.cancel()
         self._typing_tasks.clear()
-        if self.client:
-            await self.client.aclose()
-            self.client = None
+        await self._close_client()
         self._release_platform_lock()
         logger.info("Signal: disconnected")
 
@@ -353,15 +354,16 @@ class SignalAdapter(BasePlatformAdapter):
             logger.warning("Signal: SSE idle for %.0fs, checking daemon health", elapsed)
             try:
                 resp = await self.client.get(f"{self.http_url}/api/v1/check", timeout=10.0)
-                if resp.status_code == 200:
-                    # Daemon alive but SSE quiet — reset activity to avoid repeated warnings
-                    self._last_sse_activity = time.time()
-                    logger.debug("Signal: daemon healthy, SSE idle")
-                else:
-                    logger.warning("Signal: health check failed (%d), forcing reconnect", resp.status_code)
-                    self._force_reconnect()
             except Exception as e:
                 logger.warning("Signal: health check error: %s, forcing reconnect", e)
+                self._force_reconnect()
+                continue
+            if resp.status_code == 200:
+                # Daemon alive but SSE quiet — reset activity to avoid repeated warnings
+                self._last_sse_activity = time.time()
+                logger.debug("Signal: daemon healthy, SSE idle")
+            else:
+                logger.warning("Signal: health check failed (%d), forcing reconnect", resp.status_code)
                 self._force_reconnect()
 
     def _force_reconnect(self) -> None:
