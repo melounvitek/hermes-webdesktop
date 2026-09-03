@@ -9,44 +9,32 @@ import sys
 
 _STATUS_MARKERS = {"installed": "✓", "missing": "·", "manual-only": "?"}
 
+# (name, parser kwargs, optional (flag, add_argument kwargs)) — order defines the help listing.
+_SUBCOMMANDS = [
+    ("status", {"help": "Show LSP service status"},
+     ("--json", {"action": "store_true", "help": "Emit machine-readable JSON"})),
+    ("list", {"help": "List supported language servers"},
+     ("--installed-only", {"action": "store_true", "help": "Only show servers whose binary is currently available"})),
+    ("install", {"help": "Install a server binary"}, ("server", {"help": "Server id (e.g. pyright, gopls)"})),
+    ("install-all", {"help": "Install every server with a known auto-install recipe"},
+     ("--include-manual", {"action": "store_true", "help": "Even attempt servers marked manual-install (best effort)"})),
+    ("restart", {"help": "Tear down running LSP clients (next edit re-spawns)"}, None),
+    ("which", {"help": "Print binary path for a server"}, ("server", {"help": "Server id"})),
+]
+
 
 def register_subparser(subparsers: argparse._SubParsersAction) -> None:
     """Wire the ``hermes lsp`` subcommand tree into the main argparse."""
     parser = subparsers.add_parser(
         "lsp",
         help="Language Server Protocol management",
-        description=(
-            "Manage the LSP layer that powers post-write semantic "
-            "diagnostics in write_file/patch."
-        ),
+        description="Manage the LSP layer that powers post-write semantic diagnostics in write_file/patch.",
     )
     sub = parser.add_subparsers(dest="lsp_command")
-
-    sub.add_parser("status", help="Show LSP service status").add_argument(
-        "--json", action="store_true", help="Emit machine-readable JSON"
-    )
-    sub.add_parser("list", help="List supported language servers").add_argument(
-        "--installed-only",
-        action="store_true",
-        help="Only show servers whose binary is currently available",
-    )
-    sub.add_parser("install", help="Install a server binary").add_argument(
-        "server", help="Server id (e.g. pyright, gopls)"
-    )
-    sub.add_parser(
-        "install-all",
-        help="Install every server with a known auto-install recipe",
-    ).add_argument(
-        "--include-manual",
-        action="store_true",
-        help="Even attempt servers marked manual-install (best effort)",
-    )
-    sub.add_parser(
-        "restart",
-        help="Tear down running LSP clients (next edit re-spawns)",
-    )
-    sub.add_parser("which", help="Print binary path for a server").add_argument("server", help="Server id")
-
+    for name, kwargs, arg in _SUBCOMMANDS:
+        p = sub.add_parser(name, **kwargs)
+        if arg is not None:
+            p.add_argument(arg[0], **arg[1])
     parser.set_defaults(func=run_lsp_command)
 
 
@@ -97,17 +85,12 @@ def _cmd_status(emit_json: bool) -> int:
                 f"  wait_timeout:    {info.get('wait_timeout')}s",
                 f"  install_strategy:{info.get('install_strategy')}"]
         clients = info.get("clients") or []
-        if clients:
-            out.append(f"  active clients:  {len(clients)}")
-            out.extend(
-                f"    - {c['server_id']:20s} state={c['state']:10s} root={c['workspace_root']}" for c in clients
-            )
-        else:
-            out.append("  active clients:  none")
+        out.append(f"  active clients:  {len(clients)}" if clients else "  active clients:  none")
+        out += [f"    - {c['server_id']:20s} state={c['state']:10s} root={c['workspace_root']}" for c in clients]
         broken = info.get("broken") or []
         if broken:
             out.append(f"  broken pairs:    {len(broken)}")
-            out.extend(f"    - {b}" for b in broken)
+            out += [f"    - {b}" for b in broken]
         disabled = info.get("disabled_servers") or []
         if disabled:
             out.append(f"  disabled in cfg: {', '.join(disabled)}")
@@ -115,9 +98,8 @@ def _cmd_status(emit_json: bool) -> int:
     # Sidecar gaps the registry table can't show (bash-language-server -> shellcheck).
     backend_warnings = _backend_warnings()
     if backend_warnings:
-        out.extend(["", "Backend warnings", "================"])
-        out.extend(f"  ! {line}" for line in backend_warnings)
-    out.extend(["", "Registered Servers", "=================="])
+        out += ["", "Backend warnings", "================"] + [f"  ! {line}" for line in backend_warnings]
+    out += ["", "Registered Servers", "=================="]
     for s in SERVERS:
         status = detect_status(_recipe_pkg_for(s.server_id))
         ext_summary = ", ".join(list(s.extensions)[:5])
@@ -176,11 +158,8 @@ def _cmd_install_all(include_manual: bool) -> int:
         sys.stdout.write(f"  installing {s.server_id} (pkg={pkg}) ... ")
         sys.stdout.flush()
         path = try_install(pkg, "auto")
-        if path:
-            sys.stdout.write(f"ok ({path})\n")
-        else:
-            sys.stdout.write("FAILED\n")
-            rc = 1
+        sys.stdout.write(f"ok ({path})\n" if path else "FAILED\n")
+        rc = rc if path else 1
     return rc
 
 
@@ -222,9 +201,6 @@ def _backend_warnings() -> list:
     import shutil
     from agent.lsp.install import _existing_binary
     if _existing_binary("bash-language-server") is not None and shutil.which("shellcheck") is None:
-        return [
-            "bash-language-server is installed but shellcheck is missing — "
-            "diagnostics will be empty (apt: shellcheck, brew: shellcheck, "
-            "scoop: shellcheck)."
-        ]
+        return ["bash-language-server is installed but shellcheck is missing — "
+                "diagnostics will be empty (apt: shellcheck, brew: shellcheck, scoop: shellcheck)."]
     return []

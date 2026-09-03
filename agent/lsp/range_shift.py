@@ -1,12 +1,11 @@
 """Diff-aware line-shift map for cross-edit LSP delta filtering.
 
-When an edit inserts or deletes lines, every diagnostic below the edit point
-moves.  The delta filter keys on ``(severity, code, source, message, range)``,
-so without adjustment the shifted-but-identical diagnostics look brand-new.
-We build a pre→post line map from ``difflib.SequenceMatcher.get_opcodes()``
-and apply it to the baseline before the set-difference; diagnostics in a
-deleted region map to ``None`` and drop out.  Keeping range in the key
-preserves the "new instance of an identical error at a different line" signal.
+An edit that inserts/deletes lines moves every diagnostic below it, and the delta
+filter keys on ``(severity, code, source, message, range)`` — so shifted-but-identical
+diagnostics would look brand-new.  We build a pre→post line map from
+``difflib.SequenceMatcher.get_opcodes()`` and apply it to the baseline before the
+set-difference; diagnostics in a deleted region map to ``None`` and drop out.
+Keeping range in the key preserves the "same error at a new line" signal.
 """
 from __future__ import annotations
 
@@ -24,10 +23,8 @@ def build_line_shift(pre_text: str, post_text: str) -> _Shift:
     """
     pre_lines = pre_text.splitlines() if pre_text else []
     post_lines = post_text.splitlines() if post_text else []
-
     if pre_lines == post_lines:
         return lambda line: line
-
     # Opcodes are (tag, i1, i2, j1, j2): i-range in pre, j-range in post.
     opcodes = difflib.SequenceMatcher(a=pre_lines, b=post_lines, autojunk=False).get_opcodes()
 
@@ -54,7 +51,6 @@ def shift_diagnostic_range(diag: Dict[str, Any], shift: _Shift) -> Optional[Dict
     rng = diag.get("range") or {}
     start = rng.get("start") or {}
     end = rng.get("end") or {}
-
     pre_start_line = int(start.get("line", 0))
     new_start_line = shift(pre_start_line)
     if new_start_line is None:
@@ -62,7 +58,6 @@ def shift_diagnostic_range(diag: Dict[str, Any], shift: _Shift) -> Optional[Dict
     new_end_line = shift(int(end.get("line", pre_start_line)))
     if new_end_line is None:
         new_end_line = new_start_line
-
     return {
         **diag,
         "range": {

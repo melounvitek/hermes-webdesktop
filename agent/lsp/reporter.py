@@ -63,9 +63,8 @@ def report_for_file(
     if not filtered:
         return ""
     body = "\n".join(format_diagnostic(d) for d in filtered[:max_per_file])
-    extra = len(filtered) - max_per_file
-    if extra > 0:
-        body += f"\n... and {extra} more"
+    if len(filtered) > max_per_file:
+        body += f"\n... and {len(filtered) - max_per_file} more"
     # quote=True also escapes ``"`` so a crafted file name can't break out of
     # the ``file="..."`` attribute and synthesize new tags.
     safe_path = html.escape(file_path, quote=True)

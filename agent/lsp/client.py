@@ -75,8 +75,7 @@ def file_uri(path: str) -> str:
     if os.name == "nt":
         # ``C:\foo`` → ``file:///C:/foo``: the drive letter must be a path component.
         abs_path = abs_path.replace("\\", "/")
-        if not abs_path.startswith("/"):
-            abs_path = "/" + abs_path
+        abs_path = abs_path if abs_path.startswith("/") else "/" + abs_path
     return "file://" + quote(abs_path, safe="/:")
 
 
@@ -130,11 +129,8 @@ class _DocState:
 
 
 class LSPClient:
-    """Async LSP client tied to one server process and one workspace root.
-
-    Lifecycle: ``start()`` → ``open_file()`` → ``wait_for_diagnostics()`` →
-    ``diagnostics_for()`` → ``shutdown()``.
-    """
+    """One server process + one workspace root.  ``start()`` → ``open_file()`` → ``wait_for_diagnostics()`` →
+    ``diagnostics_for()`` → ``shutdown()``."""
 
     def __init__(self, *, server_id: str, workspace_root: str, command: List[str],
                  env: Optional[Dict[str, str]] = None, cwd: Optional[str] = None,
@@ -270,8 +266,7 @@ class LSPClient:
             unexpected_close = not self._stopping and self._state in _LIVE_STATES
             if unexpected_close:
                 self._state = "error"
-            # Fail pending requests fast.
-            for fut in list(self._pending.values()):
+            for fut in list(self._pending.values()):  # fail pending requests fast
                 if not fut.done():
                     fut.set_exception(LSPProtocolError("server connection closed"))
             self._pending.clear()
@@ -398,11 +393,11 @@ class LSPClient:
         fut = self._pending.get(req_id)
         if fut is None or fut.done():
             return
-        if "error" in msg:
-            err = msg["error"] or {}
-            fut.set_exception(LSPRequestError(int(err.get("code", -32000)), str(err.get("message", "unknown")), err.get("data")))
-        else:
+        if "error" not in msg:
             fut.set_result(msg.get("result"))
+            return
+        err = msg["error"] or {}
+        fut.set_exception(LSPRequestError(int(err.get("code", -32000)), str(err.get("message", "unknown")), err.get("data")))
 
     async def _dispatch_request(self, req_id: Any, msg: dict) -> None:
         method = msg.get("method", "")

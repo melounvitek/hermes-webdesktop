@@ -37,9 +37,7 @@ def _short_path(file_path: str) -> str:
         rel = os.path.relpath(file_path)
     except ValueError:
         return file_path
-    if rel.startswith(".." + os.sep) or rel == "..":
-        return file_path
-    return rel
+    return file_path if rel.startswith(".." + os.sep) or rel == ".." else rel
 
 
 def _emit(server_id: str, level: int, message: str) -> None:
@@ -51,10 +49,7 @@ def _emit_once(bucket: set, key: Tuple, server_id: str, level: int, first: str, 
     with _announce_lock:
         is_first = key not in bucket
         bucket.add(key)
-    if is_first:
-        _emit(server_id, level, first)
-    else:
-        _emit(server_id, logging.DEBUG, repeat)
+    _emit(server_id, level if is_first else logging.DEBUG, first if is_first else repeat)
 
 
 # ---- Public event helpers — call these from the LSP layer ----
@@ -72,10 +67,8 @@ def log_disabled(server_id: str, file_path: str, reason: str) -> None:
 
 def log_active(server_id: str, workspace_root: str) -> None:
     """A client started for (server_id, workspace_root).  INFO once per pair, DEBUG thereafter."""
-    _emit_once(
-        _announced_active, (server_id, workspace_root), server_id, logging.INFO,
-        f"active for {workspace_root}", f"reused client for {workspace_root}",
-    )
+    _emit_once(_announced_active, (server_id, workspace_root), server_id, logging.INFO,
+               f"active for {workspace_root}", f"reused client for {workspace_root}")
 
 
 def log_diagnostics(server_id: str, file_path: str, count: int) -> None:
@@ -121,8 +114,7 @@ def log_reaped(keys: List[Tuple[str, str]], idle_timeout: float) -> None:
     re-announces at INFO instead of a misleading DEBUG "reused client".
     """
     with _announce_lock:
-        for key in keys:
-            _announced_active.discard(key)
+        _announced_active.difference_update(keys)
     summary = ", ".join(f"{sid} ({root})" for sid, root in keys)
     _emit("reaper", logging.INFO, f"reaped {len(keys)} idle client(s) after {idle_timeout:.0f}s: {summary}")
 

@@ -31,9 +31,7 @@ class LSPRequestError(Exception):
 
     def __init__(self, code: int, message: str, data: Any = None) -> None:
         super().__init__(f"LSP error {code}: {message}")
-        self.code = code
-        self.message = message
-        self.data = data
+        self.code, self.message, self.data = code, message, data
 
 
 def encode_message(obj: dict) -> bytes:
@@ -129,15 +127,11 @@ def classify_message(msg: dict) -> Tuple[str, Any]:
     """
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return "invalid", None
-    has_id = "id" in msg
-    has_method = "method" in msg
-    if has_id and has_method:
-        return "request", msg["id"]
-    if has_id and ("result" in msg or "error" in msg):
-        return "response", msg["id"]
-    if has_method:
-        return "notification", msg["method"]
-    return "invalid", None
+    if "id" in msg:
+        if "method" in msg:
+            return "request", msg["id"]
+        return ("response", msg["id"]) if ("result" in msg or "error" in msg) else ("invalid", None)
+    return ("notification", msg["method"]) if "method" in msg else ("invalid", None)
 
 
 __all__ = [

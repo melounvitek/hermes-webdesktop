@@ -62,7 +62,6 @@ INSTALL_RECIPES: Dict[str, Dict[str, Any]] = {
     "powershell": _manual("pwsh"),
 }
 
-
 _install_locks: Dict[str, threading.Lock] = {}
 _install_results: Dict[str, Optional[str]] = {}
 _install_lock_meta = threading.Lock()
@@ -83,26 +82,21 @@ def hermes_lsp_bin_dir() -> Path:
 
 
 def _native_binary_candidates(base: Path) -> list[Path]:
-    """Return platform-native executable candidates for a staged binary."""
+    """Return platform-native executable candidates for a staged binary (``base`` plus Windows wrappers)."""
     candidates = [base]
     if _is_windows():
-        existing = {str(base).lower()}
+        seen = {str(base).lower()}
         for suffix in _WINDOWS_WRAPPER_SUFFIXES:
             candidate = Path(str(base) + suffix)
-            key = str(candidate).lower()
-            if key not in existing:
+            if str(candidate).lower() not in seen:
                 candidates.append(candidate)
-                existing.add(key)
+                seen.add(str(candidate).lower())
     return candidates
 
 
 def _first_existing(*bases: Path) -> Optional[Path]:
     """First platform-native candidate of any ``base`` that exists on disk."""
-    for base in bases:
-        for c in _native_binary_candidates(base):
-            if c.exists():
-                return c
-    return None
+    return next((c for base in bases for c in _native_binary_candidates(base) if c.exists()), None)
 
 
 def _existing_binary(name: str) -> Optional[str]:
@@ -114,24 +108,19 @@ def _existing_binary(name: str) -> Optional[str]:
     return next((p for s in suffixes if (p := shutil.which(f"{name}{s}"))), None)
 
 
-def _get_lock(pkg: str) -> threading.Lock:
-    with _install_lock_meta:
-        return _install_locks.setdefault(pkg, threading.Lock())
-
-
 def try_install(pkg: str, strategy: str = "auto") -> Optional[str]:
     """Try to install ``pkg``; return the binary path or ``None``.
 
-    Only ``"auto"`` installs; ``"manual"``/``"off"`` just probe for an
-    existing binary.  Results are cached per package and concurrent calls
-    are serialized.
+    Only ``"auto"`` installs; ``"manual"``/``"off"`` just probe for an existing
+    binary.  Results are cached per package and concurrent calls are serialized.
     """
     if strategy != "auto":
         return _existing_binary(INSTALL_RECIPES.get(pkg, {}).get("bin", pkg))
-
     if pkg in _install_results:
         return _install_results[pkg]
-    with _get_lock(pkg):
+    with _install_lock_meta:
+        lock = _install_locks.setdefault(pkg, threading.Lock())
+    with lock:
         if pkg not in _install_results:
             _install_results[pkg] = _do_install(pkg)
         return _install_results[pkg]
@@ -140,9 +129,7 @@ def try_install(pkg: str, strategy: str = "auto") -> Optional[str]:
 def _do_install(pkg: str) -> Optional[str]:
     recipe = INSTALL_RECIPES.get(pkg)
     if recipe is None:
-        # Not in our registry — best-effort: just probe PATH.
-        return shutil.which(pkg)
-
+        return shutil.which(pkg)  # not in our registry — best-effort: just probe PATH
     strategy = recipe.get("strategy", "manual")
     bin_name = recipe.get("bin", pkg)
     existing = _existing_binary(bin_name)
@@ -151,7 +138,6 @@ def _do_install(pkg: str) -> Optional[str]:
     if strategy == "manual":
         logger.debug("[install] %s requires manual install (recipe=%s)", pkg, recipe)
         return None
-
     installer = _INSTALLERS.get(strategy)
     if installer is None:
         logger.warning("[install] unknown strategy %r for %s", strategy, pkg)
@@ -218,9 +204,8 @@ def _install_go(pkg: str, bin_name: str) -> Optional[str]:
         logger.info("[install] cannot install %s: go not on PATH", pkg)
         return None
     staging = hermes_lsp_bin_dir()
-    env = {**os.environ, "GOBIN": str(staging)}
     logger.info("[install] go install %s (GOBIN=%s)", pkg, staging)
-    if not _run_installer("go", pkg, [go, "install", pkg], timeout=600, env=env):
+    if not _run_installer("go", pkg, [go, "install", pkg], timeout=600, env={**os.environ, "GOBIN": str(staging)}):
         return None
     bin_path = (staging / bin_name).with_suffix(".exe") if _is_windows() else staging / bin_name
     if bin_path.exists():
@@ -263,9 +248,7 @@ def detect_status(pkg: str) -> str:
     recipe = INSTALL_RECIPES.get(pkg)
     if _existing_binary(recipe.get("bin", pkg) if recipe else pkg):
         return "installed"
-    if recipe and recipe.get("strategy") == "manual":
-        return "manual-only"
-    return "missing"
+    return "manual-only" if recipe and recipe.get("strategy") == "manual" else "missing"
 
 
 __all__ = ["INSTALL_RECIPES", "try_install", "detect_status", "hermes_lsp_bin_dir"]

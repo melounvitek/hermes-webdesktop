@@ -93,8 +93,7 @@ class ServerContext:
 def _file_ext_or_basename(path: str) -> str:
     """Lower-cased extension, or the full basename for extensionless files (``Dockerfile``)."""
     base = os.path.basename(path)
-    ext = os.path.splitext(base)[1]
-    return ext.lower() if ext else base
+    return os.path.splitext(base)[1].lower() or base
 
 
 def _which(*names: str) -> Optional[str]:
@@ -111,6 +110,13 @@ def _root_or_workspace(file_path: str, workspace: str, markers: Sequence[str], e
         # the exclude fired (gated off); otherwise fall back to the workspace.
         return None
     return found or workspace
+
+
+def _markers_root(markers: Optional[Sequence[str]], excludes: Sequence[str] = ()) -> _RootFn:
+    """Root resolver over marker files; ``None`` markers means "always the workspace root"."""
+    if markers is None:
+        return lambda fp, ws: ws
+    return lambda fp, ws: _root_or_workspace(fp, ws, markers, excludes=excludes)
 
 
 def _find_binary(ctx: ServerContext, server_id: str, which: Sequence[str], install_pkg: Optional[str]) -> Optional[str]:
@@ -140,13 +146,6 @@ def _simple_spawn(server_id: str, which: Sequence[str], args: Sequence[str] = ()
     return build
 
 
-def _markers_root(markers: Optional[Sequence[str]], excludes: Sequence[str] = ()) -> _RootFn:
-    """Root resolver over marker files; ``None`` markers means "always the workspace root"."""
-    if markers is None:
-        return lambda fp, ws: ws
-    return lambda fp, ws: _root_or_workspace(fp, ws, markers, excludes=excludes)
-
-
 # ---- bespoke spawn builders ----
 
 
@@ -161,19 +160,13 @@ def _spawn_pyright(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
             bin_path = sibling
     # Point pyright at the project venv; its default "python on PATH" rarely is.
     py = _detect_python(root)
-    init: Dict[str, Any] = {"python": {"pythonPath": py}} if py else {}
-    return _make_spec(root, ctx, "pyright", [bin_path, "--stdio"], init)
+    return _make_spec(root, ctx, "pyright", [bin_path, "--stdio"], {"python": {"pythonPath": py}} if py else {})
 
 
 def _detect_python(root: str) -> Optional[str]:
-    candidates = [v for v in (os.environ.get("VIRTUAL_ENV"),) if v]
-    candidates.extend([os.path.join(root, ".venv"), os.path.join(root, "venv")])
-    for v in candidates:
-        for sub in ("bin/python", "bin/python3", "Scripts/python.exe"):
-            p = os.path.join(v, sub)
-            if os.path.exists(p):
-                return p
-    return None
+    venvs = [v for v in (os.environ.get("VIRTUAL_ENV"), os.path.join(root, ".venv"), os.path.join(root, "venv")) if v]
+    paths = (os.path.join(v, sub) for v in venvs for sub in ("bin/python", "bin/python3", "Scripts/python.exe"))
+    return next((p for p in paths if os.path.exists(p)), None)
 
 
 _warned_once: set = set()
@@ -192,12 +185,8 @@ def _spawn_bash_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     # bash-language-server delegates diagnostics to shellcheck; without it the
     # server runs but never reports anything.  Warn once so the gap is visible.
     if _which("shellcheck") is None:
-        _warn_once(
-            "shellcheck",
-            "bash-language-server: shellcheck not found on PATH — "
-            "diagnostics will be empty until shellcheck is installed "
-            "(apt: shellcheck, brew: shellcheck, scoop: shellcheck).",
-        )
+        _warn_once("shellcheck", "bash-language-server: shellcheck not found on PATH — diagnostics will be empty "
+                   "until shellcheck is installed (apt: shellcheck, brew: shellcheck, scoop: shellcheck).")
     return _make_spec(root, ctx, "bash-language-server", [bin_path, "start"])
 
 
@@ -209,7 +198,6 @@ def _find_pses_bundle(ctx: ServerContext) -> Optional[str]:
     then ``<HERMES_HOME>/lsp/PowerShellEditorServices``.
     """
     from hermes_constants import get_hermes_home
-
     override = ctx.binary_overrides.get("powershell")
     init = ctx.init_overrides.get("powershell", {})
     candidates = [
@@ -227,6 +215,13 @@ def _find_pses_bundle(ctx: ServerContext) -> Optional[str]:
     return None
 
 
+_PSES_MISSING_MSG = (
+    "powershell: pwsh found but the PowerShellEditorServices bundle is missing. Download the release zip from "
+    "https://github.com/PowerShell/PowerShellEditorServices/releases, extract it, and either set "
+    "lsp.servers.powershell.command to the bundle path or unzip it to <HERMES_HOME>/lsp/PowerShellEditorServices."
+)
+
+
 def _spawn_powershell_es(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     """Spawn PowerShellEditorServices: needs a ``pwsh``/``powershell`` host plus the module bundle."""
     pwsh = _which("pwsh", "powershell")
@@ -234,15 +229,7 @@ def _spawn_powershell_es(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
         return None
     bundle = _find_pses_bundle(ctx)
     if bundle is None:
-        _warn_once(
-            "pses-bundle",
-            "powershell: pwsh found but the PowerShellEditorServices "
-            "bundle is missing. Download the release zip from "
-            "https://github.com/PowerShell/PowerShellEditorServices/releases, "
-            "extract it, and either set lsp.servers.powershell.command "
-            "to the bundle path or unzip it to "
-            "<HERMES_HOME>/lsp/PowerShellEditorServices.",
-        )
+        _warn_once("pses-bundle", _PSES_MISSING_MSG)
         return None
     start_script = os.path.join(bundle, "PowerShellEditorServices", "Start-EditorServices.ps1")
     # PSES writes connection info to the session details file on startup.
@@ -264,7 +251,6 @@ def _spawn_powershell_es(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 def hermes_lsp_session_dir() -> str:
     """Return (and create) the dir for PSES session/log scratch files."""
     from hermes_constants import get_hermes_home
-
     d = os.path.join(str(get_hermes_home()), "lsp", "pses")
     os.makedirs(d, exist_ok=True)
     return d
