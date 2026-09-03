@@ -1,23 +1,19 @@
 """Single owner for personality overlays.
 
-The v34 config migration resets the selection once; this module ensures the split cannot happen
-again.
-
-* ``display.personality`` holds the selected NAME (empty = no overlay). * ``agent.system_prompt`` is
-the user-owned manual overlay. Personality code never writes it. * ``agent.personalities`` holds
-user-defined/overridden personalities; they overlay the built-ins by name.
+* ``display.personality`` holds the selected NAME (empty = no overlay).
+* ``agent.system_prompt`` is the user-owned manual overlay; personality code never writes it.
+* ``agent.personalities`` holds user-defined/overridden personalities, overlaying built-ins by name.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional, Tuple
 
 #: Names that mean "no personality overlay".
 NEUTRAL_PERSONALITY_NAMES = frozenset({"", "none", "default", "neutral"})
 
-#: Built-in personalities, available on every surface (CLI, gateway, TUI,
-#: desktop) without any config. User entries in ``agent.personalities``
-#: overlay these by name.
+#: Built-in personalities, available on every surface without any config.
 BUILTIN_PERSONALITIES: Dict[str, str] = {
     "helpful": "You are a helpful, friendly AI assistant.",
     "concise": "You are a concise assistant. Keep responses brief and to the point.",
@@ -97,9 +93,7 @@ def available_personalities(cfg: Optional[Dict[str, Any]] = None) -> Dict[str, A
     return merged
 
 
-def resolve_personality(
-    value: Any, cfg: Optional[Dict[str, Any]] = None
-) -> Tuple[str, str]:
+def resolve_personality(value: Any, cfg: Optional[Dict[str, Any]] = None) -> Tuple[str, str]:
     """Resolve a requested personality to ``(canonical_name, prompt_text)``."""
     name = normalize_personality_name(value)
     if not name:
@@ -116,18 +110,12 @@ def resolve_personality(
 def active_personality_name(cfg: Optional[Dict[str, Any]]) -> str:
     """The currently selected personality name ('' when none is active)."""
     name = normalize_personality_name(_get(cfg, "display", "personality", default=""))
-    if name and name in available_personalities(cfg):
-        return name
-    return ""
+    return name if name and name in available_personalities(cfg) else ""
 
 
 def resolve_ephemeral_system_prompt(cfg: Optional[Dict[str, Any]]) -> str:
-    """Resolve the session overlay from config.
-
-    ``display.personality`` wins when it names a known personality; otherwise the user-owned
-    ``agent.system_prompt`` applies. Callers should still prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``
-    when that env var is set.
-    """
+    """Session overlay: ``display.personality`` when it names a known personality, else the
+    user-owned ``agent.system_prompt``. Callers still prefer ``HERMES_EPHEMERAL_SYSTEM_PROMPT``."""
     name = active_personality_name(cfg)
     if name:
         return render_personality_prompt(available_personalities(cfg)[name])
@@ -135,12 +123,9 @@ def resolve_ephemeral_system_prompt(cfg: Optional[Dict[str, Any]]) -> str:
 
 
 def persist_personality(value: Any) -> bool:
-    """Persist the personality selection — the ONLY sanctioned write path.
-
-    Writes the canonical name (or '') to ``display.personality`` in the active HERMES_HOME
-    config.yaml atomically, preserving comments and ordering. Never touches ``agent.system_prompt``.
-    Returns True on success.
-    """
+    """Persist the selection — the ONLY sanctioned write path. Writes the canonical name (or '')
+    to ``display.personality`` atomically (comments/ordering preserved); never touches
+    ``agent.system_prompt``. Returns True on success."""
     name = normalize_personality_name(value)
     try:
         from hermes_constants import get_hermes_home
@@ -150,8 +135,6 @@ def persist_personality(value: Any) -> bool:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_roundtrip_yaml_update(config_path, "display.personality", name)
         try:
-            import os
-
             os.chmod(config_path, 0o600)
         except (OSError, NotImplementedError):
             pass
