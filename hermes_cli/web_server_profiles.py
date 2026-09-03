@@ -116,8 +116,8 @@ def _fallback_profile_entry(profiles_mod, name: str, home: Path, *, is_default: 
         return _safe(lambda: profiles_mod.read_profile_meta(home).get(key, default), default)
 
     return {
-        "name": name, "path": str(home), "is_default": is_default, "model": model, "provider": provider,
-        "has_env": has_env,
+        "name": name, "path": str(home), "is_default": is_default,
+        "model": model, "provider": provider, "has_env": has_env,
         "skill_count": _safe(lambda: profiles_mod._count_skills(home), 0),
         "gateway_running": _safe(gateway_running, False),
         "description": meta("description", ""), "description_auto": meta("description_auto", False),
@@ -422,9 +422,11 @@ def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
         if _is_current_profile(profile):
             lock = HubLockFile()
         else:
-            lock = HubLockFile(_resolve_profile_dir(profile.strip()) / "skills" / ".hub" / "lock.json")
+            profile_dir = _resolve_profile_dir(profile.strip())
+            lock = HubLockFile(profile_dir / "skills" / ".hub" / "lock.json")
         return {
-            entry["identifier"]: {"name": entry.get("name"), "trust_level": entry.get("trust_level"),
+            entry["identifier"]: {"name": entry.get("name"),
+                                  "trust_level": entry.get("trust_level"),
                                   "scan_verdict": entry.get("scan_verdict")}
             for entry in lock.list_installed() if entry.get("identifier")}
     except Exception:

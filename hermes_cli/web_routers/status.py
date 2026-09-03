@@ -319,7 +319,8 @@ def _auth_gate_status() -> Dict[str, Any]:
     except Exception:
         # Module not importable yet (early startup) — leave as [].
         pass
-    return {"auth_required": auth_required, "auth_providers": auth_providers, "auth_flows": auth_flows}
+    return {"auth_required": auth_required, "auth_providers": auth_providers,
+            "auth_flows": auth_flows}
 
 
 def _nous_session_validity() -> str:
@@ -465,7 +466,8 @@ async def get_status(profile: Optional[str] = None):
             "gateway_updated_at": gateway["gateway_updated_at"],
             "active_agents": active_agents,
             "gateway_busy": derive_gateway_busy(
-                gateway_running=gateway_running, gateway_state=gateway_state, active_agents=active_agents),
+                gateway_running=gateway_running, gateway_state=gateway_state,
+                active_agents=active_agents),
             "gateway_drainable": derive_gateway_drainable(
                 gateway_running=gateway_running, gateway_state=gateway_state),
             "restart_drain_timeout": restart_drain_timeout,
@@ -521,9 +523,7 @@ async def get_system_stats():
 
     info: Dict[str, Any] = {
         **_display_system_platform(
-            system=_platform.system(),
-            release=_platform.release(),
-            version=_platform.version(),
+            system=_platform.system(), release=_platform.release(), version=_platform.version(),
             platform_label=_platform.platform()),
         "arch": _platform.machine(),
         "hostname": _platform.node(),
@@ -554,7 +554,8 @@ async def get_system_stats():
     def _process():
         proc = psutil.Process()
         info["process"] = {"pid": proc.pid, "rss": proc.memory_info().rss,
-                           "create_time": int(proc.create_time()), "num_threads": proc.num_threads()}
+                           "create_time": int(proc.create_time()),
+                           "num_threads": proc.num_threads()}
 
     # psutil enriches the picture when present; everything below is optional.
     try:
@@ -664,7 +665,8 @@ async def get_learning_node(id: str, profile: Optional[str] = None):
 async def delete_learning_node(body: LearningNodeRef):
     """Delete a journey node — skills are archived (restorable), memories removed."""
     from agent.learning_mutations import delete_node
-    return await _learning_mutation(body.profile, lambda: delete_node(body.id), 400, "delete failed")
+    return await _learning_mutation(
+        body.profile, lambda: delete_node(body.id), 400, "delete failed")
 
 
 @router.put("/api/learning/node")
@@ -794,11 +796,8 @@ async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
 
 @logs_router.get("/api/logs")
 async def get_logs(
-    file: str = "agent",
-    lines: int = 100,
-    level: Optional[str] = None,
-    component: Optional[str] = None,
-    search: Optional[str] = None):
+    file: str = "agent", lines: int = 100, level: Optional[str] = None,
+    component: Optional[str] = None, search: Optional[str] = None):
     from hermes_cli.logs import _read_tail, LOG_FILES
 
     log_name = LOG_FILES.get(file)
@@ -829,10 +828,8 @@ async def get_logs(
 
     has_filters = bool(min_level or comp_prefixes or search)
     result = _read_tail(
-        log_path, min(lines, 500) if not search else 2000,
-        has_filters=has_filters,
-        min_level=min_level,
-        component_prefixes=comp_prefixes)
+        log_path, min(lines, 500) if not search else 2000, has_filters=has_filters,
+        min_level=min_level, component_prefixes=comp_prefixes)
     # _read_tail doesn't support free-text search, so post-filter (case-insensitive
     # substring) here and trim to the requested line count afterward.
     if search:

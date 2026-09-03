@@ -434,12 +434,9 @@ def get_profiles_sessions(
     # section passes source=cron — two independent lists so newest cron sessions can't
     # starve the recents page.
     filters = dict(
-        source=source or None,
-        sources=_csv_list(sources) or None,
-        exclude_sources=_csv_list(exclude_sources) or None,
-        min_message_count=max(0, min_messages),
-        include_archived=archived == "include",
-        archived_only=archived == "only")
+        source=source or None, sources=_csv_list(sources) or None,
+        exclude_sources=_csv_list(exclude_sources) or None, min_message_count=max(0, min_messages),
+        include_archived=archived == "include", archived_only=archived == "only")
     # Over-fetch per profile so the merged+sorted window is correct for the requested page.
     # Capped so a huge profile can't blow up the response.
     per_profile = min(max(limit + offset, limit), 500)
@@ -470,12 +467,8 @@ def get_profiles_sessions(
 @sessions_router.get("/api/profiles/sessions/sidebar")
 @_sidebar_singleflight_cache
 def get_profiles_sessions_sidebar(
-    recents_profile: str = "all",
-    recents_limit: int = 20,
-    recents_exclude: str = None,
-    cron_limit: int = 50,
-    messaging_limit: int = 100,
-    messaging_exclude: str = None):
+    recents_profile: str = "all", recents_limit: int = 20, recents_exclude: str = None,
+    cron_limit: int = 50, messaging_limit: int = 100, messaging_exclude: str = None):
     """Batched sidebar session slices — one profile-DB open per refresh.
 
     The desktop sidebar needs three source-scoped windows per refresh: recents (local
@@ -590,9 +583,7 @@ def _merge_by_id(into: Dict[str, Dict[str, Any]], entries: List[Dict[str, Any]],
 
 
 def _merge_profile_tree(
-    merged: Dict[str, Dict[str, Any]],
-    projects: List[Dict[str, Any]],
-    profile: str,
+    merged: Dict[str, Dict[str, Any]], projects: List[Dict[str, Any]], profile: str,
     preview_limit: int) -> None:
     """Fold one profile's projects into the shared tree, keyed by folder.
 
