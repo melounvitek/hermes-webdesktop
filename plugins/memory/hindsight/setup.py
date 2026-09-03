@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -10,17 +12,9 @@ from agent.secret_scope import get_secret
 from hermes_cli.secret_prompt import masked_secret_prompt
 
 from . import templates as _hs_templates
-from .embedded import (
-    _embedded_profile_env_path,
-    _load_simple_env,
-    _materialize_embedded_profile_env,
-)
+from .embedded import _embedded_profile_env_path, _load_simple_env, _materialize_embedded_profile_env
 from .settings import (
-    _DEFAULT_API_URL,
-    _DEFAULT_IDLE_TIMEOUT,
-    _DEFAULT_LOCAL_URL,
-    _DEFAULT_TIMEOUT,
-    _MIN_CLIENT_VERSION,
+    _DEFAULT_API_URL, _DEFAULT_IDLE_TIMEOUT, _DEFAULT_LOCAL_URL, _DEFAULT_TIMEOUT, _MIN_CLIENT_VERSION,
     _PROVIDER_DEFAULT_MODELS,
 )
 
@@ -60,29 +54,10 @@ def _write_env(env_path: Path, env_writes: dict) -> None:
     new_lines = []
     for line in existing:
         key = line.split("=", 1)[0].strip() if "=" in line and not line.startswith("#") else None
-        if key in env_writes:
-            new_lines.append(f"{key}={env_writes[key]}")
-            updated.add(key)
-        else:
-            new_lines.append(line)
+        new_lines.append(f"{key}={env_writes[key]}" if key in env_writes else line)
+        updated.add(key)
     new_lines.extend(f"{k}={v}" for k, v in env_writes.items() if k not in updated)
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
-
-
-def _offer_starter_template(mode: str, provider_config: dict, env_writes: dict) -> None:
-    """Seed the bank with a Hermes starter template (best-effort)."""
-    import os
-
-    from hermes_cli.memory_setup import _CANCELLED, _curses_select
-
-    default_url = _DEFAULT_LOCAL_URL if mode == "local_external" else _DEFAULT_API_URL
-    _hs_templates.run_template_step(
-        api_url=provider_config.get("api_url") or default_url,
-        bank_id=provider_config.get("bank_id", "hermes"),
-        api_key=env_writes.get("HINDSIGHT_API_KEY") or os.environ.get("HINDSIGHT_API_KEY", "") or None,
-        select=_curses_select,
-        cancelled=_CANCELLED,
-    )
 
 
 def run_setup(provider, hermes_home: str, config: dict) -> None:
@@ -94,13 +69,15 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     print("\n  Configuring Hindsight memory:\n")
 
     existing_config = provider._config if isinstance(provider._config, dict) else _load_config()
-    existing_config = existing_config if isinstance(existing_config, dict) else {}
+    if not isinstance(existing_config, dict):
+        existing_config = {}
 
     mode = _select("  Select mode", _MODE_ITEMS, _MODE_VALUES, existing_config.get("mode"))
     if mode is None:
         return
     provider_config: dict = dict(existing_config, mode=mode)
     env_writes: dict = {}
+    hermes_env = Path(hermes_home) / ".env"
 
     llm_provider = ""
     if mode == "local_embedded":
@@ -158,9 +135,7 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
         provider_config["llm_model"] = val or current_model
 
         llm_key = _secret_prompt("  LLM API key: ")
-        env_writes["HINDSIGHT_LLM_API_KEY"] = (
-            llm_key or _load_simple_env(Path(hermes_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
-        )
+        env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key or _load_simple_env(hermes_env).get("HINDSIGHT_LLM_API_KEY", "")
 
     provider_config.setdefault("bank_id", "hermes")
     provider_config.setdefault("recall_budget", "mid")
@@ -176,23 +151,30 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     save_config(config)
     provider.save_config(provider_config, hermes_home)
     if env_writes:
-        _write_env(Path(hermes_home) / ".env", env_writes)
+        _write_env(hermes_env, env_writes)
 
-    # Starter template only where the API is reachable now (local_embedded's daemon isn't up).
+    # Starter template (best-effort) only where the API is reachable now
+    # (local_embedded's daemon isn't up).
     if _hs_templates.supported_for_mode(mode):
-        _offer_starter_template(mode, provider_config, env_writes)
+        from hermes_cli.memory_setup import _CANCELLED, _curses_select
+
+        default_url = _DEFAULT_LOCAL_URL if mode == "local_external" else _DEFAULT_API_URL
+        _hs_templates.run_template_step(
+            api_url=provider_config.get("api_url") or default_url,
+            bank_id=provider_config.get("bank_id", "hermes"),
+            api_key=env_writes.get("HINDSIGHT_API_KEY") or os.environ.get("HINDSIGHT_API_KEY", "") or None,
+            select=_curses_select, cancelled=_CANCELLED,
+        )
 
     if mode == "local_embedded":
         materialized_config = dict(provider_config)
-        try:
+        with contextlib.suppress(Exception):
             materialized_config = json.loads(
                 (Path(hermes_home) / "hindsight" / "config.json").read_text(encoding="utf-8")
             )
-        except Exception:
-            pass
         llm_api_key = (
             env_writes.get("HINDSIGHT_LLM_API_KEY", "")
-            or _load_simple_env(Path(hermes_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
+            or _load_simple_env(hermes_env).get("HINDSIGHT_LLM_API_KEY", "")
             or _load_simple_env(_embedded_profile_env_path(materialized_config)).get("HINDSIGHT_API_LLM_API_KEY", "")
         )
         _materialize_embedded_profile_env(materialized_config, llm_api_key=llm_api_key or None)
