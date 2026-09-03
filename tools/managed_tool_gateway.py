@@ -44,39 +44,30 @@ def _read_nous_provider_state() -> Optional[dict]:
             return None
         providers = json.loads(path.read_text(encoding="utf-8-sig")).get("providers", {})
         nous_provider = providers.get("nous", {}) if isinstance(providers, dict) else None
-        if isinstance(nous_provider, dict):
-            return nous_provider
+        return nous_provider if isinstance(nous_provider, dict) else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _parse_timestamp(value: object) -> Optional[datetime]:
     normalized = _clean(value)
     if normalized is None:
         return None
-    if normalized.endswith("Z"):
-        normalized = normalized[:-1] + "+00:00"
     try:
-        parsed = datetime.fromisoformat(normalized)
+        parsed = datetime.fromisoformat(normalized[:-1] + "+00:00" if normalized.endswith("Z") else normalized)
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return (parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
 
 
 def _access_token_is_expiring(expires_at: object, skew_seconds: int) -> bool:
     expires = _parse_timestamp(expires_at)
-    if expires is None:
-        return True
-    return (expires - datetime.now(timezone.utc)).total_seconds() <= max(0, int(skew_seconds))
+    return expires is None or (expires - datetime.now(timezone.utc)).total_seconds() <= max(0, int(skew_seconds))
 
 
 def _read_user_token_override() -> Optional[str]:
-    """Read the TOOL_GATEWAY_USER_TOKEN override through the secret scope. Scope verdict is
-    authoritative when installed (a scoped miss must NOT borrow the process env under
-    multiplex); ``os.environ`` only when unscoped."""
+    """Read the TOOL_GATEWAY_USER_TOKEN override through the secret scope. Scope verdict is authoritative
+    when installed (a scoped miss must NOT borrow the process env under multiplex); ``os.environ`` only when unscoped."""
     try:
         from agent.secret_scope import UnscopedSecretError, get_secret
 
@@ -90,16 +81,14 @@ def _read_user_token_override() -> Optional[str]:
 
 
 def peek_nous_access_token() -> Optional[str]:
-    """Cheap token probe: env override or cached auth-store token, no expiry check and no
-    network — availability scans must stay off the synchronous OAuth refresh path (that lives
-    in :func:`read_nous_access_token`)."""
+    """Cheap token probe: env override or cached auth-store token, no expiry check and no network —
+    availability scans must stay off the synchronous OAuth refresh path (:func:`read_nous_access_token`)."""
     return _read_user_token_override() or _clean((_read_nous_provider_state() or {}).get("access_token"))
 
 
 def read_nous_access_token() -> Optional[str]:
     """Read a Nous Subscriber OAuth access token from auth store or env override."""
-    explicit = _read_user_token_override()
-    if explicit:
+    if explicit := _read_user_token_override():
         return explicit
     nous_provider = _read_nous_provider_state() or {}
     cached_token = peek_nous_access_token()
@@ -108,8 +97,7 @@ def read_nous_access_token() -> Optional[str]:
     try:
         from hermes_cli.auth import resolve_nous_access_token
 
-        refreshed_token = _clean(resolve_nous_access_token(refresh_skew_seconds=_NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS))
-        if refreshed_token:
+        if refreshed_token := _clean(resolve_nous_access_token(refresh_skew_seconds=_NOUS_ACCESS_TOKEN_REFRESH_SKEW_SECONDS)):
             return refreshed_token
     except Exception as exc:
         logger.debug("Nous access token refresh failed: %s", exc)
@@ -126,8 +114,7 @@ def get_tool_gateway_scheme() -> str:
 
 def build_vendor_gateway_url(vendor: str) -> str:
     """Return the gateway origin for a specific vendor."""
-    explicit_vendor_url = os.getenv(f"{vendor.upper().replace('-', '_')}_GATEWAY_URL", "").strip().rstrip("/")
-    if explicit_vendor_url:
+    if explicit_vendor_url := os.getenv(f"{vendor.upper().replace('-', '_')}_GATEWAY_URL", "").strip().rstrip("/"):
         return explicit_vendor_url
     shared_domain = os.getenv("TOOL_GATEWAY_DOMAIN", "").strip().strip("/") or _DEFAULT_TOOL_GATEWAY_DOMAIN
     return f"{get_tool_gateway_scheme()}://{vendor}-gateway.{shared_domain}"
@@ -135,8 +122,7 @@ def build_vendor_gateway_url(vendor: str) -> str:
 
 def resolve_managed_tool_gateway(
     vendor: str, gateway_builder: Optional[Callable[[str], str]] = None,
-    token_reader: Optional[Callable[[], Optional[str]]] = None,
-) -> Optional[ManagedToolGatewayConfig]:
+    token_reader: Optional[Callable[[], Optional[str]]] = None) -> Optional[ManagedToolGatewayConfig]:
     """Resolve shared managed-tool gateway config for a vendor."""
     if not managed_nous_tools_enabled():
         return None
@@ -148,10 +134,9 @@ def resolve_managed_tool_gateway(
 
 
 def is_managed_tool_gateway_ready(
-    vendor: str,
-    gateway_builder: Optional[Callable[[str], str]] = None,
+    vendor: str, gateway_builder: Optional[Callable[[str], str]] = None,
     token_reader: Optional[Callable[[], Optional[str]]] = None) -> bool:
     """True when a gateway URL and a likely-usable Nous token are present. Defaults to
-    :func:`peek_nous_access_token` (no OAuth refresh); callers about to make a real request
-    use :func:`resolve_managed_tool_gateway` instead."""
+    :func:`peek_nous_access_token` (no OAuth refresh); callers about to make a real request use
+    :func:`resolve_managed_tool_gateway` instead."""
     return resolve_managed_tool_gateway(vendor, gateway_builder=gateway_builder, token_reader=token_reader or peek_nous_access_token) is not None

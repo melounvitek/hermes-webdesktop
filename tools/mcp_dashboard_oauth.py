@@ -1,9 +1,6 @@
-"""Dashboard-mediated callback bridge for MCP OAuth.
-
-The MCP SDK remains responsible for discovery, DCR, PKCE, state validation and
-token exchange. This module only moves the two human/browser callbacks from a
-loopback listener into the already-authenticated dashboard session.
-"""
+"""Dashboard-mediated callback bridge for MCP OAuth: the SDK still does discovery, DCR, PKCE, state
+validation and token exchange; this only moves the two human/browser callbacks from a loopback
+listener into the already-authenticated dashboard session."""
 
 from __future__ import annotations
 
@@ -115,12 +112,8 @@ class DashboardOAuthFlow:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {
-                "flow_id": self.flow_id,
-                "server_name": self.server_name,
-                "status": self.status,
-                "authorization_url": self.authorization_url,
-                "error": self.error}
+            return {"flow_id": self.flow_id, "server_name": self.server_name, "status": self.status,
+                    "authorization_url": self.authorization_url, "error": self.error}
 
     def mark_worker_done(self) -> None:
         self._worker_done.set()
