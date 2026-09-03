@@ -19,6 +19,18 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """``_fresh_run_agent`` wipes the agent stack out of ``sys.modules``. Put the original
+    module objects back afterwards: sibling test files hold module-level references into
+    ``hermes_cli.*`` / ``tools.*`` and their monkeypatches would otherwise land on modules
+    the app no longer imports."""
+    saved = dict(sys.modules)
+    yield
+    sys.modules.clear()
+    sys.modules.update(saved)
+
+
 def _fresh_run_agent(hermes_home):
     for mod in list(sys.modules):
         if mod == "run_agent" or mod.startswith("agent.") or mod.startswith("tools.") or mod.startswith("hermes_"):
