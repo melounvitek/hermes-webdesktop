@@ -200,15 +200,14 @@ class SessionGatewayMixin:
         origin_json: str = None, include_compression_ancestors: bool = False) -> None:
         """Persist the gateway routing peer for an existing session row.
 
-        ``display_name`` / ``origin_json``: ``None`` leaves the stored value untouched
-        (consumers read routing data from state.db, not sessions.json).
-        ``include_compression_ancestors`` keeps a compression lineage on one routing
-        peer when an explicit resume moves its tip to another lane; per-turn refreshes
-        update only the supplied row. Self-healing: a missing target row (deferred
-        ``create_session`` write, or crash between routing publication and row creation)
-        is INSERTed with full identity rather than no-opped, so a gateway row is never
-        first-created by the identity-less lazy writer (``update_token_counts``) and left
-        unroutable forever."""
+        ``display_name`` / ``origin_json``: ``None`` leaves the stored value untouched (consumers read
+        routing data from state.db, not sessions.json). ``include_compression_ancestors`` keeps a
+        compression lineage on one routing peer when an explicit resume moves its tip to another lane;
+        per-turn refreshes update only the supplied row. Self-healing: a missing target row (deferred
+        ``create_session`` write, or crash between routing publication and row creation) is INSERTed with
+        full identity rather than no-opped, so a gateway row is never first-created by the identity-less
+        lazy writer (``update_token_counts``) and left unroutable forever.
+        """
         if not session_id or not session_key:
             return
         identity = (session_key, source, user_id, chat_id, chat_type, thread_id, display_name, origin_json)
@@ -287,11 +286,10 @@ class SessionGatewayMixin:
         return {r["session_key"]: r["entry_json"] for r in rows}
 
     def list_never_active_keyed_sessions(self, *, older_than_days: float) -> List[Dict[str, Any]]:
-        """Keyed, still-open rows with no evidence of a single turn (no messages, tokens,
-        tool/API calls, activity, or title): leaked fixtures or chats routed but never
-        answered. Safe to drop — the gateway mints a fresh session on the next message.
-        Needs its own selector because ``bulk prune``/``archive`` are pinned to
-        ``ended_at IS NOT NULL``. ``pinned``/``archived`` = explicit keep intent."""
+        """Keyed, still-open rows with no evidence of a single turn (no messages, tokens, tool/API calls,
+        activity, or title): leaked fixtures or chats routed but never answered. Safe to drop — the gateway
+        mints a fresh session on the next message. Needs its own selector because ``bulk prune``/``archive``
+        are pinned to ``ended_at IS NOT NULL``. ``pinned``/``archived`` = explicit keep intent."""
         cutoff = time.time() - (float(older_than_days) * 86400.0)
         rows = self._read_all(
             """
@@ -383,19 +381,18 @@ class SessionGatewayMixin:
     ) -> Optional[Dict[str, Any]]:
         """Find the latest recoverable gateway session for a routing peer.
 
-        The durable ``session_key`` on the row rebuilds a missing/pruned ``sessions.json``
-        mapping. Rows ended only by the old ``agent_close`` bug or a mistaken TUI
-        ``ws_orphan_reap`` are recoverable; explicit boundaries (/new, /resume switches,
-        compression splits) are not. Ranked by ``last_activity_at`` (fallback
-        ``started_at`` — alone it resurrected days-old zombies); rows with messages win,
-        but an empty keyed row still beats ``None`` (which mints a new id while the
-        transcript may live under a compression child). Reset fence: a candidate is
-        rejected when a peer boundary row ended *after* its last activity, or the
-        has-messages ranking could reach behind a /new. The exact-key fallback requires
-        the complete peer tuple (never cross chats/threads/users) plus a profile fence: a
-        Telegram DM's tuple is identical for every bot, so a sibling profile's legacy row
-        would otherwise be adopted. Ours = profile_name is the owner or NULL; stores
-        outside the profile tree derive no owner and stay unfenced."""
+        The durable ``session_key`` on the row rebuilds a missing/pruned ``sessions.json`` mapping. Rows
+        ended only by the old ``agent_close`` bug or a mistaken TUI ``ws_orphan_reap`` are recoverable;
+        explicit boundaries (/new, /resume switches, compression splits) are not. Ranked by
+        ``last_activity_at`` (fallback ``started_at`` — alone it resurrected days-old zombies); rows with
+        messages win, but an empty keyed row still beats ``None`` (which mints a new id while the transcript
+        may live under a compression child). Reset fence: a candidate is rejected when a peer boundary row
+        ended *after* its last activity, or the has-messages ranking could reach behind a /new. The
+        exact-key fallback requires the complete peer tuple (never cross chats/threads/users) plus a profile
+        fence: a Telegram DM's tuple is identical for every bot, so a sibling profile's legacy row would
+        otherwise be adopted. Ours = profile_name is the owner or NULL; stores outside the profile tree
+        derive no owner and stay unfenced.
+        """
         if not session_key:
             return None
         with self._read_ctx() as conn:
@@ -411,14 +408,13 @@ class SessionGatewayMixin:
         return self._session_row_dict(row) if row else None
 
     def find_orphaned_gateway_sessions(self, *, max_gap_s: Optional[float] = None) -> List[Dict[str, Any]]:
-        """Report message-bearing rows that lost their routing identity (messages, no
-        ``session_key``). Adoptable only when exactly one keyed predecessor can be named:
-        ``lineage`` (``parent_session_id`` is a keyed row of the same source; no time
-        window) or ``contiguity`` (exactly one keyed same-source row with compatible
-        ``user_id`` fell quiet within *max_gap_s* of the orphan's start and is older than
-        its last activity). Ambiguity is reported ``adoptable=False`` with a reason, never
-        guessed — mis-adopting splices one person's conversation into another's chat.
-        Branch/delegate/tool rows are excluded: unkeyed by design, not damage."""
+        """Report message-bearing rows that lost their routing identity (messages, no ``session_key``).
+        Adoptable only when exactly one keyed predecessor can be named: ``lineage`` (``parent_session_id``
+        is a keyed row of the same source; no time window) or ``contiguity`` (exactly one keyed same-source
+        row with compatible ``user_id`` fell quiet within *max_gap_s* of the orphan's start and is older
+        than its last activity). Ambiguity is reported ``adoptable=False`` with a reason, never guessed —
+        mis-adopting splices one person's conversation into another's chat. Branch/delegate/tool rows are
+        excluded: unkeyed by design, not damage."""
         gap = self._ORPHAN_ADOPTION_MAX_GAP_S if max_gap_s is None else float(max_gap_s)
         records: List[Dict[str, Any]] = []
         with self._read_ctx() as conn:

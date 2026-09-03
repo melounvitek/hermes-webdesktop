@@ -196,10 +196,9 @@ def is_automatic_end_reason(reason) -> bool:
 
 
 def _legacy_reset_child_sql(alias: str, reasons_sql: str) -> str:
-    """Pre-marker reset-continuation heuristic: child rides its parent's exact non-empty
-    routing key and the parent ended at a reset boundary.  Shared by ``_RESET_CHILD_SQL``
-    and ``reopen_session()``'s marker-stamping UPDATE so the two cannot drift;
-    ``reasons_sql`` is a literal or placeholder list."""
+    """Pre-marker reset-continuation heuristic: child rides its parent's exact non-empty routing key and the
+    parent ended at a reset boundary.  Shared by ``_RESET_CHILD_SQL`` and ``reopen_session()``'s
+    marker-stamping UPDATE so the two cannot drift; ``reasons_sql`` is a literal or placeholder list."""
     return (
         f"EXISTS (SELECT 1 FROM sessions p"
         f"            WHERE p.id = {alias}.parent_session_id"
@@ -799,9 +798,8 @@ def is_advisory_lock_contention(exc: BaseException) -> bool:
 
 
 def _proc_start_ticks(pid: int):
-    """Kernel start time of *pid* (field 22 of ``/proc/<pid>/stat``), which with the PID
-    uniquely identifies a process; None off Linux or on any failure — callers must
-    treat None as unknowable and FAIL CLOSED."""
+    """Kernel start time of *pid* (field 22 of ``/proc/<pid>/stat``), which with the PID uniquely identifies
+    a process; None off Linux or on any failure — callers must treat None as unknowable and FAIL CLOSED."""
     try:
         with open(f"/proc/{pid}/stat", "rb") as fh:
             stat = fh.read()
@@ -964,8 +962,7 @@ def _describe_lock_holder(record) -> str:
 
 
 def _acquire_msvcrt_lock(lock_path, handle, timeout):
-    """Windows counterpart of ``_acquire_db_flock`` (no orphan break); same
-    True / False / None contract."""
+    """Windows counterpart of ``_acquire_db_flock`` (no orphan break); same True / False / None contract."""
     import msvcrt
 
     deadline = time.monotonic() + timeout
@@ -991,12 +988,11 @@ def _acquire_msvcrt_lock(lock_path, handle, timeout):
 def fts_rebuild_admission(db_path, *, timeout_seconds=None):
     """Serialize full structural FTS rebuilds on *db_path* across processes.
 
-    Yields True when this process holds the authority, False when the bounded acquire
-    timed out or the lock file could not be opened. On False the caller must NOT
-    rebuild (fail closed); the stale breadcrumb guarantees a retry. ``db_path`` None
-    (in-memory DB) yields True. Opportunistic in-process retries pass
-    ``timeout_seconds=0`` so a live holder never stalls a long-lived writer; the orphan
-    break still applies."""
+    Yields True when this process holds the authority, False when the bounded acquire timed out or the lock
+    file could not be opened. On False the caller must NOT rebuild (fail closed); the stale breadcrumb
+    guarantees a retry. ``db_path`` None (in-memory DB) yields True. Opportunistic in-process retries pass
+    ``timeout_seconds=0`` so a live holder never stalls a long-lived writer; the orphan break still applies.
+    """
     if db_path is None:
         yield True
         return

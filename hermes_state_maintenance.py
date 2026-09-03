@@ -354,17 +354,16 @@ class SessionMaintenanceMixin:
         sessions_dir: Optional[Path] = None, min_vacuum_interval_days: int = 30,
         min_vacuum_freelist_ratio: float = AUTO_VACUUM_MIN_FREELIST_RATIO,
     ) -> Dict[str, Any]:
-        """Idempotent startup auto-maintenance (never raises): prune inactive sessions, reap stale
-        open state-owned rows, optional VACUUM.  Runs at most once per ``min_interval_hours``;
-        VACUUM has its own ``min_vacuum_interval_days`` throttle and also requires
-        ``freelist_count / page_count`` > ``min_vacuum_freelist_ratio`` so a small prune on a
-        dense multi-GB database never triggers a full rewrite.  Stale-open reconciliation:
-        cron/kanban/subagent/one-shot CLI rows never set ``ended_at`` when their process dies and
-        prune only deletes ended rows, so after pruning, open rows from
+        """Idempotent startup auto-maintenance (never raises): prune inactive sessions, reap stale open
+        state-owned rows, optional VACUUM.  Runs at most once per ``min_interval_hours``; VACUUM has its own
+        ``min_vacuum_interval_days`` throttle and also requires ``freelist_count / page_count`` >
+        ``min_vacuum_freelist_ratio`` so a small prune on a dense multi-GB database never triggers a full
+        rewrite.  Stale-open reconciliation: cron/kanban/subagent/one-shot CLI rows never set ``ended_at``
+        when their process dies and prune only deletes ended rows, so after pruning, open rows from
         :attr:`_AUTO_PRUNE_STALE_OPEN_SOURCES` older than ``retention_days`` are closed
-        (``startup_orphan_reap``); they stay resumable and age from their close.  Returns
-        ``{"skipped", "pruned", "closed", "vacuumed"}`` plus ``"freelist_ratio"`` when a VACUUM
-        was considered and ``"error"`` on failure."""
+        (``startup_orphan_reap``); they stay resumable and age from their close.  Returns ``{"skipped",
+        "pruned", "closed", "vacuumed"}`` plus ``"freelist_ratio"`` when a VACUUM was considered and
+        ``"error"`` on failure."""
         from hermes_state import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
         result: Dict[str, Any] = {"skipped": False, "pruned": 0, "closed": 0, "vacuumed": False}
         maintenance_lock = _try_acquire_auto_maintenance_lock(self.db_path)

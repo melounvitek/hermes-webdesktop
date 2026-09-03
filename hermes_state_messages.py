@@ -111,10 +111,9 @@ class SessionMessagesMixin:
     """Message append/replace/rewind, reactions, resume conversations, replay dedupe."""
 
     def _bump_conversation_generation(self, conn, session_id: str, end_reason: str) -> None:
-        """Advance this peer's conversation generation past a boundary, inside the txn that
-        writes it. Only ``_RESET_END_REASONS`` count (``compression`` continues one
-        conversation). Never derived from session rows (deletes/prunes could re-emit a
-        retired affinity identity); it only ever increments."""
+        """Advance this peer's conversation generation past a boundary, inside the txn that writes it. Only
+        ``_RESET_END_REASONS`` count (``compression`` continues one conversation). Never derived from
+        session rows (deletes/prunes could re-emit a retired affinity identity); it only ever increments."""
         if end_reason not in _RESET_END_REASONS:
             return
         row = conn.execute("SELECT source, session_key FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -127,11 +126,10 @@ class SessionMessagesMixin:
 
     @classmethod
     def _encode_content(cls, content: Any) -> Any:
-        """Serialize list/dict content (multimodal parts) as a sentinel-prefixed JSON string
-        (sqlite3 binds only str/bytes/int/float/None). Lone UTF-16 surrogates (web-scraped
-        tool results reach the canonical history unsanitized) are scrubbed here: left raw,
-        sqlite3 raises UnicodeEncodeError, the flush is abandoned and the session silently
-        stops persisting. Paired with :meth:`_decode_content`."""
+        """Serialize list/dict content (multimodal parts) as a sentinel-prefixed JSON string (sqlite3 binds
+        only str/bytes/int/float/None). Lone UTF-16 surrogates (web-scraped tool results reach the canonical
+        history unsanitized) are scrubbed here: left raw, sqlite3 raises UnicodeEncodeError, the flush is
+        abandoned and the session silently stops persisting. Paired with :meth:`_decode_content`."""
         if isinstance(content, str):
             return _sanitize_surrogates(content)
         if content is None or isinstance(content, (bytes, int, float)):
@@ -174,9 +172,8 @@ class SessionMessagesMixin:
 
     @staticmethod
     def _decode_display_metadata(raw: Any) -> Optional[Dict[str, Any]]:
-        """Decode a ``display_metadata`` column into a dict (never the raw TEXT — the desktop
-        does ``'task_count' in meta``). Pre-guard rows are double-encoded: a second string
-        layer is unwrapped."""
+        """Decode a ``display_metadata`` column into a dict (never the raw TEXT — the desktop does
+        ``'task_count' in meta``). Pre-guard rows are double-encoded: a second string layer is unwrapped."""
         if raw is None:
             return None
         try:
@@ -193,10 +190,9 @@ class SessionMessagesMixin:
 
     @staticmethod
     def _reasoning_json_text(value: Any) -> Optional[str]:
-        """Serialize a structured reasoning field for its TEXT column. Strings are stored
-        as-is: round-tripping callers (get_messages -> replace_messages) hand back the raw
-        TEXT; re-dumping would double-encode it and reasoning-replay consumers
-        (``isinstance(..., list)``) would drop it."""
+        """Serialize a structured reasoning field for its TEXT column. Strings are stored as-is:
+        round-tripping callers (get_messages -> replace_messages) hand back the raw TEXT; re-dumping
+        would double-encode it and reasoning-replay consumers (``isinstance(..., list)``) would drop it."""
         return None if not value else (value if isinstance(value, str) else json.dumps(value))
 
     def _check_transcript_write_guards(
@@ -205,12 +201,11 @@ class SessionMessagesMixin:
         reject_active_turn_lease: bool = False, reject_active_compression_lock: bool = False,
         allow_closed_compression_parent: bool = False,
     ) -> None:
-        """Transcript-write admission checks, run INSIDE the write txn (shared by every
-        writer). Ordinary appends do NOT check compression_locks: the lock only stops two
-        COMPRESSIONS colliding and archive_and_compact() commits against a watermark, so
-        concurrent appends are safe (blocking them killed turns during slow summaries).
-        Destructive user mutations opt in via ``reject_active_*`` so a compressor that
-        captured its watermark cannot resurrect the removed turn."""
+        """Transcript-write admission checks, run INSIDE the write txn (shared by every writer). Ordinary
+        appends do NOT check compression_locks: the lock only stops two COMPRESSIONS colliding and
+        archive_and_compact() commits against a watermark, so concurrent appends are safe (blocking them
+        killed turns during slow summaries). Destructive user mutations opt in via ``reject_active_*`` so a
+        compressor that captured its watermark cannot resurrect the removed turn."""
         from hermes_state import CompressionSessionClosedError, SessionCompressionInProgressError, SessionTurnLeaseLostError
         if reject_active_compression_lock:
             active_lock = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
@@ -297,10 +292,9 @@ class SessionMessagesMixin:
         display_metadata: Optional[Dict[str, Any]] = None, compression_lock_holder: Optional[str] = None,
         turn_lease_holder: Optional[str] = None, turn_lease_ttl_seconds: float = 300.0,
     ) -> int:
-        """Append one message; returns the row id and bumps the session counters.
-        ``platform_message_id``: the platform's own id (recall-style flows). ``api_content``:
-        byte-fidelity sidecar — the exact string sent to the API when it differed from
-        ``content`` — stored as sent except lone surrogates."""
+        """Append one message; returns the row id and bumps the session counters. ``platform_message_id``:
+        the platform's own id (recall-style flows). ``api_content``: byte-fidelity sidecar — the exact
+        string sent to the API when it differed from ``content`` — stored as sent except lone surrogates."""
         msg = dict(locals())  # every keyword above is a message-dict field of the same name
         # Encode outside the write txn (display metadata first: log-order parity).
         msg["display_metadata"] = self._encode_display_metadata(display_metadata)
@@ -325,10 +319,9 @@ class SessionMessagesMixin:
         turn_lease_holder: Optional[str] = None, chunk_rows: Optional[int] = None,
         turn_lease_ttl_seconds: float = 300.0,
     ) -> int:
-        """Append *messages* (``_insert_message_rows`` dict shape) in ONE write txn: all rows
-        land or none, guards run once. ``chunk_rows`` bounds txn size for LARGE copies
-        (branch seeds; FTS triggers run per row) by committing in chunks. Returns the
-        inserted row count."""
+        """Append *messages* (``_insert_message_rows`` dict shape) in ONE write txn: all rows land or none,
+        guards run once. ``chunk_rows`` bounds txn size for LARGE copies (branch seeds; FTS triggers run per
+        row) by committing in chunks. Returns the inserted row count."""
         if not messages:
             return 0
         if chunk_rows is not None and len(messages) > chunk_rows:
@@ -502,11 +495,10 @@ class SessionMessagesMixin:
         self, session_id: str, messages: List[Dict[str, Any]], active_only: bool = False,
         archive_dropped: bool = False, reject_active_turn_lease: bool = False,
     ) -> None:
-        """Atomically replace a session's stored messages (/retry, /undo, /compress).
-        DESTRUCTIVE by default (rows DELETEd, leave FTS). ``active_only`` spares
-        soft-archived rows (needed alongside in-place compaction). ``archive_dropped``
-        SOFT-archives the live rows rewind-style instead of deleting — what rewind/edit/
-        regenerate must use, since a DELETE leaves nothing to recover. ``reject_active_
+        """Atomically replace a session's stored messages (/retry, /undo, /compress). DESTRUCTIVE by default
+        (rows DELETEd, leave FTS). ``active_only`` spares soft-archived rows (needed alongside in-place
+        compaction). ``archive_dropped`` SOFT-archives the live rows rewind-style instead of deleting — what
+        rewind/edit/ regenerate must use, since a DELETE leaves nothing to recover. ``reject_active_
         turn_lease`` runs the lease check in-txn for user rewrites that don't own it."""
         from hermes_state import CompressionSessionClosedError
         active_clause = " AND active = 1" if active_only else ""
@@ -534,9 +526,8 @@ class SessionMessagesMixin:
             "SELECT 1 FROM messages WHERE session_id = ? AND active = 0 LIMIT 1", (session_id,)) is not None
 
     def get_active_message_watermark(self, session_id: str) -> int:
-        """MAX(id) of the session's active rows — captured at compression START; every active
-        row above it arrived concurrently and must survive compaction verbatim. 0 for an
-        empty/unknown session."""
+        """MAX(id) of the session's active rows — captured at compression START; every active row above it
+        arrived concurrently and must survive compaction verbatim. 0 for an empty/unknown session."""
         if not session_id:
             return 0
         row = self._read_one("SELECT COALESCE(MAX(id), 0) FROM messages WHERE session_id = ? AND active = 1", (session_id,))
@@ -861,13 +852,12 @@ class SessionMessagesMixin:
         self, rows, *, session_id: str, include_ancestors: bool, repair_alternation: bool,
         include_row_ids: bool = False, include_summary_markers: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Decode fetched message rows (ordered by id, pre-filtered) into OpenAI format.
-        Every dict is stamped ``_DB_PERSISTED_MARKER_KEY`` at the source (born durable) so an
-        identity-losing handoff never re-appends the whole transcript on flush. ``_row_id``
-        is opt-in (gateway reactions). Reasoning fields are restored on assistant rows only.
-        Key order of each dict is stable. ``api_content`` is returned VERBATIM (no
-        sanitize/strip): the replay path substitutes it to keep the provider prompt cache
-        byte-stable."""
+        """Decode fetched message rows (ordered by id, pre-filtered) into OpenAI format. Every dict is
+        stamped ``_DB_PERSISTED_MARKER_KEY`` at the source (born durable) so an identity-losing handoff
+        never re-appends the whole transcript on flush. ``_row_id`` is opt-in (gateway reactions).
+        Reasoning fields are restored on assistant rows only. Key order of each dict is stable.
+        ``api_content`` is returned VERBATIM (no sanitize/strip): the replay path substitutes it to keep
+        the provider prompt cache byte-stable."""
         from hermes_state import _strip_background_review_harness, _strip_stale_tool_call_markers
         messages = []
         exact_user_clones: Dict[Tuple[Any, str], Dict[str, Any]] = {}
@@ -1006,9 +996,8 @@ class SessionMessagesMixin:
             for message in lineage if message.get("_row_id") in ancestor_ids]
 
     def get_conversation_root(self, session_id: str) -> str:
-        """ROOT id of *session_id*'s lineage — the stable conversation id across compression
-        segments and delegate subagents (Nous Portal usage tagging). Unchanged when there
-        is no recorded parent."""
+        """ROOT id of *session_id*'s lineage — the stable conversation id across compression segments and
+        delegate subagents (Nous Portal usage tagging). Unchanged when there is no recorded parent."""
         chain = self._session_lineage_root_to_tip(session_id)
         return chain[0] if chain and chain[0] else session_id
 
@@ -1093,16 +1082,14 @@ class SessionMessagesMixin:
         self, session_id: str, target_message_id: int, *, preserve_compaction_handoff: bool = False,
         expected_active_ids: Optional[List[int]] = None, expected_target_content: Any = None,
     ) -> Dict[str, Any]:
-        """Soft-delete (``active=0``) every message with id >= *target_message_id*, the target
-        included (the caller pre-fills it as the next prompt). Returns ``{"rewound_count",
-        "target_message", "new_head_id"}``, plus ``replacement_message_id`` with
-        ``preserve_compaction_handoff`` (archives a composite summary carrier, inserts its
-        hidden handoff scaffold as the new head). ``ValueError`` when the target is missing
-        or not a ``user`` row. ``expected_active_ids`` / ``expected_target_content`` pin the
-        active set and the canonical live payload in-txn before any mutation
-        (presentation-only metadata changes don't invalidate a rewind). A live turn lease
-        refuses the rewind; expired/dead holders are reclaimed. ``rewind_count`` always
-        increments."""
+        """Soft-delete (``active=0``) every message with id >= *target_message_id*, the target included (the
+        caller pre-fills it as the next prompt). Returns ``{"rewound_count", "target_message",
+        "new_head_id"}``, plus ``replacement_message_id`` with ``preserve_compaction_handoff`` (archives a
+        composite summary carrier, inserts its hidden handoff scaffold as the new head). ``ValueError`` when
+        the target is missing or not a ``user`` row. ``expected_active_ids`` / ``expected_target_content``
+        pin the active set and the canonical live payload in-txn before any mutation (presentation-only
+        metadata changes don't invalidate a rewind). A live turn lease refuses the rewind; expired/dead
+        holders are reclaimed. ``rewind_count`` always increments."""
         def _do(conn):
             self._check_transcript_write_guards(
                 conn, session_id, None, reject_active_turn_lease=True, reject_active_compression_lock=True)
@@ -1177,24 +1164,22 @@ class SessionMessagesMixin:
         return parent_id in markers if parent_id else any(m is not None for m in markers)
 
     def is_explicit_fork_child(self, session_id: str) -> bool:
-        """Public read-only view of :meth:`_is_explicit_fork_child_row`; a missing row is not
-        a fork (``agent/prompt_cache_scope.py`` keeps a declared conversation key from
-        crossing the fork boundary)."""
+        """Public read-only view of :meth:`_is_explicit_fork_child_row`; a missing row is not a fork
+        (``agent/prompt_cache_scope.py`` keeps a declared conversation key from crossing the fork boundary)."""
         session = self.get_session(session_id)
         return bool(session and self._is_explicit_fork_child_row(session))
 
     def latest_conversation_boundary(self, session_key: str, source: str) -> Optional[int]:
-        """How many conversation boundaries (``_RESET_END_REASONS`` ends) this routing peer
-        has crossed, or ``None`` when never reset. The peer is ``(session_key, source)`` —
-        the identity recovery uses — never the key alone (an API caller may legally reuse a
-        Telegram row's key). Read from ``conversation_generations`` (advanced inside each
-        boundary's txn), not an aggregate over session rows: deletes/prunes would let an
-        aggregate re-emit a retired pair. Rows are never garbage-collected, by design
-        (dropping one would re-issue generation 1 — the ABA this counter prevents).
-        Wall-clock-free, so a backwards NTP correction cannot reorder it. DBs upgraded
-        mid-conversation start at no generation and take their first from the next boundary
-        written (a pre-upgrade reset shares its predecessor's scope once — costs a warm
-        prompt-cache bucket, never crosses an identity)."""
+        """How many conversation boundaries (``_RESET_END_REASONS`` ends) this routing peer has crossed, or
+        ``None`` when never reset. The peer is ``(session_key, source)`` — the identity recovery uses —
+        never the key alone (an API caller may legally reuse a Telegram row's key). Read from
+        ``conversation_generations`` (advanced inside each boundary's txn), not an aggregate over session
+        rows: deletes/prunes would let an aggregate re-emit a retired pair. Rows are never
+        garbage-collected, by design (dropping one would re-issue generation 1 — the ABA this counter
+        prevents). Wall-clock-free, so a backwards NTP correction cannot reorder it. DBs upgraded
+        mid-conversation start at no generation and take their first from the next boundary written (a
+        pre-upgrade reset shares its predecessor's scope once — costs a warm prompt-cache bucket, never
+        crosses an identity)."""
         if not session_key or not source:
             return None
         row = self._read_one(
@@ -1211,11 +1196,10 @@ class SessionMessagesMixin:
         self._execute_write(_do)
 
     def purge_stale_tool_call_markers(self, *, dry_run: bool = False, backup: bool = True) -> Dict[str, Any]:
-        """Permanently clear bare tool-call marker content (e.g. "[memory]") left by pre-fix
-        sessions (``_rows_to_conversation`` already repairs it in memory; this stops the
-        re-scan). Only ``content`` is touched. ``backup``: ``VACUUM INTO`` snapshot first
-        (none when nothing changes). Returns ``{"dry_run", "rows_affected", "row_ids",
-        "backup_path"}``."""
+        """Permanently clear bare tool-call marker content (e.g. "[memory]") left by pre-fix sessions
+        (``_rows_to_conversation`` already repairs it in memory; this stops the re-scan). Only ``content``
+        is touched. ``backup``: ``VACUUM INTO`` snapshot first (none when nothing changes). Returns
+        ``{"dry_run", "rows_affected", "row_ids", "backup_path"}``."""
         from hermes_state import _STALE_TOOL_CALL_MARKER_RE
 
         def _find_affected(conn) -> List[int]:

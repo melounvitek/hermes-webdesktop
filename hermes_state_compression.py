@@ -132,10 +132,9 @@ class SessionCompressionMixin:
 
     def _publish_child_session_row(self, conn, parent, *, parent_session_id, child_session_id, source,
                                    model, model_config, system_prompt, cwd, profile_name) -> None:
-        """INSERT the compression child's ``sessions`` row copied from *parent*. Same contract
-        as _insert_session_row's compression-fork backfill: the child stays on the parent's
-        profile and keeps gateway routing/origin columns; no owner on either side -> this
-        store's profile."""
+        """INSERT the compression child's ``sessions`` row copied from *parent*. Same contract as
+        _insert_session_row's compression-fork backfill: the child stays on the parent's profile and keeps
+        gateway routing/origin columns; no owner on either side -> this store's profile."""
         system_prompt_hash = self._store_system_prompt(conn, system_prompt)
         conn.execute(
             """INSERT INTO sessions (
@@ -161,19 +160,18 @@ class SessionCompressionMixin:
         compression_lock_holder: str = None, require_compression_lease: bool = True,
         require_lease_refresh: bool = False, lease_ttl_seconds: float = 300.0,
         watermark: Optional[int] = None, watermark_ceiling: Optional[int] = None) -> None:
-        """Atomically close a parent and publish its durable compression child: closure,
-        child row, and handoff commit in one transaction, so readers see the live parent
-        or a complete child, never an ended parent with a missing/empty child.
+        """Atomically close a parent and publish its durable compression child: closure, child row, and
+        handoff commit in one transaction, so readers see the live parent or a complete child, never an
+        ended parent with a missing/empty child.
 
-        *watermark* (parent's ``get_active_message_watermark`` at compression start):
-        parent rows with ``id > watermark`` — appends landed during the slow summary — are
-        column-cloned into the child AFTER the handoff. *watermark_ceiling* bounds the
-        clone: the rotation path flushes its OWN transcript to the parent just before
-        publishing and those rows are already in the handoff, so only
-        ``(watermark, watermark_ceiling]`` is foreign tail (``None`` = unbounded).
-        *require_lease_refresh* + *compression_lock_holder* refreshes the lease on the same
-        ``conn`` before the expiry check (no TOCTOU window), so a refresher that died on
-        transient DB errors gets one last chance."""
+        *watermark* (parent's ``get_active_message_watermark`` at compression start): parent rows with ``id
+        > watermark`` — appends landed during the slow summary — are column-cloned into the child AFTER the
+        handoff. *watermark_ceiling* bounds the clone: the rotation path flushes its OWN transcript to the
+        parent just before publishing and those rows are already in the handoff, so only ``(watermark,
+        watermark_ceiling]`` is foreign tail (``None`` = unbounded). *require_lease_refresh* +
+        *compression_lock_holder* refreshes the lease on the same ``conn`` before the expiry check (no
+        TOCTOU window), so a refresher that died on transient DB errors gets one last chance.
+        """
         from hermes_state import CompressionSessionBusyError
 
         def _do(conn):
@@ -248,9 +246,8 @@ class SessionCompressionMixin:
 
     def record_compression_failure_cooldown(
         self, session_id: str, cooldown_until: float, error: Optional[str] = None) -> None:
-        """Persist the active compression-failure cooldown. Merge-max with any longer live
-        deadline so a later shorter write can't reopen the thrash window; error always
-        takes the latest diagnostic."""
+        """Persist the active compression-failure cooldown. Merge-max with any longer live deadline so a
+        later shorter write can't reopen the thrash window; error always takes the latest diagnostic."""
         if not session_id:
             return
         self._write_sql_logged(
@@ -384,10 +381,9 @@ class SessionCompressionMixin:
             return False
 
     def try_acquire_compression_lock(self, session_id: str, holder: str, ttl_seconds: float = 300.0) -> bool:
-        """Try to atomically acquire the compression lock for ``session_id``. ``False``:
-        another holder owns a live lock and the caller MUST NOT compress (its rotation
-        would split the lineage). Expired locks and structured holders whose local ``pid=``
-        is dead are reclaimed transparently."""
+        """Try to atomically acquire the compression lock for ``session_id``. ``False``: another holder owns
+        a live lock and the caller MUST NOT compress (its rotation would split the lineage). Expired
+        locks and structured holders whose local ``pid=`` is dead are reclaimed transparently."""
         from hermes_state import _compression_lock_holder_process_is_dead
         if not session_id:
             return False
@@ -480,10 +476,9 @@ class SessionCompressionMixin:
         wait_seconds: float = 1800.0, poll_interval_seconds: float = 1.0, on_wait=None,
         wait_notice_interval_seconds: float = 15.0, should_abort=None, acquire_patience_s: float = 0.5,
     ) -> bool:
-        """Wait for a cross-process turn lease without holding a SQLite lock. ``on_wait(elapsed)``
-        is best-effort: called when the first attempt fails and about every
-        ``wait_notice_interval_seconds`` after. ``should_abort()`` True (e.g. ``/stop``) returns
-        False at once."""
+        """Wait for a cross-process turn lease without holding a SQLite lock. ``on_wait(elapsed)`` is
+        best-effort: called when the first attempt fails and about every ``wait_notice_interval_seconds``
+        after. ``should_abort()`` True (e.g. ``/stop``) returns False at once."""
         from hermes_state import classify_persistence_error
         deadline = time.monotonic() + max(0.0, float(wait_seconds))
         wait_started = None
@@ -588,14 +583,13 @@ class SessionCompressionMixin:
         ) or 0
 
     def get_compression_chain(self, session_id: str) -> List[str]:
-        """Walk the compression-continuation chain forward: root-first through the tip
-        (``[session_id]`` when no continuation); ``get_compression_tip`` is the last element.
-        A continuation is a child of a session with ``end_reason='compression'``. The old
-        ``child.started_at >= parent.ended_at`` test was too brittle (gateway + compression
-        races insert the real continuation before ``ended_at`` is written, while a stale
-        websocket later creates a sibling that passes it). Instead exclude
-        branch/delegate/tool children and prefer children that continue the chain or are
-        still live over stale closed siblings such as ``ws_orphan_reap``."""
+        """Walk the compression-continuation chain forward: root-first through the tip (``[session_id]``
+        when no continuation); ``get_compression_tip`` is the last element. A continuation is a child of
+        a session with ``end_reason='compression'``. The old ``child.started_at >= parent.ended_at`` test
+        was too brittle (gateway + compression races insert the real continuation before ``ended_at`` is
+        written, while a stale websocket later creates a sibling that passes it). Instead exclude
+        branch/delegate/tool children and prefer children that continue the chain or are still live over
+        stale closed siblings such as ``ws_orphan_reap``."""
         current = session_id
         chain = [current] if current else []
         seen = set(chain)
