@@ -83,9 +83,7 @@ class StreamDeliveryMixin:
 
     @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
-        if not isinstance(text, str):
-            return ""
-        return re.sub(r"\s+", " ", text).strip()
+        return re.sub(r"\s+", " ", text).strip() if isinstance(text, str) else ""
 
     def _interim_content_was_streamed(self, content: str) -> bool:
         visible_content = self._normalize_interim_visible_text(self._strip_think_blocks(content or ""))
@@ -143,10 +141,10 @@ class StreamDeliveryMixin:
         commentary AND a partial final answer while tools are pending, and treating content
         as progress leaks the answer early. Content may be a parts list.
         """
-        visible = self._extract_codex_interim_visible_text(assistant_msg)
-        if visible:
-            return visible
-        return self._strip_think_blocks(flatten_message_text(assistant_msg.get("content"))).strip()
+        return (
+            self._extract_codex_interim_visible_text(assistant_msg)
+            or self._strip_think_blocks(flatten_message_text(assistant_msg.get("content"))).strip()
+        )
 
     def _interim_text_was_delivered(self, text: str) -> bool:
         normalized = self._normalize_interim_visible_text(text)
@@ -161,21 +159,28 @@ class StreamDeliveryMixin:
                 self._delivered_interim_texts = delivered
             delivered.add(normalized)
 
+    def _deliver_interim(self, visible: str, *, already_streamed: bool, record: List[str]) -> None:
+        """Hand ``visible`` to ``interim_assistant_callback`` and mark ``record`` delivered; swallows callback errors."""
+        cb = getattr(self, "interim_assistant_callback", None)
+        if cb is None:
+            return
+        try:
+            cb(visible, already_streamed=already_streamed)
+            for part in record:
+                self._record_delivered_interim_text(part)
+        except Exception:
+            logger.debug("interim_assistant_callback error", exc_info=True)
+
     def _fire_streamed_codex_commentary(self, text: str) -> None:
         """Deliver a completed live Codex commentary message immediately."""
-        cb = getattr(self, "interim_assistant_callback", None)
-        if cb is None or not isinstance(text, str):
+        if getattr(self, "interim_assistant_callback", None) is None or not isinstance(text, str):
             return
         visible = self._strip_think_blocks(text).strip()
         if visible:
             visible = redact_sensitive_text(visible)
         if not visible or visible == "(empty)" or self._interim_text_was_delivered(visible):
             return
-        try:
-            cb(visible, already_streamed=False)
-            self._record_delivered_interim_text(visible)
-        except Exception:
-            logger.debug("interim_assistant_callback error", exc_info=True)
+        self._deliver_interim(visible, already_streamed=False, record=[visible])
 
     def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
         """Surface a real mid-turn assistant commentary message to the UI layer.
@@ -203,15 +208,7 @@ class StreamDeliveryMixin:
             return
         already_streamed = self._interim_content_was_streamed(visible)
         self._enqueue_stream_hook("on_interim_message", text=visible, already_streamed=already_streamed)
-        cb = getattr(self, "interim_assistant_callback", None)
-        if cb is None:
-            return
-        try:
-            cb(visible, already_streamed=already_streamed)
-            for part in undelivered_parts or [visible]:
-                self._record_delivered_interim_text(part)
-        except Exception:
-            logger.debug("interim_assistant_callback error", exc_info=True)
+        self._deliver_interim(visible, already_streamed=already_streamed, record=undelivered_parts or [visible])
 
     # ── single-writer stream fence ──
 
@@ -236,8 +233,7 @@ class StreamDeliveryMixin:
         """
         self._ensure_stream_writer_state()
         with self._stream_writer_lock:
-            self._stream_writer_token += 1
-            token = self._stream_writer_token
+            self._stream_writer_token = token = self._stream_writer_token + 1
         self._stream_writer_tls.token = token
         return token
 
@@ -250,11 +246,8 @@ class StreamDeliveryMixin:
 
         A thread that never claimed (``token is None``) is never reported superseded.
         """
-        tls = getattr(self, "_stream_writer_tls", None)
-        token = getattr(tls, "token", None) if tls is not None else None
-        if token is None:
-            return False
-        return token != getattr(self, "_stream_writer_token", token)
+        token = getattr(getattr(self, "_stream_writer_tls", None), "token", None)
+        return token is not None and token != getattr(self, "_stream_writer_token", token)
 
     def _note_dropped_stream_writer(self, where: str) -> None:
         """Record + log that a superseded stream's delta was discarded."""
