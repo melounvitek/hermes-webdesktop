@@ -26,8 +26,8 @@ from hermes_constants import get_hermes_home
 # Cache/slot cluster lives in client_cache.py; re-exported because tests and reset
 # bookkeeping reach these names through this module.
 from plugins.memory.honcho.client_cache import (  # noqa: F401
-    _DEFAULT_HTTP_TIMEOUT, _apply_fresh_oauth_token, _client_cache_key, _client_slots, _client_slots_lock,
-    _credential_fingerprint, _honcho_json_timeout_memo, _refresh_cached_oauth, _slot_for,
+    _DEFAULT_HTTP_TIMEOUT, _client_cache_key, _client_slots, _client_slots_lock, _credential_fingerprint,
+    _honcho_json_timeout_memo, _refresh_oauth, _slot_for,
 )
 
 if TYPE_CHECKING:
@@ -508,7 +508,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     slot = _slot_for(key)
     cached = slot.peek()
     if cached is not None:
-        _refresh_cached_oauth(cached, config, slot)
+        _refresh_oauth(config, cached, slot)
         refreshed = slot.peek()
         if refreshed is not None:
             return refreshed
@@ -518,7 +518,7 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
         config = HonchoClientConfig.from_global_config()
 
     # Start with a live access token rather than 401ing an hour in.
-    _apply_fresh_oauth_token(config)
+    _refresh_oauth(config)
 
     if not config.api_key and not config.base_url:
         raise ValueError("Honcho API key not found. Get your API key at https://app.honcho.dev, "

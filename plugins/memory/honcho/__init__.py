@@ -686,8 +686,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
         return json.dumps({"result": card} if card else self._empty_profile_hint(peer))
 
     def _tool_search(self, args: dict) -> str:
-        query = (args.get("query") or "").strip()
-        if not query:
+        if not (query := (args.get("query") or "").strip()):
             return tool_error("Missing required parameter: query")
         max_tokens = min(int(args.get("max_tokens", 800)), 2000)
         result = self._manager.search_context(self._session_key, query, max_tokens=max_tokens, peer=args.get("peer", "user"))
@@ -696,8 +695,7 @@ class HonchoMemoryProvider(DialecticMixin, MemoryProvider):
     def _tool_reasoning(self, args: dict) -> str:
         from plugins.memory.honcho.session import HonchoAuthError
 
-        query = (args.get("query") or "").strip()
-        if not query:
+        if not (query := (args.get("query") or "").strip()):
             return tool_error("Missing required parameter: query")
         try:
             # Explicit reasoning bypasses the automatic-injection cap, and surfaces

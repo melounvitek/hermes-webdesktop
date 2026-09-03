@@ -169,22 +169,13 @@ def _resolve_timeout_from_sources(config: HonchoClientConfig | None) -> float:
     return timeout if timeout is not None else _DEFAULT_HTTP_TIMEOUT
 
 
-def _apply_fresh_oauth_token(config: HonchoClientConfig) -> None:
-    """Refresh a near-expiry OAuth grant and point ``config.api_key`` at it. No-op for static
-    keys or on failure (the first 401 triggers session.py's forced rotation). Refreshes against
-    the config's BOUND path: the ambient resolver on daemon threads lands on the default profile."""
-    try:
-        from plugins.memory.honcho import oauth
-        token, _ = oauth.ensure_fresh_token(config.bound_config_path(), config.host)
-        if token:
-            config.api_key = token
-    except Exception:
-        logger.warning("Honcho OAuth pre-build refresh failed", exc_info=True)
-
-
-def _refresh_cached_oauth(client: Honcho, config: HonchoClientConfig | None, slot: SingletonSlot | None = None) -> None:
-    """Rotate the cached client's Bearer in place when its OAuth token is stale. If the in-place
-    rotation can't apply (SDK shape change), the slot is reset so the next acquisition rebuilds."""
+def _refresh_oauth(config: HonchoClientConfig | None, client: Honcho | None = None, slot: SingletonSlot | None = None) -> None:
+    """Refresh a near-expiry OAuth grant. Pre-build (``client=None``): point ``config.api_key`` at the
+    fresh token so a new client doesn't 401 an hour in. Cached (``client`` given): rotate its Bearer in
+    place; if the in-place rotation can't apply (SDK shape change) reset ``slot`` so the next acquisition
+    rebuilds. No-op for static keys or on failure (the first 401 triggers session.py's forced rotation).
+    Refreshes against the config's BOUND path: the ambient resolver on daemon threads lands on the
+    default profile."""
     from plugins.memory.honcho.client import resolve_active_host, resolve_config_path
 
     try:
@@ -194,7 +185,10 @@ def _refresh_cached_oauth(client: Honcho, config: HonchoClientConfig | None, slo
         else:
             host, path = resolve_active_host(), resolve_config_path()
         token, refreshed = oauth.ensure_fresh_token(path, host)
-        if refreshed and token and not oauth.apply_token_to_client(client, token) and slot is not None:
+        if client is None:
+            if token:
+                config.api_key = token
+        elif refreshed and token and not oauth.apply_token_to_client(client, token) and slot is not None:
             slot.reset()
     except Exception:
-        logger.warning("Honcho OAuth cached refresh failed", exc_info=True)
+        logger.warning("Honcho OAuth %s refresh failed", "pre-build" if client is None else "cached", exc_info=True)
