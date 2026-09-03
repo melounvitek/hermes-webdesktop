@@ -102,7 +102,9 @@ def _scan_dashboard_processes(*, exclude_pids: set[int] | None = None) -> list[t
         seen = {pid for pid, _ in found} | skip
         for entry in ledger_entries():
             pid = entry.get("pid")
-            if entry.get("purpose") in ("serve", "dashboard") and isinstance(pid, int) and pid not in seen:
+            if entry.get("purpose") not in ("serve", "dashboard") or not isinstance(pid, int):
+                continue
+            if pid not in seen:
                 found.append((pid, str(entry.get("argv") or "")))
     except Exception:
         pass  # ledger unavailable → scan-only behavior
@@ -540,7 +542,7 @@ def _is_desktop_local_serve_cmdline(command: str) -> bool:
 
 
 def _process_ppid(pid: int) -> int | None:
-    """Best-effort parent pid; None on failure (always on Windows: desktop tree-kill reaps there)."""
+    """Best-effort parent pid; None on failure (always None on Windows: desktop tree-kill reaps)."""
     try:
         if sys.platform == "win32":
             return None

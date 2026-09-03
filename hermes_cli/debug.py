@@ -63,7 +63,7 @@ def _load_pending() -> list[dict]:
         return []
     if not isinstance(data, list):
         return []
-    return [e for e in data if isinstance(e, dict) and "url" in e and "expire_at" in e]
+    return [e for e in data if isinstance(e, dict) and {"url", "expire_at"} <= e.keys()]
 
 
 def _save_pending(entries: list[dict]) -> None:
@@ -99,18 +99,14 @@ def _sweep_expired_pastes(now: Optional[float] = None) -> tuple[int, int]:
         if expire_at > current:
             remaining.append(entry)
             continue
-
         try:
-            if delete_paste(entry.get("url", "")):
-                deleted += 1
-                continue
+            gone = delete_paste(entry.get("url", ""))
         except Exception:
-            pass  # network hiccup, 404 (already gone), ...
-
-        if expire_at + 86400 > current:
-            remaining.append(entry)
+            gone = False  # network hiccup, 404 (already gone), ...
+        if gone or expire_at + 86400 <= current:
+            deleted += 1  # deleted, or given up on → count as reaped
         else:
-            deleted += 1  # count as reaped
+            remaining.append(entry)
 
     if deleted:
         _save_pending(remaining)
@@ -299,7 +295,9 @@ def _redact_log_text(text: str) -> str:
     return _EMAIL_ADDRESS_RE.sub("[REDACTED_EMAIL]", text)
 
 
-def _read_tail_bytes(log_path: Path, size: int, max_bytes: int, tail_lines: int) -> tuple[bytes, bool]:
+def _read_tail_bytes(
+    log_path: Path, size: int, max_bytes: int, tail_lines: int,
+) -> tuple[bytes, bool]:
     """Read the whole file, or enough of its tail for both views → (raw, truncated).
 
     For oversized files, read backwards until we have ``max_bytes`` for the standalone upload
@@ -313,7 +311,8 @@ def _read_tail_bytes(log_path: Path, size: int, max_bytes: int, tail_lines: int)
         chunks: list[bytes] = []
         total = 0
         newline_count = 0
-        while pos > 0 and (total < max_bytes or newline_count <= tail_lines + 1) and total < max_bytes * 2:
+        while (pos > 0 and total < max_bytes * 2
+               and (total < max_bytes or newline_count <= tail_lines + 1)):
             read_size = min(chunk_size, pos)
             pos -= read_size
             f.seek(pos)
@@ -384,7 +383,9 @@ def _tail_budget(name: str, log_lines: int) -> int:
     return log_lines if name == "agent" else min(log_lines, 100)
 
 
-def _capture_default_log_snapshots(log_lines: int, *, redact: bool = True) -> dict[str, LogSnapshot]:
+def _capture_default_log_snapshots(
+    log_lines: int, *, redact: bool = True,
+) -> dict[str, LogSnapshot]:
     """Capture all logs used by debug-share exactly once."""
     return {
         name: _capture_log_snapshot(name, tail_lines=_tail_budget(name, log_lines), redact=redact)
@@ -414,7 +415,8 @@ def _capture_dump() -> str:
 
 
 def collect_debug_report(
-    *, log_lines: int = 200, dump_text: str = "", log_snapshots: Optional[dict[str, LogSnapshot]] = None,
+    *, log_lines: int = 200, dump_text: str = "",
+    log_snapshots: Optional[dict[str, LogSnapshot]] = None,
 ) -> str:
     """Build the summary debug report (system dump + log tails) as upload-ready text.
 
@@ -471,7 +473,8 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
     dump_text = _capture_dump()
     log_snapshots = _capture_default_log_snapshots(log_lines, redact=redact)
 
-    report = collect_debug_report(log_lines=log_lines, dump_text=dump_text, log_snapshots=log_snapshots)
+    report = collect_debug_report(log_lines=log_lines, dump_text=dump_text,
+                                  log_snapshots=log_snapshots)
     banner = _REDACTION_BANNER if redact else ""
     bundle: dict[str, str] = {"report": banner + report}
     for name in _FULL_LOGS:
@@ -506,7 +509,9 @@ class DebugShareResult:
     report: str = ""  # the summary report text (kept for local fallback)
 
 
-def build_debug_share(*, log_lines: int = 200, expiry: int = 7, redact: bool = True) -> DebugShareResult:
+def build_debug_share(
+    *, log_lines: int = 200, expiry: int = 7, redact: bool = True,
+) -> DebugShareResult:
     """Collect the debug report + full logs, upload each, return the URLs.
 
     Shared core behind ``hermes debug share`` and the dashboard ``POST /api/ops/debug-share``.
@@ -517,7 +522,9 @@ def build_debug_share(*, log_lines: int = 200, expiry: int = 7, redact: bool = T
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
 
     if redact:
-        logger.info("hermes debug share: applied force-mode redaction to log snapshots before upload")
+        logger.info(
+            "hermes debug share: applied force-mode redaction to log snapshots before upload"
+        )
 
     report = bundle["report"]
 
@@ -607,12 +614,9 @@ def run_debug_share(args):
     print("\nDebug report uploaded:")
     for label, url in result.urls.items():
         print(f"  {label:<{label_width}}  {url}")
-
     if result.failures:
         print(f"\n  (failed to upload: {', '.join(result.failures)})")
-
-    hours = result.auto_delete_seconds // 3600
-    print(f"\n⏱  Pastes will auto-delete in {hours} hours.")
+    print(f"\n⏱  Pastes will auto-delete in {result.auto_delete_seconds // 3600} hours.")
     print("To delete now:  hermes debug delete <url>")
     print("\nShare these links with the Hermes team for support.")
 
@@ -633,7 +637,7 @@ _NOUS_PRIVACY_NOTICE = """\
 
 
 def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
-    """``hermes debug share --nous``: gzip the same bundle into the Nous envelope, upload to Nous-S3."""
+    """``hermes debug share --nous``: gzip the same bundle into the Nous envelope → Nous-S3."""
     from hermes_cli.diagnostics_upload import share_to_nous
 
     print(_NOUS_PRIVACY_NOTICE)
@@ -664,17 +668,12 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
         sys.exit(1)
 
     view_url = res.get("viewUrl") or res.get("view_url")
-    print("\nDebug bundle uploaded to Nous (private):")
-    if view_url:
-        print(f"  View URL  {view_url}")
-    else:
-        print(f"  (no view URL returned; upload id: {res.get('id', '?')})")
-
     expires_at = res.get("expiresAt") or res.get("expires_at")
-    if expires_at:
-        print(f"\n⏱  Auto-deletes at {expires_at} (14-day retention).")
-    else:
-        print("\n⏱  Auto-deletes after 14 days.")
+    print("\nDebug bundle uploaded to Nous (private):")
+    print(f"  View URL  {view_url}" if view_url
+          else f"  (no view URL returned; upload id: {res.get('id', '?')})")
+    print(f"\n⏱  Auto-deletes at {expires_at} (14-day retention)." if expires_at
+          else "\n⏱  Auto-deletes after 14 days.")
 
     print(
         "\nShare this private link with the Nous team — only Nous staff "
@@ -713,13 +712,12 @@ def run_debug(args):
     # Opportunistic sweep of expired pastes on every ``hermes debug`` call.
     _best_effort_sweep_expired_pastes()
 
-    subcmd = getattr(args, "debug_command", None)
-    if subcmd == "share":
-        run_debug_share(args)
-    elif subcmd == "delete":
-        run_debug_delete(args)
-    else:
+    handlers = {"share": run_debug_share, "delete": run_debug_delete}
+    handler = handlers.get(getattr(args, "debug_command", None))
+    if handler is None:
         print(_DEBUG_USAGE)
+    else:
+        handler(args)
 
 
 _DEBUG_USAGE = """\

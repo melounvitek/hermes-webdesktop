@@ -21,13 +21,10 @@ from cron.lifecycle_guard import (  # noqa: F401  (re-exported for terminal_tool
 
 
 def _normalize_skills(single_skill=None, skills: Optional[Iterable[str]] = None) -> Optional[List[str]]:
-    if skills is None:
-        if single_skill is None:
-            return None
-        raw_items = [single_skill]
-    else:
-        raw_items = list(skills)
-
+    """Deduped, stripped skill names; None when neither argument was given."""
+    if skills is None and single_skill is None:
+        return None
+    raw_items = list(skills) if skills is not None else [single_skill]
     normalized: List[str] = []
     for item in raw_items:
         text = str(item or "").strip()
@@ -78,7 +75,9 @@ def _builtin_gateway_liveness() -> Optional[bool]:
                 return True
         except Exception:
             pass  # a crashing lock probe is "unknown", not "dead" — let the pid scan decide
-        from hermes_cli.gateway import find_gateway_pids, named_profile_served_by_running_multiplexer
+        from hermes_cli.gateway import (
+            find_gateway_pids, named_profile_served_by_running_multiplexer,
+        )
 
         if find_gateway_pids():
             return True
@@ -161,7 +160,9 @@ def _print_banner(title: str) -> None:
 
 
 def _unverified_targets(unverified) -> str:
-    return ", ".join(str(t) for t in unverified) if isinstance(unverified, list) else str(unverified)
+    if isinstance(unverified, list):
+        return ", ".join(str(t) for t in unverified)
+    return str(unverified)
 
 
 _STATE_BADGES = {"paused": ("[paused]", Colors.YELLOW), "completed": ("[completed]", Colors.BLUE)}
@@ -217,7 +218,8 @@ def cron_list(show_all: bool = False):
             if mon_state.get("last_changed_at"):
                 rows.append(("Changed", mon_state["last_changed_at"]))
         if job.get("no_agent"):
-            rows.append(("Mode", f"{color('no-agent', Colors.DIM)} (script stdout delivered directly)"))
+            mode = color("no-agent", Colors.DIM) + " (script stdout delivered directly)"
+            rows.append(("Mode", mode))
         if job.get("workdir"):
             rows.append(("Workdir", job["workdir"]))
 
@@ -410,7 +412,7 @@ def _print_ticker_health(pids: list) -> None:
         )
         print("  Cron jobs may NOT be firing. Restart: hermes gateway restart")
     elif ok_age is not None and ok_age > STALE_AFTER:
-        # Loop alive (fresh heartbeat) but no tick SUCCEEDED in a long time → failing every iteration.
+        # Loop alive (fresh heartbeat) but no tick SUCCEEDED in a long time → every tick fails.
         _warn(
             "⚠ Gateway and cron ticker are running, but no tick has "
             f"succeeded in {int(ok_age)}s — ticks may be failing."
@@ -503,7 +505,8 @@ def _print_active_jobs_summary(jobs) -> None:
     ]
     if late:
         print()
-        print(color(f"  ⚠ {len(late)} job(s) last fired late (missed-fire catch-up):", Colors.YELLOW))
+        print(color(f"  ⚠ {len(late)} job(s) last fired late (missed-fire catch-up):",
+                    Colors.YELLOW))
         for j in late:
             d = j["last_dispatch"]
             print(
@@ -584,26 +587,20 @@ def _cron_doctor_issues_for_job(job: Dict[str, Any]) -> List[str]:
 
     unverified = job.get("last_delivery_unverified")
     if unverified:
-        issues.append(
-            f"last delivery unverified (adapter acked without evidence): {_unverified_targets(unverified)}"
-        )
+        issues.append("last delivery unverified (adapter acked without evidence): "
+                      + _unverified_targets(unverified))
 
     if job.get("enabled", True) and job.get("state") not in {"paused", "completed"}:
         next_run = str(job.get("next_run_at") or "").strip()
-        if not next_run:
-            issues.append("active job has no next_run_at")
-        else:
-            overdue = _next_run_overdue_issue(next_run)
-            if overdue:
-                issues.append(overdue)
+        issue = _next_run_overdue_issue(next_run) if next_run else "active job has no next_run_at"
+        if issue:
+            issues.append(issue)
 
     script = str(job.get("script") or "").strip()
     if job.get("no_agent") and not script:
         issues.append("no-agent job has no script")
-    if script:
-        script_issue = _script_health_issue(script)
-        if script_issue:
-            issues.append(script_issue)
+    if script and (script_issue := _script_health_issue(script)):
+        issues.append(script_issue)
 
     workdir = str(job.get("workdir") or "").strip()
     if workdir and not Path(workdir).expanduser().exists():
@@ -617,11 +614,7 @@ def cron_doctor() -> int:
     from cron.jobs import list_jobs
 
     jobs = list_jobs(include_disabled=False)
-    findings: List[tuple[Dict[str, Any], List[str]]] = []
-    for job in jobs:
-        issues = _cron_doctor_issues_for_job(job)
-        if issues:
-            findings.append((job, issues))
+    findings = [(job, issues) for job in jobs if (issues := _cron_doctor_issues_for_job(job))]
 
     if not findings:
         print(color("✓ Cron doctor found no issues", Colors.GREEN))
@@ -635,9 +628,7 @@ def cron_doctor() -> int:
     print(color(f"Cron doctor found {issue_count} issue(s) across {len(findings)} job(s):", Colors.YELLOW))
     print()
     for job, issues in findings:
-        job_id = job.get("id", "?")
-        name = job.get("name", "(unnamed)")
-        print(f"  {color(job_id, Colors.YELLOW)} {name}")
+        print(f"  {color(job.get('id', '?'), Colors.YELLOW)} {job.get('name', '(unnamed)')}")
         for issue in issues:
             print(f"    - {issue}")
     print()
@@ -724,9 +715,7 @@ def cron_edit(args):
         final_skills = replacement_skills
     elif add_skills or remove_skills:
         final_skills = [skill for skill in existing_skills if skill not in remove_skills]
-        for skill in add_skills:
-            if skill not in final_skills:
-                final_skills.append(skill)
+        final_skills += [skill for skill in add_skills if skill not in final_skills]
 
     result = _cron_api(action="update", job_id=args.job_id,
                        schedule=getattr(args, "schedule", None),
@@ -782,14 +771,12 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
         # (execution_mode="background" and/or a delegation_id) and keeps running AFTER this
         # CLI exits — a terminal success/failure verdict would be a lie, so report the dispatch.
         delegation_id = job.get("delegation_id")
-        if job.get("execution_mode") == "background" or delegation_id:
-            if delegation_id:
-                print(f"  Running in background (delegation {delegation_id}).")
-            else:
-                print("  Running in background.")
+        if delegation_id:
+            print(f"  Running in background (delegation {delegation_id}).")
+        elif job.get("execution_mode") == "background":
+            print("  Running in background.")
         elif job.get("executed"):
-            outcome = "succeeded" if job.get("execution_success") else "failed"
-            print(f"  Ran now: {outcome}.")
+            print(f"  Ran now: {'succeeded' if job.get('execution_success') else 'failed'}.")
         elif job.get("execution_skipped"):
             print(f"  {job['execution_skipped']}")
         else:
@@ -862,7 +849,6 @@ def cron_notepad(args) -> int:
             print(color(f"No notepad key '{key}' for job {job_id}.", Colors.YELLOW))
             return 1
 
-        # list (default)
         notes = notepad.list_notes(job_id)
         if not notes:
             print(color(f"Notepad for job {job_id} is empty.", Colors.DIM))

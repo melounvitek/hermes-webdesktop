@@ -275,7 +275,7 @@ def _cleanup_stale_runtime_files(profile_dir: Path) -> None:
 
 
 def _read_prior_exit_label(profile_dir: Path) -> str:
-    """Exception-free ``lifecycle_ledger.read_prior_exit_label``: forensics never block cont-init."""
+    """Exception-free ``lifecycle_ledger.read_prior_exit_label`` — forensics never block boot."""
     try:
         from gateway.lifecycle_ledger import read_prior_exit_label
         return read_prior_exit_label(profile_dir)

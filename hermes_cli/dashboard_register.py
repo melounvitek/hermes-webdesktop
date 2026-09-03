@@ -99,7 +99,8 @@ def _register_self_hosted_client(
             raise RuntimeError(
                 detail or "Your account is not permitted to register a self-hosted dashboard."
             ) from exc
-        raise RuntimeError(f"Portal returned HTTP {exc.code}" + (f": {detail}" if detail else "")) from exc
+        suffix = f": {detail}" if detail else ""
+        raise RuntimeError(f"Portal returned HTTP {exc.code}{suffix}") from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Could not reach Nous Portal at {portal_base_url}: {exc.reason}") from exc
 
