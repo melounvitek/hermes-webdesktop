@@ -5,6 +5,7 @@ legitimate uses, so findings are hints, not verdicts."""
 from __future__ import annotations
 
 import ast
+from contextlib import suppress
 from pathlib import Path
 from typing import List, Tuple
 
@@ -13,10 +14,8 @@ Finding = Tuple[str, int, str, str]
 
 _IGNORED_DIRS = {"__pycache__", ".venv", "venv", "node_modules"}
 # builtin name -> (index of the argument that must be a literal, pattern_id, description)
-_DYNAMIC_CALLS = {
-    "__import__": (0, "dynamic_import_computed", "__import__ with non-literal module name"),
-    "getattr": (1, "dynamic_getattr", "getattr with non-literal attribute name"),
-}
+_DYNAMIC_CALLS = {"__import__": (0, "dynamic_import_computed", "__import__ with non-literal module name"),
+                  "getattr": (1, "dynamic_getattr", "getattr with non-literal attribute name")}
 
 
 def _is_importlib(name: str) -> bool:
@@ -59,10 +58,8 @@ def _scan_source(content: str, rel_path: str) -> List[Finding]:
                 hit(node, "importlib_import", f"from {node.module} import ... — enables dynamic module loading")
             self.generic_visit(node)
 
-    try:
+    with suppress(RecursionError, ValueError, RuntimeError):  # hostile input: keep what was collected so far
         V().visit(tree)
-    except (RecursionError, ValueError, RuntimeError):
-        pass  # hostile/pathological input: return what was collected so far
     return findings
 
 

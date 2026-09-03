@@ -50,7 +50,7 @@ class Finding:
 class ScanResult:
     skill_name: str
     source: str
-    trust_level: str    # "builtin" | "trusted" | "community"
+    trust_level: str    # "builtin" | "trusted" | "community" | "agent-created"
     verdict: str        # "safe" | "caution" | "dangerous"
     findings: List[Finding] = field(default_factory=list)
     scanned_at: str = ""
@@ -59,7 +59,6 @@ class ScanResult:
 
 
 # --- Threat patterns — (regex, pattern_id, severity, category, description) --
-
 # File-modification verbs for the agent-config persistence tiers: a verb shortly before a config
 # filename on the same line is scored as modification; a bare mention is not.
 MODIFY_VERB_RE = (
@@ -101,9 +100,7 @@ def _prose_modify_re(file_alt: str) -> str:
 def _content_contract_re(file_alt: str) -> str:
     """"<file> should contain/include ..." prose. Authoring guides and attacks share this shape and are not
     separable statically, so the tier is scored high (caution → confirmation), never critical."""
-    return (
-        rf'{file_alt}\b[^\n]{{0,40}}?\b(?:should|must|needs?\s+to)\s+'
-        rf'(?:contain|say|include|have|list)\b')
+    return rf'{file_alt}\b[^\n]{{0,40}}?\b(?:should|must|needs?\s+to)\s+(?:contain|say|include|have|list)\b'
 
 THREAT_PATTERNS = [
     # ── Exfiltration: shell commands leaking secrets ──
@@ -350,19 +347,15 @@ THREAT_PATTERNS = [
 
 _COMPILED_THREAT_PATTERNS = [(re.compile(pattern, re.IGNORECASE), *rest) for pattern, *rest in THREAT_PATTERNS]
 
-# Structural limits for skill directories
-MAX_FILE_COUNT = 50       # skills shouldn't have 50+ files
-MAX_TOTAL_SIZE_KB = 5120  # 5MB — large skills are informational only, not blocking
-MAX_SINGLE_FILE_KB = 256  # individual file > 256KB is suspicious
+# Structural limits: file count; total KB (5MB, informational only — large skills don't block); single-file KB.
+MAX_FILE_COUNT, MAX_TOTAL_SIZE_KB, MAX_SINGLE_FILE_KB = 50, 5120, 256
 
 # Text extensions to scan; known binary extensions that should NOT be in a skill; script types allowed +x.
 SCANNABLE_EXTENSIONS = {
     '.md', '.txt', '.py', '.sh', '.bash', '.js', '.ts', '.rb', '.yaml', '.yml', '.json', '.toml',
-    '.cfg', '.ini', '.conf', '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php',
-}
+    '.cfg', '.ini', '.conf', '.html', '.css', '.xml', '.tex', '.r', '.jl', '.pl', '.php'}
 SUSPICIOUS_BINARY_EXTENSIONS = {
-    '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com', '.msi', '.dmg', '.app', '.deb', '.rpm',
-}
+    '.exe', '.dll', '.so', '.dylib', '.bin', '.dat', '.com', '.msi', '.dmg', '.app', '.deb', '.rpm'}
 _SCRIPT_EXTENSIONS = {'.sh', '.bash', '.py', '.rb', '.pl'}
 
 # Zero-width / directional unicode used for text hiding, with the readable name reported in the finding.
@@ -372,8 +365,7 @@ _INVISIBLE_CHAR_NAMES = {
     '\u2064': "invisible plus", '\ufeff': "BOM/zero-width no-break space",
     '\u202a': "LTR embedding", '\u202b': "RTL embedding", '\u202c': "pop directional",
     '\u202d': "LTR override", '\u202e': "RTL override", '\u2066': "LTR isolate", '\u2067': "RTL isolate",
-    '\u2068': "first strong isolate", '\u2069': "pop directional isolate",
-}
+    '\u2068': "first strong isolate", '\u2069': "pop directional isolate"}
 INVISIBLE_CHARS = set(_INVISIBLE_CHAR_NAMES)
 
 
@@ -432,8 +424,7 @@ def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
         ignore = _load_skill_ignore(skill_path)
         findings.extend(_check_structure(skill_path, ignore=ignore))
         for f in skill_path.rglob("*"):
-            rel = str(f.relative_to(skill_path))
-            if f.is_file() and not ignore(rel):
+            if f.is_file() and not ignore(rel := str(f.relative_to(skill_path))):
                 findings.extend(scan_file(f, rel))
     elif skill_path.is_file():
         findings.extend(scan_file(skill_path, skill_path.name))
@@ -446,10 +437,9 @@ def _content_digest(skill_path: Path) -> str:
     """Canonical SHA-256 over (POSIX relative path, file bytes) ORDERED by the rel-path STRING — Path sorting is
     case-insensitive on Windows and diverged from ``skills_hub.bundle_content_hash`` (every installed skill then
     reported ``update_available`` forever). String order keeps both sides byte-symmetric."""
-    h = hashlib.sha256()
     if not skill_path.is_dir():
-        h.update(skill_path.read_bytes())
-        return h.hexdigest()
+        return hashlib.sha256(skill_path.read_bytes()).hexdigest()
+    h = hashlib.sha256()
     for rel, p in sorted((p.relative_to(skill_path).as_posix(), p) for p in skill_path.rglob("*") if p.is_file()):
         h.update(rel.encode("utf-8") + b"\x00")
         h.update(p.read_bytes())
@@ -462,9 +452,8 @@ def content_hash(skill_path: Path) -> str:
     return f"sha256:{_content_digest(skill_path)[:16]}"
 
 
-def scan_skill_cached(
-    skill_path: Path, source: str = "community", *, source_url: str = "", cache_dir: Path | None = None,
-) -> Tuple[ScanResult, dict]:
+def scan_skill_cached(skill_path: Path, source: str = "community", *, source_url: str = "",
+                      cache_dir: Path | None = None) -> Tuple[ScanResult, dict]:
     """Scan plus attestation dict; the cache (keyed by content digest + source identity) only serves exact
     current content under the current scanner version."""
     digest = _content_digest(skill_path)
@@ -550,13 +539,11 @@ def _check_structure(skill_dir: Path, ignore=None) -> List[Finding]:
             st = f.stat()
         except OSError:
             continue
-        size = st.st_size
-        total_size += size
+        total_size += (size := st.st_size)
         if size > MAX_SINGLE_FILE_KB * 1024:
             add("oversized_file", "medium", "structural", rel, f"{size // 1024}KB",
                 f"file is {size // 1024}KB (limit: {MAX_SINGLE_FILE_KB}KB)")
-        ext = f.suffix.lower()
-        if ext in SUSPICIOUS_BINARY_EXTENSIONS:
+        if (ext := f.suffix.lower()) in SUSPICIOUS_BINARY_EXTENSIONS:
             add("binary_file", "critical", "structural", rel, f"binary: {ext}",
                 f"binary/executable file ({ext}) should not be in a skill")
         if ext not in _SCRIPT_EXTENSIONS and st.st_mode & 0o111:
@@ -584,8 +571,8 @@ def _load_skill_ignore(skill_dir: Path):
     for ig in (skill_dir / name for name in _SKILL_IGNORE_FILENAMES):
         with suppress(UnicodeDecodeError, OSError):
             if ig.is_file():
-                lines = (raw.strip() for raw in ig.read_text(encoding="utf-8").splitlines())
-                patterns.extend(line for line in lines if line and not line.startswith("#"))
+                patterns.extend(s for s in map(str.strip, ig.read_text(encoding="utf-8").splitlines())
+                                if s and not s.startswith("#"))
 
     def ignore(rel: str) -> bool:
         rel_posix = Path(rel).as_posix()
@@ -629,8 +616,8 @@ def _resolve_trust_level(source: str) -> str:
 
 def _determine_verdict(findings: List[Finding]) -> str:
     """critical → dangerous, high → caution; medium/low alone are informational (safe)."""
-    severities = {f.severity for f in findings}
-    return "dangerous" if "critical" in severities else "caution" if "high" in severities else "safe"
+    sev = {f.severity for f in findings}
+    return "dangerous" if "critical" in sev else "caution" if "high" in sev else "safe"
 
 
 def _build_summary(name: str, source: str, trust: str, verdict: str, findings: List[Finding]) -> str:

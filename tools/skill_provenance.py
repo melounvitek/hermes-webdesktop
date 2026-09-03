@@ -6,13 +6,10 @@ AIAgent._memory_write_origin: ``token = set_current_write_origin(...)`` / ``rese
 import contextvars
 
 _write_origin: contextvars.ContextVar[str] = contextvars.ContextVar("skill_write_origin", default="foreground")
-
-# Sentinel used by the background review fork (run_agent._spawn_background_review).
-BACKGROUND_REVIEW = "background_review"
+BACKGROUND_REVIEW = "background_review"  # sentinel used by run_agent._spawn_background_review
 
 
 def set_current_write_origin(origin: str) -> contextvars.Token[str]:
-    """Bind the active write origin; pass the Token to reset_current_write_origin."""
     return _write_origin.set(origin or "foreground")
 
 

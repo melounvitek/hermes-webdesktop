@@ -20,17 +20,14 @@ from typing import List
 logger = logging.getLogger(__name__)
 
 SCANNER_BIN = "skillevaluator"
-
-# Keyless, deterministic checks. Schema/quality are index-pipeline hygiene, not install-time signal.
-# `security` invokes NVIDIA SkillSpector (static rules, no LLM); when absent it reports status="incomplete".
+# Keyless, deterministic checks (schema/quality are index-pipeline hygiene, not install-time signal). `security`
+# invokes NVIDIA SkillSpector (static rules, no LLM); when absent it reports status="incomplete".
 TIER1_CHECKS = "pii,unicode,lint,license,security"
 SCAN_TIMEOUT_SECONDS = 120
 
-# SkillEvaluator pii_patterns.yaml categories that indicate a possible REAL credential rather than
-# personal-info hygiene — the only findings that earn a confirmation prompt.
-SECRETS_CLASS_CHECKS = frozenset({
-    "database_credentials", "hardcoded_secrets", "jwt_tokens", "webhook_urls",
-    "aws_identifiers", "github_tokens", "private_keys"})
+# pii_patterns.yaml categories indicating a possible REAL credential (not PII hygiene) — the only prompt-worthy ones.
+SECRETS_CLASS_CHECKS = frozenset({"database_credentials", "hardcoded_secrets", "jwt_tokens", "webhook_urls",
+                                  "aws_identifiers", "github_tokens", "private_keys"})
 
 
 @dataclass
@@ -102,9 +99,9 @@ def _parse_report(report: dict) -> Tier1Report:
 
 def run_tier1_scan(skill_dir: Path, timeout: int = SCAN_TIMEOUT_SECONDS) -> Tier1Report:
     """Run SkillEvaluator Tier 1 over one skill dir; any failure returns ``available=False``, never raises."""
-    if shutil.which(SCANNER_BIN) is None:
-        return Tier1Report(available=False, error="scanner not on PATH")
     unavailable = lambda why: Tier1Report(available=False, error=why)  # noqa: E731
+    if shutil.which(SCANNER_BIN) is None:
+        return unavailable("scanner not on PATH")
     with tempfile.TemporaryDirectory(prefix="se-tier1-") as outdir:
         try:
             subprocess.run([SCANNER_BIN, "validate", str(skill_dir), "--checks", TIER1_CHECKS, "--no-dedup",
@@ -113,8 +110,7 @@ def run_tier1_scan(skill_dir: Path, timeout: int = SCAN_TIMEOUT_SECONDS) -> Tier
             return unavailable(f"scan timed out after {timeout}s")
         except OSError as exc:
             return unavailable(f"scanner failed to launch: {exc}")
-        reports = sorted(Path(outdir).glob("skillevaluator-output-*.json"))
-        if not reports:
+        if not (reports := sorted(Path(outdir).glob("skillevaluator-output-*.json"))):
             return unavailable("scanner produced no JSON report")
         try:
             parsed = json.loads(reports[-1].read_text(encoding="utf-8"))
