@@ -1,7 +1,6 @@
-"""Private embedded cua-driver daemon for non-standard permission modes, plus the macOS
-CuaDriver.app identity checks its launch path depends on. Driver resolution / policy helpers
-are looked up lazily through ``tools.computer_use.cua_backend`` so tests that patch them there
-keep working.
+"""Private embedded cua-driver daemon for non-standard permission modes, plus the macOS CuaDriver.app
+identity checks its launch path depends on. Driver resolution / policy helpers are looked up lazily
+through ``tools.computer_use.cua_backend`` so tests that patch them there keep working.
 """
 
 from __future__ import annotations
@@ -20,8 +19,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("tools.computer_use.cua_backend")
 
-# The only bundle identity the private daemon may launch through, and the teams that sign
-# official releases. Exact matches only: a suffixed identifier or other team is an impostor.
+# The only bundle identity the private daemon may launch through, and the teams that sign official
+# releases. Exact matches only: a suffixed identifier or other team is an impostor.
 _CUA_DRIVER_BUNDLE_ID = "com.trycua.driver"
 _CUA_DRIVER_TEAM_IDS = ("4YEC26S9KF", "YCK386LBJ7")
 _QUIET_ERRORS = (OSError, subprocess.SubprocessError)
@@ -29,13 +28,12 @@ _QUIET_ERRORS = (OSError, subprocess.SubprocessError)
 def _cb():
     """Origin module, looked up lazily so ``patch("tools.computer_use.cua_backend.X")`` applies."""
     from tools.computer_use import cua_backend
-
     return cua_backend
 
 def _resolve_cua_driver_app_path(driver_cmd: str) -> Optional[str]:
-    """Return the CuaDriver.app bundle that CARRIES *driver_cmd*, if any. Derived from the
-    resolved binary path only — no /Applications fallback, which could be a DIFFERENT install
-    than the one the manifest resolved, running code the resolution chain never validated."""
+    """Return the CuaDriver.app bundle that CARRIES *driver_cmd*, if any. Derived from the resolved binary
+    path only — no /Applications fallback, which could be a DIFFERENT install than the one the manifest
+    resolved, running code the resolution chain never validated."""
     resolved = os.path.realpath(driver_cmd)
     marker_index = resolved.find(".app/Contents/MacOS/")
     if marker_index < 0:
@@ -45,11 +43,11 @@ def _resolve_cua_driver_app_path(driver_cmd: str) -> Optional[str]:
     return candidate if os.path.isfile(executable) and os.access(executable, os.X_OK) else None
 
 def _validate_cua_driver_app_signature(app_path: str) -> None:
-    """Fail closed unless *app_path* is the genuinely-signed CuaDriver.app. ``/usr/bin/open``
-    hands LaunchServices whatever bundle sits at the path, so ``codesign -dv`` must report EXACTLY
-    ``Identifier=com.trycua.driver`` and an expected TeamIdentifier. ``TeamIdentifier=not set``
-    (ad-hoc dev builds) is allowed only with ``computer_use.allow_unsigned_driver: true``.
-    Raises RuntimeError on any mismatch or when codesign is unavailable/fails."""
+    """Fail closed unless *app_path* is the genuinely-signed CuaDriver.app. ``/usr/bin/open`` hands
+    LaunchServices whatever bundle sits at the path, so ``codesign -dv`` must report EXACTLY
+    ``Identifier=com.trycua.driver`` and an expected TeamIdentifier. ``TeamIdentifier=not set`` (ad-hoc dev
+    builds) is allowed only with ``computer_use.allow_unsigned_driver: true``. Raises RuntimeError on any
+    mismatch or when codesign is unavailable/fails."""
     codesign = shutil.which("codesign")
     if not codesign:
         raise RuntimeError("codesign is required to verify CuaDriver.app before launching it.")
@@ -104,18 +102,18 @@ def _wait_or_kill(process: Any) -> None:
 class _EmbeddedCuaDaemon:
     """Private daemon for a non-standard permission mode.
 
-    cua-driver's permission mode is immutable after daemon startup, so reusing the
-    machine-wide daemon would let one Hermes session's YOLO choice affect another. A private
-    daemon gives the session its own socket, runtime and launch-time authorization; on macOS
-    it is launched through CuaDriver.app so TCC stays attached to ``com.trycua.driver``.
+    cua-driver's permission mode is immutable after daemon startup, so reusing the machine-wide daemon
+    would let one Hermes session's YOLO choice affect another. A private daemon gives the session its own
+    socket, runtime and launch-time authorization; on macOS it is launched through CuaDriver.app so TCC
+    stays attached to ``com.trycua.driver``.
 
     * ``unrestricted`` — explicit Hermes YOLO (``--dangerously-bypass-approvals``).
-    * ``bounded`` — a user-reviewed capability manifest approved at launch is the
-      authorization boundary, not a runtime prompt.
+    * ``bounded`` — a user-reviewed capability manifest approved at launch is the authorization
+      boundary, not a runtime prompt.
 
-    The manifest is a ceiling, not a mode: it "can narrow a profile but never widen it", so a
-    configured v3 manifest is forwarded even for ``unrestricted`` (bounding an approval-bypassed
-    run). Mandatory for ``bounded``, optional everywhere else.
+    The manifest is a ceiling, not a mode: it "can narrow a profile but never widen it", so a configured
+    v3 manifest is forwarded even for ``unrestricted`` (bounding an approval-bypassed run). Mandatory for
+    ``bounded``, optional everywhere else.
     """
 
     _START_TIMEOUT_SECONDS = 15.0
@@ -131,8 +129,8 @@ class _EmbeddedCuaDaemon:
             if not os.path.isfile(manifest):
                 raise ValueError(f"capability manifest not found: {manifest}")
         self.capability_manifest: Optional[str] = manifest or None
-        # bounded always forwards (the driver validates it); other modes accept only a v3
-        # manifest — a legacy one would abort startup instead.
+        # bounded always forwards (the driver validates it); other modes accept only a v3 manifest — a
+        # legacy one would abort startup instead.
         self.manifest_applies = bool(manifest) and (
             permission_mode == "bounded" or _cb()._manifest_is_mode_independent(manifest))
         if manifest and not self.manifest_applies:
@@ -160,7 +158,6 @@ class _EmbeddedCuaDaemon:
 
     def _sanitized_env(self) -> Dict[str, str]:
         from tools.environments.local import _sanitize_subprocess_env
-
         return _sanitize_subprocess_env(self.child_env())
 
     def _drain_stderr(self, process: Any) -> None:
@@ -180,9 +177,9 @@ class _EmbeddedCuaDaemon:
             serve_args.append("--dangerously-bypass-approvals")
         if self.manifest_applies:
             serve_args += ["--capability-manifest", str(self.capability_manifest), "--approve-capability-manifest"]
-        # The private daemon owns the cursor overlay, so the overlay policy must apply to this
-        # long-lived serve process, not only its MCP proxy. Appended BEFORE the macOS app-launch
-        # wrapping so the flag travels inside `open ... --args` with the rest of the serve args.
+        # The private daemon owns the cursor overlay, so the overlay policy must apply to this long-lived
+        # serve process, not only its MCP proxy. Appended BEFORE the macOS app-launch wrapping so the flag
+        # travels inside `open ... --args` with the rest of the serve args.
         return _cb()._mcp_args_with_overlay_flag(serve_args, driver_cmd=self._command)
 
     def start(self) -> None:
@@ -204,8 +201,8 @@ class _EmbeddedCuaDaemon:
         deadline = time.monotonic() + self._START_TIMEOUT_SECONDS
         while time.monotonic() < deadline:
             return_code = self._process.poll()
-            # `open` exits 0 once LaunchServices took the request, so on macOS only a
-            # non-zero exit means the daemon itself died.
+            # `open` exits 0 once LaunchServices took the request, so on macOS only a non-zero exit means
+            # the daemon itself died.
             if return_code is not None and (not self._launch_via_app or return_code != 0):
                 detail = "; ".join(self._stderr_tail) or "no diagnostic output"
                 raise RuntimeError(f"embedded cua-driver exited during startup: {detail}")
