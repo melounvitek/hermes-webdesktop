@@ -317,8 +317,6 @@ def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
     """``just now`` / ``18h ago`` / ``3d ago``; "" for a missing/invalid ts. An LLM
     reads a bare absolute timestamp as current fact — the relative age is what
     prompts a worker to re-verify stale sibling work."""
-    if ts is None:
-        return ""
     try:
         ts = int(ts)
     except (TypeError, ValueError):
@@ -614,23 +612,15 @@ def create_board(
 def list_boards(*, include_archived: bool = True) -> list[dict]:
     """Metadata for every board: ``default`` first (always present), then
     ``boards/<slug>/`` dirs holding a ``kanban.db`` or ``board.json``, sorted."""
-    entries: list[dict] = []
-    seen: set[str] = set()
-
-    # Default board is always first.
-    entries.append(read_board_metadata(DEFAULT_BOARD))
-    seen.add(DEFAULT_BOARD)
-
+    entries = [read_board_metadata(DEFAULT_BOARD)]
+    seen = {DEFAULT_BOARD}
     root = boards_root()
     if root.is_dir():
         for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
             if not child.is_dir():
                 continue
-            slug = child.name
-            # Keep slug normalisation soft for discovery — but skip dirs
-            # that don't parse as valid slugs so we don't surface junk.
             try:
-                normed = _normalize_board_slug(slug)
+                normed = _normalize_board_slug(child.name)  # skip junk dirs, don't raise
             except ValueError:
                 continue
             if not normed or normed in seen or not _dir_holds_board(child):
@@ -667,9 +657,8 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         archive_root.mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
         target = archive_root / f"{normed}-{ts}"
-        # Avoid collision on rapid double-archives.
         suffix = 1
-        while target.exists():
+        while target.exists():  # rapid double-archive
             target = archive_root / f"{normed}-{ts}-{suffix}"
             suffix += 1
         d.rename(target)
@@ -1175,15 +1164,11 @@ def _project_from_source_task(
     if source_task.branch_name:
         prefix, separator, leaf = source_task.branch_name.partition("/")
         if separator and (leaf == source_task.id or leaf.startswith(f"{source_task.id}-")):
-            try:
+            with contextlib.suppress(ValueError):
                 project_slug = _pdb.normalize_slug(prefix)
-            except ValueError:
-                project_slug = None
     if project_slug is None:
-        try:
+        with contextlib.suppress(ValueError):
             project_slug = _pdb.normalize_slug(project_id)
-        except ValueError:
-            return None, None
     if not project_slug:
         return None, None
     project_repo = str(source_path.parent.parent)
@@ -2299,10 +2284,10 @@ def heartbeat_claim(
             "WHERE id = ? AND status = 'running' AND claim_lock = ?",
             (expires, task_id, lock),
         )
-        if cur.rowcount == 1:
-            _extend_run_claim(conn, task_id, expires)
-            return True
-        return False
+        if cur.rowcount != 1:
+            return False
+        _extend_run_claim(conn, task_id, expires)
+        return True
 
 
 def _extend_run_claim(conn: sqlite3.Connection, task_id: str, expires: int) -> Optional[int]:
@@ -2526,18 +2511,12 @@ def _verify_created_cards(
     phantom: list[str] = []
     for cid in ordered:
         created_by = found.get(cid)
-        if created_by is None:
-            phantom.append(cid)
-            continue
-        # Accept if any of the three trust conditions holds.
-        if (
+        trusted = created_by is not None and (
             (completing_assignee and created_by == completing_assignee)
             or created_by == completing_task_id
             or cid in linked_children
-        ):
-            verified.append(cid)
-        else:
-            phantom.append(cid)
+        )
+        (verified if trusted else phantom).append(cid)
     return verified, phantom
 
 
@@ -2831,15 +2810,7 @@ def _persist_scratch_completion_artifacts(
         try:
             attachment_dir.mkdir(parents=True, exist_ok=True)
             dest = _unique_attachment_path(attachment_dir, resolved_src.name, used_destinations)
-            with resolved_src.open("rb") as source_file, dest.open("xb") as destination_file:
-                copied = 0
-                while chunk := source_file.read(1024 * 1024):
-                    copied += len(chunk)
-                    if copied > KANBAN_ATTACHMENT_MAX_BYTES:
-                        raise ArtifactPreservationError(
-                            f"declared scratch artifact grew beyond the size limit: {artifact}"
-                        )
-                    destination_file.write(chunk)
+            _copy_capped(resolved_src, dest, artifact)
         except Exception as exc:
             if dest is not None:
                 with contextlib.suppress(OSError):
@@ -2850,7 +2821,6 @@ def _persist_scratch_completion_artifacts(
             raise ArtifactPreservationError(
                 f"could not preserve declared scratch artifact {artifact}: {exc}"
             ) from exc
-
         used_destinations.add(dest)
         persisted.append(str(dest.resolve()))
         changed = True
@@ -2860,6 +2830,19 @@ def _persist_scratch_completion_artifacts(
         metadata["_staged_artifacts"] = [
             path for path in persisted if path.startswith(str(attachment_dir.resolve()))
         ]
+
+
+def _copy_capped(src: Path, dest: Path, artifact: str) -> None:
+    """Chunked copy that aborts if the file grows past the attachment cap mid-copy."""
+    with src.open("rb") as source_file, dest.open("xb") as destination_file:
+        copied = 0
+        while chunk := source_file.read(1024 * 1024):
+            copied += len(chunk)
+            if copied > KANBAN_ATTACHMENT_MAX_BYTES:
+                raise ArtifactPreservationError(
+                    f"declared scratch artifact grew beyond the size limit: {artifact}"
+                )
+            destination_file.write(chunk)
 
 
 def _insert_completion_attachment(
@@ -2873,29 +2856,19 @@ def _insert_completion_attachment(
         "VALUES (?, ?, ?, NULL, ?, 'kanban_complete', ?)",
         (task_id, filename, stored_path, size, created_at),
     )
-    _append_event(
-        conn,
-        task_id,
-        "attached",
-        {"filename": filename, "size": size, "by": "kanban_complete"},
-    )
+    _append_event(conn, task_id, "attached", {"filename": filename, "size": size, "by": "kanban_complete"})
 
 
 def _unique_attachment_path(directory: Path, filename: str, used: set[Path]) -> Path:
     """Return a non-conflicting path under ``directory`` for ``filename``."""
     safe_name = Path(filename).name or "artifact"
+    stem, suffix = Path(safe_name).stem or "artifact", Path(safe_name).suffix
     candidate = directory / safe_name
-    if candidate not in used and not candidate.exists():
-        return candidate
-
-    stem = Path(safe_name).stem or "artifact"
-    suffix = Path(safe_name).suffix
     idx = 1
-    while True:
+    while candidate in used or candidate.exists():
         candidate = directory / f"{stem}_{idx}{suffix}"
-        if candidate not in used and not candidate.exists():
-            return candidate
         idx += 1
+    return candidate
 
 
 def edit_completed_task_result(
@@ -2918,12 +2891,12 @@ def edit_completed_task_result(
             """,
             (task_id,),
         ).fetchone()
-        run_id = int(run["id"]) if run else None
-        if run_id is None:
+        if run is None:
             run_id = _synthesize_ended_run(
                 conn, task_id, outcome="completed", summary=handoff_summary, metadata=metadata,
             )
         else:
+            run_id = int(run["id"])
             conn.execute("UPDATE task_runs SET summary = ? WHERE id = ?", (handoff_summary, run_id))
             if metadata is not None:
                 conn.execute(
@@ -2958,11 +2931,7 @@ def block_task(
         ).fetchone()
         if cur_row is None:
             return False
-        source_status = (
-            _retry_status_for_run(conn, task_id)
-            if cur_row["status"] == "running"
-            else "ready"
-        )
+        source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
@@ -2981,8 +2950,7 @@ def block_task(
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params = (*params, int(expected_run_id))
-        cur = conn.execute(sql, params)
-        if cur.rowcount != 1:
+        if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
@@ -3113,9 +3081,7 @@ def request_review(
         )
         if cur.rowcount != 1:
             return _ret(
-                False,
-                "task is not in running/ready (or expected_run_id did not "
-                "match the current run)",
+                False, "task is not in running/ready (or expected_run_id did not match the current run)",
             )
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="review_requested", status="review",
@@ -3412,7 +3378,7 @@ def invalidate_descendants_for_parent_reopen(
     Returns ``{"invalidated": [{id, prior_status, new_status, resume_status}],
     "terminations": [(worker_pid, claim_lock)]}``.
     """
-    caller_owns_txn = bool(getattr(conn, "in_transaction", False))
+    caller_owns_txn = bool(conn.in_transaction)
     now = int(time.time())
     invalidated: list[dict[str, Any]] = []
     terminations: list[tuple[Optional[int], Optional[str]]] = []
@@ -3771,8 +3737,7 @@ def schedule_task(
         if expected_run_id is not None:
             sql += " AND current_run_id = ?"
             params.append(int(expected_run_id))
-        cur = conn.execute(sql, params)
-        if cur.rowcount != 1:
+        if conn.execute(sql, params).rowcount != 1:
             return False
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="scheduled", status="scheduled", summary=reason, synthesize=bool(reason),
