@@ -20,8 +20,7 @@ from rich.markup import escape as _escape
 # Model-generated reasoning tags: suppressed during streaming (they'd display as raw XML;
 # the agent strips them from final_response too) unless show_reasoning routes them to the box.
 _OPEN_TAGS = (
-    "<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>", "<thought>",
-)
+    "<REASONING_SCRATCHPAD>", "<think>", "<reasoning>", "<THINKING>", "<thinking>", "<thought>")
 _CLOSE_TAGS = tuple("</" + t[1:] for t in _OPEN_TAGS)
 _MAX_CLOSE_TAG_LEN = max(len(t) for t in _CLOSE_TAGS)
 
@@ -29,13 +28,11 @@ _MAX_CLOSE_TAG_LEN = max(len(t) for t in _CLOSE_TAGS)
 _SLOW_COMMAND_STATUS = (
     ("/skills search", "Searching skills..."), ("/skills browse", "Loading skills..."),
     ("/skills inspect", "Inspecting skill..."), ("/skills install", "Installing skill..."),
-    ("/skills", "Processing skills command..."), ("/browser", "Configuring browser..."),
-)
+    ("/skills", "Processing skills command..."), ("/browser", "Configuring browser..."))
 _SLOW_COMMAND_STATUS_EXACT = {
     "/reload-mcp": "Reloading MCP servers...",
     "/reload-skills": "Reloading skills...",
-    "/reload_skills": "Reloading skills...",
-}
+    "/reload_skills": "Reloading skills..."}
 
 
 def _terminal_columns(default: int = 80) -> int:
@@ -145,18 +142,15 @@ class CLIStreamMixin:
             min_newline_flush = max(16, target_width // 3)
             if line_break != -1 and (
                 line_break >= min_newline_flush
-                or buf.endswith(("\n\n", ".\n", "!\n", "?\n", ":\n"))
-            ):
+                or buf.endswith(("\n\n", ".\n", "!\n", "?\n", ":\n"))):
                 flush_text, buf = buf[: line_break + 1], buf[line_break + 1 :]
             elif len(buf) >= target_width:
                 search_start = max(20, target_width // 2)
                 search_end = min(
-                    len(buf), max(target_width + (target_width // 3), target_width + 8)
-                )
+                    len(buf), max(target_width + (target_width // 3), target_width + 8))
                 cut = max(
                     buf.rfind(b, search_start, search_end)
-                    for b in (" ", "\t", ".", "!", "?", ",", ";", ":")
-                )
+                    for b in (" ", "\t", ".", "!", "?", ",", ";", ":"))
                 if cut != -1:
                     flush_text, buf = buf[: cut + 1], buf[cut + 1 :]
 
@@ -169,8 +163,7 @@ class CLIStreamMixin:
         from cli import _accent_hex, datetime
         ts_suffix = (
             f" [dim]{datetime.now().strftime(getattr(self, 'timestamp_format', '%H:%M'))}[/]"
-            if getattr(self, "show_timestamps", False) else ""
-        )
+            if getattr(self, "show_timestamps", False) else "")
         lines = user_input.split("\n")
         if len(lines) <= 1:
             return f"[bold {_accent_hex()}]●[/] [bold]{_escape(user_input)}[/]{ts_suffix}"
@@ -305,8 +298,7 @@ class CLIStreamMixin:
                     # Boundary: only whitespace since the last newline — or, with no newline
                     # buffered yet, since the last emit (which must have ended a line).
                     is_block_boundary = preceding[preceding.rfind("\n") + 1:].strip() == "" and (
-                        "\n" in preceding or getattr(self, "_stream_last_was_newline", True)
-                    )
+                        "\n" in preceding or getattr(self, "_stream_last_was_newline", True))
                     if is_block_boundary:
                         if preceding:
                             self._emit_stream_text(preceding)
@@ -363,15 +355,13 @@ class CLIStreamMixin:
         from cli import _RST, _STREAM_PAD, _cprint
         _tc = getattr(self, "_stream_text_ansi", "")
         _cprint(
-            f"{_STREAM_PAD}{_tc}{printed_line}{_RST}" if _tc else f"{_STREAM_PAD}{printed_line}"
-        )
+            f"{_STREAM_PAD}{_tc}{printed_line}{_RST}" if _tc else f"{_STREAM_PAD}{printed_line}")
 
     def _flush_stream_table_buf(self) -> None:
         """Emit the held table block re-aligned as a whole. Cell-level markdown is stripped FIRST
         so the realigner pads to the final visible width, not the marker-decorated width."""
         from cli import (
-            _strip_markdown_syntax, _terminal_width_for_streaming, realign_markdown_tables
-        )
+            _strip_markdown_syntax, _terminal_width_for_streaming, realign_markdown_tables)
         buf = self._stream_table_buf
         self._stream_table_buf = []
         self._in_stream_table = False
@@ -388,8 +378,7 @@ class CLIStreamMixin:
         """Emit filtered text to the streaming display."""
         from cli import (
             HermesCLI, _ACCENT, _RST, _STREAM_PARTIAL_PREVIEW_LEN, _cprint, _strip_markdown_syntax,
-            datetime, is_table_divider, looks_like_table_row,
-        )
+            datetime, is_table_divider, looks_like_table_row)
         if not text:
             return
         # Defer content while the reasoning box renders so reasoning always lands BEFORE it.
@@ -448,8 +437,7 @@ class CLIStreamMixin:
             self._stream_buf
             and not self._in_stream_table
             and not self._stream_buf.lstrip().startswith("|")
-            and len(self._stream_buf) >= 80
-        ):
+            and len(self._stream_buf) >= 80):
             preview = self._stream_buf[-int(_STREAM_PARTIAL_PREVIEW_LEN):]
             cut = preview.find(" ")
             if 0 < cut < len(preview) - 1:
@@ -463,8 +451,7 @@ class CLIStreamMixin:
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
         from cli import (
-            _ACCENT, _RST, _cprint, _strip_markdown_syntax, is_table_divider, looks_like_table_row
-        )
+            _ACCENT, _RST, _cprint, _strip_markdown_syntax, is_table_divider, looks_like_table_row)
         # Still inside a "reasoning block" at end-of-stream = false positive (the model
         # mentioned a tag in prose and never closed it): recover the buffer as regular text.
         if getattr(self, "_in_reasoning_block", False) and getattr(self, "_stream_prefilt", ""):
@@ -477,8 +464,7 @@ class CLIStreamMixin:
         if (
             self._stream_buf
             and getattr(self, "_in_stream_table", False)
-            and (looks_like_table_row(self._stream_buf) or is_table_divider(self._stream_buf))
-        ):
+            and (looks_like_table_row(self._stream_buf) or is_table_divider(self._stream_buf))):
             self._stream_table_buf.append(self._stream_buf)
             self._stream_buf = ""
         if getattr(self, "_stream_table_buf", None):
@@ -554,8 +540,7 @@ class CLIStreamMixin:
         analysis_prompt = (
             "Describe everything visible in this image in thorough detail. "
             "Include any text, code, data, objects, people, layout, colors, "
-            "and any other notable visual information."
-        )
+            "and any other notable visual information.")
         enriched_parts = []
         for img_path in images:
             if not img_path.exists():
@@ -565,32 +550,28 @@ class CLIStreamMixin:
                 _cprint(f"  {_DIM}👁️  analyzing {img_path.name} ({size_kb}KB)...{_RST}")
             try:
                 result_json = _asyncio.run(
-                    vision_analyze_tool(image_url=str(img_path), user_prompt=analysis_prompt)
-                )
+                    vision_analyze_tool(image_url=str(img_path), user_prompt=analysis_prompt))
                 result = json.loads(result_json)
                 if result.get("success"):
                     description = result.get("analysis", "")
                     enriched_parts.append(
                         f"[The user attached an image. Here's what it contains:\n{description}]\n"
                         f"[If you need a closer look, use vision_analyze with "
-                        f"image_url: {img_path}]"
-                    )
+                        f"image_url: {img_path}]")
                     if announce:
                         _cprint(f"  {_DIM}✓ image analyzed{_RST}")
                 else:
                     enriched_parts.append(
                         f"[The user attached an image but it couldn't be analyzed. "
                         f"You can try examining it with vision_analyze using "
-                        f"image_url: {img_path}]"
-                    )
+                        f"image_url: {img_path}]")
                     if announce:
                         _cprint(f"  {_DIM}⚠ vision analysis failed — path included for retry{_RST}")
             except Exception as e:
                 enriched_parts.append(
                     f"[The user attached an image but analysis failed ({e}). "
                     f"You can try examining it with vision_analyze using "
-                    f"image_url: {img_path}]"
-                )
+                    f"image_url: {img_path}]")
                 if announce:
                     _cprint(f"  {_DIM}⚠ vision analysis error — path included for retry{_RST}")
 
@@ -663,8 +644,7 @@ class CLIStreamMixin:
         if event_type == "tool.completed":
             self._tool_start_time = 0.0
             self._turn_summary_record(
-                function_name, kwargs.get("result"), kwargs.get("is_error", False)
-            )
+                function_name, kwargs.get("result"), kwargs.get("is_error", False))
             # Focus view: count the hidden scrollback line for the post-turn recovery report.
             if getattr(self, "_focus_view_enabled", False):
                 try:
@@ -697,11 +677,9 @@ class CLIStreamMixin:
                     if (
                         not getattr(self, "_long_tool_hint_fired", False)
                         and self.tool_progress_mode == "all"
-                        and duration >= 30.0
-                    ):
+                        and duration >= 30.0):
                         from agent.onboarding import (
-                            TOOL_PROGRESS_FLAG, is_seen, mark_seen, tool_progress_hint_cli
-                        )
+                            TOOL_PROGRESS_FLAG, is_seen, mark_seen, tool_progress_hint_cli)
                         if not is_seen(CLI_CONFIG, TOOL_PROGRESS_FLAG):
                             self._long_tool_hint_fired = True
                             _cprint(f"  {_DIM}{tool_progress_hint_cli()}{_RST}")
@@ -723,8 +701,7 @@ class CLIStreamMixin:
             self._tool_start_time = time.monotonic()
             # Store args for stacked scrollback line on completion
             self._pending_tool_info.setdefault(function_name, []).append(
-                function_args if function_args is not None else {}
-            )
+                function_args if function_args is not None else {})
             self._invalidate()
 
     def _on_tool_start(self, tool_call_id: str, function_name: str, function_args: dict):
@@ -760,7 +737,6 @@ class CLIStreamMixin:
             from agent.display import render_edit_diff_with_delta
             render_edit_diff_with_delta(
                 function_name, function_result, function_args=function_args, snapshot=snapshot,
-                print_fn=_cprint,
-            )
+                print_fn=_cprint)
         except Exception:
             logger.debug("Edit diff preview failed for %s", function_name, exc_info=True)

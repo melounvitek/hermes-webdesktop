@@ -109,8 +109,7 @@ def cmd_prune(args: argparse.Namespace) -> int:
         retention_days=args.retention_days,
         delete_orphans=delete_orphans,
         max_total_size_mb=args.max_size_mb,
-        orphan_allowlist=orphan_allowlist,
-    )
+        orphan_allowlist=orphan_allowlist)
     print(f"Scanned:         {result['scanned']}")
     print(f"Deleted orphan:  {result['deleted_orphan']}")
     print(f"Deleted stale:   {result['deleted_stale']}")

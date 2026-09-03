@@ -863,8 +863,7 @@ class CLIInfoMixin:
             diff = {
                 "Added": connected_servers - old_servers,
                 "Removed": old_servers - connected_servers,
-                "Reconnected": connected_servers & old_servers,
-            }
+                "Reconnected": connected_servers & old_servers}
             for label, icon in (("Reconnected", "♻️ "), ("Added", "➕"), ("Removed", "➖")):
                 if diff[label]:
                     print(f"  {icon} {label}: {', '.join(sorted(diff[label]))}")

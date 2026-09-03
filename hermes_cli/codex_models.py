@@ -28,8 +28,7 @@ DEFAULT_CODEX_MODELS: List[str] = [
     # not in the public API, so it stays out of the "openai" catalog in hermes_cli/models.py.
     # The backend reports ``supported_in_api: false`` for it; that flag describes API
     # availability, not Codex availability, so fetch/cache paths must not filter on it.
-    "gpt-5.3-codex-spark",
-]
+    "gpt-5.3-codex-spark"]
 
 _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
     ("gpt-5.6-sol", ("gpt-5.5", "gpt-5.4")),
@@ -40,8 +39,7 @@ _FORWARD_COMPAT_TEMPLATE_MODELS: List[tuple[str, tuple[str, ...]]] = [
     ("gpt-5.4", ("gpt-5.3-codex",)),
     # Spark surfaces whenever a compatible template is present; the backend (not Hermes)
     # gates real availability by ChatGPT Pro entitlement.
-    ("gpt-5.3-codex-spark", ("gpt-5.3-codex",)),
-]
+    ("gpt-5.3-codex-spark", ("gpt-5.3-codex",))]
 
 
 def _dedupe(model_ids) -> List[str]:
@@ -103,8 +101,7 @@ def _extract_chatgpt_account_id(access_token: str) -> Optional[str]:
         acct_id = (
             claims.get("https://api.openai.com/auth", {}).get("chatgpt_account_id")
             if isinstance(claims, dict)
-            else None
-        )
+            else None)
         return acct_id if isinstance(acct_id, str) and acct_id else None
     except Exception:
         return None
@@ -145,8 +142,7 @@ def _fetch_models_from_api(access_token: str) -> List[str]:
         resp = httpx.get(
             "https://chatgpt.com/backend-api/codex/models?client_version=1.0.0",
             headers=headers,
-            timeout=10,
-        )
+            timeout=10)
         if resp.status_code != 200:
             return []
         data = resp.json()
@@ -194,5 +190,4 @@ def get_codex_model_ids(access_token: Optional[str] = None) -> List[str]:
     default_model = _read_default_model(codex_home)
     return _finalize_codex_models(_dedupe([
         *([default_model] if default_model else []), *_read_cache_models(codex_home),
-        *DEFAULT_CODEX_MODELS,
-    ]))
+        *DEFAULT_CODEX_MODELS]))

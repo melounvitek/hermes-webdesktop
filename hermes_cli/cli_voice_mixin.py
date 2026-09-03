@@ -82,16 +82,14 @@ class CLIVoiceMixin:
                 )
             raise RuntimeError(
                 "Voice mode requires sounddevice and numpy.\n"
-                f"Install with: {sys.executable} -m pip install sounddevice numpy"
-            )
+                f"Install with: {sys.executable} -m pip install sounddevice numpy")
         if not reqs.get("stt_available", reqs.get("stt_key_set")):
             raise RuntimeError(
                 "Voice mode requires an STT provider for transcription.\n"
                 "Option 1: uv pip install faster-whisper  "
                 "(free, local; `pip install faster-whisper` also works if pip is on PATH)\n"
                 "Option 2: Set GROQ_API_KEY (free tier)\n"
-                "Option 3: Set VOICE_TOOLS_OPENAI_KEY (paid)"
-            )
+                "Option 3: Set VOICE_TOOLS_OPENAI_KEY (paid)")
 
         # Prevent double-start from concurrent threads (atomic check-and-set)
         with self._voice_lock:
@@ -223,8 +221,7 @@ class CLIVoiceMixin:
             if self._voice_stt_provider() == "local":
                 _cprint(
                     f"{_DIM}Preparing local STT model '{stt_model}' "
-                    f"(first use may download it from Hugging Face)...{_RST}"
-                )
+                    f"(first use may download it from Hugging Face)...{_RST}")
             else:
                 _cprint(f"{_DIM}Transcribing...{_RST}")
             from tools.voice_mode import is_voice_stop_phrase, transcribe_recording
@@ -270,8 +267,7 @@ class CLIVoiceMixin:
             _tts_done = getattr(self, "_voice_tts_done", None)
             _activity_hold = bool(
                 getattr(self, "_agent_running", False)
-                or (_tts_done is not None and not _tts_done.is_set())
-            )
+                or (_tts_done is not None and not _tts_done.is_set()))
             if submitted:
                 self._no_speech_count = 0
             elif not _activity_hold:
@@ -287,8 +283,7 @@ class CLIVoiceMixin:
                 self._voice_continuous
                 and not submitted
                 and not self._voice_recording
-                and not stop_continuous_restart
-            ):
+                and not stop_continuous_restart):
                 self._voice_restart_recording_async()
 
     def _voice_speak_response_async(self, text: str) -> None:
@@ -419,8 +414,7 @@ class CLIVoiceMixin:
                     # Generation phase: no audio to cut — interrupt the in-flight agent turn.
                     logger.debug(
                         "full-duplex listener tripped during generation — "
-                        "interrupting agent turn"
-                    )
+                        "interrupting agent turn")
                     if _pipe_stop is not None:
                         _pipe_stop.set()  # never let the stale reply speak
                     try:
@@ -432,8 +426,7 @@ class CLIVoiceMixin:
 
             wav_path = full_duplex_listen(
                 _should_stop, is_playing=is_audio_output_active, on_trigger=_on_trigger,
-                multiplier=_mult or None, grace_ms=max(0, _grace_ms),
-            )
+                multiplier=_mult or None, grace_ms=max(0, _grace_ms))
             if wav_path and self._voice_barge_capture.is_set():
                 self._voice_submit_barge_utterance(wav_path)
             else:
@@ -464,8 +457,7 @@ class CLIVoiceMixin:
                     from tools.voice_mode import is_tts_echo
                     if is_tts_echo(transcript, getattr(self, "_voice_last_tts_text", "")):
                         logger.debug(
-                            "Dropping playback-phase barge transcript as TTS echo: %r", transcript
-                        )
+                            "Dropping playback-phase barge transcript as TTS echo: %r", transcript)
                         _cprint(f"\n{_DIM}Ignored likely TTS echo (not queued).{_RST}")
                         return
                 self._pending_input.put(_VoiceInputMessage(transcript))
@@ -617,8 +609,7 @@ class CLIVoiceMixin:
         say = _cprint if announce else (lambda *_a: None)
         try:
             from tools.wake_word import (
-                check_wake_word_requirements, load_wake_word_config, owns_listener, start_listening
-            )
+                check_wake_word_requirements, load_wake_word_config, owns_listener, start_listening)
         except Exception as e:
             say(f"{_DIM}Wake word unavailable: {e}{_RST}")
             return False
@@ -749,8 +740,7 @@ class CLIVoiceMixin:
                         self._agent_running
                         or self._voice_recording
                         or getattr(self, "_voice_processing", False)
-                        or not self._pending_input.empty()
-                    )
+                        or not self._pending_input.empty())
                     if busy:
                         idle_polls = 0
                         continue
@@ -777,8 +767,7 @@ class CLIVoiceMixin:
         from cli import _ACCENT, _BOLD, _DIM, _RST, _cprint
         from tools.wake_word import (
             audio_is_silent, check_wake_word_requirements, is_listening, load_wake_word_config,
-            owns_listener,
-        )
+            owns_listener)
 
         cfg = load_wake_word_config()
         reqs = check_wake_word_requirements(cfg)

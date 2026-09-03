@@ -32,16 +32,14 @@ _OPENCLAW_DIR_NAMES = (".openclaw", ".clawdbot", ".moltbot")
 _MIGRATE_ARG_DEFAULTS = (
     ("source", None), ("dry_run", False), ("preset", "full"), ("overwrite", False),
     ("migrate_secrets", False), ("workspace_target", None), ("skill_conflict", "skip"),
-    ("no_backup", False), ("yes", False),
-)
+    ("no_backup", False), ("yes", False))
 
 # (status, heading, color, default reason) — printed in this order after migrated items.
 _REPORT_REASON_GROUPS = (
     ("conflict", "  ⚠ Conflicts (skipped — use --overwrite to force):", Colors.YELLOW,
      "already exists"),
     ("skipped", "  ─ Skipped:", Colors.DIM, ""),
-    ("error", "  ✗ Errors:", Colors.RED, "unknown error"),
-)
+    ("error", "  ✗ Errors:", Colors.RED, "unknown error"))
 # Summary-line counters after the migrated count: (summary key, label).
 _SUMMARY_COUNT_LABELS = (("conflict", "conflict(s)"), ("skipped", "skipped"), ("error", "error(s)"))
 
@@ -49,8 +47,7 @@ _SUMMARY_COUNT_LABELS = (("conflict", "conflict(s)"), ("skipped", "skipped"), ("
 _WORKSPACE_MARKERS = ("todo.json", "SOUL.md", "MEMORY.md", "USER.md")
 _WORKSPACE_ITEM_LABELS = (
     ("todo.json", "todo.json", Path.exists), ("sessions", "sessions/", Path.is_dir),
-    ("SOUL.md", "SOUL.md", Path.exists), ("MEMORY.md", "MEMORY.md", Path.exists),
-)
+    ("SOUL.md", "SOUL.md", Path.exists), ("MEMORY.md", "MEMORY.md", Path.exists))
 
 
 def _print_banner(title: str) -> None:

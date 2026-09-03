@@ -103,8 +103,7 @@ def get_code_identity(refresh: bool = False) -> dict:
         "sha": sha,
         "short_sha": sha[:8] if sha else None,
         "version": version,
-        "source": source,
-    }
+        "source": source}
     return dict(_code_identity_cache)
 
 

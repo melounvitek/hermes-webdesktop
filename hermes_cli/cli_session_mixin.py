@@ -28,8 +28,7 @@ def _user_turn_indices(history: list) -> list[int]:
 
     return [
         i for i, m in enumerate(history)
-        if not _is_ephemeral_scaffolding(m) and user_originated_turn_view(m) is not None
-    ]
+        if not _is_ephemeral_scaffolding(m) and user_originated_turn_view(m) is not None]
 
 
 def _timestamp_or(value, default):
@@ -84,16 +83,14 @@ def _reset_model_to_config_default(cli, silent: bool) -> None:
             current_base_url=cli.base_url or "",
             current_api_key=cli.api_key or "",
             is_global=False,
-            explicit_provider=_config_provider or "",
-        )
+            explicit_provider=_config_provider or "")
         if not r.success:
             return
         if cli.agent:
             cli.agent.switch_model(
                 new_model=r.new_model, new_provider=r.target_provider, api_key=r.api_key,
                 base_url=r.base_url, api_mode=r.api_mode,
-                capabilities=getattr(r, "runtime_capabilities", None),
-            )
+                capabilities=getattr(r, "runtime_capabilities", None))
         cli.model = r.new_model
         cli.provider = r.target_provider
         cli.requested_provider = r.target_provider
@@ -175,8 +172,7 @@ class CLISessionMixin:
         try:
             from hermes_state import SessionDB
             from tools.approval import (
-                _YOLO_MODE_FROZEN, enable_session_yolo, is_session_yolo_enabled,
-            )
+                _YOLO_MODE_FROZEN, enable_session_yolo, is_session_yolo_enabled)
         except Exception:
             return
         if _YOLO_MODE_FROZEN or not SessionDB.session_yolo_enabled(session_meta):
@@ -187,8 +183,7 @@ class CLISessionMixin:
         enable_session_yolo(session_key)
         _dim_notice(self, 
             "⚡ YOLO mode restored from session — all commands auto-approved. /yolo to turn off.",
-            quiet,
-        )
+            quiet)
 
     def _render_resume_history_panel_lines(self, panel) -> list[str]:
         """Render the resume panel at the current terminal width for resize replay."""
@@ -198,8 +193,7 @@ class CLISessionMixin:
         buf = StringIO()
         console = Console(
             file=buf, force_terminal=True, color_system="truecolor", highlight=False,
-            width=shutil.get_terminal_size((80, 24)).columns,
-        )
+            width=shutil.get_terminal_size((80, 24)).columns)
         with _suspend_output_history():
             console.print(panel)
         return buf.getvalue().rstrip("\n").splitlines()
@@ -246,8 +240,7 @@ class CLISessionMixin:
             provider_info += f"{sep}[dim]auth: {self._provider_source}[/]"
         self._console_print(
             f"  {api_indicator} [{accent_color}]{model_short}[/]{sep}"
-            f"[bold {label_color}]{tool_status}[/]{toolsets_info}{provider_info}"
-        )
+            f"[bold {label_color}]{tool_status}[/]{toolsets_info}{provider_info}")
 
     def _show_session_status(self):
         """Show gateway-style status for the current CLI session."""
@@ -320,8 +313,7 @@ class CLISessionMixin:
             f"Created: {created_at.strftime('%Y-%m-%d %H:%M')}",
             f"Last Activity: {updated_at.strftime('%Y-%m-%d %H:%M')}",
             f"Tokens: {total_tokens:,}",
-            f"Agent Running: {'Yes' if is_running else 'No'}",
-        ])
+            f"Agent Running: {'Yes' if is_running else 'No'}"])
         self._console_print("\n".join(lines), highlight=False, markup=False)
 
     def _list_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
@@ -334,8 +326,7 @@ class CLISessionMixin:
             return query_session_listing(
                 self._session_db, source="cli", current_session_id=self.session_id,
                 include_all_sources=False, include_unnamed=True, limit=limit,
-                exclude_sources=["kanban", "tool"],
-            )
+                exclude_sources=["kanban", "tool"])
         except Exception:
             return []
 
@@ -448,8 +439,7 @@ class CLISessionMixin:
             context = {
                 "session_id": self.agent.session_id if self.agent else None,
                 "platform": getattr(self, "platform", None) or "cli",
-                "reason": "new_session" if event_type == "on_session_reset" else "session_boundary",
-            }
+                "reason": "new_session" if event_type == "on_session_reset" else "session_boundary"}
             if event_type == "on_session_finalize":
                 finalize_session(**context)
             else:
@@ -469,15 +459,13 @@ class CLISessionMixin:
         try:
             from hermes_constants import get_hermes_home as _ghh
             return self._session_db.delete_session_if_empty(
-                session_id, sessions_dir=_ghh() / "sessions"
-            )
+                session_id, sessions_dir=_ghh() / "sessions")
         except Exception:
             logger.debug("Could not prune empty session %s", session_id, exc_info=True)
             return False
 
     def _launch_session_boundary_memory_flush(
-        self, history_snapshot: list, *, session_id: Optional[str] = None,
-    ) -> Optional[list]:
+        self, history_snapshot: list, *, session_id: Optional[str] = None) -> Optional[list]:
         """Stage old-session memory extraction so /new stays responsive.
 
         The context-engine ``on_session_end`` is delivered synchronously here: cheap (no LLM)
@@ -508,8 +496,7 @@ class CLISessionMixin:
         """Start a fresh session with a new session ID and cleared agent state."""
         from cli import (
             CLI_CONFIG, _parse_reasoning_config, _parse_service_tier_config,
-            _sync_process_session_id, datetime,
-        )
+            _sync_process_session_id, datetime)
         old_session_id = self.session_id
         _boundary_snapshot = None
         if self.agent:
@@ -517,8 +504,7 @@ class CLISessionMixin:
                 # Context-engine boundary now; provider extraction is queued below (after
                 # rotation) so /new never blocks on the LLM-bound call.
                 _boundary_snapshot = self._launch_session_boundary_memory_flush(
-                    list(self.conversation_history), session_id=old_session_id,
-                )
+                    list(self.conversation_history), session_id=old_session_id)
             self._notify_session_boundary("on_session_finalize")
 
         if self._session_db and old_session_id:
@@ -527,8 +513,7 @@ class CLISessionMixin:
             if self.agent:
                 with contextlib.suppress(Exception):
                     self.agent._flush_messages_to_session_db(
-                        self.conversation_history, conversation_history=self.conversation_history,
-                    )
+                        self.conversation_history, conversation_history=self.conversation_history)
             with contextlib.suppress(Exception):
                 self._session_db.end_session(old_session_id, "new_session")
             self._discard_session_if_empty(old_session_id)
@@ -543,8 +528,7 @@ class CLISessionMixin:
         # An explicit -m/--model was for the previous session only.
         self._explicit_model_override = False
         self.reasoning_config = _parse_reasoning_config(
-            CLI_CONFIG["agent"].get("reasoning_effort", "")
-        )
+            CLI_CONFIG["agent"].get("reasoning_effort", ""))
         # Session-scoped overrides (/model --session, /fast, one-turn restores) don't carry over.
         self._pending_one_turn_model_restore = None
         self.service_tier = _parse_service_tier_config(CLI_CONFIG["agent"].get("service_tier", ""))
@@ -574,8 +558,7 @@ class CLISessionMixin:
                         model=self.model,
                         model_config={
                             "max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
-                        },
-                    )
+                        })
                     self.agent._session_db_created = True
                 if title:
                     title = _apply_new_session_title(self, title)
@@ -588,13 +571,11 @@ class CLISessionMixin:
                 if _mm is not None and _boundary_snapshot:
                     _mm.commit_session_boundary_async(
                         _boundary_snapshot, new_session_id=self.session_id,
-                        parent_session_id=old_session_id or "", reason="new_session",
-                    )
+                        parent_session_id=old_session_id or "", reason="new_session")
                 elif _mm is not None:
                     _mm.on_session_switch(
                         self.session_id, parent_session_id=old_session_id or "",
-                        reset=True, reason="new_session",
-                    )
+                        reset=True, reason="new_session")
             self._notify_session_boundary("on_session_reset")
 
         if not silent:
@@ -638,8 +619,7 @@ class CLISessionMixin:
         """
         from cli import datetime
         from hermes_cli.session_export import (
-            SAVE_USAGE, normalize_save_format, render_session_for_save,
-        )
+            SAVE_USAGE, normalize_save_format, render_session_for_save)
 
         parts = cmd.split()[1:]
         redact = bool(parts) and parts[-1].lower() in ("redact", "--redact")
@@ -672,8 +652,7 @@ class CLISessionMixin:
                 return
             session_data = {
                 "id": self.session_id, "model": self.model,
-                "started_at": self.session_start.timestamp(), "messages": self.conversation_history,
-            }
+                "started_at": self.session_start.timestamp(), "messages": self.conversation_history}
         if redact:
             from hermes_cli.session_export_md import redact_session_data
 
@@ -718,8 +697,7 @@ class CLISessionMixin:
         from agent.context_compressor import (
             history_before_user_originated_turn,
             split_user_originated_turn,
-            user_originated_turn_view,
-        )
+            user_originated_turn_view)
         from agent.memory_manager import sanitize_context
         from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
         from run_agent import _is_ephemeral_scaffolding
@@ -734,8 +712,7 @@ class CLISessionMixin:
                     if isinstance(part, dict) and part.get("type") == "text":
                         text_parts.append(str(part.get("text", "")))
                     elif isinstance(part, dict) and part.get("type") in {
-                        "image", "image_url", "input_image",
-                    }:
+                        "image", "image_url", "input_image"}:
                         text_parts.append("[screenshot]")
                 return "\n".join(text_parts) if text_parts else None
             return content
@@ -752,8 +729,7 @@ class CLISessionMixin:
         changed = RuntimeError("session history changed before the rewind could be persisted")
         expected_active_ids = self._session_db.get_active_message_ids(self.session_id)
         durable = self._session_db.get_messages_as_conversation(
-            self.session_id, include_row_ids=True
-        )
+            self.session_id, include_row_ids=True)
         warm_persistence_history = [m for m in warm_history if not _is_ephemeral_scaffolding(m)]
         warm_user_indices = _user_indices(warm_persistence_history)
         durable_user_indices = _user_indices(durable)
@@ -763,13 +739,11 @@ class CLISessionMixin:
             raise RuntimeError("persisted rewind target is no longer available")
 
         warm_prefix, _ = history_before_user_originated_turn(
-            warm_persistence_history, warm_user_indices[user_ordinal]
-        )
+            warm_persistence_history, warm_user_indices[user_ordinal])
         durable_target_index = durable_user_indices[user_ordinal]
         durable_target = durable[durable_target_index]
         durable_prefix, durable_live_view = history_before_user_originated_turn(
-            durable, durable_target_index
-        )
+            durable, durable_target_index)
         if _comparison_content(durable_live_view) != _comparison_content(warm_live_view):
             raise changed
         target_row_id = durable_target.get("_row_id")
@@ -780,8 +754,7 @@ class CLISessionMixin:
             self.session_id, target_row_id,
             preserve_compaction_handoff=scaffold is not None,
             expected_active_ids=expected_active_ids,
-            expected_target_content=durable_live_view.get("content"),
-        )
+            expected_target_content=durable_live_view.get("content"))
         if scaffold is not None:
             replacement_id = result.get("replacement_message_id")
             if not isinstance(replacement_id, int) or not durable_prefix:
@@ -817,8 +790,7 @@ class CLISessionMixin:
             return None
 
         from agent.context_compressor import (
-            history_before_user_originated_turn, retryable_user_text,
-        )
+            history_before_user_originated_turn, retryable_user_text)
         from agent.memory_manager import sanitize_context
 
         warm_history = list(self.conversation_history)
@@ -833,8 +805,7 @@ class CLISessionMixin:
         # by /retry, so fail closed before archiving anything.
         try:
             truncated, live_view = history_before_user_originated_turn(
-                warm_history, user_indices[-1]
-            )
+                warm_history, user_indices[-1])
             live_content = live_view.get("content")
             if isinstance(live_content, str):
                 live_content = sanitize_context(live_content).strip()
@@ -850,8 +821,7 @@ class CLISessionMixin:
                 truncated, _, _ = self._rewind_persisted_user_turn(
                     warm_history=warm_history,
                     user_ordinal=len(user_indices) - 1,
-                    warm_live_view=live_view,
-                )
+                    warm_live_view=live_view)
             except Exception as exc:
                 print(f"(x_x) Retry rewind failed; history was not changed: {exc}")
                 return None
@@ -896,8 +866,7 @@ class CLISessionMixin:
                 truncated, durable_live_view, result = self._rewind_persisted_user_turn(
                     warm_history=warm_history,
                     user_ordinal=target_ordinal,
-                    warm_live_view=live_view,
-                )
+                    warm_live_view=live_view)
                 # Canonical editable prefill: the raw carrier holds the reference-summary wrapper.
                 durable_text = self._undo_content_to_text(durable_live_view.get("content"))
                 if durable_text:
@@ -919,8 +888,7 @@ class CLISessionMixin:
         turn_word = "turn" if turns_undone == 1 else "turns"
         print(
             f"(^_^)b Undid {turns_undone} {turn_word} ({rewound_rows or removed_count} message(s)). "
-            f"Backed up to: \"{removed_text[:60]}{'...' if len(removed_text) > 60 else ''}\""
-        )
+            f"Backed up to: \"{removed_text[:60]}{'...' if len(removed_text) > 60 else ''}\"")
         print(f"  {len(self.conversation_history)} message(s) remaining in history.")
         # Editable, not auto-sent (Claude-Code-style).
         if prefill and removed_text:
@@ -955,8 +923,7 @@ class CLISessionMixin:
             return
         try:
             from tools.approval import (
-                disable_session_yolo, enable_session_yolo, is_session_yolo_enabled,
-            )
+                disable_session_yolo, enable_session_yolo, is_session_yolo_enabled)
         except Exception:
             return
         if is_session_yolo_enabled(old_session_id):
@@ -993,8 +960,7 @@ class CLISessionMixin:
         from cli import _cprint
         from hermes_cli.colors import Colors as _Colors
         from tools.approval import (
-            _YOLO_MODE_FROZEN, disable_session_yolo, enable_session_yolo, is_session_yolo_enabled,
-        )
+            _YOLO_MODE_FROZEN, disable_session_yolo, enable_session_yolo, is_session_yolo_enabled)
 
         # A frozen process-level bypass short-circuits the approval gate ahead of the session
         # check — toggling "OFF" would be a false safety claim. Say so instead.
@@ -1003,8 +969,7 @@ class CLISessionMixin:
                 f"  ⚡ YOLO is {_Colors.BOLD}{_Colors.RED}locked ON{_Colors.RESET}"
                 " for this process (started with --yolo / HERMES_YOLO_MODE)."
                 " /yolo cannot disable it — restart without the flag to"
-                " re-enable approvals."
-            )
+                " re-enable approvals.")
             return
 
         session_key = self.session_id or "default"
@@ -1016,16 +981,14 @@ class CLISessionMixin:
                 _persist(session_key, False)
             _cprint(
                 f"  ⚠ YOLO mode {_Colors.BOLD}{_Colors.RED}OFF{_Colors.RESET}"
-                " — dangerous commands will require approval."
-            )
+                " — dangerous commands will require approval.")
         else:
             enable_session_yolo(session_key)
             if _persist:
                 _persist(session_key, True)
             _cprint(
                 f"  ⚡ YOLO mode {_Colors.BOLD}{_Colors.GREEN}ON{_Colors.RESET}"
-                " — all commands auto-approved. Use with caution."
-            )
+                " — all commands auto-approved. Use with caution.")
 
     def _persist_session_yolo(self, session_key: str, enabled: bool) -> None:
         """Persist the YOLO flag to the session row so --resume restores it. Best-effort; the
@@ -1056,8 +1019,7 @@ class CLISessionMixin:
 
         from hermes_cli.partial_compress import (
             extract_compress_flags, parse_partial_compress_args, rejoin_compressed_head_and_tail,
-            split_history_for_partial_compress, summarize_compress_preview,
-        )
+            split_history_for_partial_compress, summarize_compress_preview)
         from agent.conversation_compression import finalize_context_engine_compression_notification
         from agent.model_metadata import estimate_request_tokens_rough
 
@@ -1080,13 +1042,11 @@ class CLISessionMixin:
         # understates real request pressure and can even appear to grow after compression.
         _estimate_kw = {
             "system_prompt": getattr(self.agent, "_cached_system_prompt", "") or "",
-            "tools": getattr(self.agent, "tools", None) or None,
-        }
+            "tools": getattr(self.agent, "tools", None) or None}
         if preview:
             approx_tokens = estimate_request_tokens_rough(self.conversation_history, **_estimate_kw)
             report = summarize_compress_preview(
-                self.conversation_history, partial, keep_last, focus_topic or None, approx_tokens,
-            )
+                self.conversation_history, partial, keep_last, focus_topic or None, approx_tokens)
             for line in report["lines"]:
                 print(f"🗜️  {line}")
             return
@@ -1122,8 +1082,7 @@ class CLISessionMixin:
                 # passing _cached_system_prompt duplicated the identity block.
                 compressed, _ = self.agent._compress_context(
                     head, None, approx_tokens=approx_tokens, focus_topic=focus_topic or None,
-                    force=True, defer_context_engine_notification=True,
-                )
+                    force=True, defer_context_engine_notification=True)
 
                 # Unchanged because a concurrent compression lock is held: say so instead of
                 # the misleading "No changes" no-op text. Type-pinned check (is True / str) —
@@ -1154,17 +1113,14 @@ class CLISessionMixin:
                     self.agent._flush_messages_to_session_db(self.conversation_history, None)
                 finalize_context_engine_compression_notification(self.agent, committed=True)
                 new_tokens = estimate_request_tokens_rough(
-                    self.conversation_history, **_estimate_kw
-                )
+                    self.conversation_history, **_estimate_kw)
                 summary = summarize_manual_compression(
                     original_history, self.conversation_history, approx_tokens, new_tokens,
-                    compression_state=getattr(self.agent, "context_compressor", None),
-                )
+                    compression_state=getattr(self.agent, "context_compressor", None))
                 if (
                     summary.get("aborted")
                     or summary.get("fallback_used")
-                    or summary.get("refused_would_grow")
-                ):
+                    or summary.get("refused_would_grow")):
                     icon = "⚠️"
                 else:
                     icon = "🗜️" if summary["noop"] else "✅"
@@ -1226,8 +1182,7 @@ class CLISessionMixin:
             if not isinstance(messages, list):
                 return
             if isinstance(pending_cli_message, dict) and not any(
-                m is pending_cli_message for m in messages
-            ):
+                m is pending_cli_message for m in messages):
                 # The UI accepted a new input but the worker still exposes its prior snapshot.
                 messages = [*messages, pending_cli_message]
             if not messages:
@@ -1241,8 +1196,7 @@ class CLISessionMixin:
             if (
                 isinstance(conversation_history, list)
                 and conversation_history
-                and conversation_history[-1] is pending_cli_message
-            ):
+                and conversation_history[-1] is pending_cli_message):
                 # Accepted but not yet durable: exclude it from the resumed-history baseline.
                 conversation_history = conversation_history[:-1]
             elif not isinstance(conversation_history, list) or conversation_history is messages:
@@ -1295,8 +1249,7 @@ class CLISessionMixin:
 
         user_msgs = len([m for m in self.conversation_history if m.get("role") == "user"])
         tool_calls = len([
-            m for m in self.conversation_history if m.get("role") == "tool" or m.get("tool_calls")
-        ])
+            m for m in self.conversation_history if m.get("role") == "tool" or m.get("tool_calls")])
         elapsed = datetime.now() - self.session_start
         hours, remainder = divmod(int(elapsed.total_seconds()), 3600)
         minutes, seconds = divmod(remainder, 60)
