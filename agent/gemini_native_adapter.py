@@ -614,6 +614,13 @@ class GeminiNativeClient:
         with contextlib.suppress(Exception):
             self._http.close()
 
+    # OpenAI-client duck-type surface: callers may use ``with client:``.
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     def _headers(self) -> Dict[str, str]:
         return {"Content-Type": "application/json", "Accept": "application/json", "x-goog-api-key": self.api_key,
                 "User-Agent": f"{_API_CLIENT} (gemini-native)", "X-Goog-Api-Client": _API_CLIENT, **self._default_headers}
