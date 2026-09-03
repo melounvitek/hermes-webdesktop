@@ -39,11 +39,9 @@ def _install_id_file_lock(root: Path):
     finally:
         try:
             if windows:
-                import msvcrt
                 os.lseek(fd, 0, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
                 fcntl.flock(fd, fcntl.LOCK_UN)
         finally:
             os.close(fd)
@@ -79,8 +77,7 @@ def _read_existing(path: Path) -> tuple[Optional[str], bool]:
 def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
     """Read or atomically mint the opaque id for the physical install.
 
-    ``None`` means the id could neither be read nor persisted. Returning an ephemeral id would
-    violate the authority and connection-registry contract.
+    ``None`` = neither readable nor persistable; an ephemeral id would violate the authority/registry contract.
     """
     root = get_default_hermes_root() if root is None else root
     path = root / _INSTALL_ID_FILENAME
@@ -89,21 +86,16 @@ def read_or_create_install_id(root: Path | None = None) -> Optional[str]:
         return existing
     try:
         root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return None
-    try:
-        # Windows byte-range locks can report a same-process lock conflict instead of waiting for
-        # another thread. Serialize threads here, then retain the file lock as the cross-process
-        # publication fence.
+        # Windows byte-range locks can report a same-process conflict instead of waiting for another
+        # thread: serialize threads here, then keep the file lock as the cross-process publication fence.
         with _INSTALL_ID_PUBLICATION_LOCK, _install_id_file_lock(root):
             existing, mint = _read_existing(path)
             if not mint:
                 return existing
-            minted = uuid.uuid4().hex
             fd, tmp_name = tempfile.mkstemp(dir=str(root), prefix=".install_id-")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    handle.write(minted + "\n")
+                    handle.write(uuid.uuid4().hex + "\n")
                     handle.flush()
                     os.fsync(handle.fileno())
                 os.replace(tmp_name, path)
@@ -126,8 +118,8 @@ def get_install_id(*, cache: dict[str, Optional[str]] | None = None) -> Optional
 
     def _cached() -> Optional[str]:
         cached = target_cache.get("value")
-
         return cached if cached and target_cache.get("root") in (None, root_key) else None
+
     if value := _cached():
         return value
     with _INSTALL_ID_LOCK:
