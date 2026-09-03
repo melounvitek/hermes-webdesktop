@@ -53,9 +53,7 @@ def _fallback_socket_path(home: Path) -> Path:
     then ``/tmp`` (POSIX); if nothing fits the tempdir candidate is returned anyway — bind fails
     non-fatally and consumers use the scan layer."""
     name = f"hermes-gw-{_home_hash(home)}.sock"
-    candidates = [Path(tempfile.gettempdir()) / name]
-    if not _IS_WINDOWS:
-        candidates.append(Path("/tmp") / name)
+    candidates = [Path(tempfile.gettempdir()) / name] + ([] if _IS_WINDOWS else [Path("/tmp") / name])
     return next((c for c in candidates if _fits_sun_path(c)), candidates[0])
 
 
@@ -70,12 +68,11 @@ def resolve_client_socket_path(home: Path) -> Optional[Path]:
     direct = Path(home) / _SOCKET_FILENAME
     if direct.exists():
         return direct
-    pointer = Path(home) / _POINTER_FILENAME
     with contextlib.suppress(OSError):
-        if pointer.is_file():
-            target = pointer.read_text(encoding="utf-8").strip()
-            if target and Path(target).exists():
-                return Path(target)
+        pointer = Path(home) / _POINTER_FILENAME
+        target = pointer.read_text(encoding="utf-8").strip() if pointer.is_file() else ""
+        if target and Path(target).exists():
+            return Path(target)
     return None
 
 
@@ -89,9 +86,7 @@ def _detect_supervisor() -> str:
         return "launchd"
     if env.get("HERMES_DESKTOP_MANAGED"):
         return "desktop"
-    if "--external-supervisor" in sys.argv:
-        return "external"
-    return "manual"
+    return "external" if "--external-supervisor" in sys.argv else "manual"
 
 
 def build_identify_payload() -> dict[str, Any]:
@@ -102,9 +97,7 @@ def build_identify_payload() -> dict[str, Any]:
         "protocol": CONTROL_PROTOCOL_VERSION,
         **{k: record.get(k) for k in ("kind", "pid", "start_time", "hermes_home")},
         "profile": _profile_label_for_home(record.get("hermes_home") or ""),
-        "supervisor": _detect_supervisor(),
-    }
-    payload.update(_get_code_identity_fields())
+        "supervisor": _detect_supervisor(), **_get_code_identity_fields()}
     with contextlib.suppress(Exception):
         # served_profiles (multiplex mode) is stamped into runtime status by the runner.
         served = (read_runtime_status() or {}).get("served_profiles")
@@ -135,9 +128,8 @@ class GatewayControlServer:
         self._pipe_server: Any = None  # Windows proactor pipe server
         self._bind_path: Optional[Path] = None
         self._pointer_file: Optional[Path] = None
-        self._handlers: dict[str, Callable[[], dict[str, Any]]] = {"identify": build_identify_payload,
-                                                                   "status": build_status_payload}
-        self._handlers.update(verb_handlers or {})
+        self._handlers: dict[str, Callable[[], dict[str, Any]]] = {
+            "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
 
     async def start(self) -> bool:
         """Bind and start serving. Returns True on success, False otherwise."""
@@ -196,10 +188,9 @@ class GatewayControlServer:
 
     def cleanup_files(self) -> None:
         """Best-effort removal of socket + pointer files (atexit-safe)."""
-        for path in (self._bind_path, self._pointer_file):
-            if path is not None:
-                with contextlib.suppress(OSError):
-                    path.unlink(missing_ok=True)
+        for path in filter(None, (self._bind_path, self._pointer_file)):
+            with contextlib.suppress(OSError):
+                path.unlink(missing_ok=True)
 
     def handle_request_line(self, raw: bytes) -> bytes:
         """One JSON request line -> one JSON response line. Never raises (shared by POSIX + pipe)."""
@@ -261,11 +252,9 @@ class _PipeControlProtocol(asyncio.Protocol):
         self._buffer.extend(data)
         if len(self._buffer) > _MAX_REQUEST_BYTES:
             self._transport.close()
-            return
-        if b"\n" in self._buffer:
-            line, _, _ = bytes(self._buffer).partition(b"\n")
+        elif b"\n" in self._buffer:
             try:
-                self._transport.write(self._server.handle_request_line(line))
+                self._transport.write(self._server.handle_request_line(bytes(self._buffer).partition(b"\n")[0]))
             finally:
                 self._transport.close()
 
@@ -278,15 +267,10 @@ def query_gateway_control(home: Path, verb: str, *, timeout: float = _DEFAULT_CL
     query = _query_windows_pipe if _IS_WINDOWS else _query_unix_socket
     try:
         raw = query(Path(home), request, timeout)
+        response = json.loads(raw.decode("utf-8")) if raw else None
     except Exception:
         return None
-    try:
-        response = json.loads(raw.decode("utf-8")) if raw else None
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if not isinstance(response, dict) or response.get("ok") is not True:
-        return None
-    result = response.get("result")
+    result = response.get("result") if isinstance(response, dict) and response.get("ok") is True else None
     return result if isinstance(result, dict) else None
 
 
@@ -295,30 +279,24 @@ def _read_response_line(read: Callable[[], bytes], deadline: float) -> Optional[
     chunks: list[bytes] = []
     while time.monotonic() < deadline:
         chunk = read()
-        if not chunk:
-            break
         chunks.append(chunk)
-        if b"\n" in chunk:
+        if not chunk or b"\n" in chunk:
             break
         if sum(len(c) for c in chunks) > _MAX_RESPONSE_BYTES:
             return None
-    line, _, _ = b"".join(chunks).partition(b"\n")
-    return line or None
+    return b"".join(chunks).partition(b"\n")[0] or None
 
 
 def _query_unix_socket(home: Path, request: bytes, timeout: float) -> Optional[bytes]:
     path = resolve_client_socket_path(home)
     if path is None:
         return None
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    # OSError covers ConnectionRefusedError / FileNotFoundError on connect and socket.timeout on read.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock, contextlib.suppress(OSError):
         sock.settimeout(timeout)
-        try:
-            sock.connect(str(path))
-        except OSError:  # incl. ConnectionRefusedError / FileNotFoundError
-            return None
+        sock.connect(str(path))
         sock.sendall(request)
-        with contextlib.suppress(socket.timeout):
-            return _read_response_line(lambda: sock.recv(65536), time.monotonic() + timeout)
+        return _read_response_line(lambda: sock.recv(65536), time.monotonic() + timeout)
     return None
 
 

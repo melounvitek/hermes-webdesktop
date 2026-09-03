@@ -40,9 +40,8 @@ def classify_dead_error(error_text: Optional[str]) -> Optional[str]:
     except Exception:  # pragma: no cover - import guard
         return None
     kind = classify_send_error(None, error_text=error_text)
-    if kind not in _DEAD_ERROR_KINDS or (kind == "not_found" and not is_chat_level_not_found(error_text=error_text)):
-        return None
-    return kind
+    dead = kind in _DEAD_ERROR_KINDS and (kind != "not_found" or is_chat_level_not_found(error_text=error_text))
+    return kind if dead else None
 
 
 class DeadTargetRegistry:
@@ -54,13 +53,10 @@ class DeadTargetRegistry:
         self._dead: Dict[str, Dict[str, object]] = {}
         self._path = path if path is not None else get_hermes_home() / "gateway" / "dead_targets.json"
         try:
-            if self._path.exists():
-                raw = json.loads(self._path.read_text(encoding="utf-8"))
-                if isinstance(raw, dict):
-                    self._dead = {k: v for k, v in raw.items() if isinstance(v, dict)}
+            raw = json.loads(self._path.read_text(encoding="utf-8")) if self._path.exists() else {}
+            self._dead = {k: v for k, v in raw.items() if isinstance(v, dict)} if isinstance(raw, dict) else {}
         except (OSError, ValueError) as exc:
             logger.debug("dead_targets: could not load %s (%s) — starting empty", self._path, exc)
-            self._dead = {}
 
     def _flush_locked(self) -> None:
         try:
@@ -96,9 +92,8 @@ class DeadTargetRegistry:
             return False
         key = _normalize(platform, chat_id)
         with self._lock:
-            if key in self._dead:
-                del self._dead[key]
-                self._flush_locked()
-                logger.info("dead_targets: cleared %s (delivery succeeded again)", key)
-                return True
-        return False
+            if self._dead.pop(key, None) is None:
+                return False
+            self._flush_locked()
+            logger.info("dead_targets: cleared %s (delivery succeeded again)", key)
+        return True

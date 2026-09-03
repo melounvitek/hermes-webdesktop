@@ -18,7 +18,7 @@ import os
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 from hermes_constants import get_hermes_home
@@ -82,8 +82,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             adapter_profile TEXT
         )"""
     )
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(delivery_obligations)")}
-    if "adapter_profile" not in columns:
+    if "adapter_profile" not in {row[1] for row in conn.execute("PRAGMA table_info(delivery_obligations)")}:
         try:
             conn.execute("ALTER TABLE delivery_obligations ADD COLUMN adapter_profile TEXT")
         except sqlite3.OperationalError as exc:
@@ -98,20 +97,21 @@ def _transaction() -> Iterator[sqlite3.Connection]:
     context manager only commits/rolls back, so ``with _connect()`` alone leaks a connection (and its
     WAL/SHM fds) per call — ``record_obligation`` runs on every final response; exhausts RLIMIT_NOFILE."""
     conn = _connect()
+    with closing(conn), conn:
+        yield conn
+
+
+def _start_time(pid: int) -> Optional[int]:
     try:
-        with conn:
-            yield conn
-    finally:
-        conn.close()
+        from gateway.status import get_process_start_time  # lazy: tests monkeypatch gateway.status
+        return get_process_start_time(pid)
+    except Exception:
+        return None
 
 
 def _owner_stamp() -> tuple[int, Optional[int]]:
     pid = os.getpid()
-    try:
-        from gateway.status import get_process_start_time
-        return pid, get_process_start_time(pid)
-    except Exception:
-        return pid, None
+    return pid, _start_time(pid)
 
 
 def _owner_alive(pid: Any, started_at: Any) -> bool:
@@ -122,16 +122,11 @@ def _owner_alive(pid: Any, started_at: Any) -> bool:
         pid = int(pid)
     except (TypeError, ValueError):
         return False
-    try:
-        from gateway.status import get_process_start_time
-        current_start = get_process_start_time(pid)
-    except Exception:
-        current_start = None
+    current_start = _start_time(pid)
     if current_start is None:
-        # Start time unreadable: alive iff the pid exists. Route through the cross-platform probe —
-        # ``os.kill(pid, 0)`` on Windows is NOT a no-op (bpo-14484: it maps to
-        # ``GenerateConsoleCtrlEvent(0, pid)`` and could Ctrl+C the gateway's own console group).
-        # ``_pid_exists`` keeps EPERM-means-alive semantics (pid exists, owned by another user).
+        # Start time unreadable: alive iff the pid exists. Route through the cross-platform probe — on Windows
+        # ``os.kill(pid, 0)`` is NOT a no-op (bpo-14484: it maps to ``GenerateConsoleCtrlEvent(0, pid)`` and could
+        # Ctrl+C the gateway's own console group). ``_pid_exists`` keeps EPERM-means-alive (pid owned by another user).
         try:
             from gateway.status import _pid_exists
         except Exception:
@@ -139,11 +134,9 @@ def _owner_alive(pid: Any, started_at: Any) -> bool:
                 return False  # never fall back to a raw sig-0 probe on Windows
             try:
                 os.kill(pid, 0)  # windows-footgun: ok — POSIX-only fallback branch
-            except PermissionError:
                 return True
-            except OSError:  # incl. ProcessLookupError
-                return False
-            return True
+            except OSError as exc:  # incl. ProcessLookupError; EPERM means the pid exists
+                return isinstance(exc, PermissionError)
         try:
             return bool(_pid_exists(pid))
         except Exception:
@@ -163,8 +156,7 @@ def compute_obligation_id(session_key: str, message_ref: str, content: str) -> s
 def record_obligation(*, obligation_id: str, session_key: str, platform: str, chat_id: str,
                       thread_id: Optional[str], content: str, adapter_profile: Optional[str] = None) -> None:
     """Record a final response as owed to the platform (state='pending')."""
-    now = time.time()
-    pid, started = _owner_stamp()
+    now, (pid, started) = time.time(), _owner_stamp()
     with _DB_LOCK, _transaction() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO delivery_obligations
@@ -173,8 +165,7 @@ def record_obligation(*, obligation_id: str, session_key: str, platform: str, ch
                 owner_pid, owner_started_at, adapter_profile)
                VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)""",
             (obligation_id, session_key, platform, str(chat_id), str(thread_id) if thread_id else None,
-             content, now, now, pid, started, str(adapter_profile).strip() if adapter_profile else "default"),
-        )
+             content, now, now, pid, started, str(adapter_profile).strip() if adapter_profile else "default"))
     _prune()
 
 
@@ -207,8 +198,7 @@ def release_runtime_claim(obligation_id: str, error: str = "") -> bool:
                    updated_at=?, last_error=?
                WHERE obligation_id=? AND state='attempting'
                  AND owner_pid IS ? AND owner_started_at IS ?""",
-            (time.time(), error[:500] if error else None, obligation_id, pid, started),
-        )
+            (time.time(), error[:500] if error else None, obligation_id, pid, started))
     return bool(cursor.rowcount)
 
 
@@ -218,27 +208,16 @@ def _update_state(obligation_id: str, state: str, error: str = "") -> None:
             """UPDATE delivery_obligations
                SET state=?, updated_at=?, last_error=?
                WHERE obligation_id=?""",
-            (state, time.time(), error[:500] if error else None, obligation_id),
-        )
-
-
-def _exhausted(attempts: int, created_at: float, now: float) -> bool:
-    return attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS
+            (state, time.time(), error[:500] if error else None, obligation_id))
 
 
 def _claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts, profile, *,
                  needs_marker: bool, runtime: bool = False) -> Dict[str, Any]:
     """Claimed-row dict handed back for redelivery; ``runtime`` adds the reconnect-marker fields."""
-    row: Dict[str, Any] = {"obligation_id": oid, "session_key": session_key, "platform": platform,
-                           "chat_id": chat_id, "thread_id": thread_id, "content": content,
-                           "needs_marker": needs_marker}
-    if runtime:
-        row["marker"] = RECONNECTED_MARKER
-    row["profile"] = profile
-    if runtime:
-        row["runtime_recovery"] = True
-    row["attempts"] = attempts + 1
-    return row
+    return {"obligation_id": oid, "session_key": session_key, "platform": platform, "chat_id": chat_id,
+            "thread_id": thread_id, "content": content, "needs_marker": needs_marker,
+            **({"marker": RECONNECTED_MARKER} if runtime else {}), "profile": profile,
+            **({"runtime_recovery": True} if runtime else {}), "attempts": attempts + 1}
 
 
 def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Optional[set] = None,
@@ -253,8 +232,7 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
     and hits the cap having never been sent once (the stale cutoff still bounds untouched rows).
     ``deliverable_targets`` further scopes multiplexed gateways by exact ``(platform, adapter_profile)``
     so one connected bot cannot spend another disconnected bot's retry budget."""
-    now = now if now is not None else time.time()
-    pid, started = _owner_stamp()
+    now, (pid, started) = now if now is not None else time.time(), _owner_stamp()
     claimed: List[Dict[str, Any]] = []
     with _DB_LOCK, _transaction() as conn:
         rows = conn.execute(
@@ -268,24 +246,20 @@ def sweep_recoverable(now: Optional[float] = None, *, deliverable_platforms: Opt
              owner_pid, owner_started_at, adapter_profile) in rows:
             if _owner_alive(owner_pid, owner_started_at):
                 continue  # a live gateway still owns this row
-            if _exhausted(attempts, created_at, now):
+            if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:  # exhausted -> abandoned
                 conn.execute(
                     """UPDATE delivery_obligations
-                       SET state='abandoned', updated_at=? WHERE obligation_id=?""",
-                    (now, oid),
-                )
+                       SET state='abandoned', updated_at=? WHERE obligation_id=?""", (now, oid))
                 continue
-            if deliverable_platforms is not None and platform not in deliverable_platforms:
+            if ((deliverable_platforms is not None and platform not in deliverable_platforms)
+                    or (deliverable_targets is not None and (platform, adapter_profile) not in deliverable_targets)):
                 continue  # no adapter this boot — claiming would spend an attempt on a no-op
-            if deliverable_targets is not None and (platform, adapter_profile) not in deliverable_targets:
-                continue
             cursor = conn.execute(
                 """UPDATE delivery_obligations
                    SET owner_pid=?, owner_started_at=?, attempts=attempts+1,
                        updated_at=?
                    WHERE obligation_id=? AND (owner_pid IS ? OR owner_pid=?)""",
-                (pid, started, now, oid, owner_pid, owner_pid),
-            )
+                (pid, started, now, oid, owner_pid, owner_pid))
             if cursor.rowcount:  # pending = never started, redeliver plainly; else carry marker
                 claimed.append(_claimed_row(oid, session_key, platform, chat_id, thread_id, content, attempts,
                                             adapter_profile, needs_marker=state != "pending"))
@@ -304,8 +278,7 @@ def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
     allowlisted transient errors, same attempts/staleness bounds, every update guarded by the prior owner
     stamp and ``failed`` state. Claimed rows always carry the reconnect marker (the failed send's ack is
     not safe to infer)."""
-    now = now if now is not None else time.time()
-    pid, started = _owner_stamp()
+    now, (pid, started) = now if now is not None else time.time(), _owner_stamp()
     if started is None:  # PID alone cannot distinguish this process from a stale row left after PID
         return []        # reuse; runtime replay is optional, so fail closed (startup recovery remains).
     expected_profile = "default" if not profile or profile == "default" else str(profile)
@@ -316,32 +289,26 @@ def sweep_failed_for_runtime(platform: str, now: Optional[float] = None, *,
                       content, attempts, created_at, owner_pid,
                       owner_started_at, last_error, adapter_profile
                FROM delivery_obligations
-               WHERE state='failed' AND platform=?""",
-            (platform,),
-        ).fetchall()
+               WHERE state='failed' AND platform=?""", (platform,)).fetchall()
         for (oid, session_key, row_platform, chat_id, thread_id, content, attempts, created_at,
              owner_pid, owner_started_at, last_error, adapter_profile) in rows:
             # Exact process-start matching prevents PID reuse from stealing work.
             if (adapter_profile != expected_profile or owner_pid != pid or owner_started_at != started
                     or str(last_error or "").strip().lower() not in _RUNTIME_RETRYABLE_ERRORS):
                 continue
-            owner_guard = (oid, owner_pid, owner_started_at)
-            if _exhausted(attempts, created_at, now):
+            owner_guard = (now, oid, owner_pid, owner_started_at)
+            if attempts >= MAX_ATTEMPTS or (now - created_at) > STALE_AFTER_SECONDS:  # exhausted -> abandoned
                 conn.execute(
                     """UPDATE delivery_obligations
                        SET state='abandoned', updated_at=?
                        WHERE obligation_id=? AND state='failed'
-                         AND owner_pid IS ? AND owner_started_at IS ?""",
-                    (now, *owner_guard),
-                )
+                         AND owner_pid IS ? AND owner_started_at IS ?""", owner_guard)
                 continue
             cursor = conn.execute(
                 """UPDATE delivery_obligations
                    SET state='attempting', attempts=attempts+1, updated_at=?
                    WHERE obligation_id=? AND state='failed'
-                     AND owner_pid IS ? AND owner_started_at IS ?""",
-                (now, *owner_guard),
-            )
+                     AND owner_pid IS ? AND owner_started_at IS ?""", owner_guard)
             if cursor.rowcount:
                 claimed.append(_claimed_row(oid, session_key, row_platform, chat_id, thread_id, content,
                                             attempts, adapter_profile, needs_marker=True, runtime=True))
@@ -354,12 +321,9 @@ def _prune(now: Optional[float] = None) -> None:
         with _transaction() as conn:
             conn.execute(
                 """DELETE FROM delivery_obligations
-                   WHERE state IN ('delivered', 'abandoned') AND updated_at < ?""",
-                (now - _RETENTION_SECONDS,),
-            )
+                   WHERE state IN ('delivered', 'abandoned') AND updated_at < ?""", (now - _RETENTION_SECONDS,))
             total = conn.execute("SELECT COUNT(*) FROM delivery_obligations").fetchone()[0]
-            excess = max(0, total - _MAX_ROWS)
-            if excess:
+            if total > _MAX_ROWS:
                 conn.execute(
                     """DELETE FROM delivery_obligations WHERE obligation_id IN (
                          SELECT obligation_id FROM delivery_obligations
@@ -368,9 +332,7 @@ def _prune(now: Optional[float] = None) -> None:
                                     WHEN 'abandoned' THEN 1
                                     ELSE 2
                                   END, updated_at ASC
-                         LIMIT ?)""",
-                    (excess,),
-                )
+                         LIMIT ?)""", (total - _MAX_ROWS,))
     except Exception:
         logger.debug("delivery ledger prune failed", exc_info=True)
 
@@ -382,8 +344,6 @@ def ledger_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
             from hermes_cli.config import load_config
             config = load_config()
         value = (config.get("gateway") or {}).get("delivery_ledger", True)
-        if isinstance(value, str):
-            return value.strip().lower() not in {"false", "0", "no", "off"}
-        return bool(value)
+        return value.strip().lower() not in {"false", "0", "no", "off"} if isinstance(value, str) else bool(value)
     except Exception:
         return True

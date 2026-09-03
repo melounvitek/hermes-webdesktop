@@ -51,9 +51,8 @@ class DeliveryTransport:
     async def send(self, logical_platform: Platform, chat_id: str, content: str,
                    metadata: Optional[Dict[str, Any]]) -> Any:
         """Send through this transport while preserving the logical platform."""
-        if self.is_relay:
-            return await self.adapter.send_for_platform(logical_platform, chat_id, content, metadata=metadata)
-        return await self.adapter.send(chat_id, content, metadata=metadata)
+        return await (self.adapter.send_for_platform(logical_platform, chat_id, content, metadata=metadata)
+                      if self.is_relay else self.adapter.send(chat_id, content, metadata=metadata))
 
 
 def resolve_delivery_transport(platform: Platform, config: GatewayConfig,
@@ -63,15 +62,12 @@ def resolve_delivery_transport(platform: Platform, config: GatewayConfig,
     logical platform, so restart-time delivery is independent of per-chat caches without letting Relay
     hijack unrelated platform targets."""
     live_adapters = adapters or {}
-    native = live_adapters.get(platform)
-    native_config = config.platforms.get(platform)
+    native, native_config = live_adapters.get(platform), config.platforms.get(platform)
     # Explicitly supplied live adapters with no config block are honored, but an
     # explicitly disabled native adapter never shadows an enabled Relay transport.
     if native is not None and (native_config is None or native_config.enabled):
         return DeliveryTransport(native, native_config, platform)
-
-    relay = live_adapters.get(Platform.RELAY)
-    relay_config = config.platforms.get(Platform.RELAY)
+    relay, relay_config = live_adapters.get(Platform.RELAY), config.platforms.get(Platform.RELAY)
     fronts_platform = getattr(relay, "fronts_platform", None)
     if (relay is not None and (relay_config is None or relay_config.enabled)
             and callable(fronts_platform) and fronts_platform(platform)):
@@ -99,9 +95,7 @@ def _looks_like_int(value: Optional[str]) -> bool:
 def _send_result_error(result: Any) -> Optional[str]:
     """Error string of a failed SendResult object / plain result dict ("" if none), or None on success."""
     get = result.get if isinstance(result, dict) else (lambda name, default=None: getattr(result, name, default))
-    if get("success", True) is not False:
-        return None
-    return str(get("error") or "")
+    return None if get("success", True) is not False else str(get("error") or "")
 
 
 @dataclass
@@ -116,23 +110,18 @@ class DeliveryTarget:
     @classmethod
     def parse(cls, target: str, origin: Optional[SessionSource] = None) -> "DeliveryTarget":
         """Parse "origin" | "local" | "<platform>" | "<platform>:<chat_id>[:<thread_id>]"."""
-        target_stripped, target_lower = target.strip(), target.strip().lower()
-        if target_lower == "origin" and origin:
-            return cls(platform=origin.platform, chat_id=origin.chat_id, thread_id=origin.thread_id, is_origin=True)
-        if target_lower == "origin":
-            return cls(platform=Platform.LOCAL, is_origin=True)
-        if target_lower == "local":
-            return cls(platform=Platform.LOCAL)
+        target = target.strip()
+        if target.lower() == "origin":
+            return (cls(platform=origin.platform, chat_id=origin.chat_id, thread_id=origin.thread_id, is_origin=True)
+                    if origin else cls(platform=Platform.LOCAL, is_origin=True))
         # Platform names are case-insensitive; chat/thread ids keep case. Unknown platforms -> local.
-        parts = target_stripped.split(":", 2)
+        parts = target.split(":", 2)
         try:
             platform = Platform(parts[0].lower())
         except ValueError:
             return cls(platform=Platform.LOCAL)
-        if len(parts) == 1:
-            return cls(platform=platform)
-        return cls(platform=platform, chat_id=parts[1],
-                   thread_id=parts[2] if len(parts) > 2 else None, is_explicit=True)
+        return (cls(platform=platform, chat_id=parts[1], thread_id=parts[2] if len(parts) > 2 else None, is_explicit=True)
+                if len(parts) > 1 else cls(platform=platform))
 
     def to_string(self) -> str:
         """Convert back to string format."""
@@ -221,9 +210,8 @@ class DeliveryRouter:
     def _filter_silence_narration_enabled(self) -> bool:
         """``HERMES_FILTER_SILENCE_NARRATION`` env overrides the ``gateway.filter_silence_narration`` flag."""
         env = os.getenv("HERMES_FILTER_SILENCE_NARRATION")
-        if env is None:
-            return bool(getattr(self.config, "filter_silence_narration", True))
-        return env.strip().lower() in ("1", "true", "yes", "on")
+        return (bool(getattr(self.config, "filter_silence_narration", True)) if env is None
+                else env.strip().lower() in ("1", "true", "yes", "on"))
 
     def _cap_oversized_output(self, adapter: Any, content: str, job_id: str) -> str:
         """Audit-save oversized cron output; truncate it for non-chunking adapters. Above MAX_PLATFORM_OUTPUT
@@ -245,8 +233,7 @@ class DeliveryRouter:
             return content
         # The footer needs a valid path: if the best-effort save failed, retry
         # (a failure now is a real delivery problem and propagates).
-        if saved_path is None:
-            saved_path = self._save_full_output(content, job_id)
+        saved_path = saved_path or self._save_full_output(content, job_id)
         footer = f"\n\n... [truncated, full output saved to {saved_path}]"
         logger.info("Cron output truncated (%d chars) — full output: %s", len(content), saved_path)
         return content[:max(0, MAX_PLATFORM_OUTPUT - len(footer))] + footer
@@ -276,41 +263,39 @@ class DeliveryRouter:
             return {"success": True, "filtered": "silence_narration", "delivered": False}
 
         send_metadata = dict(metadata or {})
-        if transport.is_relay:
-            home = self.config.get_home_channel(target.platform)
-            if home is not None and home.chat_id == target.chat_id:
-                send_metadata.update({k: v for k, v in (("user_id", home.user_id), ("scope_id", home.scope_id)) if v})
+        home = self.config.get_home_channel(target.platform) if transport.is_relay else None
+        if home is not None and home.chat_id == target.chat_id:
+            send_metadata.update({k: v for k, v in (("user_id", home.user_id), ("scope_id", home.scope_id)) if v})
 
         # Caller-supplied thread routing always wins over target.thread_id.
-        named_telegram_private_topic_name: Optional[str] = None
+        named_topic: Optional[str] = None  # named Telegram private topic created for this send
         thread_id = target.thread_id
         if thread_id and not any(key in send_metadata for key in _THREAD_ROUTING_KEYS):
-            is_telegram_private = target.platform == Platform.TELEGRAM and looks_like_telegram_private_chat_id(target.chat_id)
             send_metadata["thread_id"] = thread_id
-            if is_telegram_private and not _looks_like_int(thread_id):
-                # Named topic: create via createForumTopic, use message_thread_id directly.
-                named_telegram_private_topic_name = thread_id
-                send_metadata["thread_id"] = await _ensure_named_dm_topic(adapter, target.chat_id, thread_id, refresh=False)
-                send_metadata["telegram_dm_topic_created_for_send"] = True
-            elif is_telegram_private:
-                # Legacy numeric private topic ids not created by this send path need a reply
-                # anchor to stay visible in the requested lane.
-                if send_metadata.get("telegram_reply_to_message_id") is None:
+            if target.platform == Platform.TELEGRAM and looks_like_telegram_private_chat_id(target.chat_id):
+                if not _looks_like_int(thread_id):
+                    # Named topic: create via createForumTopic, use message_thread_id directly.
+                    named_topic = thread_id
+                    send_metadata["thread_id"] = await _ensure_named_dm_topic(adapter, target.chat_id, thread_id, refresh=False)
+                    send_metadata["telegram_dm_topic_created_for_send"] = True
+                elif send_metadata.get("telegram_reply_to_message_id") is None:
+                    # Legacy numeric private topic ids not created by this send path need a reply
+                    # anchor to stay visible in the requested lane.
                     raise RuntimeError(
                         "Telegram private DM topic delivery requires telegram_reply_to_message_id; "
                         "send to the bare chat or provide a reply anchor"
                     )
-                send_metadata["telegram_dm_topic_reply_fallback"] = True
+                else:
+                    send_metadata["telegram_dm_topic_reply_fallback"] = True
 
-        result = await transport.send(target.platform, target.chat_id, content, metadata=send_metadata or None)
-        error = _send_result_error(result)
-        if error is not None and named_telegram_private_topic_name and "thread not found" in error.lower():
-            send_metadata["thread_id"] = await _ensure_named_dm_topic(
-                adapter, target.chat_id, named_telegram_private_topic_name, refresh=True
-            )
-            send_metadata["telegram_dm_topic_created_for_send"] = True
+        for retry in (False, True):
             result = await transport.send(target.platform, target.chat_id, content, metadata=send_metadata or None)
             error = _send_result_error(result)
+            if retry or error is None or not named_topic or "thread not found" not in error.lower():
+                break
+            # The named topic vanished under us: recreate it once and resend.
+            send_metadata["thread_id"] = await _ensure_named_dm_topic(adapter, target.chat_id, named_topic, refresh=True)
+            send_metadata["telegram_dm_topic_created_for_send"] = True
         if error is not None:
             raise RuntimeError(error or f"{target.platform.value} delivery failed")
         return result
