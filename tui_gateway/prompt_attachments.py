@@ -28,8 +28,8 @@ del _re  # bodies are rebound onto server globals: import inside functions only
 
 
 def _b64_payload(raw: str, data_url_re: str, flags: int) -> bytes:
-    """Strip an optional ``data:...;base64,`` wrapper and all whitespace, then
-    strictly decode (raises ``binascii.Error``/``ValueError`` on bad base64)."""
+    """Strip an optional ``data:...;base64,`` wrapper and all whitespace, then strictly
+    decode (raises ``binascii.Error``/``ValueError`` on bad base64)."""
     import base64 as _base64
     import re as _re
     cleaned = (raw or "").strip()
@@ -40,8 +40,7 @@ def _b64_payload(raw: str, data_url_re: str, flags: int) -> bytes:
 
 
 def _decode_attach_base64(raw: str, *, mime_prefix: str) -> bytes | None:
-    """Decode a base64 payload, optionally ``data:<mime_prefix>...;base64,``-wrapped,
-    tolerating embedded whitespace. ``None`` when not valid base64."""
+    """Decode a (``data:<mime_prefix>...;base64,``-wrapped) payload; None when invalid."""
     import re as _re
     try:
         return _b64_payload(
@@ -52,8 +51,7 @@ def _decode_attach_base64(raw: str, *, mime_prefix: str) -> bytes | None:
 
 def _decode_attach_payload(
     rid, raw_b64: str, *, mime_prefix: str, max_bytes: int, label: str, empty_msg: str):
-    """``(bytes, None)`` or ``(None, error)`` for an upload: 4017 on bad/empty
-    base64, 4018 over *max_bytes*."""
+    """``(bytes, None)`` or ``(None, error)``: 4017 on bad/empty base64, 4018 over *max_bytes*."""
     data = _decode_attach_base64(raw_b64, mime_prefix=mime_prefix)
     if data is None:
         return None, _err(rid, 4017, "data is not valid base64")
@@ -85,26 +83,20 @@ def _allowed_image_extensions() -> frozenset[str]:
 
 
 def _session_home_dir(session: dict, name: str) -> Path:
-    """``<session home>/<name>``, anchored on the session's stored ``profile_home``.
-
-    Attach RPCs run BEFORE ``prompt.submit`` installs the profile HERMES_HOME
-    override, so ``get_hermes_home()`` would return the gateway's launch home —
-    while the sandbox mounts and the vision host-read allowlist resolve the
-    *session profile's* dirs at run time. Writing anywhere else means the agent
-    can never see the file.
-    """
+    """``<session home>/<name>``, anchored on the session's stored ``profile_home``: attach
+    RPCs run BEFORE ``prompt.submit`` installs the profile HERMES_HOME override, while
+    the sandbox mounts and the vision host-read allowlist resolve the *session profile's*
+    dirs at run time — writing anywhere else means the agent can never see the file."""
     profile_home = session.get("profile_home")
     return (Path(profile_home) if profile_home else _hermes_home) / name
 
 
 def _session_images_dir(session: dict) -> Path:
-    """Uploads ``images/`` dir for the session (see ``_session_home_dir``)."""
     return _session_home_dir(session, "images")
 
 
 def _queue_attached_image(session: dict, img_bytes: bytes, ext: str, *, prefix: str) -> Path:
-    """Write image bytes into the session images dir and append to
-    ``session["attached_images"]`` so the next ``prompt.submit`` picks them up."""
+    """Write image bytes into the session images dir and queue them for the next submit."""
     session["image_counter"] = session.get("image_counter", 0) + 1
     img_dir = _session_images_dir(session)
     img_dir.mkdir(parents=True, exist_ok=True)
@@ -139,74 +131,37 @@ def _attachment_ref_path(session: dict, target: Path) -> str:
         return str(target.resolve())
 
 
-def _desktop_attachment_dir(session: dict) -> Path:
-    """File-attachment staging dir (``attachments/``, see ``_session_home_dir``);
-    registered in ``tools.credential_files._CACHE_DIRS`` and auto-mounted into
-    containers, so a staged file lands where the bind mount points."""
-    root = _session_home_dir(session, "attachments")
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
 def _sanitize_attachment_name(name: str) -> str:
     import re as _re
     candidate = _re.sub(r"[\x00-\x1f]+", "_", Path(str(name or "").strip()).name)
     return candidate.strip().strip(".") or "attachment"
 
 
-def _unique_attachment_path(root: Path, filename: str) -> Path:
-    candidate = root / filename
-    if not candidate.exists():
-        return candidate
-    stem = Path(filename).stem or "attachment"
-    suffix = Path(filename).suffix
-    counter = 2
-    while (next_candidate := root / f"{stem}-{counter}{suffix}").exists():
-        counter += 1
-    return next_candidate
-
-
-def _resolve_gateway_attachment_path(raw: str) -> Path | None:
-    """Resolve a raw path token to a gateway-visible file, or None."""
-    if not raw:
-        return None
-    try:
-        from cli import _detect_file_drop, _resolve_attachment_path, _split_path_input
-    except Exception:
-        return None
-    dropped = _detect_file_drop(raw)
-    if dropped:
-        return Path(dropped["path"]).resolve()
-    path_token, _remainder = _split_path_input(raw)
-    resolved = _resolve_attachment_path(path_token)
-    return Path(resolved).resolve() if resolved is not None else None
-
-
-def _decode_attachment_data_url(data_url: str) -> bytes:
-    """Decode a ``data:<any-mime>;base64,<b64>`` payload (any media type, unlike the
-    image-specific ``_decode_attach_base64``); bare base64 also accepted."""
-    import binascii as _binascii
-    import re as _re
-    try:
-        return _b64_payload(
-            data_url, r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", _re.DOTALL | _re.I)
-    except (ValueError, _binascii.Error) as exc:
-        raise ValueError("invalid data_url payload") from exc
-
-
 def _stage_session_file_attachment(
     session: dict, *, raw_path: str, data_url: str, name: str) -> tuple[Path, bool]:
-    """Make a desktop file attachment available to the gateway agent.
+    """Make a desktop file attachment available to the gateway agent: ``(stored_path, uploaded)``.
 
     1. Path resolves INSIDE the session workspace -> use as-is (``uploaded=False``).
-    2. Gateway-visible file OUTSIDE the workspace -> copy into ``attachments/``
-       (bind-mounted into container backends) so ``@file:`` resolves in the sandbox.
-    3. Not on the gateway (remote client disk) -> decode ``data_url`` bytes into
-       ``attachments/``.
-    Returns ``(stored_path, uploaded)``.
+    2. Gateway-visible file OUTSIDE the workspace -> copy into ``attachments/`` (registered
+       in ``tools.credential_files._CACHE_DIRS`` and bind-mounted into container backends)
+       so ``@file:`` resolves in the sandbox.
+    3. Not on the gateway (remote client disk) -> decode ``data_url`` bytes into ``attachments/``.
     """
     workspace = Path(_session_cwd(session)).resolve()
-    resolved = _resolve_gateway_attachment_path(raw_path)
+    resolved = None
+    if raw_path:
+        try:
+            from cli import _detect_file_drop, _resolve_attachment_path, _split_path_input
+        except Exception:
+            _detect_file_drop = None
+        if _detect_file_drop is not None:
+            dropped = _detect_file_drop(raw_path)
+            if dropped:
+                resolved = Path(dropped["path"]).resolve()
+            else:
+                path_token, _remainder = _split_path_input(raw_path)
+                found = _resolve_attachment_path(path_token)
+                resolved = Path(found).resolve() if found is not None else None
     if resolved is not None:
         try:
             resolved.relative_to(workspace)
@@ -217,10 +172,25 @@ def _stage_session_file_attachment(
     else:
         if not data_url:
             raise ValueError("file not found on gateway and no data_url provided")
-        payload = _decode_attachment_data_url(data_url)
+        # Any media type (unlike the image-specific decoder); bare base64 also accepted.
+        import binascii as _binascii
+        import re as _re
+        try:
+            payload = _b64_payload(
+                data_url, r"^data:[^;,]*(?:;[^;,=]+=[^;,]+)*;base64,(.*)$", _re.DOTALL | _re.I)
+        except (ValueError, _binascii.Error) as exc:
+            raise ValueError("invalid data_url payload") from exc
         filename = _sanitize_attachment_name(name or Path(str(raw_path or "")).name)
-    target = _unique_attachment_path(
-        _desktop_attachment_dir(session), _sanitize_attachment_name(filename))
+    root = _session_home_dir(session, "attachments")
+    root.mkdir(parents=True, exist_ok=True)
+    filename = _sanitize_attachment_name(filename)
+    target = root / filename
+    if target.exists():
+        stem = Path(filename).stem or "attachment"
+        suffix = Path(filename).suffix
+        counter = 2
+        while (target := root / f"{stem}-{counter}{suffix}").exists():
+            counter += 1
     target.write_bytes(payload)
     return target.resolve(), True
 
