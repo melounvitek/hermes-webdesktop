@@ -14,17 +14,9 @@ logger = logging.getLogger(__name__)
 
 _POOL_PROVIDER = "xai-oauth"
 
-# xAI's public API is OpenAI-compatible for the endpoints Hermes commonly
-# uses. The Responses endpoint is included because Hermes' native xAI runtime
-# uses codex_responses mode.
+# OpenAI-compatible endpoints; ``/responses`` because the native xAI runtime uses codex_responses.
 _ALLOWED_PATHS: FrozenSet[str] = frozenset(
-    {
-        "/responses",
-        "/chat/completions",
-        "/completions",
-        "/embeddings",
-        "/models",
-    }
+    {"/responses", "/chat/completions", "/completions", "/embeddings", "/models"}
 )
 
 
@@ -74,10 +66,7 @@ class XAIGrokAdapter(UpstreamAdapter):
             return self._credential_from_entry(entry)
 
     def get_retry_credential(
-        self,
-        *,
-        failed_credential: UpstreamCredential,
-        status_code: int,
+        self, *, failed_credential: UpstreamCredential, status_code: int
     ) -> Optional[UpstreamCredential]:
         if status_code not in {401, 429}:
             return None
@@ -87,10 +76,8 @@ class XAIGrokAdapter(UpstreamAdapter):
             if pool is None:
                 return None
 
-            # 401: try refreshing the current key first. 429: never refresh — mark
-            # the rate-limited key with its 1-hour cooldown and rotate to the next
-            # available credential. Returns None when the pool has no other key to
-            # offer — the 429 will flow back to the client.
+            # 401: refresh the current key first. 429: never refresh — cooldown the rate-limited
+            # key and rotate. None when the pool has nothing else → the status flows to the client.
             refreshed = pool.try_refresh_current() if status_code == 401 else None
             if refreshed is None:
                 refreshed = pool.mark_exhausted_and_rotate(status_code=status_code)

@@ -1,7 +1,4 @@
-"""Abstract base for proxy upstream adapters.
-
-The proxy server is otherwise provider-agnostic.
-"""
+"""Abstract base for proxy upstream adapters; the proxy server is otherwise provider-agnostic."""
 
 from __future__ import annotations
 
@@ -14,17 +11,10 @@ from typing import FrozenSet, Optional
 class UpstreamCredential:
     """A resolved bearer + base URL ready to forward to."""
 
-    bearer: str
-    """Authorization header value to send upstream (token only, no ``Bearer`` prefix)."""
-
-    base_url: str
-    """Upstream base URL, e.g. ``https://inference-api.nousresearch.com/v1``."""
-
+    bearer: str  # token only, no ``Bearer`` prefix
+    base_url: str  # e.g. ``https://inference-api.nousresearch.com/v1``
     token_type: str = "Bearer"
-    """Auth scheme — currently always ``Bearer`` for supported providers."""
-
-    expires_at: Optional[str] = None
-    """ISO-8601 expiry timestamp for the bearer, when known. Informational."""
+    expires_at: Optional[str] = None  # ISO-8601, informational
 
 
 class UpstreamAdapter(ABC):
@@ -43,40 +33,24 @@ class UpstreamAdapter(ABC):
     @property
     @abstractmethod
     def allowed_paths(self) -> FrozenSet[str]:
-        """Set of relative request paths the upstream accepts.
-
-        Paths are relative to the proxy's ``/v1`` mount (``"/chat/completions"`` ⇒
-        ``/v1/chat/completions``). Requests outside this set get a 404 with a helpful body.
-        """
+        """Paths relative to the proxy's ``/v1`` mount (``"/chat/completions"`` ⇒
+        ``/v1/chat/completions``); anything else gets a 404 with a helpful body."""
 
     @abstractmethod
     def is_authenticated(self) -> bool:
-        """Return True if the user has usable credentials for this upstream.
-
-        Should be cheap — no network calls. Used by ``proxy start`` for a clear up-front error
-        before binding a port.
-        """
+        """Cheap (no network) usable-credentials check; ``proxy start`` uses it for a clear
+        up-front error before binding a port."""
 
     @abstractmethod
     def get_credential(self) -> UpstreamCredential:
-        """Return a fresh credential, refreshing or rotating if necessary.
-
-        Implementations refresh a near-expiry access token, rotate a near-expiry upstream bearer key
-        and persist refreshed state to disk. Raises RuntimeError when unauthenticated or refresh
-        fails; the proxy then returns 401 to the client.
-        """
+        """Fresh credential (refreshing/rotating + persisting as needed). Raises RuntimeError when
+        unauthenticated or refresh fails; the proxy then returns 401 to the client."""
 
     def get_retry_credential(
-        self,
-        *,
-        failed_credential: UpstreamCredential,
-        status_code: int,
+        self, *, failed_credential: UpstreamCredential, status_code: int
     ) -> Optional[UpstreamCredential]:
-        """Return an alternate credential after an upstream auth failure.
-
-        The default is no retry. Providers can override this for one-shot fallback paths after the
-        upstream rejects the first request.
-        """
+        """Alternate credential for a one-shot retry after the upstream rejects the first request;
+        default is no retry."""
         _ = failed_credential, status_code
         return None
 

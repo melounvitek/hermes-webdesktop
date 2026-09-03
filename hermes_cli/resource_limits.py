@@ -22,17 +22,15 @@ _MISSING = object()
 def configured_nofile_soft_limit(
     config: Mapping[str, Any] | None = None,
 ) -> int | None:
-    """Resolve ``runtime.nofile_soft_limit`` from a loaded config.
+    """``runtime.nofile_soft_limit`` from a loaded config, or ``None`` when disabled/unresolvable.
 
-    A missing key uses the default. Explicit ``0``, ``false``, and ``null`` disable the
-    adjustment; other non-integer or negative values are ignored (caller fails open).
-    Used by service-definition generators (e.g. the launchd plist) so persisted service limits
-    and the in-process floor share one knob. ``None`` when disabled or unresolvable.
+    Missing key → default. Explicit ``0``/``false``/``null`` disable; other non-int or negative
+    values are ignored (caller fails open). Shared by the in-process floor and service-definition
+    generators (launchd plist) so both use one knob.
     """
     if config is None:
         try:
-            # Use Hermes's real, profile-aware loader rather than reading YAML
-            # here. This also applies managed-scope overlays and defaults.
+            # Profile-aware loader (applies managed-scope overlays and defaults).
             from hermes_cli.config import load_config_readonly
 
             config = load_config_readonly()
@@ -60,15 +58,11 @@ def configured_nofile_soft_limit(
 def apply_nofile_soft_limit(
     config: Mapping[str, Any] | None = None,
 ) -> bool:
-    """Raise this process's ``RLIMIT_NOFILE`` soft limit when possible.
+    """Best-effort raise of this process's ``RLIMIT_NOFILE`` soft limit; ``True`` iff changed.
 
-    The target defaults to :data:`DEFAULT_NOFILE_SOFT_LIMIT` and can be set with
-    ``runtime.nofile_soft_limit``. The target is clamped to a finite hard limit, never lowers an
-    existing higher soft limit, and returns ``False`` for an explicit opt-out or when the
-    platform/sandbox refuses the operation.
-
-    This is intentionally best-effort. Unsupported platforms, malformed settings, and denied
-    ``setrlimit`` calls must never prevent a server from starting.
+    Target = ``runtime.nofile_soft_limit`` (default :data:`DEFAULT_NOFILE_SOFT_LIMIT`), clamped
+    to a finite hard limit; never lowers a higher soft limit. Unsupported platforms, malformed
+    settings, and denied ``setrlimit`` must never prevent a server from starting.
     """
     if _resource is None:
         return False
@@ -80,9 +74,8 @@ def apply_nofile_soft_limit(
     try:
         nofile = _resource.RLIMIT_NOFILE
         current_soft, current_hard = _resource.getrlimit(nofile)
-        # On platforms where RLIM_INFINITY is represented as -1, ordinary
-        # integer ordering would make an unlimited soft limit look lower than
-        # every positive target. Never replace infinity with a finite limit.
+        # RLIM_INFINITY may be -1, which ordinary ordering would treat as "lower than any
+        # target"; never replace infinity with a finite limit.
         infinity = getattr(_resource, "RLIM_INFINITY", object())
         if current_soft == infinity or current_soft >= target:
             return False
@@ -93,14 +86,10 @@ def apply_nofile_soft_limit(
         _resource.setrlimit(nofile, (new_soft, current_hard))
         return True
     except Exception:
-        # This helper runs before server startup and must fail open for
-        # unsupported/sandboxed environments and denied resource changes.
         logger.debug("Could not raise RLIMIT_NOFILE soft limit", exc_info=True)
         return False
 
 
 __all__ = [
-    "DEFAULT_NOFILE_SOFT_LIMIT",
-    "apply_nofile_soft_limit",
-    "configured_nofile_soft_limit",
+    "DEFAULT_NOFILE_SOFT_LIMIT", "apply_nofile_soft_limit", "configured_nofile_soft_limit"
 ]
