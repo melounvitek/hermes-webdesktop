@@ -650,28 +650,29 @@ def _backup_config_file(config_path: Path) -> Path | None:
     """Back up config.yaml before setup modifies it; None when absent or copy fails."""
     if not config_path.exists():
         return None
-    from datetime import datetime as _dt
-    backup_path = config_path.with_suffix(f".yaml.bak.{_dt.now().strftime('%Y%m%d_%H%M%S')}")
+    import shutil
+    from datetime import datetime
+    backup_path = config_path.with_suffix(f".yaml.bak.{datetime.now().strftime('%Y%m%d_%H%M%S')}")
     try:
-        import shutil
         shutil.copy2(config_path, backup_path)
+        return backup_path
     except Exception:
         return None
-    return backup_path
 
 
 def _run_setup_section(config: dict, section: str) -> None:
     """``hermes setup <section>``: run one SETUP_SECTIONS entry under the banner."""
-    for key, label, func in SETUP_SECTIONS:
-        if key == section:
-            _print_banner(f"│     ⚕ Hermes Setup — {label:<34s} │")
-            _run_setup_steps([(label, lambda setup_func=func: setup_func(config))])
-            save_config(config)
-            print()
-            print_success(f"{label} configuration complete!")
-            return
-    print_error(f"Unknown setup section: {section}")
-    print_info(f"Available sections: {', '.join(k for k, _, _ in SETUP_SECTIONS)}")
+    entry = next(((label, func) for key, label, func in SETUP_SECTIONS if key == section), None)
+    if entry is None:
+        print_error(f"Unknown setup section: {section}")
+        print_info(f"Available sections: {', '.join(k for k, _, _ in SETUP_SECTIONS)}")
+        return
+    label, func = entry
+    _print_banner(f"│     ⚕ Hermes Setup — {label:<34s} │")
+    _run_setup_steps([(label, lambda: func(config))])
+    save_config(config)
+    print()
+    print_success(f"{label} configuration complete!")
 
 
 def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_ran: bool) -> None:
