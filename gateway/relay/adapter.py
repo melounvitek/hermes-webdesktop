@@ -306,9 +306,9 @@ class RelayAdapter(BasePlatformAdapter):
     _DRAFT_STATE_CAP = 512
 
     @classmethod
-    def _evict_oldest(cls, d: Dict[str, int]) -> None:
-        """FIFO-bound a coordination dict in place."""
-        while len(d) > cls._DRAFT_STATE_CAP:
+    def _evict_oldest(cls, d: Dict[str, Any], cap: Optional[int] = None) -> None:
+        """FIFO-bound an insertion-ordered dict in place (default cap: draft state)."""
+        while len(d) > (cls._DRAFT_STATE_CAP if cap is None else cap):
             d.pop(next(iter(d)), None)
 
     @staticmethod
@@ -356,6 +356,40 @@ class RelayAdapter(BasePlatformAdapter):
         return await self._transport.send_outbound(  # type: ignore[union-attr]
             action, platform=self._platform_by_chat.get(str(chat_id))
         )
+
+    async def _gated_op(
+        self,
+        chat_id: str,
+        action: Dict[str, Any],
+        *,
+        decline_level: Optional[int] = logging.WARNING,
+        subject: Any = None,
+        platform: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Emit one best-effort, op-gated frame; None when the caller must fall back.
+
+        None covers every unavailability: op not advertised (probe the descriptor
+        instead of parsing a connector error), no transport, transport raised, or a
+        structured connector decline (logged at ``decline_level``; None = silent).
+        """
+        op = action["op"]
+        if self._transport is None or not self.descriptor.supports_op(op):
+            return None
+        try:
+            result = await self._transport.send_outbound(
+                action, platform=platform or self._platform_by_chat.get(str(chat_id))
+            )
+        except Exception:  # noqa: BLE001 - transport failure degrades to the caller's fallback
+            logger.debug("relay %s transport failure", op, exc_info=True)
+            return None
+        if not result.get("success"):
+            if decline_level is not None:
+                logger.log(
+                    decline_level, "relay %s declined for %s: %s",
+                    op, chat_id if subject is None else subject, result.get("error"),
+                )
+            return None
+        return result
 
     def _text_metadata(self, chat_id: str, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """Metadata for a text egress frame: format hints + tenant discriminators.
@@ -684,8 +718,7 @@ class RelayAdapter(BasePlatformAdapter):
                 logger.info("relay inbound dropped as replay (dedupe key=%s)", dedupe_key)
                 return
             self._seen_inbound[dedupe_key] = None
-            while len(self._seen_inbound) > self._SEEN_INBOUND_MAX:
-                self._seen_inbound.pop(next(iter(self._seen_inbound)))
+            self._evict_oldest(self._seen_inbound, self._SEEN_INBOUND_MAX)
         self._capture_scope(event)
         self._stamp_slack_session_thread(event)
         # A structured prompt answer resolves its waiting primitive and is CONSUMED —
@@ -1422,19 +1455,12 @@ class RelayAdapter(BasePlatformAdapter):
         Slack only."""
         if self._transport is None:
             return
-        md = self._with_status_thread_anchor(chat_id, metadata)
         # Rich status parity: carry run.py's per-tool phrase as the frame's content
         # (rendered on assistant.threads.setStatus). Absent => omit content and the
         # connector uses its default heartbeat. NEVER send empty-string content here:
         # on Slack that is the CLEAR request.
-        frame: Dict[str, Any] = {"op": "typing", "chat_id": chat_id, "metadata": self._with_scope(chat_id, md)}
         phrase = getattr(self, "_status_text", {}).get(str(chat_id))
-        if phrase:
-            frame["content"] = str(phrase)
-        try:
-            await self._outbound(chat_id, frame)
-        except Exception:  # noqa: BLE001 - typing is cosmetic, never breaks a turn
-            logger.debug("relay send_typing failed for %s", chat_id, exc_info=True)
+        await self._typing_frame(chat_id, metadata, str(phrase) if phrase else None, "send_typing")
 
     async def stop_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         """Forward an explicit typing/status clear (empty ``content``) — Slack only:
@@ -1444,19 +1470,20 @@ class RelayAdapter(BasePlatformAdapter):
         connector first."""
         if self._transport is None or self._platform_by_chat.get(str(chat_id)) != _SLACK:
             return
+        await self._typing_frame(chat_id, metadata, "", "stop_typing")
+
+    async def _typing_frame(
+        self, chat_id: str, metadata: Optional[Dict[str, Any]], content: Optional[str], lane: str
+    ) -> None:
+        """One ``typing`` frame (``content`` None = omit; "" = Slack clear). Cosmetic: never raises."""
         md = self._with_status_thread_anchor(chat_id, metadata)
+        frame: Dict[str, Any] = {"op": "typing", "chat_id": chat_id, "metadata": self._with_scope(chat_id, md)}
+        if content is not None:
+            frame["content"] = content
         try:
-            await self._outbound(
-                chat_id,
-                {
-                    "op": "typing",
-                    "chat_id": chat_id,
-                    "content": "",
-                    "metadata": self._with_scope(chat_id, md),
-                },
-            )
-        except Exception:  # noqa: BLE001 - status clear is cosmetic, never breaks a turn
-            logger.debug("relay stop_typing failed for %s", chat_id, exc_info=True)
+            await self._outbound(chat_id, frame)
+        except Exception:  # noqa: BLE001 - typing/status is cosmetic, never breaks a turn
+            logger.debug("relay %s failed for %s", lane, chat_id, exc_info=True)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         # Op-gated so a legacy connector (which would only answer "unsupported op")
@@ -1558,15 +1585,10 @@ class RelayAdapter(BasePlatformAdapter):
         }
         if filename:
             action["filename"] = filename
-        try:
-            result = await self._outbound(chat_id, action)
-        except Exception:  # noqa: BLE001 - transport failure degrades to the caller's fallback
-            logger.debug("relay send_media transport failure", exc_info=True)
-            return None
-        if not result.get("success"):
-            # Structured connector decline (size cap, platform rejection): the
-            # caller's fallback still delivers the caption/notice.
-            logger.warning("relay send_media declined for %s: %s", chat_id, result.get("error"))
+        # A structured connector decline (size cap, platform rejection) is logged;
+        # the caller's fallback still delivers the caption/notice.
+        result = await self._gated_op(chat_id, action)
+        if result is None:
             return None
         return SendResult(success=True, message_id=result.get("message_id"), raw_response=result)
 
@@ -1712,8 +1734,6 @@ class RelayAdapter(BasePlatformAdapter):
         VERBATIM: the threading mode is decided in exactly one place — run.py's
         _resolve_progress_thread_id (flat mode suppresses the synthetic self-anchor
         there; thread mode stamps the turn's thread)."""
-        if self._transport is None or not self.descriptor.supports_op("prompt"):
-            return None
         action: Dict[str, Any] = {
             "op": "prompt",
             "chat_id": chat_id,
@@ -1726,13 +1746,8 @@ class RelayAdapter(BasePlatformAdapter):
         }
         if timeout_s is not None:
             action["timeout_s"] = int(timeout_s)
-        try:
-            result = await self._outbound(chat_id, action)
-        except Exception:  # noqa: BLE001 - transport failure degrades to fallback
-            logger.debug("relay prompt transport failure", exc_info=True)
-            return None
-        if not result.get("success"):
-            logger.warning("relay prompt declined for %s: %s", chat_id, result.get("error"))
+        result = await self._gated_op(chat_id, action)
+        if result is None:
             return None
         return SendResult(success=True, message_id=result.get("message_id"), raw_response=result)
 
@@ -1991,26 +2006,21 @@ class RelayAdapter(BasePlatformAdapter):
         remove: bool = False,
     ) -> bool:
         """Egress one `react` op; best-effort (False on any failure, logged at debug)."""
-        if self._transport is None or not self.descriptor.supports_op("react"):
-            return False
         if not chat_id or not message_id:
             return False
-        try:
-            result = await self._outbound(
-                chat_id,
-                {
-                    "op": "react",
-                    "chat_id": chat_id,
-                    "message_id": message_id,
-                    "emoji": emoji,
-                    "remove": remove,
-                    "metadata": self._with_scope(chat_id, None),
-                },
-            )
-            return bool(result.get("success"))
-        except Exception:  # noqa: BLE001 - reactions are cosmetic
-            logger.debug("relay react failed", exc_info=True)
-            return False
+        result = await self._gated_op(
+            chat_id,
+            {
+                "op": "react",
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "emoji": emoji,
+                "remove": remove,
+                "metadata": self._with_scope(chat_id, None),
+            },
+            decline_level=None,
+        )
+        return result is not None
 
     async def on_processing_start(self, event) -> None:
         """Add the 👀 in-progress reaction (op-gated; silent no-op otherwise)."""
@@ -2040,24 +2050,18 @@ class RelayAdapter(BasePlatformAdapter):
         `thread_create` op covers Discord (channel thread), Telegram (forum topic) and
         Slack (named seed root message). None on any failure/unavailability so the
         handoff watcher falls back to the parent."""
-        if self._transport is None or not self.descriptor.supports_op("thread_create"):
-            return None
-        thread_name = (str(name or "").strip() or "handoff")[:100]
-        try:
-            result = await self._outbound(
-                str(parent_chat_id),
-                {
-                    "op": "thread_create",
-                    "chat_id": str(parent_chat_id),
-                    "thread_name": thread_name,
-                    "metadata": self._with_scope(str(parent_chat_id), None),
-                },
-            )
-        except Exception:  # noqa: BLE001 - handoff falls back to the parent channel
-            logger.debug("relay thread_create transport failure", exc_info=True)
-            return None
-        if not result.get("success"):
-            logger.info("relay thread_create declined for %s: %s", parent_chat_id, result.get("error"))
+        result = await self._gated_op(
+            str(parent_chat_id),
+            {
+                "op": "thread_create",
+                "chat_id": str(parent_chat_id),
+                "thread_name": (str(name or "").strip() or "handoff")[:100],
+                "metadata": self._with_scope(str(parent_chat_id), None),
+            },
+            decline_level=logging.INFO,
+            subject=parent_chat_id,
+        )
+        if result is None:
             return None
         thread_id = result.get("thread_id") or result.get("message_id")
         return str(thread_id) if thread_id else None
@@ -2078,8 +2082,6 @@ class RelayAdapter(BasePlatformAdapter):
         rename). ``only_if_current_name`` is the legacy string guard for older
         connectors. ``parent_chat_id`` defaults to the thread id (Telegram needs the
         containing chat; Discord ignores it)."""
-        if self._transport is None or not self.descriptor.supports_op("thread_rename"):
-            return False
         cleaned = " ".join(str(name or "").split()).strip()
         if not cleaned or not thread_id:
             return False
@@ -2095,18 +2097,14 @@ class RelayAdapter(BasePlatformAdapter):
             action["only_if_connector_created"] = True
         elif only_if_current_name is not None:
             action["only_if_current_name"] = str(only_if_current_name)
-        try:
-            result = await self._transport.send_outbound(
-                action,
-                platform=self._platform_by_chat.get(chat_id) or self._platform_by_chat.get(str(thread_id)),
-            )
-        except Exception:  # noqa: BLE001 - renames are cosmetic
-            logger.debug("relay thread_rename transport failure", exc_info=True)
-            return False
-        if not result.get("success"):
-            logger.info("relay thread_rename declined for %s: %s", thread_id, result.get("error"))
-            return False
-        return True
+        result = await self._gated_op(
+            chat_id,
+            action,
+            decline_level=logging.INFO,
+            subject=thread_id,
+            platform=self._platform_by_chat.get(chat_id) or self._platform_by_chat.get(str(thread_id)),
+        )
+        return result is not None
 
 
 # prompt kind -> resolver (order-independent: kinds are distinct keys).
