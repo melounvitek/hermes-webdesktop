@@ -24,14 +24,7 @@ STREAM_DIAG_HEADERS = (
 
 def stream_diag_init() -> Dict[str, Any]:
     """Fresh per-attempt diagnostic dict; mutated in place by the streaming functions and read by the retry block."""
-    return {
-        "started_at": time.time(),
-        "first_chunk_at": None,
-        "chunks": 0,
-        "bytes": 0,
-        "headers": {},
-        "http_status": None,
-    }
+    return {"started_at": time.time(), "first_chunk_at": None, "chunks": 0, "bytes": 0, "headers": {}, "http_status": None}
 
 
 def stream_diag_capture_response(agent: Any, diag: Dict[str, Any], http_response: Any) -> None:
@@ -82,6 +75,31 @@ def flatten_exception_chain(error: BaseException) -> str:
     return " <- ".join(parts) if parts else type(error).__name__
 
 
+def _diag_fields(diag: Optional[Dict[str, Any]]) -> tuple:
+    """(http_status, bytes, chunks, elapsed, ttfb, upstream) for the retry log line; ``-`` when unknown."""
+    _bytes = _chunks = 0
+    _elapsed = 0.0
+    _ttfb = _headers_repr = _http_status = "-"
+    if isinstance(diag, dict):
+        try:
+            _now = time.time()
+            _bytes = int(diag.get("bytes") or 0)
+            _chunks = int(diag.get("chunks") or 0)
+            _started = float(diag.get("started_at") or _now)
+            _elapsed = max(0.0, _now - _started)
+            _first = diag.get("first_chunk_at")
+            if _first is not None:
+                _ttfb = f"{max(0.0, float(_first) - _started):.2f}s"
+            headers = diag.get("headers") or {}
+            if isinstance(headers, dict) and headers:
+                _headers_repr = " ".join(f"{k}={v}" for k, v in headers.items())
+            if diag.get("http_status") is not None:
+                _http_status = str(diag.get("http_status"))
+        except Exception:
+            pass
+    return _http_status, _bytes, _chunks, _elapsed, _ttfb, _headers_repr
+
+
 def log_stream_retry(
     agent: Any,
     *,
@@ -110,28 +128,6 @@ def log_stream_retry(
         except Exception:
             _chain = type(error).__name__
 
-        _now = time.time()
-        _bytes = _chunks = 0
-        _elapsed = 0.0
-        _ttfb = None
-        _headers_repr = _http_status = "-"
-        if isinstance(diag, dict):
-            try:
-                _bytes = int(diag.get("bytes") or 0)
-                _chunks = int(diag.get("chunks") or 0)
-                _started = float(diag.get("started_at") or _now)
-                _elapsed = max(0.0, _now - _started)
-                _first = diag.get("first_chunk_at")
-                if _first is not None:
-                    _ttfb = max(0.0, float(_first) - _started)
-                headers = diag.get("headers") or {}
-                if isinstance(headers, dict) and headers:
-                    _headers_repr = " ".join(f"{k}={v}" for k, v in headers.items())
-                if diag.get("http_status") is not None:
-                    _http_status = str(diag.get("http_status"))
-            except Exception:
-                pass
-
         logger.warning(
             "Stream %s on attempt %s/%s — retrying. "
             "subagent_id=%s depth=%s provider=%s base_url=%s "
@@ -145,9 +141,7 @@ def log_stream_retry(
             agent.provider or "-",
             agent.base_url or "-",
             type(error).__name__, _summary, _chain,
-            _http_status, _bytes, _chunks, _elapsed,
-            f"{_ttfb:.2f}s" if _ttfb is not None else "-",
-            _headers_repr,
+            *_diag_fields(diag),
             extra={"mid_tool_call": mid_tool_call},
         )
     except Exception:
