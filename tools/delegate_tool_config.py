@@ -62,24 +62,30 @@ def _get_subagent_approval_callback():
         return _subagent_auto_approve
     return _subagent_auto_deny
 
-def _knob(key: str, env_var: str, parse, default, warn_invalid):
+def _knob(key: str, env_var: Optional[str], parse, default, invalid_msg: str):
     """delegation.<key> > <env_var> > default. A config value that fails ``parse``
-    calls ``warn_invalid(value)`` and yields the default; an env value that fails
-    is silently ignored."""
+    logs ``invalid_msg`` (``%r`` = the value) and yields the default; an env value
+    that fails is silently ignored."""
     val = _cfg().get(key)
     if val is not None:
         try:
             return parse(val)
         except (TypeError, ValueError):
-            warn_invalid(val)
+            logger.warning(invalid_msg, val)
             return default
-    env_val = os.getenv(env_var)
+    env_val = os.getenv(env_var) if env_var else None
     if env_val:
         try:
             return parse(env_val)
         except (TypeError, ValueError):
             pass
     return default
+
+def _warn_once(flag_name: str, message: str, *args: Any) -> None:
+    """Module-global one-shot warning (``flag_name`` is the ``_*_WARNED`` global)."""
+    if not globals()[flag_name]:
+        globals()[flag_name] = True
+        logger.warning(message, *args)
 
 def _get_max_concurrent_children() -> int:
     """delegation.max_concurrent_children > DELEGATION_MAX_CONCURRENT_CHILDREN env > 10.
@@ -89,19 +95,14 @@ def _get_max_concurrent_children() -> int:
     result = _knob(
         "max_concurrent_children", "DELEGATION_MAX_CONCURRENT_CHILDREN", lambda v: max(1, int(v)),
         _DEFAULT_MAX_CONCURRENT_CHILDREN,
-        lambda val: logger.warning(
-            "delegation.max_concurrent_children=%r is not a valid integer; using default %d",
-            val, _DEFAULT_MAX_CONCURRENT_CHILDREN,
-        ),
+        f"delegation.max_concurrent_children=%r is not a valid integer; using default {_DEFAULT_MAX_CONCURRENT_CHILDREN}",
     )
     if result > 10 and _cfg().get("max_concurrent_children") is not None:
-        global _HIGH_CONCURRENCY_WARNED
-        if not _HIGH_CONCURRENCY_WARNED:
-            _HIGH_CONCURRENCY_WARNED = True
-            logger.warning(
-                "delegation.max_concurrent_children=%d: each child consumes API tokens "
-                "independently. High values multiply cost linearly.", result,
-            )
+        _warn_once(
+            "_HIGH_CONCURRENCY_WARNED",
+            "delegation.max_concurrent_children=%d: each child consumes API tokens "
+            "independently. High values multiply cost linearly.", result,
+        )
     return result
 
 def _get_worktree_isolation() -> bool:
@@ -122,13 +123,12 @@ def _get_max_async_children() -> int:
     deprecation warning.
     """
     from tools.delegate_tool import _get_max_concurrent_children
-    global _LEGACY_MAX_ASYNC_WARNED
-    if _cfg().get("max_async_children") is not None and not _LEGACY_MAX_ASYNC_WARNED:
-        _LEGACY_MAX_ASYNC_WARNED = True
-        logger.warning(
+    if _cfg().get("max_async_children") is not None:
+        _warn_once(
+            "_LEGACY_MAX_ASYNC_WARNED",
             "delegation.max_async_children is deprecated and ignored; "
             "delegation.max_concurrent_children now caps background "
-            "delegations too. Remove the stale key from config.yaml."
+            "delegations too. Remove the stale key from config.yaml.",
         )
     return _get_max_concurrent_children()
 
@@ -147,9 +147,7 @@ def _get_child_timeout() -> Optional[float]:
     """
     return _knob(
         "child_timeout_seconds", "DELEGATION_CHILD_TIMEOUT_SECONDS", _parse_timeout, DEFAULT_CHILD_TIMEOUT,
-        lambda val: logger.warning(
-            "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)", val,
-        ),
+        "delegation.child_timeout_seconds=%r is not a valid number; using default (no timeout)",
     )
 
 def _get_max_spawn_depth() -> int:
@@ -158,18 +156,16 @@ def _get_max_spawn_depth() -> int:
     Depth 0 is the parent; agents at depths 0..N-1 may spawn, depth N is the
     leaf floor. Default 1 is flat. Each extra level multiplies API cost.
     """
-    val = _cfg().get("max_spawn_depth")
-    if val is None:
-        return MAX_DEPTH
-    try:
-        ival = int(val)
-    except (TypeError, ValueError):
-        logger.warning("delegation.max_spawn_depth=%r is not a valid integer; " "using default %d", val, MAX_DEPTH)
-        return MAX_DEPTH
-    floored = max(_MIN_SPAWN_DEPTH, ival)
-    if floored != ival:
-        logger.warning("delegation.max_spawn_depth=%d below floor %d; using %d", ival, _MIN_SPAWN_DEPTH, floored)
-    return floored
+    def _floored(v):
+        ival = int(v)
+        if ival < _MIN_SPAWN_DEPTH:
+            logger.warning("delegation.max_spawn_depth=%d below floor %d; using %d", ival, _MIN_SPAWN_DEPTH, _MIN_SPAWN_DEPTH)
+        return max(_MIN_SPAWN_DEPTH, ival)
+
+    return _knob(
+        "max_spawn_depth", None, _floored, MAX_DEPTH,
+        f"delegation.max_spawn_depth=%r is not a valid integer; using default {MAX_DEPTH}",
+    )
 
 def _get_orchestrator_enabled() -> bool:
     """delegation.orchestrator_enabled kill switch (default True): False forces every child to leaf."""
