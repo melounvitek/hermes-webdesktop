@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state_common import (
-    AUTO_VACUUM_MIN_FREELIST_RATIO, _sql_session_last_active, escape_like as _escape_like
+    AUTO_VACUUM_MIN_FREELIST_RATIO, _placeholders, _sql_session_last_active, escape_like as _escape_like
 )
 
 # caplog tests pin the "hermes_state" logger name.
@@ -35,10 +35,6 @@ def _cwd_prefix_filter(value: str) -> Tuple[List[str], list]:
 
 def _one(clause: str, conv=None):
     return lambda v: ([clause], [conv(v) if conv else v])
-
-
-def _placeholders(n: int) -> str:
-    return ",".join("?" * n)
 
 
 def _seconds_since(now: float, raw) -> Optional[float]:
@@ -100,7 +96,7 @@ class SessionMaintenanceMixin:
                   )
             """, (cutoff,)).fetchall()]
             if ids:
-                conn.execute(f"DELETE FROM sessions WHERE id IN ({_placeholders(len(ids))})", ids)
+                conn.execute(f"DELETE FROM sessions WHERE id IN ({_placeholders(ids)})", ids)
                 self._delete_unreferenced_system_prompts(conn)
             return ids
         removed_ids = self._execute_write(_do) or []
@@ -159,7 +155,7 @@ class SessionMaintenanceMixin:
             orphan_predicate += (" AND NOT EXISTS (SELECT 1 FROM gateway_heartbeats h WHERE"
                                  " h.last_heartbeat >= ? AND h.started_at <= sessions.started_at + ?)")
             heartbeat_params = (now - hb_staleness, hb_grace)
-        scope_sql = f" AND source IN ({_placeholders(len(srcs))}){pin_scope} AND {orphan_predicate}"
+        scope_sql = f" AND source IN ({_placeholders(srcs)}){pin_scope} AND {orphan_predicate}"
         scope_params = (*srcs, cutoff, cutoff, *heartbeat_params)
         def _do(conn):
             rows = conn.execute(f"SELECT id FROM sessions WHERE ended_at IS NULL{scope_sql}",
@@ -172,7 +168,7 @@ class SessionMaintenanceMixin:
             # Re-apply every predicate under the write lock.
             conn.execute(
                 f"UPDATE sessions SET ended_at = ?, end_reason = 'startup_orphan_reap'"
-                f" WHERE id IN ({_placeholders(len(victims))}) AND ended_at IS NULL{scope_sql}",
+                f" WHERE id IN ({_placeholders(victims)}) AND ended_at IS NULL{scope_sql}",
                 (time.time(), *victims, *scope_params))
             return victims
         return self._execute_write(_do) or []
@@ -284,7 +280,7 @@ class SessionMaintenanceMixin:
             if not session_ids:
                 return 0
             conn.execute(f"UPDATE sessions SET parent_session_id = NULL "
-                         f"WHERE parent_session_id IN ({_placeholders(len(session_ids))})", list(session_ids))
+                         f"WHERE parent_session_id IN ({_placeholders(session_ids)})", list(session_ids))
             for sid in session_ids:
                 conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))

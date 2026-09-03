@@ -11,20 +11,17 @@ import sqlite3
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_state_common import _sql_session_last_active, is_automatic_end_reason
+from hermes_state_common import (
+    _COMPRESSION_LOCK_ROW_SQL as _LOCK_ROW_SQL, _ENDED_ROW_SQL, _ended_by_compression, _sql_session_last_active,
+    is_automatic_end_reason,
+)
 
 # Log-record parity with the origin module (caplog tests pin "hermes_state").
 logger = logging.getLogger("hermes_state")
 
-_ENDED_ROW_SQL = "SELECT ended_at, end_reason FROM sessions WHERE id = ?"
-_LOCK_ROW_SQL = "SELECT holder, expires_at FROM compression_locks WHERE session_id = ?"
 _COOLDOWN_ROW_SQL = (
     "SELECT compression_failure_cooldown_until, compression_failure_error FROM sessions WHERE id = ?"
 )
-
-
-def _ended_by_compression(row) -> bool:
-    return row is not None and row["ended_at"] is not None and row["end_reason"] == "compression"
 
 
 def _cooldown_row(exists: bool, cooldown_until, error) -> Dict[str, Any]:

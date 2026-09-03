@@ -15,7 +15,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from agent.context_compressor import _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY
 from agent.memory_manager import sanitize_context
 from agent.message_sanitization import _sanitize_surrogates
-from hermes_state_common import _RESET_END_REASONS, _RESET_END_REASONS_SQL, _legacy_reset_child_sql
+from hermes_state_common import (
+    _COMPRESSION_LOCK_ROW_SQL, _ENDED_ROW_SQL, _RESET_END_REASONS, _RESET_END_REASONS_SQL, _ended_by_compression,
+    _legacy_reset_child_sql, _placeholders,
+)
 
 # Log-record parity with the origin module (caplog tests pin "hermes_state").
 logger = logging.getLogger("hermes_state")
@@ -33,8 +36,6 @@ _BUMP_GENERATION_SQL = """
                 SET generation = conversation_generations.generation + 1
             """
 
-_ENDED_BY_COMPRESSION_SQL = "SELECT ended_at, end_reason FROM sessions WHERE id = ?"
-_COMPRESSION_LOCK_ROW_SQL = "SELECT holder, expires_at FROM compression_locks WHERE session_id = ?"
 _TURN_LEASE_ROW_SQL = "SELECT holder, expires_at FROM session_turn_leases WHERE conversation_id = ?"
 _DELETE_COMPRESSION_LOCK_SQL = "DELETE FROM compression_locks WHERE session_id = ? AND holder = ?"
 _DISPLAY_ACTIVE_CLAUSE = " AND (active = 1 OR compacted = 1)"
@@ -44,10 +45,6 @@ _SET_COUNTERS_SQL = "UPDATE sessions SET message_count = ?, tool_call_count = ?"
 _RESET_COUNTERS_SQL = "UPDATE sessions SET message_count = 0, tool_call_count = 0 WHERE id = ?"
 _SET_DISPLAY_META_SQL = "UPDATE messages SET display_metadata = ? WHERE id = ?"
 _ARCHIVE_ACTIVE_SQL = "UPDATE messages SET active = 0, compacted = 1 WHERE session_id = ? AND active = 1"
-
-
-def _placeholders(items) -> str:
-    return ",".join("?" for _ in items)
 
 
 def _json_or(raw: Any, fallback: Any, warning: str) -> Any:
@@ -95,10 +92,6 @@ def _parse_tool_calls(tool_calls: Any) -> Any:
 
 def _tool_calls_count(tool_calls: Any) -> int:
     return 0 if tool_calls is None else (len(tool_calls) if isinstance(tool_calls, list) else 1)
-
-
-def _ended_by_compression(row) -> bool:
-    return row is not None and row["ended_at"] is not None and row["end_reason"] == "compression"
 
 
 def _stale_holder(row, now: float) -> bool:
@@ -240,7 +233,7 @@ class SessionMessagesMixin:
                 conn.execute(
                     "DELETE FROM session_turn_leases WHERE conversation_id = ? AND holder = ?",
                     (conversation_id, lease["holder"]))
-        session = conn.execute(_ENDED_BY_COMPRESSION_SQL, (session_id,)).fetchone()
+        session = conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()
         if _ended_by_compression(session) and not allow_closed_compression_parent:
             raise CompressionSessionClosedError(session_id)
 
@@ -507,7 +500,7 @@ class SessionMessagesMixin:
             if reject_active_turn_lease:
                 self._check_transcript_write_guards(
                     conn, session_id, None, reject_active_turn_lease=True, reject_active_compression_lock=True)
-            elif _ended_by_compression(conn.execute(_ENDED_BY_COMPRESSION_SQL, (session_id,)).fetchone()):
+            elif _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()):
                 raise CompressionSessionClosedError(session_id)
             if archive_dropped:
                 # Content-preserving UPDATE: FTS triggers don't fire on `active`, so the

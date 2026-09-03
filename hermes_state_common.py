@@ -292,6 +292,20 @@ def stat_db_file_identity(path) -> "tuple[int, int] | None":
     return (st.st_dev, st.st_ino) if st.st_dev and st.st_ino else None
 
 
+# Row probes shared by the messages / compression mixins.
+_ENDED_ROW_SQL = "SELECT ended_at, end_reason FROM sessions WHERE id = ?"
+_COMPRESSION_LOCK_ROW_SQL = "SELECT holder, expires_at FROM compression_locks WHERE session_id = ?"
+
+
+def _ended_by_compression(row) -> bool:
+    return row is not None and row["ended_at"] is not None and row["end_reason"] == "compression"
+
+
+def _placeholders(items) -> str:
+    """``?,?,?`` for one bound parameter per element of *items* (a sequence or an int count)."""
+    return ",".join("?" for _ in range(items if isinstance(items, int) else len(items)))
+
+
 _FTS_TRIGGERS = (
     "messages_fts_insert", "messages_fts_delete", "messages_fts_update",
     "messages_fts_trigram_insert", "messages_fts_trigram_delete", "messages_fts_trigram_update",
