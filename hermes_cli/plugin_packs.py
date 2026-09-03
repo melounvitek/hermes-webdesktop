@@ -1,32 +1,28 @@
-"""Plugin packs — declarative, shareable plugin sets (#64166).
+"""Plugin packs — declarative, shareable plugin sets.
 
-* Every plugin entry MUST pin an exact 40-character commit SHA in ``ref``. Tags and branch names are
+Every plugin entry MUST pin an exact 40-character commit SHA in ``ref``; tags and branch names are
 rejected with an error naming the entry.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, List, Optional
 
-logger = __import__("logging").getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 _EXACT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
-
-# Key names that look like secrets are refused in pack config seeds and
-# stripped from exports. Packs declare needed secrets via each plugin's own
-# ``requires_env`` manifest field, which prompts at install time.
+# Secret-shaped keys are refused in config seeds and stripped from exports; packs declare secrets
+# via each plugin's ``requires_env``, which prompts at install time.
 _SECRET_KEY_RE = re.compile(
     r"(?i)(token|secret|passw(or)?d|api[_-]?key|private[_-]?key|credential|auth)"
 )
-
-# plugins.entries.<id> keys a pack may never set: consent/capability state
-# and the deprecated allow_* trust gates. A pack cannot pre-grant anything.
+# plugins.entries.<id> keys a pack may never set (consent state; allow_* gates are also refused).
 _RESERVED_ENTRY_KEYS = frozenset({"granted_capabilities", "capabilities_consent"})
-
 _MAX_PACK_BYTES = 1 * 1024 * 1024  # a pack is a small manifest, not a payload
 _FETCH_TIMEOUT = 15.0
 
@@ -51,8 +47,7 @@ class PackPluginEntry:
 
     @property
     def install_identifier(self) -> Optional[str]:
-        """Identifier for the existing install path (None for bare names,
-        which must first resolve through the community index)."""
+        """Identifier for the install path; None for bare names (resolved via the community index)."""
         if self.repo:
             return f"{self.repo}/{self.subdir}" if self.subdir else self.repo
         return None
@@ -85,12 +80,9 @@ class PluginPack:
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"name": self.name}
-        if self.description:
-            d["description"] = self.description
-        if self.author:
-            d["author"] = self.author
-        if self.version:
-            d["version"] = self.version
+        for key in ("description", "author", "version"):
+            if getattr(self, key):
+                d[key] = getattr(self, key)
         d["plugins"] = [p.to_dict() for p in self.plugins]
         if self.config:
             d["config"] = self.config
@@ -112,11 +104,8 @@ def _entry_label(item: Any, index: int) -> str:
 
 
 def validate_config_seed(plugin_id: str, seed: Any) -> dict[str, Any]:
-    """Validate one plugin's config seed mapping and return it.
-
-    Rejects non-dict seeds, reserved consent/capability keys, deprecated ``allow_*`` trust gates,
-    and secret-shaped key names -- a pack must not be able to grant itself trust or ship secrets.
-    """
+    """Validate one plugin's config seed mapping and return a copy. Rejects non-dict seeds,
+    reserved consent keys, ``allow_*`` trust gates, and secret-shaped keys."""
     if not isinstance(seed, dict):
         raise PackError(
             f"Pack config for plugin '{plugin_id}' must be a mapping of "
@@ -124,9 +113,7 @@ def validate_config_seed(plugin_id: str, seed: Any) -> dict[str, Any]:
         )
     for key in seed:
         if not isinstance(key, str) or not key.strip():
-            raise PackError(
-                f"Pack config for plugin '{plugin_id}' has an invalid key: {key!r}."
-            )
+            raise PackError(f"Pack config for plugin '{plugin_id}' has an invalid key: {key!r}.")
         if key in _RESERVED_ENTRY_KEYS or key.startswith("allow_"):
             raise PackError(
                 f"Pack config for plugin '{plugin_id}' sets reserved key "
@@ -153,66 +140,24 @@ def parse_pack(text: str, *, source: str = "<pack>") -> PluginPack:
     if not isinstance(raw, dict):
         raise PackError(f"Pack {source} must be a YAML mapping.")
 
-    # Accept the issue-sketch nested form (pack: {name: ...}) as sugar.
+    # Accept the nested form (pack: {name: ...}) as sugar.
     meta = raw.get("pack") if isinstance(raw.get("pack"), dict) else raw
-
     name = meta.get("name")
     if not isinstance(name, str) or not name.strip():
         raise PackError(f"Pack {source} is missing a 'name'.")
-
     plugins_raw = raw.get("plugins")
     if not isinstance(plugins_raw, list) or not plugins_raw:
         raise PackError(f"Pack {source} must declare a non-empty 'plugins' list.")
-
-    entries: List[PackPluginEntry] = []
-    for i, item in enumerate(plugins_raw):
-        label = _entry_label(item, i)
-        if not isinstance(item, dict):
-            raise PackError(f"Pack plugin entry {label} must be a mapping.")
-        entry_name = item.get("name")
-        entry_repo = item.get("repo") or item.get("source")
-        if isinstance(entry_repo, str):
-            entry_repo = entry_repo.removeprefix("github:").strip() or None
-        if entry_name is not None and (
-            not isinstance(entry_name, str) or not entry_name.strip()
-        ):
-            raise PackError(f"Pack plugin entry {label} has an invalid 'name'.")
-        entry_name = entry_name.strip() if isinstance(entry_name, str) else None
-        if not entry_name and not entry_repo:
-            raise PackError(
-                f"Pack plugin entry {label} needs either 'name' (community "
-                "index) or 'repo' (owner/repo or git URL)."
-            )
-        ref = item.get("ref") or item.get("version")
-        if not isinstance(ref, str) or not _EXACT_SHA_RE.fullmatch(ref.strip()):
-            raise PackError(
-                f"Pack plugin entry {label} has ref {ref!r}: refs must be "
-                "exact 40-character commit SHAs (tags and branch names are "
-                "rejected — pin the commit for reproducible installs)."
-            )
-        subdir = item.get("subdir")
-        if subdir is not None and (not isinstance(subdir, str) or not subdir.strip("/")):
-            raise PackError(f"Pack plugin entry {label} has an invalid 'subdir'.")
-        entries.append(
-            PackPluginEntry(
-                ref=ref.strip().lower(),
-                name=entry_name,
-                repo=entry_repo,
-                subdir=subdir.strip("/") if isinstance(subdir, str) else None,
-            )
-        )
+    entries = [_parse_pack_entry(item, _entry_label(item, i)) for i, item in enumerate(plugins_raw)]
 
     config_raw = raw.get("config") or {}
     if not isinstance(config_raw, dict):
         raise PackError(f"Pack {source} 'config' must be a mapping of plugin id → settings.")
-    config: dict[str, dict[str, Any]] = {}
-    for plugin_id, seed in config_raw.items():
-        config[str(plugin_id)] = validate_config_seed(str(plugin_id), seed)
+    config = {str(pid): validate_config_seed(str(pid), seed) for pid, seed in config_raw.items()}
 
     skills_raw = raw.get("skills") or []
     if not isinstance(skills_raw, list):
         raise PackError(f"Pack {source} 'skills' must be a list of skill ids.")
-    skills = [str(s).strip() for s in skills_raw if str(s).strip()]
 
     return PluginPack(
         name=name.strip(),
@@ -221,7 +166,41 @@ def parse_pack(text: str, *, source: str = "<pack>") -> PluginPack:
         version=str(meta.get("version") or ""),
         plugins=entries,
         config=config,
-        skills=skills,
+        skills=[str(s).strip() for s in skills_raw if str(s).strip()],
+    )
+
+
+def _parse_pack_entry(item: Any, label: str) -> PackPluginEntry:
+    """Validate one ``plugins:`` item (``name`` and/or ``repo``, exact-SHA ``ref``, ``subdir``)."""
+    if not isinstance(item, dict):
+        raise PackError(f"Pack plugin entry {label} must be a mapping.")
+    entry_name = item.get("name")
+    entry_repo = item.get("repo") or item.get("source")
+    if isinstance(entry_repo, str):
+        entry_repo = entry_repo.removeprefix("github:").strip() or None
+    if entry_name is not None and (not isinstance(entry_name, str) or not entry_name.strip()):
+        raise PackError(f"Pack plugin entry {label} has an invalid 'name'.")
+    entry_name = entry_name.strip() if isinstance(entry_name, str) else None
+    if not entry_name and not entry_repo:
+        raise PackError(
+            f"Pack plugin entry {label} needs either 'name' (community "
+            "index) or 'repo' (owner/repo or git URL)."
+        )
+    ref = item.get("ref") or item.get("version")
+    if not isinstance(ref, str) or not _EXACT_SHA_RE.fullmatch(ref.strip()):
+        raise PackError(
+            f"Pack plugin entry {label} has ref {ref!r}: refs must be "
+            "exact 40-character commit SHAs (tags and branch names are "
+            "rejected — pin the commit for reproducible installs)."
+        )
+    subdir = item.get("subdir")
+    if subdir is not None and (not isinstance(subdir, str) or not subdir.strip("/")):
+        raise PackError(f"Pack plugin entry {label} has an invalid 'subdir'.")
+    return PackPluginEntry(
+        ref=ref.strip().lower(),
+        name=entry_name,
+        repo=entry_repo,
+        subdir=subdir.strip("/") if isinstance(subdir, str) else None,
     )
 
 
@@ -240,9 +219,7 @@ def load_pack(path_or_url: str) -> PluginPack:
             raise PackError("Pack payload exceeds the 1 MiB size limit.")
         return parse_pack(text, source=path_or_url)
     if path_or_url.startswith(("http://", "file://", "ftp://")):
-        raise PackError(
-            "Pack URLs must use https:// (or pass a local file path)."
-        )
+        raise PackError("Pack URLs must use https:// (or pass a local file path).")
     path = Path(path_or_url).expanduser()
     if not path.is_file():
         raise PackError(f"Pack file not found: {path}")
@@ -266,52 +243,34 @@ class ResolvedPackPlugin:
 
 
 def resolve_pack_plugins(pack: PluginPack) -> List[ResolvedPackPlugin]:
-    """Resolve every entry; bare names go through the community index.
-
-    Resolution failures do not raise — they are carried per-entry so the review screen can show them
-    and install can report partial failure.
-    """
+    """Resolve every entry; bare names go through the community index. Failures do not raise —
+    they are carried per-entry so the review screen shows them and install reports partial failure."""
     resolved: List[ResolvedPackPlugin] = []
     index_entries = None
     for entry in pack.plugins:
-        ident = entry.install_identifier
-        if ident is not None:
-            resolved.append(ResolvedPackPlugin(entry=entry, identifier=ident))
+        if entry.install_identifier is not None:
+            resolved.append(ResolvedPackPlugin(entry=entry, identifier=entry.install_identifier))
             continue
-        # Bare community-index name.
         try:
+            from hermes_cli.plugin_index import load_index, resolve_name
             if index_entries is None:
-                from hermes_cli.plugin_index import load_index
-
                 index_entries, _src = load_index()
-            from hermes_cli.plugin_index import resolve_name
-
             match, candidates = resolve_name(index_entries, entry.name or "")
         except Exception as exc:  # index load must not crash pack handling
-            resolved.append(
-                ResolvedPackPlugin(
-                    entry=entry, identifier=None,
-                    resolve_error=f"community index unavailable: {exc}",
-                )
-            )
+            resolved.append(ResolvedPackPlugin(
+                entry=entry, identifier=None, resolve_error=f"community index unavailable: {exc}",
+            ))
             continue
         if match is None:
-            detail = (
-                "ambiguous in the community index"
-                if len(candidates) > 1
-                else "not found in the community index"
-            )
-            resolved.append(
-                ResolvedPackPlugin(entry=entry, identifier=None, resolve_error=detail)
-            )
+            detail = "ambiguous" if len(candidates) > 1 else "not found"
+            resolved.append(ResolvedPackPlugin(
+                entry=entry, identifier=None, resolve_error=f"{detail} in the community index",
+            ))
             continue
-        resolved.append(
-            ResolvedPackPlugin(
-                entry=entry,
-                identifier=match.install_identifier,
-                index_capabilities=list(match.capabilities),
-            )
-        )
+        resolved.append(ResolvedPackPlugin(
+            entry=entry, identifier=match.install_identifier,
+            index_capabilities=list(match.capabilities),
+        ))
     return resolved
 
 
@@ -319,9 +278,7 @@ def render_pack_review(console, pack: PluginPack, resolved: List[ResolvedPackPlu
     """Print the full pack review screen (mandatory before install)."""
     from rich.table import Table
 
-    header = f"[bold]{pack.name}[/bold]"
-    if pack.version:
-        header += f" v{pack.version}"
+    header = f"[bold]{pack.name}[/bold]" + (f" v{pack.version}" if pack.version else "")
     if pack.author:
         header += f" — by {pack.author}"
     console.print(f"\n{header}")
@@ -346,12 +303,9 @@ def render_pack_review(console, pack: PluginPack, resolved: List[ResolvedPackPlu
                 console.print(f"  {plugin_id}.{key} = {value!r}")
     if pack.skills:
         console.print(
-            "[yellow]Pack lists skills (NOT auto-installed yet):[/yellow] "
-            + ", ".join(pack.skills)
+            "[yellow]Pack lists skills (NOT auto-installed yet):[/yellow] " + ", ".join(pack.skills)
         )
-        console.print(
-            "[dim]Install them manually, e.g. `hermes skills install <id>`.[/dim]"
-        )
+        console.print("[dim]Install them manually, e.g. `hermes skills install <id>`.[/dim]")
     console.print(
         "\n[dim]Installing a pack runs third-party code × "
         f"{len(resolved)} plugins. Each plugin's declared capabilities still "
@@ -374,17 +328,12 @@ class PackInstallResult:
 
 
 def _seed_plugin_config(plugin_id: str, seed: dict[str, Any], console) -> None:
-    """Seed plugins.entries.<plugin_id> keys that are not already set.
-
-    Existing user values always win; the pack only fills blanks.
-    """
+    """Seed plugins.entries.<plugin_id> keys that are not already set (user values always win)."""
     from hermes_cli.config import load_config, save_config
 
     seed = validate_config_seed(plugin_id, seed)
     config = load_config()
-    plugins_cfg = config.setdefault("plugins", {})
-    entries = plugins_cfg.setdefault("entries", {})
-    entry = entries.setdefault(plugin_id, {})
+    entry = config.setdefault("plugins", {}).setdefault("entries", {}).setdefault(plugin_id, {})
     if not isinstance(entry, dict):
         console.print(
             f"[yellow]Warning:[/yellow] plugins.entries.{plugin_id} is not a "
@@ -415,9 +364,9 @@ def install_pack_plugins(
 ) -> List[PackInstallResult]:
     """Fan a pack out to N ordinary pinned installs; never raises per-plugin.
 
-    Each plugin uses the existing exact-ref install path and then the SAME per-plugin capability
-    consent flow as a single install. Successful installs are enabled (the user consented via the
-    review screen) and their pack config seed is applied.
+    Each plugin goes through the exact-ref install path, then the SAME per-plugin capability
+    consent flow as a single install (a pack never bulk-grants). Successful installs are enabled
+    (the user consented via the review screen) and their config seed applied.
     """
     from hermes_cli.plugins_cmd import (
         PluginOperationError,
@@ -432,13 +381,15 @@ def install_pack_plugins(
     )
 
     results: List[PackInstallResult] = []
+
+    def _fail(display: str, error: str) -> None:
+        results.append(PackInstallResult(display=display, ok=False, error=error))
+        console.print(f"[red]✗[/red] {display}: {error}")
+
     for rp in resolved:
         display = rp.entry.display
         if rp.identifier is None:
-            results.append(
-                PackInstallResult(display=display, ok=False, error=rp.resolve_error)
-            )
-            console.print(f"[red]✗[/red] {display}: {rp.resolve_error}")
+            _fail(display, rp.resolve_error)
             continue
         console.print(f"[dim]Installing {display} @ {rp.entry.ref[:12]}...[/dim]")
         try:
@@ -446,13 +397,11 @@ def install_pack_plugins(
                 rp.identifier, force=force, ref=rp.entry.ref
             )
         except PluginOperationError as exc:
-            results.append(PackInstallResult(display=display, ok=False, error=str(exc)))
-            console.print(f"[red]✗[/red] {display}: {exc}")
+            _fail(display, str(exc))
             continue
         except Exception as exc:  # keep the fan-out alive on unexpected errors
             logger.exception("pack install failed for %s", display)
-            results.append(PackInstallResult(display=display, ok=False, error=str(exc)))
-            console.print(f"[red]✗[/red] {display}: {exc}")
+            _fail(display, str(exc))
             continue
 
         # Secrets are prompted (requires_env), never carried by the pack.
@@ -461,7 +410,6 @@ def install_pack_plugins(
         except Exception:
             logger.debug("requires_env prompt failed for %s", installed_name, exc_info=True)
 
-        # Enable: the user confirmed the mandatory review screen.
         enabled = _get_enabled_set()
         disabled = _get_disabled_set()
         enabled.add(installed_name)
@@ -469,8 +417,6 @@ def install_pack_plugins(
         _save_enabled_set(enabled)
         _save_disabled_set(disabled)
 
-        # Per-plugin capability consent — the SAME flow as a single
-        # install (#64228). A pack never bulk-grants capabilities.
         declared = _declared_capabilities_from_manifest(manifest, installed_name)
         if declared:
             _run_capability_consent(console, installed_name, declared, context="install")
@@ -485,9 +431,7 @@ def install_pack_plugins(
                 console.print(f"[yellow]Warning:[/yellow] {exc}")
 
         console.print(f"[green]✓[/green] {display} installed as [bold]{installed_name}[/bold].")
-        results.append(
-            PackInstallResult(display=display, ok=True, installed_name=installed_name)
-        )
+        results.append(PackInstallResult(display=display, ok=True, installed_name=installed_name))
     return results
 
 
@@ -520,45 +464,30 @@ def _sanitized_entry_config(plugin_id: str) -> dict[str, Any]:
         config = load_config() or {}
     except Exception:
         return {}
-    entries = (config.get("plugins") or {}).get("entries") or {}
-    entry = entries.get(plugin_id)
+    entry = ((config.get("plugins") or {}).get("entries") or {}).get(plugin_id)
     if not isinstance(entry, dict):
         return {}
-    out: dict[str, Any] = {}
-    for key, value in entry.items():
-        if not isinstance(key, str):
-            continue
-        if key in _RESERVED_ENTRY_KEYS or key.startswith("allow_"):
-            continue
-        if _SECRET_KEY_RE.search(key):
-            continue
-        if isinstance(value, (str, int, float, bool)) or value is None or isinstance(value, (list, dict)):
-            out[key] = value
-    return out
+    return {
+        key: value for key, value in entry.items()
+        if isinstance(key, str)
+        and key not in _RESERVED_ENTRY_KEYS
+        and not key.startswith("allow_")
+        and not _SECRET_KEY_RE.search(key)
+        and (value is None or isinstance(value, (str, int, float, bool, list, dict)))
+    }
 
 
 def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack") -> tuple[str, List[str]]:
-    """Build pack YAML from the current install.
-
-    Returns ``(yaml_text, warnings)``. Plugins whose Git provenance is unknown (local-only, no
-    install metadata) are listed in the warnings and included as comments in the YAML, never as
-    installable entries.
-    """
+    """Build pack YAML from the current install; returns ``(yaml_text, warnings)``. Plugins with
+    unknown Git provenance (no install metadata) become warnings + YAML comments, never entries."""
     import yaml
 
-    from hermes_cli.plugins_cmd import (
-        _get_enabled_set,
-        _plugins_dir,
-        _read_install_metadata,
-    )
+    from hermes_cli.plugins_cmd import _get_enabled_set, _plugins_dir, _read_install_metadata
 
     metadata = _read_install_metadata()
     enabled = _get_enabled_set()
-    plugins_dir = _plugins_dir()
-
     installed = sorted(
-        d.name for d in plugins_dir.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
+        d.name for d in _plugins_dir().iterdir() if d.is_dir() and not d.name.startswith(".")
     )
     if enabled_only:
         installed = [n for n in installed if n in enabled]
@@ -596,10 +525,7 @@ def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack"
 
     text = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
     if warnings:
-        comment_lines = "\n".join(
-            f"# WARNING (not exported): {w}" for w in warnings
-        )
-        text = f"{comment_lines}\n{text}"
+        text = "\n".join(f"# WARNING (not exported): {w}" for w in warnings) + f"\n{text}"
     return text, warnings
 
 
@@ -607,11 +533,8 @@ def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack"
 # CLI commands
 # ---------------------------------------------------------------------------
 
-def cmd_pack_show(source: str) -> None:
-    """``hermes plugins pack show <path-or-url>`` — dry-run review."""
-    from rich.console import Console
-
-    console = Console()
+def _load_and_review(console, source: str):
+    """Load *source* (exit 1 on PackError), resolve it, print the review screen."""
     try:
         pack = load_pack(source)
     except PackError as exc:
@@ -619,6 +542,15 @@ def cmd_pack_show(source: str) -> None:
         sys.exit(1)
     resolved = resolve_pack_plugins(pack)
     render_pack_review(console, pack, resolved)
+    return pack, resolved
+
+
+def cmd_pack_show(source: str) -> None:
+    """``hermes plugins pack show <path-or-url>`` — dry-run review."""
+    from rich.console import Console
+
+    console = Console()
+    pack, resolved = _load_and_review(console, source)
     unresolved = [rp for rp in resolved if rp.identifier is None]
     if unresolved:
         console.print(
@@ -629,26 +561,14 @@ def cmd_pack_show(source: str) -> None:
 
 
 def cmd_pack_install(source: str, *, force: bool = False) -> None:
-    """``hermes plugins pack install <path-or-url>``.
-
-    Mandatory review screen -> one summary consent for the pack -> pinned fan-out installs ->
-    per-plugin capability consent via the standard flow. Partial failures are reported per plugin
-    and the exit code is non-zero when any plugin failed.
-    """
+    """``hermes plugins pack install <path-or-url>``: mandatory review screen -> one pack-level
+    consent -> pinned fan-out installs -> per-plugin capability consent. Exit 1 if any failed."""
     from rich.console import Console
 
     console = Console()
-    try:
-        pack = load_pack(source)
-    except PackError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
-        sys.exit(1)
+    pack, resolved = _load_and_review(console, source)
 
-    resolved = resolve_pack_plugins(pack)
-    render_pack_review(console, pack, resolved)
-
-    # Mandatory review confirmation — no --yes in v1 (a pack is arbitrary
-    # third-party code × N). Non-interactive sessions cannot consent.
+    # Mandatory review confirmation — no --yes in v1 (arbitrary third-party code × N).
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         console.print(
             "[red]Error:[/red] Pack install requires an interactive terminal "
@@ -667,12 +587,9 @@ def cmd_pack_install(source: str, *, force: bool = False) -> None:
         sys.exit(1)
 
     results = install_pack_plugins(pack, resolved, console, force=force)
-
     ok = [r for r in results if r.ok]
     failed = [r for r in results if not r.ok]
-    console.print(
-        f"\n[bold]Pack '{pack.name}':[/bold] {len(ok)} installed, {len(failed)} failed."
-    )
+    console.print(f"\n[bold]Pack '{pack.name}':[/bold] {len(ok)} installed, {len(failed)} failed.")
     for r in failed:
         console.print(f"  [red]✗[/red] {r.display}: {r.error}")
     if ok:
@@ -699,20 +616,19 @@ def cmd_pack_export(*, enabled_only: bool = False, name: str = "my-hermes-pack")
 
 def pack_command(args) -> None:
     """Dispatch ``hermes plugins pack <action>``."""
-    action = getattr(args, "pack_action", None)
-    if action == "install":
-        cmd_pack_install(args.source, force=getattr(args, "force", False))
-    elif action == "export":
-        cmd_pack_export(
-            enabled_only=getattr(args, "enabled_only", False),
-            name=getattr(args, "name", None) or "my-hermes-pack",
-        )
-    elif action == "show":
-        cmd_pack_show(args.source)
-    else:
+    handler = _PACK_ACTIONS.get(getattr(args, "pack_action", None))
+    if handler is None:
         from rich.console import Console
-
-        Console().print(
-            "[red]Error:[/red] Usage: hermes plugins pack {install|export|show}"
-        )
+        Console().print("[red]Error:[/red] Usage: hermes plugins pack {install|export|show}")
         sys.exit(1)
+    handler(args)
+
+
+_PACK_ACTIONS = {
+    "install": lambda args: cmd_pack_install(args.source, force=getattr(args, "force", False)),
+    "export": lambda args: cmd_pack_export(
+        enabled_only=getattr(args, "enabled_only", False),
+        name=getattr(args, "name", None) or "my-hermes-pack",
+    ),
+    "show": lambda args: cmd_pack_show(args.source),
+}
