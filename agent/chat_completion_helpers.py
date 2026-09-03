@@ -2607,16 +2607,8 @@ def _build_partial_stream_stub(
 # APIStatusError). They mean the upstream stream died: retry with a fresh
 # connection like an httpx drop.
 _SSE_CONN_PHRASES = (
-    "connection lost",
-    "connection reset",
-    "connection closed",
-    "connection terminated",
-    "network error",
-    "network connection",
-    "terminated",
-    "peer closed",
-    "broken pipe",
-    "upstream connect error",
+    "connection lost", "connection reset", "connection closed", "connection terminated", "network error",
+    "network connection", "terminated", "peer closed", "broken pipe", "upstream connect error",
 )
 
 
@@ -2639,16 +2631,16 @@ def _relay_stream_identity(agent, name_default: str) -> dict:
 
 
 def _relay_stream_metadata(agent, api_mode: str) -> dict:
+    if getattr(agent, "is_subagent", False):
+        call_role = "delegated"
+    elif int(getattr(agent, "_fallback_index", 0) or 0) > 0:
+        call_role = "fallback"
+    else:
+        call_role = "primary"
     return {
         "api_mode": api_mode,
         "api_request_id": getattr(agent, "_current_api_request_id", None),
-        "call_role": (
-            "delegated"
-            if getattr(agent, "is_subagent", False)
-            else "fallback"
-            if int(getattr(agent, "_fallback_index", 0) or 0) > 0
-            else "primary"
-        ),
+        "call_role": call_role,
     }
 
 
@@ -2666,10 +2658,7 @@ def _stream_final_text(response) -> str:
         if isinstance(content, str):
             return content
         if isinstance(content, list):
-            return "".join(
-                text for text in (getattr(part, "text", None) for part in content)
-                if isinstance(text, str)
-            )
+            return "".join(t for t in (getattr(part, "text", None) for part in content) if isinstance(t, str))
     except Exception:
         pass
     return ""
@@ -2816,36 +2805,25 @@ class _BedrockStream:
 
             try:
                 from agent.plugin_stream_hooks import has_reasoning_stream_observer_hooks
-
                 plugin_reasoning_observer = has_reasoning_stream_observer_hooks()
             except Exception:
                 logger.debug("plugin reasoning stream observer check failed", exc_info=True)
                 plugin_reasoning_observer = False
 
             stream = relay_llm.stream(
-                dict(self.api_kwargs),
-                self._open_stream,
-                **_relay_stream_identity(agent, "bedrock"),
-                finalizer=lambda: stream_converse_with_callbacks(
-                    {"stream": list(intercepted_events)}
-                ),
-                on_stream_created=_stream_created,
-                on_chunk=intercepted_events.append,
-                chunk_adapter=lambda chunk: chunk,
-                accept_chunk=_accept_event,
-                completed_response_predicate=lambda response: bool(
-                    getattr(response, "choices", None)
-                ),
-                metadata=_relay_stream_metadata(agent, "custom"),
-                defer_logical_completion=True,
+                dict(self.api_kwargs), self._open_stream, **_relay_stream_identity(agent, "bedrock"),
+                finalizer=lambda: stream_converse_with_callbacks({"stream": list(intercepted_events)}),
+                on_stream_created=_stream_created, on_chunk=intercepted_events.append,
+                chunk_adapter=lambda chunk: chunk, accept_chunk=_accept_event,
+                completed_response_predicate=lambda response: bool(getattr(response, "choices", None)),
+                metadata=_relay_stream_metadata(agent, "custom"), defer_logical_completion=True,
             )
+            wants_reasoning = agent.reasoning_callback or agent.stream_delta_callback or plugin_reasoning_observer
             streamed_response = stream_converse_with_callbacks(
                 {"stream": stream},
                 on_text_delta=self._on_text if agent._has_stream_consumers() else None,
                 on_tool_start=self._on_tool,
-                on_reasoning_delta=self._on_reasoning
-                if agent.reasoning_callback or agent.stream_delta_callback or plugin_reasoning_observer
-                else None,
+                on_reasoning_delta=self._on_reasoning if wants_reasoning else None,
                 on_interrupt_check=lambda: agent._interrupt_requested,
                 on_event=_stamp_event,
             )
@@ -2860,10 +2838,7 @@ class _BedrockStream:
         if not self.agent._interrupt_requested:
             return
         _record_interrupted_provider_wait(
-            self.agent,
-            time.time() - self.started_at,
-            response_started=self.response_started,
-        )
+            self.agent, time.time() - self.started_at, response_started=self.response_started)
         if worker is not None:
             # Let the worker unwind Relay scopes before raising (#81521).
             _join_worker_for_relay_teardown(worker, label="Bedrock streaming")
@@ -2878,10 +2853,7 @@ class _BedrockStream:
             "received. region=%s model=%s. Aborting call.",
             stale_elapsed, self.stale_timeout, self.region, self._model(),
         )
-        agent._buffer_status(
-            f"⚠️ No events from Bedrock for {int(stale_elapsed)}s "
-            f"(model: {self._model()}). Aborting..."
-        )
+        agent._buffer_status(f"⚠️ No events from Bedrock for {int(stale_elapsed)}s (model: {self._model()}). Aborting...")
         _bump_stale_streak(agent)
         # Evict the region's cached client so the NEXT call gets a fresh pool.
         # This does NOT abort the in-flight botocore EventStream (no external
@@ -2962,24 +2934,16 @@ class _ToolCallAccumulator:
         if isinstance(tc_id, int):  # Poolside sends integer ids
             tc_id = str(tc_id)
 
-        if raw_idx not in self._active_slot_by_idx:
-            self._active_slot_by_idx[raw_idx] = raw_idx
-        if (
-            delta_id
-            and raw_idx in self._last_id_at_idx
-            and delta_id != self._last_id_at_idx[raw_idx]
-        ):
+        self._active_slot_by_idx.setdefault(raw_idx, raw_idx)
+        if delta_id and raw_idx in self._last_id_at_idx and delta_id != self._last_id_at_idx[raw_idx]:
             self._active_slot_by_idx[raw_idx] = max(self.acc, default=-1) + 1
         if delta_id:
             self._last_id_at_idx[raw_idx] = delta_id
         idx = self._active_slot_by_idx[raw_idx]
 
-        entry = self.acc.setdefault(idx, {
-            "id": tc_id or "",
-            "type": "function",
-            "function": {"name": "", "arguments": ""},
-            "extra_content": None,
-        })
+        entry = self.acc.setdefault(
+            idx, {"id": tc_id or "", "type": "function", "function": {"name": "", "arguments": ""}, "extra_content": None},
+        )
         if tc_id:
             entry["id"] = tc_id
         tc_function = getattr(tc_delta, "function", None)
@@ -3074,10 +3038,8 @@ class _StreamingCall:
 
     def _stream_attempt_is_active(self, stream_attempt_id: int) -> bool:
         with self.stream_attempt_lock:
-            return (
-                stream_attempt_id == int(self.stream_attempt_state.get("current") or 0)
-                and stream_attempt_id not in self.stream_attempt_state["cancelled"]
-            )
+            state = self.stream_attempt_state
+            return stream_attempt_id == int(state.get("current") or 0) and stream_attempt_id not in state["cancelled"]
 
     def _stream_attempt_was_cancelled(self, stream_attempt_id: int) -> bool:
         with self.stream_attempt_lock:
@@ -3089,10 +3051,10 @@ class _StreamingCall:
         except Exception:
             chunk_bytes = 0
         with self.stream_attempt_lock:
-            self.stream_attempt_state["discarded_chunks"] += 1
-            self.stream_attempt_state["discarded_bytes"] += chunk_bytes
-            discarded_chunks = self.stream_attempt_state["discarded_chunks"]
-            discarded_bytes = self.stream_attempt_state["discarded_bytes"]
+            state = self.stream_attempt_state
+            state["discarded_chunks"] += 1
+            state["discarded_bytes"] += chunk_bytes
+            discarded_chunks, discarded_bytes = state["discarded_chunks"], state["discarded_bytes"]
         first = discarded_chunks == 1
         (logger.warning if first else logger.debug)(
             ("Discarding chunk from superseded stream attempt %s " if first else "Discarded stale stream chunk from attempt %s ")
