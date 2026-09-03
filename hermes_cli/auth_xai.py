@@ -58,8 +58,7 @@ def _xai_oauth_state_from_store(auth_store: Dict[str, Any]) -> Optional[Dict[str
             continue
         merged = dict(state or {})
         merged["tokens"] = {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
+            "access_token": access_token, "refresh_token": refresh_token,
             "token_type": str(entry.get("token_type") or "Bearer"),
         }
         if entry.get("last_refresh"):
@@ -96,10 +95,8 @@ def _read_xai_oauth_tokens(*, _lock: bool = True) -> Dict[str, Any]:
                 f"xAI OAuth state is missing {field}. {_RELOGIN}", f"xai_auth_missing_{field}", relogin=True,
             )
     return {
-        "tokens": tokens,
-        "last_refresh": state.get("last_refresh"),
-        "discovery": state.get("discovery") or {},
-        "redirect_uri": state.get("redirect_uri"),
+        "tokens": tokens, "last_refresh": state.get("last_refresh"),
+        "discovery": state.get("discovery") or {}, "redirect_uri": state.get("redirect_uri"),
     }
 
 
@@ -308,8 +305,7 @@ def _xai_tokens_from_payload(payload: Dict[str, Any], access_token: str, fallbac
     return {
         "access_token": access_token,
         "refresh_token": str(payload.get("refresh_token") or fallback_refresh).strip(),
-        "id_token": _clean(payload.get("id_token")),
-        "expires_in": payload.get("expires_in"),
+        "id_token": _clean(payload.get("id_token")), "expires_in": payload.get("expires_in"),
         "token_type": _clean(payload.get("token_type") or "Bearer") or "Bearer",
     }
 
@@ -597,9 +593,6 @@ def _xai_oauth_device_code_login(*, timeout_seconds: float = 20.0, open_browser:
         raise _xai_err("xAI device-code token response was missing required tokens.", "xai_device_token_invalid")
     return {
         "tokens": _xai_tokens_from_payload(payload, access_token, refresh_token),
-        "discovery": discovery,
-        "redirect_uri": "",
-        "base_url": _xai_oauth_inference_base_url(),
-        "last_refresh": _utc_now_z(),
-        "source": "oauth-device-code",
+        "discovery": discovery, "redirect_uri": "", "base_url": _xai_oauth_inference_base_url(),
+        "last_refresh": _utc_now_z(), "source": "oauth-device-code",
     }

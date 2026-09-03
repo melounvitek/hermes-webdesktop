@@ -76,12 +76,8 @@ def _minimax_request_user_code(
         client,
         f"{portal_base_url}/oauth/code",
         data={
-            "response_type": "code",
-            "client_id": client_id,
-            "scope": MINIMAX_OAUTH_SCOPE,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "state": state,
+            "response_type": "code", "client_id": client_id, "scope": MINIMAX_OAUTH_SCOPE,
+            "code_challenge": code_challenge, "code_challenge_method": "S256", "state": state,
         },
         headers={**_FORM_JSON_HEADERS, "x-request-id": str(uuid.uuid4())},
     )
@@ -135,10 +131,8 @@ def _minimax_poll_token(
             client,
             f"{portal_base_url}/oauth/token",
             data={
-                "grant_type": MINIMAX_OAUTH_GRANT_TYPE,
-                "client_id": client_id,
-                "user_code": user_code,
-                "code_verifier": code_verifier,
+                "grant_type": MINIMAX_OAUTH_GRANT_TYPE, "client_id": client_id,
+                "user_code": user_code, "code_verifier": code_verifier,
             },
             headers=_FORM_JSON_HEADERS,
         )

@@ -130,10 +130,8 @@ def _resolve_zai_base_url(api_key: str, default_url: str, env_override: str) -> 
         return default_url
 
     detected_endpoint = {
-        "base_url": detected["base_url"],
-        "endpoint_id": detected.get("id", ""),
-        "model": detected.get("model", ""),
-        "label": detected.get("label", ""),
+        "base_url": detected["base_url"], "endpoint_id": detected.get("id", ""),
+        "model": detected.get("model", ""), "label": detected.get("label", ""),
         "key_hash": key_hash,
     }
     # Persist failure (disk full, permissions, lock timeout) must not break resolution — detection

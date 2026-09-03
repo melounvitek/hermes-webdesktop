@@ -20,9 +20,7 @@ EXIT_ASK = 2
 EXIT_DENY = 3
 
 _VERDICT_EXIT = {
-    "allow": EXIT_ALLOW,
-    "ask-approval": EXIT_ASK,
-    "hardline-deny": EXIT_DENY,
+    "allow": EXIT_ALLOW, "ask-approval": EXIT_ASK, "hardline-deny": EXIT_DENY,
     "user-deny": EXIT_DENY,
 }
 
@@ -46,12 +44,8 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
 
     def result(verdict: str, rule=None, detail: str = "") -> dict:
         return {
-            "command": command,
-            "env_type": env_type,
-            "verdict": verdict,
-            "exit_code": _VERDICT_EXIT[verdict],
-            "rule": rule,
-            "detail": detail,
+            "command": command, "env_type": env_type, "verdict": verdict,
+            "exit_code": _VERDICT_EXIT[verdict], "rule": rule, "detail": detail,
             "normalized_variants": variants,
         }
 

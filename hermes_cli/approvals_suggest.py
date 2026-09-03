@@ -367,12 +367,8 @@ def suggest_command(args) -> int:
             "days": days,
             "proposals": [
                 {
-                    "n": i,
-                    "pattern": p.pattern,
-                    "kind": p.kind,
-                    "count": p.count,
-                    "classes": sorted(p.classes),
-                    "examples": p.examples,
+                    "n": i, "pattern": p.pattern, "kind": p.kind, "count": p.count,
+                    "classes": sorted(p.classes), "examples": p.examples,
                 }
                 for i, p in enumerate(proposals, 1)
             ],

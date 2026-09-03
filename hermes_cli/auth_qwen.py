@@ -137,9 +137,7 @@ def resolve_qwen_runtime_credentials(
     return {
         "provider": "qwen-oauth",
         "base_url": os.getenv("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL,
-        "api_key": access_token,
-        "source": "qwen-cli",
-        "expires_at_ms": tokens.get("expiry_date"),
+        "api_key": access_token, "source": "qwen-cli", "expires_at_ms": tokens.get("expiry_date"),
         "auth_file": str(_qwen_cli_auth_path()),
     }
 
@@ -153,11 +151,8 @@ def get_qwen_auth_status() -> Dict[str, Any]:
         # broken Qwen setup flow.
         creds = resolve_qwen_runtime_credentials(refresh_if_expiring=True)
         return {
-            "logged_in": True,
-            "auth_file": str(auth_path),
-            "source": creds.get("source"),
-            "api_key": creds.get("api_key"),
-            "expires_at_ms": creds.get("expires_at_ms"),
+            "logged_in": True, "auth_file": str(auth_path), "source": creds.get("source"),
+            "api_key": creds.get("api_key"), "expires_at_ms": creds.get("expires_at_ms"),
         }
     except AuthError as exc:
         return {"logged_in": False, "auth_file": str(auth_path), "error": str(exc)}

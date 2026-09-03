@@ -106,12 +106,8 @@ def _spotify_build_authorize_url(
     accounts_base_url: str,
 ) -> str:
     query = urlencode({
-        "client_id": client_id,
-        "response_type": "code",
-        "redirect_uri": redirect_uri,
-        "scope": scope,
-        "state": state,
-        "code_challenge_method": "S256",
+        "client_id": client_id, "response_type": "code", "redirect_uri": redirect_uri,
+        "scope": scope, "state": state, "code_challenge_method": "S256",
         "code_challenge": code_challenge,
     })
     return f"{accounts_base_url}/authorize?{query}"
@@ -197,19 +193,15 @@ def _spotify_token_payload_to_state(
     expires_at = datetime.fromtimestamp(now.timestamp() + expires_in, tz=timezone.utc)
     state = dict(previous_state or {})
     state.update({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "accounts_base_url": accounts_base_url,
-        "api_base_url": api_base_url,
+        "client_id": client_id, "redirect_uri": redirect_uri,
+        "accounts_base_url": accounts_base_url, "api_base_url": api_base_url,
         "scope": requested_scope,
         "granted_scope": str(token_payload.get("scope") or requested_scope).strip(),
         "token_type": _clean(token_payload.get("token_type", "Bearer") or "Bearer") or "Bearer",
         "access_token": _clean(token_payload.get("access_token")),
         "refresh_token": _clean(token_payload.get("refresh_token") or state.get("refresh_token")),
-        "obtained_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "expires_in": expires_in,
-        "auth_type": "oauth_pkce",
+        "obtained_at": now.isoformat(), "expires_at": expires_at.isoformat(),
+        "expires_in": expires_in, "auth_type": "oauth_pkce",
     })
     return state
 
@@ -308,15 +300,12 @@ def resolve_spotify_runtime_credentials(
         )
 
     return {
-        "provider": "spotify",
-        "access_token": access_token,
-        "api_key": access_token,
+        "provider": "spotify", "access_token": access_token, "api_key": access_token,
         "token_type": str(state.get("token_type", "Bearer") or "Bearer"),
         "base_url": _spotify_api_base_url(state),
         "scope": _clean(state.get("granted_scope") or state.get("scope")),
         "client_id": _spotify_client_id(state=state),
-        "redirect_uri": _spotify_redirect_uri(state=state),
-        "expires_at": state.get("expires_at"),
+        "redirect_uri": _spotify_redirect_uri(state=state), "expires_at": state.get("expires_at"),
         "refresh_token": _clean(state.get("refresh_token")),
     }
 
@@ -331,13 +320,10 @@ def get_spotify_auth_status() -> Dict[str, Any]:
     refresh_token = _clean(state.get("refresh_token"))
     return {
         "logged_in": bool(refresh_token or not _is_expiring(expires_at, 0)),
-        "auth_type": state.get("auth_type", "oauth_pkce"),
-        "client_id": state.get("client_id"),
+        "auth_type": state.get("auth_type", "oauth_pkce"), "client_id": state.get("client_id"),
         "redirect_uri": state.get("redirect_uri"),
-        "scope": state.get("granted_scope") or state.get("scope"),
-        "expires_at": expires_at,
-        "api_base_url": state.get("api_base_url"),
-        "has_refresh_token": bool(refresh_token),
+        "scope": state.get("granted_scope") or state.get("scope"), "expires_at": expires_at,
+        "api_base_url": state.get("api_base_url"), "has_refresh_token": bool(refresh_token),
     }
 
 
@@ -445,10 +431,8 @@ def login_spotify_command(args) -> None:
     token_payload = _spotify_token_post(
         accounts_base_url,
         {
-            "client_id": client_id,
-            "grant_type": "authorization_code",
-            "code": str(callback.get("code") or ""),
-            "redirect_uri": redirect_uri,
+            "client_id": client_id, "grant_type": "authorization_code",
+            "code": str(callback.get("code") or ""), "redirect_uri": redirect_uri,
             "code_verifier": code_verifier,
         },
         timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
