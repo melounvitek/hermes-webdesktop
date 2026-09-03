@@ -34,9 +34,7 @@ from hermes_cli.browser_connect import (
     launch_chrome_debug, local_port_in_use, manual_chrome_debug_command)
 
 
-# ---------------------------------------------------------------------------------------
 # Output helpers. Slash-command text is user-visible: every literal below is load-bearing.
-# ---------------------------------------------------------------------------------------
 def _cp(*lines: str) -> None:
     """``_cprint`` each line (lazy import: cli.py imports this module)."""
     from cli import _cprint
@@ -159,9 +157,7 @@ def _print_capped(lines_text: str, limit: int, tail: str, emit) -> None:
         emit(lines_text)
 
 
-# ---------------------------------------------------------------------------------------
 # Small data tables.
-# ---------------------------------------------------------------------------------------
 
 # /cron flag tables: flag -> opts key. Order-sensitive in _parse_cron_flags: bool flags never
 # consume a value; --repeat is int-validated separately.
@@ -307,9 +303,7 @@ def _parse_cron_flags(tokens):
     return opts
 
 
-# ---------------------------------------------------------------------------------------
 # Session-switch plumbing shared by /resume and /branch.
-# ---------------------------------------------------------------------------------------
 def _end_current_session(cli, reason: str) -> None:
     """Flush un-persisted messages, then end the current session row with ``reason``.
     Best-effort on both steps (the switch proceeds even if the DB write fails)."""
@@ -388,9 +382,7 @@ def _refresh_tui_before_print(cli) -> None:
     print()
 
 
-# ---------------------------------------------------------------------------------------
 # /browser sub-handlers.
-# ---------------------------------------------------------------------------------------
 def _print_lightpanda_engine_status() -> None:
     """``/browser status`` line(s) about ``browser.engine: lightpanda`` — silent unless set;
     says whether it is in use or which higher-precedence setting shadows it."""
@@ -1084,11 +1076,9 @@ class CLICommandsMixin:
         parts = _shlex_args(cmd)
         subcommand = parts[0] if parts else ""
         if subcommand not in {"list", "disable", "enable"}:
-            self.show_tools()
-            return
+            return self.show_tools()
         if subcommand == "list":
-            _run_capture(Namespace(tools_action="list", platform="cli"))
-            return
+            return _run_capture(Namespace(tools_action="list", platform="cli"))
         names = parts[1:]
         if not names:
             return _pr(f"(._.) Usage: /tools {subcommand} <name> [name ...]",
@@ -1569,7 +1559,7 @@ class CLICommandsMixin:
             try:
                 from hermes_cli.config import cfg_get, read_raw_config
                 self.system_prompt = prompt_text(
-                cfg_get(read_raw_config(), "agent", "system_prompt", default=""))
+                    cfg_get(read_raw_config(), "agent", "system_prompt", default=""))
             except Exception:
                 self.system_prompt = ""
             self.agent = None  # Force re-init
