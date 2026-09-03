@@ -103,9 +103,7 @@ def _selected_provider(section: object, name_key: str = "provider") -> Optional[
     if is_truthy_value(section.get("use_gateway"), default=False):
         return "nous"
     value = section.get(name_key)
-    if value is None:
-        return None
-    return str(value).strip().lower() or None
+    return None if value is None else (str(value).strip().lower() or None)
 
 
 @dataclass(frozen=True)
@@ -137,8 +135,7 @@ class NousSubscriptionFeatures:
         raise AttributeError(name)
 
     def items(self) -> Iterable[NousFeatureState]:
-        for key in _FEATURE_ORDER:
-            yield self.features[key]
+        return (self.features[key] for key in _FEATURE_ORDER)
 
 
 def _section(config: Dict[str, object], key: str) -> Dict[str, object]:
@@ -209,10 +206,7 @@ def _has_agent_browser() -> bool:
     # (same cascade, same Termux carve-out) so setup/status can't diverge from runtime;
     # validate=False keeps this a cheap existence check with no subprocess spawn.
     try:
-        from tools.browser_tool import (
-            _find_agent_browser,
-            _requires_real_termux_browser_install,
-        )
+        from tools.browser_tool import _find_agent_browser, _requires_real_termux_browser_install
     except Exception:
         # Runtime probe unavailable: fall back to binary presence rather than crashing. Validate
         # the resolved binary actually runs — a dangling symlink is reported by ``which`` but
@@ -222,11 +216,7 @@ def _has_agent_browser() -> bool:
         from hermes_constants import with_hermes_node_path
 
         local_bin_dir = Path(__file__).parent.parent / "node_modules" / ".bin"
-        search_paths = [
-            None,
-            with_hermes_node_path().get("PATH", ""),
-            str(local_bin_dir) if local_bin_dir.is_dir() else "",
-        ]
+        search_paths = [None, with_hermes_node_path().get("PATH", ""), str(local_bin_dir) if local_bin_dir.is_dir() else ""]
         for path in search_paths:
             if path == "":
                 continue
@@ -334,20 +324,10 @@ def _web_feature(
         "searxng": _any_env("SEARXNG_URL"),
     }
     web_managed = backend == "firecrawl" and managed and not direct_firecrawl
+    active = web_managed or direct.get(backend) or direct.get(search_backend) or (extract_backend == "tavily" and direct["tavily"])
     return _state(
-        "web",
-        available=bool(managed or any(direct.values())),
-        active=bool(
-            tool_enabled
-            and (
-                web_managed
-                or direct.get(backend)
-                or direct.get(search_backend)
-                or (extract_backend == "tavily" and direct["tavily"])
-            )
-        ),
-        managed_by_nous=web_managed,
-        toolset_enabled=tool_enabled,
+        "web", available=bool(managed or any(direct.values())), active=bool(tool_enabled and active),
+        managed_by_nous=web_managed, toolset_enabled=tool_enabled,
         current_provider=backend or search_backend or extract_backend or "",
         explicit_configured=bool(backend or search_backend or extract_backend),
     )
@@ -361,23 +341,15 @@ def _fal_feature(key: str, tool_enabled: bool, direct: bool, managed: bool, sele
     else:
         label = "Nous Subscription" if (fal_managed or selected == "nous") else ""
     return _state(
-        key,
-        available=bool(managed or direct),
-        active=bool(tool_enabled and (fal_managed or direct)),
-        managed_by_nous=fal_managed,
-        toolset_enabled=tool_enabled,
-        current_provider=label,
+        key, available=bool(managed or direct), active=bool(tool_enabled and (fal_managed or direct)),
+        managed_by_nous=fal_managed, toolset_enabled=tool_enabled, current_provider=label,
         explicit_configured=selected is not None or direct,
     )
 
 
 def _audio_features(
-    tts_cfg: Dict[str, object],
-    stt_cfg: Dict[str, object],
-    tts_tool_enabled: bool,
-    managed: Dict[str, bool],
-    selected: Dict[str, Optional[str]],
-    use_gateway: Dict[str, bool],
+    tts_cfg: Dict[str, object], stt_cfg: Dict[str, object], tts_tool_enabled: bool,
+    managed: Dict[str, bool], selected: Dict[str, Optional[str]], use_gateway: Dict[str, bool],
 ) -> tuple[NousFeatureState, NousFeatureState]:
     tts_gw, stt_gw = use_gateway["tts"], use_gateway["stt"]
     tts_provider = _norm(tts_cfg.get("provider"), "edge")
@@ -397,19 +369,12 @@ def _audio_features(
     tts_current = tts_provider or "edge"
     tts_managed = tts_tool_enabled and tts_current == "openai" and managed["tts"] and not direct_openai_tts
     tts_available = bool({
-        "edge": True,
-        "neutts": True,
-        "openai": managed["tts"] or direct_openai_tts,
-        "elevenlabs": _any_env("ELEVENLABS_API_KEY") and not tts_gw,
-        "mistral": _any_env("MISTRAL_API_KEY"),
+        "edge": True, "neutts": True, "openai": managed["tts"] or direct_openai_tts,
+        "elevenlabs": _any_env("ELEVENLABS_API_KEY") and not tts_gw, "mistral": _any_env("MISTRAL_API_KEY"),
     }.get(tts_current, False))
     tts = _state(
-        "tts",
-        available=tts_available,
-        active=bool(tts_tool_enabled and tts_available),
-        managed_by_nous=tts_managed,
-        toolset_enabled=tts_tool_enabled,
-        current_provider=_provider_label("tts", tts_current),
+        "tts", available=tts_available, active=bool(tts_tool_enabled and tts_available),
+        managed_by_nous=tts_managed, toolset_enabled=tts_tool_enabled, current_provider=_provider_label("tts", tts_current),
         # Mirrors the stored selection so status/picker markers stay in lockstep with dispatch.
         explicit_configured=selected["tts"] is not None and selected["tts"] != "edge",
     )
@@ -419,30 +384,21 @@ def _audio_features(
     # toolset_enabled is reported True so status never flags it "tool disabled".
     stt_current = stt_provider or "local"
     stt_available = bool({
-        "local": _local_stt_backend_available() and not stt_gw,
-        "openai": managed["stt"] or direct_openai_stt,
-        "groq": _any_env("GROQ_API_KEY") and not stt_gw,
-        "mistral": _any_env("MISTRAL_API_KEY") and not stt_gw,
+        "local": _local_stt_backend_available() and not stt_gw, "openai": managed["stt"] or direct_openai_stt,
+        "groq": _any_env("GROQ_API_KEY") and not stt_gw, "mistral": _any_env("MISTRAL_API_KEY") and not stt_gw,
     }.get(stt_current, False))
     stt = _state(
-        "stt",
-        available=stt_available,
-        active=stt_available,
+        "stt", available=stt_available, active=stt_available,
         managed_by_nous=stt_current == "openai" and managed["stt"] and not direct_openai_stt,
-        toolset_enabled=True,
-        current_provider=_provider_label("stt", stt_current),
+        toolset_enabled=True, current_provider=_provider_label("stt", stt_current),
         explicit_configured=selected["stt"] is not None,
     )
     return tts, stt
 
 
 def _browser_feature(
-    browser_cfg: Dict[str, object],
-    tool_enabled: bool,
-    managed: bool,
-    selected: Optional[str],
-    browser_gw: bool,
-    direct_firecrawl: bool,
+    browser_cfg: Dict[str, object], tool_enabled: bool, managed: bool,
+    selected: Optional[str], browser_gw: bool, direct_firecrawl: bool,
 ) -> NousFeatureState:
     """Resolve browser availability using the same precedence as runtime."""
     explicit = "cloud_provider" in browser_cfg
@@ -469,9 +425,7 @@ def _browser_feature(
             "browser-use": local_available and (managed or direct_browser_use),
             "firecrawl": local_available and direct_firecrawl,
         }
-        current = provider or "local"
-        if current not in cloud_available:
-            current = "local"
+        current = provider if provider in cloud_available else "local"
         available = bool(cloud_available.get(current, local_runnable))
         managed_now = browser_use_managed if current == "browser-use" else False
     # Never-configured autodetect: CAMOFOX_URL activates Camofox when no selection was stored.
@@ -484,13 +438,8 @@ def _browser_feature(
     else:
         current, available, managed_now = "local", bool(local_runnable), False
     return _state(
-        "browser",
-        available=available,
-        active=bool(tool_enabled and available),
-        managed_by_nous=managed_now,
-        toolset_enabled=tool_enabled,
-        current_provider=_provider_label("browser", current),
-        explicit_configured=explicit,
+        "browser", available=available, active=bool(tool_enabled and available), managed_by_nous=managed_now,
+        toolset_enabled=tool_enabled, current_provider=_provider_label("browser", current), explicit_configured=explicit,
     )
 
 
@@ -515,21 +464,14 @@ def _modal_feature(
         managed_now = direct_override = active = False
         available = bool({"managed": managed, "direct": direct_modal}.get(modal_mode, managed or direct_modal))
     return _state(
-        "modal",
-        available=available,
-        active=active,
-        managed_by_nous=managed_now,
-        direct_override=direct_override,
-        toolset_enabled=tool_enabled,
-        current_provider="Modal" if is_modal else terminal_backend or "local",
+        "modal", available=available, active=active, managed_by_nous=managed_now, direct_override=direct_override,
+        toolset_enabled=tool_enabled, current_provider="Modal" if is_modal else terminal_backend or "local",
         explicit_configured=is_modal,
     )
 
 
 def get_nous_subscription_features(
-    config: Optional[Dict[str, object]] = None,
-    *,
-    force_fresh: bool = False,
+    config: Optional[Dict[str, object]] = None, *, force_fresh: bool = False
 ) -> NousSubscriptionFeatures:
     if config is None:
         config = load_config() or {}
@@ -567,16 +509,13 @@ def get_nous_subscription_features(
     tts, stt = _audio_features(
         _section(config, "tts"), _section(config, "stt"), enabled["tts"], managed, selected, use_gateway
     )
-    features = {
+    def _fal(key: str) -> NousFeatureState:
+        return _fal_feature(key, enabled[key], fal_configured and not use_gateway[key], managed[key], selected[key])
+
+    features = {  # insertion order == _FEATURE_ORDER
         "web": _web_feature(_section(config, "web"), enabled["web"], managed["web"], use_gateway["web"], direct_firecrawl),
-        "image_gen": _fal_feature(
-            "image_gen", enabled["image_gen"], fal_configured and not use_gateway["image_gen"],
-            managed["image_gen"], selected["image_gen"],
-        ),
-        "video_gen": _fal_feature(
-            "video_gen", enabled["video_gen"], fal_configured and not use_gateway["video_gen"],
-            managed["video_gen"], selected["video_gen"],
-        ),
+        "image_gen": _fal("image_gen"),
+        "video_gen": _fal("video_gen"),
         "tts": tts,
         "stt": stt,
         "browser": _browser_feature(
@@ -586,11 +525,8 @@ def get_nous_subscription_features(
         "modal": _modal_feature(_section(config, "terminal"), enabled["terminal"], managed["modal"], managed_tools_flag),
     }
     return NousSubscriptionFeatures(
-        subscribed=provider_is_nous or nous_auth_present,
-        nous_auth_present=nous_auth_present,
-        provider_is_nous=provider_is_nous,
-        features=features,
-        account_info=account_info,
+        subscribed=provider_is_nous or nous_auth_present, nous_auth_present=nous_auth_present,
+        provider_is_nous=provider_is_nous, features=features, account_info=account_info,
     )
 
 
@@ -599,10 +535,7 @@ def _has_managed_default_direct(key: str) -> bool:
 
 
 def apply_nous_managed_defaults(
-    config: Dict[str, object],
-    *,
-    enabled_toolsets: Optional[Iterable[str]] = None,
-    force_fresh: bool = False,
+    config: Dict[str, object], *, enabled_toolsets: Optional[Iterable[str]] = None, force_fresh: bool = False
 ) -> set[str]:
     features = get_nous_subscription_features(config, force_fresh=force_fresh)
     account_info = features.account_info
@@ -659,10 +592,7 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
     fal_direct = fal_key_is_configured()
     audio_direct = bool(resolve_openai_audio_api_key())
     return {
-        "web": _any_env(
-            "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "PARALLEL_API_KEY",
-            "TAVILY_API_KEY", "EXA_API_KEY", "SEARXNG_URL",
-        ),
+        "web": _any_env("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "PARALLEL_API_KEY", "TAVILY_API_KEY", "EXA_API_KEY", "SEARXNG_URL"),
         "image_gen": fal_direct,
         "video_gen": fal_direct,
         "tts": audio_direct or _any_env("ELEVENLABS_API_KEY"),
@@ -675,9 +605,7 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
 
 
 def get_gateway_eligible_tools(
-    config: Optional[Dict[str, object]] = None,
-    *,
-    force_fresh: bool = False,
+    config: Optional[Dict[str, object]] = None, *, force_fresh: bool = False
 ) -> tuple[list[str], list[str], list[str], list[str]]:
     """Return (unconfigured, has_direct, explicit_configured, already_managed) tool key lists.
 
@@ -715,10 +643,7 @@ def get_gateway_eligible_tools(
     return unconfigured, has_direct, explicit_configured, already_managed
 
 
-def apply_gateway_defaults(
-    config: Dict[str, object],
-    tool_keys: list[str],
-) -> set[str]:
+def apply_gateway_defaults(config: Dict[str, object], tool_keys: list[str]) -> set[str]:
     """Store the managed selection for ``tool_keys``; returns the set of tools actually changed."""
     for key in _DEFAULT_SECTIONS:
         _ensure_section(config, key)
@@ -728,11 +653,7 @@ def apply_gateway_defaults(
     return set(changed)
 
 
-def prompt_enable_tool_gateway(
-    config: Dict[str, object],
-    *,
-    force_fresh: bool = True,
-) -> set[str]:
+def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool = True) -> set[str]:
     """If eligible tools exist, show a per-tool checklist to route them through the Tool Gateway.
 
     Triggered by a live free tool pool or paid access. explicit_configured tools (e.g. an explicit
@@ -803,11 +724,7 @@ def prompt_enable_tool_gateway(
 # ---------------------------------------------------------------------------
 
 
-def ensure_nous_portal_access(
-    *,
-    capability: str = "the Nous Tool Gateway",
-    coverage_category: Optional[str] = None,
-) -> bool:
+def ensure_nous_portal_access(*, capability: str = "the Nous Tool Gateway", coverage_category: Optional[str] = None) -> bool:
     """Make sure the user is entitled to the Nous Tool Gateway, logging in if needed.
 
     Only performs the device-code OAuth (when not logged in) and refreshes entitlement — no model
