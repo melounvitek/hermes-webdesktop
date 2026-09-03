@@ -77,31 +77,26 @@ from tools.mcp_tool_discovery import (  # noqa: F401
     has_registered_mcp_tools, get_registered_mcp_server_names)
 
 
-# Wall-clock bound on the (fail-open) OSV malware preflight run off the loop before a
-# stdio spawn. Kept just ABOVE osv_check._TIMEOUT (10s) so the inner socket timeout
-# normally fires first; this only bites when a stalled SSL handshake defeats it.
+# Wall-clock bound on the fail-open OSV malware preflight before a stdio spawn; just ABOVE
+# osv_check._TIMEOUT (10s) so it only bites when a stalled SSL handshake defeats that.
 _OSV_MALWARE_CHECK_TIMEOUT_S = 12.0
 
 
-# ---------------------------------------------------------------------------
-# Optional MCP SDK: availability probe now, symbol import on first use
-# ---------------------------------------------------------------------------
+# ---- Optional MCP SDK: availability probe now, symbol import on first use ----
 
 _MCP_AVAILABLE = _MCP_HTTP_AVAILABLE = _MCP_NEW_HTTP = _MCP_LEGACY_HTTP = False
 _MCP_SAMPLING_TYPES = _MCP_NOTIFICATION_TYPES = _MCP_ELICITATION_TYPES = False
 _MCP_MESSAGE_HANDLER_SUPPORTED = _MCP_LOGGING_CALLBACK_SUPPORTED = False
 sse_client = None
-# Fallback for SDKs that don't export LATEST_PROTOCOL_VERSION (Streamable HTTP arrived
-# with 2025-03-26, so this stays valid for the HTTP path).
+# Fallback for SDKs without LATEST_PROTOCOL_VERSION (Streamable HTTP arrived with 2025-03-26).
 LATEST_PROTOCOL_VERSION = "2025-03-26"
-# Newest revision ``ClientSession.initialize()`` actually speaks. From 2026-07-28 the
-# handshake is replaced by a per-request envelope, so this can be OLDER than
-# LATEST_PROTOCOL_VERSION; the MCP-Protocol-Version header must be seeded from this one.
+# Newest revision ``ClientSession.initialize()`` speaks; from 2026-07-28 the handshake is a
+# per-request envelope so this can be OLDER than LATEST_PROTOCOL_VERSION, and the
+# MCP-Protocol-Version header must be seeded from THIS one.
 LATEST_HANDSHAKE_VERSION = LATEST_PROTOCOL_VERSION
 
-# Importing ``mcp`` costs ~260ms, so it is deferred to first real use (_ensure_mcp_sdk).
-# Availability is decided here with a metadata-only find_spec probe so every
-# ``if not _MCP_AVAILABLE`` gate / test patch / skipif keeps its exact semantics.
+# Importing ``mcp`` costs ~260ms, so it is deferred to first use (_ensure_mcp_sdk); availability
+# is decided now via find_spec so every ``if not _MCP_AVAILABLE`` gate / patch / skipif holds.
 try:
     _MCP_AVAILABLE = importlib.util.find_spec("mcp") is not None
 except Exception:
@@ -113,9 +108,9 @@ ClientSession: Any = None
 _MCP_SDK_IMPORT_ATTEMPTED = False
 _MCP_SDK_IMPORT_LOCK = threading.Lock()
 
-# Optional SDK type families (module, names, debug message when absent) bound in this order to
-# _MCP_SAMPLING_TYPES / _MCP_ELICITATION_TYPES / _MCP_NOTIFICATION_TYPES. Each is gated
-# separately so an older SDK only loses that feature, not MCP.
+# Optional SDK type families (module, names, debug message when absent), bound in this order to
+# _MCP_SAMPLING_TYPES / _MCP_ELICITATION_TYPES / _MCP_NOTIFICATION_TYPES; an older SDK only
+# loses that feature, not MCP.
 _OPTIONAL_TYPE_FAMILIES = (
     ("mcp.types", ("CreateMessageResult", "CreateMessageResultWithTools", "ErrorData", "SamplingCapability",
                    "SamplingToolsCapability", "TextContent", "ToolUseContent"),
@@ -126,9 +121,8 @@ _OPTIONAL_TYPE_FAMILIES = (
                    "ResourceListChangedNotification"),
      "MCP notification types not available -- dynamic tool discovery disabled"),
 )
-# SDK symbols bound by _ensure_mcp_sdk(). Module __getattr__ (PEP 562) imports the SDK on
-# first external access, so mock.patch("tools.mcp_tool.stdio_client") sees a real original
-# and the mock is never clobbered (_ensure is idempotent).
+# Bound by _ensure_mcp_sdk(); module __getattr__ (PEP 562) imports the SDK on first external
+# access so mock.patch("tools.mcp_tool.stdio_client") sees a real original, never clobbered.
 _MCP_SDK_LAZY_SYMBOLS = frozenset(
     {"StdioServerParameters", "stdio_client", "streamablehttp_client", "streamable_http_client"}
     | {n for _mod, names, _msg in _OPTIONAL_TYPE_FAMILIES for n in names})
@@ -159,12 +153,9 @@ def _import_sdk_names(module: str, names: tuple, missing_msg: Optional[str] = No
 
 
 def _ensure_mcp_sdk() -> bool:
-    """Import the optional ``mcp`` SDK on first use; return availability.
-
-    Idempotent and thread-safe. Honors a test-patched ``_MCP_AVAILABLE=False`` (no import)
-    and pre-installed mock symbols (``ClientSession`` already set means no re-import, so
-    mocks are never clobbered).
-    """
+    """Import the optional ``mcp`` SDK on first use; return availability. Idempotent and
+    thread-safe; honors a test-patched ``_MCP_AVAILABLE=False`` (no import) and pre-installed
+    mocks (``ClientSession`` already set means no re-import)."""
     global _MCP_SDK_IMPORT_ATTEMPTED, _MCP_AVAILABLE, _MCP_HTTP_AVAILABLE, _MCP_NEW_HTTP, _MCP_LEGACY_HTTP
     global _MCP_SAMPLING_TYPES, _MCP_NOTIFICATION_TYPES, _MCP_ELICITATION_TYPES, sse_client
     global _MCP_MESSAGE_HANDLER_SUPPORTED, _MCP_LOGGING_CALLBACK_SUPPORTED, LATEST_HANDSHAKE_VERSION
@@ -213,14 +204,10 @@ _SDK_HTTPX_MOD = None
 
 
 def sdk_httpx():
-    """Return the httpx module the *installed* MCP SDK is built against.
-
-    mcp 2.0 moved to ``httpx2`` (same API, separate distribution). Every object crossing the
-    SDK boundary (the ``AsyncClient`` passed to the transport, OAuth ``Request`` objects, the
-    exception classes) must come from the module the SDK itself imports, or it fails at the
-    transport layer. Resolved from the SDK's transport module, not a version number; falls
-    back to the newest module present. ``None`` only when neither module is importable.
-    """
+    """The httpx module the *installed* MCP SDK is built against (mcp 2.0 moved to ``httpx2``).
+    Every object crossing the SDK boundary (AsyncClient, OAuth Request, exception classes) must
+    come from the module the SDK itself imports or it fails at the transport layer. Resolved
+    from the SDK's transport module, else the newest present; ``None`` if neither imports."""
     global _SDK_HTTPX_MOD
     if _SDK_HTTPX_MOD is not None:
         return _SDK_HTTPX_MOD
@@ -256,46 +243,34 @@ _MCP_LOG_LEVEL_MAP = {
     "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.ERROR,
     "alert": logging.ERROR, "emergency": logging.ERROR}
 
-# ---------------------------------------------------------------------------
-# Reconnect / keepalive tuning
-# ---------------------------------------------------------------------------
+# ---- Reconnect / keepalive tuning ----
 
 _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
-# Parked servers (budget exhausted, tools deregistered) self-probe on this cadence: with
-# no tools registered nothing else can ever revive them.
-_PARKED_RETRY_INTERVAL = 300
 _RECYCLED_RECONNECT_TIMEOUT = 15.0
+# Parked servers (tools deregistered) self-probe on this cadence: nothing else can revive them.
+_PARKED_RETRY_INTERVAL = 300
 # Bounded wait for a respawned stdio child when a call finds it dead (gateway restarts kill
 # every MCP child); bounded so a broken server still parks via run()'s rapid-drop budget.
 _STDIO_RESPAWN_WAIT_SEC = 15.0
-
-# Servers may expire idle sessions on any TTL, so the client MUST ping faster than that TTL;
-# short-TTL servers (~15s) need a smaller configured ``keepalive_interval``. The floor stops
-# a tiny interval from busy-looping.
-_DEFAULT_KEEPALIVE_INTERVAL = 180
-_MIN_KEEPALIVE_INTERVAL = 5
-
-# One bounded cancellation cycle for pending loop tasks at final shutdown, so
-# cancellation-resistant tasks cannot hang process exit.
+# The client MUST ping faster than the server's idle-session TTL (short-TTL servers need a
+# smaller configured ``keepalive_interval``); the floor stops a tiny interval busy-looping.
+_DEFAULT_KEEPALIVE_INTERVAL, _MIN_KEEPALIVE_INTERVAL = 180, 5
+# One bounded cancellation cycle at final shutdown so resistant tasks cannot hang exit.
 _MCP_LOOP_DRAIN_TIMEOUT = 3.0
-
-# JSON-RPC 2.0 "method not found" (e.g. a server without the optional ``ping``).
-# _ensure_mcp_sdk() overrides it from mcp.types once the SDK is loaded.
+# JSON-RPC 2.0 "method not found" (server without optional ``ping``); _ensure_mcp_sdk()
+# overrides it from mcp.types once loaded.
 _JSONRPC_METHOD_NOT_FOUND = -32601
-
-# Cap on nextCursor pagination so a server returning a cursor forever cannot spin
-# discovery; 50 pages at 50-100 items/page covers thousands of entries.
+# nextCursor pagination cap so a forever-cursor cannot spin discovery (50 pages = thousands).
 _MCP_LIST_MAX_PAGES = 50
 
 
 async def _paginate_full_list(list_method, items_attr: str, server_name: str,
                               cache_meta_out: Optional[dict] = None):
-    """Drain a paginated ``list_*`` call by following ``nextCursor`` (the SDK fetches one
-    page per call). ``cache_meta_out`` receives the first page's SEP-2549 hints (``ttl_ms``,
-    ``cache_scope``). Callers must hold the server's ``_rpc_lock`` for a consistent snapshot."""
+    """Drain a paginated ``list_*`` call by following ``nextCursor``; ``cache_meta_out`` gets the
+    first page's SEP-2549 hints. Callers must hold the server's ``_rpc_lock``."""
     items: list = []
     cursor = None
     for _ in range(_MCP_LIST_MAX_PAGES):
@@ -326,15 +301,12 @@ async def _paginate_full_list(list_method, items_attr: str, server_name: str,
     return items
 
 
-# ---------------------------------------------------------------------------
-# Server task -- each MCP server lives in one long-lived asyncio Task
-# ---------------------------------------------------------------------------
+# ---- Server task -- each MCP server lives in one long-lived asyncio Task ----
 
 class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthMixin):
-    """One MCP server connection living in one long-lived asyncio Task, so the transport's
-    anyio cancel scopes are entered and exited in the same Task. Run state machine in
-    ``MCPServerRunMixin``, transport bring-up in ``MCPServerTransportMixin``, keepalive /
-    refresh / liveness in ``MCPServerHealthMixin``."""
+    """One MCP server connection in one long-lived asyncio Task (the transport's anyio cancel
+    scopes must enter/exit in the same Task). Run state machine, transport bring-up and
+    keepalive/liveness live in the three mixins."""
 
     __slots__ = (
         "name", "session", "tool_timeout", "_task", "_ready", "_shutdown_event", "_reconnect_event",
@@ -353,63 +325,54 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         self._task: Optional[asyncio.Task] = None
         self._ready = asyncio.Event()
         self._shutdown_event = asyncio.Event()
-        # When set, _run_http/_run_stdio exit their async-with cleanly and run() re-enters
-        # the transport (auth recovery, manual refresh, ...).
+        # Set -> _run_http/_run_stdio exit cleanly and run() re-enters the transport.
         self._reconnect_event = asyncio.Event()
         self._tools: list = []
-        self._error: Optional[Exception] = None
+        self._registered_tool_names: list[str] = []
         self._config: dict = {}
+        self._error: Optional[Exception] = None
         self._sampling: Optional[SamplingHandler] = None
         self._elicitation: Optional[ElicitationHandler] = None
-        self._registered_tool_names: list[str] = []
         self._reconnect_retries: int = 0
-        # Rapid-drop budget: a (re)established session is UNPROVEN until it survives a full
-        # keepalive interval or serves a successful call. Only a proven session clears the
-        # reconnect budget, so a transport that flaps right after the handshake still parks.
+        # Rapid-drop budget: a session is UNPROVEN until it survives a keepalive interval or a
+        # successful call; only a proven session clears the budget, so a post-handshake flapper
+        # still parks.
         self._session_proven: bool = False
-        # Set once tools were ever registered, never cleared (unlike _ready, which clears every
-        # reconnect cycle): separates first-connect from reconnect failures in run()'s ladders.
+        # Never cleared (unlike _ready): separates first-connect from reconnect failures.
         self._ever_connected: bool = False
-        # True from park until the session proves healthy again; logs the revival once.
+        # True from park until proven healthy again; logs the revival once.
         self._was_parked: bool = False
-        # In-flight RPC tasks, so a reconnect/shutdown teardown can fail them fast instead of
-        # orphaning them on a dying transport; _reconnecting is True while such a deliberate
-        # teardown runs, letting _track_inflight_rpc turn the cancel into a retryable error.
+        # In-flight RPC tasks so a deliberate teardown fails them fast; _reconnecting is True
+        # during that teardown so _track_inflight_rpc turns the cancel into a retryable error.
         self._inflight_tasks: set = set()
         self._reconnecting: bool = False
-        # Latched by races (teardown-vs-keepalive, auth-lock corruption); verified lazily by
-        # ensure_healthy() before the next call.
+        # Latched by races (teardown-vs-keepalive, auth-lock corruption); ensure_healthy()
+        # verifies before the next call.
         self._suspect_reason: Optional[str] = None
-        # A teardown that failed >=1 in-flight call makes the next reconnect a RACE RECOVERY:
-        # it must not charge the rapid-drop budget.
+        # Teardown that failed in-flight calls => next reconnect is RACE RECOVERY, not a
+        # budget charge.
         self._teardown_race: bool = False
-        # One-time grace: an auth/permanent-classified failure on a previously PROVEN session
-        # gets one suspect+reconnect cycle before the park ladder applies.
+        # One-time grace: auth/permanent failure on a PROVEN session gets one suspect+reconnect
+        # cycle before parking.
         self._permanent_grace_used: bool = False
-        # Children of the current stdio transport: in-flight calls fail FAST when the child
-        # dies instead of riding out the tool timeout.
+        # Children of the current stdio transport: in-flight calls fail FAST when one dies.
         self._stdio_child_pids: Set[int] = set()
         self._auth_type: str = ""
         self._refresh_lock = asyncio.Lock()
-        # A stdio session is one JSON-RPC stream: a list_tools issued by the notification
-        # handler while a tool call is in flight can wedge it. Serialize client-initiated
-        # RPCs per server (HTTP too, for ordering).
+        # A stdio session is one JSON-RPC stream (a concurrent list_tools can wedge a tool
+        # call): serialize client-initiated RPCs per server (HTTP too, for ordering).
         self._rpc_lock = asyncio.Lock()
         self._pending_refresh_tasks: set[asyncio.Task] = set()
-        # contextvars snapshot of the agent task inside session.call_tool(). The SDK dispatches
-        # elicitation/create on a separate task that does not inherit HERMES_SESSION_PLATFORM;
-        # replaying this context in the elicitation callback routes the prompt correctly.
+        # contextvars snapshot inside session.call_tool(): the SDK runs elicitation/create on a
+        # task that does not inherit HERMES_SESSION_PLATFORM, so the callback replays this.
         self._pending_call_context: Optional[contextvars.Context] = None
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
-        self._idle_timeout_seconds: Optional[float] = None
-        self._max_lifetime_seconds: Optional[float] = None
-        self._recycled_reason: Optional[str] = None
-        # InitializeResult from the handshake: the server's REAL advertised capabilities.
+        self._idle_timeout_seconds = self._max_lifetime_seconds = self._recycled_reason = None
+        # Handshake InitializeResult: the server's REAL advertised capabilities.
         self.initialize_result: Optional[Any] = None
         # SEP-2549 cache hints from the last tools/list (ttl_ms, cache_scope).
         self._list_cache_meta: dict = {}
-        # Latched when keepalive ``ping`` returns -32601 (optional utility not implemented);
-        # later keepalives use list_tools instead. Reset on every fresh transport connection.
+        # Latched when ``ping`` returns -32601; keepalives then use list_tools. Reset per connect.
         self._ping_unsupported: bool = False
 
     # Content types a real Streamable-HTTP endpoint may return on the initial POST/GET;
@@ -417,58 +380,48 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
     _MCP_CONTENT_TYPES = ("application/json", "text/event-stream")
 
 
-# ---------------------------------------------------------------------------
-# Module-level state (every mutation under ``_lock``)
-# ---------------------------------------------------------------------------
+# ---- Module-level state (every mutation under ``_lock``) ----
 
 _servers: Dict[str, MCPServerTask] = {}
-# Profile registry scope owning each live connection (None outside multiplex): a
-# multiplexed /reload-mcp tears down only its own profile's servers.
+# Profile registry scope per live connection (None outside multiplex) so a multiplexed
+# /reload-mcp tears down only its own profile's servers.
 _server_scope_keys: Dict[str, Optional[str]] = {}
 _server_connecting: set[str] = set()
 _server_connect_errors: Dict[str, str] = {}
-# Lazy startup: servers registered from the on-disk schema cache without connecting;
-# popped once a real connection is established on first use.
+# Lazy startup: servers registered from the schema cache without connecting; popped on
+# first real connection.
 _lazy_server_configs: Dict[str, dict] = {}
 _lazy_server_fingerprints: Dict[str, str] = {}
 _lazy_server_tool_names: Dict[str, List[str]] = {}
-# Discovery installs a task-local claim around ``_connect_server`` so it can retain a
-# recoverable parked task without standalone probe calls publishing failed servers into
-# module-global ownership.
+# Task-local claim around ``_connect_server``: discovery retains a recoverable parked task
+# while standalone probes never publish failed servers into module-global ownership.
 _connect_server_claim: contextvars.ContextVar[Optional[Callable[[MCPServerTask], None]]] = (
     contextvars.ContextVar("mcp_connect_server_claim", default=None))
 
-# Per-server connect cooldown. A server that fails to spawn never reaches ``_servers``, so
-# without this every ``discover_mcp_tools()`` (one per worker session) would respawn it from
-# scratch — a restart storm whose unreaped subprocesses destabilise the healthy co-located
-# servers. Failed attempts stamp an exponential-backoff deadline that
-# ``register_mcp_servers`` honours; a successful connection clears it.
+# Per-server connect cooldown: a server that fails to spawn never reaches ``_servers``, so
+# without it every ``discover_mcp_tools()`` (one per worker session) would respawn it — a
+# restart storm whose unreaped children destabilise healthy servers. Exponential-backoff
+# deadline honoured by ``register_mcp_servers``; cleared on success.
 _server_connect_retry_after: Dict[str, float] = {}   # name -> monotonic deadline
 _server_connect_failures: Dict[str, int] = {}        # name -> consecutive failures
-_CONNECT_RETRY_BASE_BACKOFF_SEC = 30.0
-_CONNECT_RETRY_MAX_BACKOFF_SEC = 600.0
+_CONNECT_RETRY_BASE_BACKOFF_SEC, _CONNECT_RETRY_MAX_BACKOFF_SEC = 30.0, 600.0
 
-# Circuit breaker per server: closed (count < threshold) -> open (calls short-circuit with a
-# "stop retrying" message until the cooldown elapses) -> half-open (next call is a probe;
-# success closes, failure re-arms). Mutate only via _bump_server_error / _reset_server_error.
+# Per-server circuit breaker: closed -> open (calls short-circuit until the cooldown) ->
+# half-open (next call probes). Mutate only via _bump_server_error / _reset_server_error.
 _server_error_counts: Dict[str, int] = {}
 _server_breaker_opened_at: Dict[str, float] = {}
-_CIRCUIT_BREAKER_THRESHOLD = 3
-_CIRCUIT_BREAKER_COOLDOWN_SEC = 60.0
+_CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
 
-# Trust-tier gating (``mcp_servers.<name>.trust: full | untrusted``). On an untrusted server
-# every write-capable call needs user approval before the RPC fires; a tool is write-capable
-# unless its discovery-time ``annotations.readOnlyHint`` is exactly True (malformed fails
-# closed). readOnlyHint is a server-supplied HINT and a hostile server can lie, but on an
-# untrusted server a lie can only skip approval for calls the operator was already warned
-# about — never widen access. Missing ``trust`` defaults to full (backward compatible); any
-# unrecognized value normalizes to untrusted (a typo must never disable the gate).
-# Classified at CALL time from DISCOVERY data: no schema mutation, prompt cache intact.
+# Trust-tier gating (``trust: full | untrusted``): on an untrusted server every write-capable
+# call (discovery-time ``readOnlyHint`` not exactly True; malformed fails closed) needs approval
+# before the RPC fires. A lying readOnlyHint can only skip approval for calls the operator was
+# already warned about, never widen access. Missing trust = full; unrecognized = untrusted (a
+# typo must never disable the gate). Classified at CALL time from DISCOVERY data: no schema
+# mutation, prompt cache intact.
 _server_trust_levels: Dict[str, str] = {}
 _tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
 
-_TRUST_FULL = "full"
-_TRUST_UNTRUSTED = "untrusted"
+_TRUST_FULL, _TRUST_UNTRUSTED = "full", "untrusted"
 
 
 def _bump_server_error(server_name: str) -> None:
@@ -485,23 +438,21 @@ def _reset_server_error(server_name: str) -> None:
     _server_breaker_opened_at.pop(server_name, None)
 
 
-# Raw server names opted into parallel tool calls. Raw identity matters: ``foo-bar`` and
-# ``foo_bar`` both sanitize to ``foo_bar`` but must not share policy.
+# Raw server names opted into parallel tool calls (``foo-bar``/``foo_bar`` sanitize alike but
+# must not share policy).
 _parallel_safe_servers: set = set()
-# registry tool name -> raw server name, captured at registration. The generated name is
-# lossy (punctuation -> ``_``), so never re-parse it.
+# registry tool name -> raw server name (the generated name is lossy; never re-parse it).
 _mcp_tool_server_names: Dict[str, str] = {}
 
-# Dedicated event loop running in a background daemon thread.
+# Dedicated event loop in a background daemon thread; _lock guards the loop handles, _servers,
+# the status maps and the PID ledgers.
 _mcp_loop: Optional[asyncio.AbstractEventLoop] = None
 _mcp_thread: Optional[threading.Thread] = None
-# Guards the loop handles, _servers, the status maps and the PID ledgers.
 _lock = threading.Lock()
 
 
 def _mcp_registry_scope() -> Optional[str]:
-    """Registry scope for MCP registrations: under a profile multiplexer each profile's MCP
-    tools live in its own registry overlay; single-profile processes stay global (None)."""
+    """Registry scope for MCP registrations: a profile overlay under a multiplexer, else None."""
     from agent.secret_scope import is_multiplex_active
     if not is_multiplex_active():
         return None
@@ -510,18 +461,15 @@ def _mcp_registry_scope() -> Optional[str]:
 
 
 def _server_registry_scope(name: str) -> Optional[str]:
-    """Scope owning server *name*'s tools: recorded at connect, else current. Teardown runs
-    on the MCP loop without the discovering profile's context, so the scope captured at
-    adoption into ``_servers`` is authoritative."""
+    """Scope owning *name*'s tools: the one captured at adoption (teardown runs on the MCP
+    loop without the discovering profile's context), else the current one."""
     if name in _server_scope_keys:
         return _server_scope_keys[name]
     return _mcp_registry_scope()
 
 
-# Cross-process MCP discovery guard: advisory file lock so gateway + CLI + TUI don't all
-# run discovery at once.
+# Cross-process discovery guard: advisory file lock so gateway + CLI + TUI don't all discover.
 _LOCK_UNAVAILABLE: Any = object()  # sentinel: locking broken/unavailable
 _MCP_DISCOVERY_LOCK_PATH: Optional[str] = None  # resolved lazily
 # Bounded wait when another process holds the lock.
-_MCP_DISCOVERY_LOCK_MAX_RETRIES: int = 240
-_MCP_DISCOVERY_LOCK_RETRY_DELAY_S: float = 0.5
+_MCP_DISCOVERY_LOCK_MAX_RETRIES, _MCP_DISCOVERY_LOCK_RETRY_DELAY_S = 240, 0.5
