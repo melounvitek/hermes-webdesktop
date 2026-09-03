@@ -9,45 +9,34 @@ state or prompting lives here.
 import contextvars
 import logging
 import os
-from typing import Optional
 from hermes_cli.config import cfg_get
 from utils import env_var_enabled, is_truthy_value
 
 logger = logging.getLogger("tools.approval")
 
 
+def _ctx(name: str, default: "str | None" = "") -> contextvars.ContextVar:
+    return contextvars.ContextVar(name, default=default)
+
+
 # Per-thread/per-task gateway session identity. Gateway runs agent turns
 # concurrently in executor threads, so a process-global env var is racy; the
 # env fallback stays for legacy single-threaded callers.
-_approval_session_key: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_session_key", default="",
-)
-
-_approval_turn_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_turn_id", default="",
-)
-
-_approval_tool_call_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_tool_call_id", default="",
-)
-
+_approval_session_key: contextvars.ContextVar[str] = _ctx("approval_session_key")
+_approval_turn_id: contextvars.ContextVar[str] = _ctx("approval_turn_id")
+_approval_tool_call_id: contextvars.ContextVar[str] = _ctx("approval_tool_call_id")
 # Hermes session id (observability identity, distinct from the gateway routing
 # session_key). Forwarded to approval hooks so observer plugins attach marks to
 # the REAL session scope — without it they fall back to a synthetic "default"
 # session whose scope never closes, so close-time exporters never ship them.
-_approval_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "approval_session_id", default="",
-)
-
+_approval_session_id: contextvars.ContextVar[str] = _ctx("approval_session_id")
 # Interactive-CLI flag. Concurrent ACP sessions share a ThreadPoolExecutor, so
 # mutating os.environ["HERMES_INTERACTIVE"] races: one session's `finally`
 # restore can clobber another's set mid-run, dropping it onto the
 # non-interactive auto-approve path so a dangerous command runs without the
 # approval callback firing (GHSA-96vc-wcxf-jjff). None = unset → fall back to
 # the env var for legacy single-threaded CLI callers.
-_hermes_interactive_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "hermes_interactive", default=None,
-)
+_hermes_interactive_ctx: contextvars.ContextVar[str | None] = _ctx("hermes_interactive", None)
 
 
 def set_hermes_interactive_context(interactive: bool) -> contextvars.Token:
@@ -82,9 +71,8 @@ def _fire_approval_hook(hook_name: str, **kwargs) -> None:
     try:
         kwargs.setdefault("turn_id", _approval_turn_id.get())
         kwargs.setdefault("tool_call_id", _approval_tool_call_id.get())
-        _session_id = _approval_session_id.get()
-        if _session_id:
-            kwargs.setdefault("session_id", _session_id)
+        if _approval_session_id.get():
+            kwargs.setdefault("session_id", _approval_session_id.get())
         invoke_hook(hook_name, **kwargs)
     except Exception as exc:
         # invoke_hook() swallows per-callback errors; reaching here means the
@@ -102,14 +90,12 @@ def reset_current_session_key(token: contextvars.Token[str]) -> None:
     _approval_session_key.reset(token)
 
 
+_Tokens = tuple[contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]]
+
+
 def set_current_observability_context(
-    *,
-    turn_id: str = "",
-    tool_call_id: str = "",
-    session_id: str = "",
-) -> tuple[
-    contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]
-]:
+    *, turn_id: str = "", tool_call_id: str = "", session_id: str = "",
+) -> _Tokens:
     """Bind active tool correlation IDs to approval hooks."""
     return (
         _approval_turn_id.set(turn_id or ""),
@@ -118,11 +104,7 @@ def set_current_observability_context(
     )
 
 
-def reset_current_observability_context(
-    tokens: tuple[
-        contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]
-    ],
-) -> None:
+def reset_current_observability_context(tokens: _Tokens) -> None:
     """Restore prior approval hook correlation IDs."""
     turn_token, tool_token, session_token = tokens
     _approval_session_id.reset(session_token)
@@ -139,43 +121,33 @@ def get_current_session_key(default: str = "default") -> str:
     return get_session_env("HERMES_SESSION_KEY", default)
 
 
-def _session_env_flag(name: str) -> bool:
-    """Truthy session-scoped env flag, contextvar-first so one cron/-q job cannot
-    taint unrelated gateway/API/TUI turns in the same process; process env is
-    the fallback for CLI tests and older entrypoints."""
+def _session_env(name: str) -> str:
+    """Session-scoped env value, contextvar-first so one cron/-q job cannot taint
+    unrelated gateway/API/TUI turns in the same process; process env is the
+    fallback for CLI tests and older entrypoints."""
     try:
         from gateway.session_context import get_session_env
-
-        return is_truthy_value(get_session_env(name, ""))
+        return get_session_env(name, "") or ""
     except Exception:
-        return env_var_enabled(name)
+        return os.getenv(name, "") or ""
 
 
 def _get_session_platform() -> str:
     """Return the current gateway platform from contextvars/env fallback."""
-    try:
-        from gateway.session_context import get_session_env
-
-        return get_session_env("HERMES_SESSION_PLATFORM", "") or ""
-    except Exception:
-        return os.getenv("HERMES_SESSION_PLATFORM", "") or ""
+    return _session_env("HERMES_SESSION_PLATFORM")
 
 
 def _is_cron_approval_context() -> bool:
     """True when the current approval decision is running inside cron."""
-    return _session_env_flag("HERMES_CRON_SESSION")
+    return is_truthy_value(_session_env("HERMES_CRON_SESSION"))
 
 
 #: Programmatic/unattended platforms: no human can answer a prompt and the
 #: adapter has no ``send_exec_approval`` / ``/approve`` surface. Governed by
 #: ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` —
 #: never an interactive round-trip that blocks for the full timeout with
-#: nobody to answer (#37284, #87509).
-_UNATTENDED_APPROVAL_PLATFORMS = frozenset({
-    "webhook",
-    "msgraph_webhook",
-    "api_server",
-})
+#: nobody to answer.
+_UNATTENDED_APPROVAL_PLATFORMS = frozenset({"webhook", "msgraph_webhook", "api_server"})
 
 
 def _is_unattended_platform_approval_context() -> bool:
@@ -184,15 +156,12 @@ def _is_unattended_platform_approval_context() -> bool:
 
 
 def _is_single_query_approval_context() -> bool:
-    """True for a single-query (-q) session.
-
-    ``hermes chat -q`` exports ``HERMES_INTERACTIVE=1`` (so sudo password
-    prompts work) but nobody is waiting to answer approvals; without this
-    marker the gate would wait the full timeout for a human who never comes,
-    then fail closed and push the agent toward workarounds (e.g. execute_code).
-    ``approvals.single_query_mode`` makes the path deterministic.
-    """
-    return _session_env_flag("HERMES_SINGLE_QUERY_SESSION")
+    """True for a single-query (-q) session: ``hermes chat -q`` exports
+    ``HERMES_INTERACTIVE=1`` (so sudo password prompts work) but nobody is waiting
+    to answer approvals; without this marker the gate would wait the full timeout,
+    fail closed and push the agent toward workarounds (e.g. execute_code).
+    ``approvals.single_query_mode`` makes the path deterministic."""
+    return is_truthy_value(_session_env("HERMES_SINGLE_QUERY_SESSION"))
 
 
 def _is_gateway_approval_context() -> bool:
@@ -200,19 +169,15 @@ def _is_gateway_approval_context() -> bool:
 
     Legacy integrations set HERMES_GATEWAY_SESSION; concurrent paths bind
     HERMES_SESSION_PLATFORM via contextvars. Cron is NEVER a gateway approval
-    context even when it originated from a platform (cron binds the platform
-    for delivery routing): falling through would submit a pending approval with
-    no listener and block the job indefinitely. Unattended platforms are
-    excluded for the same reason (#37284, #87509).
+    context even when it originated from a platform (cron binds the platform for
+    delivery routing): falling through would submit a pending approval with no
+    listener and block the job indefinitely. Unattended platforms are excluded
+    for the same reason.
     """
     from tools import approval as _a
-    if _a._is_cron_approval_context():
+    if _a._is_cron_approval_context() or _is_unattended_platform_approval_context():
         return False
-    if _is_unattended_platform_approval_context():
-        return False
-    if env_var_enabled("HERMES_GATEWAY_SESSION"):
-        return True
-    return bool(_get_session_platform())
+    return env_var_enabled("HERMES_GATEWAY_SESSION") or bool(_get_session_platform())
 
 
 def _resolve_cli_approval_callback(approval_callback=None):
@@ -226,12 +191,7 @@ def _resolve_cli_approval_callback(approval_callback=None):
         return None
 
 
-def _should_fall_through_to_cli_approval(
-    *,
-    is_cli: bool,
-    approval_callback,
-    notify_cb,
-) -> bool:
+def _should_fall_through_to_cli_approval(*, is_cli: bool, approval_callback, notify_cb) -> bool:
     """Prefer the CLI Dangerous Command panel over a silent pending approval.
 
     ``HERMES_EXEC_ASK`` (or a platform marker) can leak into an interactive CLI
@@ -242,6 +202,9 @@ def _should_fall_through_to_cli_approval(
     return bool(is_cli and approval_callback is not None and notify_cb is None)
 
 
+_VALID_MODES = ("manual", "smart", "off")
+
+
 def _normalize_approval_mode(mode) -> str:
     """Normalize approval mode values loaded from YAML/config.
 
@@ -249,22 +212,19 @@ def _normalize_approval_mode(mode) -> str:
     treat it as the intended string mode. Unknown strings (e.g. 'auto') warn and
     fall back to 'manual' instead of silently failing every mode check.
     """
-    _VALID_MODES = ("manual", "smart", "off")
     if isinstance(mode, bool):
         return "off" if mode is False else "manual"
     if isinstance(mode, str):
         normalized = mode.strip().lower()
-        if not normalized:
-            return "manual"
         if normalized in _VALID_MODES:
             return normalized
-        logger.warning(
-            "Unknown approvals.mode %r — defaulting to 'manual'. "
-            "Valid values: %s",
-            mode,
-            ", ".join(_VALID_MODES),
-        )
-        return "manual"
+        if normalized:
+            logger.warning(
+                "Unknown approvals.mode %r — defaulting to 'manual'. "
+                "Valid values: %s",
+                mode,
+                ", ".join(_VALID_MODES),
+            )
     return "manual"
 
 
@@ -276,8 +236,7 @@ def _get_approval_config() -> dict:
     """
     try:
         from hermes_cli.config import load_config_readonly
-        config = load_config_readonly()
-        return config.get("approvals", {}) or {}
+        return load_config_readonly().get("approvals", {}) or {}
     except Exception as e:
         logger.warning("Failed to load approval config: %s", e)
         return {}
@@ -287,17 +246,13 @@ def _get_approval_mode() -> str:
     """Return 'manual', 'smart', or 'off' (a hosted-room policy overrides config)."""
     from tools import approval as _a
     try:
-        from gateway.hosted_room_execution_policy import (
-            current_room_execution_policy,
-        )
-
+        from gateway.hosted_room_execution_policy import current_room_execution_policy
         room_policy = current_room_execution_policy()
         if room_policy is not None:
             return room_policy.approval_mode
     except Exception:
         pass
-    mode = _a._get_approval_config().get("mode", "manual")
-    return _a._normalize_approval_mode(mode)
+    return _a._normalize_approval_mode(_a._get_approval_config().get("mode", "manual"))
 
 
 def _get_approval_timeout() -> int:
@@ -306,8 +261,8 @@ def _get_approval_timeout() -> int:
 
     Clamped to ``agent.deadline.MAX_SAFE_TIMEOUT_S`` (~1 year): a larger value
     overflows ``time_t`` inside ``Thread.join`` / ``Lock.acquire`` on macOS and
-    crashed every parallel tool batch (#83220). Clamping at the single
-    config-read site keeps every consumer platform-safe at once.
+    crashed every parallel tool batch. Clamping at the single config-read site
+    keeps every consumer platform-safe at once.
     """
     from tools import approval as _a
     try:
@@ -316,7 +271,6 @@ def _get_approval_timeout() -> int:
         return 300
     try:
         from agent.deadline import MAX_SAFE_TIMEOUT_S
-
         safe_cap = int(MAX_SAFE_TIMEOUT_S)
     except Exception:
         # Fail CLOSED: the raw value would re-open the overflow this prevents.
@@ -336,11 +290,8 @@ def _binary_approval_mode(key: str) -> str:
     """Read ``approvals.<key>`` as 'approve' or 'deny' (default deny)."""
     try:
         from hermes_cli.config import load_config_readonly
-        config = load_config_readonly()
-        mode = str(cfg_get(config, "approvals", key, default="deny")).lower().strip()
-        if mode in {"approve", "off", "allow", "yes"}:
-            return "approve"
-        return "deny"
+        mode = str(cfg_get(load_config_readonly(), "approvals", key, default="deny")).lower().strip()
+        return "approve" if mode in {"approve", "off", "allow", "yes"} else "deny"
     except Exception:
         return "deny"
 
@@ -366,7 +317,7 @@ def _tirith_fail_open() -> bool:
     """``security.tirith_fail_open`` (default True; True when config is unreadable).
 
     False means the operator opted into fail-closed: an un-importable scanner
-    must not silently grant access (#20733).
+    must not silently grant access.
     """
     try:
         from hermes_cli.config import load_config_readonly as _load_cfg
@@ -382,9 +333,7 @@ def _get_approval_transport_config() -> tuple[str, str | None]:
     """Return explicitly selected transport and fail-closed fallback mode."""
     try:
         from hermes_cli.config import load_config_readonly
-
-        config = load_config_readonly() or {}
-        approval_config = ((config.get("security") or {}).get("approval") or {})
+        approval_config = ((load_config_readonly() or {}).get("security") or {}).get("approval") or {}
         selected = str(approval_config.get("transport") or "builtin").strip().lower()
         fallback = str(approval_config.get("transport_fallback") or "").strip().lower()
     except Exception:
