@@ -52,7 +52,6 @@ def _resolve_portal_base_url(override: Optional[str] = None) -> str:
         return override.rstrip("/")
     try:
         from hermes_cli.auth import DEFAULT_NOUS_PORTAL_URL, get_provider_auth_state
-
         base = (get_provider_auth_state("nous") or {}).get("portal_base_url")
         chosen = base if isinstance(base, str) and base.strip() else str(DEFAULT_NOUS_PORTAL_URL)
         return chosen.rstrip("/")
@@ -113,7 +112,6 @@ def _print_post_register_hint(
 ) -> None:
     """Print the success summary + the gate-engagement caveat."""
     from hermes_cli.config import get_env_path
-
     print(f"\n  Wrote to {get_env_path()}:\n    HERMES_DASHBOARD_OAUTH_CLIENT_ID={client_id}")
     if wrote_portal_url:
         print("    HERMES_DASHBOARD_PORTAL_URL=" + str(portal_base_url))
@@ -150,7 +148,6 @@ def _print_post_register_hint(
 def _env_value(key: str) -> Optional[str]:
     """Stored ``.env`` value, or ``None`` on any read failure."""
     from hermes_cli.config import get_env_value
-
     try:
         return get_env_value(key)
     except Exception:
@@ -160,7 +157,6 @@ def _env_value(key: str) -> Optional[str]:
 def _save_env_quietly(key: str, value: str) -> bool:
     """Persist *key*; False on failure (non-fatal: only client_id is load-bearing)."""
     from hermes_cli.config import save_env_value
-
     try:
         save_env_value(key, value)
         return True
@@ -188,7 +184,6 @@ def cmd_dashboard_register(args) -> None:
     """Register a self-hosted dashboard OAuth client with Nous Portal."""
     from hermes_cli.auth import AuthError, resolve_nous_access_token
     from hermes_cli.config import is_managed, save_env_value
-
     # Managed (Docker/hosted) installs get HERMES_DASHBOARD_OAUTH_CLIENT_ID stamped in by the
     # orchestrator; save_env_value refuses to write anyway.
     if is_managed():

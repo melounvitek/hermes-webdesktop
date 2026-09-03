@@ -1,5 +1,6 @@
 """``hermes debug`` debug tools for Hermes Agent."""
 
+import contextlib
 import datetime
 import gzip
 import io
@@ -11,6 +12,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from hermes_constants import get_hermes_home
@@ -242,7 +244,6 @@ class LogSnapshot:
 def _primary_log_path(log_name: str) -> Optional[Path]:
     """Where *log_name* would live if present. Doesn't check existence."""
     from hermes_cli.logs import LOG_FILES
-
     filename = LOG_FILES.get(log_name)
     return (get_hermes_home() / "logs" / filename) if filename else None
 
@@ -290,7 +291,6 @@ def _redact_log_text(text: str) -> str:
     if not text:
         return text
     from agent.redact import redact_sensitive_text
-
     text = redact_sensitive_text(text, force=True)
     return _EMAIL_ADDRESS_RE.sub("[REDACTED_EMAIL]", text)
 
@@ -398,19 +398,9 @@ def _capture_default_log_snapshots(
 def _capture_dump() -> str:
     """Run ``hermes dump`` and return its stdout as a string."""
     from hermes_cli.dump import run_dump
-
-    class _FakeArgs:
-        show_keys = False
-
-    old_stdout = sys.stdout
-    sys.stdout = capture = io.StringIO()
-    try:
-        run_dump(_FakeArgs())
-    except SystemExit:
-        pass
-    finally:
-        sys.stdout = old_stdout
-
+    capture = io.StringIO()
+    with contextlib.redirect_stdout(capture), contextlib.suppress(SystemExit):
+        run_dump(SimpleNamespace(show_keys=False))
     return capture.getvalue()
 
 
@@ -436,7 +426,6 @@ def collect_debug_report(
     # process, where the errors.log tail below carries the same escalation lines instead.
     try:
         from agent.agent_runtime_helpers import get_sanitizer_heal_stats
-
         heal_stats = get_sanitizer_heal_stats()
         if heal_stats:
             buf.write("\n\n--- transcript sanitiser heal counters ---\n")
@@ -451,9 +440,8 @@ def collect_debug_report(
 
     buf.write("\n")
     for name in _REPORT_LOGS:
-        buf.write(f"\n--- {name}.log (last {_tail_budget(name, log_lines)} lines) ---\n")
-        buf.write(log_snapshots[name].tail_text)
-        buf.write("\n")
+        buf.write(f"\n--- {name}.log (last {_tail_budget(name, log_lines)} lines) ---\n"
+                  f"{log_snapshots[name].tail_text}\n")
 
     return buf.getvalue()
 
@@ -638,7 +626,6 @@ _NOUS_PRIVACY_NOTICE = """\
 def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
     """``hermes debug share --nous``: gzip the same bundle into the Nous envelope → Nous-S3."""
     from hermes_cli.diagnostics_upload import share_to_nous
-
     print(_NOUS_PRIVACY_NOTICE)
     if not _confirm_upload(args):
         return
