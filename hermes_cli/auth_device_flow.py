@@ -101,8 +101,7 @@ def _print_loopback_ssh_hint(redirect_uri: str, *, docs_url: str | None = None) 
         parsed = urlparse(redirect_uri)
     except Exception:
         return
-    host = parsed.hostname or ""
-    port = parsed.port
+    host, port = parsed.hostname or "", parsed.port
     if host not in {"127.0.0.1", "::1", "localhost"} or not port:
         return
     divider = "-" * 60
@@ -168,8 +167,8 @@ def _request_device_code(
     response.raise_for_status()
     data = response.json()
     required_fields = [
-        "device_code", "user_code", "verification_uri",
-        "verification_uri_complete", "expires_in", "interval"]
+        "device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in",
+        "interval"]
     missing = [f for f in required_fields if f not in data]
     if missing:
         raise ValueError(f"Device code response missing fields: {', '.join(missing)}")
@@ -202,13 +201,12 @@ def _print_device_code_instructions(
     print(f"  2. If prompted, enter code: {user_code}")
     if not open_browser:
         return
-    if swallow_open_errors:
-        try:
-            opened = webbrowser.open(verification_url)
-        except Exception:
-            opened = False
-    else:
+    try:
         opened = webbrowser.open(verification_url)
+    except Exception:
+        if not swallow_open_errors:
+            raise
+        opened = False
     if opened:
         print("  (Opened browser for verification)")
     else:
@@ -273,10 +271,9 @@ def _poll_for_token(
                 "device_code": device_code}),
         expires_in=expires_in,
         poll_interval=max(1, min(poll_interval, DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS)),
-        validate_success=_validate,
+        validate_success=_validate, on_error=_error,
         on_non_json_error=lambda _r: RuntimeError(
             "Token endpoint returned a non-JSON error response"),
-        on_error=_error,
         # Enriched at the SOURCE so the CLI login and the dashboard/desktop poller
         # (web_server._nous_poller surfaces str(e) to the UI) both inherit the guidance.
         on_timeout=lambda: TimeoutError(_nous_device_auth_timeout_message(portal_base_url)))
