@@ -308,13 +308,12 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
 # --- handlers: (backend, action, args, **delivery) -> ActionResult (_dispatch applies the follow-up capture) or a
 #     final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
 
-def _xy(args: Dict[str, Any]) -> Tuple[Any, Any]:
+def _xy(args: Dict[str, Any]) -> Dict[str, Any]:
     coord = args.get("coordinate")
-    return (coord[0], coord[1]) if coord and coord[0] is not None else (None, None)
+    return dict(x=coord[0], y=coord[1]) if coord and coord[0] is not None else dict(x=None, y=None)
 
 def _do_click(backend, action, args, button=None, count=1, **delivery):
-    x, y = _xy(args)
-    return backend.click(element=args.get("element"), x=x, y=y, button=button or args.get("button") or "left",
+    return backend.click(element=args.get("element"), **_xy(args), button=button or args.get("button") or "left",
                          click_count=count, modifiers=args.get("modifiers"), **delivery)
 
 def _do_drag(backend, action, args, **delivery):
@@ -326,9 +325,8 @@ def _do_drag(backend, action, args, **delivery):
                         button=args.get("button", "left"), modifiers=args.get("modifiers"), **delivery)
 
 def _do_scroll(backend, action, args, **delivery):
-    x, y = _xy(args)
     return backend.scroll(direction=args.get("direction", "down"), amount=int(args.get("amount", 3)),
-                          element=args.get("element"), x=x, y=y, modifiers=args.get("modifiers"), **delivery)
+                          element=args.get("element"), **_xy(args), modifiers=args.get("modifiers"), **delivery)
 
 def _do_set_value(backend, action, args, **delivery):
     if args.get("value") is None:
@@ -386,8 +384,7 @@ _ACTIONS: Dict[str, _ActionSpec] = {
     "list_apps": _ActionSpec(partial(_do_listing, key="apps")),
     "list_windows": _ActionSpec(partial(_do_listing, key="windows")),
 }
-# Native input actions deliver to the backend's sticky target; `app=` on these calls is NOT a
-# targeting parameter — see the mismatch guard in _dispatch.
+# Native input actions deliver to the backend's sticky target; `app=` is NOT a targeting parameter (guard in _dispatch).
 _INPUT_ACTIONS = frozenset(a for a, s in _ACTIONS.items() if s.input)
 
 # Unknown actions are never aliased (no repairing bad model output), but the nearest real action is
@@ -555,18 +552,6 @@ def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
            f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum)"] if v.dims_omitted else []),
     ]
 
-def _multimodal_capture(v: SimpleNamespace, summary: str) -> Dict[str, Any]:
-    cap = v.cap  # envelope carrying the screenshot (not the elements array, so no truncation note)
-    return {
-        "_multimodal": True,
-        "content": [{"type": "text", "text": summary},
-                    {"type": "image_url", "image_url": {"url": f"data:{_capture_image_format(cap)[0]};base64,{cap.png_b64}"}}],
-        "text_summary": summary,
-        "meta": {"mode": cap.mode, "width": v.width, "height": v.height, "elements": v.total,
-                 "png_bytes": cap.png_bytes_len, **_present(screenshot_path=v.screenshot_path,
-                                                          elements_file=v.elements_file, bounds_scale=v.bounds_scale)},
-    }
-
 def _text_capture_payload(v: SimpleNamespace, summary: str, extra: Optional[Dict[str, Any]] = None) -> str:
     """JSON text payload shared by the AX, vision-unavailable and aux-vision branches. Key order is contract:
     fixed fields, ``extra`` branch markers, then set optionals."""
@@ -587,8 +572,16 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
     if v.has_image:
         # Hand the screenshot to auxiliary.vision (text-only result) when the main model may not consume images
         # natively; returning the multimodal envelope unconditionally tripped HTTP 404/400 at the provider.
-        if not _should_route_through_aux_vision():
-            return _multimodal_capture(v, summary)
+        if not _should_route_through_aux_vision():  # envelope carrying the screenshot (not the elements array, so no truncation note)
+            return {
+                "_multimodal": True,
+                "content": [{"type": "text", "text": summary},
+                            {"type": "image_url", "image_url": {"url": f"data:{_capture_image_format(cap)[0]};base64,{cap.png_b64}"}}],
+                "text_summary": summary,
+                "meta": {"mode": cap.mode, "width": v.width, "height": v.height, "elements": v.total,
+                         "png_bytes": cap.png_bytes_len, **_present(screenshot_path=v.screenshot_path,
+                                                                  elements_file=v.elements_file, bounds_scale=v.bounds_scale)},
+            }
         routed = _route_capture_through_aux_vision(
             cap, summary, visible_elements=v.visible, truncated_elements=v.truncated,
             elements_file=v.elements_file, screenshot_path=v.screenshot_path)
@@ -626,10 +619,7 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         resp["text_summary"] = prefix + resp["text_summary"]
         resp["action_result"] = payload
         return resp
-    data = {"capture": resp}  # text capture: merge the action payload in
-    with contextlib.suppress(TypeError, json.JSONDecodeError):
-        data = json.loads(resp)
-    return json.dumps({**data, **payload})
+    return json.dumps({**json.loads(resp), **payload})  # text capture: merge the action payload in
 
 
 # ── Cache files (screenshots, element spills, vision temps) ─────────────────
