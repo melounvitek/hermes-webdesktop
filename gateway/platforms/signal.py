@@ -874,16 +874,16 @@ class SignalAdapter(BasePlatformAdapter):
         skipped = {"download": 0, "missing": 0, "oversize": 0}
         for image_url, _alt_text in images:
             file_path, reason, detail = await self._resolve_image_path(image_url)
+            if not reason:
+                attachments.append(file_path)
+                continue
+            skipped[reason] += 1
             if reason == "download":
                 logger.warning("Signal: failed to download image %s: %s", image_url, detail)
             elif reason == "missing":
                 logger.warning("Signal: image file not found for %s", image_url)
-            elif reason == "oversize":
-                logger.warning("Signal: image too large (%d bytes), skipping %s", detail, image_url)
-            if reason:
-                skipped[reason] += 1
             else:
-                attachments.append(file_path)
+                logger.warning("Signal: image too large (%d bytes), skipping %s", detail, image_url)
         if not attachments:
             logger.error("Signal: no valid images in batch of %d (download=%d missing=%d oversize=%d)",
                          len(images), skipped["download"], skipped["missing"], skipped["oversize"])
@@ -891,9 +891,8 @@ class SignalAdapter(BasePlatformAdapter):
         logger.info("Signal send_multiple_images: %d/%d images valid, sending in chunks",
                     len(attachments), len(images))
         base_params = await self._with_target({"account": self.account, "message": ""}, chat_id)
-        att_batches = [
-            attachments[i:i + SIGNAL_MAX_ATTACHMENTS_PER_MSG]
-            for i in range(0, len(attachments), SIGNAL_MAX_ATTACHMENTS_PER_MSG)]
+        per = SIGNAL_MAX_ATTACHMENTS_PER_MSG
+        att_batches = [attachments[i:i + per] for i in range(0, len(attachments), per)]
         n_batches = len(att_batches)
         for idx, att_batch in enumerate(att_batches, start=1):
             n = len(att_batch)
@@ -962,11 +961,10 @@ class SignalAdapter(BasePlatformAdapter):
         file_path, reason, detail = await self._resolve_image_path(image_url)
         if reason == "download":
             logger.warning("Signal: failed to download image: %s", detail)
-            return SendResult(success=False, error=str(detail))
-        if reason == "missing":
-            return SendResult(success=False, error="Image file not found")
-        if reason == "oversize":
-            return SendResult(success=False, error=f"Image too large ({detail} bytes)")
+        if reason:
+            error = {"download": str(detail), "missing": "Image file not found",
+                     "oversize": f"Image too large ({detail} bytes)"}[reason]
+            return SendResult(success=False, error=error)
         return await self._send_file(chat_id, file_path, caption, "RPC send with attachment failed")
 
     async def _send_file(self, chat_id: str, file_path: str, caption: Optional[str], fail_error: str) -> SendResult:
