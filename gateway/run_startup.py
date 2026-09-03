@@ -141,7 +141,11 @@ class GatewayStartupMixin:
     ) -> set:
         """``asyncio.wait`` (which, unlike wait_for/gather+timeout, does NOT cancel on timeout) with
         the gate-release warning + late-failure callback every boot gate uses. Returns ``done``.
-        ``warn_fmt`` takes ``%.0fs`` (timeout) and optionally ``%d`` (pending count)."""
+        ``warn_fmt`` takes ``%.0fs`` (timeout) and optionally ``%d`` (pending count). A non-positive
+        ``timeout`` opts out of the bound ("wait forever")."""
+        if timeout <= 0:
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return set(tasks)
         done, pending = await asyncio.wait(tasks, timeout=timeout)
         if pending:
             args = (timeout, len(pending)) if warn_fmt.count("%") > 1 else (timeout,)
@@ -164,22 +168,15 @@ class GatewayStartupMixin:
         from gateway.run import _startup_restore_drain_timeout_secs
         tasks = list(getattr(self, "_startup_restore_tasks", []) or [])
         if tasks:
-            timeout = _startup_restore_drain_timeout_secs()
-            if timeout > 0:
-                # Tasks that outlive the gate get a late-failure callback: their normal done-callback
-                # only discards them from _background_tasks, so a LATER failure would be swallowed.
-                done = await self._wait_bounded_or_release(
-                    set(tasks), timeout,
-                    "Startup-restore gate released after %.0fs with %d boot auto-resume turn(s) "
-                    "still running; draining inbound queue now (resume slots already claimed, so no "
-                    "duplicate agents). Slow turn(s) continue in the background.",
-                    "background startup auto-resume task failed after gate release",
-                    level=logging.DEBUG,
-                )
-            else:
-                # Non-positive timeout => opt out of the bound ("wait forever").
-                await asyncio.gather(*tasks, return_exceptions=True)
-                done = set(tasks)
+            # Tasks that outlive the gate get a late-failure callback: their normal done-callback
+            # only discards them from _background_tasks, so a LATER failure would be swallowed.
+            done = await self._wait_bounded_or_release(
+                set(tasks), _startup_restore_drain_timeout_secs(),
+                "Startup-restore gate released after %.0fs with %d boot auto-resume turn(s) "
+                "still running; draining inbound queue now (resume slots already claimed, so no "
+                "duplicate agents). Slow turn(s) continue in the background.",
+                "background startup auto-resume task failed after gate release", level=logging.DEBUG,
+            )
             report = self._late_failure_callback("startup auto-resume task failed", level=logging.DEBUG)
             for task in done:
                 report(task)
@@ -229,16 +226,16 @@ class GatewayStartupMixin:
 
         boot_task = asyncio.create_task(_boot_sends())
         timeout = _startup_restore_drain_timeout_secs()
-        if timeout > 0:
-            await self._wait_bounded_or_release(
-                {boot_task}, timeout,
-                "Boot-path sends still running after %.0fs; releasing inbound gate so other "
-                "platforms are not frozen. Restart notification / obligation redelivery continue "
-                "in the background.",
-                "background boot-path send failed after gate release: see traceback", track=True,
-            )
-        else:
-            await boot_task
+        if timeout <= 0:
+            await boot_task  # unbounded: a failing send surfaces here (unlike the gate path)
+            return
+        await self._wait_bounded_or_release(
+            {boot_task}, timeout,
+            "Boot-path sends still running after %.0fs; releasing inbound gate so other "
+            "platforms are not frozen. Restart notification / obligation redelivery continue "
+            "in the background.",
+            "background boot-path send failed after gate release: see traceback", track=True,
+        )
 
     async def _clear_resume_pending_for_claimed_obligations(
         self, claimed: list, *, require_success: bool = False

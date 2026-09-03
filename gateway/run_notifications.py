@@ -610,14 +610,12 @@ class GatewayNotificationsMixin:
 
             platform = Platform(platform_str)
             adapter = self.adapters.get(platform)
-
-            if not adapter and chat_id:
+            if chat_id and not adapter:
                 # The update finished, but the target platform has not reconnected yet (common right
                 # after the restart that `hermes update` triggers). A definitive skip would delete the
                 # markers and silently lose the notification; preserve them for a later retry.
                 return _defer("Update notification deferred: %s adapter not connected yet", platform_str)
-
-            if adapter and chat_id:
+            if chat_id:
                 metadata = self._pending_marker_metadata(platform, chat_id, pending, adapter)
                 from tools.ansi_strip import strip_ansi
                 output = strip_ansi(output).strip()
