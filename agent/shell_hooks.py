@@ -52,9 +52,9 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # kwargs promoted to top-level payload keys; everything else lands under ``extra``.
 _TOP_LEVEL_PAYLOAD_KEYS = {"tool_name", "args", "session_id", "parent_session_id"}
 
-# (home, event, matcher, command) tuples wired to the plugin manager in this process. Matcher is in
-# the key (one script may register per-tool under one event); home is in the key so multiplexed-
-# gateway profiles (each with their own plugin manager) can register identical triples.
+# (home, event, matcher, command) wired to the plugin manager in this process. Matcher is in the key
+# (one script may register per-tool under one event); home so multiplexed-gateway profiles can register
+# identical triples.
 _registered: Set[Tuple[str, str, Optional[str], str]] = set()
 _registered_lock = threading.Lock()
 # Non-POSIX fallback for allowlist read-modify-write. Must be separate from _registered_lock, which
@@ -67,8 +67,7 @@ def _home_key() -> str:
 
 
 def _forget_home_registrations(registry: Set[tuple], lock: threading.Lock) -> None:
-    """Drop the current home's idempotence keys only (shared with outbound webhooks): a force-reload
-    in profile A must never drop profile B's live registration."""
+    """Drop the current home's keys only (shared with outbound webhooks): profile A's reload must not drop B."""
     home_key = _home_key()
     with lock:
         registry.difference_update({k for k in registry if k[0] == home_key})
@@ -212,11 +211,8 @@ def iter_configured_hooks(cfg: Optional[Dict[str, Any]]) -> List[ShellHookSpec]:
 
 
 def re_register_config_hooks() -> None:
-    """Re-register config hooks after a plugin force-reload cleared the manager's hooks.
-
-    Only the current home's idempotence keys are cleared (profile A's reload never drops profile
-    B); allowlisted commands stay allowlisted, so this never re-prompts.
-    """
+    """Re-register config hooks after a plugin force-reload cleared the manager's hooks. Only the
+    current home's keys are cleared (profile A's reload never drops profile B); never re-prompts."""
     _forget_home_registrations(_registered, _registered_lock)
     from hermes_cli.config import load_config
 
@@ -405,13 +401,10 @@ def _fail_closed_block(spec: ShellHookSpec, reason: str) -> Dict[str, Any]:
 
 
 def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Turn a ``_spawn`` diagnostic dict into the hook's contribution (shared by the live callback
-    and ``run_once``).
-
-    Spawn error/timeout fail open unless fail_closed; exit 2 on a blocking event blocks (message
-    from stdout JSON, then stderr, then default); other non-zero exits warn then parse stdout;
-    unparseable stdout on a fail_closed hook blocks.
-    """
+    """``_spawn`` diagnostic dict → the hook's contribution (shared by the live callback and
+    ``run_once``). Spawn error/timeout fail open unless fail_closed; exit 2 on a blocking event blocks
+    (message from stdout JSON, then stderr, then default); other non-zero exits warn then parse
+    stdout; unparseable stdout on a fail_closed hook blocks."""
     blocking_event = spec.event in _BLOCKING_EVENTS
     fail_closed = spec.fail_closed and blocking_event
 

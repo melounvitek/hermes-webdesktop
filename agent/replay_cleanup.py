@@ -51,14 +51,9 @@ def _orphan_recovery(name: str, unknown_text: str, none_text: str) -> tuple:
 
 
 def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Strip interrupted assistant→tool sequences from replay history.
-
-    The interrupted block is not necessarily the final tail (a queued real user message may
-    follow it), so every contiguous assistant(tool_calls)+tool-result block containing an
-    interrupted result is handled; successful sequences stay intact. Read-only blocks are
-    dropped; blocks with a side-effecting call are KEPT with the interrupted results rewritten
-    as orphan-recovery notices, since the effect may already have happened.
-    """
+    """Strip interrupted assistant→tool blocks anywhere in replay history (a queued user message may
+    follow one). Read-only blocks are dropped; blocks with a side-effecting call are KEPT with the
+    interrupted results rewritten as orphan-recovery notices, since the effect may have happened."""
     if not agent_history:
         return agent_history
 
@@ -110,14 +105,10 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
 
 
 def strip_dangling_tool_call_tail(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Strip a trailing ``assistant(tool_calls)`` block left with NO answers.
-
-    A tool call that kills the gateway process itself (``docker restart``, ``hermes gateway
-    restart``) is SIGKILLed mid-call, before any tool result or the orderly shutdown rewind; the
-    persisted tail has zero matching ``tool`` rows, which ``strip_interrupted_tool_tails`` cannot
-    detect. Only acts when the tail has NO tool answers — a partially answered block still
-    resumes. Read-only tails are dropped; side-effecting ones get synthetic UNKNOWN-effect results.
-    """
+    """Strip a trailing ``assistant(tool_calls)`` with NO answers — a call that killed the gateway
+    itself (``docker restart``) left zero ``tool`` rows, which ``strip_interrupted_tool_tails`` cannot
+    detect. A partially answered block still resumes. Read-only tails are dropped; side-effecting
+    ones get synthetic UNKNOWN-effect results."""
     if not agent_history:
         return agent_history
 
@@ -197,14 +188,9 @@ def strip_stale_dangerous_confirmations(
     now: float,
     expiry_seconds: float = _DANGEROUS_CONFIRMATION_EXPIRY_SECONDS,
 ) -> List[Dict[str, Any]]:
-    """Expire stale dangerous-confirmation text in user messages.
-
-    If a host restart killed the gateway before the tool result was written, the user's
-    confirmation phrase survives in the transcript; a casual "are you there?" minutes later can
-    read to the model as a fresh re-confirmation. Expired confirmations are REDACTED IN PLACE.
-    Messages without a timestamp (legacy transcripts, test scaffolding) and confirmations still
-    inside the expiry window are left untouched.
-    """
+    """Redact IN PLACE dangerous-confirmation text older than ``expiry_seconds`` in user messages: a
+    confirmation surviving a restart can read as a fresh re-confirmation minutes later. Messages
+    without a timestamp (legacy transcripts, test scaffolding) are left untouched."""
     if not agent_history:
         return agent_history
 

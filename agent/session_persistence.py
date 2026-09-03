@@ -59,11 +59,8 @@ def _is_ephemeral_scaffolding(msg: Any) -> bool:
 
 
 def _safe_session_filename_component(session_id: str) -> str:
-    """Path-safe filename component for a (possibly untrusted ``X-Hermes-Session-Id``) session ID.
-
-    Collapses non ``[A-Za-z0-9_-]`` chars to ``_``, caps length, and appends a short content hash
-    whenever sanitization changed the string so distinct IDs cannot collide.
-    """
+    """Path-safe filename component for a (possibly untrusted ``X-Hermes-Session-Id``) session ID:
+    non ``[A-Za-z0-9_-]`` → ``_``, capped, plus a content hash when changed so distinct IDs cannot collide."""
     raw = str(session_id or "").strip()
     sanitized = re.sub(r"[^\w-]", "_", raw).strip("._")
     sanitized = sanitized[:96] or "session"
@@ -74,12 +71,9 @@ def _safe_session_filename_component(session_id: str) -> str:
 
 
 def _override_replaces_content(msg: Dict, content: Any, override: Any) -> bool:
-    """Whether the persist user-message override may replace ``content``.
-
-    A plain-text override must not replace native image/audio blocks (a list override is the clean
-    multimodal payload and does). Preflight compaction may re-anchor the index at a message MERGED
-    with the compaction summary — overwriting it would drop the summary from the durable transcript.
-    """
+    """Whether the persist user-message override may replace ``content``: a plain-text override must
+    not replace native image/audio blocks (a list override is the clean multimodal payload and does),
+    and never a message MERGED with a compaction summary (overwriting would drop the summary)."""
     return (
         override is not None
         and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
@@ -88,8 +82,8 @@ def _override_replaces_content(msg: Dict, content: Any, override: Any) -> bool:
 
 
 def _summary_display_kind(msg: Dict) -> Any:
-    """Standalone reference handoffs are always hidden so they never occupy the active user slot in
-    retry/undo dispatch; merge-into-tail carriers keep their prior visibility."""
+    """Standalone handoffs are hidden so they never occupy the active user slot in retry/undo
+    dispatch; merge-into-tail carriers keep their prior visibility."""
     if (
         msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
         and user_originated_turn_view(msg) is None
@@ -103,8 +97,7 @@ def _summary_display_kind(msg: Dict) -> Any:
 
 
 def _durable_content(content: Any) -> Any:
-    """Text-only projection for the DB: multimodal envelopes become their summary, OpenAI-style part
-    lists keep text and replace images with ``[screenshot]`` (base64 bloats the DB)."""
+    """Text-only DB projection: multimodal envelopes → summary; part lists keep text, images → ``[screenshot]``."""
     if _is_multimodal_tool_result(content):
         return _multimodal_text_summary(content)
     if isinstance(content, list):
@@ -132,8 +125,8 @@ def _tool_calls_data(msg: Dict) -> Any:
 
 
 def _db_flush_seed_ids(agent) -> set:
-    """One-shot ``_flushed_db_message_ids`` seed, honoured only for the same session after a
-    non-empty flush; translated to markers by the scan and cleared afterwards."""
+    """One-shot ``_flushed_db_message_ids`` seed (same session, after a non-empty flush); the scan
+    translates it to markers and the flush clears it."""
     current_session_id = getattr(agent, "session_id", None)
     seed_ids = None
     if getattr(agent, "_flushed_db_message_session_id", None) == current_session_id and agent._last_flushed_db_idx != 0:
@@ -143,8 +136,7 @@ def _db_flush_seed_ids(agent) -> set:
 
 
 def _db_flush_scan_start(agent, messages: List[Dict]) -> int:
-    """Bounded scan: skip the identity-matched, still-marked prefix of the previous flush's
-    snapshot — every message in it already got its final disposition."""
+    """Skip the identity-matched, still-marked prefix of the previous flush's snapshot."""
     scan_start = 0
     prev_prefix = getattr(agent, "_db_flush_scan_prefix", None)
     if isinstance(prev_prefix, list):
@@ -231,8 +223,7 @@ def _db_flush_collect(agent, messages: List[Dict], conversation_history: Optiona
 
 
 def _db_flush_write(agent, batch_rows: List[Dict[str, Any]], batch_msgs: List[Dict]) -> None:
-    """One transaction for the turn's new rows; on failure no rows land and no markers are
-    stamped, so the next flush re-writes the tail."""
+    """One transaction for the turn's new rows: on failure nothing lands and no markers are stamped."""
     if not batch_rows:
         return
     agent._session_db.append_messages_batch(
@@ -246,11 +237,8 @@ def _db_flush_write(agent, batch_rows: List[Dict[str, Any]], batch_msgs: List[Di
 
 
 def _db_flush_adopt_compression_tip(agent) -> bool:
-    """Adopt the live continuation of a session closed by compression, if there is one.
-
-    ``get_compression_tip`` returning the same id means no continuation exists; a tip whose row
-    is missing or already ended is not adopted either.
-    """
+    """Adopt the live continuation of a session closed by compression. Same-id tip = no continuation;
+    a tip whose row is missing or already ended is not adopted either."""
     old_id = agent.session_id
     try:
         tip = agent._session_db.get_compression_tip(old_id)
@@ -313,11 +301,8 @@ class SessionPersistenceMixin:
     """Session DB flush, session log and trajectory persistence (see module docstring)."""
 
     def _apply_persist_user_message_override(self, messages: List[Dict]) -> None:
-        """Rewrite the current-turn user message in place before persistence/return.
-
-        Some paths send an API-only user-message variant that must not leak into transcripts or
-        resumed history; mutating the live list keeps persistence and returned history clean.
-        """
+        """Rewrite the current-turn user message in place: some paths send an API-only variant that
+        must not leak into transcripts or resumed history."""
         idx = getattr(self, "_persist_user_message_idx", None)
         override = getattr(self, "_persist_user_message_override", None)
         timestamp = getattr(self, "_persist_user_message_timestamp", None)
@@ -336,13 +321,9 @@ class SessionPersistenceMixin:
             msg["platform_message_id"] = platform_id
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
-        """Save session state to both JSON log and SQLite on any exit path.
-
-        Trailing empty-response scaffolding is dropped from the live list. The persist user-message
-        override is NOT applied here — ``_flush_messages_to_session_db`` writes it to the DB row only.
-        """
-        # Close and turn-start persistence can run on separate CLI threads, so scaffolding removal
-        # plus the marker test-and-append must be one critical section.
+        """Save session state to both JSON log and SQLite on any exit path. Trailing empty-response
+        scaffolding is dropped from the live list; the persist override is applied to the DB row only."""
+        # Close and turn-start persistence can run on separate CLI threads: one critical section.
         from agent.agent_runtime_helpers import note_turn_persisted
 
         with getattr(self, "_session_persist_lock", None) or nullcontext():
@@ -356,12 +337,9 @@ class SessionPersistenceMixin:
             note_turn_persisted(self)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
-        """Remove private empty-response retry/failure scaffolding from transcript tails.
-
-        Also rewinds a trailing tool-result / assistant(tool_calls) pair the failed iteration left
-        hanging; otherwise the next user turn lands as ``...tool, user`` and providers return empty
-        content forever. The rewind only runs when scaffolding was actually present.
-        """
+        """Remove empty-response retry scaffolding from the tail, then (only if any was present) rewind
+        the tool-result / assistant(tool_calls) pair the failed iteration left hanging — otherwise the
+        next user turn lands as ``...tool, user`` and providers return empty content forever."""
         def _tail(*keys: str) -> bool:
             return bool(messages) and isinstance(messages[-1], dict) and any(messages[-1].get(k) for k in keys)
 
@@ -390,15 +368,12 @@ class SessionPersistenceMixin:
         conversation_history: Optional[List[Dict]] = None,
         _adoption_budget: int = 1,
     ):
-        """Persist any un-flushed messages to the SQLite session store.
-
-        Dedup is an intrinsic ``_DB_PERSISTED_MARKER`` on each written dict — not positional slices
-        (drift after sequence repair) nor a retained ``id(msg)`` set (address reuse). The persist
-        user-message override is applied ONLY to the written row, never to the live dict. A
-        compression-closed session adopts its live tip and retries exactly once.
-        """
-        # Persistence-isolated agents (background review fork) share the parent's session_id for
-        # cache warmth; a write here would land the curator's turn in the user's real history.
+        """Persist un-flushed messages to SQLite. Dedup is the intrinsic ``_DB_PERSISTED_MARKER`` on
+        each written dict — not positional slices (drift after sequence repair) nor an ``id(msg)`` set
+        (address reuse). The persist override touches the written row only. A compression-closed
+        session adopts its live tip and retries exactly once."""
+        # Persistence-isolated agents (background review fork) share the parent's session_id for cache
+        # warmth; a write here would land the curator's turn in the user's real history.
         if getattr(self, "_persist_disabled", False):
             return None
         if not self._session_db:
@@ -423,8 +398,7 @@ class SessionPersistenceMixin:
             return False
 
     def _get_messages_up_to_last_assistant(self, messages: List[Dict]) -> List[Dict]:
-        """Messages up to (not including) the last assistant turn — the rollback point when the final
-        assistant message is incomplete or malformed. All messages when there is none."""
+        """Messages before the last assistant turn (rollback point for a malformed final answer); all if none."""
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") == "assistant":
                 return messages[:i]
@@ -457,8 +431,7 @@ class SessionPersistenceMixin:
 
     @staticmethod
     def _redact_message_content(content):
-        """Redact secrets in str or list-of-parts content; only text fields are touched.
-        No-op when ``HERMES_REDACT_SECRETS`` disables redaction."""
+        """Redact secrets in str or list-of-parts content (text fields only; honours HERMES_REDACT_SECRETS)."""
         if isinstance(content, str):
             return redact_sensitive_text(content)
         if not isinstance(content, list):
@@ -474,8 +447,7 @@ class SessionPersistenceMixin:
         return redacted
 
     def _session_log_entry(self, msg: Dict[str, Any]) -> Dict[str, Any]:
-        """Copy of ``msg`` with scratchpad tags normalised and credentials redacted
-        (defence-in-depth; respects HERMES_REDACT_SECRETS)."""
+        """Copy of ``msg`` with scratchpad tags normalised and credentials redacted (respects HERMES_REDACT_SECRETS)."""
         if msg.get("role") == "assistant" and msg.get("content"):
             msg = dict(msg)
             msg["content"] = self._clean_session_content(msg["content"])
@@ -485,12 +457,9 @@ class SessionPersistenceMixin:
         return msg
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
-        """Optional per-session JSON snapshot (``sessions.write_json_snapshots``, default False).
-
-        state.db is canonical; this exists for external tooling reading ``session_{sid}.json``.
-        Rewrites the full list after every persistence point, never overwriting a larger log with
-        fewer messages (resumed agent with partial history).
-        """
+        """Optional per-session JSON snapshot (``sessions.write_json_snapshots``, default False) for
+        external tooling; state.db is canonical. Rewrites the full list after every persistence point,
+        never overwriting a larger log with fewer messages (resumed agent with partial history)."""
         if not getattr(self, "_session_json_enabled", False):
             return
         messages = messages or self._session_messages

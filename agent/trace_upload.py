@@ -171,13 +171,9 @@ def build_trace_jsonl(
     cwd: str = "",
     redact: bool = True,
 ) -> str:
-    """Render Hermes conversation messages as Claude Code JSONL text.
-
-    Each non-system message becomes one line: ``user``/``tool`` -> ``{"type": "user"}``,
-    ``assistant`` -> ``{"type": "assistant"}`` with text + ``tool_use`` blocks. Tool results ride
-    on user turns as a ``tool_result`` block keyed by ``tool_call_id``; turns link via ``uuid`` /
-    ``parentUuid``.
-    """
+    """Render messages as Claude Code JSONL: one line per non-system message (``user``/``tool`` ->
+    type user, ``assistant`` -> type assistant with text + ``tool_use`` blocks; tool results ride
+    on user turns as ``tool_result`` keyed by ``tool_call_id``; turns link via ``parentUuid``)."""
     lines: List[str] = []
     parent: Optional[str] = None
     base_ts = _now_iso()

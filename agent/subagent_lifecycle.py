@@ -226,12 +226,9 @@ def _handle_is_well_formed(handle: Any) -> bool:
 
 
 class SubagentLifecycleService:
-    """Stable public service returned by :attr:`PluginContext.subagent_lifecycle`.
-
-    Running children are in-process only. Completed results remain available
-    until process exit; ``reconnect`` reports that a serialized handle cannot
-    reconnect after a restart instead of launching work again.
-    """
+    """Stable public service returned by :attr:`PluginContext.subagent_lifecycle`. Children run
+    in-process only; completed results stay until process exit, and ``reconnect`` reports that a
+    serialized handle cannot reconnect after a restart instead of launching work again."""
 
     def __init__(self, parent_agent_resolver: Callable[[], Any]) -> None:
         self._parent_agent_resolver = parent_agent_resolver
