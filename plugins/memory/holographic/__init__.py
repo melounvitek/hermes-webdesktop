@@ -27,13 +27,10 @@ FACT_STORE_SCHEMA = {
     "description": (
         "Deep structured memory with algebraic reasoning. Use alongside the memory tool — memory for always-on "
         "context, fact_store for deep recall and compositional queries.\n\nACTIONS (simple → powerful):\n"
-        "• add — Store a fact the user would expect you to remember.\n"
-        "• search — Keyword lookup ('editor config', 'deploy process').\n"
-        "• probe — Entity recall: ALL facts about a person/thing.\n"
-        "• related — What connects to an entity? Structural adjacency.\n"
+        "• add — Store a fact the user would expect you to remember.\n• search — Keyword lookup ('editor config', 'deploy process').\n"
+        "• probe — Entity recall: ALL facts about a person/thing.\n• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
-        "• contradict — Memory hygiene: find facts making conflicting claims.\n"
-        "• update/remove/list — CRUD operations.\n\n"
+        "• contradict — Memory hygiene: find facts making conflicting claims.\n• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
     "parameters": {
@@ -94,12 +91,9 @@ def _limit(args: dict) -> int:
 
 
 def _tool_handler(actions: dict):
-    """Return a bound-style handler dispatching on args["action"] over ``actions`` (unknown -> tool_error)."""
-    def handle(self, args: dict) -> str:
-        action = args["action"]
-        handler = actions.get(action)
-        return handler(self, args) if handler is not None else tool_error(f"Unknown action: {action}")
-    return handle
+    """(self, args) handler dispatching on args["action"] over ``actions``; unknown action -> tool_error."""
+    return lambda self, args: (actions[args["action"]](self, args) if args["action"] in actions
+                               else tool_error(f"Unknown action: {args['action']}"))
 
 
 class HolographicMemoryProvider(MemoryProvider):
@@ -240,25 +234,22 @@ class HolographicMemoryProvider(MemoryProvider):
         "fact_feedback": lambda self, a: json.dumps(self._store.record_feedback(int(a["fact_id"]), helpful=a["action"] == "helpful")),
     }
 
-    @staticmethod
-    def _harvestable_text(msg: dict):
-        """User text eligible for extraction, or None. Compaction handoff summaries arrive as role="user" and match
-        the decision patterns; never store the compactor's own output as a fact. A merge-into-tail row holds genuine
-        prior user text BEFORE _MERGED_SUMMARY_DELIMITER (after the header) and the summary AFTER — harvest only that."""
-        from agent.context_compressor import _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER, is_compaction_summary_message  # heavy; lazy
-        content, pre = msg.get("content", ""), ""
-        if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content:
-            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0].removeprefix(_MERGED_PRIOR_CONTEXT_HEADER).strip()
-        if pre:
-            content = pre
-        elif is_compaction_summary_message(msg):
-            return None
-        return content if isinstance(content, str) and len(content) >= 10 else None
-
     def _auto_extract_facts(self, messages: list) -> None:
+        # Compaction handoff summaries arrive as role="user" and match the decision patterns; never store the
+        # compactor's own output as a fact. A merge-into-tail row holds genuine prior user text BEFORE
+        # _MERGED_SUMMARY_DELIMITER (after the header) and the summary AFTER it — harvest only that segment.
+        from agent.context_compressor import _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER, is_compaction_summary_message  # heavy; lazy
         extracted = 0
-        texts = filter(None, (self._harvestable_text(m) for m in messages if m.get("role") == "user"))
-        for content in texts:
+        for msg in messages:
+            content = msg.get("content", "") if msg.get("role") == "user" else None
+            pre = content.split(_MERGED_SUMMARY_DELIMITER, 1)[0].removeprefix(_MERGED_PRIOR_CONTEXT_HEADER).strip() \
+                if isinstance(content, str) and _MERGED_SUMMARY_DELIMITER in content else ""
+            if pre:
+                content = pre
+            elif content is None or is_compaction_summary_message(msg):
+                continue
+            if not isinstance(content, str) or len(content) < 10:
+                continue
             for patterns, category in _EXTRACT_CATEGORIES:
                 if any(p.search(content) for p in patterns):
                     try:
@@ -268,7 +259,6 @@ class HolographicMemoryProvider(MemoryProvider):
                         pass
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
-
 
 def register(ctx) -> None:
     """Register the holographic memory provider with the plugin system."""

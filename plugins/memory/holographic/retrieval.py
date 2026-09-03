@@ -50,8 +50,8 @@ class FactRetriever:
         return hrr.bytes_to_phases(blob, dim=self.hrr_dim)
 
     def search(self, query: str, category: str | None = None, min_trust: float = 0.3, limit: int = 10) -> list[dict]:
-        """Hybrid search: FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting →
-        optional temporal decay 0.5^(age_days / half_life). Returns fact dicts with 'score', sorted desc."""
+        """FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting → optional temporal decay
+        0.5^(age_days / half_life). Returns fact dicts with 'score', sorted desc."""
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
         query_tokens = self._tokenize(query)
         # Query vector is loop-invariant; encode lazily on the first candidate that carries an HRR vector
@@ -74,18 +74,14 @@ class FactRetriever:
             fact.pop("hrr_vector", None)  # callers expect JSON-serializable dicts
         return results
 
-    def _vector_query(self, fallback: str, category: str | None, limit: int, make_sim: Callable[[], Callable]) -> list[dict]:
-        """Rank every fact vector (optionally per category) with the sim fn built by make_sim(); FTS5 fallback
-        when no vectors exist. make_sim runs after the rows check so role atoms are encoded once, never for fallback."""
+    def _vector_query(self, fallback: str, category: str | None, limit: int, sim_fn: Callable) -> list[dict]:
+        """Rank every fact vector (optionally per category) by sim_fn; FTS5 fallback when no vectors exist."""
         rows = self._vector_rows(category)
-        if not rows:
-            return self.search(fallback, category=category, limit=limit)
-        return self._rank_by_vector(rows, make_sim(), limit)
+        return self._rank_by_vector(rows, sim_fn, limit) if rows else self.search(fallback, category=category, limit=limit)
 
     def probe(self, entity: str, category: str | None = None, limit: int = 10) -> list[dict]:
-        """Compositional entity query: unbind bind(entity, ROLE_ENTITY) from the category bank
-        (or each fact vector) to find facts where the entity plays a structural role.
-        Not keyword search. Falls back to FTS5 without numpy."""
+        """Compositional entity query: unbind bind(entity, ROLE_ENTITY) from the category bank (or each fact vector)
+        to find facts where the entity plays a structural role. Not keyword search. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
         probe_key = hrr.bind(self._atom(entity.lower()), self._atom(_ROLE_ENTITY))
@@ -94,47 +90,35 @@ class FactRetriever:
             if bank_row:
                 extracted = hrr.unbind(self._phases(bank_row["vector"]), probe_key)
                 return self._rank_by_vector(self._vector_rows(category), lambda _f, fact_vec: hrr.similarity(extracted, fact_vec), limit)
-
-        def make_sim():
-            role_content = self._atom(_ROLE_CONTENT)
-            # Does unbinding the probe key leave the fact's content signal?
-            return lambda fact, fact_vec: hrr.similarity(
-                hrr.unbind(fact_vec, probe_key), hrr.bind(hrr.encode_text(fact["content"], self.hrr_dim), role_content))
-
-        return self._vector_query(entity, category, limit, make_sim)
+        role_content = self._atom(_ROLE_CONTENT)  # loop-invariant: encode once, not per row
+        # Does unbinding the probe key leave the fact's content signal?
+        return self._vector_query(entity, category, limit, lambda fact, fact_vec: hrr.similarity(
+            hrr.unbind(fact_vec, probe_key), hrr.bind(hrr.encode_text(fact["content"], self.hrr_dim), role_content)))
 
     def related(self, entity: str, category: str | None = None, limit: int = 10) -> list[dict]:
-        """Facts structurally connected to an entity (shared context), not just facts
-        *about* it as in probe. Falls back to FTS5 without numpy."""
+        """Facts structurally connected to an entity (shared context), not just facts *about* it as in probe.
+        Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
         entity_vec = self._atom(entity.lower())  # bare atom, not role-bound: ANY structural match
-
-        def make_sim():
-            roles = (self._atom(_ROLE_ENTITY), self._atom(_ROLE_CONTENT))
-            # A residual similar to ANY role vector means the entity plays a structural role.
-            return lambda _f, fact_vec: max(hrr.similarity(hrr.unbind(fact_vec, entity_vec), role) for role in roles)
-
-        return self._vector_query(entity, category, limit, make_sim)
+        roles = (self._atom(_ROLE_ENTITY), self._atom(_ROLE_CONTENT))  # loop-invariant: encode once
+        # A residual similar to ANY role vector means the entity plays a structural role in the fact.
+        return self._vector_query(entity, category, limit, lambda _f, fact_vec: max(
+            hrr.similarity(hrr.unbind(fact_vec, entity_vec), role) for role in roles))
 
     def reason(self, entities: list[str], category: str | None = None, limit: int = 10) -> list[dict]:
-        """Multi-entity compositional query (vector-space JOIN): facts where ALL entities
-        play structural roles. Falls back to FTS5 without numpy."""
+        """Multi-entity compositional query (vector-space JOIN): facts where ALL entities play structural roles.
+        Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY or not entities:
             return self.search(" ".join(entities), category=category, limit=limit)
-        role_entity = self._atom(_ROLE_ENTITY)
+        role_entity, role_content = self._atom(_ROLE_ENTITY), self._atom(_ROLE_CONTENT)
         probe_keys = [hrr.bind(self._atom(entity.lower()), role_entity) for entity in entities]
-
-        def make_sim():
-            role_content = self._atom(_ROLE_CONTENT)
-            # AND semantics via min: high only if EVERY entity is structurally present.
-            return lambda _f, fact_vec: min(hrr.similarity(hrr.unbind(fact_vec, key), role_content) for key in probe_keys)
-
-        return self._vector_query(" ".join(entities), category, limit, make_sim)
+        # AND semantics via min: high only if EVERY entity is structurally present.
+        return self._vector_query(" ".join(entities), category, limit, lambda _f, fact_vec: min(
+            hrr.similarity(hrr.unbind(fact_vec, key), role_content) for key in probe_keys))
 
     def contradict(self, category: str | None = None, threshold: float = 0.3, limit: int = 10) -> list[dict]:
-        """Memory hygiene: pairs of facts that share entities (same subject) but have low
-        content-vector similarity (different claims). Empty without numpy."""
+        """Pairs of facts sharing entities (same subject) with low content-vector similarity (different claims). Empty without numpy."""
         if not hrr._HAS_NUMPY:
             return []
         rows = self._vector_rows(category, columns="fact_id, content, category, tags, trust_score, created_at, updated_at, hrr_vector")
