@@ -160,6 +160,7 @@ class _ValidatedEvent:
 _identifier = partial(common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS)
 _exact_fields = partial(common.exact_fields, error=DiscussionValidationError)
 _bounded_int = partial(common.bounded_int, error=DiscussionValidationError)
+_text = partial(common.text, error=DiscussionValidationError)
 
 
 def _positive_int(value: Any, *, label: str) -> int:
@@ -168,9 +169,6 @@ def _positive_int(value: Any, *, label: str) -> int:
 
 def _zero_based_int(value: Any, *, label: str, maximum: int) -> int:
     return _bounded_int(value, message=f"{label} must be an integer between 0 and {maximum}", high=maximum)
-
-
-_text = partial(common.text, error=DiscussionValidationError)
 
 
 def _peer_id(member: DiscussionMember) -> str | None:
@@ -196,8 +194,9 @@ def _all_failure_reasons() -> frozenset[str]:
 def validate_user_payload(value: Any) -> dict[str, Any]:
     """Validate and normalize the exact ``message.user`` Discussion payload."""
     payload = _exact_fields(value, label="user payload", required=_USER_PAYLOAD_FIELDS)
-    text = _text(payload["text"], label="user payload text", max_bytes=MAX_USER_TEXT_BYTES)
-    return {"text": text, "thread_id": _identifier(payload["thread_id"], label="thread_id")}
+    return {
+        "text": _text(payload["text"], label="user payload text", max_bytes=MAX_USER_TEXT_BYTES),
+        "thread_id": _identifier(payload["thread_id"], label="thread_id")}
 
 
 def _validate_member_target(value: Any, *, profile: str, known_profiles: set[str], index: int) -> dict[str, Any]:
@@ -717,11 +716,11 @@ def _terminal_text(result: Any, *, field: str, fallback: str) -> str:
 
 # -- per-status terminal payload builders (dispatched by plan_publication) -----
 # Each returns (extra terminal payload fields, visible effects to publish first).
+Effects = tuple[dict[str, Any], list[EventPlan]]
 
 
 def _settled_effects(
-    result: Any, *, task: DiscussionTaskPlan, room: DiscussionRoom, message_event_id: str, **_: Any
-) -> tuple[dict[str, Any], list[EventPlan]]:
+    result: Any, *, task: DiscussionTaskPlan, room: DiscussionRoom, message_event_id: str, **_: Any) -> Effects:
     text = _truncate_utf8_text(
         _terminal_text(result, field="text", fallback=""), max_bytes=MAX_MEMBER_TEXT_BYTES,
         suffix=_TRUNCATED_REPLY_NOTICE)
@@ -733,7 +732,7 @@ def _settled_effects(
         authority_epoch=room.authority_epoch)]
 
 
-def _failed_effects(result: Any, **_: Any) -> tuple[dict[str, Any], list[EventPlan]]:
+def _failed_effects(result: Any, **_: Any) -> Effects:
     error_text = _terminal_text(result, field="error", fallback="member turn failed")
     from tools.bot_failure_reasons import classify_agent_error
     supplied_reason = (
@@ -742,17 +741,15 @@ def _failed_effects(result: Any, **_: Any) -> tuple[dict[str, Any], list[EventPl
     return {"error": error_text, "reason_code": reason_code}, []
 
 
-def _cancelled_effects(result: Any, *, newer_same_thread: bool, **_: Any) -> tuple[dict[str, Any], list[EventPlan]]:
+def _cancelled_effects(result: Any, *, newer_same_thread: bool, **_: Any) -> Effects:
     if newer_same_thread:
         return {"reason": "superseded_by_newer_user_event"}, []
     return {"reason": _terminal_text(result, field="reason", fallback="member turn cancelled")}, []
 
 
-def _deferred_effects(
-    result: Any, *, execution_generation: int | None, **_: Any) -> tuple[dict[str, Any], list[EventPlan]]:
-    return {
-        "execution_generation": execution_generation,
-        "reason": _terminal_text(result, field="reason", fallback="member_unavailable")}, []
+def _deferred_effects(result: Any, *, execution_generation: int | None, **_: Any) -> Effects:
+    reason = _terminal_text(result, field="reason", fallback="member_unavailable")
+    return {"execution_generation": execution_generation, "reason": reason}, []
 
 
 _TERMINAL_EFFECTS = {
