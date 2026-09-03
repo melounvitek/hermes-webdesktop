@@ -448,12 +448,8 @@ def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _chat_messages_to_responses_input(
-    messages: List[Dict[str, Any]],
-    *,
-    is_xai_responses: bool = False,
-    is_github_responses: bool = False,
-    replay_encrypted_reasoning: bool = True,
-    current_issuer_kind: Optional[str] = None,
+    messages: List[Dict[str, Any]], *, is_xai_responses: bool = False, is_github_responses: bool = False,
+    replay_encrypted_reasoning: bool = True, current_issuer_kind: Optional[str] = None,
     native_compaction_eligible: bool = False,
 ) -> List[Dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
@@ -549,11 +545,7 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
 
 
 def estimate_native_responses_preflight_tokens(
-    agent: Any,
-    messages: List[Dict[str, Any]],
-    *,
-    system_prompt: str = "",
-    tools: Optional[List[Dict[str, Any]]] = None,
+    agent: Any, messages: List[Dict[str, Any]], *, system_prompt: str = "", tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[int]:
     """Estimate tokens for the checkpoint-pruned Responses payload (the full transcript
     overstates a natively compacted session and fires local compression needlessly).
@@ -774,11 +766,7 @@ def _optional_dict(api_kwargs: Dict[str, Any], key: str) -> Optional[Dict[str, A
 
 
 def _preflight_codex_api_kwargs(
-    api_kwargs: Any,
-    *,
-    allow_stream: bool = False,
-    is_github_responses: bool = False,
-    sanitize_harmony_tokens: bool = False,
+    api_kwargs: Any, *, allow_stream: bool = False, is_github_responses: bool = False, sanitize_harmony_tokens: bool = False,
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
