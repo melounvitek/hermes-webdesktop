@@ -76,9 +76,12 @@ def _text(content: str) -> Any:
 
 def _arg(args: Optional[Args], *keys: str, default: str = "") -> str:
     """First truthy ``args[key]`` as a stripped string, else ``default``."""
-    a = args or {}
-    value = next((a.get(k) for k in keys if a.get(k)), None)
-    return str(value or default).strip() or default
+    return str(_first(args or {}, *keys, default=default)).strip() or default
+
+
+def _first(data: Args, *keys: str, default: Any = "") -> Any:
+    """First truthy ``data[key]`` in ``keys`` order, else ``default``."""
+    return next((data[k] for k in keys if data.get(k)), default)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -337,7 +340,7 @@ def _format_search_files_result(tool_name: str, data: Args, args: Args) -> Optio
         if not isinstance(match, dict):
             lines.append(f"- {match}")
             continue
-        path = str(match.get("path") or match.get("file") or match.get("filename") or "?")
+        path = str(_first(match, "path", "file", "filename", default="?"))
         line = match.get("line") or match.get("line_number")
         content = str(match.get("content") or match.get("text") or "").strip()
         lines.append(f"- {path}:{line}" if line else f"- {path}")
@@ -477,7 +480,7 @@ def _format_process_result(tool_name: str, data: Args, args: Args) -> Optional[s
             bits = [str(proc.get("status") or ("exited" if proc.get("exited") else "running"))]
             bits += [f"pid {proc['pid']}"] if proc.get("pid") is not None else []
             bits += [f"exit {proc['exit_code']}"] if proc.get("exit_code") is not None else []
-            sid = proc.get("session_id") or proc.get("id") or "?"
+            sid = _first(proc, "session_id", "id", default="?")
             lines.append(f"- `{sid}` — {', '.join(bits)}" + (f" — {cmd[:120]}" if cmd else ""))
         if len(processes) > 20:
             lines.append(f"... {len(processes) - 20} more process(es)")
@@ -489,8 +492,8 @@ def _format_process_result(tool_name: str, data: Args, args: Args) -> Optional[s
     for key, label in (("command", "Command"), ("pid", "PID"), ("exit_code", "Exit code"), ("returncode", "Exit code"), ("lines", "Lines")):
         if data.get(key) is not None:
             lines.append(f"- **{label}:** {data.get(key)}")
-    output = data.get("output") or data.get("new_output") or data.get("log") or data.get("stdout")
-    error = data.get("error") or data.get("stderr")
+    output = _first(data, "output", "new_output", "log", "stdout", default=None)
+    error = _first(data, "error", "stderr", default=None)
     if output:
         lines.extend(["", "Output:", _truncate_text(str(output), limit=5000)])
     if error:
@@ -549,8 +552,8 @@ def _format_session_search_result(tool_name: str, data: Args, args: Args) -> Opt
     for item in results:
         if not isinstance(item, dict):
             continue
-        title = str(item.get("title") or item.get("when") or "Untitled session").strip()
-        when = str(item.get("last_active") or item.get("started_at") or item.get("when") or "").strip()
+        title = str(_first(item, "title", "when", default="Untitled session")).strip()
+        when = str(_first(item, "last_active", "started_at", "when")).strip()
         count = item.get("message_count")
         meta = ", ".join(str(x) for x in [when, str(item.get("source") or "").strip(), f"{count} msgs" if count is not None else ""] if x)
         lines.append(f"- **{title}** (`{item.get('session_id') or '?'}`)" + (f" — {meta}" if meta else ""))
@@ -620,8 +623,8 @@ def _format_browser_result(tool_name: str, data: Args, args: Args) -> Optional[s
                 url = str(img.get("url") or img.get("src") or "").strip()
                 lines.append(f"- {str(img.get('alt') or '').strip() or 'image'}" + (f" — {url}" if url else ""))
         return _truncate_text("\n".join(lines), limit=5000)
-    title = str(data.get("title") or data.get("url") or data.get("status") or tool_name)
-    text = str(data.get("text") or data.get("content") or data.get("snapshot") or data.get("analysis") or data.get("message") or "").strip()
+    title = str(_first(data, "title", "url", "status", default=tool_name))
+    text = str(_first(data, "text", "content", "snapshot", "analysis", "message")).strip()
     lines = [title]
     if data.get("url") and data.get("url") != title:
         lines.append(str(data.get("url")))
@@ -677,9 +680,7 @@ def _format_structured_value(key: str, value: Any, *, indent: int = 0, max_depth
         lines = [_line(_plural(len(value), "item"))]
         for idx, item in enumerate(value[:max_items], 1):
             if isinstance(item, dict):
-                headline = str(
-                    item.get("content") or item.get("message") or item.get("title") or item.get("name") or item.get("id") or ""
-                ).strip()
+                headline = str(_first(item, "content", "message", "title", "name", "id")).strip()
                 if headline:
                     lines.append(f"{pad}  {idx}. {_truncate_text(headline, limit=220)}")
                     for child_key in ("id", "status", "type", "scope", "quality_score", "score", "path", "url"):
