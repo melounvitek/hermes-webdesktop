@@ -28,8 +28,7 @@ _GENERIC_API_KEY_PROVIDERS = frozenset({
     "openai-api", "gemini", "deepseek", "xai", "zai", "kimi-coding-cn",
     "minimax", "minimax-cn", "kilocode", "opencode-zen", "opencode-go",
     "opencode-free", "alibaba", "huggingface", "xiaomi", "arcee", "gmi",
-    "nvidia", "ollama-cloud", "tencent-tokenhub", "tencent-tokenplan", "lmstudio",
-})
+    "nvidia", "ollama-cloud", "tencent-tokenhub", "tencent-tokenplan", "lmstudio"})
 
 
 def _short_url(url: str) -> str:
@@ -70,8 +69,7 @@ _AUX_TASKS: list[tuple[str, str, str]] = [
     ("triage_specifier", "Triage specifier", "kanban spec fleshing"),
     ("kanban_decomposer", "Kanban decomposer", "task decomposition"),
     ("profile_describer", "Profile describer", "auto profile descriptions"),
-    ("curator", "Curator", "skill-usage review pass"),
-]
+    ("curator", "Curator", "skill-usage review pass")]
 
 # Special non-auxiliary task surfaced in the same picker: subagent delegation. Routing lives
 # under top-level `delegation.*` (NOT `auxiliary.delegation`) because delegate_task spawns full
@@ -208,8 +206,7 @@ def _aux_config_menu() -> None:
         entries = [
             (task_key, f"{name.ljust(name_col)}{('(' + desc + ')').ljust(desc_col)}"
                        f"{_format_aux_current(_aux_task_cfg(cfg, task_key))}")
-            for task_key, name, desc in menu_tasks
-        ]
+            for task_key, name, desc in menu_tasks]
         entries.append(("__reset__", "Reset all to auto"))
         entries.append(("__back__", "Back"))
 
@@ -380,9 +377,7 @@ def _prompt_provider_choice(choices, *, default=0, title="Select provider:"):
 
 
 _DEFAULT_QWEN_PORTAL_MODELS = [
-    "qwen3-coder-plus",
-    "qwen3-coder",
-]
+    "qwen3-coder-plus", "qwen3-coder"]
 
 
 # (mode value, label, description, accepted answers); "" = auto-detect
@@ -394,8 +389,7 @@ _CUSTOM_API_MODES = (
     ("codex_responses", "Responses / Codex", "Use /responses for Codex-compatible tool-calling backends.",
      ("3", "responses", "codex", "codex_responses")),
     ("anthropic_messages", "Anthropic Messages", "Use /v1/messages for Anthropic-compatible endpoints.",
-     ("4", "anthropic", "anthropic_messages", "messages")),
-)
+     ("4", "anthropic", "anthropic_messages", "messages")))
 _CUSTOM_API_MODE_ANSWERS = {answer: value for value, _, _, answers in _CUSTOM_API_MODES for answer in answers}
 
 
@@ -529,8 +523,7 @@ def _remove_custom_provider(config):
     print("Remove a custom provider:\n")
     choices = [
         f"{entry.get('name', 'unnamed')} ({_short_url(entry.get('base_url', ''))})" if isinstance(entry, dict) else str(entry)
-        for entry in providers
-    ]
+        for entry in providers]
     choices.append("Cancel")
 
     try:
@@ -815,8 +808,7 @@ def _named_custom_provider_map(cfg) -> dict[str, dict[str, str]]:
             "api_mode": entry.get("api_mode", ""),
             "provider_key": provider_key,
             "api_key_ref": _lookup_ref(raw_api_key_refs, name, provider_key, model),
-            "base_url_ref": _lookup_ref(raw_base_url_refs, name, provider_key, model),
-        }
+            "base_url_ref": _lookup_ref(raw_base_url_refs, name, provider_key, model)}
     return custom_provider_map
 
 
@@ -835,8 +827,7 @@ def _build_provider_picker_rows(config: dict, active: str, provider_labels: dict
     _cli_excluded = {
         str(p).strip().lower()
         for p in (config.get("model_catalog", {}) or {}).get("excluded_providers") or []
-        if p
-    }
+        if p}
     if _cli_excluded:
         # A canonical provider is hidden if its slug OR any alias is excluded.
         _names_for: dict[str, set[str]] = {_p.slug: {_p.slug.lower()} for _p in CANONICAL_PROVIDERS}

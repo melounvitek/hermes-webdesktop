@@ -233,8 +233,7 @@ _SYNC_USAGE = (
     "  device [--name N] Show or set this device's label\n"
     "\n"
     "Shared with your team:\n"
-    "  propose <skill>   Share a skill with your organisation"
-)
+    "  propose <skill>   Share a skill with your organisation")
 
 
 def _sync_device(args, ssc) -> int:

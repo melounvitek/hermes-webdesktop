@@ -15,38 +15,18 @@ import os
 
 from hermes_cli.config import clear_model_endpoint_credentials
 from hermes_cli.model_setup_flows_common import (  # noqa: F401
-    _HTTP,
-    _activate_provider_model,
-    _ask,
-    _begin_model_config,
-    _commit_model_config,
-    _curses_choice,
-    _ensure_dict_section,
-    _ensure_flow_api_key,
-    _existing_api_key_for_model_flow,
-    _finish_model,
-    _load_config_model_section,
-    _models_dev_merged,
-    _oauth_gate,
-    _persist_model,
-    _pick_model_or_prompt,
-    _print_numbered,
-    _prompt_auth_credentials_choice,
-    _prune_replaced_custom_model_config_credentials,
-    _run_login,
-    _say,
-    _show_curated)
-from hermes_cli.model_setup_flows_custom import (  # noqa: F401
-    _model_flow_custom,
-    _model_flow_named_custom)
-from hermes_cli.model_setup_flows_azure import (  # noqa: F401
-    _model_flow_azure_foundry)
+    _HTTP, _activate_provider_model, _ask, _begin_model_config, _commit_model_config, _curses_choice,
+    _ensure_dict_section, _ensure_flow_api_key, _existing_api_key_for_model_flow, _finish_model,
+    _load_config_model_section, _models_dev_merged, _oauth_gate, _persist_model, _pick_model_or_prompt,
+    _print_numbered, _prompt_auth_credentials_choice, _prune_replaced_custom_model_config_credentials,
+    _run_login, _say, _show_curated,
+)
+from hermes_cli.model_setup_flows_custom import _model_flow_custom, _model_flow_named_custom  # noqa: F401
+from hermes_cli.model_setup_flows_azure import _model_flow_azure_foundry  # noqa: F401
 from hermes_cli.model_setup_flows_bedrock import (  # noqa: F401
-    BEDROCK_GEO_PREFIXES,
-    bedrock_region_geo_prefix,
-    bedrock_model_routable_from_region,
-    _model_flow_bedrock_api_key,
-    _model_flow_bedrock)
+    BEDROCK_GEO_PREFIXES, bedrock_region_geo_prefix, bedrock_model_routable_from_region,
+    _model_flow_bedrock_api_key, _model_flow_bedrock,
+)
 
 
 def _env_base_url(base_url_env: str) -> str:
@@ -73,6 +53,20 @@ def _prompt_base_url_override(effective_base: str, base_url_env: str) -> str:
 def _report_live_models(model_list, source: str) -> None:
     if model_list:
         print(f"  Found {len(model_list)} model(s) from {source}")
+
+
+def _aggregator_flow(provider_id: str, label: str, base_url: str, current_model: str, existing_key: str,
+                     resolved_key: str, fetch_ids, *, clear_creds: bool = True, **pick_kw) -> None:
+    """Shared tail of the OpenRouter / AI Gateway flows: live catalog + pricing, picker, persist."""
+    from hermes_cli.auth import _prompt_model_selection
+    from hermes_cli.models import get_pricing_for_provider
+
+    models_list = fetch_ids(force_refresh=True)
+    # Live pricing is non-blocking — empty dict on failure.
+    pricing = get_pricing_for_provider(provider_id, force_refresh=True)
+    selected = _prompt_model_selection(models_list, current_model=current_model, pricing=pricing, **pick_kw)
+    _finish_model(selected, provider_id, f"Default model set to: {selected} (via {label})",
+                  base_url=base_url, api_mode="chat_completions", clear_creds=clear_creds)
 
 
 def _model_flow_openrouter(config, current_model=""):
