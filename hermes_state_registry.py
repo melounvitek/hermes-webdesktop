@@ -1,10 +1,8 @@
 """Process-wide shared SessionDB registry.
 
-A gateway process opens state.db from many call sites (runner, SessionStore,
-per-agent recall, cron, per-message helpers).  Each bare ``SessionDB()`` mints
-its own writer connection, lock, close-time WAL checkpoint and token-writer
-thread; N independent writers on one WAL file rely only on SQLite's write lock
-plus busy_timeout, and one connection's close-time checkpoint can race another's
+A gateway process opens state.db from many call sites; each bare ``SessionDB()``
+mints its own writer connection, lock, close-time WAL checkpoint and token
+writer thread, and one connection's close-time checkpoint can race another's
 growth (lost/reordered-page-write corruption).  This module owns that boundary:
 one shared ``SessionDB`` per resolved path per process, refcounted, with
 generation-aware retirement when the file is replaced (snapshot restore,
@@ -14,16 +12,14 @@ Lifecycle rules:
 
 - ``acquire(path)`` returns the current generation for *path* and bumps its
   refcount.  Same path ⇒ same instance ⇒ same writer connection.
-- ``close()`` on a shared instance is a NO-OP: the registry, not any caller,
-  owns the connection lifecycle, so one caller can never tear down a writer
-  others still hold.
+- ``close()`` on a shared instance is a NO-OP: the registry owns the connection
+  lifecycle, so one caller can never tear down a writer others still hold.
 - ``release(db)`` decrements the generation *db was acquired from* (object-
-  keyed, not pathname-keyed, so an inode replacement cannot strand a
-  still-owned generation).  The final release of a retired generation tears
-  it down.
+  keyed, so an inode replacement cannot strand a still-owned generation).  The
+  final release of a retired generation tears it down.
 - On inode change the old generation is RETIRED (never lent again) but stays
   alive until its holders release.  If the replacement open fails the registry
-  keeps NO path entry (never a closed stale object) so the next acquire retries.
+  keeps NO path entry, so the next acquire retries.
 - All teardown happens OUTSIDE the registry lock: a final release's WAL
   checkpoint must never stall acquisition for every state.db.
 """
@@ -56,7 +52,7 @@ class _Generation:
 
 
 _lock = threading.Lock()
-# path → live generation.  Retired generations move to _retired (keyed by
+# path → live generation; retired generations move to _retired (keyed by
 # id(db)) until their last holder releases.
 _generations: Dict[Path, _Generation] = {}
 _retired: Dict[int, _Generation] = {}
@@ -85,16 +81,20 @@ def _teardown(db: "SessionDB") -> None:
         logger.debug("Error closing shared SessionDB", exc_info=True)
 
 
+def _finish_opening(path: Path, opening: threading.Event) -> None:
+    """Drop the per-path construction marker and wake waiters (caller holds _lock)."""
+    if _opening.get(path) is opening:
+        _opening.pop(path, None)
+    opening.set()
+
+
 def acquire(db_path: Optional[Path] = None) -> "SessionDB":
     """Return the shared SessionDB for *db_path*, incrementing its refcount.
 
-    If the file was replaced (different inode) since the generation opened —
-    ``hermes sessions recover``, snapshot restore — that generation is RETIRED
-    but stays alive for its holders, and a fresh one is opened in its place.
-
-    Raises whatever ``SessionDB.__init__`` raises.  On a replacement-open
-    failure the registry holds NO entry for the path, so the next acquire
-    retries fresh instead of receiving a closed stale object.
+    If the file was replaced (different inode) since the generation opened,
+    that generation is RETIRED but stays alive for its holders, and a fresh one
+    is opened in its place.  Raises whatever ``SessionDB.__init__`` raises; on
+    a replacement-open failure the registry holds NO entry for the path.
     """
     from hermes_state import _default_db_path
 
@@ -109,24 +109,16 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
             generation = _generations.get(path)
             if generation is not None:
                 current = _stat_db_file_identity(path)
-                if (
-                    current is not None
-                    and generation.identity is not None
-                    and current != generation.identity
-                ):
-                    # File replaced: retire, then elect one caller to open
-                    # the replacement below.
+                if current is not None and generation.identity is not None and current != generation.identity:
+                    # File replaced: retire, then elect one caller to open the replacement.
                     _retire_generation_locked(path, generation)
                 else:
                     generation.refcount += 1
                     return generation.db
-
             opening = _opening.get(path)
             if opening is None:
-                opening = threading.Event()
-                _opening[path] = opening
+                opening = _opening[path] = threading.Event()
                 break
-
         # Another caller is constructing this path; wait without holding the
         # global lock.  A failed opener signals too, so a waiter can retry.
         opening.wait()
@@ -139,9 +131,7 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
         identity = _stat_db_file_identity(path)
     except BaseException:
         with _lock:
-            if _opening.get(path) is opening:
-                _opening.pop(path, None)
-            opening.set()
+            _finish_opening(path, opening)
         raise
 
     with _lock:
@@ -153,9 +143,7 @@ def acquire(db_path: Optional[Path] = None) -> "SessionDB":
         else:
             _generations[path] = _Generation(db, identity)
             winner = db
-        if _opening.get(path) is opening:
-            _opening.pop(path, None)
-        opening.set()
+        _finish_opening(path, opening)
     if winner is not db:
         _teardown(db)
     return winner
@@ -178,9 +166,8 @@ def release(db: "SessionDB") -> bool:
 
     Returns ``True`` if *db* was shared; ``False`` if it is not registry-managed
     (caller owns close()).  The final release tears the generation down OUTSIDE
-    the registry lock so a close-time WAL checkpoint never stalls acquisition.
-    Lookup is object-keyed, so holders of an old generation release into its
-    retired record, not into whatever the path currently names.
+    the registry lock.  Lookup is object-keyed, so holders of an old generation
+    release into its retired record, not into whatever the path currently names.
     """
     if db is None:
         return False
@@ -223,7 +210,6 @@ def close_all() -> int:
 
     For gateway shutdown, after all agents and cron jobs finished.  Idempotent.
     """
-    closed = 0
     with _lock:
         generations = list(_generations.values()) + list(_retired.values())
         _generations.clear()
@@ -232,16 +218,15 @@ def close_all() -> int:
             generation.retired = True
     for generation in generations:
         _teardown(generation.db)
-        closed += 1
-    return closed
+    return len(generations)
 
 
 def live_shared_session_dbs() -> List["SessionDB"]:
-    """Snapshot of every live (non-retired) shared SessionDB.
+    """Snapshot of every live (non-retired) shared SessionDB (refcounts untouched).
 
-    For in-process maintenance (housekeeping deferred-FTS retry).  Refcounts
-    are NOT touched: a concurrent final release may close an instance, in
-    which case the callee sees ``_conn is None``.
+    For in-process maintenance (housekeeping deferred-FTS retry).  A concurrent
+    final release may close an instance, in which case the callee sees
+    ``_conn is None``.
     """
     with _lock:
         return [g.db for g in _generations.values() if not g.retired]
@@ -250,13 +235,10 @@ def live_shared_session_dbs() -> List["SessionDB"]:
 def stats() -> Dict[str, int]:
     """Registry census for tests and diagnostics (no locks held long)."""
     with _lock:
-        live = len(_generations)
-        retired = len(_retired)
-        refs = sum(g.refcount for g in _generations.values())
         return {
-            "live_generations": live,
-            "retired_generations": retired,
-            "total_refcounts": refs,
+            "live_generations": len(_generations),
+            "retired_generations": len(_retired),
+            "total_refcounts": sum(g.refcount for g in _generations.values()),
         }
 
 

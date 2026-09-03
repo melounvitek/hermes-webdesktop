@@ -13,66 +13,44 @@ from hermes_state_common import _COMPRESSION_CHILD_SQL, escape_like as _escape_l
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
 
+# ASCII controls (keeping \t \n \r for the whitespace collapse), then zero-width,
+# bidi override, object-replacement and interlinear-annotation code points.
+_TITLE_CONTROL_RE = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
+_TITLE_INVISIBLE_RE = re.compile(r'[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ufffc\ufff9-\ufffb]')
+_NUMBERED_TITLE_RE = re.compile(r'^(.*?) #(\d+)$')
+
 
 class SessionTitlesMixin:
     """Sanitizing, ranking auto/user titles, lineage-aware lookups."""
 
     @classmethod
     def _title_rank(cls, source: Optional[str]) -> int:
-        """Rank a stored title_source.
-
-        NULL (pre-provenance rows) is indistinguishable from a manual ``/title``
-        of that era, so it ranks as ``user``: auto-titling only ever fills
-        genuinely empty legacy titles.
-        """
+        """Rank a stored title_source. NULL (pre-provenance rows) is indistinguishable
+        from a manual ``/title`` of that era, so it ranks as ``user``."""
         if source is None:
             return cls._TITLE_SOURCE_RANK[cls.TITLE_SOURCE_USER]
         return cls._TITLE_SOURCE_RANK.get(str(source), 0)
 
     @staticmethod
     def sanitize_title(title: Optional[str]) -> Optional[str]:
-        """Strip control/zero-width/bidi chars, collapse whitespace, normalize
-        empty to None.  Raises ValueError if longer than MAX_TITLE_LENGTH
-        after cleaning."""
+        """Strip control/zero-width/bidi chars (and lone surrogates sqlite3 cannot
+        bind), collapse whitespace, normalize empty to None. Raises ValueError if
+        longer than MAX_TITLE_LENGTH after cleaning."""
         from hermes_state import SessionDB
         if not title:
             return None
-
-        # Lone surrogates cannot be bound by sqlite3 (UnicodeEncodeError).
-        title = _sanitize_surrogates(title)
-
-        # ASCII controls, keeping \t \n \r so the whitespace collapse below
-        # turns them into spaces.
-        cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', title)
-
-        # Zero-width, bidi override, object-replacement, interlinear annotation.
-        cleaned = re.sub(
-            r'[\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff\ufffc\ufff9-\ufffb]',
-            '', cleaned,
-        )
-
+        cleaned = _TITLE_INVISIBLE_RE.sub('', _TITLE_CONTROL_RE.sub('', _sanitize_surrogates(title)))
         cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-
         if not cleaned:
             return None
-
         if len(cleaned) > SessionDB.MAX_TITLE_LENGTH:
-            raise ValueError(
-                f"Title too long ({len(cleaned)} chars, max {SessionDB.MAX_TITLE_LENGTH})"
-            )
-
+            raise ValueError(f"Title too long ({len(cleaned)} chars, max {SessionDB.MAX_TITLE_LENGTH})")
         return cleaned
 
-    def _is_compression_ancestor(
-        self, conn, *, ancestor_id: str, descendant_id: str
-    ) -> bool:
-        """True if *ancestor_id* is a compression predecessor of *descendant_id*.
-
-        Uses the canonical continuation edge ``_COMPRESSION_CHILD_SQL`` (parent
-        ended with ``end_reason = 'compression'`` and child started at/after its
-        ``ended_at``), which excludes delegate/branch children that also carry
-        ``parent_session_id``.  One recursive CTE so the edge is defined once.
-        """
+    def _is_compression_ancestor(self, conn, *, ancestor_id: str, descendant_id: str) -> bool:
+        """True if *ancestor_id* is a compression predecessor of *descendant_id*, via the
+        canonical continuation edge ``_COMPRESSION_CHILD_SQL`` (excludes delegate/branch
+        children that also carry ``parent_session_id``)."""
         if not ancestor_id or not descendant_id or ancestor_id == descendant_id:
             return False
         edge = _COMPRESSION_CHILD_SQL.format(a="child")
@@ -93,23 +71,15 @@ class SessionTitlesMixin:
         ).fetchone()
         return row is not None
 
-    def _set_session_title(
-        self,
-        session_id: str,
-        title: str,
-        *,
-        source: str,
-    ) -> bool:
+    def _set_session_title(self, session_id: str, title: str, *, source: str) -> bool:
         """Write a title, enforcing provenance precedence.
 
-        A ``user`` write always lands.  ``derived``/``llm`` land only when the
-        row is untitled or holds strictly lower authority, so derived upgrades
-        to llm exactly once, nothing overwrites a user name, and re-running the
-        titler on an llm row is a no-op (stops sessions renaming themselves).
-        No writer may move a hidden canonical Bot Chat off its title.
-
-        Read and write are one compare-and-swap in a single transaction, so a
-        manual ``/title`` racing an in-flight generation is not clobbered.
+        A ``user`` write always lands. ``derived``/``llm`` land only when the row is
+        untitled or holds strictly lower authority (derived upgrades to llm exactly once,
+        nothing overwrites a user name, re-running the titler on an llm row is a no-op).
+        No writer may move a hidden canonical Bot Chat off its title. Read and write are
+        one compare-and-swap transaction, so a manual ``/title`` racing an in-flight
+        generation is not clobbered.
         """
         title = self.sanitize_title(title)
         is_user = source == self.TITLE_SOURCE_USER
@@ -117,18 +87,14 @@ class SessionTitlesMixin:
 
         def _do(conn):
             current = conn.execute(
-                "SELECT title, title_source, hidden FROM sessions WHERE id = ?",
-                (session_id,),
+                "SELECT title, title_source, hidden FROM sessions WHERE id = ?", (session_id,),
             ).fetchone()
             if current is None:
                 return 0
-            # The canonical Bot Chat's NAME is its identity: Bot Mode resolves it
-            # by exact-title lookup on every open, so a rename orphans the whole
-            # conversation (next open mints an empty replacement and UNIQUE(title)
-            # blocks renaming back).  Refuse here, the single write path every
-            # surface funnels through.  Hidden is the discriminator: canonical
-            # chats are born hidden; a visible session merely named "Bot Chat"
-            # stays renameable.  Provenance-blind so the auto-titler no-ops too.
+            # The canonical Bot Chat's NAME is its identity (Bot Mode resolves it by
+            # exact-title lookup on every open), so a rename orphans the conversation.
+            # Hidden is the discriminator: canonical chats are born hidden; a visible
+            # session merely named "Bot Chat" stays renameable. Provenance-blind.
             if (
                 (current["title"] or "") == self.CANONICAL_BOT_CHAT_TITLE
                 and bool(current["hidden"])
@@ -141,100 +107,64 @@ class SessionTitlesMixin:
                         "To start fresh, create a new bot instead."
                     )
                 return 0
-            if not is_user and current["title"] is not None:
-                if self._title_rank(current["title_source"]) >= new_rank:
-                    return 0
-
+            if not is_user and current["title"] is not None and self._title_rank(current["title_source"]) >= new_rank:
+                return 0
             if title:
-                cursor = conn.execute(
-                    "SELECT id FROM sessions WHERE title = ? AND id != ?",
-                    (title, session_id),
-                )
-                conflict = cursor.fetchone()
+                conflict = conn.execute(
+                    "SELECT id FROM sessions WHERE title = ? AND id != ?", (title, session_id),
+                ).fetchone()
                 if conflict:
                     conflict_id = conflict["id"]
-                    # If the conflicting holder is a hidden compressed ancestor
-                    # of this continuation, the user cannot free the title, so
-                    # transfer it onto the tip.  Uniqueness and lineage are kept.
-                    if self._is_compression_ancestor(
-                        conn, ancestor_id=conflict_id, descendant_id=session_id
-                    ):
-                        conn.execute(
-                            "UPDATE sessions SET title = NULL WHERE id = ?",
-                            (conflict_id,),
-                        )
+                    # A hidden compressed ancestor holding the title cannot be freed by
+                    # the user, so transfer it onto the tip (uniqueness + lineage kept).
+                    if self._is_compression_ancestor(conn, ancestor_id=conflict_id, descendant_id=session_id):
+                        conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (conflict_id,))
                     else:
-                        raise ValueError(
-                            f"Title '{title}' is already in use by session {conflict_id}"
-                        )
-            # CAS on the values just read (``IS`` is NULL-safe): a concurrent
-            # write between the SELECT and here loses instead of being overwritten.
+                        raise ValueError(f"Title '{title}' is already in use by session {conflict_id}")
+            # CAS on the values just read (``IS`` is NULL-safe): a concurrent write
+            # between the SELECT and here loses instead of being overwritten.
             cursor = conn.execute(
                 "UPDATE sessions SET title = ?, title_source = ? "
                 "WHERE id = ? AND title IS ? AND title_source IS ?",
-                (
-                    title,
-                    source if title else None,
-                    session_id,
-                    current["title"],
-                    current["title_source"],
-                ),
+                (title, source if title else None, session_id, current["title"], current["title_source"]),
             )
             return cursor.rowcount
 
-        rowcount = self._execute_write(_do)
-        return rowcount > 0
+        return self._execute_write(_do) > 0
 
     def set_session_title(self, session_id: str, title: str) -> bool:
-        """Set a title on the user's behalf (``user`` provenance; auto-titling
-        never replaces it).  Empty clears the title.  Raises ValueError on a
-        title conflict or validation failure.  Automatic callers must use
-        :meth:`set_auto_title`."""
-        return self._set_session_title(
-            session_id, title, source=self.TITLE_SOURCE_USER
-        )
+        """Set a title on the user's behalf (``user`` provenance). Empty clears it.
+        Raises ValueError on conflict or validation failure."""
+        return self._set_session_title(session_id, title, source=self.TITLE_SOURCE_USER)
 
     def set_auto_title(self, session_id: str, title: str, *, source: str) -> bool:
-        """Set an automatic title; False (untouched) when a higher-authority
-        title already holds the row."""
+        """Set an automatic title; False (untouched) when a higher-authority title
+        already holds the row."""
         if source not in (self.TITLE_SOURCE_DERIVED, self.TITLE_SOURCE_LLM):
             raise ValueError(f"invalid automatic title source: {source!r}")
         return self._set_session_title(session_id, title, source=source)
 
     def set_auto_title_if_empty(self, session_id: str, title: str) -> bool:
-        """Back-compat shim (third-party plugins reference it by name); new
-        code calls :meth:`set_auto_title` with an explicit source."""
-        return self.set_auto_title(
-            session_id, title, source=self.TITLE_SOURCE_LLM
-        )
+        """Back-compat shim (third-party plugins reference it by name)."""
+        return self.set_auto_title(session_id, title, source=self.TITLE_SOURCE_LLM)
 
     def get_session_title(self, session_id: str) -> Optional[str]:
         """Get the title for a session, or None."""
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
-                "SELECT title FROM sessions WHERE id = ?", (session_id,)
-            )
-            row = cursor.fetchone()
+        row = self._read_one("SELECT title FROM sessions WHERE id = ?", (session_id,))
         return row["title"] if row else None
 
     def get_session_title_source(self, session_id: str) -> Optional[str]:
         """Get the provenance of a session's title, or None when untitled."""
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
-                "SELECT title, title_source FROM sessions WHERE id = ?",
-                (session_id,),
-            )
-            row = cursor.fetchone()
+        row = self._read_one("SELECT title, title_source FROM sessions WHERE id = ?", (session_id,))
         if not row or row["title"] is None:
             return None
         return row["title_source"]
 
     def set_session_title_source(self, session_id: str, source: str) -> bool:
-        """Overwrite a title's provenance without touching the text: a title
-        copied across a compression rotation keeps the original's authority."""
+        """Overwrite a title's provenance without touching the text (a title copied
+        across a compression rotation keeps the original's authority)."""
         if source not in self._TITLE_SOURCE_RANK:
             raise ValueError(f"invalid title source: {source!r}")
-
         return self._write_rowcount(
             "UPDATE sessions SET title_source = ? "
             "WHERE id = ? AND title IS NOT NULL",
@@ -243,63 +173,44 @@ class SessionTitlesMixin:
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
-                "SELECT s.*, "
-                "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
-                "FROM sessions s "
-                "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
-                "WHERE s.title = ?",
-                (title,),
-            )
-            row = cursor.fetchone()
+        row = self._read_one(
+            "SELECT s.*, "
+            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+            "FROM sessions s "
+            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "WHERE s.title = ?",
+            (title,),
+        )
         return self._session_row_dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
         """Resolve a title to a session ID, preferring the latest "title #N"
         continuation over the exact match."""
         exact = self.get_session_by_title(title)
-
         # Escape LIKE wildcards so "%"/"_" in titles cannot false-match.
-        escaped = _escape_like(title)
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
-                "SELECT id, title, started_at FROM sessions "
-                "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
-                (f"{escaped} #%",),
-            )
-            numbered = cursor.fetchall()
-
+        numbered = self._read_all(
+            "SELECT id, title, started_at FROM sessions "
+            "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
+            (f"{_escape_like(title)} #%",),
+        )
         if numbered:
             return numbered[0]["id"]
-        elif exact:
-            return exact["id"]
-        return None
+        return exact["id"] if exact else None
 
     def get_next_title_in_lineage(self, base_title: str) -> str:
-        """Next title in a lineage ("my session" → "my session #2"): strip any
-        " #N" suffix, then increment the highest existing number."""
-        match = re.match(r'^(.*?) #(\d+)$', base_title)
-        if match:
-            base = match.group(1)
-        else:
-            base = base_title
-
-        escaped = _escape_like(base)
-        with self._read_ctx() as conn:
-            cursor = conn.execute(
-                "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
-                (base, f"{escaped} #%"),
-            )
-            existing = [row["title"] for row in cursor.fetchall()]
-
-        if not existing:
+        """Next title in a lineage ("my session" -> "my session #2"): strip any " #N"
+        suffix, then increment the highest existing number."""
+        match = _NUMBERED_TITLE_RE.match(base_title)
+        base = match.group(1) if match else base_title
+        rows = self._read_all(
+            "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
+            (base, f"{_escape_like(base)} #%"),
+        )
+        if not rows:
             return base
-
-        max_num = 1  # The unnumbered original counts as #1
-        for t in existing:
-            m = re.match(r'^.* #(\d+)$', t)
+        max_num = 1  # the unnumbered original counts as #1
+        for row in rows:
+            m = re.match(r'^.* #(\d+)$', row["title"])
             if m:
                 max_num = max(max_num, int(m.group(1)))
-
         return f"{base} #{max_num + 1}"
