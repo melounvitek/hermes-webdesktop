@@ -295,12 +295,11 @@ def _get_process_start_time(pid: int) -> Optional[int]:
     (macOS/Windows): psutil ``create_time()`` quantized to centiseconds for stable
     equality. Units differ per platform; the guard only compares same-host values.
     """
-    try:
+    with contextlib.suppress(IndexError, ValueError, OSError):
         return int(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21])
-    except (IndexError, ValueError, OSError):
-        pass
     try:
         import psutil  # type: ignore
+
         return int(round(psutil.Process(pid).create_time() * 100))
     except Exception:
         return None
@@ -320,22 +319,19 @@ def _read_process_cmdline(pid: int) -> Optional[str]:
     if raw:
         return raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
     if not _IS_WINDOWS:
-        try:
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             result = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "command="],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
-        except (OSError, subprocess.TimeoutExpired):
-            pass
-    try:
+    with contextlib.suppress(Exception):
         import psutil  # type: ignore
+
         cmdline_parts = psutil.Process(pid).cmdline()
         if cmdline_parts:
             return " ".join(cmdline_parts)
-    except Exception:
-        pass
     return None
 
 
@@ -528,11 +524,24 @@ def _read_text_file(path: Path) -> Optional[str]:
         return None
 
 
-def _read_json_file(path: Path) -> Optional[dict[str, Any]]:
-    try:
-        payload = json.loads(_read_text_file(path) or "")
-    except json.JSONDecodeError:
+def _read_json_file(path: Path, *, bare_pid_ok: bool = False) -> Optional[dict[str, Any]]:
+    """JSON object at ``path`` or None; ``bare_pid_ok``
+    also reads legacy bare-integer PID files as ``{"pid": N}``.
+    """
+    raw = _read_text_file(path)
+    if raw is None:
         return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        if not bare_pid_ok:
+            return None
+        try:
+            return {"pid": int(raw)}
+        except ValueError:
+            return None
+    if bare_pid_ok and isinstance(payload, int):
+        return {"pid": payload}
     return payload if isinstance(payload, dict) else None
 
 
@@ -546,24 +555,11 @@ def _unlink_quietly(path: Path) -> None:
 
 
 def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
-    """PID record as a dict; legacy bare-integer files become ``{"pid": N}``."""
-    raw = _read_text_file(pid_path or _get_pid_path())
-    if raw is None:
-        return None
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            return {"pid": int(raw)}
-        except ValueError:
-            return None
-    if isinstance(payload, int):
-        return {"pid": payload}
-    return payload if isinstance(payload, dict) else None
+    return _read_json_file(pid_path or _get_pid_path(), bare_pid_ok=True)
 
 
 def _read_gateway_lock_record(lock_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
-    return _read_pid_record(lock_path or _get_gateway_lock_path())
+    return _read_json_file(lock_path or _get_gateway_lock_path(), bare_pid_ok=True)
 
 
 def _pid_from_record(record: Optional[dict[str, Any]]) -> Optional[int]:
@@ -668,15 +664,13 @@ def _pid_exists(pid: int) -> bool:
         if len(stat_fields) > 2 and stat_fields[2] == "Z":
             return False
     except FileNotFoundError:  # No /proc (macOS/BSD): use ps state.
-        try:
+        with contextlib.suppress(Exception):
             r = subprocess.run(
                 ["ps", "-o", "state=", "-p", str(pid)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
             )
             if r.returncode == 0 and r.stdout.strip().startswith("Z"):
                 return False
-        except Exception:
-            pass
     except (IndexError, PermissionError, OSError):
         pass
     try:
@@ -737,8 +731,8 @@ def acquire_gateway_runtime_lock() -> bool:
     try:
         handle = open(path, "a+", encoding="utf-8")
     except PermissionError:
-        # Stale root-owned lock from a launchd Background session that ran as
-        # root. The directory owner can unlink it; retry once with a fresh file.
+        # Stale root-owned lock from a launchd Background session that ran as root.
+        # The directory owner can unlink it; retry once with a fresh file.
         try:
             path.unlink()
             handle = open(path, "a+", encoding="utf-8")
@@ -926,11 +920,10 @@ def write_runtime_status(
         )
         payload["platforms"][platform] = platform_payload
     _write_json_file(path, payload)
-    try:
+    with contextlib.suppress(Exception):
         from agent.monitoring.gateway_health import emit_runtime_status_transition
+
         emit_runtime_status_transition(previous_payload, payload)
-    except Exception:
-        pass
 
 
 def read_runtime_status(path: Optional[Path] = None) -> Optional[dict[str, Any]]:
@@ -1131,12 +1124,10 @@ def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optiona
     ):
         return True
     # Stopped / tracing-stop state (T/t) in /proc/<pid>/status.
-    try:
+    with contextlib.suppress(OSError):
         for line in Path(f"/proc/{existing_pid}/status").read_text(encoding="utf-8").splitlines():
             if line.startswith("State:"):
                 return line.split()[1] in {"T", "t"}
-    except OSError:
-        pass
     return False
 
 
