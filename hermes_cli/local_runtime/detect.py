@@ -1,9 +1,8 @@
 """Detection of running llama-server instances.
 
 Probes well-known local roots and fingerprints genuine llama-server via /props (build_info + model
-fields — Ollama and LM Studio answer /v1/models but not /props). The credential is reachability;
-detection never needs a key, but honors one if the probed server requires it (401 -> detected,
-auth_required=True).
+fields — Ollama and LM Studio answer /v1/models but not /props). Detection never needs a key, but
+honors one if the probed server requires it (401 -> detected, auth_required=True).
 """
 
 from __future__ import annotations
@@ -51,13 +50,12 @@ def probe_port(port: int) -> DetectedServer | None:
     if not build:
         return None  # answers /props but isn't llama-server
     dgs = props.get("default_generation_settings")
-    n_ctx = dgs.get("n_ctx") if isinstance(dgs, dict) else None
     models_status, models = _get(f"{root}/models")
     return DetectedServer(
         base_url=f"{root}/v1",
         build_info=build,
         model_path=str(props.get("model_path", "")),
-        n_ctx=n_ctx,
+        n_ctx=dgs.get("n_ctx") if isinstance(dgs, dict) else None,
         router_mode=(models_status == 200 and isinstance(models, dict)
                      and "data" in models),
         auth_required=False,

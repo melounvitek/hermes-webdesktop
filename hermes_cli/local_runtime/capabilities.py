@@ -8,27 +8,22 @@ screenshot silently leaving the machine).
 
 from __future__ import annotations
 
-import json
 import logging
-import urllib.request
 
 logger = logging.getLogger(__name__)
 
 from hermes_cli.local_runtime.endpoint import LLAMACPP_ALIASES as _LLAMACPP_ALIASES
 
-# Image formats the managed server's decoder actually handles. llama.cpp
-# decodes with stb_image: PNG/JPEG/GIF/BMP yes, WebP NO — and a WebP part
-# fails SILENTLY (no HTTP error, no log line; the model just never sees an
-# image and confabulates a description). Anything outside this set must be
-# transcoded before the request. Measured against the live server: the
-# same red square answered 'Red' as PNG and 'Unseen' as WebP.
+# Image formats the managed server's decoder actually handles. llama.cpp decodes with stb_image:
+# PNG/JPEG/GIF/BMP yes, WebP NO — and a WebP part fails SILENTLY (no HTTP error, no log line; the
+# model just never sees an image and confabulates). Anything outside this set must be transcoded
+# before the request. Measured live: the same red square answered 'Red' as PNG, 'Unseen' as WebP.
 ACCEPTED_IMAGE_MIMES = frozenset({"image/png", "image/jpeg"})
 
 
 def is_managed_provider(provider: str, base_url: str = "") -> bool:
-    """True when this provider/base_url pair points at the managed server.
-    ``custom`` only counts when the base_url IS the managed endpoint —
-    background lookups must never claim someone else's custom server."""
+    """True when this provider/base_url pair points at the managed server. ``custom`` only counts
+    when the base_url IS the managed endpoint — never claim someone else's custom server."""
     p = (provider or "").strip().lower()
     if p in _LLAMACPP_ALIASES:
         return True
@@ -43,21 +38,15 @@ def is_managed_provider(provider: str, base_url: str = "") -> bool:
 
 
 def _props_modalities(model_id: str) -> "bool | None":
-    """Ask the running server whether this loaded child sees images. None when the server is down, the
-    model isn't loaded, or the build doesn't report modalities.
-    """
+    """Ask the running server whether this loaded child sees images. None when the server is down,
+    the model isn't loaded, or the build doesn't report modalities."""
     try:
-        from hermes_cli.local_runtime.endpoint import _state_endpoint
+        from hermes_cli.local_runtime.endpoint import managed_get_json, managed_root
 
-        state = _state_endpoint()
-        if state is None:
+        ep = managed_root()
+        if ep is None:
             return None
-        base = state["base_url"].rsplit("/v1", 1)[0]
-        req = urllib.request.Request(
-            f"{base}/props?model={model_id}",
-            headers={"Authorization": f"Bearer {state.get('api_key', '')}"})
-        with urllib.request.urlopen(req, timeout=3) as r:
-            props = json.load(r)
+        props = managed_get_json(*ep, f"/props?model={model_id}", timeout_s=3)
         modalities = props.get("modalities")
         if isinstance(modalities, dict) and "vision" in modalities:
             return bool(modalities["vision"])
@@ -67,8 +56,8 @@ def _props_modalities(model_id: str) -> "bool | None":
 
 
 def managed_model_supports_vision(model_id: str) -> "bool | None":
-    """Ground-truth vision capability for a staged model, or None when the
-    model isn't ours / nothing is known (caller keeps falling through)."""
+    """Ground-truth vision capability for a staged model, or None when the model isn't ours /
+    nothing is known (caller keeps falling through)."""
     if not model_id:
         return None
 
@@ -85,8 +74,9 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
     if live is not None:
         return live
 
-    # Staged but not loaded (or an older server build): the catalog knows
-    # whether this model ships a vision projector.
+    # Staged but not loaded (or an older server build): the catalog knows whether this model
+    # ships a vision projector. Capability requires the projector to actually be on disk — a
+    # model downloaded before its mmproj (partial delete, old layout) genuinely cannot see.
     try:
         from hermes_cli.local_runtime.bootstrap import assets_dir
         from hermes_cli.local_runtime.catalog import find_entry_for_model
@@ -97,9 +87,6 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
         entry = hit[0]
         if entry.mmproj is None:
             return False
-        # Capability requires the projector to actually be on disk — a
-        # model downloaded before its mmproj (partial delete, old layout)
-        # genuinely cannot see.
         return (assets_dir() / entry.mmproj.local_name).exists()
     except Exception:  # noqa: BLE001
         return None

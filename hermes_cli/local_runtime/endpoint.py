@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import time
+import urllib.request
 
 LLAMACPP_ALIASES = frozenset({"llamacpp", "llama.cpp", "llama-cpp"})
 
@@ -53,6 +54,29 @@ def _state_endpoint() -> dict | None:
     if not _pid_alive(int(state.get("pid") or 0)):
         return None
     return {"base_url": base_url, "api_key": state.get("api_key", "")}
+
+
+def managed_root() -> "tuple[str, str] | None":
+    """(base_root, api_key) of the managed router, or None. Resolved through the
+    ownership-guarded reader, not a raw state-file read: on the shared stable port a foreign
+    install's server answers /health for anyone, and a raw read would attach callers to someone
+    else's server."""
+    try:
+        state = _state_endpoint()
+        if state is None:
+            return None
+        base = str(state.get("base_url", "")).rsplit("/v1", 1)[0]
+        return (base, str(state.get("api_key", ""))) if base else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def managed_get_json(base: str, api_key: str, route: str, timeout_s: float) -> object:
+    """Authenticated GET against the managed router; raises on any transport/decode failure."""
+    req = urllib.request.Request(f"{base}{route}",
+                                 headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req, timeout=timeout_s) as r:
+        return json.loads(r.read())
 
 
 def resolve_llamacpp_endpoint(config: dict | None = None,

@@ -1,10 +1,8 @@
 """Context policy — the window ladder for managed local models.
 
 One contract: any model runs at any window up to its native max; hardware and session depth only
-change tokens/s. Constants, not knobs — nothing in this module reads config.
-
-The policy encodes behavior measured on real hardware (llama.cpp, discrete NVIDIA GPUs on
-Windows/WDDM, and unified-memory devices):
+change tokens/s. Constants, not knobs — nothing in this module reads config. The policy encodes
+behavior measured on real hardware (llama.cpp, discrete NVIDIA on Windows/WDDM, unified-memory).
 """
 
 from __future__ import annotations
@@ -25,22 +23,17 @@ _GROW_AT_OCCUPANCY = 0.85             # of the current window, at turn boundary
 SPEED_FLOOR_TOK_S = 6.0               # deepest measured spill bottomed near this
 _EARLY_COST_CTX_FRACTION = 0.15       # bounded early cost when weights spill
 
-# TARGET_WINDOW: the smallest ladder rung at which compression becomes the
-# exception rather than the routine. Measured over 161 real agentic
-# sessions: 66% complete uncompressed in 64K, 82% in 96K, 91% in 144K —
-# and the marginal gain past 144K (+6 points for 216K) falls below the
-# quality cost of stepping down another quant. Quant selection prefers
-# the best build that reaches this; the FLOOR remains the guarantee.
+# The smallest ladder rung at which compression becomes the exception rather than the routine.
+# Measured over 161 real agentic sessions: 66% complete uncompressed in 64K, 82% in 96K, 91% in
+# 144K — and the marginal gain past 144K (+6 points for 216K) falls below the quality cost of
+# stepping down another quant. The FLOOR remains the guarantee.
 TARGET_WINDOW = 144 * 1024
 
-# What a load really costs beyond weights + KV: CUDA contexts and compute
-# buffers at the DEFAULT microbatch (-ub 512, no MTP). Measured on a
-# 32 GiB card: a model estimated at 29.3 GiB (weights+KV) loaded at
-# ~31.2 GiB resident and the server's own fit still shaved a layer to
-# CPU. Microbatch/MTP logits buffers are priced separately per model
-# (ub_logits_bytes — they scale with the model's vocab and doubled once
-# packed a card 3.9 GiB past this constant). Callers add mmproj bytes on
-# top.
+# What a load really costs beyond weights + KV: CUDA contexts and compute buffers at the DEFAULT
+# microbatch (-ub 512, no MTP). Measured on a 32 GiB card: a model estimated at 29.3 GiB loaded at
+# ~31.2 GiB resident and fit still shaved a layer to CPU. Microbatch/MTP logits buffers are priced
+# separately per model (ub_logits_bytes — they scale with vocab and once packed a card 3.9 GiB
+# past this constant). Callers add mmproj bytes on top.
 RUNTIME_OVERHEAD_BYTES = int(1.5 * (1 << 30))
 
 
@@ -74,8 +67,8 @@ def initial_window(profile: ModelProfile, budget: HardwareBudget,
 
     Zero-spill rung: weights + ctx + overhead fit usable VRAM entirely. Bounded-early-cost rung
     (weights already exceed VRAM): largest rung whose ctx stays <= ~15% of usable VRAM. Floor
-    everywhere, capped at native. ``overhead_bytes`` is runtime cost beyond weights+KV; zero
-    keeps this pure physics for decision-table tests, production callers pass it.
+    everywhere, capped at native. ``overhead_bytes`` is runtime cost beyond weights+KV; zero keeps
+    this pure physics for decision-table tests, production callers pass it.
     """
     refusal = physics_check(profile, budget, FLOOR, flash_attention=flash_attention)
     if refusal:
@@ -84,38 +77,36 @@ def initial_window(profile: ModelProfile, budget: HardwareBudget,
     native = profile.n_ctx_train or FLOOR
     rungs = ladder(native)
 
-    reasons: list[str] = []
+    def kv(rung: int) -> int:
+        return ctx_bytes(profile, rung, flash_attention=flash_attention)
+
     best_zero_spill: int | None = None
     for rung in rungs:
-        need = (profile.weights_bytes + overhead_bytes
-                + ctx_bytes(profile, rung, flash_attention=flash_attention))
-        if need <= budget.usable_vram_bytes:
-            best_zero_spill = rung
-        else:
+        if profile.weights_bytes + overhead_bytes + kv(rung) > budget.usable_vram_bytes:
             break
+        best_zero_spill = rung
 
     if best_zero_spill is not None and best_zero_spill >= min(FLOOR, native):
         window = best_zero_spill
-        reasons.append(f"largest zero-spill rung ({window // 1024}K)")
+        reason = f"largest zero-spill rung ({window // 1024}K)"
     else:
-        # Weights spill from turn one (steep-curve model on a small card) —
-        # hold the floor, bound the early ctx cost.
+        # Weights spill from turn one (steep-curve model on a small card) — hold the floor, bound
+        # the early ctx cost.
         cap = int(budget.usable_vram_bytes * _EARLY_COST_CTX_FRACTION)
         window = min(FLOOR, native)
         for rung in rungs:
             if rung < window:
                 continue
-            if ctx_bytes(profile, rung, flash_attention=flash_attention) <= cap:
-                window = rung
-            else:
+            if kv(rung) > cap:
                 break
-        reasons.append(f"floor held at {window // 1024}K; weights spill (deliberate price of the guarantee)")
+            window = rung
+        reason = f"floor held at {window // 1024}K; weights spill (deliberate price of the guarantee)"
 
-    kv = ctx_bytes(profile, window, flash_attention=flash_attention)
-    spill = max(0, profile.weights_bytes + kv - budget.usable_vram_bytes)
+    kv_bytes = kv(window)
+    spill = max(0, profile.weights_bytes + kv_bytes - budget.usable_vram_bytes)
     return WindowDecision(window=window, spill_bytes=spill,
-                          kv_on_gpu=kv <= budget.usable_vram_bytes,
-                          reasons=reasons)
+                          kv_on_gpu=kv_bytes <= budget.usable_vram_bytes,
+                          reasons=[reason])
 
 
 @dataclass
@@ -134,9 +125,9 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
     """One growth evaluation, END-OF-TURN ONLY (recurrent state cannot rewind mid-sequence).
 
     Gate order: occupancy (~85%) → native cap → idleness (growth only on an otherwise-idle
-    server) → speed floor (below it compression is the default) → re-fit against LIVE free
-    memory (the rung must fit NOW, not at launch). ``occupancy_confirmed`` skips gate 1 when the
-    caller's own compression gate already fired, so two edge definitions can't deadlock into
+    server) → speed floor (below it compression is the default) → re-fit against LIVE free memory
+    (the rung must fit NOW, not at launch). ``occupancy_confirmed`` skips gate 1 when the caller's
+    own compression gate already fired, so two edge definitions can't deadlock into
     compress-before-grow.
     """
     if not occupancy_confirmed and session_tokens < current_window * _GROW_AT_OCCUPANCY:
@@ -159,11 +150,10 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
 
     next_rung = next((r for r in ladder(native) if r > current_window), native)
 
-    # Re-fit against live free memory: allocation beyond residency is the
-    # slow path, so a rung that no longer fits doesn't get granted.
+    # Re-fit against live free memory: allocation beyond residency is the slow path, so a rung
+    # that no longer fits doesn't get granted.
     kv = ctx_bytes(profile, next_rung, flash_attention=flash_attention)
-    total_need = profile.weights_bytes + kv
-    if total_need > budget.usable_vram_bytes + budget.ram_available_bytes:
+    if profile.weights_bytes + kv > budget.usable_vram_bytes + budget.ram_available_bytes:
         return GrowthDecision("compress-default",
                               reason="next rung exceeds physics; compression instead")
 
@@ -173,9 +163,8 @@ def growth_decision(profile: ModelProfile, budget: HardwareBudget, *,
 
 def spill_overrides(profile: ModelProfile) -> list[str]:
     """-ot placement for spilled configs: expert/FFN weights to host so attention + KV stay
-    GPU-resident. MoE gets the expert pattern; hybrids push recurrent-layer FFNs (their n_head_kv==0
-    layers carry no KV worth protecting).
-    """
+    GPU-resident. MoE gets the expert pattern; hybrids push recurrent-layer FFNs (their
+    n_head_kv==0 layers carry no KV worth protecting)."""
     if profile.moe:
         return ["-ot", r"blk\.\d+\.ffn_.*_exps\.weight=CPU"]
     if profile.recurrent_layer_count:
@@ -191,8 +180,7 @@ def launch_args(profile: ModelProfile, decision: WindowDecision, *,
                 mtp_prefill: bool = False) -> list[str]:
     """Per-model launch flags from a window decision. Explicit -c puts fit into
     spill-weights-and-hold-ctx; q8 KV cache wherever flash attention exists; -ot placement on
-    spilled configs — DISCRETE cards only.
-    """
+    spilled configs — DISCRETE cards only."""
     args = ["-c", str(decision.window)]
     if mtp_capable:
         args += ["--spec-type", "draft-mtp",
@@ -211,10 +199,9 @@ def launch_args(profile: ModelProfile, decision: WindowDecision, *,
 
 def ub_logits_bytes(n_vocab: int, *, mtp_capable: bool,
                     mtp_prefill: bool = False) -> int:
-    """GPU logits/compute-buffer cost of the microbatch posture chosen by launch_args, priced from the
-    model's own vocab and calibrated against measured server RSS (Qwen3.8 Q4, both postures, three
-    windows):
-    """
+    """GPU logits/compute-buffer cost of the microbatch posture chosen by launch_args, priced from
+    the model's own vocab and calibrated against measured server RSS (Qwen3.8 Q4, both postures,
+    three windows)."""
     v = max(0, int(n_vocab))
     if mtp_capable and mtp_prefill:
         return int(2048 * v * 4 * 1.5)

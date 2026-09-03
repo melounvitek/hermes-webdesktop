@@ -1,8 +1,8 @@
 """Managed llama.cpp runtime.
 
-- ``binaries`` — resolve/download/verify official llama.cpp release zips into
-``$HERMES_HOME/runtimes/llamacpp/<tag>/``. - ``supervisor``— spawn and supervise one llama-server in
-router mode; readiness is a touch generation, never health-200 alone. - ``detect`` — find an
+``binaries`` resolves/downloads/verifies official llama.cpp release zips into
+``$HERMES_HOME/runtimes/llamacpp/<tag>/``; ``supervisor`` spawns and supervises one llama-server in
+router mode (readiness is a touch generation, never health-200 alone); ``detect`` finds an
 already-running llama-server (external or ours).
 """
 

@@ -1,12 +1,10 @@
 """Live model-load progress from the managed llama-server router.
 
-llama-server's child processes emit per-tensor load progress ({stages, current, value}, throttled
-upstream to ~200ms) which the router relays ONLY over its /models/sse stream — GET /models carries
-just the coarse status string.
-
-The watcher starts on first call, reconnects with backoff (the router bounces on model
-download/eject), and never raises into callers — no router, no state file, or no SSE support (older
-engines) all read as "nothing loading".
+llama-server's children emit per-tensor load progress ({stages, current, value}, throttled upstream
+to ~200ms) which the router relays ONLY over its /models/sse stream — GET /models carries just the
+coarse status string. The watcher starts on first call, reconnects with backoff (the router bounces
+on model download/eject), and never raises into callers — no router, no state file, or no SSE
+support (older engines) all read as "nothing loading".
 """
 
 from __future__ import annotations
@@ -22,51 +20,43 @@ logger = logging.getLogger(__name__)
 _TEXT_STAGE_SHARE = 0.85     # composite range share for the text model
 _RECONNECT_DELAY_S = 3.0
 _STALE_ENTRY_TTL_S = 120.0   # a loading entry with no events this long is dead
+_LOAD_EVENTS = ("status_change", "model_status")
 
 _lock = threading.Lock()
 _watcher: threading.Thread | None = None
 _snapshot: dict[str, dict] = {}
 
 
+def _pct(x: float) -> int:
+    return max(0, min(100, round(x * 100)))
+
+
 def _composite_percent(stages: list[str], current: str, value: float) -> int:
     """Map (stage, in-stage value) onto one 0-100 range, text-heavy."""
     if not stages or current not in stages or len(stages) == 1:
-        return max(0, min(100, round(value * 100)))
+        return _pct(value)
     extras = [s for s in stages if s != "text_model"]
     extra_share = (1.0 - _TEXT_STAGE_SHARE) / len(extras) if extras else 0.0
     offset = 0.0
     for stage in stages:
         share = _TEXT_STAGE_SHARE if stage == "text_model" else extra_share
         if stage == current:
-            return max(0, min(100, round((offset + share * value) * 100)))
+            return _pct(offset + share * value)
         offset += share
-    return max(0, min(100, round(value * 100)))
+    return _pct(value)
 
 
 def _endpoint() -> "tuple[str, str] | None":
-    """(base_root, api_key) of the managed router, or None.
+    """(base_root, api_key) of the managed router via the ownership-guarded reader, or None."""
+    from hermes_cli.local_runtime.endpoint import managed_root
 
-    Resolved through the endpoint module's ownership-guarded reader, not a raw state-file read: on
-    the shared stable port a foreign install's server answers /health for anyone, and a raw read
-    would attach this watcher to someone else's SSE stream. The dead-pid check is the ownership
-    proof.
-    """
-    try:
-        from hermes_cli.local_runtime.endpoint import _state_endpoint
-
-        state = _state_endpoint()
-        if state is None:
-            return None
-        base = str(state.get("base_url", "")).rsplit("/v1", 1)[0]
-        return (base, str(state.get("api_key", ""))) if base else None
-    except Exception:  # noqa: BLE001
-        return None
+    return managed_root()
 
 
 def _apply_event(model: str, event: str, data: dict) -> None:
     with _lock:
         status = str(data.get("status", ""))
-        if event in ("status_change", "model_status") and status == "loading":
+        if event in _LOAD_EVENTS and status == "loading":
             progress = data.get("progress") or {}
             stages = [str(s) for s in (progress.get("stages") or [])]
             current = str(progress.get("current", ""))
@@ -78,18 +68,21 @@ def _apply_event(model: str, event: str, data: dict) -> None:
                 entry["stage"] = current
                 entry["value"] = float(value)
                 entry["percent"] = _composite_percent(stages, current, float(value))
-        elif event in ("status_change", "model_status", "model_remove"):
+        elif event in (*_LOAD_EVENTS, "model_remove") and status != "loading":
             # Any terminal status (loaded/unloaded/failed) ends the load.
-            if status != "loading":
-                _snapshot.pop(model, None)
+            _snapshot.pop(model, None)
+
+
+def _clear_snapshot() -> None:
+    with _lock:
+        _snapshot.clear()
 
 
 def _watch() -> None:
     while True:
         endpoint = _endpoint()
         if endpoint is None:
-            with _lock:
-                _snapshot.clear()
+            _clear_snapshot()
             time.sleep(_RECONNECT_DELAY_S)
             continue
         base, key = endpoint
@@ -119,10 +112,9 @@ def _watch() -> None:
                             continue
         except Exception as exc:  # noqa: BLE001 — watcher must never die loud
             logger.debug("load-progress SSE reconnecting: %s", exc)
-        # Stream ended (router bounce, timeout, error): loading entries from
-        # the dead connection are unverifiable — drop rather than freeze.
-        with _lock:
-            _snapshot.clear()
+        # Stream ended (router bounce, timeout, error): loading entries from the dead connection
+        # are unverifiable — drop rather than freeze.
+        _clear_snapshot()
         time.sleep(_RECONNECT_DELAY_S)
 
 
@@ -136,8 +128,8 @@ def _ensure_watcher() -> None:
 
 
 def get_loading_progress() -> dict[str, dict]:
-    """{model_id: {"stage", "value", "percent"}} for models loading right
-    now. Empty when nothing is loading (or nothing is knowable)."""
+    """{model_id: {"stage", "value", "percent"}} for models loading right now. Empty when
+    nothing is loading (or nothing is knowable)."""
     _ensure_watcher()
     now = time.monotonic()
     with _lock:
@@ -151,23 +143,20 @@ def get_prefill_progress(model: str) -> "dict | None":
     """{"processed": tokens} while the managed server is prompt-processing for ``model``, or None
     (idle, decoding, unreachable, or foreign server).
 
-    llama-server's /slots exposes ``n_prompt_tokens_processed`` but no total, so callers supply the
-    denominator. The busiest processing slot wins: a parallel small request freezes its counter
-    during decode while a live prefill keeps climbing. One HTTP call per poll; every failure reads
-    as "no prefill" — garnish, never load-bearing.
+    /slots exposes ``n_prompt_tokens_processed`` but no total, so callers supply the denominator.
+    The busiest processing slot wins: a parallel small request freezes its counter during decode
+    while a live prefill keeps climbing. One HTTP call per poll; every failure reads as "no
+    prefill" — garnish, never load-bearing.
     """
     ep = _endpoint()
     if ep is None:
         return None
-    base, key = ep
     try:
         from urllib.parse import quote
 
-        req = urllib.request.Request(
-            f"{base}/slots?model={quote(model)}",
-            headers={"Authorization": f"Bearer {key}"})
-        with urllib.request.urlopen(req, timeout=2) as r:
-            slots = json.loads(r.read())
+        from hermes_cli.local_runtime.endpoint import managed_get_json
+
+        slots = managed_get_json(*ep, f"/slots?model={quote(model)}", timeout_s=2)
     except Exception:  # noqa: BLE001
         return None
     best = 0
