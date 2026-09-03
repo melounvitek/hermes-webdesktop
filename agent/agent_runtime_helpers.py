@@ -454,43 +454,52 @@ def note_turn_persisted(agent):
     agent._inflight_turn_session_id = None
 
 
-def repair_message_sequence(agent, messages: List[Dict]) -> int:
-    """Collapse malformed role-alternation left in the live history.
+def _is_codex_interim(m: Dict) -> bool:
+    """Codex Responses interim turn: carries its own continuation state, replayed verbatim."""
+    return bool(
+        m.get("codex_reasoning_items")
+        or m.get("codex_message_items")
+        or m.get("finish_reason") == "incomplete"
+    )
 
-    Providers require strict alternation after the system message; violations
-    cause silent empty responses or HTTP 400s. Runs right before the API call as
-    a defensive belt for host-fed, resumed, or replayed histories.
 
-    Passes: 0. merge consecutive assistant turns (union tool_calls, concat
-    content; codex interim turns exempt; #29148, #49147); 1. drop stray ``tool``
-    results with no preceding matching tool_call; 2. prune tool_calls not
-    answered in the immediately following tool run, dropping the turn if left
-    empty (codex interims exempt); 3. merge consecutive user messages.
-    A user turn directly after an assistant turn is valid and left alone.
+def _merge_assistant_into(prev: Dict, msg: Dict) -> None:
+    """Fold a consecutive assistant ``msg`` into ``prev`` (union tool_calls, concat text)."""
+    prev_calls = list(prev.get("tool_calls") or [])
+    new_calls = list(msg.get("tool_calls") or [])
+    if new_calls:
+        prev["tool_calls"] = prev_calls + new_calls
+    elif prev_calls:
+        prev["tool_calls"] = prev_calls
+    else:
+        # Drop a stale ``tool_calls: []`` at the source: strict providers (DeepSeek v4,
+        # Kimi) 400 on it and it persists into replayed history.
+        prev.pop("tool_calls", None)
+    # Concatenate plain-text content only; leave multimodal (list) content alone.
+    prev_content = prev.get("content")
+    new_content = msg.get("content")
+    content_rewritten = False
+    if isinstance(prev_content, str) and isinstance(new_content, str):
+        joined = "\n".join(p for p in (prev_content.strip(), new_content.strip()) if p)
+        prev["content"] = joined
+        # A falsy new_content leaves ``joined`` == prev_content; that is not a rewrite.
+        content_rewritten = joined != prev_content
+    elif not prev_content and new_content is not None:
+        prev["content"] = new_content
+        content_rewritten = new_content != prev_content
+    # Carry reasoning_content from the later turn only if the earlier lacks it
+    # (strict thinking providers need one on the merged tool-call turn).
+    if not prev.get("reasoning_content") and msg.get("reasoning_content"):
+        prev["reasoning_content"] = msg["reasoning_content"]
+    # A stale ``api_content`` sidecar overrides ``content`` at API-build time and would
+    # replay pre-merge bytes; drop it only when content actually changed.
+    if content_rewritten:
+        drop_stale_api_content(prev)
 
-    Returns the number of repairs made.
-    """
-    if not messages:
-        return 0
 
+def _merge_consecutive_assistants(messages: List[Dict]) -> Tuple[List[Dict], int]:
+    """Pass 0: merge consecutive assistant turns (codex interims exempt)."""
     repairs = 0
-
-    # Pass 0: merge consecutive assistant messages, BEFORE Pass 1 so the merged
-    # tool_call-id union is known. Codex Responses interim turns are exempt:
-    # each carries its own continuation state that must be replayed verbatim.
-    def _is_codex_interim(m: Dict) -> bool:
-        return bool(
-            m.get("codex_reasoning_items")
-            or m.get("codex_message_items")
-            or m.get("finish_reason") == "incomplete"
-        )
-
-    def _is_verification_candidate(m: Dict) -> bool:
-        return m.get("finish_reason") in {
-            "verification_required",
-            "verify_hook_continue",
-        }
-
     collapsed: List[Dict] = []
     for msg in messages:
         if (
@@ -503,61 +512,30 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
             and not _is_codex_interim(collapsed[-1])
         ):
             prev = collapsed[-1]
-            # A provisional verification candidate (finish_reason =
-            # verification_required / verify_hook_continue) is superseded, not unioned (#65919 §7).
-            if _is_verification_candidate(prev):
+            # A provisional verification candidate is superseded, not unioned.
+            if prev.get("finish_reason") in {"verification_required", "verify_hook_continue"}:
                 collapsed[-1] = msg
-                repairs += 1
-                continue
-            # Union tool_calls (preserve order, both may carry them).
-            prev_calls = list(prev.get("tool_calls") or [])
-            new_calls = list(msg.get("tool_calls") or [])
-            if new_calls:
-                prev["tool_calls"] = prev_calls + new_calls
-            elif prev_calls:
-                prev["tool_calls"] = prev_calls
             else:
-                # Drop a stale ``tool_calls: []`` at the source: strict providers
-                # (DeepSeek v4, Kimi) 400 on it and it persists into replayed history (#58755, #77921).
-                prev.pop("tool_calls", None)
-            # Concatenate plain-text content only; leave multimodal (list) content alone.
-            prev_content = prev.get("content")
-            new_content = msg.get("content")
-            content_rewritten = False
-            if isinstance(prev_content, str) and isinstance(new_content, str):
-                joined = "\n".join(
-                    p for p in (prev_content.strip(), new_content.strip()) if p
-                )
-                prev["content"] = joined
-                # A falsy new_content leaves ``joined`` == prev_content; that is not a rewrite (#78063).
-                content_rewritten = joined != prev_content
-            elif not prev_content and new_content is not None:
-                prev["content"] = new_content
-                content_rewritten = new_content != prev_content
-            # Carry reasoning_content from the later turn only if the earlier lacks it
-            # (strict thinking providers need one on the merged tool-call turn).
-            if not prev.get("reasoning_content") and msg.get("reasoning_content"):
-                prev["reasoning_content"] = msg["reasoning_content"]
-            # A stale ``api_content`` sidecar overrides ``content`` at API-build time and
-            # would replay pre-merge bytes; drop it only when content actually changed (#78063).
-            if content_rewritten:
-                drop_stale_api_content(prev)
+                _merge_assistant_into(prev, msg)
             repairs += 1
             continue
         collapsed.append(msg)
+    return collapsed, repairs
 
-    # Pass 1: drop stray tool messages not following a known assistant tool call.
-    # Consume the whole alias group (call_id/id/response_item_id/composite) so a
-    # duplicate keyed on a sibling alias is not replayed to strict providers (#66974, #91768).
+
+def _drop_stray_tool_results(messages: List[Dict]) -> Tuple[List[Dict], int]:
+    """Pass 1: drop tool results not following a known assistant tool call.
+
+    Consumes the whole alias group (call_id/id/response_item_id/composite) so a
+    duplicate keyed on a sibling alias is not replayed to strict providers.
+    """
+    repairs = 0
     known_tool_ids: Dict[str, int] = {}
     matched_tool_groups: set = set()
     next_tool_group = 0
     filtered: List[Dict] = []
-    for msg in collapsed:
-        if not isinstance(msg, dict):
-            filtered.append(msg)
-            continue
-        role = msg.get("role")
+    for msg in messages:
+        role = msg.get("role") if isinstance(msg, dict) else None
         if role == "assistant":
             known_tool_ids = {}
             matched_tool_groups = set()
@@ -569,40 +547,39 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
                 next_tool_group += 1
                 for tc_id in variants:
                     known_tool_ids.setdefault(tc_id, group_id)
-            filtered.append(msg)
         elif role == "tool":
             result_variants = tool_result_id_variants(msg.get("tool_call_id"))
             candidate_groups = {
                 known_tool_ids[tc_id]
                 for tc_id in result_variants
-                if tc_id in known_tool_ids
-                and known_tool_ids[tc_id] not in matched_tool_groups
+                if tc_id in known_tool_ids and known_tool_ids[tc_id] not in matched_tool_groups
             }
-            if not result_variants:
-                filtered.append(msg)
-            elif candidate_groups:
-                # Consume the whole alias group so a second result on any sibling
-                # spelling is dropped; strict providers 400 on duplicates (#58327, #66974, #55436).
-                group_id = min(candidate_groups)
-                filtered.append(msg)
-                matched_tool_groups.add(group_id)
-            else:
+            if result_variants and not candidate_groups:
                 repairs += 1
-        else:
-            if role == "user":
-                # A user turn closes the tool-result run; later tool messages are orphans.
-                known_tool_ids = {}
-                matched_tool_groups = set()
-            filtered.append(msg)
+                continue
+            if candidate_groups:
+                matched_tool_groups.add(min(candidate_groups))
+        elif role == "user":
+            # A user turn closes the tool-result run; later tool messages are orphans.
+            known_tool_ids = {}
+            matched_tool_groups = set()
+        filtered.append(msg)
+    return filtered, repairs
 
-    # Pass 2: prune tool_calls never answered in the IMMEDIATELY following tool run
-    # (any id variant, same alias policy as Pass 1); a displaced result masks the per-call
-    # stub pass and strict providers (DeepSeek v4) 400. Drop payload-empty turns; codex interims exempt.
+
+def _prune_unanswered_tool_calls(messages: List[Dict]) -> Tuple[List[Dict], int]:
+    """Pass 2: prune tool_calls not answered in the IMMEDIATELY following tool run.
+
+    A displaced result masks the per-call stub pass and strict providers 400.
+    Payload-empty turns are dropped; codex interims exempt.
+    """
+    repairs = 0
     pruned: List[Dict] = []
+    n = len(messages)
     i = 0
-    n = len(filtered)
     while i < n:
-        msg = filtered[i]
+        msg = messages[i]
+        i += 1
         if not (
             isinstance(msg, dict)
             and msg.get("role") == "assistant"
@@ -610,45 +587,35 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
             and not _is_codex_interim(msg)
         ):
             pruned.append(msg)
-            i += 1
             continue
         answered: set = set()
-        j = i + 1
-        while (
-            j < n
-            and isinstance(filtered[j], dict)
-            and filtered[j].get("role") == "tool"
-        ):
-            tid = (filtered[j].get("tool_call_id") or "").strip()
+        j = i
+        while j < n and isinstance(messages[j], dict) and messages[j].get("role") == "tool":
+            tid = (messages[j].get("tool_call_id") or "").strip()
             if tid:
                 answered.update(tool_result_id_variants(tid))
             j += 1
-        kept_calls: List[Dict] = []
-        dropped_calls = 0
-        for tc in msg.get("tool_calls") or []:
-            variants = tool_call_id_variants(tc)
-            if variants and (variants & answered):
-                kept_calls.append(tc)
-            else:
-                dropped_calls += 1
-        if dropped_calls:
+        kept_calls = [tc for tc in msg["tool_calls"] if tool_call_id_variants(tc) & answered]
+        if len(kept_calls) != len(msg["tool_calls"]):
             repairs += 1
             if not kept_calls and not _msg_has_payload(
                 {k: v for k, v in msg.items() if k != "tool_calls"}
             ):
                 # Pruned calls were the only payload; drop the turn (empty assistant messages 400).
-                i += 1
                 continue
             if kept_calls:
                 msg["tool_calls"] = kept_calls
             else:
                 msg.pop("tool_calls", None)
         pruned.append(msg)
-        i += 1
+    return pruned, repairs
 
-    # Pass 3: merge consecutive user messages (no user input lost).
+
+def _merge_consecutive_users(messages: List[Dict]) -> Tuple[List[Dict], int]:
+    """Pass 3: merge consecutive plain-text user messages (no user input lost)."""
+    repairs = 0
     merged: List[Dict] = []
-    for msg in pruned:
+    for msg in messages:
         if (
             merged
             and isinstance(msg, dict)
@@ -657,19 +624,15 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
             and merged[-1].get("role") == "user"
         ):
             prev = merged[-1]
-            # A summary carrier followed by a new user row is a deliberate durable shape
-            # after retry/rewind; never mutate the persisted carrier (sanitizers merge copies later).
+            # A summary carrier followed by a new user row is a deliberate durable shape after
+            # retry/rewind; never mutate the persisted carrier (sanitizers merge copies later).
             from agent.context_compressor import split_user_originated_turn
 
             handoff, _ = split_user_originated_turn(prev)
-            if handoff is not None:
-                merged.append(msg)
-                continue
-
             prev_content = prev.get("content", "")
             new_content = msg.get("content", "")
             # Only merge plain-text content; leave multimodal (list) content alone.
-            if isinstance(prev_content, str) and isinstance(new_content, str):
+            if handoff is None and isinstance(prev_content, str) and isinstance(new_content, str):
                 prev["content"] = (
                     (prev_content + "\n\n" + new_content)
                     if prev_content and new_content
@@ -680,11 +643,38 @@ def repair_message_sequence(agent, messages: List[Dict]) -> int:
                 repairs += 1
                 continue
         merged.append(msg)
+    return merged, repairs
 
+
+_SEQUENCE_REPAIR_PASSES = (
+    _merge_consecutive_assistants,
+    _drop_stray_tool_results,
+    _prune_unanswered_tool_calls,
+    _merge_consecutive_users,
+)
+
+
+def repair_message_sequence(agent, messages: List[Dict]) -> int:
+    """Collapse malformed role-alternation left in the live history; returns repair count.
+
+    Providers require strict alternation after the system message; violations cause
+    silent empty responses or HTTP 400s. Runs right before the API call as a defensive
+    belt for host-fed, resumed, or replayed histories. Passes, in order: merge
+    consecutive assistant turns (BEFORE orphan detection so the merged tool_call-id
+    union is known); drop stray tool results; prune tool_calls unanswered in the
+    immediately following tool run; merge consecutive user messages. A user turn
+    directly after an assistant turn is valid and left alone.
+    """
+    if not messages:
+        return 0
+    repairs = 0
+    current = messages
+    for repair_pass in _SEQUENCE_REPAIR_PASSES:
+        current, made = repair_pass(current)
+        repairs += made
     if repairs > 0:
         # Rewrite in place so persistence/return value/DB flush see the repaired sequence.
-        messages[:] = merged
-
+        messages[:] = current
     return repairs
 
 
