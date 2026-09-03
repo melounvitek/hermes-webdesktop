@@ -1061,7 +1061,7 @@ class GatewayShutdownMixin:
         watcher_env = GatewayShutdownMixin._restart_watcher_env()
         project_root = Path(__file__).resolve().parent.parent
         # Console python under CREATE_NO_WINDOW: nothing flashes. NOT pythonw.exe — a console-less
-        # watcher makes every console-subsystem descendant allocate a visible conhost.
+        # watcher makes every console-subsystem descendant allocate a visible conhost (#54220/#56747).
         watcher_python = sys.executable
         venv_dir = Path(watcher_env.get("VIRTUAL_ENV") or project_root / "venv")
         site_packages = venv_dir / "Lib" / "site-packages"

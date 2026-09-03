@@ -859,7 +859,10 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         return False
     from hermes_cli._subprocess_compat import windows_detach_flags_without_breakaway, windows_detach_popen_kwargs
 
-    # Windows: normalize the interpreter and capture a stable cwd + env overlay (HERMES_HOME,
+    # Windows: ``run_argv`` leads with the venv's console ``python.exe`` — the interpreter we want:
+    # the watcher respawns it under CREATE_NO_WINDOW detach flags so the gateway owns one hidden
+    # console all descendants inherit and nothing flashes (#54220/#56747). The spec helper
+    # normalizes the interpreter and captures a stable cwd + env overlay (HERMES_HOME,
     # VIRTUAL_ENV, PYTHONPATH) so the respawn doesn't depend on the watcher's cwd. No-op on POSIX.
     respawn_cwd = ""
     respawn_env_overlay: dict[str, str] = {}

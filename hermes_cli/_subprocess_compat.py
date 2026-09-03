@@ -112,12 +112,13 @@ def resolve_node_command(name: str, argv: Sequence[str]) -> list[str]:
 # to exist on stdlib subprocess for older Pythons or non-Windows builds.
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 # DETACHED_PROCESS (0x00000008) is intentionally NOT part of any flag bundle — do not re-add it
-# (the recurring console-flash bug): (1) MSDN: CREATE_NO_WINDOW "is ignored if used with either
+# (the recurring console-flash bug #54220 / #56747): (1) MSDN: CREATE_NO_WINDOW "is ignored if used with either
 # CREATE_NEW_CONSOLE or DETACHED_PROCESS"; (2) a DETACHED_PROCESS child has NO console, so every
 # console-subsystem descendant (git, gh, cmd, node, powershell, …) allocates its own — a visible
 # flash per spawn, including inside third-party libraries no per-site sweep can reach. A
 # CREATE_NO_WINDOW child instead OWNS a hidden console all descendants inherit (A/B verified on
-# Windows 11 by the desktop backend fix).
+# Windows 11 by the desktop backend fix, commit aa2ae36c3f: with per-site hide flags neutered,
+# naive git/gh/cmd spawns don't flash under a hidden-console parent and do under a console-less one).
 _CREATE_NO_WINDOW = 0x08000000
 # Escape any Win32 job object the parent belongs to. Without this a detached child inherits the
 # parent's job, and when that parent (Electron, Tauri, Windows Terminal, the Desktop bootstrap
@@ -131,7 +132,9 @@ def windows_detach_flags() -> int:
 
     Pair with the default ``start_new_session=False`` (POSIX uses ``start_new_session=True``).
     CREATE_NEW_PROCESS_GROUP stops Ctrl+C propagating; CREATE_NO_WINDOW gives the child a hidden
-    console descendants inherit; CREATE_BREAKAWAY_FROM_JOB escapes Electron/Tauri job objects. A
+    console descendants (git, gh, cmd, node, …) inherit so they don't flash — deliberately replacing
+    the old DETACHED_PROCESS approach, which re-created the per-descendant console-flash bug
+    (#54220/#56747) at every spawn; CREATE_BREAKAWAY_FROM_JOB escapes Electron/Tauri job objects. A
     job that forbids breakaway yields PermissionError from Popen — callers catch OSError and fall
     back to :func:`windows_detach_flags_without_breakaway`.
     """

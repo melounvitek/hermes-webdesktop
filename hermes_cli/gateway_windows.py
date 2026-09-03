@@ -168,7 +168,8 @@ def _current_profile_cli_args() -> list[str]:
 def _launch_elevated_gateway_command(command: str, extra_args: list[str] | None = None) -> bool:
     """Launch an elevated gateway subcommand via UAC and return True on handoff. The child is console
     ``python.exe`` with ``SW_HIDE``: it owns one hidden console its subprocesses (schtasks, taskkill)
-    inherit — no visible window and no per-descendant conhost flashes (pythonw.exe re-created them)."""
+    inherit — no visible window and no per-descendant conhost flashes (the console-less pythonw.exe
+    alternative re-created #54220/#56747 for every descendant)."""
     _assert_windows()
     args = ["-m", "hermes_cli.main", *_current_profile_cli_args(), "gateway", command, *(extra_args or [])]
     params = subprocess.list2cmdline(args)
@@ -326,7 +327,7 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
     Run via ``wscript.exe``, not ``cmd.exe``: at logon Windows broadcasts CTRL_CLOSE_EVENT to console
     groups, killing a cmd-hosted gateway with STATUS_CONTROL_C_EXIT, which Task Scheduler treats as a
     user cancel (``RestartOnFailure`` never fires). wscript has no console; python.exe runs with window
-    style 0 so descendants inherit one hidden console instead of flashing their own.
+    style 0 so descendants inherit one hidden console instead of flashing their own (#54220/#56747).
     """
     python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
     # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
@@ -573,7 +574,8 @@ def _spawn_detached(script_path: Path | None = None) -> int:
     """Launch the gateway as a fully detached background process (``script_path`` is ignored; kept
     for API symmetry). Spawns python.exe directly — a cmd.exe shim inherits the parent console and
     gets reaped when the shell exits. Flags: CREATE_NEW_PROCESS_GROUP (no Ctrl+C from our group),
-    CREATE_NO_WINDOW (hidden console descendants inherit, so nothing flashes), CREATE_BREAKAWAY_FROM_JOB
+    CREATE_NO_WINDOW (hidden console descendants inherit, so nothing flashes — #54220/#56747; the old
+    DETACHED_PROCESS made every descendant spawn flash), CREATE_BREAKAWAY_FROM_JOB
     (escape a parent Job Object — some Windows Terminal versions wrap children in one)."""
     _assert_windows()
     argv, working_dir, env_overlay = _build_gateway_argv()

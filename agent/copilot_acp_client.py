@@ -301,7 +301,7 @@ class CopilotACPClient:
                 "HERMES_COPILOT_ACP_COMMAND / HERMES_COPILOT_ACP_ARGS to a working pair."
             )
         try:
-            from hermes_cli._subprocess_compat import windows_hide_flags  # hide the Windows console flash; pipes intact
+            from hermes_cli._subprocess_compat import windows_hide_flags  # hide the Windows console flash (#56747); pipes intact for the ACP wire
 
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -191,9 +191,13 @@ DEFAULT_DB_PATH = _IMPORT_DEFAULT_DB_PATH = get_hermes_home() / "state.db"
 # Back off from read-only opens after one fails: not per query, but short enough that
 # transient fd pressure doesn't strand the read pool.
 _READ_OPEN_RETRY_SECONDS = 60.0
-# Transient SQLITE_IOERR retry budget for READ-ONLY opens: a WAL writer's checkpoint/reset/
-# frame flush surfaces "disk I/O error" to a concurrent mode=ro reader for a millisecond-wide
-# window (ro cannot do the -shm recovery). Never for writable opens: there an IOERR is real.
+# Transient SQLITE_IOERR retry budget for READ-ONLY opens (#100436): a WAL writer's checkpoint/
+# reset/frame flush surfaces "disk I/O error" to a concurrent mode=ro reader for a millisecond-
+# wide window — the ro connection cannot perform WAL recovery because recovery writes the -shm
+# index, which mode=ro refuses. The writer closes the window on its own, so a few short retries
+# make the open succeed instead of 500-ing the whole /api/sessions poll (or any other ro opener).
+# Deliberately NOT for writable opens: a writer owns the transition, so an IOERR there is a real
+# storage/fd problem. A persistent IOERR still exhausts the budget and propagates.
 _READ_ONLY_IOERR_RETRY_ATTEMPTS, _READ_ONLY_IOERR_RETRY_BACKOFF_S = 3, 0.05
 
 
@@ -552,7 +556,10 @@ class SessionDB(
                     raise
                 return
             except sqlite3.OperationalError as ioerr:
-                # Transient SQLITE_IOERR window (see _READ_ONLY_IOERR_RETRY_ATTEMPTS).
+                # In-flight WAL checkpoint/reset/frame-flush on the writer side can surface
+                # SQLITE_IOERR to a mode=ro reader (it can't do the -shm recovery the read
+                # needs). Closes in milliseconds: retry a bounded number of times before
+                # classifying the store as failed (#100436; see _READ_ONLY_IOERR_RETRY_ATTEMPTS).
                 transient = _DISK_IO_ERROR_MARKER in str(ioerr).lower()
                 if attempt >= _READ_ONLY_IOERR_RETRY_ATTEMPTS or not transient:
                     raise

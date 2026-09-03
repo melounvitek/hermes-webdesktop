@@ -403,7 +403,11 @@ def is_interrupt_then_dispatch(command_name: str | None) -> bool:
 def should_bypass_active_session(command_name: str | None) -> bool:
     """True for any resolvable slash command: every recognized command is dispatched mid-run
     (Guard-2 handler or the "busy" catch-all), never queued — gateway.run's safety net discards
-    command text reaching the pending queue, so a queued /model would vanish."""
+    command text reaching the pending queue, so a queued mid-run /model (or /reasoning, /voice,
+    /insights, /title, /resume, /retry, /undo, /compress, /usage, /reload-mcp, /sethome, /reset)
+    would silently interrupt the agent AND get discarded — a zero-char response. See issue
+    #5057 / PRs #6252, #10370, #4665. ACTIVE_SESSION_BYPASS_COMMANDS remains the subset with
+    explicit Level-2 handlers; the rest fall through to the catch-all."""
     return resolve_command(command_name) is not None if command_name else False
 
 

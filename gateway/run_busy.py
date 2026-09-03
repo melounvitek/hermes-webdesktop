@@ -700,7 +700,12 @@ class GatewayBusySessionMixin:
         """Dispatch a recognized slash command while an agent is running.
 
         Order: ``busy_handler`` (mid-run variant) → ``busy_policy == "dispatch"`` (normal handler)
-        → catch-all reject text. Rejecting beats interrupt + discard (a zero-char response).
+        → catch-all reject text. Rejecting is required rather than falling through to
+        interrupt + discard: commands like /model, /reasoning, /voice, /insights, /title,
+        /resume, /retry, /undo, /compress, /usage, /reload-mcp, /sethome, /reset (all
+        registered as Discord slash commands) would interrupt the agent AND get silently
+        discarded by the slash-command safety net, producing a zero-char response.
+        See #5057, #6252, #10370.
         """
         name = cmd_def.name
         policy = getattr(cmd_def, "busy_policy", "reject")

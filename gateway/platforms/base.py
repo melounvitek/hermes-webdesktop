@@ -1766,7 +1766,9 @@ class BasePlatformAdapter(ABC):
         self._fatal_error_code: Optional[str] = None
         self._fatal_error_message: Optional[str] = None
         self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
-        # Strong refs to shielded fatal-error handler tasks (asyncio keeps only weak refs).
+        # Strong refs to shielded fatal-error handler tasks that outlive their carrier task
+        # (asyncio keeps only weak refs); without them the loop can GC the detached handler
+        # mid-flight — the "handler killed mid-flight" class (#81335).
         self._detached_fatal_tasks: set = set()
         # Lock takeover armed only for the initial connect of ``gateway run --replace``.
         self._platform_lock_takeover_allowed = self._platform_lock_takeover_attempted = False
@@ -1992,10 +1994,15 @@ class BasePlatformAdapter(ABC):
             return
         result = handler(self)
         if asyncio.iscoroutine(result):
-            # Detached + shielded: often awaited from an adapter-owned task that the handler's
-            # ``disconnect()`` cancels; unshielded, the handler died mid-flight (adapter popped
-            # but never queued for reconnect). Strong ref so the loop can't GC it.
+            # Detached + shielded: often awaited from an adapter-owned task (e.g. Telegram
+            # ``_polling_error_task``) that the gateway fatal handler's ``disconnect()``
+            # cancels; unshielded, the handler died mid-flight — adapter popped from the
+            # gateway map but never queued for background reconnect, leaving a zombie
+            # gateway with no platforms and no pending retries (#81335).
             task = asyncio.ensure_future(result)
+            # Strong ref: asyncio only keeps weak refs to tasks ("save a reference ... to
+            # avoid a task disappearing mid-execution"); matches
+            # GatewayRunner._handle_adapter_fatal_error.
             _tasks = _lazy_attr(self, "_detached_fatal_tasks", set)
             _tasks.add(task)
             task.add_done_callback(_tasks.discard)
@@ -3340,7 +3347,11 @@ class BasePlatformAdapter(ABC):
     async def _handle_message_while_active(self, event: MessageEvent, session_key: str) -> None:
         """Route a message that arrived while ``session_key`` is busy: bypass
         commands / clarify replies dispatch inline, everything else is queued."""
-        # Bypass commands run inline: queued they'd leak as user text (/new) or deadlock (/approve).
+        # Bypass commands run inline: queued they'd leak as user text (/new) or deadlock
+        # (/approve, /deny — the agent is blocked on Event.wait).  Dispatch inline by
+        # calling the message handler directly and sending the response.  Do NOT use
+        # _process_message_background — it manages session lifecycle and its cleanup
+        # races with the running task (split-brain, see PR #4926).
         cmd = event.get_command()
         from hermes_cli.commands import (is_interrupt_then_dispatch, should_bypass_active_session)
         if should_bypass_active_session(cmd):
@@ -3357,7 +3368,10 @@ class BasePlatformAdapter(ABC):
                 logger.error("[%s] Command '/%s' dispatch failed: %s", self.name, cmd, e, exc_info=True)
             return
         # Clarify bypass: while blocked on clarify_tool the next message must reach the
-        # text-intercept.
+        # text-intercept so numeric/exact/"Other" answers resolve it and unblock the agent.
+        # Otherwise it lands in _pending_messages as a follow-up turn and the answer is
+        # discarded.  Same shape as the /approve deadlock fix (PR #4926): agent thread
+        # blocked on Event.wait, message must reach the resolver before being a new turn.
         if not cmd and event.allow_gateway_control:
             try:
                 from tools import clarify_gateway as _clarify_mod
