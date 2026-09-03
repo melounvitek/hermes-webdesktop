@@ -65,24 +65,21 @@ def _run(cli: HermesCLI, command: str) -> str:
     cmd = (command or "").strip()
     if not cmd:
         return ""
-    if not cmd.startswith("/"):
-        cmd = f"/{cmd}"
     buf = io.StringIO()
-    # Rich Console captures its file handle at construction, so redirect_stdout won't affect it;
-    # swap the console's file so self.console.print() is captured.
+    # Rich Console captures its file handle at construction, so redirect_stdout won't affect it; swap
+    # the console's file so self.console.print() is captured. cli._cprint is likewise redirected.
     cli.console = Console(file=buf, force_terminal=True, width=120)
     old = getattr(cli_mod, "_cprint", None)
     if old is not None:
         cli_mod._cprint = lambda text: print(text)
     try:
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            cli.process_command(cmd)
+            cli.process_command(cmd if cmd.startswith("/") else f"/{cmd}")
     finally:
         if old is not None:
             cli_mod._cprint = old
-    # Desktop chat bubbles render plain text, not ANSI. A command that emits Rich color (e.g.
-    # /journey building its own Console under the gateway's inherited COLORTERM) would leak raw
-    # escapes; strip at this single choke point.
+    # Desktop chat bubbles render plain text, not ANSI. A command that emits Rich color (e.g. /journey
+    # under the gateway's inherited COLORTERM) would leak raw escapes; strip at this single choke point.
     from tools.ansi_strip import strip_ansi
 
     return strip_ansi(buf.getvalue().rstrip())
@@ -102,22 +99,17 @@ def main():
     p.add_argument("--session-key", required=True)
     p.add_argument("--model", default="")
     args = p.parse_args()
-
     os.environ["HERMES_SESSION_KEY"] = args.session_key
     os.environ["HERMES_INTERACTIVE"] = "1"
-
-    # Start before the (hundreds-of-ms) HermesCLI build — that window is itself an orphan risk if
-    # the gateway dies mid-spawn.
+    # Start before the (hundreds-of-ms) HermesCLI build — that window is itself an orphan risk if the
+    # gateway dies mid-spawn.
     _start_parent_death_watchdog(os.getppid())
     _prepare_slash_worker_runtime()
-
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         cli = HermesCLI(model=args.model or None, compact=True, resume=args.session_key, verbose=False)
-
-    # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue as the gateway
-    # entry point — any child inheriting fd 0 can flip the flag).
+    # Spurious stdin-EOF recovery (same shared-file-description O_NONBLOCK issue as the gateway entry
+    # point — any child inheriting fd 0 can flip the flag).
     _sw_recovery_times: list[float] = []
-
     while True:
         raw = sys.stdin.readline()
         if not raw:
