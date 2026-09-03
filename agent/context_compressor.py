@@ -1521,39 +1521,37 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
         # Rule 2: superseded tool-result image, even inside the protected tail.
         return message.get("role") == "tool" and index != tool_anchor
 
-    changed = False
-    result: List[Dict[str, Any]] = []
-    for i, msg in enumerate(messages):
+    def _stripped(i: int, msg: Any) -> Optional[Dict[str, Any]]:
         if not isinstance(msg, dict) or not _is_stale(i, msg):
-            result.append(msg)
-            continue
+            return None
         content = msg.get("content")
         # Native multimodal envelope: route through the tool-message stripper
         # (collapses to text summary, drops stale api_content sidecar).
-        if (
-            msg.get("role") == "tool"
-            and isinstance(content, dict)
-            and content.get("_multimodal")
-            and _tool_content_has_images(content)
-        ):
-            new_msg = _strip_images_from_tool_msg(msg)
-            if new_msg is None:
-                result.append(msg)
-                continue
-            result.append(new_msg)
-            changed = True
-            continue
+        if msg.get("role") == "tool" and isinstance(content, dict) and content.get("_multimodal"):
+            return _strip_images_from_tool_msg(msg) if _tool_content_has_images(content) else None
         if not _content_has_images(content):
-            result.append(msg)
-            continue
-        new_msg = msg.copy()
-        new_msg["content"] = _strip_images_from_content(content)
+            return None
+        new_msg = {**msg, "content": _strip_images_from_content(content)}
         # Content rewritten: drop the stale api_content sidecar so replay can't resend it.
         drop_stale_api_content(new_msg)
-        result.append(new_msg)
-        changed = True
+        return new_msg
 
-    return result if changed else messages
+    result = [(_stripped(i, msg), msg) for i, msg in enumerate(messages)]
+    if all(new is None for new, _ in result):
+        return messages
+    return [msg if new is None else new for new, msg in result]
+
+
+def _summary_part_text(part: Any) -> str:
+    """Summarizer-facing text of one content part; non-text parts keep a marker so content is known to exist."""
+    if isinstance(part, str):
+        return part
+    ptype = part.get("type")
+    if ptype == "text":
+        return part.get("text", "")
+    if ptype in _IMAGE_PART_TYPES:
+        return _image_part_label(part)
+    return f"[{ptype or 'attachment'}]"
 
 
 def _image_part_label(part: Dict[str, Any]) -> str:
@@ -3142,6 +3140,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     # Aggregate cap applied after per-message limits; class alias so subclasses/tests can override.
     _SUMMARY_INPUT_MAX_CHARS = _SUMMARY_INPUT_MAX_CHARS
 
+    def _render_tool_call_for_summary(self, tc: Any) -> str:
+        """``  name(args)`` line for the summarizer; object-shaped calls render as ``name(...)``."""
+        if not isinstance(tc, dict):
+            fn = getattr(tc, "function", None)
+            return f"  {getattr(fn, 'name', '?') if fn else '?'}(...)"
+        fn = tc.get("function", {})
+        args = _redact_compaction_text(fn.get("arguments", ""))
+        if len(args) > self._TOOL_ARGS_MAX:
+            args = args[:self._TOOL_ARGS_HEAD] + "..."
+        return f"  {fn.get('name', '?')}({args})"
+
     def _serialize_for_summary(self, turns: List[Dict[str, Any]]) -> str:
         """Serialize turns into labeled, redacted text for the summarizer."""
         # Lazy import: agent_runtime_helpers pulls heavy transitive imports.
@@ -3152,20 +3161,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             role = msg.get("role", "unknown")
             content = msg.get("content")
             if isinstance(content, list):
-                text_parts: list[str] = []
-                for part in content:
-                    if isinstance(part, dict):
-                        ptype = part.get("type")
-                        if ptype == "text":
-                            text_parts.append(part.get("text", ""))
-                        elif ptype in {"image", "image_url", "input_image"}:
-                            text_parts.append(_image_part_label(part))
-                        else:
-                            # Keep a marker so the summarizer knows content existed.
-                            text_parts.append(f"[{ptype or 'attachment'}]")
-                    elif isinstance(part, str):
-                        text_parts.append(part)
-                content = "\n".join(text_parts)
+                content = "\n".join(
+                    _summary_part_text(part) for part in content if isinstance(part, (dict, str))
+                )
             content = _redact_compaction_text(content or "")
             content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
             # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.
@@ -3179,26 +3177,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 parts.append(f"[TOOL RESULT {msg.get('tool_call_id', '')}]: {content}")
                 continue
 
-            if role == "assistant":
-                tool_calls = msg.get("tool_calls", [])
-                if tool_calls:
-                    tc_parts = []
-                    for tc in tool_calls:
-                        if isinstance(tc, dict):
-                            fn = tc.get("function", {})
-                            name = fn.get("name", "?")
-                            args = _redact_compaction_text(fn.get("arguments", ""))
-                            if len(args) > self._TOOL_ARGS_MAX:
-                                args = args[:self._TOOL_ARGS_HEAD] + "..."
-                            tc_parts.append(f"  {name}({args})")
-                        else:
-                            fn = getattr(tc, "function", None)
-                            name = getattr(fn, "name", "?") if fn else "?"
-                            tc_parts.append(f"  {name}(...)")
-                    content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
-                parts.append(f"[ASSISTANT]: {content}")
-                continue
-
+            if role == "assistant" and msg.get("tool_calls", []):
+                tc_parts = [self._render_tool_call_for_summary(tc) for tc in msg["tool_calls"]]
+                content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
             parts.append(f"[{role.upper()}]: {content}")
 
         return "\n\n".join(parts)
@@ -4223,12 +4204,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         """
         from agent.agent_runtime_helpers import _classify_tool_call_orphans
 
-        (
-            surviving_call_ids,
-            result_call_ids,
-            orphaned_result_msgs,
-            missing_tool_calls,
-        ) = _classify_tool_call_orphans(messages)
+        _, result_call_ids, orphaned_result_msgs, missing_tool_calls = _classify_tool_call_orphans(messages)
         orphaned_results = {id(m) for m in orphaned_result_msgs}
 
         if orphaned_results:
@@ -4238,44 +4214,38 @@ This compaction should PRIORITISE preserving all information related to the focu
 
         # Strip orphaned tool_calls (not stub them: stubs get dropped by repair_message_sequence
         # when call_id != id). A call survives if ANY id variant still has a result.
+        if not missing_tool_calls:
+            return messages
+        # In-flight protection: compression can fire before the executor appends the result, so the
+        # last non-tool assistant's calls are presumed pending and kept verbatim. Skip trailing tool
+        # results first: a multi-call batch snapshot between appends is still in flight. Unanswered
+        # survivors are stubbed pre-API by sanitize_api_messages.
+        idx = len(messages) - 1
+        while idx >= 0 and messages[idx].get("role") == "tool":
+            idx -= 1
+        trailing_inflight = messages[idx] if idx >= 0 and messages[idx].get("role") == "assistant" else None
         stripped_count = 0
-        if missing_tool_calls:
-            # In-flight protection: compression can fire before the executor appends the result,
-            # so the last non-tool assistant's calls are presumed pending and kept verbatim.
-            trailing_inflight: Optional[Dict[str, Any]] = None
-            # Skip trailing tool results first: a multi-call batch snapshot between appends
-            # is still in flight. Unanswered survivors are stubbed pre-API by sanitize_api_messages.
-            idx = len(messages) - 1
-            while idx >= 0 and messages[idx].get("role") == "tool":
-                idx -= 1
-            if idx >= 0 and messages[idx].get("role") == "assistant":
-                trailing_inflight = messages[idx]
-            for msg in messages:
-                if msg.get("role") != "assistant":
-                    continue
-                if msg is trailing_inflight:
-                    # Live request, not an orphan.
-                    continue
-                tcs = msg.get("tool_calls")
-                if not tcs:
-                    continue
-                kept = [tc for tc in tcs if self._tool_call_id_variants(tc) & result_call_ids]
-                if len(kept) != len(tcs):
-                    stripped_count += len(tcs) - len(kept)
-                    if kept:
-                        msg["tool_calls"] = kept
-                    else:
-                        msg.pop("tool_calls", None)
-                        # Keep visible content so the API does not reject an empty turn.
-                        content = msg.get("content")
-                        if not content or (isinstance(content, str) and not content.strip()):
-                            msg["content"] = "(tool call removed)"
-            if stripped_count and not self.quiet_mode:
-                logger.info(
-                    "Compression sanitizer: stripped %d orphaned tool_call(s) from assistant messages",
-                    stripped_count,
-                )
-
+        for msg in messages:
+            tcs = msg.get("tool_calls")
+            if msg.get("role") != "assistant" or msg is trailing_inflight or not tcs:
+                continue
+            kept = [tc for tc in tcs if self._tool_call_id_variants(tc) & result_call_ids]
+            if len(kept) == len(tcs):
+                continue
+            stripped_count += len(tcs) - len(kept)
+            if kept:
+                msg["tool_calls"] = kept
+            else:
+                msg.pop("tool_calls", None)
+                # Keep visible content so the API does not reject an empty turn.
+                content = msg.get("content")
+                if not content or (isinstance(content, str) and not content.strip()):
+                    msg["content"] = "(tool call removed)"
+        if stripped_count and not self.quiet_mode:
+            logger.info(
+                "Compression sanitizer: stripped %d orphaned tool_call(s) from assistant messages",
+                stripped_count,
+            )
         return messages
 
     def _align_boundary_forward(self, messages: List[Dict[str, Any]], idx: int) -> int:
