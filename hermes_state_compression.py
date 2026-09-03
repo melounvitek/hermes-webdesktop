@@ -22,6 +22,28 @@ _COOLDOWN_ROW_SQL = (
     "SELECT compression_failure_cooldown_until, compression_failure_error FROM sessions WHERE id = ?"
 )
 
+# One forward step of get_compression_chain: the preferred continuation child of ``?``.
+_CHAIN_STEP_SQL = f"""
+                    SELECT child.id
+                    FROM sessions parent
+                    JOIN sessions child ON child.parent_session_id = parent.id
+                    WHERE parent.id = ?
+                      AND parent.end_reason = 'compression'
+                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
+                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
+                      AND COALESCE(child.source, '') != 'tool'
+                    ORDER BY
+                      CASE
+                        WHEN child.end_reason = 'compression' THEN 0
+                        WHEN child.ended_at IS NULL THEN 1
+                        ELSE 2
+                      END,
+                      {_sql_session_last_active("child")} DESC,
+                      child.started_at DESC,
+                      child.id DESC
+                    LIMIT 1
+                    """
+
 
 def _cooldown_row(exists: bool, cooldown_until, error) -> Dict[str, Any]:
     return {"session_exists": exists,
@@ -251,10 +273,8 @@ class SessionCompressionMixin:
 
     def get_compression_failure_cooldown(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Return the active (unexpired) compression-failure cooldown, or None."""
-        if not session_id:
-            return None
         now = time.time()
-        row = self._read_one(_COOLDOWN_ROW_SQL, (session_id,))
+        row = self._read_one(_COOLDOWN_ROW_SQL, (session_id,)) if session_id else None
         if row is None or row[0] is None or float(row[0]) <= now:
             return None
         return {"cooldown_until": float(row[0]), "remaining_seconds": float(row[0]) - now, "error": row[1]}
@@ -286,9 +306,7 @@ class SessionCompressionMixin:
         expected = _cooldown_row(True, deadline, error)
         if actual != expected:
             raise RuntimeError(
-                f"compression cooldown rollback verification failed: "
-                f"expected={expected!r}, actual={actual!r}"
-            )
+                f"compression cooldown rollback verification failed: expected={expected!r}, actual={actual!r}")
 
     def clear_compression_failure_cooldown(self, session_id: str) -> None:
         """Clear any persisted compression-failure cooldown for a session."""
@@ -302,13 +320,9 @@ class SessionCompressionMixin:
     def _read_session_number(self, column: str, session_id: str, cast: type, zero: Any) -> Any:
         """Read one numeric ``sessions`` column clamped at ``zero``; a missing session,
         NULL, or unparsable value also reads as ``zero``."""
-        if not session_id:
-            return zero
-        row = self._read_one(f"SELECT {column} FROM sessions WHERE id = ?", (session_id,))
-        if row is None:
-            return zero
+        row = self._read_one(f"SELECT {column} FROM sessions WHERE id = ?", (session_id,)) if session_id else None
         try:
-            return max(zero, cast(row[0] or zero))
+            return zero if row is None else max(zero, cast(row[0] or zero))
         except (TypeError, ValueError):
             return zero
 
@@ -365,8 +379,7 @@ class SessionCompressionMixin:
         try:
             return self._write_rowcount(
                 "UPDATE compression_locks SET expires_at = ? WHERE session_id = ? AND holder = ?",
-                (expires_at, session_id, holder),
-            ) > 0
+                (expires_at, session_id, holder)) > 0
         except sqlite3.Error as exc:
             logger.warning("refresh_compression_lock(%s) failed: %s", session_id, exc)
             return False
@@ -532,8 +545,7 @@ class SessionCompressionMixin:
         if not session_id:
             return None
         row = self._read_one(
-            "SELECT holder FROM compression_locks WHERE session_id = ? AND expires_at >= ?",
-            (session_id, time.time()))
+            "SELECT holder FROM compression_locks WHERE session_id = ? AND expires_at >= ?", (session_id, time.time()))
         return None if row is None else row[0]
 
     def finalize_orphaned_compression_sessions(self) -> int:
@@ -578,29 +590,7 @@ class SessionCompressionMixin:
         seen = set(chain)
         for _ in range(100):  # defensive bound; chains this deep are pathological
             with self._read_ctx() as conn:
-                row = conn.execute(
-                    f"""
-                    SELECT child.id
-                    FROM sessions parent
-                    JOIN sessions child ON child.parent_session_id = parent.id
-                    WHERE parent.id = ?
-                      AND parent.end_reason = 'compression'
-                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._branched_from') IS NULL
-                      AND json_extract(COALESCE(child.model_config, '{{}}'), '$._delegate_from') IS NULL
-                      AND COALESCE(child.source, '') != 'tool'
-                    ORDER BY
-                      CASE
-                        WHEN child.end_reason = 'compression' THEN 0
-                        WHEN child.ended_at IS NULL THEN 1
-                        ELSE 2
-                      END,
-                      {_sql_session_last_active("child")} DESC,
-                      child.started_at DESC,
-                      child.id DESC
-                    LIMIT 1
-                    """,
-                    (current,),
-                ).fetchone()
+                row = conn.execute(_CHAIN_STEP_SQL, (current,)).fetchone()
             child_id = row["id"] if row is not None else None
             if not child_id or child_id in seen:
                 return chain
@@ -644,9 +634,7 @@ class SessionCompressionMixin:
                 SELECT * FROM sessions
                 WHERE parent_session_id = ?
                 ORDER BY started_at ASC
-                """,
-                (current["id"],),
-            )
+                """, (current["id"],))
             next_child = next((dict(row) for row in rows if self._is_compression_child_row(dict(row))), None)
             if not next_child or next_child["id"] in seen:
                 break
