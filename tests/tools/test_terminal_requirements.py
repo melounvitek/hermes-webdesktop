@@ -88,7 +88,7 @@ def test_modal_backend_managed_mode_without_feature_flag_logs_clear_error(monkey
 def test_vercel_backend_without_sdk_logs_specific_error(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: None)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()
@@ -103,7 +103,7 @@ def test_vercel_backend_without_sdk_logs_specific_error(monkeypatch, caplog):
 def test_vercel_backend_without_auth_logs_specific_error(monkeypatch, caplog):
     _clear_terminal_env(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()
@@ -119,7 +119,7 @@ def test_vercel_backend_accepts_oidc_auth(monkeypatch):
     _clear_terminal_env(monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     assert terminal_tool_module.check_terminal_requirements() is True
 
@@ -130,7 +130,7 @@ def test_vercel_backend_accepts_token_tuple_auth(monkeypatch):
     monkeypatch.setenv("VERCEL_TOKEN", "token")
     monkeypatch.setenv("VERCEL_PROJECT_ID", "project")
     monkeypatch.setenv("VERCEL_TEAM_ID", "team")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     assert terminal_tool_module.check_terminal_requirements() is True
 
@@ -141,7 +141,7 @@ def test_vercel_backend_accepts_supported_runtimes(monkeypatch, runtime):
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", runtime)
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     assert terminal_tool_module.check_terminal_requirements() is True
 
@@ -151,7 +151,7 @@ def test_vercel_backend_accepts_blank_runtime(monkeypatch):
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "   ")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     assert terminal_tool_module.check_terminal_requirements() is True
 
@@ -161,7 +161,7 @@ def test_vercel_backend_rejects_unsupported_runtime(monkeypatch, caplog):
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_VERCEL_RUNTIME", "node20")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()
@@ -179,7 +179,7 @@ def test_vercel_backend_rejects_nondefault_disk(monkeypatch, caplog):
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_CONTAINER_DISK", "8192")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()
@@ -196,7 +196,7 @@ def test_vercel_backend_rejects_malformed_disk_without_raising(monkeypatch, capl
     monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
     monkeypatch.setenv("TERMINAL_CONTAINER_DISK", "large")
     monkeypatch.setenv("VERCEL_OIDC_TOKEN", "oidc-token")
-    monkeypatch.setattr(terminal_tool_module.importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
 
     with caplog.at_level(logging.ERROR):
         ok = terminal_tool_module.check_terminal_requirements()
