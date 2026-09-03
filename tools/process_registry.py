@@ -874,10 +874,9 @@ class ProcessRegistry:
         if session.exited:
             with self._lock:
                 self._prune_if_needed()
-            return session
-        self._track_started(
-            session, self._env_poller_loop, f"proc-poller-{session.id}", (env, log_path, pid_path, exit_path),
-        )
+        else:
+            self._track_started(
+                session, self._env_poller_loop, f"proc-poller-{session.id}", (env, log_path, pid_path, exit_path))
         return session
 
     # ----- Reader / Poller Threads -----
@@ -1081,10 +1080,8 @@ class ProcessRegistry:
         this session: still running AND, with ``watch_patterns``, none matched yet (a
         long-lived watcher unblocks on its trigger, not on exit). Unknown/exited/
         already-fired sessions return False so a stale barrier can never wedge the loop."""
-        if not session_id:
-            return False
         with self._lock:
-            session = self._running.get(session_id) or self._finished.get(session_id)
+            session = (self._running.get(session_id) or self._finished.get(session_id)) if session_id else None
         if session is None:
             return False
         with suppress(Exception):
@@ -1239,8 +1236,7 @@ class ProcessRegistry:
                         "type=%s session_id=%s task_id=%s",
                         evt.get("type", "completion"), _evt_sid, _evt_task_id)
                     continue
-            text = format_process_notification(evt)
-            if text:
+            if text := format_process_notification(evt):
                 results.append((evt, text))
         for evt in requeue:
             self.completion_queue.put(evt)
@@ -1254,9 +1250,7 @@ class ProcessRegistry:
         short hashes); ambiguous or too-short prefixes resolve to None, never a guess."""
         with self._lock:
             session = self._running.get(session_id) or self._finished.get(session_id)
-        if session is None:
-            session = self._resolve_prefix(session_id)
-        return self._refresh_detached_session(session)
+        return self._refresh_detached_session(session if session is not None else self._resolve_prefix(session_id))
 
     def _resolve_prefix(self, session_id: str) -> Optional[ProcessSession]:
         """Resolve a unique session-ID prefix (a bare hex tail is normalized to
@@ -1707,10 +1701,9 @@ class ProcessRegistry:
         MAX_PROCESSES. Must hold _lock."""
         now = time.time()
         expired = [sid for sid, s in self._finished.items() if (now - s.started_at) > FINISHED_TTL_SECONDS]
-        if len(self._running) + len(self._finished) - len(expired) >= MAX_PROCESSES:
-            survivors = [sid for sid in self._finished if sid not in expired]
-            if survivors:
-                expired.append(min(survivors, key=lambda sid: self._finished[sid].started_at))
+        over_cap = len(self._running) + len(self._finished) - len(expired) >= MAX_PROCESSES
+        if over_cap and (survivors := [sid for sid in self._finished if sid not in expired]):
+            expired.append(min(survivors, key=lambda sid: self._finished[sid].started_at))
         for sid in expired:
             del self._finished[sid]
         # Belt-and-suspenders against module-lifetime growth: forget consumed /
@@ -1886,8 +1879,7 @@ def _redact_process_result(result: dict) -> dict:
 
     command = result.get("command") or ""
     for key in ("output", "output_preview"):
-        value = result.get(key)
-        if isinstance(value, str) and value:
+        if isinstance(value := result.get(key), str) and value:
             result[key] = redact_terminal_output(value, command)
     if isinstance(command, str) and command:
         result["command"] = redact_sensitive_text(command, code_file=True)
@@ -1897,17 +1889,13 @@ def _redact_process_result(result: dict) -> dict:
 def _list_processes(task_id) -> dict:
     # Also surface session-scoped background processes (e.g. a forgotten preview
     # server): they share the gateway session_key and can block session reset.
-    try:
+    session_key = ""
+    with suppress(Exception):
         from tools.approval import get_current_session_key
         session_key = get_current_session_key(default="") or ""
-    except Exception:
-        session_key = ""
-    return {
-        "processes": [
-            _redact_process_result(p)
-            for p in process_registry.list_sessions(task_id=task_id, session_key=session_key or None)
-        ]
-    }
+    return {"processes": [
+        _redact_process_result(p)
+        for p in process_registry.list_sessions(task_id=task_id, session_key=session_key or None)]}
 
 
 # action -> (handler(session_id, args) -> dict, redact output?). Output-bearing
