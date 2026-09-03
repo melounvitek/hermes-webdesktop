@@ -63,9 +63,8 @@ _telegram_onboarding_lock = LateState("_telegram_onboarding_lock")
 _telegram_onboarding_pairings = LateState("_telegram_onboarding_pairings")
 
 
-# Display labels for env vars not in OPTIONAL_ENV_VARS (HOME_CHANNEL_*, bridge
-# toggles, Twilio, HASS, Email, etc.) so the UI can still render a friendly label.
-# (key, description, prompt, extra flags: url / password / advanced)
+# Display labels for env vars not in OPTIONAL_ENV_VARS (bridge toggles, Twilio, HASS, Email, ...)
+# so the UI can still render a friendly label. Rows: (key, description, prompt, extra flags).
 _MESSAGING_ENV_FALLBACKS: dict[str, dict[str, Any]] = {
     key: {"description": description, "prompt": prompt, **extra}
     for key, description, prompt, extra in (
@@ -111,9 +110,8 @@ _SLACK_MEMBER_ID_RE = re.compile(r"[UW][A-Z0-9]{2,}")
 
 
 def _csv_ids(value: str) -> list[str]:
-    """Split like the gateway parsers do (gateway/platforms/*.py): comma, strip,
-    drop empties — so a trailing/interior comma isn't rejected here when the
-    runtime would accept it."""
+    """Split like the gateway parsers (gateway/platforms/*.py): comma, strip, drop
+    empties — so a trailing/interior comma isn't rejected when the runtime accepts it."""
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
@@ -170,21 +168,16 @@ def _require_platform(platform_id: str) -> dict[str, Any]:
 def _platform_enablement(
     platform_id: str, entry: dict[str, Any], env_on_disk: dict[str, str], scoped: bool
 ) -> tuple[bool, bool, dict | None]:
-    """(enabled, configured, home_channel) for a platform.
-
-    Profile-scoped: derive from the profile's config.yaml + .env only —
-    load_gateway_config()'s env-override layer reads os.environ and would leak
-    the root install's tokens into the profile's reported state.
-    """
+    """(enabled, configured, home_channel). Profile-scoped: derive from the profile's
+    config.yaml + .env only — load_gateway_config()'s env-override layer reads
+    os.environ and would leak the root install's tokens into the profile's state."""
     required = entry["required_env"]
     if scoped:
         try:
             plat_cfg = (load_config().get("platforms") or {}).get(platform_id)
-            if not isinstance(plat_cfg, dict):
-                plat_cfg = {}
-            enabled = bool(plat_cfg.get("enabled"))
+            plat_cfg = plat_cfg if isinstance(plat_cfg, dict) else {}
             hc = plat_cfg.get("home_channel")
-            home_channel = hc if isinstance(hc, dict) else None
+            enabled, home_channel = bool(plat_cfg.get("enabled")), (hc if isinstance(hc, dict) else None)
         except Exception:
             enabled, home_channel = False, None
         return enabled, all(env_on_disk.get(key) for key in required), home_channel
@@ -214,11 +207,10 @@ def _messaging_platform_payload(
     if not isinstance(runtime_platform, dict):
         runtime_platform = {}
     # Same shared liveness ladder /api/status uses, so the sidebar strip and the
-    # Channels page can never disagree on the same page load. profile_home is
-    # passed when scoped to a named profile: gateway/status readers resolve
-    # process-level paths and do NOT follow the HERMES_HOME contextvar override,
-    # so the profile's directory is handed over explicitly or messaging silently
-    # reports another profile's gateway.
+    # Channels page can never disagree on one page load. profile_home is passed when
+    # scoped to a named profile: gateway/status readers resolve process-level paths
+    # and do NOT follow the HERMES_HOME contextvar override, so without it messaging
+    # silently reports another profile's gateway.
     gateway_running = resolve_gateway_liveness(
         profile_dir=profile_home, runtime=runtime,
         health_probe=_probe_gateway_health if _GATEWAY_HEALTH_URL else None,
@@ -227,9 +219,8 @@ def _messaging_platform_payload(
     ).running
 
     def env_value(key: str) -> str:
-        # When profile-scoped, judge only the profile's own .env — the dashboard
-        # process's os.environ carries the ROOT install's .env (loaded at startup)
-        # and would falsely report the root credentials as the profile's.
+        # Profile-scoped: judge only the profile's own .env — the dashboard process's
+        # os.environ carries the ROOT install's .env and would report root credentials as the profile's.
         return env_on_disk.get(key) or ("" if scoped else os.getenv(key, ""))
 
     env_vars = [
@@ -372,9 +363,7 @@ def _ensure_whatsapp_bridge_dependencies(bridge_dir: Path) -> None:
         raise HTTPException(status_code=500, detail=f"Failed to install WhatsApp bridge dependencies: {exc}") from exc
 
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
-        if detail:
-            detail = "\n".join(detail.splitlines()[-10:])
+        detail = "\n".join((result.stderr or result.stdout or "").strip().splitlines()[-10:])
         raise HTTPException(status_code=500, detail=f"npm install failed for WhatsApp bridge: {detail or 'no output'}")
 
 
@@ -547,16 +536,14 @@ async def start_whatsapp_onboarding(body: WhatsAppOnboardingStart):
             expires_at_ts=expires_at_ts, profile=body.profile,
         )
         already_linked = (session_path / "creds.json").exists()
-        if already_linked:
+        if already_linked:  # creds on disk: report connected without pairing
             account_id, account_name, account_phone = _whatsapp_linked_account_from_session(session_path)
-            record = _WhatsAppOnboardingSession(**fields, status="connected", account_id=account_id,
-                                                account_name=account_name, account_phone=account_phone)
-            pairing_id = _register_whatsapp_session(session_path, record)
-            return _whatsapp_onboarding_payload(pairing_id, record)
+            fields.update(status="connected", account_id=account_id, account_name=account_name, account_phone=account_phone)
 
     record = _WhatsAppOnboardingSession(**fields)
     pairing_id = _register_whatsapp_session(session_path, record)
-    threading.Thread(target=_run_whatsapp_pairing, args=(pairing_id, session_path, mode), daemon=True).start()
+    if not already_linked:
+        threading.Thread(target=_run_whatsapp_pairing, args=(pairing_id, session_path, mode), daemon=True).start()
     return _whatsapp_onboarding_payload(pairing_id, record)
 
 
@@ -730,13 +717,10 @@ async def get_telegram_onboarding_status(pairing_id: str):
 
 @router.post("/api/messaging/telegram/onboarding/{pairing_id}/apply")
 async def apply_telegram_onboarding(pairing_id: str, body: TelegramOnboardingApply, profile: Optional[str] = None):
-    allowed_user_ids: list[str] = []
-    for raw_id in body.allowed_user_ids:
-        normalized = _normalize_telegram_user_id(raw_id)
-        if not normalized:
-            raise HTTPException(status_code=400, detail="Allowed Telegram user IDs must be numeric.")
-        if normalized not in allowed_user_ids:
-            allowed_user_ids.append(normalized)
+    normalized_ids = [_normalize_telegram_user_id(raw_id) for raw_id in body.allowed_user_ids]
+    if not all(normalized_ids):
+        raise HTTPException(status_code=400, detail="Allowed Telegram user IDs must be numeric.")
+    allowed_user_ids = list(dict.fromkeys(normalized_ids))
     if not allowed_user_ids:
         raise HTTPException(status_code=400, detail="Add at least one allowed Telegram user ID.")
 
@@ -761,10 +745,9 @@ async def apply_telegram_onboarding(pairing_id: str, body: TelegramOnboardingApp
     with _telegram_onboarding_lock:
         _telegram_onboarding_pairings.pop(pairing_id, None)
 
-    # Best-effort restart: the QR flow pulls users into Telegram on another
-    # device, so a saved token waiting on a manual restart click reads as
-    # "Hermes is broken" from the chat side. The config save stays
-    # authoritative; a failed restart is reported so the UI shows its banner.
+    # Best-effort restart: the QR flow pulls users into Telegram on another device, so a
+    # saved token waiting on a manual restart click reads as "Hermes is broken" from the
+    # chat side. The save stays authoritative; a failed restart is reported for the UI banner.
     restart_result = _restart_gateway_after(effective_profile, what="Telegram onboarding", label="Telegram onboarding")
     return {
         "ok": True, "platform": "telegram", "bot_username": bot_username,
@@ -784,8 +767,7 @@ async def cancel_telegram_onboarding(pairing_id: str):
 
 @router.get("/api/messaging/platforms")
 async def get_messaging_platforms(profile: Optional[str] = None):
-    # Profile-scoped so the dashboard's global profile switcher shows the
-    # TARGET profile's channel credentials/state, not the root install's.
+    # Profile-scoped so the global profile switcher shows the TARGET profile's channel state.
     def _run():
         with _profile_scope(profile) as scoped_dir:
             return {
@@ -817,8 +799,8 @@ def _multiplex_port_binding_conflict(platform_id: str, requested_profile: Option
     if not requested or requested.lower() == "current":
         from hermes_cli.profiles import get_active_profile_name
 
-        # The dashboard's own profile. "custom" (an unrecognized HERMES_HOME)
-        # is outside the profiles tree, so a multiplexed gateway never serves it.
+        # The dashboard's own profile. "custom" (unrecognized HERMES_HOME) is outside
+        # the profiles tree, so a multiplexed gateway never serves it.
         target = get_active_profile_name()
     else:
         _resolve_profile_dir(requested)  # same 400/404 as _profile_scope
@@ -826,9 +808,8 @@ def _multiplex_port_binding_conflict(platform_id: str, requested_profile: Option
     if target in ("default", "custom"):
         return None
 
-    # The flag that matters is the one the shared gateway reads at startup: the
-    # DEFAULT profile's gateway config (plus the process-wide
-    # GATEWAY_MULTIPLEX_PROFILES override, which load_gateway_config applies).
+    # The flag that matters is the one the shared gateway reads at startup: the DEFAULT
+    # profile's config (plus the process-wide GATEWAY_MULTIPLEX_PROFILES override).
     with _config_profile_scope("default"):
         if not load_gateway_config().multiplex_profiles:
             return None

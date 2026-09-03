@@ -199,10 +199,7 @@ def download_file(url: str, dest: Path, job: Dict[str, Any], *,
     progress_lock = threading.Lock()
 
     def pump(r, f) -> None:
-        while True:
-            chunk = r.read(_CHUNK)
-            if not chunk:
-                break
+        for chunk in iter(lambda: r.read(_CHUNK), b""):
             f.write(chunk)
             with progress_lock:
                 file_done[0] += len(chunk)
@@ -305,11 +302,16 @@ def _engine_too_old(min_engine: str) -> bool:
         return False
 
 
-def _load_config() -> dict:
+def _quiet(fn: Callable[[], Any], default: Any) -> Any:
+    """``fn()`` or ``default`` on any exception — for garnish that must never 500."""
     try:
-        return config_mod.load_config()
+        return fn()
     except Exception:  # noqa: BLE001
-        return {}
+        return default
+
+
+def _load_config() -> dict:
+    return _quiet(config_mod.load_config, {})
 
 
 def _runtime_section() -> dict:
@@ -408,12 +410,17 @@ def _installed_backend(tag: str) -> str | None:
     if not root.exists():
         return None
     for backend_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        try:
-            binaries.server_binary(backend_dir)
+        if _quiet(lambda: binaries.server_binary(backend_dir), None) is not None:
             return backend_dir.name
-        except Exception:  # noqa: BLE001
-            continue
     return None
+
+
+def _staged_row(gguf: Path) -> Dict[str, Any]:
+    model_id = _model_id_for(gguf)
+    # Split models: report the whole variant's bytes, not one part's.
+    hit = catalog.find_entry_for_model(model_id)
+    size = hit[1].size_bytes if hit is not None else gguf.stat().st_size
+    return {"id": model_id, "size_bytes": size, "size_label": _human_gb(size)}
 
 
 def _active_llamacpp_model_id() -> str | None:
@@ -439,22 +446,12 @@ def local_models_status():
 
     # The tag actually serving (boot ladder: configured if installed, else newest installed).
     tag = configured_tag if configured_tag in have else (have[0] if have else configured_tag)
-
     # Update pending = engine in use (enabled + something installed) and the configured
     # tag (pinned or release default) isn't on disk. The download is a button click, never automatic.
     update_available = bool(section.get("enabled") and have and configured_tag not in have)
     runtime_backend = _installed_backend(tag)
-
-    staged = []
     mdir = _models_dir()
-    if mdir.exists():
-        for gguf in bootstrap.staged_models():
-            model_id = _model_id_for(gguf)
-            # Split models: report the whole variant's bytes, not one part's.
-            hit = catalog.find_entry_for_model(model_id)
-            size = hit[1].size_bytes if hit is not None else gguf.stat().st_size
-            staged.append({"id": model_id, "size_bytes": size, "size_label": _human_gb(size)})
-
+    staged = [_staged_row(gguf) for gguf in bootstrap.staged_models()] if mdir.exists() else []
     running = _state_endpoint()
 
     # Resident models from the live router ({} when down): Loaded pills + eject.
@@ -474,18 +471,11 @@ def local_models_status():
         "runtime_backend": runtime_backend, "server_running": running is not None,
         "server_base_url": (running or {}).get("base_url"), "active_model_id": _active_llamacpp_model_id(),
         "loaded_models": loaded,
-        # Live load progress per model (SSE-fed): {model_id: {stage, value,
-        # percent}}. The chat's loading bar and the picker rows poll this.
-        "loading": _loading_progress(),
+        # Live load progress per model (SSE-fed): {model_id: {stage, value, percent}}.
+        # The chat's loading bar and the picker rows poll this; garnish, never a 500.
+        "loading": _quiet(load_progress.get_loading_progress, {}),
         "placement": placement, "models": staged, "models_dir": str(mdir),
     }
-
-
-def _loading_progress() -> Dict[str, Any]:
-    try:
-        return load_progress.get_loading_progress()
-    except Exception:  # noqa: BLE001 — progress is garnish, never a 500
-        return {}
 
 
 # ── hardware: what this machine can do ───────────────────────
