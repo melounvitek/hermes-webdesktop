@@ -282,6 +282,7 @@ class CDPSupervisor(DialogSupervisionMixin, FrameTrackingMixin):
                     t.cancel()
                 if pending:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            with contextlib.suppress(Exception):
                 loop.close()
             self._set_active(False)
 

@@ -106,9 +106,11 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
+    path = _pending_path(subsystem, pending_id)
+    if not path.exists():
+        return None
     with suppress(Exception):
-        path = _pending_path(subsystem, pending_id)
-        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        return json.loads(path.read_text(encoding="utf-8"))
     return None
 
 
@@ -126,8 +128,11 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
 
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
+    d = _pending_path(subsystem, "").parent
+    if not d.exists():
+        return 0
     with suppress(Exception):
-        return len(_pending_files(subsystem))
+        return sum(1 for _ in d.glob("*.json"))
     return 0
 
 
@@ -235,11 +240,13 @@ def _frontmatter_description(content: str) -> str:
 
 def _find_skill_path(name: str) -> Optional[Path]:
     """Directory of an installed skill, or None if unknown / lookup unavailable."""
-    with suppress(Exception):
+    try:
         from tools.skill_manager_tool import _find_skill
-        found = _find_skill(name)
-        return found["path"] if found else None
-    return None
+    except Exception:
+        return None
+    # Only the import is guarded (as on main); a lookup failure propagates.
+    found = _find_skill(name)
+    return found["path"] if found else None
 
 
 def skill_pending_diff(record: Dict[str, Any]) -> str:

@@ -483,7 +483,8 @@ def sync_status() -> Dict[str, Any]:
     except Exception as e:
         logger.debug("skills_sync_client: sync_status identity failed: %s", e)
     with suppress(Exception):
-        status.update(opted_in_skills=list_synced_skill_names(), local_head=read_sync_state().get("head"))
+        status["opted_in_skills"] = list_synced_skill_names()
+        status["local_head"] = read_sync_state().get("head")
     try:
         org_identity = resolve_org_identity()
         status.update(org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),
