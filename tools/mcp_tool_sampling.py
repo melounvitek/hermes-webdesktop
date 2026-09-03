@@ -18,10 +18,6 @@ def _tool_use_id(block):
     return mcp_field(block, "tool_use_id", "toolUseId", _MISSING)
 
 
-def _is_tool_use(block) -> bool:
-    return hasattr(block, "name") and hasattr(block, "input")
-
-
 def _tool_result_text(block) -> str:
     """Text of a ToolResultContent block ("" when it carries no content)."""
     content = getattr(block, "content", None)
@@ -54,8 +50,9 @@ def _convert_sampling_message(msg) -> List[dict]:
     blocks = msg.content_as_list if hasattr(msg, "content_as_list") else (
         msg.content if isinstance(msg.content, list) else [msg.content])
     tool_results = [b for b in blocks if _tool_use_id(b) is not _MISSING]
-    tool_uses = [b for b in blocks if _is_tool_use(b) and _tool_use_id(b) is _MISSING]
-    content_blocks = [b for b in blocks if _tool_use_id(b) is _MISSING and not _is_tool_use(b)]
+    others = [b for b in blocks if _tool_use_id(b) is _MISSING]
+    tool_uses = [b for b in others if hasattr(b, "name") and hasattr(b, "input")]
+    content_blocks = [b for b in others if not (hasattr(b, "name") and hasattr(b, "input"))]
     out = [{"role": "tool", "tool_call_id": _tool_use_id(tr), "content": _tool_result_text(tr)} for tr in tool_results]
     if tool_uses:
         msg_dict: dict = {"role": msg.role, "tool_calls": [_tool_call_dict(tu, i) for i, tu in enumerate(tool_uses)]}
@@ -82,10 +79,6 @@ def _parse_tool_call_arguments(server_name: str, args) -> dict:
                            server_name, args)
             return {"_raw": args}
     return args if isinstance(args, dict) else {"_raw": str(args)}
-
-
-def _response_total_tokens(response, default):
-    return getattr(getattr(response, "usage", None), "total_tokens", default)
 
 
 class SamplingHandler:
@@ -144,7 +137,7 @@ class SamplingHandler:
 
     def _log_response(self, response, suffix: str = "", *args) -> None:
         logger.log(self.audit_level, "MCP server '%s' sampling response: model=%s, tokens=%s" + suffix,
-                   self.server_name, response.model, _response_total_tokens(response, "?"), *args)
+                   self.server_name, response.model, getattr(getattr(response, "usage", None), "total_tokens", "?"), *args)
 
     def _build_tool_use_result(self, choice, response):
         """CreateMessageResultWithTools from a tool_calls response, under ``max_tool_rounds`` (0 disables)."""
@@ -227,7 +220,7 @@ class SamplingHandler:
             return self._fail(f"LLM returned empty response (no choices) for server '{self.server_name}'")
         choice = response.choices[0]
         self.metrics["requests"] += 1
-        total_tokens = _response_total_tokens(response, 0)
+        total_tokens = getattr(getattr(response, "usage", None), "total_tokens", 0)
         self.metrics["tokens_used"] += total_tokens if isinstance(total_tokens, int) else 0
         if choice.finish_reason == "tool_calls" and getattr(choice.message, "tool_calls", None):
             return self._build_tool_use_result(choice, response)

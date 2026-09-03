@@ -384,7 +384,6 @@ class MCPServerTransportMixin:
         headers = dict(config.get("headers") or {})
         # Agent Plugins v1 strict_redirect_headers: configured headers MUST NOT follow a cross-origin
         # redirect. Capture their names BEFORE client-generated headers are merged in.
-        strict_cfg_headers = bool(config.get("strict_redirect_headers"))
         configured_header_names = {key.lower() for key in headers}
         # Optional per-user identity header; explicit headers of the same name win.
         headers = _apply_identity_header(self.name, config, headers)
@@ -394,10 +393,8 @@ class MCPServerTransportMixin:
         if not any(key.lower() == "mcp-protocol-version" for key in headers):
             headers["mcp-protocol-version"] = _core.LATEST_HANDSHAKE_VERSION
         connect_timeout = config.get("connect_timeout", _core._DEFAULT_CONNECT_TIMEOUT)
-        ssl_verify = config.get("ssl_verify", True)
-        client_cert = _resolve_client_cert(self.name, config)
-        oauth_auth = self._build_oauth_auth(url, config)
-        common = (url, headers, connect_timeout, ssl_verify, client_cert, oauth_auth, strict_cfg_headers)
+        common = (url, headers, connect_timeout, config.get("ssl_verify", True), _resolve_client_cert(self.name, config),
+                  self._build_oauth_auth(url, config), bool(config.get("strict_redirect_headers")))
         if config.get("transport") == "sse":
             transport, label = self._sse_transport(*common), "SSE"
         else:
@@ -418,12 +415,11 @@ class MCPServerTransportMixin:
             logger.info("MCP server '%s': does not advertise 'tools' capability — "
                         "skipping tools/list (prompts/resources remain available)", self.name)
             self._tools = []
-            self._register_discovered_tools_if_needed()
-            return
-        async with self._rpc_lock:
-            self._list_cache_meta = {}
-            self._tools = await _core._paginate_full_list(
-                self.session.list_tools, "tools", self.name, cache_meta_out=self._list_cache_meta)
+        else:
+            async with self._rpc_lock:
+                self._list_cache_meta = {}
+                self._tools = await _core._paginate_full_list(
+                    self.session.list_tools, "tools", self.name, cache_meta_out=self._list_cache_meta)
         self._register_discovered_tools_if_needed()
 
     def _register_discovered_tools_if_needed(self) -> None:
