@@ -96,11 +96,9 @@ class _ManagedFalSyncClient:
             self._add_timeout_header(start_timeout, request_headers)
         response = self._maybe_retry_request(
             self._http_client, "POST", url, json=arguments,
-            timeout=getattr(self._sync_client, "default_timeout", 120.0), headers=request_headers,
-        )
+            timeout=getattr(self._sync_client, "default_timeout", 120.0), headers=request_headers)
         self._raise_for_status(response)
         data = response.json()
         return self._request_handle_class(
             request_id=data["request_id"], response_url=data["response_url"],
-            status_url=data["status_url"], cancel_url=data["cancel_url"], client=self._http_client,
-        )
+            status_url=data["status_url"], cancel_url=data["cancel_url"], client=self._http_client)

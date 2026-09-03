@@ -42,8 +42,7 @@ from tools.image_generation_catalog import (  # noqa: F401 — re-exported (plug
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import (
     NOUS_MANAGED_PROVIDER, fal_key_is_configured, managed_nous_tools_enabled,
-    nous_tool_gateway_unavailable_message, read_selection, selection_error,
-)
+    nous_tool_gateway_unavailable_message, read_selection, selection_error)
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +66,7 @@ def _resolve_managed_fal_gateway():
         if gateway is None:
             raise ValueError(selection_error(
                 "image_gen", NOUS_MANAGED_PROVIDER,
-                "the Nous Tool Gateway is not available (not entitled or unreachable)",
-            ))
+                "the Nous Tool Gateway is not available (not entitled or unreachable)"))
         return gateway
     if selected is not None:
         if fal_key_is_configured():
@@ -87,8 +85,7 @@ def _get_managed_fal_client(managed_gateway):
             # Resolved on this module so monkeypatching ``image_generation_tool.fal_client`` still applies.
             _managed_fal_client = _ManagedFalSyncClient(
                 _load_fal_client(), key=managed_gateway.nous_user_token,
-                queue_run_origin=managed_gateway.gateway_origin,
-            )
+                queue_run_origin=managed_gateway.gateway_origin)
             _managed_fal_client_config = client_config
         return _managed_fal_client
 
@@ -116,8 +113,7 @@ def _wait_fal_result(handler, *, poll_seconds: float = 0.5):
     while worker.is_alive():
         if is_interrupted():
             raise ImageGenerationInterrupted(
-                "Image generation interrupted by user — abandoned the in-flight FAL job."
-            )
+                "Image generation interrupted by user — abandoned the in-flight FAL job.")
         worker.join(timeout=poll_seconds)
     if error_box:
         raise error_box[0]
@@ -142,8 +138,7 @@ def _submit_fal_request(model: str, arguments: Dict[str, Any]):
             gateway_message = ""
             if status in {401, 402, 403}:
                 gateway_message = "\n\n" + nous_tool_gateway_unavailable_message(
-                    "managed FAL image generation", force_fresh=True,
-                )
+                    "managed FAL image generation", force_fresh=True)
             raise ValueError(
                 f"Nous Subscription gateway rejected model '{model}' (HTTP {status}). This model "
                 f"may not yet be enabled on the Nous Portal's FAL proxy. Either:\n"
@@ -254,8 +249,7 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
             "creativity": UPSCALER_CREATIVITY, "resemblance": UPSCALER_RESEMBLANCE,
             "guidance_scale": UPSCALER_GUIDANCE_SCALE,
             "num_inference_steps": UPSCALER_NUM_INFERENCE_STEPS,
-            "enable_safety_checker": UPSCALER_SAFETY_CHECKER,
-        })
+            "enable_safety_checker": UPSCALER_SAFETY_CHECKER})
         result = _wait_fal_result(handler)
         if result and "image" in result:
             up = result["image"]
@@ -263,8 +257,7 @@ def _upscale_image(image_url: str, original_prompt: str) -> Optional[Dict[str, A
                         up.get("width", "unknown"), up.get("height", "unknown"))
             return {
                 "url": up["url"], "width": up.get("width", 0), "height": up.get("height", 0),
-                "upscaled": True, "upscale_factor": UPSCALER_FACTOR,
-            }
+                "upscaled": True, "upscale_factor": UPSCALER_FACTOR}
         logger.error("Upscaler returned invalid response")
         return None
     except ImageGenerationInterrupted:
@@ -368,8 +361,7 @@ def _format_images(images: list, should_upscale: bool, prompt: str) -> list:
             logger.warning("Using original image as fallback (upscale failed)")
         formatted.append({
             "url": img["url"], "width": img.get("width", 0), "height": img.get("height", 0),
-            "upscaled": False,
-        })
+            "upscaled": False})
     return formatted
 
 
@@ -411,8 +403,7 @@ def image_generate_tool(
     num_inference_steps: Optional[int] = None, guidance_scale: Optional[float] = None,
     num_images: Optional[int] = None, output_format: Optional[str] = None,
     seed: Optional[int] = None, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-) -> str:
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None) -> str:
     """Generate (or, with source images + an ``edit_endpoint`` model, edit) an image via FAL.
 
     Extra kwargs are overrides filtered per-model via ``supports`` / ``edit_supports`` (dropped
@@ -426,14 +417,12 @@ def image_generate_tool(
     modality = "image" if use_edit else "text"
     overrides: Dict[str, Any] = {
         "num_inference_steps": num_inference_steps, "guidance_scale": guidance_scale,
-        "num_images": num_images, "output_format": output_format,
-    }
+        "num_images": num_images, "output_format": output_format}
     debug_call_data = {
         "model": model_id,
         "parameters": {"prompt": prompt, "aspect_ratio": aspect_ratio, **overrides, "seed": seed,
                        "modality": modality, "source_images": len(source_images)},
-        "error": None, "success": False, "images_generated": 0, "generation_time": 0,
-    }
+        "error": None, "success": False, "images_generated": 0, "generation_time": 0}
     start_time = datetime.datetime.now()
 
     def finish(generation_time: float, response: Dict[str, Any]) -> str:
@@ -470,8 +459,7 @@ def image_generate_tool(
             "success": True,
             "image": formatted_images[0]["url"],
             "modality": modality,
-            "upscaled": bool(formatted_images[0].get("upscaled")),
-        })
+            "upscaled": bool(formatted_images[0].get("upscaled"))})
     except Exception as e:
         error_msg = f"Error generating image: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
@@ -612,8 +600,7 @@ def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model
 
 def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-):
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
     (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
@@ -672,8 +659,7 @@ def _normalize_krea_model(model_id: Optional[str]) -> Optional[str]:
 
 def _maybe_route_managed_krea(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
-) -> Optional[str]:
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None) -> Optional[str]:
     """JSON result from the managed Krea gateway, or ``None`` to fall through.
 
     Fires only for a native ``krea-2-*`` model with no ``image_gen.provider`` other than

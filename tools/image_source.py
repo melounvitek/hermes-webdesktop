@@ -69,8 +69,7 @@ async def resolve_image_source(src: str, ctx: ResolveContext, *, permitted: tupl
         raise UnsupportedScheme(
             "Unrecognized image source scheme. Use an http(s) URL, a local "
             "file path, a file:// URI, or a data: URL.",
-            src=s,
-        )
+            src=s)
     # Everything else is a filesystem path — including bare relative names like "pic.png"
     # (a path-shape gate here regressed them once).
     candidate = s[len("file://"):] if s.lower().startswith("file://") else s
@@ -149,8 +148,7 @@ def _is_local_terminal_backend() -> bool:
 _MEDIA_CACHE_SUBDIRS = (
     "cache",  # cache/images, cache/vision, cache/video(s), cache/audio
     "images",  # desktop/clipboard/PDF uploads (tui_gateway)
-    "image_cache", "audio_cache", "video_cache", "temp_vision_images", "temp_video_files",
-)
+    "image_cache", "audio_cache", "video_cache", "temp_vision_images", "temp_video_files")
 
 
 def _media_cache_roots() -> list:
@@ -207,8 +205,7 @@ def _ensure_container_env(task_id: Optional[str]) -> None:
 
 
 async def _resolve_container_fallback(
-    p: Path, ctx: ResolveContext, src: str, permitted: tuple = ("image",)
-) -> ResolvedImage:
+    p: Path, ctx: ResolveContext, src: str, permitted: tuple = ("image",)) -> ResolvedImage:
     """Read the bytes inside the sandbox; fail-closed when no env exists (a non-cache host
     path under a sandbox must never leak via a host fallback).
 
@@ -288,8 +285,7 @@ def _detect_video_mime(data: bytes, src: str) -> Optional[str]:
 
 
 async def resolve_local_source_to_data_url(
-    src: str, task_id: Optional[str], *, permitted: tuple = ("image",)
-) -> str:
+    src: str, task_id: Optional[str], *, permitted: tuple = ("image",)) -> str:
     """Convert a path-like media source into a ``data:`` URL via the resolver.
 
     Dispatch-layer chokepoint for generation tools so providers never read model-supplied paths
