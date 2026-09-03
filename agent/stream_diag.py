@@ -115,19 +115,12 @@ def log_stream_retry(
             _chain = type(error).__name__
 
         logger.warning(
-            "Stream %s on attempt %s/%s — retrying. "
-            "subagent_id=%s depth=%s provider=%s base_url=%s "
-            "error_type=%s error=%s "
-            "chain=%s "
-            "http_status=%s bytes=%d chunks=%d elapsed=%.2fs ttfb=%s "
-            "upstream=[%s]",
+            "Stream %s on attempt %s/%s — retrying. subagent_id=%s depth=%s provider=%s base_url=%s "
+            "error_type=%s error=%s chain=%s http_status=%s bytes=%d chunks=%d elapsed=%.2fs ttfb=%s upstream=[%s]",
             kind, attempt, max_attempts,
-            getattr(agent, "_subagent_id", None) or "-",
-            getattr(agent, "_delegate_depth", 0),
-            agent.provider or "-",
-            agent.base_url or "-",
-            type(error).__name__, _summary, _chain,
-            *_diag_fields(diag),
+            getattr(agent, "_subagent_id", None) or "-", getattr(agent, "_delegate_depth", 0),
+            agent.provider or "-", agent.base_url or "-",
+            type(error).__name__, _summary, _chain, *_diag_fields(diag),
             extra={"mid_tool_call": mid_tool_call},
         )
     except Exception:
@@ -146,13 +139,12 @@ def emit_stream_drop(
     )
     provider = agent.provider or "provider"
     _suffix = ""
-    if isinstance(diag, dict):
-        try:
-            started = diag.get("started_at")
-            if started is not None:
-                _suffix = f" after {max(0.0, time.time() - float(started)):.1f}s"
-        except Exception:
-            pass
+    try:
+        started = diag.get("started_at") if isinstance(diag, dict) else None
+        if started is not None:
+            _suffix = f" after {max(0.0, time.time() - float(started)):.1f}s"
+    except Exception:
+        pass
     try:
         agent._buffer_status(
             f"⚠️ {provider} stream {kind} ({type(error).__name__}){_suffix} "
