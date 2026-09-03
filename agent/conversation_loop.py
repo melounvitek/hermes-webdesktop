@@ -86,17 +86,14 @@ RUN_BUDGET_WRAPUP_NOTICE = (
 
 
 def _midturn_request_pressure_tokens(
-    agent: Any,
-    api_messages: List[Dict[str, Any]],
-    effective_system: str,
-    approx_tokens: int,
+    agent: Any, api_messages: List[Dict[str, Any]], effective_system: str, approx_tokens: int
 ) -> int:
     """Token figure the mid-turn pre-API compression guard compares: the pruned
     native-Responses estimate when native compaction eligibility is proven (the generic
     estimate overstates the wire on compacted sessions, #96995), else messages+tools.
     The system prompt is counted exactly once."""
     try:
-        from agent.codex_responses_adapter import (estimate_native_responses_preflight_tokens)
+        from agent.codex_responses_adapter import estimate_native_responses_preflight_tokens
         native = estimate_native_responses_preflight_tokens(
             agent, api_messages, system_prompt=effective_system or "",
             tools=getattr(agent, "tools", None) or None,
@@ -130,15 +127,11 @@ def _maybe_inject_run_budget_wrapup(agent: Any, messages: List[Dict[str, Any]]) 
     ``_run_budget_wrapup_injected`` only on a successful append."""
     budget = getattr(agent, "run_budget_seconds", None)
     started = getattr(agent, "_run_budget_started_at", None)
-    if (
-        not budget
-        or not started
-        or getattr(agent, "_run_budget_wrapup_injected", False)
-        or (time.time() - started) < 0.8 * float(budget)
+    if not budget or not started or getattr(agent, "_run_budget_wrapup_injected", False) or (
+        (time.time() - started) < 0.8 * float(budget)
     ):
         return False
-    for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
+    for msg in reversed(messages):
         if isinstance(msg, dict) and msg.get("role") == "tool":
             existing = msg.get("content", "")
             if isinstance(existing, str):
@@ -205,20 +198,13 @@ INTERRUPT_WAITING_FOR_MODEL_PREFIX = "Operation interrupted: waiting for model r
 
 
 def _should_rearm_compression_budget(
-    compression_attempts: int,
-    *,
-    completed_compaction_pending: bool,
-    prompt_tokens: int,
-    threshold_tokens: int,
+    compression_attempts: int, *, completed_compaction_pending: bool, prompt_tokens: int, threshold_tokens: int
 ) -> bool:
     """True once a provider proves a completed compaction worked: rough estimates cannot
     rearm the anti-thrash budget, only the completed-compaction latch plus a positive
     normalized prompt count below the threshold."""
     return bool(
-        compression_attempts
-        and completed_compaction_pending
-        and threshold_tokens > 0
-        and 0 < prompt_tokens < threshold_tokens
+        compression_attempts and completed_compaction_pending and 0 < prompt_tokens < threshold_tokens
     )
 
 
@@ -447,12 +433,7 @@ def _is_nous_inference_route(provider: str, base_url: str) -> bool:
 
 
 def _billing_or_entitlement_message(
-    *,
-    capability: str,
-    provider: str,
-    base_url: str,
-    model: str,
-    unverified: bool = False,
+    *, capability: str, provider: str, base_url: str, model: str, unverified: bool = False
 ) -> str:
     if _is_nous_inference_route(provider, base_url):
         return _nous_entitlement_message(capability)
@@ -507,9 +488,7 @@ def _billing_or_entitlement_message(
     ])
 
 
-def _billing_block_dict(
-    provider, base_url, model, message="", *, unverified: bool = False
-) -> Optional[dict]:
+def _billing_block_dict(provider, base_url, model, message="", *, unverified: bool = False) -> Optional[dict]:
     """Best-effort structured billing descriptor (None if billing_links is unavailable)."""
     try:
         from agent.billing_links import build_billing_block
@@ -535,14 +514,7 @@ def _billing_terminal_label(summary: str, unverified: bool) -> str:
 
 
 def _billing_failure_result(
-    *,
-    classified,
-    summary: str,
-    messages,
-    api_call_count: int,
-    provider: str,
-    base_url,
-    model: str,
+    *, classified, summary: str, messages, api_call_count: int, provider: str, base_url, model: str,
     guidance: Optional[str] = None,
 ) -> dict:
     """Structured terminal result for a billing-classified failure — the single construction
@@ -566,13 +538,7 @@ def _billing_failure_result(
 
 
 def _print_billing_or_entitlement_guidance(
-    agent,
-    *,
-    capability: str,
-    provider: str,
-    base_url: str,
-    model: str,
-    unverified: bool = False,
+    agent, *, capability: str, provider: str, base_url: str, model: str, unverified: bool = False
 ) -> bool:
     return _print_guidance(agent, _billing_or_entitlement_message(
         capability=capability, provider=provider, base_url=base_url, model=model,
@@ -928,11 +894,7 @@ def _invalid_tool_name_error_content(name: str, valid_tool_names) -> str:
 
 
 def _content_policy_blocked_result(
-    messages: List[Dict],
-    api_call_count: int,
-    *,
-    final_response: str,
-    error_detail: str,
+    messages: List[Dict], api_call_count: int, *, final_response: str, error_detail: str
 ) -> Dict[str, Any]:
     """Terminal turn result for a content-policy block (deterministic for the unchanged
     prompt, so no retry); shared by the HTTP-200 and exception paths."""
@@ -953,12 +915,7 @@ def _partial_turn_result(
     }
 
 
-def _compression_deferred_result(
-    agent,
-    messages: List[Dict],
-    api_call_count: int,
-    reason: str = "lock",
-) -> Dict[str, Any]:
+def _compression_deferred_result(agent, messages: List[Dict], api_call_count: int, reason: str = "lock") -> Dict[str, Any]:
     """Soft turn result for a transiently-deferred compression. Both reasons must end as
     ``compression_deferred``, never ``compression_exhausted`` — the gateway wipes the
     session on exhaustion (#9893/#35809). ``failed`` stays False; the turn persists."""
@@ -994,12 +951,8 @@ def _compression_deferred_result(
 
 
 def _provider_overflow_exhausted_result(
-    agent,
-    messages: List[Dict],
-    conversation_history,
-    api_call_count: int,
-    request_pressure_tokens: int,
-    max_compression_attempts: int,
+    agent, messages: List[Dict], conversation_history, api_call_count: int,
+    request_pressure_tokens: int, max_compression_attempts: int,
 ) -> Dict[str, Any]:
     """Fail closed when a rebuilt request is still too large after recovery."""
     agent._flush_status_buffer()
@@ -1068,22 +1021,15 @@ def _ensure_cached_system_prompt_static(agent, system_message=None) -> None:
     reconstruct_static_prefix(agent, system_message=system_message, log_label="failover redecoration")
 
 
-def _peel_moa_guidance(
-    messages: List[Dict[str, Any]],
-    guidance: Any,
-) -> List[Dict[str, Any]]:
+def _peel_moa_guidance(messages: List[Dict[str, Any]], guidance: Any) -> List[Dict[str, Any]]:
     """Remove MoA reference guidance attached by ``_attach_reference_guidance``."""
     from agent.moa_loop import peel_reference_guidance
     return peel_reference_guidance(messages, guidance)
 
 
 def _redecorate_prompt_cache_for_provider(
-    agent,
-    api_messages: List[Dict[str, Any]],
-    *,
-    system_message=None,
-    moa_prepared: Optional[Dict[str, Any]] = None,
-    tools_for_api: Optional[List[Dict[str, Any]]] = None,
+    agent, api_messages: List[Dict[str, Any]], *, system_message=None,
+    moa_prepared: Optional[Dict[str, Any]] = None, tools_for_api: Optional[List[Dict[str, Any]]] = None,
 ) -> tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]] | tuple[List[Dict[str, Any]], Optional[Dict[str, Any]], List[Dict[str, Any]]]:
     """Strip and re-apply cache_control for the *current* provider policy — failover
     ``continue`` paths reuse ``api_messages`` (#72626). MoA guidance is peeled and rebased."""
@@ -1151,12 +1097,8 @@ def _engine_overrides_hook(engine: Any, name: str) -> bool:
 
 
 def _apply_context_engine_selection(
-    agent: Any,
-    api_messages: List[Dict[str, Any]],
-    conversation_messages: List[Dict[str, Any]],
-    incoming_message: Optional[Dict[str, Any]],
-    *,
-    logger: Any,
+    agent: Any, api_messages: List[Dict[str, Any]], conversation_messages: List[Dict[str, Any]],
+    incoming_message: Optional[Dict[str, Any]], *, logger: Any,
 ) -> List[Dict[str, Any]]:
     """Run the optional per-turn ``ContextEngine.select_context()`` hook, fail-open: any
     exception or invalid return yields ``api_messages`` unchanged; history is never mutated."""
@@ -1201,12 +1143,7 @@ def _apply_context_engine_selection(
 
 
 def _notify_context_engine_turn_complete(
-    agent: Any,
-    messages: List[Dict[str, Any]],
-    *,
-    usage: Optional[Dict[str, Any]] = None,
-    logger: Any,
-    **meta: Any,
+    agent: Any, messages: List[Dict[str, Any]], *, usage: Optional[Dict[str, Any]] = None, logger: Any, **meta: Any
 ) -> None:
     """Notify the active context engine that a user turn has finished (fail-open; the engine
     gets a copy so it cannot mutate the persisted transcript)."""
