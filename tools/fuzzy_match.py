@@ -1,67 +1,321 @@
 #!/usr/bin/env python3
 """Fuzzy find-and-replace for LLM-generated edits.
 
-Tries an ordered chain of increasingly permissive matching strategies (see
-:mod:`tools.fuzzy_match_strategies`) so whitespace, indentation, escaping and
-Unicode drift in tool-call arguments still land on the intended region.
+An ordered chain of increasingly permissive strategies (``STRATEGIES``) lets
+whitespace, indentation, escaping and Unicode drift in tool-call arguments
+still land on the intended region::
 
     new_content, match_count, strategy, error = fuzzy_find_and_replace(
         content, old_string, new_string, replace_all=False)
 """
 
+import re
 from difflib import SequenceMatcher
-from typing import List, Optional, Tuple
+from typing import Callable, Optional
 
-from tools.fuzzy_match_strategies import (  # noqa: F401 — re-exported names
-    SIMILARITY_STRATEGIES,
-    STRATEGIES,
-    UNICODE_MAP,
-    _build_orig_to_norm_map,
-    _calculate_line_positions,
-    _invert_norm_map,
-    _map_normalized_positions,
-    _map_positions_norm_to_orig,
-    _norm_end_to_orig,
-    _strategy_block_anchor,
-    _strategy_context_aware,
-    _strategy_escape_normalized,
-    _strategy_exact,
-    _strategy_indentation_flexible,
-    _strategy_line_trimmed,
-    _strategy_trimmed_boundary,
-    _strategy_unicode_normalized,
-    _strategy_whitespace_normalized,
-    _unicode_normalize,
-)
+Span = tuple[int, int]
 
 IDENTICAL_STRINGS_ERROR = (
     "No edit was applied because old_string and new_string are identical. "
     "Provide the existing text to replace in old_string and the changed "
-    "replacement text in new_string."
-)
+    "replacement text in new_string.")
 
+UNICODE_MAP = {
+    "\u201c": '"', "\u201d": '"',  # smart double quotes
+    "\u2018": "'", "\u2019": "'",  # smart single quotes
+    "\u2014": "--", "\u2013": "-",  # em/en dashes
+    "\u2026": "...", "\u00a0": " ",  # ellipsis and non-breaking space
+    "\u2212": "-",  # typographic minus (math/scientific docs)
+    # Space-separator family (Zs): otherwise such files fall to the similarity fallback.
+    "\u2000": " ", "\u2001": " ", "\u2002": " ", "\u2003": " ",
+    "\u2004": " ", "\u2005": " ", "\u2006": " ", "\u2007": " ",
+    "\u2008": " ", "\u2009": " ", "\u200a": " ", "\u202f": " ",
+    "\u205f": " ", "\u3000": " "}
+
+
+def _unicode_normalize(text: str) -> str:
+    """Map typographic Unicode variants to ASCII equivalents."""
+    for char, repl in UNICODE_MAP.items():
+        text = text.replace(char, repl)
+    return text
+
+
+# ── Position helpers ─────────────────────────────────────────────────────
+
+def _calculate_line_positions(content_lines: list[str], start_line: int,
+                              end_line: int, content_length: int) -> Span:
+    """Character span covering ``content_lines[start_line:end_line]`` (end exclusive)."""
+    start_pos = sum(len(line) + 1 for line in content_lines[:start_line])
+    end_pos = sum(len(line) + 1 for line in content_lines[:end_line]) - 1
+    return start_pos, min(content_length, end_pos)
+
+
+def _window_spans(content: str, content_lines: list[str], n: int,
+                  accept: Callable[[int], bool]) -> list[Span]:
+    """Spans of every ``n``-line window starting at ``i`` for which ``accept(i)``."""
+    return [
+        _calculate_line_positions(content_lines, i, i + n, len(content))
+        for i in range(len(content_lines) - n + 1) if accept(i)]
+
+
+def _match_transformed_lines(content: str, pattern: str,
+                             transform: Callable[[list[str]], list[str]]) -> list[Span]:
+    """Match ``pattern`` against ``content`` after applying ``transform`` to each line block."""
+    content_lines = content.split('\n')
+    pattern_norm = transform(pattern.split('\n'))
+    n = len(pattern_norm)
+    return _window_spans(content, content_lines, n,
+                         lambda i: transform(content_lines[i:i + n]) == pattern_norm)
+
+
+def _strip_boundary(lines: list[str]) -> list[str]:
+    """Strip whitespace on the first and last lines only."""
+    lines = list(lines)
+    lines[0] = lines[0].strip()
+    if len(lines) > 1:
+        lines[-1] = lines[-1].strip()
+    return lines
+
+
+def _build_orig_to_norm_map(original: str) -> list[int]:
+    """Map each original index to its index in ``_unicode_normalize(original)``
+    (replacements can expand one char into several). Length ``len(original)+1``;
+    the last entry is a sentinel one past the final character."""
+    result: list[int] = []
+    norm_pos = 0
+    for char in original:
+        result.append(norm_pos)
+        repl = UNICODE_MAP.get(char)
+        norm_pos += len(repl) if repl is not None else 1
+    result.append(norm_pos)
+    return result
+
+
+def _invert_norm_map(orig_to_norm: list[int]) -> dict[int, int]:
+    """norm_pos -> first original position mapping to it."""
+    inverted: dict[int, int] = {}
+    for orig_pos, norm_pos in enumerate(orig_to_norm[:-1]):
+        inverted.setdefault(norm_pos, orig_pos)
+    return inverted
+
+
+def _norm_end_to_orig(orig_to_norm: list[int], orig_start: int, norm_end: int) -> int:
+    """Walk from ``orig_start`` until the mapped position reaches ``norm_end``."""
+    orig_len = len(orig_to_norm) - 1
+    orig_end = orig_start
+    while orig_end < orig_len and orig_to_norm[orig_end] < norm_end:
+        orig_end += 1
+    return orig_end
+
+
+def _map_positions_norm_to_orig(orig_to_norm: list[int], norm_matches: list[Span]) -> list[Span]:
+    """Convert spans in the normalised string to original-string spans."""
+    norm_to_orig_start = _invert_norm_map(orig_to_norm)
+    results: list[Span] = []
+    for norm_start, norm_end in norm_matches:
+        if norm_start in norm_to_orig_start:
+            orig_start = norm_to_orig_start[norm_start]
+            results.append((orig_start, _norm_end_to_orig(orig_to_norm, orig_start, norm_end)))
+    return results
+
+
+def _map_normalized_positions(original: str, normalized: str,
+                              normalized_matches: list[Span]) -> list[Span]:
+    """Best-effort span mapping for ``[ \\t]+`` -> ``' '`` whitespace collapsing."""
+    orig_to_norm = []  # orig_to_norm[i] = position in normalized
+    orig_idx = norm_idx = 0
+    while orig_idx < len(original) and norm_idx < len(normalized):
+        if original[orig_idx] == normalized[norm_idx]:
+            orig_to_norm.append(norm_idx)
+            orig_idx += 1
+            norm_idx += 1
+        elif original[orig_idx] in ' \t' and normalized[norm_idx] == ' ':
+            # Collapsed run: advance norm_idx only once the run is consumed.
+            orig_to_norm.append(norm_idx)
+            orig_idx += 1
+            if orig_idx < len(original) and original[orig_idx] not in ' \t':
+                norm_idx += 1
+        else:
+            # Extra whitespace in original, or a mismatch normalization should
+            # never produce — either way, pin to the current norm_idx.
+            orig_to_norm.append(norm_idx)
+            orig_idx += 1
+    orig_to_norm.extend([len(normalized)] * (len(original) - orig_idx))
+
+    norm_to_orig_start = {}
+    norm_to_orig_end = {}
+    for orig_pos, norm_pos in enumerate(orig_to_norm):
+        norm_to_orig_start.setdefault(norm_pos, orig_pos)
+        norm_to_orig_end[norm_pos] = orig_pos
+
+    original_matches = []
+    for norm_start, norm_end in normalized_matches:
+        if norm_start in norm_to_orig_start:
+            orig_start = norm_to_orig_start[norm_start]
+        else:
+            orig_start = min(i for i, n in enumerate(orig_to_norm) if n >= norm_start)
+        if norm_end - 1 in norm_to_orig_end:
+            orig_end = norm_to_orig_end[norm_end - 1] + 1
+        else:
+            orig_end = orig_start + (norm_end - norm_start)
+        # Absorb trailing collapsed whitespace only when the normalized match
+        # itself ended in a space; otherwise the first whitespace after the
+        # match is a word boundary that must survive.
+        if norm_end < len(normalized) and normalized[norm_end - 1] == ' ':
+            while orig_end < len(original) and original[orig_end] in ' \t':
+                orig_end += 1
+        original_matches.append((orig_start, min(orig_end, len(original))))
+    return original_matches
+
+
+# ── Strategies ───────────────────────────────────────────────────────────
+# Each takes ``(content, pattern)`` and returns ``(start, end)`` spans in the
+# ORIGINAL content.
+
+def _strategy_exact(content: str, pattern: str) -> list[Span]:
+    """Strategy 1: exact, non-overlapping occurrences (str.replace semantics —
+    overlapping spans would corrupt the file under replace_all)."""
+    return [m.span() for m in re.finditer(re.escape(pattern), content)]
+
+
+def _strategy_line_trimmed(content: str, pattern: str) -> list[Span]:
+    """Strategy 2: strip each line before comparing."""
+    return _match_transformed_lines(content, pattern, lambda ls: [l.strip() for l in ls])
+
+
+def _strategy_whitespace_normalized(content: str, pattern: str) -> list[Span]:
+    """Strategy 3: collapse runs of spaces/tabs to a single space."""
+    def normalize(s):
+        return re.sub(r'[ \t]+', ' ', s)
+
+    content_normalized = normalize(content)
+    matches_in_normalized = _strategy_exact(content_normalized, normalize(pattern))
+    if not matches_in_normalized:
+        return []
+    return _map_normalized_positions(content, content_normalized, matches_in_normalized)
+
+
+def _strategy_indentation_flexible(content: str, pattern: str) -> list[Span]:
+    """Strategy 4: ignore leading indentation entirely."""
+    return _match_transformed_lines(content, pattern, lambda ls: [l.lstrip() for l in ls])
+
+
+def _strategy_escape_normalized(content: str, pattern: str) -> list[Span]:
+    """Strategy 5: treat literal ``\\n``/``\\t``/``\\r`` in the pattern as control chars."""
+    pattern_unescaped = pattern.replace('\\n', '\n').replace('\\t', '\t').replace('\\r', '\r')
+    if pattern_unescaped == pattern:
+        return []
+    return _strategy_exact(content, pattern_unescaped)
+
+
+def _strategy_trimmed_boundary(content: str, pattern: str) -> list[Span]:
+    """Strategy 6: strip whitespace on the first and last lines only."""
+    return _match_transformed_lines(content, pattern, _strip_boundary)
+
+
+def _strategy_unicode_normalized(content: str, pattern: str) -> list[Span]:
+    """Strategy 7: exact/line-trimmed match after Unicode->ASCII normalisation of both sides."""
+    norm_pattern = _unicode_normalize(pattern)
+    norm_content = _unicode_normalize(content)
+    if norm_content == content and norm_pattern == pattern:
+        return []
+    norm_matches = (_strategy_exact(norm_content, norm_pattern)
+                    or _strategy_line_trimmed(norm_content, norm_pattern))
+    if not norm_matches:
+        return []
+    return _map_positions_norm_to_orig(_build_orig_to_norm_map(content), norm_matches)
+
+
+def _strategy_block_anchor(content: str, pattern: str) -> list[Span]:
+    """Strategy 8: anchor on first+last lines, similarity-score the middle."""
+    pattern_lines = _unicode_normalize(pattern).split('\n')
+    if len(pattern_lines) < 2:
+        return []
+    first_line = pattern_lines[0].strip()
+    last_line = pattern_lines[-1].strip()
+    n = len(pattern_lines)
+
+    # Match on normalized lines; compute offsets from the ORIGINAL lines so
+    # multi-char expansions (em-dash -> '--') don't shift positions.
+    norm_content_lines = _unicode_normalize(content).split('\n')
+    potential_matches = {
+        i for i in range(len(norm_content_lines) - n + 1)
+        if norm_content_lines[i].strip() == first_line
+        and norm_content_lines[i + n - 1].strip() == last_line}
+    # Looser thresholds (0.10/0.30) matched unrelated blocks; these are the safe floor.
+    threshold = 0.50 if len(potential_matches) == 1 else 0.70
+    pattern_middle = '\n'.join(pattern_lines[1:-1])
+
+    def similar(i: int) -> bool:
+        if i not in potential_matches:
+            return False
+        if n <= 2:
+            return True
+        content_middle = '\n'.join(norm_content_lines[i + 1:i + n - 1])
+        return SequenceMatcher(None, content_middle, pattern_middle).ratio() >= threshold
+
+    return _window_spans(content, content.split('\n'), n, similar)
+
+
+def _strategy_context_aware(content: str, pattern: str) -> list[Span]:
+    """Strategy 9 (last resort): anchored per-line similarity, every non-blank line >= 0.80.
+    The anchor pre-filter bounds the scan; the all-lines rule stops coincidental matches."""
+    pattern_lines = pattern.split('\n')
+    content_lines = content.split('\n')
+    n = len(pattern_lines)
+    if n > len(content_lines):
+        return []
+    first_pat = pattern_lines[0].strip()
+    last_pat = pattern_lines[-1].strip()
+
+    def _sim(a: str, b: str) -> float:
+        return 1.0 if a == b else SequenceMatcher(None, a, b).ratio()
+
+    def accept(i: int) -> bool:
+        block_lines = content_lines[i:i + n]
+        if _sim(first_pat, block_lines[0].strip()) < 0.80:
+            return False
+        if _sim(last_pat, block_lines[-1].strip()) < 0.80:
+            return False
+        return all(
+            not p_line.strip() or _sim(p_line.strip(), c_line.strip()) >= 0.80
+            for p_line, c_line in zip(pattern_lines, block_lines))
+
+    return _window_spans(content, content_lines, n, accept)
+
+
+# Ordered chain: precise strategies first, similarity-based last.
+STRATEGIES: list[tuple[str, Callable[[str, str], list[Span]]]] = [
+    ("exact", _strategy_exact),
+    ("line_trimmed", _strategy_line_trimmed),
+    ("whitespace_normalized", _strategy_whitespace_normalized),
+    ("indentation_flexible", _strategy_indentation_flexible),
+    ("escape_normalized", _strategy_escape_normalized),
+    ("trimmed_boundary", _strategy_trimmed_boundary),
+    ("unicode_normalized", _strategy_unicode_normalized),
+    ("block_anchor", _strategy_block_anchor),
+    ("context_aware", _strategy_context_aware)]
+
+# Matches from these only *approximately* resemble old_string — fine for one
+# unique replacement, never safe under replace_all.
+SIMILARITY_STRATEGIES = frozenset({"block_anchor", "context_aware"})
+
+
+# ── Orchestrator ─────────────────────────────────────────────────────────
 
 def is_already_applied(content: str, old_string: str, new_string: str) -> bool:
-    """True when the requested edit is already present (re-sent edit -> success-shaped no-op).
-
-    Conservative: new_string must be non-trivial (>= 8 chars stripped) and
-    appear EXACTLY; when it differs from old_string, old_string must be gone.
-    """
-    if not new_string or len(new_string.strip()) < 8:
+    """True when the edit is already present (re-sent edit -> success-shaped no-op).
+    Conservative: new_string non-trivial (>= 8 chars) and present EXACTLY; old_string gone."""
+    if not new_string or len(new_string.strip()) < 8 or new_string not in content:
         return False
-    if new_string not in content:
-        return False
-    if old_string == new_string:
-        return True
-    return old_string not in content
+    return old_string == new_string or old_string not in content
 
 
-def _matched_regions(content: str, matches: List[Tuple[int, int]]) -> str:
+def _matched_regions(content: str, matches: list[Span]) -> str:
     return "".join(content[start:end] for start, end in matches)
 
 
-def _format_match_locations(content: str, matches: List[Tuple[int, int]],
-                            cap: int = 5) -> str:
+def _format_match_locations(content: str, matches: list[Span], cap: int = 5) -> str:
     """Render up to ``cap`` match positions as 'L<line>: <snippet>' rows."""
     rows = []
     for start, _end in matches[:cap]:
@@ -81,7 +335,7 @@ def _format_match_locations(content: str, matches: List[Tuple[int, int]],
 
 
 def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
-                           replace_all: bool = False) -> Tuple[str, int, Optional[str], Optional[str]]:
+                           replace_all: bool = False) -> tuple[str, int, Optional[str], Optional[str]]:
     """Find and replace via the strategy chain.
 
     Returns ``(new_content, match_count, strategy_name, error)``; on failure
@@ -106,15 +360,13 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
             return content, 0, None, (
                 f"Found {len(matches)} matches for old_string. "
                 f"Provide more context to make it unique, or use replace_all=True. "
-                f"Matches:\n{locations}"
-            )
+                f"Matches:\n{locations}")
         if replace_all and len(matches) > 1 and strategy_name in SIMILARITY_STRATEGIES:
             return content, 0, None, (
                 f"Found {len(matches)} approximate matches via the "
                 f"'{strategy_name}' strategy; replace_all only applies to exact "
                 f"matches. Provide the precise text (whitespace included) so an "
-                f"exact/line-trimmed match can be made."
-            )
+                f"exact/line-trimmed match can be made.")
 
         # Non-exact matches came through some normalization, so new_string may
         # carry serialization drift the file doesn't have.
@@ -125,13 +377,10 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
 
         effective_new = _maybe_unescape_new_string(new_string, content, matches)
         if strategy_name == "unicode_normalized":
-            effective_new = _preserve_unicode_in_replacement(
-                content, matches, old_string, effective_new,
-            )
+            effective_new = _preserve_unicode_in_replacement(content, matches, old_string, effective_new)
         new_content = _apply_replacements(
             content, matches, effective_new,
-            old_string=old_string if strategy_name != "exact" else None,
-        )
+            old_string=old_string if strategy_name != "exact" else None)
         return new_content, len(matches), strategy_name, None
 
     return content, 0, None, "Could not find a match for old_string in the file"
@@ -139,14 +388,10 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
 
 # ── Escape-drift guards ──────────────────────────────────────────────────
 
-def _detect_escape_drift(content: str, matches: List[Tuple[int, int]],
+def _detect_escape_drift(content: str, matches: list[Span],
                          old_string: str, new_string: str) -> Optional[str]:
-    """Error string when new_string carries tool-call escape artifacts, else None.
-
-    Fires on ``\\'``/``\\"`` present in both old_string and new_string but
-    absent from the matched region (spurious shell-style escaping), and on
-    JSON double-escaped backslash runs (see ``_detect_backslash_doubling``).
-    """
+    """Error string when new_string carries tool-call escape artifacts, else None:
+    ``\\'``/``\\"`` in both strings but not the matched region, or doubled backslash runs."""
     has_quote_suspects = "\\'" in new_string or '\\"' in new_string
     if not has_quote_suspects and "\\" not in old_string:
         return None
@@ -163,47 +408,27 @@ def _detect_escape_drift(content: str, matches: List[Tuple[int, int]],
                     f"serialization artifact where an apostrophe or quote got "
                     f"prefixed with a spurious backslash. Re-read the file with "
                     f"read_file and pass old_string/new_string without "
-                    f"backslash-escaping {plain!r} characters."
-                )
+                    f"backslash-escaping {plain!r} characters.")
     return _detect_backslash_doubling(matched_regions, old_string, new_string)
 
 
-def _backslash_runs(s: str) -> List[int]:
+def _backslash_runs(s: str) -> list[int]:
     """Lengths of maximal backslash runs in ``s``, in order."""
-    runs: List[int] = []
-    n = 0
-    for ch in s:
-        if ch == "\\":
-            n += 1
-        elif n:
-            runs.append(n)
-            n = 0
-    if n:
-        runs.append(n)
-    return runs
+    return [len(run) for run in re.findall(r"\\+", s)]
 
 
 def _detect_backslash_doubling(matched_regions: str, old_string: str,
                                new_string: str) -> Optional[str]:
-    """Detect old_string whose every backslash run is exactly 2x the file's.
-
-    That pattern means the arguments were JSON-escaped one extra time; a
-    similarity strategy still matches, and writing new_string verbatim would
-    double every backslash in the file. Requires the same run count, a
-    non-trivial signal (a run >= 2 or 2+ runs), and new_string not already
-    matching the file's counts.
-    """
+    """Detect old_string whose every backslash run is exactly 2x the file's (arguments
+    JSON-escaped one extra time). Requires the same run count, a non-trivial signal
+    (a run >= 2 or 2+ runs), and new_string not already matching the file's counts."""
     old_runs = _backslash_runs(old_string)
     file_runs = _backslash_runs(matched_regions)
-    if not old_runs or not file_runs or len(old_runs) != len(file_runs):
-        return None
-    if old_runs == file_runs:
-        return None
-    if any(o != f * 2 for o, f in zip(old_runs, file_runs)):
-        return None
-    if not (any(f >= 2 for f in file_runs) or len(file_runs) >= 2):
-        return None
-    if _backslash_runs(new_string) == file_runs:
+    if (not old_runs or not file_runs or len(old_runs) != len(file_runs)
+            or old_runs == file_runs
+            or any(o != f * 2 for o, f in zip(old_runs, file_runs))
+            or not (any(f >= 2 for f in file_runs) or len(file_runs) >= 2)
+            or _backslash_runs(new_string) == file_runs):
         return None
     return (
         "Escape-drift detected: every backslash run in old_string is exactly "
@@ -212,29 +437,20 @@ def _detect_backslash_doubling(matched_regions: str, old_string: str,
         "were JSON-escaped one extra time; applying new_string verbatim would "
         "double every backslash in the file. Re-read the file with read_file "
         "and resend old_string/new_string with the backslash counts exactly "
-        "as they appear in the file."
-    )
+        "as they appear in the file.")
 
 
-def _maybe_unescape_new_string(new_string: str, content: str,
-                               matches: List[Tuple[int, int]]) -> str:
-    """Convert literal ``\\t``/``\\r`` in new_string to control chars, per sequence,
-    only when the matched file region already contains the real control char.
-
-    Files that legitimately contain the two-char string (e.g. ``sep = "\\t"``)
-    have a backslash+t in the region, not a tab, so they're left alone.
-    ``\\n`` is deliberately excluded: newlines serialize correctly through
-    JSON and rewriting them would mangle escape sequences in source literals.
-    """
+def _maybe_unescape_new_string(new_string: str, content: str, matches: list[Span]) -> str:
+    """Convert literal ``\\t``/``\\r`` in new_string to control chars, per sequence, only
+    when the matched region already contains the real control char (so ``sep = "\\t"`` files
+    are left alone). ``\\n`` is excluded: rewriting it would mangle source escape literals."""
     if "\\t" not in new_string and "\\r" not in new_string:
         return new_string
     matched_regions = _matched_regions(content, matches)
-    out = new_string
-    if "\\t" in out and "\t" in matched_regions:
-        out = out.replace("\\t", "\t")
-    if "\\r" in out and "\r" in matched_regions:
-        out = out.replace("\\r", "\r")
-    return out
+    for literal, control in (("\\t", "\t"), ("\\r", "\r")):
+        if literal in new_string and control in matched_regions:
+            new_string = new_string.replace(literal, control)
+    return new_string
 
 
 # ── Replacement shaping ──────────────────────────────────────────────────
@@ -244,20 +460,13 @@ def _leading_whitespace(line: str) -> str:
 
 
 def _first_meaningful_line(text: str) -> Optional[str]:
-    for line in text.split("\n"):
-        if line.strip():
-            return line
-    return None
+    return next((line for line in text.split("\n") if line.strip()), None)
 
 
 def _reindent_replacement(file_region: str, old_string: str, new_string: str) -> str:
-    """Re-anchor ``new_string``'s indentation onto the file's actual base indent.
-
-    After a non-exact match the LLM's base indent (first non-blank line of
-    old_string) may differ from the file's. Each non-blank new_string line
-    swaps the LLM base prefix for the file's, preserving relative nesting;
-    lines shallower than the LLM base are anchored to the file base.
-    """
+    """Re-anchor ``new_string``'s indentation onto the file's actual base indent after a
+    non-exact match: swap the LLM base prefix (first non-blank old_string line) for the
+    file's, preserving relative nesting; shallower lines anchor to the file base."""
     if not new_string:
         return new_string
     old_first = _first_meaningful_line(old_string)
@@ -269,7 +478,7 @@ def _reindent_replacement(file_region: str, old_string: str, new_string: str) ->
     if old_indent == file_indent:
         return new_string
 
-    out_lines: List[str] = []
+    out_lines: list[str] = []
     for line in new_string.split("\n"):
         if not line.strip():
             out_lines.append(line)
@@ -280,17 +489,10 @@ def _reindent_replacement(file_region: str, old_string: str, new_string: str) ->
     return "\n".join(out_lines)
 
 
-def _preserve_unicode_in_replacement(
-    content: str, matches: List[Tuple[int, int]],
-    old_string: str, new_string: str,
-) -> str:
-    """Apply only the old->new edits onto the file's original (Unicode) text.
-
-    After a unicode_normalized match, writing the LLM's ASCII new_string
-    verbatim would flatten the file's em-dashes/smart quotes. Diff the
-    normalized old_string against new_string and keep the file's original
-    characters for every ``equal`` span.
-    """
+def _preserve_unicode_in_replacement(content: str, matches: list[Span],
+                                     old_string: str, new_string: str) -> str:
+    """Apply only the old->new edits onto the file's original (Unicode) text, so a
+    unicode_normalized match doesn't flatten the file's em-dashes/smart quotes."""
     file_region = _matched_regions(content, matches)
     norm_old = _unicode_normalize(old_string)
     if norm_old != _unicode_normalize(file_region):
@@ -299,7 +501,7 @@ def _preserve_unicode_in_replacement(
     file_orig_to_norm = _build_orig_to_norm_map(file_region)
     file_norm_to_orig = _invert_norm_map(file_orig_to_norm)
 
-    result_parts: List[str] = []
+    result_parts: list[str] = []
     for tag, i1, i2, j1, j2 in SequenceMatcher(None, norm_old, new_string).get_opcodes():
         if tag == "equal":
             orig_start = file_norm_to_orig.get(i1, 0)
@@ -310,13 +512,10 @@ def _preserve_unicode_in_replacement(
     return "".join(result_parts)
 
 
-def _apply_replacements(content: str, matches: List[Tuple[int, int]],
+def _apply_replacements(content: str, matches: list[Span],
                         new_string: str, old_string: Optional[str] = None) -> str:
-    """Splice ``new_string`` over each span (end-to-start so offsets stay valid).
-
-    ``old_string`` non-None signals a non-exact match: new_string is
-    re-indented per region to the file's actual indentation.
-    """
+    """Splice ``new_string`` over each span (end-to-start so offsets stay valid);
+    ``old_string`` non-None (non-exact match) re-indents it per region."""
     result = content
     for start, end in sorted(matches, key=lambda x: x[0], reverse=True):
         adjusted = new_string
@@ -330,12 +529,9 @@ def _apply_replacements(content: str, matches: List[Tuple[int, int]],
 
 def _visualize_whitespace(line: str) -> str:
     """Render the leading whitespace run visibly (→ = tab, · = space)."""
-    i = 0
-    prefix = []
-    while i < len(line) and line[i] in (" ", "\t"):
-        prefix.append("→" if line[i] == "\t" else "·")
-        i += 1
-    return "".join(prefix) + line[i:]
+    stripped = line.lstrip(" \t")
+    prefix = line[:len(line) - len(stripped)]
+    return prefix.replace("\t", "→").replace(" ", "·") + stripped
 
 
 def find_closest_lines(old_string: str, content: str, context_lines: int = 2, max_results: int = 3) -> str:
@@ -347,25 +543,15 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
     if not old_lines or not content_lines:
         return ""
 
-    anchor = old_lines[0].strip()
+    anchor = old_lines[0].strip() or next((l.strip() for l in old_lines if l.strip()), "")
     if not anchor:
-        candidates = [l.strip() for l in old_lines if l.strip()]
-        if not candidates:
-            return ""
-        anchor = candidates[0]
-
-    scored = []
-    for i, line in enumerate(content_lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        ratio = SequenceMatcher(None, anchor, stripped).ratio()
-        if ratio > 0.3:
-            scored.append((ratio, i))
-    if not scored:
         return ""
-    scored.sort(key=lambda x: -x[0])
-    top = scored[:max_results]
+
+    scored = sorted(((SequenceMatcher(None, anchor, line.strip()).ratio(), i)
+                     for i, line in enumerate(content_lines) if line.strip()), key=lambda x: -x[0])
+    top = [s for s in scored if s[0] > 0.3][:max_results]
+    if not top:
+        return ""
 
     parts = []
     seen_ranges = set()
@@ -376,11 +562,7 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
             continue
         seen_ranges.add((start, end))
         parts.append("\n".join(
-            f"{start + j + 1:4d}| {content_lines[start + j]}"
-            for j in range(end - start)
-        ))
-    if not parts:
-        return ""
+            f"{start + j + 1:4d}| {content_lines[start + j]}" for j in range(end - start)))
     result = "\n---\n".join(parts)
 
     # Whitespace-shaped miss: best line equals the anchor once stripped. Show
@@ -391,23 +573,15 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
             "\n\nWhitespace difference detected (→ = tab, · = space):\n"
             f"  file has: {_visualize_whitespace(best_line)}\n"
             f"  you sent: {_visualize_whitespace(old_lines[0])}\n"
-            "Use the exact whitespace shown in 'file has'."
-        )
+            "Use the exact whitespace shown in 'file has'.")
     return result
 
 
 def format_no_match_hint(error: Optional[str], match_count: int,
                          old_string: str, content: str) -> str:
-    """'\\n\\nDid you mean...' snippet for plain no-match errors only, else ''.
-
-    Ambiguous-match, escape-drift and identical-strings errors also have
-    ``match_count == 0`` but a hint would mislead there.
-    """
-    if match_count != 0:
-        return ""
-    if not error or not error.startswith("Could not find"):
+    """'\\n\\nDid you mean...' snippet for plain no-match errors only, else '' (ambiguous /
+    escape-drift / identical errors also have ``match_count == 0`` but a hint would mislead)."""
+    if match_count != 0 or not error or not error.startswith("Could not find"):
         return ""
     hint = find_closest_lines(old_string, content)
-    if not hint:
-        return ""
-    return "\n\nDid you mean one of these sections?\n" + hint
+    return "\n\nDid you mean one of these sections?\n" + hint if hint else ""
