@@ -15,8 +15,7 @@ logger = logging.getLogger(__name__)
 # Marker comments wrapping the managed section so re-runs can detect what's ours and what's
 # user-edited. Both must appear or strip is a no-op.
 MIGRATION_MARKER = (
-    "# managed by hermes-agent — `hermes codex-runtime migrate` regenerates this section"
-)
+    "# managed by hermes-agent — `hermes codex-runtime migrate` regenerates this section")
 MIGRATION_END_MARKER = "# end hermes-agent managed section"
 
 
@@ -65,8 +64,7 @@ _KNOWN_HERMES_KEYS = {
     "command", "args", "env", "cwd",
     "url", "headers", "transport",
     "timeout", "connect_timeout",
-    "enabled", "description",
-}
+    "enabled", "description"}
 _KEYS_DROPPED_WITH_WARNING = {"sampling"}
 
 # (hermes key, codex key, skip note) — timeouts are emitted as floats or skipped when non-numeric.
@@ -91,7 +89,6 @@ def _translate_one_server(name: str, hermes_cfg: dict) -> tuple[Optional[dict], 
     """
     if not isinstance(hermes_cfg, dict):
         return None, []
-
     skipped: list[str] = []
     out: dict[str, Any] = {}
     if hermes_cfg.get("command"):
@@ -112,7 +109,6 @@ def _translate_one_server(name: str, hermes_cfg: dict) -> tuple[Optional[dict], 
             skipped.append("transport=sse (codex auto-negotiates)")
     else:
         return None, ["no command or url field"]
-
     for hermes_key, codex_key, note in _TIMEOUT_KEYS:
         if hermes_key in hermes_cfg:
             try:
@@ -121,7 +117,6 @@ def _translate_one_server(name: str, hermes_cfg: dict) -> tuple[Optional[dict], 
                 skipped.append(note)
     if hermes_cfg.get("enabled") is False:
         out["enabled"] = False
-
     for key in hermes_cfg:
         if key in _KEYS_DROPPED_WITH_WARNING:
             skipped.append(f"{key} (no codex equivalent)")
@@ -171,8 +166,7 @@ def _quote_key(key: str) -> str:
 
 def render_codex_toml_section(
     servers: dict[str, dict], plugins: Optional[list[dict]] = None,
-    default_permission_profile: Optional[str] = None,
-) -> str:
+    default_permission_profile: Optional[str] = None) -> str:
     """Render the managed [mcp_servers.<n>] / [plugins.<id>] / default_permissions block.
 
     ``default_permission_profile`` (e.g. "workspace-write", "read-only", "full-access") is written
@@ -185,7 +179,6 @@ def render_codex_toml_section(
         out.append("# (no MCP servers, plugins, or permissions configured by Hermes)")
         out.append(MIGRATION_END_MARKER)
         return "\n".join(out) + "\n"
-
     if default_permission_profile:
         profile = default_permission_profile
         normalized = profile if profile.startswith(":") else f":{profile}"
@@ -211,13 +204,11 @@ def _insert_managed_block_at_top_level(user_text: str, managed_block: str) -> st
     """
     if not user_text.strip():
         return managed_block
-
     lines = user_text.splitlines(keepends=True)
     first_table_idx = next((i for i, ln in enumerate(lines) if ln.lstrip().startswith("[")), None)
     if first_table_idx is None:
         prefix = user_text.rstrip("\n")
         return f"{prefix}\n\n{managed_block}" if prefix else managed_block
-
     prefix = "".join(lines[:first_table_idx]).rstrip("\n")
     suffix = "".join(lines[first_table_idx:]).lstrip("\n")
     return f"{prefix}\n\n{managed_block}\n{suffix}" if prefix else f"{managed_block}\n{suffix}"
@@ -287,30 +278,23 @@ def _strip_existing_managed_block(toml_text: str) -> str:
 
 
 def _query_codex_plugins(
-    codex_home: Optional[Path] = None, timeout: float = 8.0
-) -> tuple[list[dict], Optional[str]]:
-    """Query codex's `plugin/list` for installed curated plugins.
-
-    Spawns ``codex app-server`` briefly, sends initialize + plugin/list and keeps installed=true.
-    Returns ``(plugins, error)``; any failure (not installed, RPC error, timeout) yields ``([],
-    error)`` and is non-fatal — MCP servers and permissions still write through.
-
-    Plugins codex reports as unavailable (broken install, missing OAuth, removed from marketplace)
-    are skipped: we write codex's config.toml directly, so a broken plugin would surface as a
-    codex error on the user's first turn. ``enabled`` is carried forward as codex reports it.
+    codex_home: Optional[Path] = None, timeout: float = 8.0) -> tuple[list[dict], Optional[str]]:
+    """Spawn ``codex app-server`` briefly and return ``(installed plugins, error)`` from
+    ``plugin/list``. Any failure yields ``([], error)`` and is non-fatal (servers and
+    permissions still write). Plugins codex reports unavailable (broken install, missing OAuth,
+    delisted) are skipped — we write config.toml directly, so they would surface as a codex
+    error on the first turn. ``enabled`` is carried forward as reported.
     """
     try:
         from agent.transports.codex_app_server import CodexAppServerClient
     except Exception as exc:
         return [], f"transport unavailable: {exc}"
-
     try:
         with CodexAppServerClient(codex_home=str(codex_home) if codex_home else None) as client:
             client.initialize(client_name="hermes-migration")
             resp = client.request("plugin/list", {}, timeout=timeout)
     except Exception as exc:
         return [], f"plugin/list query failed: {exc}"
-
     marketplaces = resp.get("marketplaces") or []
     if not isinstance(marketplaces, list):
         return [], "plugin/list response missing 'marketplaces'"
@@ -353,20 +337,16 @@ def _looks_like_test_tempdir(path: str) -> bool:
 
 
 def _build_hermes_tools_mcp_entry() -> dict:
-    """Build the codex stdio entry that launches Hermes' own tool surface as an MCP server, so the
-    codex subprocess can call back for browser/web/delegate_task/vision/memory/skills tools.
+    """Codex stdio entry launching Hermes' own tool surface as an MCP server (browser/web/
+    delegate_task/vision/memory/skills call-backs).
 
-    HERMES_HOME passes through IF SET so the subprocess sees the same config/auth/sessions DB as
-    the parent CLI. Read from os.environ (not get_hermes_home()) on purpose: when unset, the codex
-    subprocess should inherit whatever HERMES_HOME its launcher sets at runtime (systemd unit,
-    gateway, kanban dispatcher, custom shell) rather than a migrate-time default burned into
-    config.toml, which would pin it to the wrong profile. The pytest-tempdir guard stops a sibling
-    test's ``monkeypatch.setenv("HERMES_HOME", tmp_path)`` from leaking a transient dir into the
-    user's real config.toml. PYTHONPATH passes through so a worktree-launched hermes finds the
-    branch's modules instead of the installed package.
+    HERMES_HOME passes through only IF SET, read from os.environ (not get_hermes_home()): when
+    unset the codex subprocess must inherit its launcher's runtime HERMES_HOME (systemd, gateway,
+    kanban), not a migrate-time default burned into config.toml that pins the wrong profile. The
+    pytest-tempdir guard keeps a sibling test's monkeypatched HERMES_HOME out of the user's real
+    config. PYTHONPATH passes through so a worktree-launched hermes finds the branch's modules.
     """
     import sys
-
     env: dict[str, str] = {}
     hermes_home = os.environ.get("HERMES_HOME") or ""
     if hermes_home and not _looks_like_test_tempdir(hermes_home):
@@ -376,22 +356,19 @@ def _build_hermes_tools_mcp_entry() -> dict:
     # Quiet mode + redaction defaults so the MCP wire stays clean.
     env["HERMES_QUIET"] = "1"
     env["HERMES_REDACT_SECRETS"] = env.get("HERMES_REDACT_SECRETS", "true")
-
     return {
         "command": sys.executable,
         "args": ["-m", "agent.transports.hermes_tools_mcp_server"],
         "env": env,
         # Generous timeouts — browser_navigate or delegate_task can take a while.
         "startup_timeout_sec": 30.0,
-        "tool_timeout_sec": 600.0,
-    }
+        "tool_timeout_sec": 600.0}
 
 
 def _write_atomic(target: Path, text: str) -> None:
     """Write via a same-directory temp file + rename (atomic on POSIX, ReplaceFile on Windows) so a
     crash mid-write never leaves a half-written config.toml that codex would refuse to load."""
     import tempfile
-
     tmp_fd, tmp_path_str = tempfile.mkstemp(prefix=".config.toml.", dir=str(target.parent))
     tmp_path = Path(tmp_path_str)
     try:
@@ -400,8 +377,7 @@ def _write_atomic(target: Path, text: str) -> None:
         tmp_path.replace(target)
     except Exception:
         try:
-            if tmp_path.exists():
-                tmp_path.unlink()
+            tmp_path.unlink(missing_ok=True)
         except Exception:
             pass
         raise
@@ -410,8 +386,7 @@ def _write_atomic(target: Path, text: str) -> None:
 def migrate(
     hermes_config: dict, *, codex_home: Optional[Path] = None, dry_run: bool = False,
     discover_plugins: bool = True, default_permission_profile: Optional[str] = ":workspace",
-    expose_hermes_tools: bool = True,
-) -> MigrationReport:
+    expose_hermes_tools: bool = True) -> MigrationReport:
     """Translate Hermes mcp_servers config + Codex curated plugins into ~/.codex/config.toml.
 
     ``discover_plugins`` spawns the live codex CLI (set False in tests); discovery is best-effort
@@ -425,12 +400,10 @@ def migrate(
     codex_home = codex_home or Path.home() / ".codex"
     target = codex_home / "config.toml"
     report.target_path = target
-
     hermes_servers = (hermes_config or {}).get("mcp_servers") or {}
     if not isinstance(hermes_servers, dict):
         report.errors.append("mcp_servers in Hermes config is not a dict; cannot migrate.")
         return report
-
     translated: dict[str, dict] = {}
     for raw_name, cfg in hermes_servers.items():
         name = str(raw_name)
@@ -443,7 +416,6 @@ def migrate(
         if skipped:
             report.skipped_keys_per_server[name] = skipped
         report.migrated.append(name)
-
     plugins: list[dict] = []
     plugin_query_succeeded = False
     if discover_plugins and not dry_run:
@@ -454,17 +426,14 @@ def migrate(
         # re-render and may strip pre-existing tables outside the managed block.
         plugin_query_succeeded = not plugin_err
         report.migrated_plugins += [f"{p['name']}@{p['marketplace']}" for p in plugins]
-
     if default_permission_profile:
         report.wrote_permissions_default = default_permission_profile
     if expose_hermes_tools:
         translated["hermes-tools"] = _build_hermes_tools_mcp_entry()
         if "hermes-tools" not in report.migrated:
             report.migrated.append("hermes-tools")
-
     managed_block = render_codex_toml_section(
-        translated, plugins=plugins, default_permission_profile=default_permission_profile,
-    )
+        translated, plugins=plugins, default_permission_profile=default_permission_profile)
     new_text = managed_block
     if target.exists():
         try:
@@ -476,7 +445,6 @@ def migrate(
         if plugin_query_succeeded:
             without_managed = _strip_unmanaged_plugin_tables(without_managed)
         new_text = _insert_managed_block_at_top_level(without_managed, managed_block)
-
     if dry_run:
         return report
     try:

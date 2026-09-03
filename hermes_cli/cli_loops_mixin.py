@@ -49,8 +49,7 @@ class CLILoopsMixin:
     def _cmd_clear(self, cmd_original: str):
         from cli import (
             ChatConsole, _build_compact_banner, _clear_output_history, _cprint,
-            build_welcome_banner, get_tool_definitions,
-        )
+            build_welcome_banner, get_tool_definitions)
         if self._confirm_destructive_slash(
             "clear",
             "This clears the screen and starts a new session.\n"
@@ -78,14 +77,14 @@ class CLILoopsMixin:
             cc.print(_build_compact_banner())
         else:
             tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
+            agent = getattr(self, "agent", None)
             ctx_len = None
-            if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
-                ctx_len = self.agent.context_compressor.context_length
+            if agent and hasattr(agent, "context_compressor"):
+                ctx_len = agent.context_compressor.context_length
             build_welcome_banner(
                 console=cc, model=self.model, cwd=os.getenv("TERMINAL_CWD", os.getcwd()),
                 tools=tools, enabled_toolsets=self.enabled_toolsets, session_id=self.session_id,
-                context_length=ctx_len, provider=self.provider,
-            )
+                context_length=ctx_len, provider=self.provider)
         _cprint(_FRESH_START)
         self._print_random_tip()
 
@@ -179,8 +178,7 @@ class CLILoopsMixin:
         _undo_desc = (
             "This removes the last user/assistant exchange from history."
             if _undo_n == 1
-            else f"This removes the last {_undo_n} user turns from history."
-        )
+            else f"This removes the last {_undo_n} user turns from history.")
         if self._confirm_destructive_slash("undo", _undo_desc, cmd_original=cmd_original) is None:
             return True  # confirmation cancelled — command handled, keep REPL alive
         self.undo_last(_undo_n)
@@ -191,11 +189,9 @@ class CLILoopsMixin:
 
     def _cmd_egress(self, cmd_original: str):
         from hermes_cli.slash_exec import CommandContext, execute_command
-
         self._console_print(
             execute_command("egress", CommandContext(surface="cli")).text,
-            highlight=False, markup=False,
-        )
+            highlight=False, markup=False)
 
     def _cmd_statusbar(self, cmd_original: str):
         self._status_bar_visible = not self._status_bar_visible
@@ -208,7 +204,6 @@ class CLILoopsMixin:
 
     def _cmd_version(self, cmd_original: str):
         from hermes_cli.main import _print_version_info
-
         _print_version_info(check_updates=True)
 
     def _cmd_reload(self, cmd_original: str):
@@ -227,9 +222,7 @@ class CLILoopsMixin:
             # installed-but-not-enabled plugins show up; the plugin manager only knows
             # *loaded* plugins and made fresh installs look like "nothing installed".
             from hermes_cli.plugins_cmd import (
-                _discover_all_plugins, _get_disabled_set, _get_enabled_set, _plugin_status
-            )
-
+                _discover_all_plugins, _get_disabled_set, _get_enabled_set, _plugin_status)
             entries = _discover_all_plugins()
             enabled = _get_enabled_set()
             disabled = _get_disabled_set()
@@ -238,7 +231,6 @@ class CLILoopsMixin:
             # on one line (full catalog behind `hermes plugins list`).
             user_entries = [e for e in entries if e[3] != "bundled"]
             bundled_count = len(entries) - len(user_entries)
-
             if not user_entries:
                 print("No user plugins installed.")
                 print("  Install one: hermes plugins install owner/repo")
@@ -246,15 +238,11 @@ class CLILoopsMixin:
                 if bundled_count:
                     print(f"  ({bundled_count} bundled plugins available — see: hermes plugins list)")
                 return
-            # Loaded-plugin details (tools/hooks/commands counts, errors) by name.
-            loaded: dict = {}
-            try:
+            try:  # loaded-plugin details (tools/hooks/commands counts, errors) by name
                 from hermes_cli.plugins import get_plugin_manager
-                for p in get_plugin_manager().list_plugins():
-                    loaded[p["name"]] = p
+                loaded = {p["name"]: p for p in get_plugin_manager().list_plugins()}
             except Exception:
                 loaded = {}
-
             print(f"User plugins ({len(user_entries)}):")
             for name, version, _desc, source, _dir, key in sorted(user_entries):
                 state = _plugin_status(name, enabled, disabled, key=key)
@@ -362,18 +350,13 @@ class CLILoopsMixin:
         return self._session_bound_manager("_loop_manager", "loop manager", load)
 
     def _start_heartbeat_watchdog(self):
-        """Start the idle-poll thread that fires due heartbeats.
-
-        Same pattern as the wake-word watchdog: a daemon thread polls a few times a
-        minute; when the session is idle (no agent running, empty input queue) and the
-        heartbeat is due, its prompt is injected into ``_pending_input`` as a normal user
-        turn. Missed ticks coalesce — the anchor resets on fire, so a busy hour yields ONE
-        heartbeat turn. Idempotent; safe to call on every /heartbeat set.
-        """
+        """Start the idle-poll daemon that injects a due heartbeat prompt into
+        ``_pending_input`` as a normal user turn when the session is idle. Missed ticks
+        coalesce (the anchor resets on fire, so a busy hour yields ONE heartbeat turn).
+        Idempotent; safe to call on every /heartbeat set."""
         if getattr(self, "_heartbeat_watchdog_started", False):
             return
         self._heartbeat_watchdog_started = True
-
         from hermes_cli.heartbeat import POLL_SECONDS
 
         def _loop():
@@ -388,8 +371,7 @@ class CLILoopsMixin:
                             self._agent_running
                             or getattr(self, "_voice_recording", False)
                             or getattr(self, "_voice_processing", False)
-                            or not self._pending_input.empty()
-                        )
+                            or not self._pending_input.empty())
                         if busy:
                             continue
                         prompt = mgr.due_prompt()
@@ -399,7 +381,6 @@ class CLILoopsMixin:
                         logging.debug("heartbeat watchdog tick failed: %s", exc)
             finally:
                 self._heartbeat_watchdog_started = False
-
         threading.Thread(target=_loop, daemon=True, name="heartbeat-watchdog").start()
 
     def _maybe_fire_loop_tick(self) -> None:
@@ -426,12 +407,10 @@ class CLILoopsMixin:
             return
         try:
             from hermes_cli.loops import goal_blocks_loop_tick
-
             if goal_blocks_loop_tick(mgr.session_id):
                 return
         except Exception:
             pass
-
         wakeup = mgr.fire_tick()
         if not wakeup:
             return
@@ -470,8 +449,7 @@ class CLILoopsMixin:
                         parts = [
                             p.get("text", "")
                             for p in content
-                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}
-                        ]
+                            if isinstance(p, dict) and p.get("type") in {"text", "output_text"}]
                         return "\n".join(t for t in parts if t)
                     return str(content or "")
         except Exception:
@@ -502,10 +480,8 @@ class CLILoopsMixin:
                 pass
             _cprint(
                 f"  {_DIM}⏸ Loop paused — wakeup turn was interrupted. "
-                f"Use /loop resume to continue, or /loop stop to end it.{_RST}"
-            )
+                f"Use /loop resume to continue, or /loop stop to end it.{_RST}")
             return
-
         decision = mgr.complete_tick(self._last_assistant_response_text())
         msg = decision.get("message") or ""
         if msg:
@@ -514,15 +490,11 @@ class CLILoopsMixin:
             _cprint(f"  {_DIM}↻ Loop: {mgr.state.remaining_label()}.{_RST}")
 
     def _maybe_continue_goal_after_turn(self) -> None:
-        """Hook run after every CLI turn: judge the goal and maybe re-queue a continuation.
-
-        Safe when no goal is set. Preemption is automatic: a real user message already in
-        ``_pending_input`` skips judging (the user's turn goes first; we re-judge after).
-        A user-cancelled turn (Ctrl+C) AUTO-PAUSES the goal instead of judging — the judge
-        would run on partial output, almost always say "continue", and re-queue exactly
-        what the user cancelled; pausing is observable and recoverable via ``/goal
-        resume``. The empty-response skip mirrors ``_handle_message`` in ``gateway/run.py``.
-        """
+        """Post-turn hook: judge the goal and maybe re-queue a continuation. A real user
+        message already queued preempts judging (re-judged after their turn). Ctrl+C
+        AUTO-PAUSES instead of judging — the judge on partial output nearly always says
+        "continue" and would re-queue exactly what was cancelled; pausing is recoverable
+        via ``/goal resume``. Empty-response skip mirrors ``gateway/run.py``."""
         from cli import _DIM, _RST, _cprint, _looks_like_slash_command
         mgr = self._get_goal_manager()
         if mgr is None or not mgr.is_active():
@@ -551,7 +523,6 @@ class CLILoopsMixin:
                     return
         except Exception:
             pass
-
         if getattr(self, "_last_turn_interrupted", False):
             try:
                 mgr.pause(reason="user-interrupted (Ctrl+C)")
@@ -559,8 +530,7 @@ class CLILoopsMixin:
                 logging.debug("goal pause-on-interrupt failed: %s", exc)
             _cprint(
                 f"  {_DIM}⏸ Goal paused — turn was interrupted. "
-                f"Use /goal resume to continue, or /goal clear to stop.{_RST}"
-            )
+                f"Use /goal resume to continue, or /goal clear to stop.{_RST}")
             return
 
         # Empty/whitespace responses are almost always transient failures (API error,
@@ -568,20 +538,16 @@ class CLILoopsMixin:
         last_response = self._last_assistant_response_text()
         if not last_response.strip():
             return
-
         try:
             from hermes_cli.goals import gather_background_processes as _gather_bg
             _bg_procs = _gather_bg()
         except Exception:
             _bg_procs = None
-
         decision = mgr.evaluate_after_turn(
-            last_response, user_initiated=True, background_processes=_bg_procs
-        )
+            last_response, user_initiated=True, background_processes=_bg_procs)
         msg = decision.get("message") or ""
         if msg:
             _cprint(f"  {msg}")
-
         if decision.get("should_continue"):
             prompt = decision.get("continuation_prompt")
             if prompt:
