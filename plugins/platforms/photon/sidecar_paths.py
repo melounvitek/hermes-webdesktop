@@ -103,8 +103,7 @@ def resolve_sidecar_dir(source_dir: Optional[Path] = None) -> Path:
             "to %s failed (%s) — falling back to the read-only source dir; "
             "dependency installs will not be possible",
             mirror,
-            exc,
-        )
+            exc)
         return source
 
 

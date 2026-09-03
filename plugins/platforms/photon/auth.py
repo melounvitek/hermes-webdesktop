@@ -201,21 +201,18 @@ def load_dashboard_project_id() -> Optional[str]:
         return (
             entry.get("spectrum_project_id")
             or entry.get("dashboard_project_id")
-            or entry.get("project_id")
-        )
+            or entry.get("project_id"))
     return None
 
 
 def store_project_credentials(
     *, spectrum_project_id: str, project_secret: str,
-    dashboard_project_id: Optional[str] = None, name: Optional[str] = None,
-) -> None:
+    dashboard_project_id: Optional[str] = None, name: Optional[str] = None) -> None:
     """Persist project credentials to both .env (runtime) and auth.json (mgmt/offline status)."""
     record: Dict[str, Any] = {
         "spectrum_project_id": spectrum_project_id,
         "project_secret": project_secret,
-        "issued_at": int(time.time()),
-    }
+        "issued_at": int(time.time())}
     if dashboard_project_id:
         record["dashboard_project_id"] = dashboard_project_id
     if name:
@@ -226,8 +223,7 @@ def store_project_credentials(
 
 def store_user_numbers(
     *, phone_number: Optional[str] = None, assigned_phone_number: Optional[str] = None,
-    user_id: Optional[str] = None, dashboard_project_id: Optional[str] = None,
-) -> None:
+    user_id: Optional[str] = None, dashboard_project_id: Optional[str] = None) -> None:
     """Persist non-secret Photon user numbers for offline ``status`` output."""
     if not phone_number and not assigned_phone_number:
         return
@@ -236,8 +232,7 @@ def store_user_numbers(
         ("phone_number", phone_number),
         ("assigned_phone_number", assigned_phone_number),
         ("user_id", user_id),
-        ("dashboard_project_id", dashboard_project_id),
-    ):
+        ("dashboard_project_id", dashboard_project_id)):
         if value:
             record[key] = value
     _store_pool_record("photon_user", record)
@@ -344,8 +339,7 @@ class _DeviceTokenCandidate:
 
 
 def request_device_code(
-    *, client_id: str = DEFAULT_CLIENT_ID, scope: Optional[str] = DEFAULT_SCOPE,
-) -> DeviceCode:
+    *, client_id: str = DEFAULT_CLIENT_ID, scope: Optional[str] = DEFAULT_SCOPE) -> DeviceCode:
     """POST ``/api/auth/device/code`` and return the device + user codes."""
     _require_httpx(" device login")
     body: Dict[str, Any] = {"client_id": client_id}
@@ -359,14 +353,12 @@ def request_device_code(
         verification_uri=data["verification_uri"],
         verification_uri_complete=data.get("verification_uri_complete"),
         expires_in=int(data.get("expires_in") or DEFAULT_POLL_TIMEOUT),
-        interval=int(data.get("interval") or DEFAULT_POLL_INTERVAL),
-    )
+        interval=int(data.get("interval") or DEFAULT_POLL_INTERVAL))
 
 
 def poll_for_token(
     code: DeviceCode, *, client_id: str = DEFAULT_CLIENT_ID, timeout: Optional[int] = None,
-    interval: Optional[int] = None, on_pending: Optional[Callable[[], None]] = None,
-) -> str:
+    interval: Optional[int] = None, on_pending: Optional[Callable[[], None]] = None) -> str:
     """Poll ``/api/auth/device/token`` until approved (official-CLI semantics: sleep
     first; ``authorization_pending`` keeps the interval, ``slow_down`` +5s, HTTP 429
     +10s, ``access_denied``/``expired_token`` abort)."""
@@ -386,10 +378,8 @@ def poll_for_token(
                 json={
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "device_code": code.device_code,
-                    "client_id": client_id,
-                },
-                timeout=30.0,
-            )
+                    "client_id": client_id},
+                timeout=30.0)
         except httpx.RequestError as e:
             logger.warning("photon: device-token poll failed: %s", e)
             continue
@@ -405,8 +395,7 @@ def poll_for_token(
                 raise RuntimeError(
                     "Photon returned 200 but no token candidate in the "
                     "device-token response (expected access_token, "
-                    "data.access_token, accessToken, or set-auth-token)."
-                )
+                    "data.access_token, accessToken, or set-auth-token).")
             return candidates[0].token
         if resp.status_code == 429:  # RFC 8628 §3.5 — treat as slow_down
             sleep += 10
@@ -488,23 +477,19 @@ def validate_photon_token(token: str) -> Dict[str, Any]:
     resp = _dashboard_get("/api/auth/get-session", token)
     if resp.status_code in (401, 403):
         raise PhotonDashboardAuthError(
-            "Photon issued a device token, but the dashboard session lookup "
-            "rejected it."
-        )
+            "Photon issued a device token, but the dashboard session lookup " "rejected it.")
     resp.raise_for_status()
     data = resp.json()
     user = data.get("user") if isinstance(data, dict) else None
     if not isinstance(user, dict) or not user:
         raise PhotonDashboardAuthError(
             "Photon issued a device token, but the dashboard session lookup "
-            "did not recognize it."
-        )
+            "did not recognize it.")
     projects_resp = _dashboard_get("/api/projects/", token)
     if projects_resp.status_code in (401, 403):
         raise PhotonDashboardAuthError(
             "Photon device token was accepted for the session lookup but "
-            "rejected by the project API."
-        )
+            "rejected by the project API.")
     projects_resp.raise_for_status()
     return user
 
@@ -537,8 +522,7 @@ def _validated_dashboard_token(candidates: list) -> str:
 
 def login_device_flow(
     *, client_id: str = DEFAULT_CLIENT_ID, open_browser: bool = True,
-    on_user_code: Optional[Callable[["DeviceCode"], None]] = None,
-) -> str:
+    on_user_code: Optional[Callable[["DeviceCode"], None]] = None) -> str:
     """Run the full device-code login flow, validate the token against the
     dashboard API before persisting it, and return it. ``on_user_code`` receives
     the :class:`DeviceCode` so callers can print it."""
@@ -682,8 +666,7 @@ def create_user(
 
 def register_user_if_absent(
     project_id: str, project_secret: str, *, phone_number: str, first_name: Optional[str] = None,
-    last_name: Optional[str] = None, email: Optional[str] = None,
-) -> Tuple[Dict[str, Any], bool]:
+    last_name: Optional[str] = None, email: Optional[str] = None) -> Tuple[Dict[str, Any], bool]:
     """Idempotently register a Spectrum user → ``(user, created)``; the official
     CLI does no dedup, so we add it to keep ``setup`` re-runnable."""
     existing = find_user_by_phone(project_id, project_secret, phone_number)
@@ -691,8 +674,7 @@ def register_user_if_absent(
         return existing, False
     user = create_user(
         project_id, project_secret,
-        phone_number=phone_number, first_name=first_name, last_name=last_name, email=email,
-    )
+        phone_number=phone_number, first_name=first_name, last_name=last_name, email=email)
     return user, True
 
 
@@ -714,8 +696,7 @@ def load_user_numbers() -> Tuple[Optional[str], Optional[str]]:
         if phone or assigned:
             return (
                 str(phone) if phone else _configured_operator_phone(),
-                str(assigned) if assigned else None,
-            )
+                str(assigned) if assigned else None)
     return _configured_operator_phone(), None
 
 
@@ -750,8 +731,7 @@ def refresh_user_numbers(project_id: str, project_secret: str) -> Tuple[Optional
                     assigned = str(line["phoneNumber"])
     store_user_numbers(
         phone_number=phone, assigned_phone_number=assigned,
-        user_id=str(user_id) if user_id else None, dashboard_project_id=dashboard_id,
-    )
+        user_id=str(user_id) if user_id else None, dashboard_project_id=dashboard_id)
     return phone, assigned
 
 
@@ -796,8 +776,7 @@ def add_line(token: str, project_id: str, *, platform: str = "imessage") -> Dict
 
 
 def get_imessage_line(
-    token: str, project_id: str, *, create_if_missing: bool = True,
-) -> Optional[Dict[str, Any]]:
+    token: str, project_id: str, *, create_if_missing: bool = True) -> Optional[Dict[str, Any]]:
     """The project's iMessage line, provisioning one if absent and
     ``create_if_missing``; None if there is none and provisioning failed."""
     for line in list_lines(token, project_id):
@@ -825,15 +804,11 @@ def print_credential_summary(emit: Any = print) -> None:
         "Photon iMessage status",
         "──────────────────────",
         "  device token        : " + (
-            "✓ stored" if load_photon_token() else "✗ missing (run `hermes photon setup`)"
-        ),
+            "✓ stored" if load_photon_token() else "✗ missing (run `hermes photon setup`)"),
         "  project id          : " + (sid if sid else "✗ missing"),
         "  project secret      : " + ("✓ stored" if sec else "✗ missing"),
         "  my number           : " + (
-            phone if phone else "✗ missing (run `hermes photon setup --phone ...`)"
-        ),
+            phone if phone else "✗ missing (run `hermes photon setup --phone ...`)"),
         "  assigned number     : " + (
-            assigned if assigned else "✗ missing (run `hermes photon setup`)"
-        ),
-    ]
+            assigned if assigned else "✗ missing (run `hermes photon setup`)")]
     emit("\n".join(rows))
