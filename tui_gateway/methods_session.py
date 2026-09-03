@@ -331,7 +331,6 @@ def _(rid, params: dict) -> dict:
     resolved_cwd = _completion_cwd(params)
     source = _resolve_session_source(str(params.get("source") or "").strip() or None)
     _enable_gateway_prompts()
-
     # ``profile`` (app-global remote mode): stored on the session so the build and every turn
     # re-bind HERMES_HOME.
     profile = (params.get("profile") or "").strip() or None
@@ -358,12 +357,10 @@ def _(rid, params: dict) -> dict:
             "slash_worker": None, "tool_progress_mode": _load_tool_progress_mode(), "tool_started_at": {},
             "transport": current_transport() or _stdio_transport}
         _register_session_cwd(_sessions[sid])
-
     # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded
     # branch children, which must exist now.
     if parent_session_id and history:
         _seed_branch_row(sid, key, parent_session_id, history, source, profile_home)
-
     # Return immediately so Ink can paint; the AIAgent builds right after the flush.
     _schedule_agent_build(sid)
     _schedule_session_cap_enforcement()  # trim detached idle sessions over the cap
@@ -945,7 +942,6 @@ def _(rid, params: dict) -> dict:
     resolved = os.path.abspath(os.path.expanduser(translate_cwd_for_wsl_backend(raw)))
     if not os.path.isdir(resolved):
         return _err(rid, 4017, f"working directory does not exist: {raw}")
-
     # Snapshot under the lock — concurrent RPCs mutate _sessions.
     with _sessions_lock:
         live_sid, live = next(
@@ -1204,7 +1200,6 @@ def _(rid, params: dict, session: dict) -> dict:
     platform_name = (params.get("platform", "") or "").strip().lower()
     if not platform_name:
         return _err(rid, 4023, "platform required")
-
     # Validate up front: an unconfigured platform / missing home channel pends forever.
     try:
         from gateway.config import Platform, load_gateway_config
@@ -1228,7 +1223,6 @@ def _(rid, params: dict, session: dict) -> dict:
             rid, 4026,
             f"no home channel configured for {platform_name} — set one with "
             "/sethome on the destination chat first")
-
     # The watcher transfers a persisted row, so make sure one exists for an empty chat.
     _ensure_session_db_row(session)
     with _session_db(session) as db:
@@ -1391,7 +1385,6 @@ def _(rid, params: dict) -> dict:
     scale = float(pet_cfg.get("scale", constants.DEFAULT_SCALE) or constants.DEFAULT_SCALE)
     cols = int(params.get("cols") or 0) or constants.resolve_cols(scale, pet_cfg.get("unicode_cols", 0))
     base = {"enabled": True, "slug": pet.slug, "displayName": pet.display_name, "state": state}
-
     if params.get("graphics") and (kitty := _pet_kitty_cells(pet, pet_cfg, state, scale)):
         return _ok(rid, {**base, **kitty})
     renderer = PetRenderer(str(pet.spritesheet), mode="unicode", scale=scale, unicode_cols=cols)
@@ -1570,7 +1563,6 @@ def _(rid, params: dict) -> dict:
     from agent.pet.generate.imagegen import GenerationError, resolve_provider
     root = _pet_gen_root()
     _pet_gen_sweep(root)
-
     # Token up front so each draft is staged + streamed the moment it lands.
     token = uuid.uuid4().hex[:12]
     _pet_cancel_arm(token)
@@ -1582,7 +1574,6 @@ def _(rid, params: dict) -> dict:
             reference_images = _pet_reference_images_from_data_url(ref_raw, stage)
         except ValueError as exc:
             return _pet_gen_abort(rid, token, 4004, str(exc))
-
     # Resolve a picker-chosen provider up front so a bad pick fails fast, not mid-fan-out.
     provider_name = str(params.get("provider") or "").strip()
     sprite = None
@@ -1593,7 +1584,6 @@ def _(rid, params: dict) -> dict:
             return _pet_gen_abort(rid, token, 5031, str(exc))
     concept = prompt or "a pet based on the reference image"
     out: list[dict] = []
-
     # Token-only init event so a Stop fired before the first draft can target this run.
     _pet_emit("pet.generate.progress", {"token": token, "count": count}, "pet.generate init")
 
@@ -1646,7 +1636,6 @@ def _(rid, params: dict) -> dict:
     base = _pet_gen_root() / token / f"draft-{index}.png"
     if not base.is_file():
         return _err(rid, 4004, "draft expired — generate again")
-
     # Picker override (rows always need reference grounding).
     provider_name = str(params.get("provider") or "").strip()
     sprite = None
@@ -2177,7 +2166,6 @@ def _(rid, params: dict, session: dict) -> dict:
                 dict(msg)
                 for msg in list(session.get("display_history_prefix") or []) + list(session.get("history", []))
                 if isinstance(msg, dict)]
-
         # Live history is the MODEL projection (post-compaction: summary + tail). Snapshot the persisted
         # display projection or the child loses every archived turn.
         history = None
