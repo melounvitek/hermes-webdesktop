@@ -547,10 +547,8 @@ def enforce_max_runtime(
             os.kill if hasattr(os, "kill") else None
         )
         if kill is not None:
-            try:
+            with contextlib.suppress(ProcessLookupError, OSError):
                 kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError):
-                pass
             # Short polling wait — no time.sleep on the write txn.
             for _ in range(10):
                 if not _kb._pid_alive(pid):
@@ -1722,10 +1720,8 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
             try:
                 total += count_running_tasks(other)
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     other.close()
-                except Exception:
-                    pass
         except Exception:
             continue
     return total
@@ -2295,10 +2291,8 @@ def _rotate_worker_log(
             src = _rotated_log_path(log_path, generation)
             if not src.exists():
                 continue
-            try:
+            with contextlib.suppress(OSError):
                 src.rename(_rotated_log_path(log_path, generation + 1))
-            except OSError:
-                pass
         log_path.rename(_rotated_log_path(log_path, 1))
     except OSError:
         pass
@@ -2739,10 +2733,8 @@ def run_daemon(
         for sig_name in ("SIGINT", "SIGTERM"):
             sig = getattr(signal, sig_name, None)
             if sig is not None:
-                try:
+                with contextlib.suppress(ValueError, OSError):
                     signal.signal(sig, _handle)
-                except (ValueError, OSError):
-                    pass
 
     while not stop_event.is_set():
         try:
@@ -2765,10 +2757,8 @@ def run_daemon(
                     failure_limit=failure_limit,
                 )
             if on_tick is not None:
-                try:
+                with contextlib.suppress(Exception):
                     on_tick(res)
-                except Exception:
-                    pass
         except Exception:
             # Don't let any single tick kill the daemon.
             import traceback

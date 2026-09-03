@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 from typing import TYPE_CHECKING
+import contextlib
 
 if TYPE_CHECKING:
     from hermes_cli.kanban_db import Task
@@ -31,19 +32,15 @@ def _managed_scratch_path_info(p: Path) -> tuple[bool, Optional[str]]:
     roots: list[tuple[Path, Optional[str]]] = []
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
     if override:
-        try:
+        with contextlib.suppress(OSError):
             roots.append((Path(override).expanduser().resolve(strict=False), None))
-        except OSError:
-            pass
     try:
         home = _kb.kanban_home()
     except OSError:
         home = None
     if home is not None:
-        try:
+        with contextlib.suppress(OSError):
             roots.append(((home / "kanban" / "workspaces").resolve(strict=False), _kb.DEFAULT_BOARD))
-        except OSError:
-            pass
         try:
             boards_parent = (home / "kanban" / "boards").resolve(strict=False)
         except OSError:

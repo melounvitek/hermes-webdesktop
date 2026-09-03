@@ -123,35 +123,16 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 VALID_STATUSES = {"triage", "todo", "scheduled", "ready", "running", "blocked", "review", "done", "archived"}
 VALID_INITIAL_STATUSES = {"running", "blocked"}
 
-# Typed block reasons. Distinguishes the two fundamentally different things a
-# worker (or human) means by "blocked", so each can be routed differently
-# instead of all landing in one undifferentiated ``blocked`` bucket that a cron
-# unblocks → worker re-blocks → cron unblocks … forever.
-#
-#   * ``dependency``   — can't proceed until another task finishes. Routed to
-#                        ``todo`` (NOT ``blocked``) so the existing
-#                        parent-gating / ``recompute_ready`` machinery promotes
-#                        it automatically once parents are done. No human, no
-#                        cron, no retry storm.
-#   * ``needs_input``  — needs a human decision/answer it cannot derive.
-#   * ``capability``   — hit a hard wall (no access, missing creds, an action no
-#                        AI agent can perform). Genuinely human-only.
-#   * ``transient``    — a flaky/temporary failure that may clear on retry.
-#
-# ``needs_input`` and ``capability`` are "truly blocked": they go to ``blocked``
-# for a human, and the unblock-loop breaker (see ``block_task`` /
-# ``BLOCK_RECURRENCE_LIMIT``) escalates them to ``triage`` if a cron keeps
-# unblocking them only to have the worker re-block for the same reason.
-# ``None`` = legacy/un-typed block (treated as a generic human blocker).
+# Typed block reasons (routing rules live on ``block_task``): ``dependency``
+# -> ``todo`` (parent gating promotes it, no human/cron/retry storm);
+# ``needs_input`` / ``capability`` -> ``blocked`` for a human; ``transient`` =
+# may clear on retry. ``None`` = legacy un-typed block (generic human blocker).
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
-# After a task has been blocked, unblocked, and re-blocked this many times for
-# the same (truly-blocked) reason, the unblock-loop breaker stops trusting the
-# unblocker (usually a cron) and routes the task to ``triage`` instead of back
-# to ``blocked`` — breaking the infinite unblock↔re-block loop and forcing a
-# human-in-the-loop decision. Mirrors the dispatcher's ``DEFAULT_FAILURE_LIMIT``
-# spirit (default 2) but counts a different signal: manual unblock recurrences,
-# not dispatcher spawn/crash/timeout failures.
+# Same-reason block -> unblock -> re-block cycles tolerated before the loop
+# breaker stops trusting the unblocker (usually a cron) and routes to ``triage``
+# for a human decision. Counts manual unblock recurrences, NOT dispatcher
+# spawn/crash/timeout failures (that is ``DEFAULT_FAILURE_LIMIT``).
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
@@ -666,10 +647,8 @@ def set_current_board(slug: str) -> Path:
 def clear_current_board() -> None:
     """Remove ``<root>/kanban/current`` so the active board reverts to ``default``."""
     _assert_not_delegated_child_mutation()
-    try:
+    with contextlib.suppress(FileNotFoundError):
         current_board_path().unlink()
-    except FileNotFoundError:
-        pass
 
 
 def board_dir(board: Optional[str] = None) -> Path:
@@ -1017,10 +996,9 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
             suffix += 1
         d.rename(target)
         return {"slug": normed, "action": "archived", "new_path": str(target)}
-    else:
-        import shutil
-        shutil.rmtree(d)
-        return {"slug": normed, "action": "deleted", "new_path": ""}
+    import shutil
+    shutil.rmtree(d)
+    return {"slug": normed, "action": "deleted", "new_path": ""}
 
 
 # ---------------------------------------------------------------------------
@@ -1050,75 +1028,37 @@ class Task:
     project_id: Optional[str] = None
     result: Optional[str] = None
     idempotency_key: Optional[str] = None
-    # Unified non-success counter. Incremented on any of:
-    #   * spawn failure (dispatcher couldn't launch the worker)
-    #   * timed_out outcome (worker exceeded max_runtime_seconds)
-    #   * crashed outcome (worker PID vanished)
-    # Reset to 0 only on a successful completion. See
-    # ``_record_task_failure`` for the circuit-breaker trip rule.
-    # (Pre-rename column: ``spawn_failures``.)
+    # Column semantics are documented on SCHEMA_SQL. Pre-rename columns:
+    # ``spawn_failures`` -> consecutive_failures, ``last_spawn_error`` ->
+    # last_failure_error (see ``from_row`` fallbacks).
     consecutive_failures: int = 0
     worker_pid: Optional[int] = None
-    # Short excerpt of the last failure's error text (any outcome, not
-    # just spawn). Pre-rename column: ``last_spawn_error``.
     last_failure_error: Optional[str] = None
     max_runtime_seconds: Optional[int] = None
     last_heartbeat_at: Optional[int] = None
     current_run_id: Optional[int] = None
     workflow_template_id: Optional[str] = None
     current_step_key: Optional[str] = None
-    # Force-loaded skills for the worker on this task (passed via
-    # --skills). Stored as a JSON array of skill names. None = use only
-    # the defaults; empty list = explicitly no extra skills.
-    skills: Optional[list] = None
+    skills: Optional[list] = None            # None = defaults only; [] = explicitly none
     model_override: Optional[str] = None
-    # Provider that ``model_override`` belongs to. When set, the dispatcher
-    # passes ``--provider <name>`` alongside ``-m <model>`` so the worker
-    # resolves the model against the right backend instead of the profile's
-    # configured provider. NULL = worker profile's provider resolves the
-    # model (pre-existing behaviour). Solves the "model from provider A,
-    # profile configured for provider B" mismatch class.
-    provider_override: Optional[str] = None
-    # Per-task reasoning effort for the worker (one of
-    # ``hermes_constants.VALID_REASONING_EFFORTS``, or ``"none"`` for thinking
-    # off). When set, the dispatcher passes ``--reasoning <level>`` so the
-    # worker runs at that depth regardless of the profile's
-    # ``agent.reasoning_effort``. NULL = the worker profile's own setting.
-    reasoning_effort: Optional[str] = None
-    # Per-task override for the consecutive-failure circuit breaker.
-    # The value is the failure count at which the breaker trips — e.g.
-    # ``max_retries=1`` blocks on the first failure (zero retries),
-    # ``max_retries=3`` blocks on the third (two retries allowed).
-    # ``None`` (the common case) falls through to the dispatcher-level
-    # ``kanban.failure_limit`` config, and then to ``DEFAULT_FAILURE_LIMIT``.
-    # Name matches the ``--max-retries`` CLI flag on ``kanban create``.
+    provider_override: Optional[str] = None  # provider ``model_override`` belongs to
+    reasoning_effort: Optional[str] = None   # VALID_REASONING_EFFORTS | "none"; NULL = profile's
+    # Failure count at which the breaker trips (1 = block on first failure);
+    # None -> ``kanban.failure_limit`` config -> DEFAULT_FAILURE_LIMIT.
     max_retries: Optional[int] = None
-    # When True, the dispatched worker runs in a Ralph-style goal loop
-    # (the same engine behind the ``/goal`` slash command): after each
-    # turn an auxiliary judge model evaluates the worker's response
-    # against this card's title/body (treated as the goal). If the judge
-    # says "not done" and budget remains, the worker is fed a
-    # continuation prompt IN THE SAME SESSION and keeps working until the
-    # judge agrees, the goal-turn budget is exhausted (→ kanban_block),
-    # or the worker explicitly blocks/completes. ``False`` (default) =
-    # the classic single-shot worker. ``goal_max_turns`` bounds the loop.
+    # Ralph-style goal loop (same engine as ``/goal``): a judge model re-checks
+    # the worker's response against title/body each turn and feeds a
+    # continuation prompt IN THE SAME SESSION until done, budget exhausted
+    # (-> kanban_block) or explicit block/complete. ``goal_max_turns`` None ->
+    # ``goals.DEFAULT_MAX_TURNS``.
     goal_mode: bool = False
-    # Goal-loop turn budget for ``goal_mode`` workers. ``None`` falls
-    # through to the goals engine default (``goals.DEFAULT_MAX_TURNS``).
     goal_max_turns: Optional[int] = None
-    # Originating chat/agent session id, when the task was created from
-    # within an agent loop that propagated ``HERMES_SESSION_ID``. NULL for
-    # tasks created from the CLI, the dashboard, or any path that doesn't
-    # set the env var. Lets clients render a per-session board without
-    # relying on tenant + time-window heuristics.
+    # Originating agent session (``HERMES_SESSION_ID``); NULL from CLI/dashboard.
     session_id: Optional[str] = None
-    # Typed block reason (one of VALID_BLOCK_KINDS) or None for legacy/un-typed
-    # blocks. Set by ``block_task``; preserved across unblock so a re-block for
-    # the same kind is recognisable as an unblock↔re-block loop.
+    # Typed block reason (VALID_BLOCK_KINDS) or None for legacy blocks; kept
+    # across unblock so a same-kind re-block is recognisable as a loop.
     block_kind: Optional[str] = None
-    # Unblock-loop counter. See the column comment in SCHEMA_SQL and
-    # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
-    block_recurrences: int = 0
+    block_recurrences: int = 0               # unblock-loop counter, see BLOCK_RECURRENCE_LIMIT
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -2482,10 +2422,8 @@ def store_attachment_bytes(
     except Exception:
         # Don't leave an orphan blob if the metadata insert fails (most
         # commonly: the task id doesn't exist).
-        try:
+        with contextlib.suppress(OSError):
             dest_path.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise
 
 
@@ -3855,14 +3793,10 @@ def _persist_scratch_completion_artifacts(
 
     def _discard_copies() -> None:
         for copied in used_destinations:
-            try:
+            with contextlib.suppress(OSError):
                 copied.unlink(missing_ok=True)
-            except OSError:
-                pass
-        try:
+        with contextlib.suppress(OSError):
             attachment_dir.rmdir()
-        except OSError:
-            pass
 
     for item in raw_artifacts:
         artifact = str(item).strip() if isinstance(item, str) else ""
@@ -3908,10 +3842,8 @@ def _persist_scratch_completion_artifacts(
                     destination_file.write(chunk)
         except Exception as exc:
             if dest is not None:
-                try:
+                with contextlib.suppress(OSError):
                     dest.unlink(missing_ok=True)
-                except OSError:
-                    pass
             _discard_copies()
             if isinstance(exc, ArtifactPreservationError):
                 raise

@@ -102,10 +102,8 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
         # stale entry in the connect_tracked live-connection registry (which
         # only clears on close), permanently blocking byte-level probes of
         # this database file. Close before re-raising.
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
         raise
     return conn
 
@@ -421,10 +419,8 @@ def _prune_corrupt_backups(
             stale.with_name(stale.name + "-wal"),
             stale.with_name(stale.name + "-shm"),
         ):
-            try:
+            with contextlib.suppress(OSError):
                 victim.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def _backup_corrupt_db(path: Path) -> Optional[Path]:
@@ -496,10 +492,8 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
         sidecar_backup = parent / (candidate.name + suffix)
         if sidecar_backup.parent != parent or sidecar_backup.exists():
             continue
-        try:
+        with contextlib.suppress(OSError):
             shutil.copy2(sidecar, sidecar_backup)
-        except OSError:
-            pass
     return candidate
 
 
@@ -942,10 +936,8 @@ def connect_closing(
     try:
         yield conn
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
 
 def init_db(
@@ -1321,10 +1313,8 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
                 conn.execute(index_sql)
         conn.execute("COMMIT")
     except Exception:
-        try:
+        with contextlib.suppress(sqlite3.OperationalError):
             conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            pass
         raise
 
 
@@ -1466,10 +1456,8 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute("ROLLBACK")
-            except sqlite3.OperationalError:
-                pass
             raise
         # Post-commit file-length check: header page_count must match actual file pages.
         # A discrepancy means a torn-extend — raise now rather than silently corrupt.
