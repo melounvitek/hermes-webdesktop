@@ -360,8 +360,7 @@ def _resolve_locally(configured_path: str, *, warn_missing: bool) -> tuple[str |
     expanded = os.path.expanduser(configured_path)
     # An explicit (non-"tirith") path is authoritative: never auto-download a replacement.
     if configured_path != "tirith":
-        found = expanded if _is_executable(expanded) else shutil.which(expanded)
-        if found:
+        if found := (expanded if _is_executable(expanded) else shutil.which(expanded)):
             _resolved_path = found
             return found, False
         if warn_missing:
@@ -370,8 +369,7 @@ def _resolve_locally(configured_path: str, *, warn_missing: bool) -> tuple[str |
         return None, False
     # Always re-run the cheap local checks so a manual install is picked up even after a
     # previous network failure (a long-lived gateway recovers without restart).
-    found = _find_local_tirith()
-    if found:
+    if found := _find_local_tirith():
         _set_resolved(found)
         _clear_install_failed()
         return found, False
@@ -385,13 +383,15 @@ def _resolve_locally(configured_path: str, *, warn_missing: bool) -> tuple[str |
     return None, True
 
 
-def _record_install_result(installed: str | None, reason: str) -> None:
+def _record_install_result(installed: str | None, reason: str) -> str | None:
+    """Cache an install outcome in module state + disk marker; returns *installed*."""
     if installed:
         _set_resolved(installed)
         _clear_install_failed()
     else:
         _set_failed(reason)
         _mark_install_failed(reason)
+    return installed
 
 
 def _resolve_tirith_path(configured_path: str) -> str:
@@ -410,11 +410,14 @@ def _resolve_tirith_path(configured_path: str) -> str:
     if found or not may_install:
         return found or expanded
     # A background install is running: don't start a parallel one; fail-open until it finishes.
-    if (_install_thread is not None and _install_thread.is_alive()) or _disk_marker_blocks_install():
+    if _install_running() or _disk_marker_blocks_install():
         return expanded
-    installed, reason = _install_tirith()
-    _record_install_result(installed, reason)
+    installed = _record_install_result(*_install_tirith())
     return installed or expanded
+
+
+def _install_running() -> bool:
+    return _install_thread is not None and _install_thread.is_alive()
 
 
 def _background_install(*, log_failures: bool = True):
@@ -422,8 +425,7 @@ def _background_install(*, log_failures: bool = True):
     with _install_lock:
         if _resolved_path is not None:  # another thread resolved meanwhile
             return
-        found = _find_local_tirith()  # may have been installed by another process
-        if found:
+        if found := _find_local_tirith():  # may have been installed by another process
             _set_resolved(found)
             return
         _record_install_result(*_install_tirith(log_failures=log_failures))
@@ -446,7 +448,7 @@ def ensure_installed(*, log_failures: bool = True):
     found, may_install = _resolve_locally(cfg["tirith_path"], warn_missing=False)
     if found or not may_install or _disk_marker_blocks_install():
         return found
-    if _install_thread is None or not _install_thread.is_alive():
+    if not _install_running():
         _install_thread = threading.Thread(target=_background_install, daemon=True,
                                            kwargs={"log_failures": log_failures})
         _install_thread.start()

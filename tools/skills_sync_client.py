@@ -143,10 +143,7 @@ def _rel_to_skills_dir(skill_dir: Path) -> Optional[Path]:
 
 def _skill_rel_path(skill_name: str) -> Optional[PurePosixPath]:
     """The skill's path relative to ~/.hermes/skills/ (posix), or None."""
-    try:
-        from tools.skill_usage import _find_skill_dir
-    except Exception:
-        return None
+    from tools.skill_usage import _find_skill_dir
     skill_dir = _find_skill_dir(skill_name)
     rel = _rel_to_skills_dir(skill_dir) if skill_dir is not None else None
     return PurePosixPath(rel.as_posix()) if rel is not None else None
@@ -155,11 +152,8 @@ def _skill_rel_path(skill_name: str) -> Optional[PurePosixPath]:
 def is_sync_eligible(skill_name: str) -> bool:
     """Sync candidate (before opt-in): local, NOT bundled/hub-installed/external, NOT under ``_org/``
     (enterprise content never rides a personal push). Mirrors the curator's exclusions."""
-    try:
-        from tools.skill_usage import is_bundled, is_hub_installed, _find_skill_dir
-        from agent.skill_utils import is_external_skill_path
-    except Exception:
-        return False
+    from tools.skill_usage import is_bundled, is_hub_installed, _find_skill_dir
+    from agent.skill_utils import is_external_skill_path
     skill_dir = None if is_bundled(skill_name) or is_hub_installed(skill_name) else _find_skill_dir(skill_name)
     if skill_dir is None or is_external_skill_path(skill_dir):
         return False
@@ -170,12 +164,8 @@ def is_sync_eligible(skill_name: str) -> bool:
 def list_synced_skill_names() -> List[str]:
     """Sorted skill names that should sync: opt-in -> eligible skills with ``sync: true``;
     opt-out (``sync_default_opt_in()``) -> every eligible skill unless ``sync: false``."""
-    try:
-        from tools.skill_usage import load_usage
-    except Exception:
-        return []
-    usage = load_usage() or {}
-    flags = {n: rec.get("sync") for n, rec in usage.items() if isinstance(rec, dict)}
+    from tools.skill_usage import load_usage
+    flags = {n: rec.get("sync") for n, rec in (load_usage() or {}).items() if isinstance(rec, dict)}
     if sync_default_opt_in():
         names = [n for n in _all_local_skill_names() if flags.get(n) is not False and is_sync_eligible(n)]
     else:
@@ -212,11 +202,9 @@ def _adopt_manifest_opt_ins(remote_manifest: Optional[Dict[str, bool]]) -> List[
     """Enable local sync intent for skills the plane manifest enabled that are locally
     curation-eligible. Enables only -- a pull never silently disables. Returns adopted names."""
     adopted: List[str] = []
-    if not remote_manifest:
-        return adopted
     try:
         from tools.skill_usage import set_sync, is_curation_eligible, is_sync_enabled
-        for sname, enabled in remote_manifest.items():
+        for sname, enabled in (remote_manifest or {}).items():
             if enabled and is_curation_eligible(sname) and not is_sync_enabled(sname):
                 set_sync(sname, True)
                 adopted.append(sname)
