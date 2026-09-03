@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from hermes_cli.session_recovery import (
-    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _immediate_transaction, _quoted_columns,
-    _table_columns,
+    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _immediate_transaction, _placeholder_titles,
+    _quoted_columns, _table_columns,
 )
 
 # Hermes session ids are timestamps (20260812_135332_ab12cd): the strongest sentinel for schema-less rows.
@@ -39,15 +39,12 @@ _EPOCH_LOW = 1_000_000_000.0   # 2001
 _EPOCH_HIGH = 4_000_000_000.0  # 2096
 
 SQLITE3_CLI_GUIDANCE = (
-    "A last-resort page-level salvage is available when a `.recover`-capable "
-    "`sqlite3` command-line shell is installed: its `.recover` command can "
-    "rebuild rows into lost_and_found tables even when the table schemas are "
-    "unreadable (this is a CLI-only feature, not part of Python's sqlite3 "
-    "module, and some distro builds lack it — the shell must include the "
-    "sqlite_dbpage extension, as the official builds from sqlite.org do). "
-    "Install such a sqlite3 CLI (e.g. `brew install sqlite` or the "
-    "precompiled sqlite-tools from sqlite.org) so it is on PATH, then re-run "
-    "with --allow-partial."
+    "A last-resort page-level salvage is available when a `.recover`-capable `sqlite3` command-line shell is "
+    "installed: its `.recover` command can rebuild rows into lost_and_found tables even when the table schemas are "
+    "unreadable (this is a CLI-only feature, not part of Python's sqlite3 module, and some distro builds lack it — "
+    "the shell must include the sqlite_dbpage extension, as the official builds from sqlite.org do). Install such a "
+    "sqlite3 CLI (e.g. `brew install sqlite` or the precompiled sqlite-tools from sqlite.org) so it is on PATH, then "
+    "re-run with --allow-partial."
 )
 
 
@@ -269,8 +266,7 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
         lf_tables = [
             str(row[0])
             for row in lf_conn.execute(
-                "SELECT name FROM sqlite_master "
-                "WHERE type='table' AND name LIKE 'lost_and_found%'"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'lost_and_found%'"
             )
         ]
         report["lost_and_found_tables"] = lf_tables
@@ -296,9 +292,7 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                         # Pre-modern layout with unknown column order: salvage identity + timing only.
                         inserted = (
                             dest.execute(
-                                "INSERT OR IGNORE INTO sessions "
-                                "(id, source, started_at, title) "
-                                "VALUES (?, ?, ?, ?)",
+                                "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
                                 (
                                     cells[0],
                                     cells[1] if _looks_like_source(cells[1]) else "recovered",
@@ -332,32 +326,24 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
     with _immediate_transaction(dest):
         orphan_ids: dict[str, dict[str, Any]] = {}
         for session_id, first_ts, count in dest.execute(
-            "SELECT m.session_id, MIN(m.timestamp), COUNT(*) FROM messages AS m "
-            "WHERE m.session_id IS NOT NULL AND NOT EXISTS "
-            "(SELECT 1 FROM sessions WHERE sessions.id = m.session_id) "
-            "GROUP BY m.session_id"
+            "SELECT m.session_id, MIN(m.timestamp), COUNT(*) FROM messages AS m WHERE m.session_id IS NOT NULL AND "
+            "NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.id = m.session_id) GROUP BY m.session_id"
         ):
             orphan_ids[str(session_id)] = {
                 "started_at": float(first_ts) if first_ts is not None else 0.0,
                 "message_count": int(count),
             }
         for (session_id,) in dest.execute(
-            "SELECT DISTINCT u.session_id FROM session_model_usage AS u "
-            "WHERE u.session_id IS NOT NULL AND NOT EXISTS "
-            "(SELECT 1 FROM sessions WHERE sessions.id = u.session_id)"
+            "SELECT DISTINCT u.session_id FROM session_model_usage AS u WHERE u.session_id IS NOT NULL AND NOT "
+            "EXISTS (SELECT 1 FROM sessions WHERE sessions.id = u.session_id)"
         ):
             orphan_ids.setdefault(str(session_id), {"started_at": 0.0, "message_count": 0})
 
-        sequence = 1
+        titles = _placeholder_titles(dest, "best-effort recovered")
         for session_id, info in sorted(orphan_ids.items()):
-            while True:
-                title = f"[best-effort recovered {sequence}] session metadata was unreadable"
-                sequence += 1
-                if dest.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,)).fetchone() is None:
-                    break
+            title = next(titles)
             dest.execute(
-                "INSERT INTO sessions (id, source, started_at, title, "
-                "message_count) VALUES (?, 'recovered', ?, ?, ?)",
+                "INSERT INTO sessions (id, source, started_at, title, message_count) VALUES (?, 'recovered', ?, ?, ?)",
                 (session_id, info["started_at"], title, info["message_count"]),
             )
             result["sessions_stubbed"] += 1
@@ -367,15 +353,12 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
 
         # Repair dangling intra-sessions references without deleting rows.
         dest.execute(
-            "UPDATE sessions SET parent_session_id = NULL "
-            "WHERE parent_session_id IS NOT NULL AND NOT EXISTS "
-            "(SELECT 1 FROM sessions AS p WHERE p.id = sessions.parent_session_id)"
+            "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IS NOT NULL AND NOT EXISTS (SELECT "
+            "1 FROM sessions AS p WHERE p.id = sessions.parent_session_id)"
         )
         dest.execute(
-            "UPDATE sessions SET system_prompt_hash = NULL "
-            "WHERE system_prompt_hash IS NOT NULL AND NOT EXISTS "
-            "(SELECT 1 FROM system_prompts "
-            "WHERE system_prompts.hash = sessions.system_prompt_hash)"
+            "UPDATE sessions SET system_prompt_hash = NULL WHERE system_prompt_hash IS NOT NULL AND NOT EXISTS "
+            "(SELECT 1 FROM system_prompts WHERE system_prompts.hash = sessions.system_prompt_hash)"
         )
     return result
 

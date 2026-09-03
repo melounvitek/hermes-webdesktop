@@ -93,8 +93,7 @@ def _validate_paths(
         protected = {_sidecar_path(source, suffix).resolve(strict=False) for suffix in _SIDECAR_SUFFIXES}
         if output.resolve(strict=False) in protected:
             raise SessionRecoverySafetyError(
-                "The recovery output must not be the source database or one of "
-                "its journal sidecars."
+                "The recovery output must not be the source database or one of its journal sidecars."
             )
         for suffix in _SIDECAR_SUFFIXES:
             candidate = _sidecar_path(output, suffix)
@@ -159,17 +158,13 @@ def _disk_space_preflight(source: Path, work_root: Path, output_parent: Optional
 
     if output_parent is None or _same_filesystem(work_root, output_parent):
         required = bundle_bytes + output_allowance + headroom
-        report["shared_filesystem"] = True
-        report["work_dir_required_bytes"] = required
+        report.update(shared_filesystem=True, work_dir_required_bytes=required)
         if work_free < required:
             raise SessionRecoverySafetyError(
-                "Not enough free disk space for a safe recovery copy: "
-                f"{_format_bytes(work_free)} available at {work_root}, "
-                f"{_format_bytes(required)} required "
-                f"({_format_bytes(bundle_bytes)} source bundle + "
-                f"{_format_bytes(output_allowance)} output allowance + "
-                f"{_format_bytes(headroom)} headroom). Use --work-dir or "
-                "--output on a filesystem with more free space."
+                f"Not enough free disk space for a safe recovery copy: {_format_bytes(work_free)} available at "
+                f"{work_root}, {_format_bytes(required)} required ({_format_bytes(bundle_bytes)} source bundle + "
+                f"{_format_bytes(output_allowance)} output allowance + {_format_bytes(headroom)} headroom). "
+                "Use --work-dir or --output on a filesystem with more free space."
             )
         return report
 
@@ -346,16 +341,12 @@ def _snapshot_and_inspect(
         snapshot_source, copied = _copy_source_bundle(source, Path(temp_dir.name))
         if _source_fingerprint(source) != before:
             raise SessionRecoverySafetyError(
-                "The source database bundle changed while it was being copied. "
-                "Stop every Hermes process using this profile and retry. "
-                "This includes the interactive `hermes` CLI session this "
-                "command may have been launched from: a running parent CLI "
-                "writes session bookkeeping (compression ticks, context "
-                "tracking) to state.db in the background and counts as a "
-                "Hermes process even after the gateway is stopped. Run the "
-                "recovery from a fresh shell with no `hermes` session open, "
-                "or point --source at an immutable snapshot copy of the "
-                "database."
+                "The source database bundle changed while it was being copied. Stop every Hermes process using this "
+                "profile and retry. This includes the interactive `hermes` CLI session this command may have been "
+                "launched from: a running parent CLI writes session bookkeeping (compression ticks, context "
+                "tracking) to state.db in the background and counts as a Hermes process even after the gateway is "
+                "stopped. Run the recovery from a fresh shell with no `hermes` session open, or point --source at an "
+                "immutable snapshot copy of the database."
             )
 
         conn = _connect(snapshot_source)
@@ -363,8 +354,7 @@ def _snapshot_and_inspect(
             inspection = _inspect_connection(conn)
         finally:
             conn.close()
-        inspection["source_bundle"] = copied
-        inspection["source_fingerprint"] = before
+        inspection.update(source_bundle=copied, source_fingerprint=before)
         return temp_dir, snapshot_source, inspection
     except BaseException:
         temp_dir.cleanup()
@@ -683,20 +673,13 @@ def _state_meta_precheck(
     source_columns = _table_columns(source, "state_meta")
     if not {"key", "value"}.issubset(source_columns):
         if salvage and source_columns:  # present but unusable: real data loss
-            return _state_meta_result(
-                source_rows,
-                **extra,
-                status="failed",
-                error=(
-                    "source state_meta exists but is missing the key/value "
-                    f"columns (found: {', '.join(source_columns) or 'none'})"
-                ),
-            )
+            found = ", ".join(source_columns) or "none"
+            error = f"source state_meta exists but is missing the key/value columns (found: {found})"
+            return _state_meta_result(source_rows, **extra, status="failed", error=error)
         return _state_meta_result(source_rows, **extra, status="missing")  # genuinely absent: nothing lost
     if not {"key", "value"}.issubset(_table_columns(destination, "state_meta")):
-        return _state_meta_result(
-            source_rows, **extra, status="failed", error="destination state_meta schema is incomplete"
-        )
+        error = "destination state_meta schema is incomplete"
+        return _state_meta_result(source_rows, **extra, status="failed", error=error)
     return None
 
 
@@ -738,6 +721,16 @@ def _copy_state_meta(
     )
 
 
+def _placeholder_titles(destination: sqlite3.Connection, prefix: str) -> Iterator[str]:
+    """Yield ``[<prefix> N] session metadata was unreadable`` titles not yet present in ``sessions``."""
+    sequence = 1
+    while True:
+        title = f"[{prefix} {sequence}] session metadata was unreadable"
+        sequence += 1
+        if destination.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,)).fetchone() is None:
+            yield title
+
+
 def _reconstruct_missing_sessions(destination: sqlite3.Connection) -> dict[str, Any]:
     """Recreate placeholder session rows for salvaged orphaned messages.
 
@@ -750,29 +743,18 @@ def _reconstruct_missing_sessions(destination: sqlite3.Connection) -> dict[str, 
         return result
 
     orphaned = destination.execute(
-        "SELECT m.session_id, MIN(m.timestamp), COUNT(*) "
-        "FROM messages AS m "
-        "WHERE m.session_id IS NOT NULL AND NOT EXISTS ("
-        "SELECT 1 FROM sessions WHERE sessions.id = m.session_id) "
-        "GROUP BY m.session_id"
+        "SELECT m.session_id, MIN(m.timestamp), COUNT(*) FROM messages AS m WHERE m.session_id IS NOT NULL AND NOT "
+        "EXISTS (SELECT 1 FROM sessions WHERE sessions.id = m.session_id) GROUP BY m.session_id"
     ).fetchall()
     if not orphaned:
         return result
 
-    title_sequence = 1
+    titles = _placeholder_titles(destination, "recovered")
     for session_id, first_timestamp, message_count in orphaned:
         started_at = float(first_timestamp) if first_timestamp is not None else 0.0
-        while True:
-            title = f"[recovered {title_sequence}] session metadata was unreadable"
-            title_sequence += 1
-            taken = destination.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,)).fetchone()
-            if taken is None:
-                break
-
+        title = next(titles)
         cursor = destination.execute(
-            "INSERT INTO sessions "
-            "(id, source, started_at, title, message_count) "
-            "VALUES (?, 'recovered', ?, ?, ?)",
+            "INSERT INTO sessions (id, source, started_at, title, message_count) VALUES (?, 'recovered', ?, ?, ?)",
             (session_id, started_at, title, int(message_count)),
         )
         if cursor.rowcount != 1:
@@ -995,8 +977,7 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
     fts_tables = {
         str(row[0])
         for row in destination.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name IN ('messages_fts', 'messages_fts_trigram')"
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('messages_fts', 'messages_fts_trigram')"
         ).fetchall()
     }
     result: dict[str, Any] = {"fts_tables": sorted(fts_tables), "finalized": False}
@@ -1009,8 +990,7 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
     with _immediate_transaction(destination):
         destination.execute(f"DELETE FROM state_meta WHERE key IN ({placeholders})", fts_keys)
         destination.execute(
-            "INSERT INTO state_meta(key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            "INSERT INTO state_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             ("fts_storage_version", str(FTS_STORAGE_VERSION)),
         )
     result["finalized"] = True
@@ -1078,9 +1058,8 @@ def _recover_via_lost_and_found(
     )
     verification["loss_detected"] = True
     verification["warnings"].append(
-        "BEST-EFFORT page-level salvage: the source table schemas were "
-        "unreadable, so rows were rebuilt from raw pages and mapped "
-        "heuristically. Review every count before trusting this output."
+        "BEST-EFFORT page-level salvage: the source table schemas were unreadable, so rows were rebuilt from raw "
+        "pages and mapped heuristically. Review every count before trusting this output."
     )
     verification["complete"] = False
 
