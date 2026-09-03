@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Optional
 
+from utils import is_truthy_value
+
 
 def shell_quote_context(command_template: str, position: int) -> Optional[str]:
     """Return the shell quote char (``'``/``"``) active right before *position*, or None."""
@@ -48,10 +50,8 @@ def shell_quote_context(command_template: str, position: int) -> Optional[str]:
                 escaped = True
             elif char == '"':
                 quote = None
-        elif char == "'":
-            quote = "'"
-        elif char == '"':
-            quote = '"'
+        elif char in ("'", '"'):
+            quote = char
         elif char == "\\":
             i += 1
         i += 1
@@ -64,9 +64,7 @@ def quote_command_placeholder(value: str, quote_context: Optional[str]) -> str:
         return value.replace("'", r"'\''")
     if quote_context == '"':
         return value.replace("\\", "\\\\").replace('"', r'\"').replace("$", r"\$").replace("`", r"\`")
-    if os.name == "nt":
-        return subprocess.list2cmdline([value])
-    return shlex.quote(value)
+    return subprocess.list2cmdline([value]) if os.name == "nt" else shlex.quote(value)
 
 
 def render_command_template(command_template: str, placeholders: Dict[str, str]) -> str:
@@ -110,35 +108,28 @@ def terminate_command_process_tree(proc: subprocess.Popen) -> None:
         return
     if os.name == "nt":
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, stdin=subprocess.DEVNULL,
-            )
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=5, stdin=subprocess.DEVNULL)
         except Exception:
             proc.kill()
         return
     try:
         import psutil  # type: ignore
     except ImportError:
-        proc.terminate()
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        return
-    _signal_process_tree(psutil, proc, "terminate")
+        psutil = None
+    # Without psutil only the shell itself is signalled (children may survive).
+    signal = (lambda m: getattr(proc, m)()) if psutil is None else (lambda m: _signal_process_tree(psutil, proc, m))
+    signal("terminate")
     try:
         proc.wait(timeout=2)
     except subprocess.TimeoutExpired:
-        _signal_process_tree(psutil, proc, "kill")
+        signal("kill")
 
 
 def command_env_passthrough(config: Dict[str, Any]) -> list:
     """``env_passthrough`` allowlist: parent env vars copied back into the secret-scrubbed child env."""
     raw = config.get("env_passthrough")
-    if not isinstance(raw, (list, tuple)):
-        return []
-    return [str(item).strip() for item in raw if str(item).strip()]
+    return [str(item).strip() for item in raw if str(item).strip()] if isinstance(raw, (list, tuple)) else []
 
 
 def command_failure_detail(exc: subprocess.CalledProcessError) -> str:
@@ -164,17 +155,13 @@ def run_command_provider(
         value = os.environ.get(key)
         if value is not None:
             scrubbed[key] = value
-    popen_kwargs: Dict[str, Any] = {
-        "shell": True, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "text": True,
-        # Lossy UTF-8 decode: locale-mismatched bytes must not raise in the reader threads.
-        "encoding": "utf-8", "errors": "replace", "env": delegated_child_subprocess_env(scrubbed),
-    }
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    else:
-        popen_kwargs["start_new_session"] = True
-
-    proc = subprocess.Popen(command, **popen_kwargs, stdin=subprocess.DEVNULL)
+    # Own process group so the whole tree can be signalled on idle timeout. Lossy UTF-8 decode:
+    # locale-mismatched bytes must not raise in the reader threads.
+    group = ({"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)} if os.name == "nt"
+             else {"start_new_session": True})
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            encoding="utf-8", errors="replace", env=delegated_child_subprocess_env(scrubbed),
+                            stdin=subprocess.DEVNULL, **group)
     output_queue: "queue.Queue[tuple[str, Optional[str]]]" = queue.Queue()
     chunks: Dict[str, list[str]] = {"stdout": [], "stderr": []}
     open_streams = {"stdout", "stderr"}
@@ -191,13 +178,10 @@ def run_command_provider(
         finally:
             output_queue.put((name, None))
 
-    readers = [
-        threading.Thread(target=read_stream, args=(name, stream), daemon=True)
-        for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))
-    ]
+    readers = [threading.Thread(target=read_stream, args=(name, stream), daemon=True)
+               for name, stream in (("stdout", proc.stdout), ("stderr", proc.stderr))]
     for reader in readers:
         reader.start()
-
     deadline = time.monotonic() + timeout
     timed_out = False
     while open_streams:
@@ -225,20 +209,14 @@ def run_command_provider(
         terminate_command_process_tree(proc)
         for reader in readers:
             reader.join(timeout=0.5)
-        while True:
-            try:
-                name, chunk = output_queue.get_nowait()
-            except queue.Empty:
-                break
+        while not output_queue.empty():
+            name, chunk = output_queue.get_nowait()
             if chunk:
                 chunks[name].append(chunk)
-        stdout, stderr = "".join(chunks["stdout"]), "".join(chunks["stderr"])
-        try:
-            raise subprocess.TimeoutExpired(command, timeout)
-        except subprocess.TimeoutExpired as exc:
-            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from exc
-
     stdout, stderr = "".join(chunks["stdout"]), "".join(chunks["stderr"])
+    if timed_out:
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from (
+            subprocess.TimeoutExpired(command, timeout))
     if proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, command, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
@@ -251,9 +229,7 @@ def run_command_provider(
 
 def _get_provider_section(config: Dict[str, Any], name: str) -> Dict[str, Any]:
     """Return ``config[name]`` if it's a dict, else an empty dict."""
-    if not isinstance(config, dict):
-        return {}
-    section = config.get(name)
+    section = config.get(name) if isinstance(config, dict) else None
     return section if isinstance(section, dict) else {}
 
 
@@ -266,9 +242,7 @@ def _named_provider_config(config: Dict[str, Any], name: str, builtins: FrozenSe
     section = _get_provider_section(config, "providers").get(name)
     if isinstance(section, dict):
         return section
-    if name.lower() not in builtins:
-        return _get_provider_section(config, name)
-    return {}
+    return _get_provider_section(config, name) if name.lower() not in builtins else {}
 
 
 def _is_command_provider_config(config: Dict[str, Any]) -> bool:
@@ -276,20 +250,16 @@ def _is_command_provider_config(config: Dict[str, Any]) -> bool:
     if not isinstance(config, dict):
         return False
     ptype = str(config.get("type") or "").strip().lower()
-    if ptype and ptype != "command":
-        return False
     command = config.get("command")
-    return isinstance(command, str) and bool(command.strip())
+    return ptype in ("", "command") and isinstance(command, str) and bool(command.strip())
 
 
 def _resolve_command_config(
     provider: str, config: Dict[str, Any], reserved: FrozenSet[str],
 ) -> Optional[Dict[str, Any]]:
     """Config of a user-declared command provider; None for *reserved* names, unknown or non-command."""
-    if not provider:
-        return None
-    key = provider.lower().strip()
-    if key in reserved:
+    key = (provider or "").lower().strip()
+    if not key or key in reserved:
         return None
     named = _named_provider_config(config, key, reserved)
     return named if _is_command_provider_config(named) else None
@@ -334,6 +304,10 @@ def _resolve_command_provider_config(provider: str, tts_config: Dict[str, Any]) 
     return _resolve_command_config(provider, tts_config, BUILTIN_TTS_PROVIDERS)
 
 
+def _get_command_tts_timeout(config: Dict[str, Any]) -> float:
+    return _command_timeout(config, DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS)
+
+
 def _iter_command_providers(tts_config: Dict[str, Any]):
     """Yield (name, config) pairs for every declared command-type provider."""
     for name, cfg in _get_provider_section(tts_config, "providers").items():
@@ -341,25 +315,17 @@ def _iter_command_providers(tts_config: Dict[str, Any]):
             yield name, cfg
 
 
-def _get_command_tts_timeout(config: Dict[str, Any]) -> float:
-    return _command_timeout(config, DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS)
-
-
 def _get_command_tts_output_format(config: Dict[str, Any], output_path: Optional[str] = None) -> str:
     """Validated output format: the output path's suffix wins, then ``format``/``output_format``."""
-    if output_path:
-        suffix = Path(output_path).suffix.lower().strip().lstrip(".")
-        if suffix in COMMAND_TTS_OUTPUT_FORMATS:
-            return suffix
+    suffix = Path(output_path).suffix.lower().strip().lstrip(".") if output_path else ""
+    if suffix in COMMAND_TTS_OUTPUT_FORMATS:
+        return suffix
     return _command_output_format(config, COMMAND_TTS_OUTPUT_FORMATS, DEFAULT_COMMAND_TTS_OUTPUT_FORMAT)
 
 
 def _is_command_tts_voice_compatible(config: Dict[str, Any]) -> bool:
     """True only when the user explicitly opted in to voice delivery."""
-    value = config.get("voice_compatible", False)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return is_truthy_value(config.get("voice_compatible", False))
 
 
 def _configured_command_tts_output_path(path: Path, config: Dict[str, Any]) -> Path:
@@ -383,24 +349,19 @@ def _generate_command_tts(
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.unlink()
-
     timeout = _get_command_tts_timeout(config)
-    output_format = _get_command_tts_output_format(config, str(output))
-    speed = config.get("speed", tts_config.get("speed", ""))
-
     with tempfile.TemporaryDirectory() as tmpdir:
         text_path = Path(tmpdir) / "input.txt"
         text_path.write_text(text, encoding="utf-8")
         placeholders = {
             "input_path": str(text_path), "text_path": str(text_path), "output_path": str(output),
-            "format": output_format, "voice": str(config.get("voice", "")),
-            "model": str(config.get("model", "")), "speed": str(speed),
+            "format": _get_command_tts_output_format(config, str(output)), "voice": str(config.get("voice", "")),
+            "model": str(config.get("model", "")), "speed": str(config.get("speed", tts_config.get("speed", ""))),
         }
         command = render_command_template(command_template, placeholders)
         try:
             # Resolved through the origin so tests patching ``tools.tts_tool._run_command_tts`` still intercept.
             from tools.tts_tool import _run_command_tts
-
             _run_command_tts(command, timeout, env_passthrough=command_env_passthrough(config))
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(f"TTS provider '{provider_name}' timed out after {timeout:g}s") from exc
