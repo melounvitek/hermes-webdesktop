@@ -22,9 +22,8 @@ _SSH_SENSITIVE_PATH = r'(?:~|\$home|\$\{home\})/\.ssh(?:/|$)'
 _HERMES_ENV_PATH = (
     r'(?:~\/\.hermes/|(?:\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/)' r'\.env\b'
 )
-# ~/.hermes/config.yaml IS the security policy (approvals.mode, yolo, allowlist) and the config
-# cache is mtime-keyed, so a write takes effect mid-session. Terminal-side coverage (sed -i, tee,
-# >, cp) pairs the file_tools deny.
+# ~/.hermes/config.yaml IS the security policy (approvals.mode, yolo, allowlist) and the config cache is mtime-keyed,
+# so a write takes effect mid-session. Terminal-side coverage (sed -i, tee, >, cp) pairs the file_tools deny.
 _HERMES_CONFIG_PATH = (
     r'(?:~\/\.hermes/|(?:\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/)' r'config\.yaml\b'
 )
@@ -58,11 +57,10 @@ _WRITE_TARGET_BOUNDARY = r'(?=[\s;&|<>"\']|$)'
 # shutdown, DoS). Recoverable operations (git reset --hard, chmod -R 777, curl|sh) stay in
 # DANGEROUS_PATTERNS.
 
-# Start-of-command position: start of string, newline, subshell opener ($( or backtick), optionally
-# consuming sudo/env/exec/nohup/setsid/time wrappers. Keeps shutdown/reboot rules from firing on
-# "echo reboot" / "grep 'shutdown' log". Real ;/&/| separators are converted to newlines by the
-# quote-aware _mark_command_starts pass; keeping them here mistakes quoted data
-# (grep '(safe|rm -rf /)') for commands.
+# Start-of-command position: start of string, newline, subshell opener ($( or backtick), optionally consuming
+# sudo/env/exec/nohup/setsid/time wrappers. Keeps shutdown/reboot rules from firing on "echo reboot" / "grep
+# 'shutdown' log". Real ;/&/| separators are converted to newlines by the quote-aware _mark_command_starts pass;
+# keeping them here mistakes quoted data (grep '(safe|rm -rf /)') for commands.
 _CMDPOS = (
     r'(?:^|[\n`]|\$\()' r'\s*'  # start position, optional whitespace
     r'(?:sudo\s+(?:-[^\s]+\s+)*)?' r'(?:env\s+(?:\w+=\S*\s+)*)?'  # optional sudo with flags, env VAR=VAL pairs
@@ -286,12 +284,11 @@ DANGEROUS_PATTERNS = [
     # between `hermes` and `gateway` (`hermes -p ade gateway restart`) are allowed so a profile flag can't slip past.
     (r'\bhermes\s+(?:-{1,2}\S+(?:\s+\S+)?\s+)*gateway\s+(stop|restart)\b', "stop/restart hermes gateway (kills running agents)"),
     (r'\bhermes\s+update\b', "hermes update (restarts gateway, kills running agents)"),
-    # Docker/Podman daemon redirect — global flags or env that point the CLI at a DIFFERENT (often
-    # remote) daemon: `docker -H ssh://prod stop app` looks local but operates on remote infra, so
-    # any redirect requires approval regardless of subcommand. The flag must be in global position
-    # (before the subcommand) and -H/--host/--context must carry a value, keeping `docker -h` and
-    # `docker run -h <hostname>` out. Listed BEFORE the lifecycle rules so a redirected lifecycle
-    # command surfaces the more specific reason.
+    # Docker/Podman daemon redirect — global flags or env that point the CLI at a DIFFERENT (often remote) daemon:
+    # `docker -H ssh://prod stop app` looks local but operates on remote infra, so any redirect requires approval
+    # regardless of subcommand. The flag must be in global position (before the subcommand) and -H/--host/--context
+    # must carry a value, keeping `docker -h` and `docker run -h <hostname>` out. Listed BEFORE the lifecycle rules so
+    # a redirected lifecycle command surfaces the more specific reason.
     (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-h|--host)[=\s]+\S+', "docker with remote daemon redirect (-H/--host)"),
     (r'\bdocker\s+(?:-{1,2}\S+(?:[=\s]\S+)?\s+)*(?:-c|--context)[=\s]+\S+', "docker with daemon redirect (--context: alternate daemon)"),
     (r'\bdocker\s+context\s+use\b', "docker context use (switches default daemon for future commands)"),
@@ -312,11 +309,10 @@ DANGEROUS_PATTERNS = [
     # pattern above, so catch the structural form.
     (r'\bkill\b.*\$\(\s*(pgrep|pidof)\b', "kill process via pgrep/pidof expansion (self-termination)"),
     (r'\bkill\b.*`\s*(pgrep|pidof)\b', "kill process via backtick pgrep/pidof expansion (self-termination)"),
-    # launchctl-driven gateway stop/restart on macOS (label `ai.hermes.gateway`). Two independent
-    # lookaheads, NOT a sequential match: a for-loop building the label from a list defined EARLIER
-    # (`for item in 'ai.hermes...'; do launchctl bootout "$label"`) never has "hermes" after the
-    # verb, and that slipped past and restarted 4 gateways with zero approval. Erring broad is
-    # correct for an approval gate: an extra prompt is cheap.
+    # launchctl-driven gateway stop/restart on macOS (label `ai.hermes.gateway`). Two independent lookaheads, NOT a
+    # sequential match: a for-loop building the label from a list defined EARLIER (`for item in 'ai.hermes...'; do
+    # launchctl bootout "$label"`) never has "hermes" after the verb, and that slipped past and restarted 4 gateways
+    # with zero approval. Erring broad is correct for an approval gate: an extra prompt is cheap.
     (r'(?=[\s\S]*\blaunchctl\s+(?:stop|kickstart|bootout|unload|kill|disable|remove)\b)(?=[\s\S]*\b(?:hermes|ai\.hermes)\b)', "stop/restart hermes launchd service (kills running agents)"),
     (rf'\b(cp|mv|install)\b.*\s{_SYSTEM_CONFIG_PATH}', "copy/move file into system config path"),
     (rf'\b(cp|mv|install)\b.*\s["\']?{_PROJECT_SENSITIVE_WRITE_TARGET}["\']?{_COMMAND_TAIL}', "overwrite project env/config file"),
@@ -336,9 +332,8 @@ DANGEROUS_PATTERNS = [
     # write_file/patch deny so the terminal side is not an open door.
     (rf'\bsed\s+-[^\s]*i.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env"),
     (rf'\bsed\s+--in-place\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (long flag)"),
-    # perl/ruby -i: the flag may be its own token after other flags (`-p -i -e`), combined (`-pi`),
-    # or carry a backup suffix (`-i.bak`), so match any flag token containing `i` anywhere;
-    # `perl -e '...'` (no -i) does not trip.
+    # perl/ruby -i: the flag may be its own token after other flags (`-p -i -e`), combined (`-pi`), or carry a backup
+    # suffix (`-i.bak`), so match any flag token containing `i` anywhere; `perl -e '...'` (no -i) does not trip.
     (rf'\b(?:perl|ruby)\b.*(?:^|\s)-[^\s]*i\b.*(?:{_HERMES_CONFIG_PATH}|{_HERMES_ENV_PATH})', "in-place edit of Hermes config/env (perl/ruby)"),
     # Interpreter heredocs are handled by _execution_flag_findings(); only shell heredocs stay
     # regex-based. `bash <<'EOF'` runs arbitrary commands without triggering the `bash -c` path.
@@ -351,19 +346,17 @@ DANGEROUS_PATTERNS = [
     (r'\bgit\s+push\b.*-f\b', "git force push short flag (rewrites remote history)"),
     (r'\bgit\s+clean\s+-[^\s]*f', "git clean with force (deletes untracked files)"),
     (r'\bgit\s+branch\s+-D\b', "git branch force delete"),
-    # `-D` = `-d --force`; the long spellings are different tokens, so match delete+force in either
-    # order, bounded to one command segment (no `;`/`|`/`&`/newline) so an unrelated later command
-    # isn't contaminated.
+    # `-D` = `-d --force`; the long spellings are different tokens, so match delete+force in either order, bounded to
+    # one command segment (no `;`/`|`/`&`/newline) so an unrelated later command isn't contaminated.
     (r'\bgit\s+branch\b[^;|&\n]*?(?:-d\b|--delete\b)[^;|&\n]*?(?:-f\b|--force\b)', "git branch force delete (long flags)"),
     (r'\bgit\s+branch\b[^;|&\n]*?(?:-f\b|--force\b)[^;|&\n]*?(?:-d\b|--delete\b)', "git branch force delete (long flags, force-first)"),
     # chmod +x then immediate run: the script content may hold dangerous commands individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
-    # Sudo stdin/askpass/shell/list-privs flags. The agent has no TTY, so sudo invocations that
-    # succeed non-interactively read the password from stdin (-S) or askpass (-A); -s (shell) and
-    # -a (list) are gated as privilege chains (read SUDO_PASSWORD from .env -> sudo -S -s). Plain
-    # `sudo cmd` is TTY-bound and excluded. Input is lowercased, so S/s and A/a collapse. Lazy
-    # `[^;|&\n]*?` allows flag args without spanning separators. sudo resolves unambiguous
-    # long-flag prefixes: `--stdin` is the only long option starting with "st", `--askpass` the
+    # Sudo stdin/askpass/shell/list-privs flags. The agent has no TTY, so sudo invocations that succeed
+    # non-interactively read the password from stdin (-S) or askpass (-A); -s (shell) and -a (list) are gated as
+    # privilege chains (read SUDO_PASSWORD from .env -> sudo -S -s). Plain `sudo cmd` is TTY-bound and excluded. Input
+    # is lowercased, so S/s and A/a collapse. Lazy `[^;|&\n]*?` allows flag args without spanning separators. sudo
+    # resolves unambiguous long-flag prefixes: `--stdin` is the only long option starting with "st", `--askpass` the
     # only one starting with "a".
     (r'\bsudo\b[^;|&\n]*?\s+(?:-s\b|--st[a-z]*\b|-a\b|--a[a-z]*\b)', "sudo with privilege flag (stdin/askpass/shell/list)"),
     # Combined short-flag form (-nS, -sa, -las).
@@ -404,19 +397,17 @@ def _normalize_command_for_detection(command: str) -> str:
     # precede the generic escape strip below, whose [^\n] class skips newlines and would leave the
     # backslash wedged between tokens, defeating the structured rm/mkfs/dd patterns incl. the HARDLINE floor.
     command = re.sub(r'\\\r?\n', '', command)
-    # Fold absolute user/Hermes home prefixes to ~/ and ~/.hermes/ so the static patterns catch
-    # /home/alice/.bashrc and C:\Users\alice\.bashrc. Resolved at detection time (not import time)
-    # so it tracks HOME/HERMES_HOME set later. MUST run before the backslash strip (which would
-    # dissolve C:\Users\alice to C:Usersalice). Hermes home first: on Windows it nests under the
-    # user home, and folding the user home first would eat the prefix it needs.
+    # Fold absolute user/Hermes home prefixes to ~/ and ~/.hermes/ so the static patterns catch /home/alice/.bashrc
+    # and C:\Users\alice\.bashrc. Resolved at detection time (not import time) so it tracks HOME/HERMES_HOME set
+    # later. MUST run before the backslash strip (which would dissolve C:\Users\alice to C:Usersalice). Hermes home
+    # first: on Windows it nests under the user home, and folding the user home first would eat the prefix it needs.
     command = _rewrite_resolved_hermes_home(command)
     command = _rewrite_resolved_user_home(command)
     # Strip backslash-escapes (r\m -> rm) and empty-string literals (r''m -> rm).
     command = re.sub(r'\\([^\n])', r'\1', command)
     command = re.sub(r"''|\"\"", '', command)
-    # Collapse $IFS / ${IFS...} (incl. `${IFS:0:1}`) to a space: IFS defaults to whitespace, so
-    # `rm${IFS}-rf${IFS}/` runs as `rm -rf /`, and every pattern — incl. the hardline floor —
-    # anchors on literal \s between tokens.
+    # Collapse $IFS / ${IFS...} (incl. `${IFS:0:1}`) to a space: IFS defaults to whitespace, so `rm${IFS}-rf${IFS}/`
+    # runs as `rm -rf /`, and every pattern — incl. the hardline floor — anchors on literal \s between tokens.
     return re.sub(r'\$\{IFS\b[^}]*\}|\$IFS\b', ' ', command)
 
 
@@ -501,9 +492,8 @@ _READ_TOOL_EXEC_FLAGS = {
     "sort": {"--compress-program"}, "rg": {"--pre", "--hostname-bin"}, "ag": {"--pager"},
     "man": {"--pager", "--html", "-P", "-H"},
 }
-# Required-argument options are ownership boundaries: an option-looking next token is data, not
-# another option. These sets mirror the invocation grammar of the supported binaries (ripgrep 14,
-# GNU sort, man-db, and ag 2.2).
+# Required-argument options are ownership boundaries: an option-looking next token is data, not another option. These
+# sets mirror the invocation grammar of the supported binaries (ripgrep 14, GNU sort, man-db, and ag 2.2).
 _READ_TOOL_LONG_OPTIONS_WITH_ARG = {
     "rg": {
         "--after-context", "--before-context", "--color", "--colors", "--context", "--context-separator",
@@ -715,9 +705,8 @@ def _interpreter_exec_flag(family: str, args: list[str]) -> str | None:
         comparable = option.lower() if powershell else option
         if comparable in flags:
             return comparable
-        # `-Wonce` and `ruby -rjson` attach an option value; they are not short-option bundles
-        # containing an execution flag. PowerShell's normal long options also use one dash, so
-        # bundle parsing never applies to that family.
+        # `-Wonce` and `ruby -rjson` attach an option value; they are not short-option bundles containing an execution
+        # flag. PowerShell's normal long options also use one dash, so bundle parsing never applies to that family.
         has_attached_option_value = any(
             option.startswith(short) and len(option) > len(short)
             for short in with_arg if short.startswith("-") and not short.startswith("--")
@@ -1049,18 +1038,16 @@ def _command_detection_variants(command: str):
         seen.add(variant)
         return True
 
-    # Windows-path variant: normalization strips backslashes as shell escapes, so `del
-    # C:\Users\me\.ssh\id_rsa` reaches the patterns as `del C:Usersme.sshid_rsa`. When the RAW
-    # command has a drive-letter or UNC backslash path, also yield a variant with backslashes
-    # flattened to `/` BEFORE normalization. Gated on a real path shape so POSIX escape semantics
-    # (`echo a\"b`) are untouched elsewhere.
+    # Windows-path variant: normalization strips backslashes as shell escapes, so `del C:\Users\me\.ssh\id_rsa`
+    # reaches the patterns as `del C:Usersme.sshid_rsa`. When the RAW command has a drive-letter or UNC backslash
+    # path, also yield a variant with backslashes flattened to `/` BEFORE normalization. Gated on a real path shape so
+    # POSIX escape semantics (`echo a\"b`) are untouched elsewhere.
     if re.search(r"(?:[A-Za-z]:|\\\\)[\\\\]", command) or re.search(r"[A-Za-z]:\\", command):
         win_variant = _normalize_command_for_detection(_mask_quoted_newlines(command.replace("\\", "/")))
         if fresh(win_variant):
             yield win_variant
-    # Program-bearing options are parsed in their owning command's context; surfacing only the
-    # payload lets the hardline floor inspect what will actually run without promoting similar
-    # flags or quoted prose.
+    # Program-bearing options are parsed in their owning command's context; surfacing only the payload lets the
+    # hardline floor inspect what will actually run without promoting similar flags or quoted prose.
     pending = [normalized]
     while pending:
         for _, payload in _execution_flag_findings(pending.pop()):
@@ -1072,10 +1059,9 @@ def _command_detection_variants(command: str):
                 if marked_payload != payload and fresh(marked_payload):
                     yield marked_payload
                 pending.append(payload)
-    # Subshell `(cmd)` / brace-group `{ cmd; }` openers put `cmd` at a real command position the
-    # flat `_CMDPOS` patterns can't see (adding `(`/`{` there would match quoted prose like
-    # `--title "(reboot)"`). Insert a newline at each start the QUOTE-AWARE tokenizer found
-    # instead; this covers every `_CMDPOS` rule in one place.
+    # Subshell `(cmd)` / brace-group `{ cmd; }` openers put `cmd` at a real command position the flat `_CMDPOS`
+    # patterns can't see (adding `(`/`{` there would match quoted prose like `--title "(reboot)"`). Insert a newline
+    # at each start the QUOTE-AWARE tokenizer found instead; this covers every `_CMDPOS` rule in one place.
     marked = _mark_command_starts(grep_safe)
     if marked != grep_safe and fresh(marked):
         yield marked

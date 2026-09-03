@@ -18,22 +18,19 @@ def _ctx(name: str, default: "str | None" = "") -> contextvars.ContextVar:
     return contextvars.ContextVar(name, default=default)
 
 
-# Per-thread/per-task gateway session identity: gateway runs agent turns
-# concurrently in executor threads, so a process-global env var is racy (the
-# env fallback stays for legacy single-threaded callers).
+# Per-thread/per-task gateway session identity: gateway runs agent turns concurrently in executor threads, so a
+# process-global env var is racy (the env fallback stays for legacy single-threaded callers).
 _approval_session_key: contextvars.ContextVar[str] = _ctx("approval_session_key")
 _approval_turn_id: contextvars.ContextVar[str] = _ctx("approval_turn_id")
 _approval_tool_call_id: contextvars.ContextVar[str] = _ctx("approval_tool_call_id")
-# Hermes session id (observability identity, distinct from the gateway routing
-# session_key), forwarded to approval hooks so observer plugins attach marks to
-# the REAL session scope — otherwise they fall back to a synthetic "default"
+# Hermes session id (observability identity, distinct from the gateway routing session_key), forwarded to approval
+# hooks so observer plugins attach marks to the REAL session scope — otherwise they fall back to a synthetic "default"
 # session whose scope never closes, so close-time exporters never ship them.
 _approval_session_id: contextvars.ContextVar[str] = _ctx("approval_session_id")
-# Interactive-CLI flag. Concurrent ACP sessions share a ThreadPoolExecutor, so
-# mutating os.environ["HERMES_INTERACTIVE"] races: one session's `finally`
-# restore can clobber another's set mid-run, dropping it onto the
-# non-interactive auto-approve path so a dangerous command runs without the
-# approval callback firing (GHSA-96vc-wcxf-jjff). None = unset → env fallback.
+# Interactive-CLI flag. Concurrent ACP sessions share a ThreadPoolExecutor, so mutating
+# os.environ["HERMES_INTERACTIVE"] races: one session's `finally` restore can clobber another's set mid-run, dropping
+# it onto the non-interactive auto-approve path so a dangerous command runs without the approval callback firing
+# (GHSA-96vc-wcxf-jjff). None = unset → env fallback.
 _hermes_interactive_ctx: contextvars.ContextVar[str | None] = _ctx("hermes_interactive", None)
 
 
@@ -132,11 +129,9 @@ def _is_cron_approval_context() -> bool:
     return is_truthy_value(_session_env("HERMES_CRON_SESSION"))
 
 
-#: Programmatic/unattended platforms: no human can answer a prompt and the
-#: adapter has no ``send_exec_approval`` / ``/approve`` surface. Governed by
-#: ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` —
-#: never an interactive round-trip that blocks for the full timeout with
-#: nobody to answer.
+# : Programmatic/unattended platforms: no human can answer a prompt and the : adapter has no ``send_exec_approval`` /
+# ``/approve`` surface. Governed by : ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` — : never
+# an interactive round-trip that blocks for the full timeout with : nobody to answer.
 _UNATTENDED_APPROVAL_PLATFORMS = frozenset({"webhook", "msgraph_webhook", "api_server"})
 
 

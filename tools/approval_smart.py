@@ -79,9 +79,8 @@ def _smart_approve(command: str, description: str) -> str:
     try:
         from agent.auxiliary_client import _get_task_timeout, call_llm
 
-        # Pass the timeout explicitly AND log call + duration: this synchronous call
-        # gates EVERY flagged command, and a stalled provider once froze turns for
-        # tens of minutes with zero log output.
+        # Pass the timeout explicitly AND log call + duration: this synchronous call gates EVERY flagged command, and
+        # a stalled provider once froze turns for tens of minutes with zero log output.
         smart_timeout = _get_task_timeout("approval")
         logger.debug("Smart approvals: assessing risk for command (timeout=%ss)", smart_timeout)
         system_prompt = _SYSTEM_PROMPT

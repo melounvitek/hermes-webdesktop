@@ -29,10 +29,9 @@ class _HumanWaitState:
 _human_wait_lock = threading.Lock()
 _human_wait_states: dict[str, _HumanWaitState] = {}
 _HUMAN_WAIT_MAX_SESSIONS = 256
-# Margin added on top of approvals.timeout when clamping a window's contribution
-# (read-side AND close-side) and when bounding the authorization gate's
-# serialization-lock acquire in agent/tool_executor.py. One constant so the
-# clamps can't drift apart.
+# Margin added on top of approvals.timeout when clamping a window's contribution (read-side AND close-side) and when
+# bounding the authorization gate's serialization-lock acquire in agent/tool_executor.py. One constant so the clamps
+# can't drift apart.
 HUMAN_WAIT_MARGIN_S = 60.0
 
 
@@ -139,8 +138,7 @@ def human_wait_seconds(session_key: str | None = None) -> float:
     wedged-window hang)."""
     key = _resolve_key(session_key)
     now = time.monotonic()
-    # Resolve the clamp outside the lock: it reads the config cache, which must
-    # never nest under _human_wait_lock.
+    # Resolve the clamp outside the lock: it reads the config cache, which must never nest under _human_wait_lock.
     ceiling = human_wait_ceiling()
     with _human_wait_lock:
         state = _human_wait_states.get(key)

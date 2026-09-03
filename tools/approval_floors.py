@@ -102,9 +102,8 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
         "need to run it, run it yourself in a terminal outside the "
         "agent."
     )
-    # The parser-limit block is almost always a giant inline payload, not a
-    # forbidden operation, and is typically followed by blind rephrase retries —
-    # point at the saved script (or the write_file recipe).
+    # The parser-limit block is almost always a giant inline payload, not a forbidden operation, and is typically
+    # followed by blind rephrase retries — point at the saved script (or the write_file recipe).
     if description in (_PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION):
         saved = _a._save_blocked_payload(command) if command else None
         if saved:
@@ -132,11 +131,10 @@ def _sudo_stdin_block_result(description: str) -> dict:
         "manually in your own terminal.")}
 
 
-# Shell control characters that make a command compound when they appear OUTSIDE
-# quotes. Inside quotes they are literal to the outer shell — but they become
-# executable again if an option like `-c`/`-e`/`--eval` (or a git `-c alias.x=!...`)
-# hands the quoted argument to another interpreter, so quoted control chars only
-# disqualify a command when such an option is present.
+# Shell control characters that make a command compound when they appear OUTSIDE quotes. Inside quotes they are
+# literal to the outer shell — but they become executable again if an option like `-c`/`-e`/`--eval` (or a git `-c
+# alias.x=!...`) hands the quoted argument to another interpreter, so quoted control chars only disqualify a command
+# when such an option is present.
 _SHELL_CONTROL_CHARS = frozenset("\n\r;&|<>`$()")
 
 _REINTERPRETED_ARGUMENT_RE = re.compile(r"(?:^|[ \t])(?:-[^-\s]*[ce]|--(?:command|eval))(?:[= \t]|$)")

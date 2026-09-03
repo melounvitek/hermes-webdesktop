@@ -38,9 +38,8 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
     from tools import approval as _a
     if timeout_seconds is None:
         timeout_seconds = _a._get_approval_timeout()
-    # Everything below is a human prompt (callback panel or input() fallback, both
-    # bounded by the approval deadline): record it as human-wait time so the
-    # concurrent batch deadline excludes it.
+    # Everything below is a human prompt (callback panel or input() fallback, both bounded by the approval deadline):
+    # record it as human-wait time so the concurrent batch deadline excludes it.
     with human_wait_window():
         return _ask_human(command, description, timeout_seconds, allow_permanent,
                           approval_callback, allow_session, smart_denied)
@@ -78,9 +77,8 @@ def _read_choice(prompt: str, timeout_seconds: int) -> str | None:
 
 def _ask_human(command: str, description: str, timeout_seconds: int, allow_permanent: bool,
                approval_callback, allow_session: bool, smart_denied: bool) -> str:
-    # Redact before any user-visible rendering; the original `command` still
-    # executes after approval. Same redactor as memory/log sanitization so
-    # tokens mask consistently across surfaces.
+    # Redact before any user-visible rendering; the original `command` still executes after approval. Same redactor as
+    # memory/log sanitization so tokens mask consistently across surfaces.
     from agent.redact import redact_sensitive_text
     display_command = redact_sensitive_text(command)
     display_description = redact_sensitive_text(description)
@@ -98,11 +96,10 @@ def _ask_human(command: str, description: str, timeout_seconds: int, allow_perma
             logger.error("Approval callback failed: %s", e, exc_info=True)
             return "deny"
 
-    # Fail-closed guard: when prompt_toolkit owns the terminal and no callback is
-    # registered on this thread, the input() fallback would spawn a daemon thread
-    # whose read never sees Enter (keystrokes go to prompt_toolkit) — an invisible
-    # deadlock. Deny loudly instead; threads needing interactive approval must
-    # install a callback via tools.terminal_tool.set_approval_callback() first.
+    # Fail-closed guard: when prompt_toolkit owns the terminal and no callback is registered on this thread, the
+    # input() fallback would spawn a daemon thread whose read never sees Enter (keystrokes go to prompt_toolkit) — an
+    # invisible deadlock. Deny loudly instead; threads needing interactive approval must install a callback via
+    # tools.terminal_tool.set_approval_callback() first.
     try:
         from prompt_toolkit.application.current import get_app_or_none
         if get_app_or_none() is not None:
@@ -148,9 +145,8 @@ def _ask_human(command: str, description: str, timeout_seconds: int, allow_perma
 def get_plugin_manager():
     """Lazy plugin-manager seam used by tests and early tool-only imports."""
     from hermes_cli.plugins import discover_plugins, get_plugin_manager as _get_manager
-    # Approval can be imported before model_tools (which triggers discovery); make
-    # an explicitly selected transport available on the first approval instead of
-    # treating the undiscovered registry as unavailable.
+    # Approval can be imported before model_tools (which triggers discovery); make an explicitly selected transport
+    # available on the first approval instead of treating the undiscovered registry as unavailable.
     discover_plugins()
     return _get_manager()
 
