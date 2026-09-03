@@ -12,7 +12,6 @@ from hermes_cli.moa_config import DEFAULT_MOA_PRESET_NAME, normalize_moa_config
 def _prompt_choice(title: str, rows: list[str], default: int = 0) -> int:
     try:
         from hermes_cli.curses_ui import curses_radiolist
-
         return curses_radiolist(title, rows, selected=default, cancel_returns=default)
     except Exception:
         for idx, row in enumerate(rows, start=1):

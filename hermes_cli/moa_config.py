@@ -100,7 +100,6 @@ def coerce_privacy_filter(value: Any) -> str:
 def _clean_reasoning_effort(value: Any) -> str | None:
     """Canonical per-slot reasoning effort, or None when unset/invalid."""
     from hermes_constants import parse_reasoning_effort
-
     parsed = None if value is None or value is True else parse_reasoning_effort(value)
     if parsed is None:
         return None
@@ -213,7 +212,8 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raw = {}
 
-    refs = [item for item in (_clean_slot(item, include_enabled=True) for item in _reference_slots(raw.get("reference_models"))) if item is not None]
+    cleaned = (_clean_slot(item, include_enabled=True) for item in _reference_slots(raw.get("reference_models")))
+    refs = [item for item in cleaned if item is not None]
     policy = str(raw.get("degraded_reference_policy") or "loud").strip().lower()
 
     return {
@@ -285,7 +285,6 @@ def resolve_moa_preset(config: Any, name: str | None = None) -> dict[str, Any]:
     preset = cfg["presets"].get(preset_name)
     if preset is None:
         from agent.errors import MoAPresetNotFoundError
-
         available = ", ".join(cfg["presets"]) or "(none)"
         raise MoAPresetNotFoundError(
             f"MoA preset '{preset_name}' was not found. Available presets: "
