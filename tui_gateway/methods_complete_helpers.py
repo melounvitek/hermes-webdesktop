@@ -24,6 +24,42 @@ _fuzzy_cache_lock = threading.Lock()
 _fuzzy_cache: dict[str, tuple[float, list[str]]] = {}
 
 
+def _git_repo_files(root: str):
+    """Yield ``git ls-files`` paths (tracked + untracked) relative to ``root``; empty outside a
+    repo or on git failure/timeout. Entries above ``root`` are skipped (Cmd-P workspace scope)."""
+    from hermes_cli._subprocess_compat import windows_hide_flags
+    run_kw = dict(capture_output=True, timeout=2.0, check=False, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+    try:
+        top_result = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"], **run_kw)
+        if top_result.returncode != 0:
+            return
+        top = top_result.stdout.decode("utf-8", "replace").strip()
+        list_result = subprocess.run(
+            ["git", "-C", top, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], **run_kw)
+        if list_result.returncode != 0:
+            return
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
+        if p:
+            rel = os.path.relpath(os.path.join(top, p), root).replace(os.sep, "/")
+            if not rel.startswith("../"):
+                yield rel
+
+
+def _walk_repo_files(root: str):
+    """Non-git fallback: ``os.walk`` skipping vendor/build dirs + dot-dirs; dotfiles survive
+    (the ranker decides based on whether the query starts with `.`)."""
+    try:
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = [d for d in dirnames if d not in _FUZZY_FALLBACK_EXCLUDES and not d.startswith(".")]
+            rel_dir = os.path.relpath(dirpath, root)
+            for f in filenames:
+                yield (f if rel_dir == "." else f"{rel_dir}/{f}").replace(os.sep, "/")
+    except OSError:
+        return
+
+
 def _list_repo_files(root: str) -> list[str]:
     """File paths relative to ``root`` (tracked + untracked via ``git ls-files`` from the
     repo top; files outside ``root`` excluded so the picker stays Cmd-P scoped). Falls
@@ -34,44 +70,10 @@ def _list_repo_files(root: str) -> list[str]:
         cached = _fuzzy_cache.get(root)
         if cached and now - cached[0] < _FUZZY_CACHE_TTL_S:
             return cached[1]
-    files: list[str] = []
-    from hermes_cli._subprocess_compat import windows_hide_flags
-    run_kw = dict(capture_output=True, timeout=2.0, check=False, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
-    try:
-        top_result = subprocess.run(["git", "-C", root, "rev-parse", "--show-toplevel"], **run_kw)
-        if top_result.returncode == 0:
-            top = top_result.stdout.decode("utf-8", "replace").strip()
-            list_result = subprocess.run(
-                ["git", "-C", top, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], **run_kw
-            )
-            if list_result.returncode == 0:
-                for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
-                    if not p:
-                        continue
-                    rel = os.path.relpath(os.path.join(top, p), root).replace(os.sep, "/")
-                    if rel.startswith("../"):  # parents/siblings of cwd: keep Cmd-P workspace scope
-                        continue
-                    files.append(rel)
-                    if len(files) >= _FUZZY_CACHE_MAX_FILES:
-                        break
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    from itertools import islice
+    files = list(islice(_git_repo_files(root), _FUZZY_CACHE_MAX_FILES))
     if not files:
-        # Fallback walk skips vendor/build dirs + dot-dirs; dotfiles survive (the ranker
-        # decides based on whether the query starts with `.`).
-        try:
-            for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-                dirnames[:] = [d for d in dirnames if d not in _FUZZY_FALLBACK_EXCLUDES and not d.startswith(".")]
-                rel_dir = os.path.relpath(dirpath, root)
-                for f in filenames:
-                    rel = f if rel_dir == "." else f"{rel_dir}/{f}"
-                    files.append(rel.replace(os.sep, "/"))
-                    if len(files) >= _FUZZY_CACHE_MAX_FILES:
-                        break
-                if len(files) >= _FUZZY_CACHE_MAX_FILES:
-                    break
-        except OSError:
-            pass
+        files = list(islice(_walk_repo_files(root), _FUZZY_CACHE_MAX_FILES))
     with _fuzzy_cache_lock:
         _fuzzy_cache[root] = (now, files)
     return files
