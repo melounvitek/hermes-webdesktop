@@ -1623,7 +1623,7 @@ class TurnRunner:
         # completed final: interrupt paths return {interrupted: True, completed: False} with a
         # DIAGNOSTIC final_response — adopting it would seal the partial answer over with the
         # diagnostic AND suppress the gateway's own error delivery.
-        final = None
+        _final_for_stream = None
         if (
             isinstance(result, dict)
             and not result.get("failed")
@@ -1632,13 +1632,13 @@ class TurnRunner:
         ):
             fr = result.get("final_response")
             if isinstance(fr, str) and fr.strip() and fr != "(empty)":
-                final = fr
-        if final is None:
+                _final_for_stream = fr
+        if _final_for_stream is None:
             stream_consumer.finish()
             return
         # Duck-type safe: test doubles / older consumers may expose a zero-arg finish().
         try:
-            stream_consumer.finish(final)
+            stream_consumer.finish(_final_for_stream)
         except TypeError:
             stream_consumer.finish()
 
