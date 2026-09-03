@@ -24,7 +24,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -61,14 +61,10 @@ _DEFAULT_ALLOWED_HOSTS: Tuple[str, ...] = (
 
 # Provider env-var name -> upstream hosts on which the Authorization Bearer token is swapped.
 _BEARER_PROVIDERS: Dict[str, Tuple[str, ...]] = {
-    "OPENROUTER_API_KEY": ("openrouter.ai", "*.openrouter.ai"),
-    "OPENAI_API_KEY": ("api.openai.com",),
-    "GROQ_API_KEY": ("api.groq.com",),
-    "TOGETHER_API_KEY": ("api.together.xyz",),
-    "DEEPSEEK_API_KEY": ("api.deepseek.com",),
-    "MISTRAL_API_KEY": ("api.mistral.ai",),
-    "XAI_API_KEY": ("api.x.ai",),
-    "NOUS_API_KEY": ("inference.nousresearch.com",),
+    "OPENROUTER_API_KEY": ("openrouter.ai", "*.openrouter.ai"), "OPENAI_API_KEY": ("api.openai.com",),
+    "GROQ_API_KEY": ("api.groq.com",), "TOGETHER_API_KEY": ("api.together.xyz",),
+    "DEEPSEEK_API_KEY": ("api.deepseek.com",), "MISTRAL_API_KEY": ("api.mistral.ai",),
+    "XAI_API_KEY": ("api.x.ai",), "NOUS_API_KEY": ("inference.nousresearch.com",),
 }
 
 # Non-Authorization-header providers (v0.39 ``match_headers`` is case-insensitive).  ``aliases``
@@ -80,20 +76,13 @@ _HEADER_AUTH_PROVIDERS: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "ANTHROPIC_API_KEY": {"hosts": ("api.anthropic.com",), "match_headers": ("x-api-key", "Authorization"), "aliases": ()},
     "AZURE_OPENAI_API_KEY": {
         "hosts": ("*.openai.azure.com", "*.cognitiveservices.azure.com", "*.services.ai.azure.com"),
-        "match_headers": ("api-key", "Authorization"),
-        "aliases": (),
+        "match_headers": ("api-key", "Authorization"), "aliases": (),
     },
-    "GEMINI_API_KEY": {
-        "hosts": ("generativelanguage.googleapis.com",),
-        "match_headers": ("x-goog-api-key",),
-        "aliases": ("GOOGLE_API_KEY",),
-    },
+    "GEMINI_API_KEY": {"hosts": ("generativelanguage.googleapis.com",), "match_headers": ("x-goog-api-key",), "aliases": ("GOOGLE_API_KEY",)},
 }
 
 # Creds that static header replacement can't swap (SigV4, SDK-minted OAuth): warning only.
-_NON_BEARER_PROVIDERS: Tuple[str, ...] = (
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
-)
+_NON_BEARER_PROVIDERS: Tuple[str, ...] = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "GOOGLE_APPLICATION_CREDENTIALS")
 
 # Default SSRF deny list (docs promise: cloud metadata IPs refused regardless of allowlist);
 # callers pass [] to disable (hermetic tests only).
@@ -108,8 +97,7 @@ _DEFAULT_UPSTREAM_DENY_CIDRS: Tuple[str, ...] = (
 
 # Minimal daemon env; everything else is stripped so /proc/<pid>/environ never exposes operator secrets.
 _PROXY_SUBPROCESS_ENV_ALLOWLIST: Tuple[str, ...] = (
-    "PATH", "HOME", "TMPDIR", "TZ", "LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR",
-    "SSL_CERT_DIR", "SSL_CERT_FILE",
+    "PATH", "HOME", "TMPDIR", "TZ", "LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "SSL_CERT_DIR", "SSL_CERT_FILE",
     "SYSTEMROOT", "USERPROFILE",  # Windows
 )
 
@@ -435,11 +423,19 @@ def ensure_management_token(*, force: bool = False) -> str:
     return token
 
 
-def _load_proxy_yaml(cfg: Path):
-    """Parsed proxy.yaml, or ``{}`` when missing/unreadable/PyYAML absent."""
+def _yaml():
+    """PyYAML module or None (it is a Hermes dep, but never a hard requirement here)."""
     try:
         import yaml
+        return yaml
     except ImportError:
+        return None
+
+
+def _load_proxy_yaml(cfg: Path):
+    """Parsed proxy.yaml, or ``{}`` when missing/unreadable/PyYAML absent."""
+    yaml = _yaml()
+    if yaml is None:
         return {}
     try:
         return yaml.safe_load(cfg.read_text(encoding="utf-8")) or {}
@@ -658,13 +654,11 @@ def _write_state_file_atomic(state: Path, name: str, dump) -> Path:
 
 def write_proxy_config(config: Dict) -> Path:
     """Serialize the config dict to ``<hermes_home>/proxy/proxy.yaml`` (safe_dump, no Python tags)."""
-    try:
-        import yaml  # PyYAML is already a Hermes dep
-    except ImportError as exc:
-        raise RuntimeError("PyYAML is required to write the iron-proxy config but is not installed.") from exc
+    yaml = _yaml()
+    if yaml is None:
+        raise RuntimeError("PyYAML is required to write the iron-proxy config but is not installed.")
     return _write_state_file_atomic(
-        _proxy_state_dir(), "proxy.yaml",
-        lambda f: yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False),
+        _proxy_state_dir(), "proxy.yaml", lambda f: yaml.safe_dump(config, f, default_flow_style=False, sort_keys=False),
     )
 
 
@@ -876,17 +870,8 @@ def start_proxy(
 
     # Probe the CONFIGURED bind host (on Linux the docker bridge, where loopback never connects).
     probe_host, tunnel_port = _probe_target()
-    install_handlers = platform.system() != "Windows" and threading.current_thread() is threading.main_thread()
-    prev_sigint = prev_sigterm = None
-    if install_handlers:
-        prev_sigint = signal.signal(signal.SIGINT, _interrupt_handler)
-        prev_sigterm = signal.signal(signal.SIGTERM, _interrupt_handler)
-    try:
+    with _interrupt_guard(_interrupt_handler):
         listening = _await_listening(proc, probe_host, tunnel_port, on_exit=_exited_error)
-    finally:
-        if install_handlers:
-            signal.signal(signal.SIGINT, prev_sigint)
-            signal.signal(signal.SIGTERM, prev_sigterm)
     # Process may have died right at deadline.
     if proc.poll() is not None:
         raise _exited_error()
@@ -895,6 +880,20 @@ def start_proxy(
         raise _abort(f"iron-proxy did not bind {probe_host}:{tunnel_port} within {_STARTUP_GRACE_SECONDS}s.  Process was killed.  ", kill=True)
     logger.info("Started iron-proxy pid=%s config=%s", proc.pid, cfg)
     return get_status()
+
+
+@contextmanager
+def _interrupt_guard(handler):
+    """Route SIGINT/SIGTERM to ``handler`` for the block (POSIX main thread only), restoring the previous handlers after."""
+    if platform.system() == "Windows" or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    prev = [(sig, signal.signal(sig, handler)) for sig in (signal.SIGINT, signal.SIGTERM)]
+    try:
+        yield
+    finally:
+        for sig, old in prev:
+            signal.signal(sig, old)
 
 
 def _spawn_daemon(bin_path: Path, cfg: Path, env: Dict[str, str], log_path: Path) -> "subprocess.Popen":
@@ -911,10 +910,10 @@ def _spawn_daemon(bin_path: Path, cfg: Path, env: Dict[str, str], log_path: Path
         raise RuntimeError(f"iron-proxy log {log_path} has unexpected owner uid={st.st_uid}; refusing to write.")
     try:
         # start_new_session is POSIX-only (Windows isn't supported anyway — no upstream binary).
-        popen_kwargs: Dict = dict(env=env, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=subprocess.STDOUT)
-        if platform.system() != "Windows":
-            popen_kwargs["start_new_session"] = True
-        return subprocess.Popen([str(bin_path), "-config", str(cfg)], **popen_kwargs)  # noqa: S603
+        session_kw = {} if platform.system() == "Windows" else {"start_new_session": True}
+        return subprocess.Popen(  # noqa: S603
+            [str(bin_path), "-config", str(cfg)], env=env, stdin=subprocess.DEVNULL, stdout=log_fd, stderr=subprocess.STDOUT, **session_kw,
+        )
     except OSError as exc:
         raise RuntimeError(f"failed to spawn iron-proxy: {exc}") from exc
     finally:

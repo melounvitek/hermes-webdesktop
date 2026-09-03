@@ -180,11 +180,9 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     if not isinstance(events_raw, list) or not events_raw:
         warn(" needs a non-empty 'events' list (valid: %s)", valid_list)
         return None
-    events: List[str] = []
+    events: List[str] = [ev for ev in events_raw if ev in VALID_HOOKS]
     for ev in events_raw:
-        if ev in VALID_HOOKS:
-            events.append(ev)
-        else:
+        if ev not in VALID_HOOKS:
             warn(": unknown event %r ignored (valid: %s)", ev, valid_list)
     if not events:
         warn(" has no valid events — skipped")
@@ -204,12 +202,8 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
         timeout = DEFAULT_TIMEOUT_SECONDS
     name = raw.get("name")
     return WebhookTarget(
-        url=url,
-        events=events,
-        name=name.strip() if isinstance(name, str) else "",
-        secret=_resolve_secret(index, raw),
-        matcher=matcher,
-        timeout=max(1, min(timeout, MAX_TIMEOUT_SECONDS)),
+        url=url, events=events, name=name.strip() if isinstance(name, str) else "", secret=_resolve_secret(index, raw),
+        matcher=matcher, timeout=max(1, min(timeout, MAX_TIMEOUT_SECONDS)),
     )
 
 
@@ -260,21 +254,16 @@ def _serialize_payload(event: str, kwargs: Dict[str, Any], delivery_id: str) -> 
     # Profile resolved at fire time so a multiplexed gateway's receivers can tell which profile emitted.
     from hermes_cli.profiles import get_active_profile_name
     payload = {
-        "hook_event_name": event,
-        "profile": get_active_profile_name(),
-        **_payload_fields(kwargs),
-        "delivery_id": delivery_id,
-        "timestamp": _utc_now_iso(),
+        "hook_event_name": event, "profile": get_active_profile_name(), **_payload_fields(kwargs),
+        "delivery_id": delivery_id, "timestamp": _utc_now_iso(),
     }
     return json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
 
 
 def _build_delivery(event: str, target: WebhookTarget, body: bytes, delivery_id: str) -> Dict[str, Any]:
     headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Hermes-Agent-Outbound-Webhook",
-        "X-Hermes-Event": event,
-        "X-Hermes-Delivery": delivery_id,
+        "Content-Type": "application/json", "User-Agent": "Hermes-Agent-Outbound-Webhook",
+        "X-Hermes-Event": event, "X-Hermes-Delivery": delivery_id,
     }
     if target.secret:
         digest = hmac.new(target.secret.encode("utf-8"), body, hashlib.sha256).hexdigest()

@@ -37,8 +37,8 @@ class CronHealthSnapshot:
 _job_key = _safe_instance_id
 
 _AUTH_RE = re.compile(
-    r"\b(?:authentication|authenticated|authenticate|authorization|authorized|authorize"
-    r"|unauthorized|forbidden|bearer|401|403)\b|\b(?:access|api|refresh) token\b"
+    r"\b(?:authentication|authenticated|authenticate|authorization|authorized|authorize|unauthorized|forbidden|bearer|401|403)\b"
+    r"|\b(?:access|api|refresh) token\b"
 )
 
 # Ordered (predicate, class) rules; first match wins. Auth uses word boundaries so
@@ -146,15 +146,11 @@ def _single_metric(name: str, reader: Callable[[], Any]) -> Callable[[list[Gatew
 # Each group is independently fail-open so one unavailable source never hides the rest.
 # Readers are wrapped in lambdas so monkeypatching this module's names still takes effect.
 _METRIC_GROUPS: tuple[tuple[Callable[[list[GatewayMetric]], None], str], ...] = (
-    (_freshness_metric("hermes.cron.scheduler.heartbeat_age_seconds", lambda: get_ticker_heartbeat_age()),
-     "cron freshness metric unavailable"),
-    (_freshness_metric("hermes.cron.scheduler.last_success_age_seconds", lambda: get_ticker_success_age()),
-     "cron freshness metric unavailable"),
-    (_single_metric("hermes.cron.scheduler.catch_up_occurrences", lambda: get_catch_up_occurrence_count()),
-     "cron catch-up metric unavailable"),
+    (_freshness_metric("hermes.cron.scheduler.heartbeat_age_seconds", lambda: get_ticker_heartbeat_age()), "cron freshness metric unavailable"),
+    (_freshness_metric("hermes.cron.scheduler.last_success_age_seconds", lambda: get_ticker_success_age()), "cron freshness metric unavailable"),
+    (_single_metric("hermes.cron.scheduler.catch_up_occurrences", lambda: get_catch_up_occurrence_count()), "cron catch-up metric unavailable"),
     (_job_metrics, "cron job metrics unavailable"),
-    (_single_metric("hermes.cron.jobs.running", lambda: len(get_running_job_ids())),
-     "cron running-job metric unavailable"),
+    (_single_metric("hermes.cron.jobs.running", lambda: len(get_running_job_ids())), "cron running-job metric unavailable"),
 )
 
 

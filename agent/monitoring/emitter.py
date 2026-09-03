@@ -123,12 +123,7 @@ class MonitoringEmitter:
         finished.wait(timeout=timeout)
 
     def stats(self) -> Dict[str, int]:
-        return {
-            "queued": self._q.qsize(),
-            "dispatched": self._dispatched,
-            "dropped": self._dropped,
-            "subscribers": len(self._subscribers),
-        }
+        return {"queued": self._q.qsize(), "dispatched": self._dispatched, "dropped": self._dropped, "subscribers": len(self._subscribers)}
 
     def close(self) -> None:
         self._stop.set()

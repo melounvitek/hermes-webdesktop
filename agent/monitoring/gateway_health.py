@@ -60,10 +60,8 @@ _GATEWAY_ERROR_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
     (_contains_any("auth", "token", "unauthorized", "forbidden", "401", "403"), "auth_failed"),
     (lambda s: "rate" in s and "limit" in s, "rate_limited"),
     (_contains_any("timeout", "timed out"), "timeout"),
-    (_contains_any(
-        "network", "connection", "dns", "socket", "connect call failed",
-        "failed to connect", "cannot connect", "unreachable", "name resolution",
-    ), "network_error"),
+    (_contains_any("network", "connection", "dns", "socket", "connect call failed", "failed to connect", "cannot connect",
+                   "unreachable", "name resolution"), "network_error"),
     (_contains_any("config", "missing", "invalid"), "invalid_config"),
     (_contains_any("startup"), "startup_failed"),
     (_contains_any("fatal"), "platform_fatal"),
@@ -126,13 +124,13 @@ def platform_for_subsystem(subsystem: str) -> Optional[str]:
     return (subsystem.split(".", 1)[1] or None) if subsystem.startswith("platform.") else None
 
 
-def _gateway_status(name: str, fallback: Callable[..., Any], /, **kwargs: Any) -> Any:
+def _gateway_status(name: str, fallback: Callable[[], Any], /, **kwargs: Any) -> Any:
     """Prefer ``gateway.status.<name>`` (the runtime-status contract); fall back to the local approximation."""
     try:
         import gateway.status as status
         return getattr(status, name)(**kwargs)
     except Exception:
-        return fallback(**kwargs)
+        return fallback()
 
 
 def _int_or_zero(raw: Any) -> int:
@@ -143,25 +141,17 @@ def _int_or_zero(raw: Any) -> int:
 
 
 def _parse_active_agents(raw: Any) -> int:
-    return _gateway_status("parse_active_agents", _int_or_zero, raw=raw)
+    return _gateway_status("parse_active_agents", lambda: _int_or_zero(raw), raw=raw)
 
 
 def _derive_busy(gateway_running: bool, gateway_state: Any, active_agents: Any) -> bool:
-    return _gateway_status(
-        "derive_gateway_busy",
-        lambda gateway_running, gateway_state, active_agents: bool(
-            gateway_running and gateway_state == "running" and _parse_active_agents(active_agents) > 0
-        ),
-        gateway_running=gateway_running, gateway_state=gateway_state, active_agents=active_agents,
-    )
+    fallback = lambda: bool(gateway_running and gateway_state == "running" and _parse_active_agents(active_agents) > 0)  # noqa: E731
+    return _gateway_status("derive_gateway_busy", fallback, gateway_running=gateway_running, gateway_state=gateway_state, active_agents=active_agents)
 
 
 def _derive_drainable(gateway_running: bool, gateway_state: Any) -> bool:
-    return _gateway_status(
-        "derive_gateway_drainable",
-        lambda gateway_running, gateway_state: bool(gateway_running and gateway_state == "running"),
-        gateway_running=gateway_running, gateway_state=gateway_state,
-    )
+    fallback = lambda: bool(gateway_running and gateway_state == "running")  # noqa: E731
+    return _gateway_status("derive_gateway_drainable", fallback, gateway_running=gateway_running, gateway_state=gateway_state)
 
 
 def _base_attrs(*, install_id: str, version: str, supervision_mode: str) -> Dict[str, str]:
