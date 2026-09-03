@@ -5,6 +5,7 @@ fingerprint keying, read/write round-trip, and invalidation behavior.
 """
 
 import tools.mcp_schema_cache as msc
+from tools import mcp_tool_registration as _mcp_registration
 
 
 class TestConfigFingerprint:
@@ -155,7 +156,7 @@ class TestWriteThroughPreservesSchema:
         server.session = MagicMock()
 
         with patch("tools.registry.registry", ToolRegistry()):
-            registered = mt._register_server_tools("probe_srv", server, {})
+            registered = _mcp_registration._register_server_tools("probe_srv", server, {})
         assert registered, "tool was not registered; write-through never fired"
         entry = json.loads((tmp_path / "cache.json").read_text(encoding="utf-8"))["probe_srv"]
         return entry
@@ -176,12 +177,13 @@ class TestWriteThroughPreservesSchema:
         from unittest.mock import patch
 
         import tools.mcp_tool as mt
+        from tools import mcp_tool_registration as _mcp_registration
         from tools.registry import ToolRegistry
 
         entry = self._cache_write_through(tmp_path, monkeypatch)
         lazy_reg = ToolRegistry()
         with patch("tools.registry.registry", lazy_reg):
-            names = mt._register_from_cache_sync("probe_srv", {}, entry)
+            names = _mcp_registration._register_from_cache_sync("probe_srv", {}, entry)
         assert names, "lazy registration produced no tools"
         schema = lazy_reg.get_schema("mcp__probe_srv__zhida")
         assert schema is not None, "lazy path did not register the tool"

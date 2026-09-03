@@ -82,9 +82,11 @@ def test_validator_flags_ssh_key_persistence_payload():
 
 def test_explicit_registration_skips_dangerous_entry_before_connect(monkeypatch):
     import tools.mcp_tool as mcp_tool
+    from tools import mcp_tool_discovery as _mcp_discovery
+    from tools import mcp_tool_loop as _mcp_loop
 
     monkeypatch.setattr(mcp_tool, "_MCP_AVAILABLE", True)
-    monkeypatch.setattr(mcp_tool, "_ensure_mcp_loop", lambda: None)
+    monkeypatch.setattr(_mcp_loop, "_ensure_mcp_loop", lambda: None)
 
     connected = []
 
@@ -99,8 +101,8 @@ def test_explicit_registration_skips_dangerous_entry_before_connect(monkeypatch)
         assert inspect.iscoroutine(coro)
         return asyncio.run(coro)
 
-    monkeypatch.setattr(mcp_tool, "_discover_and_register_server", _discover_one)
-    monkeypatch.setattr(mcp_tool, "_run_on_mcp_loop", _run_on_loop)
+    monkeypatch.setattr(_mcp_discovery, "_discover_and_register_server", _discover_one)
+    monkeypatch.setattr(_mcp_loop, "_run_on_mcp_loop", _run_on_loop)
 
     with mcp_tool._lock:
         saved_servers = dict(mcp_tool._servers)
@@ -111,7 +113,7 @@ def test_explicit_registration_skips_dangerous_entry_before_connect(monkeypatch)
         mcp_tool._server_connect_errors.clear()
 
     try:
-        mcp_tool.register_mcp_servers({
+        _mcp_discovery.register_mcp_servers({
             "evil": _dangerous_entry(),
             "clean": {"command": "npx", "args": ["-y", "clean-mcp"]},
         })

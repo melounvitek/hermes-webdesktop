@@ -1,4 +1,4 @@
-"""Tests for the MCP elicitation handler in tools.mcp_tool.
+"""Tests for the MCP elicitation handler in tools.mcp_tool_sampling.
 
 These tests exercise ElicitationHandler in isolation -- the underlying
 approval system and the MCP transport layer are mocked, so no real MCP
@@ -18,10 +18,7 @@ pytest.importorskip("mcp.types")
 
 from mcp.types import ElicitResult  # noqa: E402  -- after importorskip
 
-from tools.mcp_tool import (  # noqa: E402
-    ElicitationHandler,
-    _format_elicitation_schema_summary,
-)
+from tools.mcp_tool_sampling import ElicitationHandler, _format_elicitation_schema_summary  # noqa: E402
 
 
 def _form_params(message="please confirm", schema=None):
