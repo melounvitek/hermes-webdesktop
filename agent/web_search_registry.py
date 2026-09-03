@@ -38,8 +38,7 @@ def _read_config_key(*path: str) -> Optional[str]:
     try:
         from hermes_cli.config import load_config_readonly
 
-        cfg = load_config_readonly()
-        cur = cfg
+        cur = load_config_readonly()
         for segment in path:
             if not isinstance(cur, dict):
                 return None
@@ -107,13 +106,10 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
         if provider is not None and _capable(provider):
             return provider
         if provider is None:
-            logger.debug(
-                "web backend '%s' configured but not registered; falling back", configured
-            )
+            logger.debug("web backend '%s' configured but not registered; falling back", configured)
         else:
             logger.debug(
-                "web backend '%s' configured but does not support '%s'; falling back",
-                configured, capability,
+                "web backend '%s' configured but does not support '%s'; falling back", configured, capability
             )
 
     # Fallbacks are availability-filtered so a registered-but-keyless provider
@@ -124,7 +120,7 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
 
     for legacy in _LEGACY_PREFERENCE:
         provider = snapshot.get(legacy)
-        if provider is not None and _capable(provider) and _available(provider):
+        if provider is not None and provider in eligible:
             return provider
 
     # Keyless free tier (anonymous public MCP tiers) is last-resort only: it is
@@ -139,9 +135,7 @@ def _resolve(configured: Optional[str], *, capability: str) -> Optional[WebSearc
                 if provider.is_keyless_available():
                     return provider
             except Exception as exc:  # noqa: BLE001 — buggy provider skipped
-                logger.debug(
-                    "provider %s.is_keyless_available() raised %s", name, exc
-                )
+                logger.debug("provider %s.is_keyless_available() raised %s", name, exc)
 
     return None
 
