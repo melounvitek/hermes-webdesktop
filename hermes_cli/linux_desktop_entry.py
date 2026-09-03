@@ -185,10 +185,8 @@ def _resolve_hermes_bin_for_desktop_entry(
 
     if not primary:
         return primary
-    if rerouted:
-        return rerouted
     if rerouted is not None:
-        return primary
+        return rerouted or primary
 
     # argv[0] was checkout-internal AND PATH had no `hermes` — common in stripped systemd user
     # sessions and autostart relaunches. Probe the installer's known wrapper locations; each
