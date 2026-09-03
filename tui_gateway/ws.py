@@ -1,17 +1,10 @@
 """WebSocket transport for the tui_gateway JSON-RPC server.
 
-Reuses :func:`tui_gateway.server.dispatch` verbatim so every RPC method, slash
-command, approval/clarify/sudo flow and agent event flows through the same
-handlers whether the client is Ink over stdio or an iOS/web client over WS.
-
-Wire protocol is identical to stdio: newline-delimited JSON-RPC both ways. The
-server emits ``gateway.ready`` right after accept, then echoes responses/events.
-
-Mounting::
-
-    @app.websocket("/api/ws")
-    async def ws(ws: WebSocket):
-        await handle_ws(ws)
+Reuses :func:`tui_gateway.server.dispatch` verbatim so every RPC method, slash command,
+approval/clarify/sudo flow and agent event flows through the same handlers whether the client is
+Ink over stdio or an iOS/web client over WS. Wire protocol is identical to stdio: newline-delimited
+JSON-RPC both ways; the server emits ``gateway.ready`` right after accept, then echoes
+responses/events. Mount as ``@app.websocket("/api/ws") async def ws(ws): await handle_ws(ws)``.
 """
 
 from __future__ import annotations
@@ -30,10 +23,9 @@ from tui_gateway.event_replay import replay_epoch
 
 _log = logging.getLogger(__name__)
 
-# Scale-to-zero: tell the (separate) gateway process a dashboard/desktop/TUI
-# client is attached via the mtime of a marker file it reads in its idle
-# predicate. Clients ping every 15s; one write per 5s per process is plenty.
-# See gateway/scale_to_zero.py.
+# Scale-to-zero: tell the (separate) gateway process a dashboard/desktop/TUI client is attached via
+# the mtime of a marker file it reads in its idle predicate (gateway/scale_to_zero.py). Clients ping
+# every 15s; one write per 5s per process is plenty.
 _DASHBOARD_CLIENT_TOUCH_MIN_INTERVAL_S = 5.0
 _dashboard_client_touched_at = 0.0
 _dashboard_client_touch_lock = threading.Lock()
@@ -55,17 +47,16 @@ def _note_dashboard_client_activity(*, force: bool = False) -> None:
         _log.debug("dashboard client heartbeat touch failed", exc_info=True)
 
 
-# Max seconds a pool-dispatched handler blocks waiting for the loop to flush a
-# WS frame before we give up waiting (the transport is NOT marked dead).
+# Max seconds a pool-dispatched handler blocks waiting for the loop to flush a WS frame before we
+# give up waiting (the transport is NOT marked dead).
 _WS_WRITE_TIMEOUT_S = 10.0
 _WS_LOG_PAYLOAD_PREVIEW = 240
 
-# Per-token streaming frames are coalesced: buffered and flushed as a batch on a
-# short timer instead of waking the loop once per token (each wakeup competes
-# with the agent turn for the GIL). Keep this set to genuinely high-frequency,
-# display-only events — anything a client must see promptly (tool/approval/
-# status/completion) is non-streaming and flushes the buffer ahead of itself,
-# so ordering is preserved.
+# Per-token streaming frames are coalesced: buffered and flushed as a batch on a short timer
+# instead of waking the loop once per token (each wakeup competes with the agent turn for the GIL).
+# Keep this set to genuinely high-frequency, display-only events — anything a client must see
+# promptly (tool/approval/status/completion) is non-streaming and flushes the buffer ahead of
+# itself, so ordering is preserved.
 _STREAMING_EVENT_TYPES = frozenset({"message.delta", "reasoning.delta", "thinking.delta"})
 # Max time a streamed token waits in the buffer (~30 fps; imperceptible).
 _TOKEN_COALESCE_S = 0.033
@@ -80,38 +71,31 @@ except ImportError:  # pragma: no cover - starlette is a required install path
 class WSTransport:
     """Per-connection WS transport.
 
-    ``write`` is safe from any thread *other than* the loop thread owning the
-    socket (pool workers marshal onto the loop and block on the future). Called
-    from the loop thread itself that would deadlock, so we detect it and
-    fire-and-forget; loop-thread callers that need completion use ``write_async``.
+    ``write`` is safe from any thread *other than* the loop thread owning the socket (pool workers
+    marshal onto the loop and block on the future). Called from the loop thread itself it would
+    deadlock, so we detect that and fire-and-forget; loop-thread callers that need completion use
+    ``write_async``.
     """
 
-    def __init__(
-        self,
-        ws: Any,
-        loop: asyncio.AbstractEventLoop,
-        *,
-        peer: str = "unknown",
-        auth_identity: dict | None = None,
-    ) -> None:
+    def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop, *, peer: str = "unknown",
+                 auth_identity: dict | None = None) -> None:
         self._ws = ws
         self._loop = loop
         self._peer = peer
-        #: Server-verified identity from the WS-upgrade credential (dashboard
-        #: ticket / internal credential), stamped by ``web_server._ws_auth_reason``.
-        #: None for legacy-token/stdio transports. RPC params can never populate
-        #: this: it is the only identity authority for browser-controller registration.
+        #: Server-verified identity from the WS-upgrade credential (dashboard ticket / internal
+        #: credential), stamped by ``web_server._ws_auth_reason``. None for legacy-token/stdio
+        #: transports. RPC params can never populate this: it is the only identity authority for
+        #: browser-controller registration.
         self.auth_identity = auth_identity
         self._closed = False
-        # Token-coalescing buffer. The lock guards the buffer + "armed" flag
-        # against worker threads calling write(); the timer handle is only ever
-        # touched on the loop thread.
+        # Token-coalescing buffer. The lock guards the buffer + "armed" flag against worker threads
+        # calling write(); the timer handle is only ever touched on the loop thread.
         self._token_lock = threading.Lock()
         self._pending_tokens: list[str] = []
         self._token_flush_handle: asyncio.TimerHandle | None = None
         self._token_flush_armed = False
-        # Socket writes need an async boundary: several batches can be queued on
-        # the owning loop while it recovers from a stall.
+        # Socket writes need an async boundary: several batches can be queued on the owning loop
+        # while it recovers from a stall.
         self._send_lock = asyncio.Lock()
 
     @staticmethod
@@ -128,8 +112,8 @@ class WSTransport:
         except RuntimeError:
             on_loop = False
 
-        # Streamed token: buffer it and arm the flush timer; the worker returns
-        # immediately. call_soon_threadsafe is safe from a worker or the loop.
+        # Streamed token: buffer it and arm the flush timer; the worker returns immediately.
+        # call_soon_threadsafe is safe from a worker or the loop.
         if self._is_streaming_frame(obj):
             with self._token_lock:
                 self._pending_tokens.append(line)
@@ -138,10 +122,9 @@ class WSTransport:
                     self._loop.call_soon_threadsafe(self._arm_token_flush)
             return not self._closed
 
-        # Non-streaming frame: append behind any buffered tokens and flush the
-        # whole batch NOW so it can never overtake them. The send is scheduled
-        # INSIDE the lock so wire order matches buffer order even if the
-        # coalesce timer fires on the loop at the same moment.
+        # Non-streaming frame: append behind any buffered tokens and flush the whole batch NOW so it
+        # can never overtake them. The send is scheduled INSIDE the lock so wire order matches
+        # buffer order even if the coalesce timer fires on the loop at the same moment.
         from agent.async_utils import safe_schedule_threadsafe
 
         with self._token_lock:
@@ -159,10 +142,9 @@ class WSTransport:
             fut.result(timeout=_WS_WRITE_TIMEOUT_S)
             return not self._closed
         except concurrent.futures.TimeoutError:  # builtin TimeoutError on 3.11+
-            # The loop is stalled (GIL-heavy turn, delegation), NOT the socket
-            # dead: the send is already scheduled and flushes once the loop
-            # breathes. Latching _closed here permanently silenced live windows
-            # after one slow write; _safe_send_many latches on a real error.
+            # The loop is stalled (GIL-heavy turn, delegation), NOT the socket dead: the send is
+            # already scheduled and flushes once the loop breathes. Latching _closed here permanently
+            # silenced live windows after one slow write; _safe_send_many latches on a real error.
             _log.warning(
                 "ws write slow (loop stalled >%ss) peer=%s — frame left in flight",
                 _WS_WRITE_TIMEOUT_S, self._peer,
@@ -170,10 +152,7 @@ class WSTransport:
             return not self._closed
         except Exception as exc:
             self._closed = True
-            _log.warning(
-                "ws write failed peer=%s error_type=%s error=%s",
-                self._peer, type(exc).__name__, exc,
-            )
+            _log.warning("ws write failed peer=%s error_type=%s error=%s", self._peer, type(exc).__name__, exc)
             return False
 
     def _arm_token_flush(self) -> None:
@@ -183,8 +162,8 @@ class WSTransport:
         self._token_flush_handle = self._loop.call_later(_TOKEN_COALESCE_S, self._flush_tokens)
 
     def _flush_tokens(self) -> None:
-        """Timer callback (loop thread): send buffered tokens as one batch. Scheduled
-        under the lock so wire order is fixed relative to a concurrent ``write``."""
+        """Timer callback (loop thread): send buffered tokens as one batch. Scheduled under the lock
+        so wire order is fixed relative to a concurrent ``write``."""
         with self._token_lock:
             self._token_flush_handle = None
             self._token_flush_armed = False
@@ -193,8 +172,8 @@ class WSTransport:
                 self._loop.create_task(self._safe_send_many(batch))
 
     async def write_async(self, obj: dict) -> bool:
-        """Send from the owning loop; awaits until the frame is on the wire. Buffered
-        tokens are flushed ahead of it in the SAME batch so nothing slips between."""
+        """Send from the owning loop; awaits until the frame is on the wire. Buffered tokens are
+        flushed ahead of it in the SAME batch so nothing slips between."""
         if self._closed:
             return False
         with self._token_lock:
@@ -214,13 +193,10 @@ class WSTransport:
                         return
                     await self._ws.send_text(line)
             except Exception as exc:
-                # Latch while holding the writer lock so queued batches observe
-                # the failure before touching the socket.
+                # Latch while holding the writer lock so queued batches observe the failure before
+                # touching the socket.
                 self._closed = True
-                _log.warning(
-                    "ws send failed peer=%s error_type=%s error=%s",
-                    self._peer, type(exc).__name__, exc,
-                )
+                _log.warning("ws send failed peer=%s error_type=%s error=%s", self._peer, type(exc).__name__, exc)
 
     def close(self) -> None:
         self._closed = True
@@ -244,11 +220,10 @@ def _ws_peer_label(ws: Any) -> str:
 def _disable_nagle(ws: Any) -> None:
     """Disable Nagle + enable TCP keepalive on the raw socket (best-effort).
 
-    Without TCP_NODELAY the kernel coalesces small per-token frames, so a burst
-    after the model's think-pause lands in one tick and no client-side smoothing
-    can recover the cadence. Without keepalive a silently-dropped client (SSH
-    tunnel reset, sleep) leaves the leg half-open forever: receive_text() blocks
-    and the disconnect teardown (detach + orphan reap + resume replay) never runs.
+    Without TCP_NODELAY the kernel coalesces small per-token frames, so a burst after the model's
+    think-pause lands in one tick and no client-side smoothing can recover the cadence. Without
+    keepalive a silently-dropped client (SSH tunnel reset, sleep) leaves the leg half-open forever:
+    receive_text() blocks and the disconnect teardown (detach + orphan reap + resume replay) never runs.
     """
     try:
         scope = getattr(ws, "scope", None) or {}
@@ -271,18 +246,12 @@ def _error_frame(code: int, message: str, req_id: Any) -> dict:
     return {"jsonrpc": "2.0", "error": {"code": code, "message": message}, "id": req_id}
 
 
-async def handle_ws(
-    ws: Any,
-    *,
-    auth_identity: dict | None = None,
-    subprotocol: str | None = None,
-) -> None:
+async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: str | None = None) -> None:
     """Run one WebSocket session. Wire-compatible with ``tui_gateway.entry``.
 
-    *auth_identity* is the server-minted ``{user_id, provider}`` recorded at
-    WS-upgrade auth; stored as ``WSTransport.auth_identity``, the only identity
-    authority for browser-controller registration. Callers that omit it
-    (harnesses, the embedded TUI child) get a ``None`` transport identity.
+    *auth_identity* is the server-minted ``{user_id, provider}`` recorded at WS-upgrade auth; stored
+    as ``WSTransport.auth_identity``, the only identity authority for browser-controller registration.
+    Callers that omit it (harnesses, the embedded TUI child) get a ``None`` transport identity.
     """
     peer = _ws_peer_label(ws)
     transport: WSTransport | None = None
@@ -300,50 +269,36 @@ async def handle_ws(
         return False
 
     try:
-        if subprotocol:
-            await ws.accept(subprotocol=subprotocol)
-        else:
-            await ws.accept()
+        await (ws.accept(subprotocol=subprotocol) if subprotocol else ws.accept())
         disconnect_reason = "connected"
-        # A client is attached from the moment the upgrade is accepted — mark it
-        # before the (possibly slow) ready/skin setup so scale-to-zero sees it.
+        # A client is attached from the moment the upgrade is accepted — mark it before the
+        # (possibly slow) ready/skin setup so scale-to-zero sees it.
         _note_dashboard_client_activity(force=True)
         _disable_nagle(ws)
         _log.info("ws accepted peer=%s", peer)
 
         transport = WSTransport(ws, asyncio.get_running_loop(), peer=peer, auth_identity=auth_identity)
 
-        # resolve_skin() is synchronous I/O + CPU work; run it in the pool so the
-        # WS read loop stays free to drain the frontend's initial RPC burst.
+        # resolve_skin() is synchronous I/O + CPU work; run it in the pool so the WS read loop stays
+        # free to drain the frontend's initial RPC burst.
         skin_payload = await asyncio.to_thread(server.resolve_skin)
-        ready_ok = await transport.write_async(
-            {
-                "jsonrpc": "2.0",
-                "method": "event",
-                "params": {
-                    "type": "gateway.ready",
-                    # change_events: this backend broadcasts pet/cron/sessions
-                    # .changed, so clients can demote legacy polls to backstops.
-                    "payload": {
-                        "skin": skin_payload,
-                        "change_events": True,
-                        "heartbeat": True,
-                        # Lets reconnecting clients detect a backend restart and
-                        # reset their per-session seq watermarks (event_replay).
-                        "replay_epoch": replay_epoch(),
-                    },
-                },
-            }
-        )
+        # change_events: this backend broadcasts pet/cron/sessions.changed, so clients can demote
+        # legacy polls to backstops. replay_epoch lets reconnecting clients detect a backend restart
+        # and reset their per-session seq watermarks (event_replay).
+        ready_ok = await transport.write_async({
+            "jsonrpc": "2.0", "method": "event",
+            "params": {"type": "gateway.ready", "payload": {
+                "skin": skin_payload, "change_events": True, "heartbeat": True, "replay_epoch": replay_epoch(),
+            }},
+        })
         if ready_ok:
-            # Live-apply skins Hermes activates mid-conversation, and track this
-            # peer for session-less global broadcasts write_json can't route.
+            # Live-apply skins Hermes activates mid-conversation, and track this peer for
+            # session-less global broadcasts write_json can't route.
             server._ensure_skin_watcher()
             server.register_live_transport(transport)
-        # Cross-backend liveness: a heartbeat row lets the startup orphan sweep
-        # tell "live but idle backend" from "truly orphaned". Idempotent and
-        # once-per-process, like the orphan sweep below (the desktop app and web
-        # dashboard reach the agent via this sidecar, not entry.main()).
+        # Cross-backend liveness: a heartbeat row lets the startup orphan sweep tell "live but idle
+        # backend" from "truly orphaned". Idempotent and once-per-process, like the orphan sweep
+        # (the desktop app and web dashboard reach the agent via this sidecar, not entry.main()).
         try:
             server._start_backend_heartbeat_refresher()
         except Exception:
@@ -363,11 +318,7 @@ async def handle_ws(
                 raw = await ws.receive_text()
                 _note_dashboard_client_activity()
             except _WebSocketDisconnect as exc:
-                disconnect_reason = (
-                    "client_disconnect("
-                    f"code={getattr(exc, 'code', None)},"
-                    f"reason={getattr(exc, 'reason', None)})"
-                )
+                disconnect_reason = f"client_disconnect(code={getattr(exc, 'code', None)},reason={getattr(exc, 'reason', None)})"
                 break
             except Exception:
                 disconnect_reason = "receive_failed"
@@ -389,8 +340,7 @@ async def handle_ws(
                 )
                 if not await _reply(
                     _error_frame(-32700, "parse error", None),
-                    "send_failed_after_parse_error",
-                    "ws parse-error reply send failed peer=%s", peer,
+                    "send_failed_after_parse_error", "ws parse-error reply send failed peer=%s", peer,
                 ):
                     break
                 continue
@@ -401,16 +351,14 @@ async def handle_ws(
             if req_method == "gateway.ping":
                 if not await _reply(
                     {"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id},
-                    "send_failed_after_heartbeat",
-                    "ws heartbeat reply send failed peer=%s id=%s", peer, req_id,
+                    "send_failed_after_heartbeat", "ws heartbeat reply send failed peer=%s id=%s", peer, req_id,
                 ):
                     break
                 continue
 
-            # dispatch() may schedule long handlers on the pool; it returns None
-            # then and the worker writes the response itself via transport.write
-            # (a separate thread, so that is the safe path). Inline handlers
-            # return the response dict, written here from the loop.
+            # dispatch() may schedule long handlers on the pool; it returns None then and the worker
+            # writes the response itself via transport.write (a separate thread, so that is the safe
+            # path). Inline handlers return the response dict, written here from the loop.
             try:
                 resp = await asyncio.to_thread(server.dispatch, req, transport)
             except Exception:
@@ -424,8 +372,7 @@ async def handle_ws(
                     break
                 continue
             if resp is not None and not await _reply(
-                resp,
-                "send_failed_after_response",
+                resp, "send_failed_after_response",
                 "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method,
             ):
                 break
@@ -434,12 +381,11 @@ async def handle_ws(
         if transport is not None:
             server.unregister_live_transport(transport)
 
-            # Owner-safely park browser controllers this transport registered (a
-            # reconnect with the same identity may deliver a terminal result for
-            # in-flight work; no new dispatch is admitted while offline).
-            # Offloaded: disconnect takes the controller's send_lock, which a
-            # worker-thread dispatch may hold while blocking on THIS loop to
-            # transmit (result(timeout=10)); inline would park the loop behind it.
+            # Owner-safely park browser controllers this transport registered (a reconnect with the
+            # same identity may deliver a terminal result for in-flight work; no new dispatch is
+            # admitted while offline). Offloaded: disconnect takes the controller's send_lock, which
+            # a worker-thread dispatch may hold while blocking on THIS loop to transmit
+            # (result(timeout=10)); inline would park the loop behind it.
             try:
                 from gateway.browser_control_broker import get_browser_control_broker
 
@@ -454,11 +400,10 @@ async def handle_ws(
             except Exception:
                 _log.exception("ws wake-word teardown failed peer=%s", peer)
 
-            # The single WS-disconnect teardown path: reap sessions this transport
-            # owned (close_on_disconnect sidecars) or detach the rest to the drop
-            # sentinel so later emits don't hit a closed socket; detached ones go
-            # to the grace-windowed orphan reaper (a quick resume cancels it).
-            # Offloaded: worker.close() blocks (terminate + waits) plus a sync DB
+            # The single WS-disconnect teardown path: reap sessions this transport owned
+            # (close_on_disconnect sidecars) or detach the rest to the drop sentinel so later emits
+            # don't hit a closed socket; detached ones go to the grace-windowed orphan reaper (a quick
+            # resume cancels it). Offloaded: worker.close() blocks (terminate + waits) plus a sync DB
             # write, which inline would freeze the loop for every other peer.
             try:
                 reaped_sessions, detached_sessions = await asyncio.to_thread(

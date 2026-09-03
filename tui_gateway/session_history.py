@@ -6,10 +6,7 @@ Bodies are rebound onto server.py's globals (method_ctx.bind_module) and referen
 
 from __future__ import annotations
 
-
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
+from .method_ctx import bind_module
 
 
 def _active_image_routing_identity(agent: Any) -> tuple[str, str]:
@@ -23,12 +20,11 @@ def _build_image_ref_message(user_text: str, image_paths: list[str]) -> str:
     """Reference attached images by path so the agent analyzes them in-loop with ``vision_analyze``.
     Pre-analyzing with the auxiliary vision model blocked submit 60-90s per photo and poisoned
     auto-titles with the description."""
-    parts = [
+    prefix = "\n\n".join(
         f"[The user attached an image: {p.name}]\n[Examine it with the vision_analyze tool using image_url: {p}]"
         for p in map(Path, image_paths) if p.exists()
-    ]
+    )
     text = user_text or ""
-    prefix = "\n\n".join(parts)
     if prefix:
         return f"{prefix}\n\n{text}" if text else prefix
     return text or "What do you see in this image?"
@@ -36,7 +32,7 @@ def _build_image_ref_message(user_text: str, image_paths: list[str]) -> str:
 
 def _build_persist_message_with_image_refs(user_text: str, image_paths: list[str]) -> str:
     """Persisted form of the user's message: ``@image:<path>`` directives (the desktop renders them
-    as images). ``_build_image_ref_message``'s ``image_url:`` hint is model-only, never persisted.
+    as images); ``_build_image_ref_message``'s ``image_url:`` hint is model-only, never persisted.
     Caption first, directives last: session previews are the first 60 chars of the first user
     message, so a leading directive would label the session with a truncated path."""
     from agent.context_references import format_reference_value
@@ -68,8 +64,7 @@ def _history_part_image_url(part: dict) -> str:
     """The URL carried by an image part (``image_url`` dict or str), else ""."""
     image_url = part.get("image_url")
     if isinstance(image_url, dict):
-        candidate = image_url.get("url")
-        return candidate if isinstance(candidate, str) else ""
+        image_url = image_url.get("url")
     return image_url if isinstance(image_url, str) else ""
 
 
@@ -90,18 +85,12 @@ def _history_dict_text(content: dict, *, image_urls: bool) -> str:
 
 
 def _content_display_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, (int, float)):
-        return str(content)
     if isinstance(content, list):
         parts = (_content_display_text(part).strip() for part in content)
         return "\n".join(text for text in parts if text)
     if isinstance(content, dict):
         return _history_dict_text(content, image_urls=False)
-    return str(content)
+    return "" if content is None else str(content)
 
 
 def _coerce_message_text(content: Any) -> str:
@@ -109,12 +98,6 @@ def _coerce_message_text(content: Any) -> str:
     Image parts keep their URL inline so the desktop's ``extractEmbeddedImages`` and the resume payload
     agree with the cached message (else the inline image flashed, then vanished); other structured
     shapes become a bracketed placeholder so resume doesn't drop the message."""
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, (int, float)):
-        return str(content)
     if isinstance(content, list):
         chunks: list[str] = []
         for part in content:
@@ -141,30 +124,23 @@ def _coerce_message_text(content: Any) -> str:
         return "".join(chunks)
     if isinstance(content, dict):
         return _history_dict_text(content, image_urls=True)
-    return str(content)
+    return "" if content is None else str(content)
 
 
-_TEXT_ONLY_BUSY_PART_KINDS = _HISTORY_TEXT_KINDS
+def _history_text_only_part(part: dict) -> bool:
+    kind = part.get("type")
+    return kind in _HISTORY_TEXT_KINDS or (kind is None and isinstance(part.get("text"), str))
 
 
 def _is_text_only_busy_payload(content: Any) -> bool:
     """True when a busy submit carries only plain text, not attachments/media."""
-    if content is None:
-        return False
     if isinstance(content, (str, int, float)):
         return True
     if isinstance(content, list):
         return bool(content) and all(
             isinstance(part, str) or (isinstance(part, dict) and _history_text_only_part(part)) for part in content
         )
-    if isinstance(content, dict):
-        return _history_text_only_part(content)
-    return False
-
-
-def _history_text_only_part(part: dict) -> bool:
-    kind = part.get("type")
-    return kind in _TEXT_ONLY_BUSY_PART_KINDS or (kind is None and isinstance(part.get("text"), str))
+    return isinstance(content, dict) and _history_text_only_part(content)
 
 
 def _is_display_hidden_marker(role: str | None, text: str) -> bool:
@@ -215,12 +191,12 @@ def _legacy_display_kind(role: str, text: str) -> str | None:
 
 
 _HISTORY_REASONING_KEYS = ("reasoning", "reasoning_content", "reasoning_details", "codex_reasoning_items")
+_HISTORY_ROLES = frozenset({"user", "assistant", "tool", "system"})
 
 
 def _history_to_messages(history: list[dict]) -> list[dict]:
     messages = []
     tool_call_args = {}
-
     for m in history:
         if not isinstance(m, dict):
             continue
@@ -228,10 +204,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if m is None:
             continue
         role = m.get("role")
-        if role not in {"user", "assistant", "tool", "system"}:
-            continue
         # display_kind="hidden": model-facing scaffolding the "[System:" sniff does not catch.
-        if m.get("display_kind") == "hidden":
+        if role not in _HISTORY_ROLES or m.get("display_kind") == "hidden":
             continue
         content_text = _coerce_message_text(m.get("content"))
         if _is_display_hidden_marker(role, content_text):
@@ -279,8 +253,8 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
                 msg["display_kind"] = "skill_invocation"
         if role == "assistant":
             for key in _HISTORY_REASONING_KEYS:
-                if key in m and m.get(key) is not None:
-                    msg[key] = m.get(key)
+                if m.get(key) is not None:
+                    msg[key] = m[key]
         # Display-only timeline metadata (model switches, delegation events).
         display_kind = m.get("display_kind") or _legacy_display_kind(role, content_text)
         if display_kind:
@@ -288,7 +262,6 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         if m.get("display_metadata"):
             msg["display_metadata"] = m["display_metadata"]
         messages.append(msg)
-
     return messages
 
 
@@ -297,17 +270,13 @@ def _coerce_seed_history(value: Any) -> list[dict]:
         return []
     history = []
     for item in value:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        if role not in ("user", "assistant", "system"):
+        if not isinstance(item, dict) or item.get("role") not in ("user", "assistant", "system"):
             continue
         content = item.get("content")
         if content is None:
             content = item.get("text")
-        if not isinstance(content, str) or not content.strip():
-            continue
-        history.append({"role": role, "content": content})
+        if isinstance(content, str) and content.strip():
+            history.append({"role": item["role"], "content": content})
     return history
 
 
@@ -339,10 +308,8 @@ def _record_inflight_correction(session: dict, text: Any) -> None:
     """Record an accepted mid-turn correction on the live turn — appended, never written over ``user``,
     so a resuming client can rebuild BOTH bubbles."""
     correction = _inflight_text(text)
-    if not correction:
-        return
     turn = session.get("inflight_turn")
-    if not isinstance(turn, dict):
+    if not correction or not isinstance(turn, dict):
         return
     turn = dict(turn)
     turn["corrections"] = [*(turn.get("corrections") or []), correction]

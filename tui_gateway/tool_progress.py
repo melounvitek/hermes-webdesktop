@@ -1,21 +1,16 @@
 """Tool lifecycle callbacks (tool.start/complete/progress events), verbose-text capping/redaction, todo-state projection.
 
-Bodies are rebound onto server.py's globals at install time (see
-method_ctx.bind_module), so they reference server.py globals bare.
+Bodies are rebound onto server.py's globals at install time (method_ctx.bind_module), so they
+reference server.py globals bare.
 """
 
 from __future__ import annotations
 
+from .method_ctx import bind_module
 
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
-
-
-# Verbose tool text is capped to the Ink render budget (a hair more, so the
-# "[omitted …]" label stays informative): unbounded output fed a render-tree
-# blowup that OOM-killed the TUI parent. Full output stays in the agent context
-# and the SQLite session, untouched.
+# Verbose tool text is capped to the Ink render budget (a hair more, so the "[omitted …]" label
+# stays informative): unbounded output fed a render-tree blowup that OOM-killed the TUI parent.
+# Full output stays in the agent context and the SQLite session, untouched.
 _TUI_VERBOSE_TEXT_MAX_CHARS = 1_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 16
 
@@ -23,12 +18,8 @@ _TODO_TOOL_NAMES = ("todo_list", "todo")  # legacy alias: pre-rename replays
 
 
 def _cap_tui_verbose_text(text: str) -> str:
-    if (
-        len(text) <= _TUI_VERBOSE_TEXT_MAX_CHARS
-        and text.count("\n") < _TUI_VERBOSE_TEXT_MAX_LINES
-    ):
+    if len(text) <= _TUI_VERBOSE_TEXT_MAX_CHARS and text.count("\n") < _TUI_VERBOSE_TEXT_MAX_LINES:
         return text
-
     idx = len(text)
     start = 0
     for _ in range(_TUI_VERBOSE_TEXT_MAX_LINES):
@@ -37,24 +28,17 @@ def _cap_tui_verbose_text(text: str) -> str:
             start = 0
             break
         start = idx + 1
-
     line_start = start
     start = max(line_start, len(text) - _TUI_VERBOSE_TEXT_MAX_CHARS)
     if start > line_start:
         next_break = text.find("\n", start)
         if 0 <= next_break < len(text) - 1:
             start = next_break + 1
-
     tail = text[start:].lstrip()
     omitted_chars = max(0, len(text) - len(tail))
     omitted_lines = text[:start].count("\n")
-    if omitted_lines:
-        label = (
-            "[showing verbose tail; omitted " f"{omitted_lines} lines / {omitted_chars} chars]\n"
-        )
-    else:
-        label = f"[showing verbose tail; omitted {omitted_chars} chars]\n"
-    return f"{label}{tail}"
+    omitted = f"{omitted_lines} lines / {omitted_chars} chars" if omitted_lines else f"{omitted_chars} chars"
+    return f"[showing verbose tail; omitted {omitted}]\n{tail}"
 
 
 def _redact_tui_verbose_text(text: str) -> str:
@@ -105,32 +89,30 @@ def _count_list(obj: object, *path: str) -> int | None:
     return len(cur) if isinstance(cur, list) else None
 
 
+# tool name -> (count-from-result, verb, singular, plural) for the tool.complete summary line.
+_SUMMARY_COUNTERS = {
+    "web_search": (lambda d: _count_list(d, "data", "web"), "Did", "search", "searches"),
+    "web_extract": (lambda d: _count_list(d, "results") or _count_list(d, "data", "results"), "Extracted", "page", "pages"),
+}
+
+
 def _tool_summary(name: str, result: str, duration_s: float | None) -> str | None:
     try:
         data = json.loads(result)
     except Exception:
         data = None
-
+    if not isinstance(data, dict):
+        return None
     dur = _fmt_tool_duration(duration_s)
     suffix = f" in {dur}" if dur else ""
-    text = None
-
-    if name == "web_search" and isinstance(data, dict):
-        n = _count_list(data, "data", "web")
-        if n is not None:
-            text = f"Did {n} {'search' if n == 1 else 'searches'}"
-
-    elif name == "web_extract" and isinstance(data, dict):
-        n = _count_list(data, "results") or _count_list(data, "data", "results")
-        if n is not None:
-            text = f"Extracted {n} {'page' if n == 1 else 'pages'}"
-
-    if isinstance(data, dict) and data.get("fallback_warning"):
-        warning = str(data.get("fallback_warning") or "").strip()
-        if warning:
-            return f"{warning}{suffix}"
-
-    return f"{text}{suffix}" if text else None
+    warning = str(data.get("fallback_warning") or "").strip()
+    if warning:
+        return f"{warning}{suffix}"
+    entry = _SUMMARY_COUNTERS.get(name)
+    n = entry[0](data) if entry else None
+    if n is None:
+        return None
+    return f"{entry[1]} {n} {entry[2] if n == 1 else entry[3]}{suffix}"
 
 
 def _normalize_todo_state(value: object) -> dict | None:
@@ -142,9 +124,8 @@ def _normalize_todo_state(value: object) -> dict | None:
     except (TypeError, ValueError):
         return None
     todos = list(value["todos"])
-    # Unused TodoStore snapshot() is {todos: [], revision: 0}: attaching it on
-    # resume stamps a client watermark and blocks unversioned tool.start merges.
-    # An empty list at revision >= 1 is a real clear.
+    # Unused TodoStore snapshot() is {todos: [], revision: 0}: attaching it on resume stamps a
+    # client watermark and blocks unversioned tool.start merges. Empty at revision >= 1 is a real clear.
     if not todos and revision == 0:
         return None
     return {"todos": todos, "revision": revision}
@@ -163,18 +144,13 @@ def _session_todo_state(session: dict) -> dict | None:
     """Return the newest live/cached todo snapshot for a runtime session."""
     cached = _normalize_todo_state(session.get("todo_state"))
     live = None
-    agent = session.get("agent")
-    store = getattr(agent, "_todo_store", None)
-    snapshot = getattr(store, "snapshot", None)
+    snapshot = getattr(getattr(session.get("agent"), "_todo_store", None), "snapshot", None)
     if callable(snapshot):
         try:
             live = _normalize_todo_state(snapshot())
         except Exception:
             logger.debug("failed to read live todo state", exc_info=True)
-
-    if live is not None and (
-        cached is None or live["revision"] >= cached["revision"]
-    ):
+    if live is not None and (cached is None or live["revision"] >= cached["revision"]):
         cached = live
     if cached is not None:
         session["todo_state"] = cached
@@ -190,36 +166,27 @@ def _attach_todo_state(payload: dict, session: dict) -> dict:
 
 
 def _todo_state_from_history(history) -> dict | None:
-    """Latest todo snapshot from an already-loaded transcript, for resume paths
-    that answer before an AIAgent (and its live TodoStore) exists: the newest
-    tool result paired with an assistant ``todo`` call IS the durable snapshot."""
+    """Latest todo snapshot from a loaded transcript, for resume paths that answer before an AIAgent
+    (and its live TodoStore) exists: the newest tool result paired with an assistant ``todo`` call
+    IS the durable snapshot."""
     if not isinstance(history, list) or not history:
         return None
     try:
         from tools.todo_tool import MAX_TODO_RESULT_CHARS
 
-        todo_call_ids: set[str] = set()
-        for msg in history:
-            if not isinstance(msg, dict):
-                continue
-            for call in msg.get("tool_calls") or []:
-                if (call.get("function") or {}).get("name") in _TODO_TOOL_NAMES:
-                    cid = call.get("id")
-                    if cid:
-                        todo_call_ids.add(cid)
+        todo_call_ids = {
+            call.get("id")
+            for msg in history if isinstance(msg, dict)
+            for call in msg.get("tool_calls") or []
+            if (call.get("function") or {}).get("name") in _TODO_TOOL_NAMES and call.get("id")
+        }
         if not todo_call_ids:
             return None
         for msg in reversed(history):
-            if not isinstance(msg, dict) or msg.get("role") != "tool":
-                continue
-            if msg.get("tool_call_id") not in todo_call_ids:
+            if not isinstance(msg, dict) or msg.get("role") != "tool" or msg.get("tool_call_id") not in todo_call_ids:
                 continue
             content = msg.get("content", "")
-            if (
-                not isinstance(content, str)
-                or len(content) > MAX_TODO_RESULT_CHARS
-                or '"todos"' not in content
-            ):
+            if not isinstance(content, str) or len(content) > MAX_TODO_RESULT_CHARS or '"todos"' not in content:
                 continue
             try:
                 return _normalize_todo_state(json.loads(content))
@@ -234,25 +201,17 @@ def _todo_state_from_history(history) -> dict | None:
 def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
     session = _sessions.get(sid)
     if session is not None:
-        try:
+        with contextlib.suppress(Exception):
             from agent.display import capture_local_edit_snapshot
 
             snapshot = capture_local_edit_snapshot(name, args)
             if snapshot is not None:
                 session.setdefault("edit_snapshots", {})[tool_call_id] = snapshot
-        except Exception:
-            pass
         session.setdefault("tool_started_at", {})[tool_call_id] = time.time()
     if _tool_progress_enabled(sid) or _tool_lifecycle_required_for_ui(name):
-        payload: dict[str, object] = {
-            "tool_id": tool_call_id,
-            "name": name,
-            "context": _tool_ctx(name, args),
-        }
-        # Full args here (not just the 80-char `context` preview) so the desktop's
-        # expanded tool row is complete while the tool runs; tool.complete ships
-        # them again. args.todos may be a partial merge — tool.complete is the
-        # source of truth for todos.
+        payload: dict[str, object] = {"tool_id": tool_call_id, "name": name, "context": _tool_ctx(name, args)}
+        # Full args (not just the 80-char `context` preview) so the desktop's expanded tool row is
+        # complete while the tool runs. args.todos may be a partial merge — tool.complete is the truth.
         if args:
             payload["args"] = args
         if _session_verbose(sid):
@@ -265,8 +224,7 @@ def _on_tool_start(sid: str, tool_call_id: str, name: str, args: dict):
 def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result: str):
     payload = {"tool_id": tool_call_id, "name": name, "args": args}
     session = _sessions.get(sid)
-    snapshot = None
-    started_at = None
+    snapshot = started_at = None
     if session is not None:
         snapshot = session.setdefault("edit_snapshots", {}).pop(tool_call_id, None)
         started_at = session.setdefault("tool_started_at", {}).pop(tool_call_id, None)
@@ -291,20 +249,12 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
             payload.update(todo_state)
             if session is not None:
                 _cache_todo_state(session, todo_state)
-    try:
+    with contextlib.suppress(Exception):
         from agent.display import render_edit_diff_with_delta
 
         rendered: list[str] = []
-        if render_edit_diff_with_delta(
-            name,
-            result,
-            function_args=args,
-            snapshot=snapshot,
-            print_fn=rendered.append,
-        ):
+        if render_edit_diff_with_delta(name, result, function_args=args, snapshot=snapshot, print_fn=rendered.append):
             payload["inline_diff"] = "\n".join(rendered)
-    except Exception:
-        pass
     if (
         _tool_progress_enabled(sid)
         or payload.get("inline_diff")
@@ -312,17 +262,16 @@ def _on_tool_complete(sid: str, tool_call_id: str, name: str, args: dict, result
         or name in _TODO_TOOL_NAMES
     ):
         _emit("tool.complete", sid, payload)
-    # Task state is application data, not tool-progress chrome: a dedicated
-    # full-snapshot event lets every client reconcile without parsing tool args.
+    # Task state is application data, not tool-progress chrome: a dedicated full-snapshot event
+    # lets every client reconcile without parsing tool args.
     if todo_state is not None:
         _emit("todo.updated", sid, todo_state)
 
 
 # ── _on_tool_progress dispatch ─────────────────────────────────────────────
-# Each handler takes (sid, name, preview, kw). `tool.started` is dropped on
-# purpose: _on_tool_start already emits the authoritative tool.start with the
-# stable id and args; an id-less duplicate row makes the desktop live view
-# diverge from hydrated history.
+# Each handler takes (sid, name, preview, kw). `tool.started` is dropped on purpose: _on_tool_start
+# already emits the authoritative tool.start with the stable id and args; an id-less duplicate row
+# makes the desktop live view diverge from hydrated history.
 
 
 def _progress_output_risk(sid, name, preview, kw):
@@ -345,12 +294,9 @@ def _progress_reasoning(sid, name, preview, kw):
 
 
 def _progress_moa_reference(sid, name, preview, kw):
-    # MoA reference-model output, rendered as a labelled block before the
-    # aggregator's response. `name` is the slot label, `preview` the text.
-    ref_payload: dict[str, object] = {
-        "label": str(name),
-        "text": str(preview or ""),
-    }
+    # MoA reference-model output, rendered as a labelled block before the aggregator's response.
+    # `name` is the slot label, `preview` the text.
+    ref_payload: dict[str, object] = {"label": str(name), "text": str(preview or "")}
     if kw.get("moa_index") is not None:
         ref_payload["index"] = kw.get("moa_index")
     if kw.get("moa_count") is not None:
@@ -363,8 +309,7 @@ def _progress_moa_aggregating(sid, name, preview, kw):
 
 
 def _progress_moa_progress(sid, name, preview, kw):
-    # Drives the status-bar `MOA: 2/3 refs done`; both counters required so the
-    # client renders deterministically.
+    # Drives the status-bar `MOA: 2/3 refs done`; both counters required for deterministic rendering.
     refs_done = kw.get("moa_refs_done")
     refs_total = kw.get("moa_refs_total")
     if refs_done is None or refs_total is None:
@@ -380,74 +325,69 @@ def _progress_moa_phase(sid, name, preview, kw):
     if not phase:
         return
     phase_payload: dict[str, object] = {"phase": str(phase)}
-    refs_done = kw.get("moa_refs_done")
-    refs_total = kw.get("moa_refs_total")
-    if refs_done is not None:
-        phase_payload["refs_done"] = int(refs_done)
-    if refs_total is not None:
-        phase_payload["refs_total"] = int(refs_total)
+    for key, out in (("moa_refs_done", "refs_done"), ("moa_refs_total", "refs_total")):
+        if kw.get(key) is not None:
+            phase_payload[out] = int(kw[key])
     if name:
         phase_payload["aggregator"] = str(name)
     _emit("moa.phase", sid, phase_payload)
 
 
-# Per-branch rollups emitted on subagent.complete.
-_SUBAGENT_INT_FIELDS = ("input_tokens", "output_tokens", "reasoning_tokens", "api_calls")
+def _not_none(v):
+    return v is not None
+
+
+def _str_list(v):
+    return [str(x) for x in v]
+
+
+def _int_or_skip(v):
+    # Per-branch rollups tolerate junk from older emitters: unparsable -> field omitted.
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Optional subagent.* payload fields in WIRE ORDER: (source key, present-when, coerce). Identity
+# fields are all optional: older emitters omit them and the TUI spawn tree falls back to flat
+# rendering. `tool_name`/`text` are fed from the positional name/preview.
+_SUBAGENT_FIELDS = (
+    ("subagent_id", bool, str), ("parent_id", bool, str), ("child_session_id", bool, str),
+    ("delegation_id", bool, str), ("depth", _not_none, int), ("model", bool, str),
+    ("tool_count", _not_none, int), ("toolsets", bool, _str_list),
+    ("input_tokens", _not_none, _int_or_skip), ("output_tokens", _not_none, _int_or_skip),
+    ("reasoning_tokens", _not_none, _int_or_skip), ("api_calls", _not_none, _int_or_skip),
+    ("files_read", bool, _str_list), ("files_written", bool, _str_list),
+    ("output_tail", bool, list),  # list of dicts
+    ("tool_name", bool, str), ("text", bool, str), ("status", bool, str), ("summary", bool, str),
+    ("duration_seconds", _not_none, float),
+)
 
 
 def _progress_subagent(sid, name, preview, kw, event_type):
-    # Identity fields are all optional: older emitters omit them and the TUI
-    # spawn tree falls back to flat rendering.
     payload = {
         "goal": str(kw.get("goal") or ""), "task_count": int(kw.get("task_count") or 1),
         "task_index": int(kw.get("task_index") or 0),
     }
-    for key in ("subagent_id", "parent_id", "child_session_id", "delegation_id"):
-        if kw.get(key):
-            payload[key] = str(kw[key])
-    if kw.get("depth") is not None:
-        payload["depth"] = int(kw["depth"])
-    if kw.get("model"):
-        payload["model"] = str(kw["model"])
-    if kw.get("tool_count") is not None:
-        payload["tool_count"] = int(kw["tool_count"])
-    if kw.get("toolsets"):
-        payload["toolsets"] = [str(t) for t in kw["toolsets"]]
-    for int_key in _SUBAGENT_INT_FIELDS:
-        val = kw.get(int_key)
-        if val is not None:
-            try:
-                payload[int_key] = int(val)
-            except (TypeError, ValueError):
-                pass
-    for key in ("files_read", "files_written"):
-        if kw.get(key):
-            payload[key] = [str(p) for p in kw[key]]
-    if kw.get("output_tail"):
-        payload["output_tail"] = list(kw["output_tail"])  # list of dicts
-    if name:
-        payload["tool_name"] = str(name)
-    if preview:
-        payload["text"] = str(preview)
-    if kw.get("status"):
-        payload["status"] = str(kw["status"])
-    if kw.get("summary"):
-        payload["summary"] = str(kw["summary"])
-    if kw.get("duration_seconds") is not None:
-        payload["duration_seconds"] = float(kw["duration_seconds"])
+    source = {**kw, "tool_name": name, "text": preview}
+    for key, present, coerce in _SUBAGENT_FIELDS:
+        if present(source.get(key)):
+            val = coerce(source[key])
+            if val is not None:
+                payload[key] = val
     if preview and event_type == "subagent.tool":
         payload["tool_preview"] = str(preview)
         payload["text"] = str(preview)
-    # subagent.text is the child's per-token reply, relayed solely to feed a
-    # watch window's live mirror (keyed off the child sid); on the parent it's
-    # hundreds of ignored frames, so skip that emit.
+    # subagent.text is the child's per-token reply, relayed solely to feed a watch window's live
+    # mirror (keyed off the child sid); on the parent it's hundreds of ignored frames, so skip it.
     if event_type != "subagent.text":
         _emit(event_type, sid, payload)
     _mirror_subagent_to_child(event_type, payload)
 
 
-# event_type -> (handler, requires) where `requires` names the arg that must be
-# truthy for the row to be emitted at all ("name" / "preview" / None).
+# event_type -> (handler, requires) where `requires` names the arg that must be truthy for the
+# row to be emitted at all ("name" / "preview" / None).
 _PROGRESS_HANDLERS = {
     "tool.output_risk": (_progress_output_risk, "name"),
     "reasoning.available": (_progress_reasoning, "preview"),
@@ -458,12 +398,8 @@ _PROGRESS_HANDLERS = {
 
 
 def _on_tool_progress(
-    sid: str,
-    event_type: str,
-    name: str | None = None,
-    preview: str | None = None,
-    _args: dict | None = None,
-    **_kwargs,
+    sid: str, event_type: str, name: str | None = None, preview: str | None = None,
+    _args: dict | None = None, **_kwargs,
 ):
     if not _tool_progress_enabled(sid):
         return
