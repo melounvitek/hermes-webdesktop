@@ -1,11 +1,7 @@
-"""Fresh-process recovery after the update's in-process restart phase aborts.
-
-``hermes update`` performs its fleet restart in the interpreter that started before ``git pull``.
-
-It is deliberately a separate owner from ``update_cmd``: the abort path has its own vocabulary
-(``verified`` / ``relaunch_attempted`` / ``failed``, serve units, survivors) and its own fail-closed
-contract, and the update monolith must not grow another authority surface (review on #96235).
-"""
+"""Fresh-process recovery after the update's in-process restart phase aborts (the fleet restart
+runs in the interpreter that started before ``git pull``). Deliberately a separate owner from
+``update_cmd``: its own vocabulary (``verified`` / ``relaunch_attempted`` / ``failed``, serve units,
+survivors) and its own fail-closed contract."""
 
 from __future__ import annotations
 
@@ -25,17 +21,11 @@ def _serve_unit_recovery_available() -> bool:
 
 
 def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
-    """Pre-update serve/dashboard runtimes that are STILL the same process.
-
-    Identity is the process incarnation ``(pid, create_time)``, never the PID alone.
-    ``ledger_entries()`` re-verifies that pair on every read and prunes anything that is gone, so a
-    live entry is a real process — but the numeric PID can be reused, and a serve that was restarted
-    correctly can come back on the same number.
-
-    Anything still here after the recovery pass is a live runtime on the pre-update code generation,
-    which is precisely the unsafe state #92145 reports. Fail closed on missing evidence: an
-    unreadable ledger, or an incarnation neither side can produce, counts the runtime as surviving.
-    """
+    """Pre-update serve/dashboard runtimes that are STILL the same process — i.e. live on the
+    pre-update code generation. Identity is the incarnation ``(pid, create_time)``, never the PID
+    alone: ``ledger_entries()`` prunes dead entries, but a correctly restarted serve can come back
+    on the same number. Fail closed on missing evidence (unreadable ledger, no incarnation on either
+    side): the runtime counts as surviving."""
     planned: dict[int, dict] = {}
     try:
         for runtime in getattr(plan, "runtimes", ()) or ():
@@ -93,11 +83,8 @@ def _without_incarnation(row: dict) -> dict:
 
 
 def _qualified_serve_skips(skip_units) -> list[dict]:
-    """Scope-qualify the units the aborted phase already settled.
-
-    ``restarted_scoped_units`` records ``<scope>/<unit>`` because ``hermes-serve.service`` can exist
-    in BOTH the user and the system manager, and those are two different processes.
-    """
+    """Scope-qualify the units the aborted phase already settled: ``<scope>/<unit>`` because
+    ``hermes-serve.service`` can exist in BOTH the user and system manager (two processes)."""
     rows: list[dict] = []
     for entry in sorted(skip_units or ()):
         scope, sep, unit = str(entry).partition("/")
@@ -114,13 +101,8 @@ def _recover_gateway_restart_after_abort(
     gateway_mode: bool,
     skip_profiles: set[str] | None = None,
     skip_units: set[str] | None = None) -> dict[str, list]:
-    """Retry supervised gateway restarts from a clean Python process.
-
-    ``hermes update`` normally performs the fleet restart in the interpreter that started before
-    ``git pull``.
-
-    Only profiles classified as supervisor-owned by the pre-update inventory are handed off.
-    """
+    """Retry supervised gateway restarts from a clean Python process (the in-process restart ran
+    in the pre-``git pull`` interpreter). Only inventory-classified supervisor-owned profiles."""
     from hermes_cli.update_cmd import _gateway_recovery_partition
     candidates, skipped = _gateway_recovery_partition(plan, skip_profiles=skip_profiles)
     profiles = sorted(candidates)
@@ -148,11 +130,9 @@ def _recover_gateway_restart_after_abort(
     for marker in ("_HERMES_GATEWAY", "HERMES_GATEWAY", "HERMES_GATEWAY_MODE"):
         env.pop(marker, None)
 
-    # A gateway-triggered update may run inside the gateway's systemd cgroup.
-    # Put the recovery process in a transient user scope before it asks systemd
-    # to restart that gateway, otherwise KillMode can terminate the recovery
-    # process together with the old service. If systemd-run is unavailable,
-    # fail closed rather than pretending the in-cgroup child is independent.
+    # A gateway-triggered update may run inside the gateway's systemd cgroup: put the recovery in a
+    # transient user scope or KillMode terminates it with the old service. No systemd-run -> fail
+    # closed rather than pretend the in-cgroup child is independent.
     if gateway_mode and sys.platform == "linux":
         systemd_run = shutil.which("systemd-run")
         if not systemd_run:
@@ -173,9 +153,8 @@ def _recover_gateway_restart_after_abort(
         "errors": "replace",
         "check": False,
         "env": env,
-        # Gateway profiles run sequentially at up to 90s each; the serve pass
-        # adds its own restart + settle budget on top, so give the child room
-        # for both rather than killing a recovery that was working.
+        # Gateway profiles run sequentially at up to 90s each, plus the serve pass's own
+        # restart + settle budget — don't kill a recovery that was working.
         "timeout": max(180, 30 + 90 * len(profiles) + (150 if recover_serve else 0))}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
@@ -214,8 +193,7 @@ def _recover_gateway_restart_after_abort(
         serve_units = {
             "verified": sorted(raw_serve["verified"]), "failed": sorted(raw_serve["failed"])}
     elif recover_serve:
-        # An unreadable serve block cannot be read as "nothing to do": the
-        # units it describes are exactly the ones that host tui_gateway and
+        # An unreadable serve block is not "nothing to do": those units host tui_gateway and
         # may still be serving the pre-update generation.
         logger.warning("Fresh recovery returned an invalid serve-unit result")
         serve_units = {"verified": [], "failed": ["<unreadable>"]}
@@ -245,13 +223,10 @@ def _recover_gateway_restart_after_abort(
 
 
 def _warn_stale_serve_runtimes(rows) -> None:
-    """Name the serve/dashboard processes that survived on pre-update code.
-
-    ``hermes serve`` hosts ``tui_gateway.server``; if its unit was never restarted it keeps the
-    pre-pull ``sys.modules`` graph, every chat turn fails with an ``ImportError`` for a symbol
-    that imports fine on disk, and no gateway row reveals the culprit. Print the PIDs and the
-    exact command that fixes it.
-    """
+    """Name the serve/dashboard processes still on pre-update code: ``hermes serve`` hosts
+    ``tui_gateway.server``, and an un-restarted unit keeps the pre-pull ``sys.modules`` graph so
+    every chat turn fails with an ``ImportError`` no gateway row explains. Print PIDs + the fixing
+    command."""
     if not rows:
         return
     print(
@@ -271,13 +246,9 @@ def _warn_stale_serve_runtimes(rows) -> None:
 def _abort_recovery_is_complete(
     *, planned_gateway_profiles, covered_gateway_profiles, recovery_result, stale_runtime_rows
 ) -> bool:
-    """May a fresh-process recovery clear the incomplete flag?
-
-    Only when EVERY inventoried runtime family is accounted for.
-
-    ``planned_gateway_profiles`` being empty is deliberately NOT completeness: with no gateway leg
-    to prove, the caller's own fail-closed contract (``_restart_phase_failure_is_incomplete``) plus
-    the stale-runtime rows decide the outcome.
+    """May a fresh-process recovery clear the incomplete flag? Only when EVERY inventoried runtime
+    family is accounted for. Empty ``planned_gateway_profiles`` is deliberately NOT completeness:
+    with no gateway leg to prove, ``_restart_phase_failure_is_incomplete`` + the stale rows decide.
     """
     if not planned_gateway_profiles:
         return False

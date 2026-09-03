@@ -1,8 +1,6 @@
 """Post-``hermes update`` config-schema migration for the active profile and every sibling.
-
-Split out of ``update_cmd.py``; names are re-imported there so ``hermes_cli.update_cmd.<name>``
-still resolves/monkeypatches. Origin helpers are imported lazily per function (no cycle; patches hold).
-"""
+Names are re-imported by ``update_cmd`` (``hermes_cli.update_cmd.<name>`` resolves/monkeypatches);
+origin helpers are imported lazily."""
 
 import logging
 import sys
@@ -15,14 +13,10 @@ logger = logging.getLogger("hermes_cli.update_cmd")
 
 
 def _reload_config_modules() -> None:
-    """Force-reload modules from disk after git pull.
-
-    ``hermes update`` runs in the PRE-pull process, so cached ``config_defaults`` /
-    ``config`` / ``config_migrations`` hold OLD code and ``check_config_version()``
-    reports "up to date" despite a newer pulled version with a migration to run.
-    Also reloads ``_subprocess_compat`` / ``dashboard_procs`` so the later dashboard
-    cleanup sees symbols the update added instead of dying with ImportError.
-    """
+    """Force-reload config modules after git pull: the updater is the PRE-pull process, so the
+    cached modules hold OLD code and ``check_config_version()`` would report "up to date" despite a
+    pulled migration. ``_subprocess_compat`` / ``dashboard_procs`` reload too so the later dashboard
+    cleanup sees symbols the update added."""
     import importlib
     importlib.invalidate_caches()
     for mod_name in (
@@ -40,7 +34,8 @@ def _reload_config_modules() -> None:
 
 
 def _run_config_check_fresh() -> tuple:
-    """Return ``(current_ver, latest_ver)`` using freshly-reloaded modules (see ``_reload_config_modules``)."""
+    """Return ``(current_ver, latest_ver)`` using freshly-reloaded modules (see
+    ``_reload_config_modules``)."""
     from hermes_cli.update_cmd import _reload_config_modules
     _reload_config_modules()
     from hermes_cli.config import check_config_version
@@ -48,7 +43,8 @@ def _run_config_check_fresh() -> tuple:
 
 
 def _run_migrate_config_fresh(*, interactive: bool = False, quiet: bool = False) -> dict:
-    """Run config migration using freshly-reloaded modules (see ``_reload_config_modules``); returns results dict."""
+    """Run config migration using freshly-reloaded modules (see ``_reload_config_modules``); returns
+    results dict."""
     from hermes_cli.update_cmd import _reload_config_modules
     _reload_config_modules()
     from hermes_cli.config import migrate_config
@@ -57,15 +53,11 @@ def _run_migrate_config_fresh(*, interactive: bool = False, quiet: bool = False)
 
 def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     """Migrate every SIBLING profile's config.yaml (the shared checkout serves all profiles;
-    migrating only the active one left siblings on configs the new code couldn't read).
-
-    Per sibling home (active one skipped — caller already did it): scope reads/writes via the
-    context-local HERMES_HOME override (thread-safe — never ``os.environ``) and run the
-    NON-INTERACTIVE quiet migration; prompt-requiring settings wait for that profile's own
-    interactive session. Returns ``[(profile_name, from_version, to_version), ...]`` for
-    profiles actually migrated. Never raises; a failing profile is skipped (its startup
-    migration remains the fallback).
-    """
+    siblings were left on configs the new code couldn't read). Per sibling (active skipped): scope
+    via the context-local HERMES_HOME override (never ``os.environ``) and run the NON-INTERACTIVE
+    quiet migration — prompt-requiring settings wait for that profile's own session. Returns
+    ``[(name, from_version, to_version), ...]``; never raises (a failing profile falls back to its
+    startup migration)."""
     from hermes_cli.update_cmd import _run_config_check_fresh, _run_migrate_config_fresh
     migrated: list[tuple[str, int, int]] = []
     with _best_effort('Sibling profile enumeration failed: %s'):
@@ -165,12 +157,9 @@ def _check_and_apply_config_migration(
     assume_yes: bool = False,
     gateway_mode: bool = False,
     pre_update_snapshot_id: str | None = None) -> None:
-    """Check/apply config migrations on an update completion path.
-
-    Must use freshly-reloaded modules (see ``_reload_config_modules``) and run on EVERY
-    completion path (post-pull, venv-repair retry, Node-deps repair on ``commit_count == 0``)
-    so an interrupted update that already pulled code doesn't strand an old config version.
-    """
+    """Check/apply config migrations with freshly-reloaded modules. Runs on EVERY completion path
+    (post-pull, venv-repair, Node-deps repair on ``commit_count == 0``) so an interrupted update
+    that already pulled code doesn't strand an old config version."""
     from hermes_cli.update_cmd import (
         _gateway_prompt,
         _migrate_sibling_profile_configs,

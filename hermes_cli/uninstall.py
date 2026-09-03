@@ -52,10 +52,8 @@ def _confirm_yes(text: str) -> bool:
 
 
 def _remove_each(candidates, remove) -> list:
-    """Run ``remove(path)`` for each candidate; collect those it reports removed (truthy).
-
-    Failures are downgraded to the shared ``Could not remove <path>: <err>`` warning.
-    """
+    """Run ``remove(path)`` per candidate, collecting the ones it reports removed; failures become
+    the shared ``Could not remove <path>: <err>`` warning."""
     removed = []
     for path in candidates:
         try:
@@ -75,7 +73,8 @@ _SHELL_RC_NAMES = (".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile"
 
 
 def _strip_hermes_path_lines(content: str) -> str:
-    """Drop the ``# Hermes Agent`` marker (+ its PATH line) and any hermes PATH line; squash blank runs."""
+    """Drop the ``# Hermes Agent`` marker (+ its PATH line) and any hermes PATH line; squash blank
+    runs."""
     new_lines = []
     skip_next = False
     for line in content.split('\n'):
@@ -105,13 +104,10 @@ def remove_path_from_shell_configs():
             new_content = _strip_hermes_path_lines(content)
             if new_content != content:
                 from utils import atomic_write_text
-                # This is the user's own shell rc, not a Hermes-owned file, and nothing here backs
-                # it up. A bare write_text() truncates it before the new content lands, so a crash
-                # or SIGINT mid-write leaves an empty/truncated ~/.zshrc -- and the enclosing
-                # `except Exception` downgrades that to a warning, so the next login just starts a
-                # bare shell. atomic_replace also resolves a symlinked rc file (dotfiles repos keep
-                # the symlink). preserve_mode keeps the rc's permission bits (normally 0644) and
-                # owner (sudo-run uninstalls) instead of mkstemp's 0600/root.
+                # The user's own rc, never backed up: a bare write_text() truncates before the new
+                # content lands, and a crash mid-write (downgraded to a warning below) would leave
+                # an empty ~/.zshrc. Atomic replace also follows a symlinked rc (dotfiles repos);
+                # preserve_mode keeps its 0644 bits and owner (sudo-run uninstalls).
                 atomic_write_text(config_path, new_content, preserve_mode=True)
                 removed_from.append(config_path)
         except Exception as e:
@@ -148,15 +144,9 @@ def _node_symlink_candidate_dirs() -> "list[Path]":
 
 
 def remove_node_symlinks(hermes_home: Path) -> list:
-    """Remove the node/npm/npx symlinks the installer placed on PATH.
-
-    - ``/usr/local/bin/`` on root FHS installs (Linux, uid 0) - ``$PREFIX/bin/`` on Termux -
-    ``~/.local/bin/`` otherwise (the common non-root case)
-
-    We check all candidate directories so that uninstall works regardless of how the install was
-    done (e.g. a root FHS install that placed links in ``/usr/local/bin``, or an older install that
-    used ``~/.local/bin`` before the FHS fix).
-    """
+    """Remove the node/npm/npx symlinks the installer placed on PATH. Every candidate dir is
+    checked (``/usr/local/bin`` root FHS, ``$PREFIX/bin`` Termux, ``~/.local/bin`` otherwise / older
+    installs) so uninstall works regardless of how the install was done."""
     node_dir = (hermes_home / "node").resolve()
 
     def _unlink_ours(link: Path) -> bool:
@@ -176,12 +166,8 @@ def remove_node_symlinks(hermes_home: Path) -> list:
 
 
 def uninstall_gateway_service():
-    """Stop/uninstall the gateway service on every platform and kill standalone gateways.
-
-    Delegates to the gateway module: systemd user+system units (Linux), launchd (macOS),
-    Scheduled Task + Startup folder (Windows), plus standalone ``hermes gateway run`` processes.
-    Termux/Android has no systemd, so only the process kill applies there.
-    """
+    """Kill standalone gateways, then remove the per-platform service (systemd user+system /
+    launchd / Scheduled Task + Startup folder). Termux/Android has neither: only the kill applies."""
     import platform
     stopped_something = False
 
@@ -249,12 +235,8 @@ def _remove_launchd_gateway() -> bool:
 
 
 def _remove_windows_gateway() -> bool:
-    """Windows: uninstall Scheduled Task + Startup-folder entry.
-
-    The gateway_windows module already knows how to locate and remove both code paths (schtasks
-    /Delete + .cmd unlink) and how to stop any running detached pythonw gateway process. We call
-    into it so the uninstall logic stays in exactly one place.
-    """
+    """Windows: uninstall Scheduled Task + Startup-folder entry via ``gateway_windows`` (it owns
+    schtasks /Delete, the .cmd unlink and stopping the detached pythonw gateway)."""
     from hermes_cli import gateway_windows
     if not any(probe() for probe in (
         gateway_windows.is_installed, gateway_windows.is_task_registered, gateway_windows.is_startup_entry_installed,
@@ -290,12 +272,9 @@ _GATEWAY_SERVICE_REMOVERS = {
 
 
 def _hermes_path_markers(hermes_home: Path, *, include_managed_bin: bool = False) -> list[str]:
-    """Path-entry substrings that identify Hermes-owned User-PATH entries.
-
-    ``include_managed_bin`` adds the managed binary dir (``<root>\bin``, holding the hermes
-    launchers and the managed uv) — only wanted when that dir is about to be deleted (full uninstall
-    from the default root), so a keep-data uninstall leaves the still-working managed uv resolvable.
-    """
+    """Prefixes identifying Hermes-owned User-PATH entries. ``include_managed_bin`` adds
+    ``<root>\bin`` (launchers + managed uv) — only when that dir is about to be deleted (full
+    uninstall from the default root), so a keep-data uninstall keeps the working uv resolvable."""
     root = str(hermes_home).rstrip("\\/")
     # Match on prefix so sub-entries (git\cmd, git\bin, git\usr\bin, node, etc.) all get swept.
     subs = ("hermes-agent", "git", "node", "venv") + (("bin",) if include_managed_bin else ())
@@ -342,11 +321,9 @@ def remove_hermes_env_vars_windows() -> list[str]:
 
 
 def _edit_user_environment(edit, *, warn_label: str) -> list[str]:
-    """Open HKCU\\Environment read/write and run ``edit(winreg, key, removed)``.
-
-    Returns whatever ``edit`` appended to ``removed`` — even when a later registry call raised, so
-    callers report exactly what was touched. ``[]`` off-Windows (no ``winreg``).
-    """
+    """Open HKCU\\Environment read/write and run ``edit(winreg, key, removed)``. Returns what
+    ``edit`` appended to ``removed`` even if a later registry call raised (callers report exactly
+    what was touched); ``[]`` off-Windows (no ``winreg``)."""
     removed: list[str] = []
     try:
         import winreg
@@ -370,13 +347,10 @@ def remove_portable_tooling_windows(hermes_home: Path) -> list[Path]:
 
 
 def remove_windows_bin_launchers(*, windows: bool | None = None) -> list[Path]:
-    """Delete the ``hermes`` launchers install.ps1 staged in the managed ``bin`` dir.
-
-    Every uninstall mode deletes the checkout, so launchers pointing at ``<checkout>/venv``
-    would dangle and error, which reads worse than command-not-found; the managed uv is kept for
-    keep-data reinstalls. A launcher that is this process's own trampoline is locked against
-    deletion but not rename, so it is renamed aside with a non-executable suffix instead.
-    """
+    """Delete the ``hermes`` launchers install.ps1 staged in the managed ``bin`` dir: every mode
+    deletes the checkout, so a launcher pointing at ``<checkout>/venv`` would dangle (worse than
+    command-not-found); the managed uv stays for keep-data reinstalls. Our own running trampoline is
+    locked against deletion but not rename, so it is renamed aside with a non-executable suffix."""
     if windows is None:
         windows = _is_windows()
     if not windows:
@@ -431,17 +405,13 @@ def _discover_named_profiles():
 
 
 def _uninstall_profile(profile) -> None:
-    """Fully uninstall a named profile: stop its gateway, remove its alias, wipe its home.
-
-    Shells out to ``hermes -p <name> gateway stop|uninstall`` because service names and unit/
-    plist paths derive from the current HERMES_HOME and can't easily be switched in-process.
-    """
+    """Fully uninstall a named profile: stop its gateway, remove its alias, wipe its home. Shells
+    out to ``hermes -p <name> gateway stop|uninstall`` because service names / unit paths derive
+    from the current HERMES_HOME and can't be switched in-process."""
     name = profile.name
     log_info(f"Uninstalling profile '{name}'...")
 
-    # 1. Stop and remove this profile's gateway service.
-    #    Use `python -m hermes_cli.main` so we don't depend on a `hermes`
-    #    wrapper that may be half-removed mid-uninstall.
+    # 1. Gateway service, via `python -m hermes_cli.main` (the `hermes` wrapper may be half-gone).
     hermes_invocation = [sys.executable, "-m", "hermes_cli.main", "--profile", name]
     for subcmd in ("stop", "uninstall"):
         try:
@@ -467,12 +437,8 @@ def _uninstall_profile(profile) -> None:
 
 
 def run_gui_uninstall(args):
-    """GUI-only uninstall: remove the Chat GUI, leave the agent + data intact.
-
-    Mirrors ``hermes uninstall --gui``. Removes the desktop app's built artifacts, the packaged app
-    bundle (best-effort), and the Electron userData dir — nothing under ``$HERMES_HOME``
-    config/sessions/.env, and never the Python agent or its venv.
-    """
+    """``hermes uninstall --gui``: remove the desktop app's built artifacts, packaged bundle
+    (best-effort) and Electron userData — never config/sessions/.env, the agent or its venv."""
     from hermes_cli.gui_uninstall import (
         agent_is_installed, gui_install_summary, uninstall_gui)
 
@@ -520,11 +486,8 @@ def run_gui_uninstall(args):
 
 
 def run_uninstall(args):
-    """Run the uninstall process.
-
-    Full uninstall removes code and ``~/.hermes/``; keep-data removes only the code so the
-    configs, data and logs survive a reinstall.
-    """
+    """Interactive/``--yes`` uninstall: full removes code and ``~/.hermes/``; keep-data removes only
+    the code so configs, data and logs survive a reinstall."""
     project_root = get_project_root()
     hermes_home = get_hermes_home()
 
@@ -534,18 +497,13 @@ def run_uninstall(args):
             project_root=project_root, hermes_home=hermes_home, full_uninstall=full_flag)
         return
 
-    # Detect named profiles when uninstalling from the default root —
-    # offer to clean them up too instead of leaving zombie HERMES_HOMEs
-    # and systemd units behind.
+    # Named profiles (only when uninstalling from the default root) are offered for cleanup too,
+    # instead of leaving zombie HERMES_HOMEs and systemd units behind.
     is_default_profile = _is_default_hermes_home(hermes_home)
     named_profiles = _discover_named_profiles() if is_default_profile else []
 
-    # Non-interactive fast path (``--yes``): no prompts. ``--full`` selects a
-    # full wipe (code + ~/.hermes data); otherwise keep-data. Named profiles
-    # are NOT auto-removed here — that's a destructive, surprising default for
-    # an unattended run, so it stays opt-in to the interactive flow. This is
-    # the path the desktop app's detached cleanup script uses for its
-    # lite/full modes.
+    # ``--yes`` (the desktop app's detached cleanup script): no prompts; ``--full`` = full wipe.
+    # Named profiles are NOT auto-removed here — too destructive a default for an unattended run.
     if bool(getattr(args, "yes", False)):
         _perform_uninstall(
             project_root=project_root, hermes_home=hermes_home, full_uninstall=full_flag,
@@ -592,10 +550,8 @@ def run_uninstall(args):
 
     full_uninstall = (choice == "2")
 
-    # When doing a full uninstall from the default profile, also offer to
-    # remove any named profiles — stopping their gateway services, unlinking
-    # their alias wrappers, and wiping their HERMES_HOME dirs. Otherwise
-    # those leave zombie services and data behind.
+    # Full uninstall from the default profile: offer to remove named profiles too (gateway
+    # services, alias wrappers, HERMES_HOME dirs) — otherwise they leave zombie services behind.
     remove_profiles = False
     n_profiles = len(named_profiles)
     profile_names = ", ".join(p.name for p in named_profiles)
@@ -652,7 +608,8 @@ def _print_uninstall_dry_run(*, project_root: Path, hermes_home: Path, full_unin
 
 
 def _remove_step(label: str, remove, success_fmt: str, none_msg: str) -> None:
-    """Announce ``label``, run ``remove()``, then log one success line per removed item (or ``none_msg``)."""
+    """Announce ``label``, run ``remove()``, then log one success line per removed item (or
+    ``none_msg``)."""
     log_info(label)
     removed = remove()
     for item in removed:
@@ -680,12 +637,9 @@ def _perform_uninstall(
     full_uninstall: bool,
     remove_profiles: bool,
     named_profiles: list) -> None:
-    """Execute the uninstall steps; shared by the interactive and ``--yes`` paths.
-
-    Order: stop gateway -> strip PATH (rc files + Windows registry) -> remove wrapper and node
-    symlinks -> remove desktop Chat GUI artifacts -> delete the checkout -> (Windows) remove
-    PortableGit/Node -> optionally wipe ``$HERMES_HOME`` and named profiles.
-    """
+    """The uninstall steps shared by the interactive and ``--yes`` paths: stop gateway -> strip PATH
+    (rc files + Windows registry) -> wrapper/launchers/node symlinks -> Chat GUI artifacts -> delete
+    the checkout -> (Windows) PortableGit/Node -> optionally ``$HERMES_HOME`` and named profiles."""
     print()
     print(color("Uninstalling...", Colors.CYAN, Colors.BOLD))
     print()
@@ -695,15 +649,12 @@ def _perform_uninstall(
     if not uninstall_gateway_service():
         log_info("No gateway service or processes found")
 
-    # 2-3b. PATH entries (POSIX rc files, then the Windows User-scope registry), wrapper script,
-    #    Windows launchers, node/npm/npx symlinks. Windows notes: hermes_home is %VAR%-expanded so
-    #    marker matching runs against fully resolved paths (install.ps1 writes literal
-    #    C:\Users\<u>\AppData\Local\hermes\git\cmd, not %LOCALAPPDATA%); the managed binary dir
-    #    (hermes\bin: launchers + managed uv) leaves the PATH only when the full wipe below is
-    #    about to delete it, so keep-data mode keeps the still-working uv resolvable; the launchers
-    #    themselves always go — both modes delete the checkout, so a surviving launcher would
-    #    dangle and error, worse than command-not-found. Symlinks are removed only when they still
-    #    point into this Hermes home's node dir (never clobber nvm / user-managed Node).
+    # 2-3b. PATH entries (rc files, then the Windows User registry), wrapper, Windows launchers,
+    #    node symlinks. Windows: hermes_home is %VAR%-expanded because install.ps1 writes literal
+    #    C:\Users\<u>\AppData\Local\hermes\git\cmd; hermes\bin (launchers + managed uv) leaves the
+    #    PATH only when the full wipe below deletes it (keep-data keeps uv resolvable), while the
+    #    launchers themselves always go (see remove_windows_bin_launchers). Symlinks go only when
+    #    they still point into this home's node dir (never clobber nvm / user-managed Node).
     windows = _is_windows()
     sweep_managed_bin = windows and full_uninstall and _is_default_hermes_home(hermes_home)
     for on_this_platform, label, remove, success_fmt, none_msg in (
@@ -724,11 +675,9 @@ def _perform_uninstall(
         if on_this_platform:
             _remove_step(label, remove, success_fmt, none_msg)
 
-    # 3c. Desktop Chat GUI artifacts (built renderer/release, node_modules, packaged app bundle,
-    #     Electron userData). Both CLI flows remove the agent code, so the GUI — just another
-    #     consumer of the same checkout — goes with it. uninstall_gui() never touches config /
-    #     sessions / .env, so it's safe in keep-data mode; the packaged app + Electron userData
-    #     live OUTSIDE HERMES_HOME, so the full-uninstall rmtree below would not reach them.
+    # 3c. Desktop Chat GUI artifacts: both flows remove the agent code, so the GUI goes with it.
+    #     uninstall_gui() never touches config/sessions/.env (safe in keep-data mode); the packaged
+    #     app + Electron userData live OUTSIDE HERMES_HOME, so the rmtree below wouldn't reach them.
     log_info("Removing desktop Chat GUI artifacts...")
     try:
         from hermes_cli.gui_uninstall import uninstall_gui
@@ -741,8 +690,8 @@ def _perform_uninstall(
     log_info("Removing installation directory...")
     _rmtree_step(project_root)
 
-    # 4b. Windows-only installer artifacts that are NOT user data (PortableGit, bundled Node,
-    #     gateway-service dir): install tooling under HERMES_HOME, safe to remove in keep-data mode.
+    # 4b. Windows installer tooling under HERMES_HOME (PortableGit, Node, gateway-service) is not
+    #     user data: safe to remove in keep-data mode too.
     if windows:
         _remove_step(
             "Removing Windows installer artifacts (PortableGit, Node, gateway-service)...",
@@ -751,9 +700,8 @@ def _perform_uninstall(
 
     # 5. Optionally remove ~/.hermes/ data directory (and named profiles)
     if full_uninstall:
-        # 5a. Stop and remove each named profile's gateway service and alias wrapper. The profile
-        #     HERMES_HOME dirs live under ``<default>/profiles/<name>/`` and are swept by the rmtree
-        #     below, but services + alias scripts live OUTSIDE the default root.
+        # 5a. Named profiles' homes live under <default>/profiles/ (swept by the rmtree below),
+        #     but their services + alias scripts live OUTSIDE the default root.
         if remove_profiles:
             for prof in named_profiles:
                 _uninstall_profile(prof)
@@ -804,12 +752,9 @@ class _UninstallArgs:
 
 
 def main(argv=None) -> int:
-    """Module entrypoint: ``python -m hermes_cli.uninstall --mode <gui|lite|full>``.
-
-    This module imports only stdlib + ``hermes_constants`` + ``hermes_cli.colors`` (and lazily
-    ``hermes_cli.gui_uninstall``), so it runs fine under a bare system Python with no site-packages
-    from the venv.
-    """
+    """``python -m hermes_cli.uninstall --mode <gui|lite|full>``. Imports only stdlib +
+    ``hermes_constants`` + ``hermes_cli.colors`` (lazily ``gui_uninstall``), so it runs under a
+    bare system Python without the venv."""
     import argparse
     parser = argparse.ArgumentParser(prog="python -m hermes_cli.uninstall")
     parser.add_argument(

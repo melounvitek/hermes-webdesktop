@@ -1,10 +1,9 @@
 """Hermes update pipeline: dispatchers (``_cmd_update_impl``/``_cmd_update_check``) + git plumbing.
 
 Each concern lives in ``update_cmd_<concern>.py`` and is re-imported here so
-``hermes_cli.update_cmd.<name>`` keeps resolving (and stays monkeypatchable).
-``_m()`` is the lazy ``hermes_cli.main`` handle kept for main-side test patches.
-Imports are one-way: main -> update_cmd -> update_cmd_* (never the reverse at
-import time; ``_m()`` resolves at call time, so no cycle).
+``hermes_cli.update_cmd.<name>`` keeps resolving (and stays monkeypatchable). Imports are
+one-way: main -> update_cmd -> update_cmd_*; ``_m()`` resolves ``hermes_cli.main`` at call
+time (no cycle, main-side test patches stay effective).
 """
 
 import logging
@@ -18,18 +17,15 @@ import time as _time
 from dataclasses import dataclass
 from pathlib import Path
 
-# Re-exported: update_cmd_* modules import lazily from here so patches stick.
-from hermes_cli.config import get_hermes_home  # noqa: F401
+from hermes_cli.config import get_hermes_home  # noqa: F401  (re-exported; patched via update_cmd)
 from hermes_cli.update_cmd_common import _best_effort
 from hermes_constants import get_default_hermes_root, venv_python_path
 
-# Re-exported: main and the split modules address these via update_cmd (tests patch here).
+# Re-exports: every split-module name stays reachable (and monkeypatchable) as update_cmd.<name>.
 from hermes_cli.update_abort_recovery import (  # noqa: F401
     _abort_recovery_is_complete, _qualified_serve_skips, _recover_gateway_restart_after_abort,
     _serve_unit_recovery_available, _surviving_pre_update_serve_runtimes,
     _warn_stale_serve_runtimes)
-# Re-exports from the split modules: every moved name stays reachable (and monkeypatchable)
-# as ``hermes_cli.update_cmd.<name>``; the split modules import origin-internal names lazily.
 from hermes_cli.update_cmd_windows import (  # noqa: F401
     _HOLDER_VALUE_FLAGS_FALLBACK, _clear_windows_venv_holders_or_exit,
     _cold_start_windows_gateway_after_update, _desktop_owns_gateway_lifecycle,
@@ -131,17 +127,17 @@ def _updates_config() -> dict:
 
 
 def _no_prompt_git_kwargs() -> dict:
-    """``subprocess.run`` kwargs for network git calls: GitHub answers anonymous fetches with
-    401 during outages and git would then block forever on ``Username for ...``; disable only
-    the *prompt* (credential helpers/askpass still run) so it fails fast into ``_classify_fetch_failure``."""
+    """``subprocess.run`` kwargs for network git: GitHub answers anonymous fetches with 401 during
+    outages and git would block forever on ``Username for ...``; disable only the *prompt*
+    (credential helpers/askpass still run) so it fails fast into ``_classify_fetch_failure``."""
     env = dict(os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GCM_INTERACTIVE"] = "Never"
     return {"stdin": subprocess.DEVNULL, "env": env}
 
 
-# CLI-startup imports (+ web_server.py, the desktop backend a fresh Windows install
-# launches) that must parse post-update; the syntax guard auto-rolls-back on failure.
+# CLI-startup files (+ web_server.py, launched by a fresh Windows Desktop install) that must
+# parse post-update; the syntax guard rolls back when one doesn't.
 _UPDATE_CRITICAL_FILES = (
     "hermes_cli/main.py", "hermes_cli/config.py", "hermes_cli/__init__.py",
     "hermes_cli/web_server.py", "cli.py", "run_agent.py", "model_tools.py", "toolsets.py",
@@ -195,12 +191,9 @@ def _validate_python_files_syntax(
 
 
 def _validate_critical_files_syntax(root) -> tuple[bool, str | None, str | None]:
-    """Compile ``_UPDATE_CRITICAL_FILES`` -> ``(ok, failing_path, error_message)``.
-
-    A syntax error there means the CLI can't bootstrap, so validate post-pull and
-    auto-roll-back. The .pyc goes to a temp dir, not ``__pycache__/``: avoids racing
-    concurrent test workers and leaving a stale pyc for a different interpreter.
-    """
+    """Compile ``_UPDATE_CRITICAL_FILES`` -> ``(ok, failing_path, error_message)``. The .pyc goes
+    to a temp dir, not ``__pycache__/`` (no race with test workers, no stale pyc for another
+    interpreter)."""
     return _validate_python_files_syntax(root, _UPDATE_CRITICAL_FILES)
 
 
@@ -401,12 +394,9 @@ def _format_concurrent_instances_message(
 
 
 def _classify_concurrent_instance(pid: int) -> str:
-    """Classify ``pid`` as "gateway" / "non-gateway" / "unknown" (psutil can't read it).
-
-    Uses ``_is_pausable_gateway``, the same matcher as the Desktop preflight exemption and
-    venv-holder guard, so "gateway" is exactly the set the downstream pause/restart machinery
-    stops. The gate treats "unknown" as non-gateway (better block than proceed blind).
-    """
+    """Classify ``pid`` as "gateway" / "non-gateway" / "unknown" (psutil can't read it). Uses
+    ``_is_pausable_gateway`` (same matcher as the Desktop preflight and venv-holder guard) so
+    "gateway" is exactly what the pause/restart machinery stops; "unknown" gates as non-gateway."""
     try:
         import psutil  # noqa: PLC0415
     except Exception:
@@ -424,8 +414,8 @@ def _classify_concurrent_instance(pid: int) -> str:
 
 def _filter_non_gateway_concurrent_instances(
     matches: list[tuple[int, str]]) -> list[tuple[int, str]]:
-    """Drop gateway matches (the pause + post-update restart machinery handles them);
-    anything else (TUI, Desktop backend child, another REPL) has no pause path, so the gate aborts."""
+    """Drop gateway matches (the pause + post-update restart machinery handles them); anything else
+    (TUI, Desktop backend child, another REPL) has no pause path, so the gate aborts."""
     return [(pid, name) for pid, name in matches if _classify_concurrent_instance(pid) != "gateway"]
 
 
@@ -651,8 +641,8 @@ def _repair_current_checkout(
 
 
 def _reconcile_diverged_checkout(git_cmd, branch: str, pre_pull_sha) -> None:
-    """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on
-    the same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
+    """Fast-forward failed: merge on a custom branch (local commits survive) or reset --hard on the
+    same branch (rescue ref first when histories share no ancestor). ``sys.exit(1)`` on failure."""
     # Diverged. A custom branch (local commits atop origin/<branch>) also can't ff,
     # and reset --hard would discard that work: merge instead, stop on conflict.
     _cur_branch = (_git_run(git_cmd, ["branch", "--show-current"]).stdout or "").strip()
@@ -807,19 +797,16 @@ class _CheckoutPlan:
 def _apply_parked_branch_guard(
     git_cmd, branch, current_branch, *, switch_branch, _windows_gateway_resume
 ) -> tuple[bool, bool, "str | None"]:
-    """Decide how a checkout parked on another branch is brought to *branch*.
+    """Decide how a checkout parked on another branch is brought to *branch* (stash-switch-pull-
+    switch-back used to "update" main while the running code stayed behind).
 
-    Returns ``(parked_branch_switched, in_place_update, switch_block_reason)``; ``sys.exit(1)``
-    when the branch is dirty/unverifiable (code update SKIPPED) or the target is missing.
+    By branch contents + updates.parked_branch_strategy: fully merged -> switch back;
+    unmerged -> "switch" (default; loud "kept" notice) or "update_in_place" (merge origin/<target>
+    INTO the branch, checkout never moves; --switch-branch overrides once); dirty/unverifiable ->
+    touch nothing, warn, ``sys.exit(1)`` with the code update SKIPPED (also when the target is
+    missing). Returns ``(parked_branch_switched, in_place_update, switch_block_reason)``.
     """
     switch_block_reason = None  # only meaningful when parked_branch_switched
-    # Parked-branch guard (stash-switch-pull-switch-back used to "update" main while the
-    # running code stayed behind). By branch contents + updates.parked_branch_strategy:
-    #   fully merged  -> switch back to the target.
-    #   unmerged: N   -> "switch" (default): switch anyway with a loud "kept" notice;
-    #                    "update_in_place": merge origin/<target> INTO the branch (checkout
-    #                    never moves). --switch-branch overrides for one run.
-    #   anything else -> dirty/unverifiable/opted out: touch nothing, warn, mark SKIPPED, stop.
     parked_branch_switched = False
     in_place_update = False
     if current_branch != branch and current_branch != "HEAD":
@@ -1228,10 +1215,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
     if _m()._is_windows() and not getattr(args, "force_venv", False):
         _clear_windows_venv_holders_or_exit(args, gateway_mode, _windows_gateway_resume)
 
-    # Self-lock deferral (this process IS the venv python and can't rewrite its own mapped
-    # .pyd) deliberately does NOT run here: pre-fetch it stranded users on the OLD checkout
-    # and eager cryptography imports made every Windows update an exit-2 loop. It runs via
-    # _abort_dependency_sync_if_self_locked() right before the dependency sync instead.
+    # Self-lock deferral deliberately does NOT run here (pre-fetch it stranded users on the OLD
+    # checkout and made every Windows update an exit-2 loop); it runs right before the
+    # dependency sync via _abort_dependency_sync_if_self_locked().
 
     # After every fail-closed venv guard, before either path can remove the release tree.
     desktop_dir = _m().PROJECT_ROOT / "apps" / "desktop"
