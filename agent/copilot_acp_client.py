@@ -312,10 +312,8 @@ class CopilotACPClient:
                 creationflags=windows_hide_flags(),
             )
         except FileNotFoundError as exc:
-            raise RuntimeError(
-                f"Could not start Copilot ACP command '{self._acp_command}'. Install GitHub Copilot CLI or set "
-                "HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
-            ) from exc
+            raise RuntimeError(f"Could not start Copilot ACP command '{self._acp_command}'. Install GitHub Copilot CLI or set "
+                               "HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.") from exc
         if proc.stdin is None or proc.stdout is None:
             proc.kill()
             raise RuntimeError("Copilot ACP process did not expose stdin/stdout pipes.")
@@ -384,9 +382,7 @@ class CopilotACPClient:
                     else:
                         logger.warning("Copilot ACP does not offer model %r; using the session default.", requested_model)
                 except Exception as exc:
-                    logger.warning(
-                        "Copilot ACP model selection for %r failed; continuing with the session default: %s", requested_model, exc
-                    )
+                    logger.warning("Copilot ACP model selection for %r failed; continuing with the session default: %s", requested_model, exc)
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
             prompt = {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt_text}]}

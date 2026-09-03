@@ -60,11 +60,17 @@ _INTERRUPTED_RESPONSE_PLACEHOLDER = "[The previous response was interrupted befo
 # Cross-provider tool_calls (e.g. fallback from xAI/Anthropic) carry no Gemini thoughtSignature;
 # without this sentinel Gemini 3 thinking models reject replayed history with 400 INVALID_ARGUMENT.
 _SKIP_SIGNATURE = "skip_thought_signature_validator"
+_END = object()  # stream-exhausted marker for _advance_stream_iterator
 _TOOL_CHOICE_MODES = {"auto": "AUTO", "required": "ANY", "none": "NONE"}
 _FINISH_REASON_MAP = {
     "STOP": "stop", "MAX_TOKENS": "length", "SAFETY": "content_filter", "RECITATION": "content_filter", "OTHER": "stop",
 }
 _HTTP_ERROR_CODES = {401: "gemini_unauthorized", 429: "gemini_rate_limited", 404: "gemini_model_not_found"}
+_MISSING_KEY_ERROR = (
+    "Gemini native client requires an API key, but none was provided. Set GOOGLE_API_KEY or GEMINI_API_KEY in your "
+    "environment / ~/.hermes/.env (get one at https://aistudio.google.com/app/apikey), or run `hermes setup` to "
+    "configure the Google provider."
+)
 
 
 def bare_gemini_model_id(model: str) -> str:
@@ -613,16 +619,11 @@ class GeminiNativeClient:
         timeout: Any = None, http_client: Optional[httpx.Client] = None, **_: Any,
     ) -> None:
         if not (api_key or "").strip():
-            raise RuntimeError(
-                "Gemini native client requires an API key, but none was provided. Set GOOGLE_API_KEY or GEMINI_API_KEY in your "
-                "environment / ~/.hermes/.env (get one at https://aistudio.google.com/app/apikey), or run `hermes setup` to "
-                "configure the Google provider."
-            )
-        self.api_key = api_key
+            raise RuntimeError(_MISSING_KEY_ERROR)
+        self.api_key, self.is_closed = api_key, False
         self.base_url = (base_url or DEFAULT_GEMINI_BASE_URL).rstrip("/").removesuffix("/openai")
         self._default_headers = dict(default_headers or {})
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
-        self.is_closed = False
         self._http = http_client or httpx.Client(timeout=timeout or httpx.Timeout(connect=15.0, read=600.0, write=30.0, pool=30.0))
 
     def close(self) -> None:
@@ -636,10 +637,8 @@ class GeminiNativeClient:
 
     @staticmethod
     def _advance_stream_iterator(iterator: Iterator[_GeminiStreamChunk]) -> tuple[bool, Optional[_GeminiStreamChunk]]:
-        try:
-            return False, next(iterator)
-        except StopIteration:
-            return True, None
+        chunk = next(iterator, _END)
+        return (True, None) if chunk is _END else (False, chunk)
 
     def _create_chat_completion(
         self, *, model: str = "gemini-3.7-flash", messages: Optional[List[Dict[str, Any]]] = None, stream: bool = False,
