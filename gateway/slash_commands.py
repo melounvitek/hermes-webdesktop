@@ -94,14 +94,10 @@ _PLATFORM_USAGE = (
 
 _WINDOWS_UPDATE_HELPER = """
 import os, subprocess, sys
-output_path = sys.argv[1]
-exit_code_path = sys.argv[2]
-cmd = sys.argv[3:]
-env = dict(os.environ)
-env["PYTHONUNBUFFERED"] = "1"
+output_path, exit_code_path, cmd = sys.argv[1], sys.argv[2], sys.argv[3:]
+env = dict(os.environ, PYTHONUNBUFFERED="1")
 with open(output_path, "wb") as f:
-    proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env)
-    rc = proc.wait(timeout=3600)
+    rc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env).wait(timeout=3600)
 with open(exit_code_path, "w", encoding="utf-8") as f:
     f.write(str(rc))
 """.strip()
@@ -137,10 +133,7 @@ def _restart_notify_payload(event: MessageEvent) -> dict:
     }
     if source.delivered_via_upstream_relay is True:
         notify_data["delivered_via_upstream_relay"] = True
-        if source.user_id:
-            notify_data["user_id"] = source.user_id
-        if source.scope_id:
-            notify_data["scope_id"] = source.scope_id
+        notify_data.update({k: getattr(source, k) for k in ("user_id", "scope_id") if getattr(source, k)})
     if source.thread_id:
         notify_data["thread_id"] = source.thread_id
     if event.message_id:
@@ -164,15 +157,9 @@ def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
     if sys.platform == "win32":
         from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
         subprocess.Popen(
-            [
-                sys.executable, "-c", _WINDOWS_UPDATE_HELPER,
-                str(output_path), str(exit_code_path),
-                sys.executable, "-m", "hermes_cli.main",
-                "update", "--gateway",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **windows_detach_popen_kwargs(),
+            [sys.executable, "-c", _WINDOWS_UPDATE_HELPER, str(output_path), str(exit_code_path),
+             sys.executable, "-m", "hermes_cli.main", "update", "--gateway"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **windows_detach_popen_kwargs(),
         )
         return
     hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
@@ -608,9 +595,14 @@ class GatewaySlashCommandsMixin(
                 return t("gateway.draining", count=count)
             return EphemeralReply(t("gateway.restart.in_progress"))
 
-        # Save the requester's routing info so the new gateway process can notify them once back.
-        try:
-            notify_data = _restart_notify_payload(event)
+        async def _write_marker(name: str, build, label: str) -> None:
+            try:
+                await asyncio.to_thread(atomic_json_write, _hermes_home / name, build(), indent=None)
+            except Exception as e:
+                logger.debug("Failed to write restart %s: %s", label, e)
+
+        def _notify_payload() -> dict:
+            data = _restart_notify_payload(event)
             try:
                 self._restart_command_source = dataclasses.replace(
                     event.source,
@@ -618,25 +610,20 @@ class GatewaySlashCommandsMixin(
                 )
             except Exception:
                 self._restart_command_source = event.source
-            await asyncio.to_thread(atomic_json_write, _hermes_home / ".restart_notify.json", notify_data, indent=None)
-        except Exception as e:
-            logger.debug("Failed to write restart notify file: %s", e)
+            return data
 
+        def _dedup_payload() -> dict:
+            data = {"platform": event.source.platform.value if event.source.platform else None, "requested_at": time.time()}
+            if event.platform_update_id is not None:
+                data["update_id"] = event.platform_update_id
+            return data
+
+        # Save the requester's routing info so the new gateway process can notify them once back.
+        await _write_marker(".restart_notify.json", _notify_payload, "notify file")
         # Record the triggering platform + update_id in a dedicated dedup marker. Unlike
         # .restart_notify.json (unlinked once the new gateway sends its notification) this persists
         # so a delayed Telegram redelivery is still detectable. Overwritten on every /restart.
-        try:
-            dedup_data = {
-                "platform": event.source.platform.value if event.source.platform else None,
-                "requested_at": time.time(),
-            }
-            if event.platform_update_id is not None:
-                dedup_data["update_id"] = event.platform_update_id
-            await asyncio.to_thread(
-                atomic_json_write, _hermes_home / ".restart_last_processed.json", dedup_data, indent=None
-            )
-        except Exception as e:
-            logger.debug("Failed to write restart dedup marker: %s", e)
+        await _write_marker(".restart_last_processed.json", _dedup_payload, "dedup marker")
 
         active_agents = self._running_agent_count()
         # Under a service manager (systemd/launchd) or Docker/Podman, exit 75 so the supervisor /

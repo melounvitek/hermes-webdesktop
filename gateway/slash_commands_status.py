@@ -99,10 +99,7 @@ def _status_model_route(status_agent, persisted_route: dict, session_row: dict, 
 
     user_config: dict[str, Any] = {}
     if not model_name or not provider_name or not context_total:
-        try:
-            user_config = _load_gateway_config()
-        except Exception:
-            user_config = {}
+        user_config = _quiet_sync(_load_gateway_config, {})
     model_cfg = user_config.get("model", {}) if isinstance(user_config, dict) else {}
     if not isinstance(model_cfg, dict):
         model_cfg = {}
