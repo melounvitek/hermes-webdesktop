@@ -5,6 +5,7 @@ and run_agent.py for pre-flight context checks.
 """
 
 import base64
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -898,15 +899,14 @@ def fetch_endpoint_model_metadata(base_url: str, api_key: str = "", force_refres
         cached = _endpoint_model_metadata_cache.get(normalized)
         if cached is not None and (time.time() - _endpoint_model_metadata_cache_time.get(normalized, 0)) < _ENDPOINT_MODEL_CACHE_TTL:
             return cached
-        if not local:
-            memo = _endpoint_disk_cache_get(normalized)
-            if memo is not None:
-                return _remember_endpoint_models(normalized, memo)
+        memo = _endpoint_disk_cache_get(normalized) if not local else None
+        if memo is not None:
+            return _remember_endpoint_models(normalized, memo)
     # Blackholed: return empty WITHOUT caching so it is retried once the entry expires.
     if _endpoint_blackholed(normalized):
         return {}
     alternate = normalized[:-3].rstrip("/") if normalized.endswith("/v1") else normalized + "/v1"
-    candidates = [normalized] + ([alternate] if alternate and alternate != normalized else [])
+    candidates = [normalized] + ([alternate] if alternate != normalized else [])
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
     verify = _resolve_requests_verify(normalized)
     last_error: Optional[Exception] = None
@@ -934,10 +934,8 @@ def fetch_endpoint_model_metadata(base_url: str, api_key: str = "", force_refres
             payload = response.json()
             cache = _parse_models_payload(payload)
             if any(m.get("owned_by") == "llamacpp" for m in payload.get("data", []) if isinstance(m, dict)):
-                try:
+                with contextlib.suppress(Exception):
                     _apply_llamacpp_props(cache, request_candidate, headers, verify)
-                except Exception:
-                    pass
             if cache and not local:
                 _endpoint_disk_cache_put(normalized, cache)
             return _remember_endpoint_models(normalized, cache)
@@ -956,12 +954,10 @@ def _resolve_endpoint_context_length(model: str, base_url: str, api_key: str = "
     """Resolve context length from an endpoint's live ``/models`` metadata."""
     endpoint_metadata = fetch_endpoint_model_metadata(base_url, api_key=api_key)
     matched = endpoint_metadata.get(model)
-    if not matched:
-        if len(endpoint_metadata) == 1:
-            matched = next(iter(endpoint_metadata.values()))
-        elif model:
-            # Substring match; "" would match EVERY key and poison the window.
-            matched = next((entry for key, entry in endpoint_metadata.items() if model in key or key in model), None)
+    if not matched and len(endpoint_metadata) == 1:
+        matched = next(iter(endpoint_metadata.values()))
+    elif not matched and model:  # substring match; "" would match EVERY key and poison the window
+        matched = next((entry for key, entry in endpoint_metadata.items() if model in key or key in model), None)
     context_length = matched.get("context_length") if matched else None
     return context_length if isinstance(context_length, int) else None
 
@@ -979,17 +975,15 @@ def _load_context_cache() -> Dict[str, int]:
         return {}
     try:
         with open(path, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        return data.get("context_lengths") or {}
+            return (yaml.safe_load(f) or {}).get("context_lengths") or {}
     except Exception as e:
         logger.debug("Failed to load context length cache: %s", e)
         return {}
 
 
 def _write_context_cache(cache: Dict[str, int]) -> None:
-    """Atomic write: a truncating ``open(path, "w")`` killed mid-dump leaves a partial file
-    that _load_context_cache() swallows as {} — silently wiping EVERY cached length.
-    Raises on failure."""
+    """Atomic write (a truncating write killed mid-dump leaves a partial file that
+    _load_context_cache() swallows as {}, wiping EVERY cached length). Raises on failure."""
     atomic_yaml_write(_get_context_cache_path(), {"context_lengths": cache})
 
 
@@ -1020,23 +1014,16 @@ def get_cached_context_length(model: str, base_url: str) -> Optional[int]:
     """Look up a previously discovered context length for model+provider."""
     key = _context_cache_key(model, base_url)
     cache = _load_context_cache()
-    # Legacy rows may carry a trailing slash (either direction can differ), so probe
-    # the canonical key, the literal form and the slashed canonical form.
-    for candidate in (key, f"{model}@{base_url}", f"{key}/"):
-        hit = cache.get(candidate)
-        if hit is not None:
-            return hit
-    return None
+    # Legacy rows may carry a trailing slash, so probe the canonical key, the literal form and the slashed canonical form.
+    return next((hit for hit in map(cache.get, (key, f"{model}@{base_url}", f"{key}/")) if hit is not None), None)
 
 
 def _invalidate_cached_context_length(model: str, base_url: str) -> None:
     """Drop a stale cache entry so it gets re-resolved on the next lookup."""
     key = _context_cache_key(model, base_url)
     cache = _load_context_cache()
-    # Also drop the in-memory TTL probe entries, or the next resolution inside the
-    # TTL window reuses the value just declared stale.
-    bare = _strip_provider_prefix(model)
-    stripped = (base_url or "").rstrip("/")
+    # Also drop the in-memory TTL probe entries, or the next resolution inside the TTL window reuses the stale value.
+    bare, stripped = _strip_provider_prefix(model), (base_url or "").rstrip("/")
     _LOCAL_CTX_PROBE_CACHE.pop((bare, stripped), None)
     _LOCAL_CTX_PROBE_CACHE.pop(("ollama_show", bare, stripped), None)
     # Every key shape get_cached_context_length consults.
@@ -1071,39 +1058,30 @@ def parse_context_limit_from_error(error_msg: str) -> Optional[int]:
         # 32768" — anchor on the phrase so the input count isn't captured.
         r'supports?\s+(?:only\s+)?up\s+to\s+(\d{4,})',
     )
-    for pattern in patterns:
-        match = re.search(pattern, error_lower)
-        if match:
-            limit = int(match.group(1))
-            if 1024 <= limit <= 10_000_000:  # sanity: must be a plausible window
-                return limit
+    for match in filter(None, (re.search(pattern, error_lower) for pattern in patterns)):
+        limit = int(match.group(1))
+        if 1024 <= limit <= 10_000_000:  # sanity: must be a plausible window
+            return limit
     return None
 
 
 def get_context_length_from_provider_error(error_msg: str, current_context_length: int) -> Optional[int]:
-    """Provider-reported limit LOWER than the current window, else None.
-    Overflow recovery must not invent a window: when the provider only says
-    the input is too long, callers keep the configured length and compress
-    rather than stepping down guessed probe tiers.
-    """
+    """Provider-reported limit LOWER than the current window, else None. Overflow recovery must
+    not invent a window: when the provider only says the input is too long, callers keep the
+    configured length and compress rather than stepping down guessed probe tiers."""
     parsed_limit = parse_context_limit_from_error(error_msg)
-    if parsed_limit is not None and parsed_limit < current_context_length:
-        return parsed_limit
-    return None
+    return parsed_limit if parsed_limit is not None and parsed_limit < current_context_length else None
 
 
 def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
-    """Available OUTPUT tokens from a "max_tokens too large" error, or None.
-    Distinct from "prompt too long" (-> compress): here input + requested_output >
-    window, so the fix is a smaller max_tokens for this call and context_length
-    must NOT be touched. E.g. Anthropic "... = available_tokens: 10000" -> 10000.
-    """
+    """Available OUTPUT tokens from a "max_tokens too large" error, or None. Distinct from "prompt
+    too long" (-> compress): here input + requested_output > window, so the fix is a smaller
+    max_tokens for this call and context_length must NOT be touched."""
     error_lower = error_msg.lower()
     if not _any_phrase_group(error_lower, _PARSEABLE_OUTPUT_CAP_SIGNALS):
         return None
-    # Direct cap figures, most specific first: "exceeds model's maximum output tokens
-    # (65536)", "Range of max_tokens should be [1, 65536]" (upper bound is the cap),
-    # Anthropic "= available_tokens: 10000", then the last number after "=".
+    # Direct cap figures, most specific first: "exceeds model's maximum output tokens (65536)", "Range of
+    # max_tokens should be [1, 65536]" (upper bound is the cap), Anthropic "= available_tokens: 10000", last "= N".
     for pattern in (
         r'exceeds model(?:\'s)? maximum output tokens\s*\(?\s*(\d+)\s*\)?',
         r'range of max_tokens should be\s*\[\s*\d+\s*,\s*(\d+)\s*\]',
@@ -1114,27 +1092,24 @@ def parse_available_output_tokens_from_error(error_msg: str) -> Optional[int]:
         match = re.search(pattern, error_lower)
         if match and int(match.group(1)) >= 1:
             return int(match.group(1))
-    # OpenRouter/Nous format: "maximum context length is N … (A of text input,
-    # B of tool input, C in the output)". Available output = ctx - text - tool.
+    # OpenRouter/Nous: "maximum context length is N … (A of text input, B of tool input, C in the output)" -> ctx - A - B.
     _m_ctx = re.search(r'maximum context length is (\d+)', error_lower)
     _m_parts = re.search(r'\((\d+)\s+of text input,\s*(\d+)\s+of tool input,\s*(\d+)\s+in the output\)', error_lower)
     if _m_ctx and _m_parts:
         _available = int(_m_ctx.group(1)) - int(_m_parts.group(1)) - int(_m_parts.group(2))
         if _available >= 1:
             return _available
-    # LM Studio / llama.cpp: window in tokens, prompt in CHARACTERS. ~3
-    # chars/token over-reserves the input so the retried cap stays inside the window.
+    # LM Studio / llama.cpp: window in tokens, prompt in CHARACTERS; ~3 chars/token over-reserves the input.
     _m_ctx_tok = re.search(r'maximum context length is (\d+)\s*token', error_lower)
     _m_chars = re.search(r'prompt contains (\d+)\s*character', error_lower)
     if _m_ctx_tok and _m_chars:
         _available = int(_m_ctx_tok.group(1)) - (int(_m_chars.group(1)) + 2) // 3
         if _available >= 1:
             return _available
-    # vLLM: window and prompt both in TOKENS; available = window - input (None when
-    # the input alone overflows -> compress). When max_tokens is the BINDING
-    # constraint vLLM reports "at least N input tokens" with N == window + 1 -
-    # requested_output, so window - N == requested_output - 1 and each retry walks
-    # the cap down by the safety margin without ever fitting: halve the cap instead.
+    # vLLM: window and prompt both in TOKENS; available = window - input (None when the input alone
+    # overflows -> compress). When max_tokens is the BINDING constraint vLLM reports "at least N input
+    # tokens" with N == window + 1 - requested_output, so window - N == requested_output - 1 and each
+    # retry walks the cap down by the safety margin without ever fitting: halve the cap instead.
     _m_vllm_input = re.search(r'prompt contains (?:at least )?(\d+)\s*input tokens', error_lower)
     if _m_ctx_tok and _m_vllm_input:
         _available = int(_m_ctx_tok.group(1)) - int(_m_vllm_input.group(1))
@@ -1177,11 +1152,9 @@ def _any_phrase_group(text: str, groups: tuple) -> bool:
 
 
 def is_output_cap_error(error_msg: str) -> bool:
-    """Yes/no sibling of :func:`parse_available_output_tokens_from_error` for unparseable wordings.
-    An output-cap 400 misclassified as context overflow death-loops the compressor
-    (same max_tokens, same rejection). Signal: talks about max_tokens as a
-    cap/range/limit and NOT about the input being too long (then defer to overflow).
-    """
+    """Yes/no sibling of :func:`parse_available_output_tokens_from_error` for unparseable wordings. An
+    output-cap 400 misclassified as context overflow death-loops the compressor (same max_tokens, same
+    rejection). Signal: talks about max_tokens as a cap/range/limit and NOT about an oversized input."""
     error_lower = error_msg.lower()
     # An error that ALSO describes an oversized INPUT is a genuine overflow — compression can fix it.
     return (
@@ -1196,14 +1169,16 @@ def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
     return candidate_id == lookup_model or ("/" in candidate_id and candidate_id.rsplit("/", 1)[1] == lookup_model)
 
 
-def _ollama_show(server_url: str, api_key: str, bare_model: str) -> Optional[Dict[str, Any]]:
-    """Ollama ``/api/show`` JSON for ``bare_model`` (3 s timeout), or None on any failure."""
+def _ollama_show(server_url: str, api_key: str, bare_model: str, timeout: float = 3.0, *, note_blackhole: bool = False) -> Optional[Dict[str, Any]]:
+    """Ollama ``/api/show`` JSON for ``bare_model``, or None on any failure (``note_blackhole``: connect timeouts condemn the host)."""
     import httpx
     try:
-        with httpx.Client(timeout=3.0, headers=_auth_headers(api_key)) as client:
+        with httpx.Client(timeout=timeout, headers=_auth_headers(api_key)) as client:
             resp = client.post(f"{server_url}/api/show", json={"name": bare_model})
             return resp.json() if resp.status_code == 200 else None
-    except Exception:
+    except Exception as exc:
+        if note_blackhole:
+            _note_if_connect_timeout(exc, server_url)
         return None
 
 
@@ -1216,8 +1191,7 @@ def _is_ollama_server(base_url: str, api_key: str) -> bool:
 
 def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Optional[int]:
     """Ollama ``/api/show`` context (Modelfile num_ctx, else GGUF max); the value to send as ``num_ctx``."""
-    bare_model = _strip_provider_prefix(model)
-    server_url = _server_root(base_url)
+    bare_model, server_url = _strip_provider_prefix(model), _server_root(base_url)
     if not _is_ollama_server(base_url, api_key):
         return None
     _disk_key = f"{server_url}|{bare_model}"
@@ -1232,11 +1206,8 @@ def query_ollama_num_ctx(model: str, base_url: str, api_key: str = "") -> Option
 
 
 def query_ollama_supports_vision(model: str, base_url: str, api_key: str = "") -> Optional[bool]:
-    """True/False when Ollama ``/api/show`` reports vision support, None when unknown.
-    Uses the ``capabilities`` field on Ollama 0.6.0+ and falls back to
-    ``model_info.*.vision.block_count`` on older servers. None when the server
-    is unreachable, not Ollama, or the model is unknown.
-    """
+    """True/False when Ollama ``/api/show`` reports vision support (``capabilities`` on 0.6.0+, else
+    ``model_info.*.vision.block_count``); None when unreachable, not Ollama, or model unknown."""
     bare_model = _strip_provider_prefix(model)
     if not bare_model or not base_url or not _is_ollama_server(base_url, api_key):
         return None
@@ -1253,10 +1224,8 @@ def query_ollama_supports_vision(model: str, base_url: str, api_key: str = "") -
 
 
 def _memo_local_probe(cache_key: tuple, probe: Callable[[], Optional[int]]) -> Optional[int]:
-    """Short-TTL, positive-only memo of a local probe (see _LOCAL_CTX_PROBE_CACHE).
-    A failure during a startup race must not suppress the retry seconds later
-    once the server is up, so only truthy results are memoized.
-    """
+    """Short-TTL, positive-only memo of a local probe (see _LOCAL_CTX_PROBE_CACHE): a failure during
+    a startup race must not suppress the retry once the server is up, so only truthy results memoize."""
     now = time.monotonic()
     cached = _LOCAL_CTX_PROBE_CACHE.get(cache_key)
     if cached is not None and (now - cached[1]) < _LOCAL_CTX_PROBE_TTL_SECONDS:
@@ -1269,31 +1238,18 @@ def _memo_local_probe(cache_key: tuple, probe: Callable[[], Optional[int]]) -> O
 
 def _query_ollama_api_show(model: str, base_url: str, api_key: str = "") -> Optional[int]:
     """Provider-agnostic Ollama ``/api/show`` probe (any hostname; non-Ollama servers 404 fast).
-    GGUF-first (hosted users can't set num_ctx) — the reverse of query_ollama_num_ctx(),
-    hence the namespaced memo key."""
-    return _memo_local_probe(
-        ("ollama_show", _strip_provider_prefix(model), base_url.rstrip("/")),
-        lambda: _query_ollama_api_show_uncached(model, base_url, api_key=api_key),
-    )
+    GGUF-first (hosted users can't set num_ctx) — the reverse of query_ollama_num_ctx(), hence the namespaced memo key."""
+    return _memo_local_probe(("ollama_show", _strip_provider_prefix(model), base_url.rstrip("/")), lambda: _query_ollama_api_show_uncached(model, base_url, api_key=api_key))
 
 
 def _query_ollama_api_show_uncached(model: str, base_url: str, api_key: str = "") -> Optional[int]:
     """Uncached body of ``_query_ollama_api_show`` — one POST to ``/api/show``."""
-    import httpx
     server_url = _server_root(base_url)
     if _endpoint_blackholed(server_url):
         return None
-    try:
-        with httpx.Client(timeout=5.0, headers=_auth_headers(api_key)) as client:
-            resp = client.post(f"{server_url}/api/show", json={"name": model})
-            if resp.status_code != 200:
-                return None
-            # Hosted Ollama: the GGUF max is authoritative (the operator may
-            # have capped num_ctx arbitrarily).
-            return _ollama_show_context(resp.json(), gguf_first=True, minimum=1024)
-    except Exception as exc:
-        _note_if_connect_timeout(exc, server_url)
-    return None
+    data = _ollama_show(server_url, api_key, model, timeout=5.0, note_blackhole=True)
+    # Hosted Ollama: the GGUF max is authoritative (the operator may have capped num_ctx arbitrarily).
+    return _ollama_show_context(data, gguf_first=True, minimum=1024) if data is not None else None
 
 
 def _model_name_suggests_kimi(model: str) -> bool:
@@ -1320,9 +1276,8 @@ _PRE_CATALOG_STALE_KEYS = frozenset({
 
 
 def _stale_pre_catalog_cache_entry(model: str, cached: int) -> bool:
-    """True when a persisted window is a pre-catalog leftover: the model resolves
-    (longest-key-first) to a _PRE_CATALOG_STALE_KEYS key and the cached value is <=
-    the largest shorter matching catch-all (or 256K). Genuine probe results are kept."""
+    """True when a persisted window is a pre-catalog leftover: the model resolves (longest-key-first) to a
+    _PRE_CATALOG_STALE_KEYS key and the cached value is <= the largest shorter matching catch-all (or 256K)."""
     model_lower = model.lower()
     matches = [(key, value) for key, value in DEFAULT_CONTEXT_LENGTHS.items() if key in model_lower]
     if not matches:
@@ -1347,10 +1302,7 @@ def _model_name_suggests_stale_32k_underreport(model: str) -> bool:
 
 def _query_local_context_length(model: str, base_url: str, api_key: str = "") -> Optional[int]:
     """Local-server context probe, short-TTL cached (see _LOCAL_CTX_PROBE_CACHE)."""
-    return _memo_local_probe(
-        (_strip_provider_prefix(model), base_url.rstrip("/")),
-        lambda: _query_local_context_length_uncached(model, base_url, api_key=api_key),
-    )
+    return _memo_local_probe((_strip_provider_prefix(model), base_url.rstrip("/")), lambda: _query_local_context_length_uncached(model, base_url, api_key=api_key))
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -1365,18 +1317,13 @@ def _lmstudio_context(client, lmstudio_url: str, model: str) -> Optional[int]:
         return None
     for m in resp.json().get("models", []):
         if _model_id_matches(m.get("key", ""), model) or _model_id_matches(m.get("id", ""), model):
-            for inst in m.get("loaded_instances", []):
-                ctx = _positive_int(inst.get("config", {}).get("context_length"))
-                if ctx is not None:
-                    return ctx
-            return None
+            return next((ctx for ctx in (_positive_int(inst.get("config", {}).get("context_length")) for inst in m.get("loaded_instances", [])) if ctx is not None), None)
     return None
 
 
 def _llamacpp_context(client, server_url: str, model: str) -> Optional[int]:
-    """llama.cpp /props: the RUNTIME n_ctx, answered by the router even for a
-    not-yet-loaded model (while /v1/models has meta=null), so a lazily-loaded
-    model doesn't fall to a family catch-all."""
+    """llama.cpp /props: the RUNTIME n_ctx, answered by the router even for a not-yet-loaded model
+    (while /v1/models has meta=null), so a lazily-loaded model doesn't fall to a family catch-all."""
     import httpx
     for props_path in (f"/props?model={model}", "/props"):
         try:
@@ -1392,8 +1339,7 @@ def _llamacpp_context(client, server_url: str, model: str) -> Optional[int]:
 
 
 def _openai_models_list_context(client, server_url: str, model: str) -> Optional[int]:
-    """/v1/models list: match by id, else the sole model on single-model servers
-    (llama.cpp reports a GGUF path as id, which rarely equals the configured name)."""
+    """/v1/models list: match by id, else the sole model on single-model servers (llama.cpp reports a GGUF path as id)."""
     resp = client.get(f"{server_url}/v1/models")
     if resp.status_code != 200:
         return None
@@ -1403,17 +1349,13 @@ def _openai_models_list_context(client, server_url: str, model: str) -> Optional
         matched = models_list[0]
     if matched is None:
         return None
-    # Runtime n_ctx (llama.cpp nests it under meta) beats n_ctx_train, which
-    # can exceed what the server allocates.
+    # Runtime n_ctx (llama.cpp nests it under meta) beats n_ctx_train, which can exceed what the server allocates.
     sources = [s for s in (matched, matched.get("meta") or {}) if isinstance(s, dict)]
-    for source in sources:
-        val = _positive_int(source.get("n_ctx"))
-        if val is not None:
-            return val
-    for source in sources:
-        ctx = _context_length_from_model_payload(source)
-        if ctx is not None:
-            return ctx
+    for reader in (lambda src: _positive_int(src.get("n_ctx")), _context_length_from_model_payload):
+        for source in sources:
+            ctx = reader(source)
+            if ctx is not None:
+                return ctx
     return None
 
 
@@ -1429,31 +1371,24 @@ def _query_local_context_length_uncached(model: str, base_url: str, api_key: str
         server_type = detect_local_server_type(base_url, api_key=api_key)
     except Exception:
         server_type = None
+    def _ollama_ctx(client) -> Optional[int]:
+        # Ollama: num_ctx (runtime window) before the GGUF training max, or conversations
+        # grow past what Ollama allocated and silently truncate. Matches query_ollama_num_ctx().
+        resp = client.post(f"{server_url}/api/show", json={"name": model})
+        return _ollama_show_context(resp.json(), gguf_first=False) if resp.status_code == 200 else None
+    def _model_detail_ctx(client) -> Optional[int]:
+        # LM Studio / vLLM / llama.cpp / Anthropic-compat proxies: /v1/models/{model}
+        resp = client.get(f"{server_url}/v1/models/{model}")
+        return _context_length_from_model_payload(resp.json()) if resp.status_code == 200 else None
+    typed = {
+        "ollama": _ollama_ctx,
+        "lm-studio": lambda client: _lmstudio_context(client, lmstudio_url, model),
+        "llamacpp": lambda client: _llamacpp_context(client, server_url, model),
+    }.get(server_type)
+    probes = ([typed] if typed else []) + [_model_detail_ctx, lambda client: _openai_models_list_context(client, server_url, model)]
     try:
         with httpx.Client(timeout=3.0, headers=_auth_headers(api_key)) as client:
-            # Ollama: num_ctx (runtime window) before the GGUF training max, or conversations
-            # grow past what Ollama allocated and silently truncate. Matches query_ollama_num_ctx().
-            if server_type == "ollama":
-                resp = client.post(f"{server_url}/api/show", json={"name": model})
-                if resp.status_code == 200:
-                    ctx = _ollama_show_context(resp.json(), gguf_first=False)
-                    if ctx is not None:
-                        return ctx
-            elif server_type == "lm-studio":
-                ctx = _lmstudio_context(client, lmstudio_url, model)
-                if ctx is not None:
-                    return ctx
-            elif server_type == "llamacpp":
-                ctx = _llamacpp_context(client, server_url, model)
-                if ctx is not None:
-                    return ctx
-            # LM Studio / vLLM / llama.cpp / Anthropic-compat proxies: /v1/models/{model}
-            resp = client.get(f"{server_url}/v1/models/{model}")
-            if resp.status_code == 200:
-                ctx = _context_length_from_model_payload(resp.json())
-                if ctx is not None:
-                    return ctx
-            return _openai_models_list_context(client, server_url, model)
+            return next((ctx for ctx in (probe(client) for probe in probes) if ctx is not None), None)
     except Exception as exc:
         _note_if_connect_timeout(exc, server_url)
     return None
@@ -1469,19 +1404,16 @@ def _query_anthropic_context_length(model: str, base_url: str, api_key: str) -> 
     if not api_key or api_key.startswith("sk-ant-oat"):
         return None
     try:
-        base = base_url.rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3]
+        base = base_url.rstrip("/").removesuffix("/v1")
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
         _ensure_requests()
         resp = requests.get(f"{base}/v1/models?limit=1000", headers=headers, timeout=(5, 10), verify=_resolve_requests_verify(base_url))
         if resp.status_code != 200:
             return None
         for m in resp.json().get("data", []):
-            if m.get("id") == model:
-                ctx = m.get("max_input_tokens")
-                if isinstance(ctx, int) and ctx > 0:
-                    return ctx
+            ctx = m.get("max_input_tokens") if m.get("id") == model else None
+            if isinstance(ctx, int) and ctx > 0:
+                return ctx
     except Exception as e:
         logger.debug("Anthropic /v1/models query failed: %s", e)
     return None
