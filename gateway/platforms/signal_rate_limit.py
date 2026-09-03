@@ -1,12 +1,11 @@
-"""
-Signal attachment rate-limit scheduler.
+"""Signal attachment rate-limit scheduler.
 
-Process-wide token-bucket simulator mirroring the per-account attachment rate
-limit signal-cli/Signal-Server enforce. Producers (``SignalAdapter.send_multiple_images``
-and the ``send_message`` tool's Signal path) call ``acquire(n)`` before an
-attachment send; on a 429 they call ``feedback(retry_after, n)`` so the model
-recalibrates from the server's authoritative hint. Concurrent calls serialize
-through an ``asyncio.Lock`` — FIFO fairness across sessions sharing one daemon.
+Process-wide token-bucket simulator mirroring the per-account attachment rate limit
+signal-cli/Signal-Server enforce. Producers (``SignalAdapter.send_multiple_images`` and
+the ``send_message`` tool's Signal path) call ``acquire(n)`` before an attachment send;
+on a 429 they call ``feedback(retry_after, n)`` so the model recalibrates from the
+server's authoritative hint. Concurrent calls serialize through an ``asyncio.Lock``
+— FIFO fairness across sessions sharing one daemon.
 """
 
 from __future__ import annotations
@@ -31,10 +30,7 @@ SIGNAL_RPC_ERROR_RATELIMIT = -5  # signal-cli (v0.14.3+) JSON-RPC error code for
 
 class SignalRateLimitError(Exception):
     """Raised by ``SignalAdapter._rpc`` for rate-limit responses when ``raise_on_rate_limit=True``.
-
-    ``retry_after`` is the server-supplied per-token Retry-After in seconds
-    (signal-cli ≥ v0.14.3), or None when the version doesn't expose it.
-    """
+    ``retry_after`` is the server's per-token Retry-After in seconds (signal-cli ≥ v0.14.3) or None."""
 
     def __init__(self, message: str, retry_after: Optional[float] = None) -> None:
         super().__init__(message)
@@ -56,12 +52,11 @@ def _error_message(err: Any) -> str:
 
 
 def _extract_retry_after_seconds(err: Any) -> Optional[float]:
-    """Pull the per-token Retry-After window from a signal-cli rate-limit error.
+    """Per-token Retry-After from a signal-cli rate-limit error, or None.
 
-    Sources, in order: ``error.data.response.results[*].retryAfterSeconds`` (structured
-    field, signal-cli ≥ v0.14.3), then ``"Retry after N seconds"`` parsed from the
-    message (libsignal-net RetryLaterException wrapped as AttachmentInvalidException,
-    where the structured field stays null). None when neither yields a value.
+    Sources, in order: ``error.data.response.results[*].retryAfterSeconds`` (signal-cli
+    ≥ v0.14.3), then "Retry after N seconds" parsed from the message (libsignal-net
+    RetryLaterException wrapped as AttachmentInvalidException, structured field null).
     """
     if isinstance(err, dict):
         results = ((err.get("data") or {}).get("response") or {}).get("results") or []
@@ -77,13 +72,10 @@ def _extract_retry_after_seconds(err: Any) -> Optional[float]:
 
 
 def _is_signal_rate_limit_error(err: Any) -> bool:
-    """True if a signal-cli RPC error reflects a rate-limit failure.
-
-    Matches the typed ``RATELIMIT_ERROR`` code (signal-cli ≥ v0.14.3), the legacy
-    ``[429]`` / ``RateLimitException`` substrings, and libsignal-net's
-    ``RetryLaterException`` / ``Retry after N seconds`` leaked through
-    AttachmentInvalidException during upload (substring is the only signal there).
-    """
+    """True if a signal-cli RPC error reflects a rate-limit failure: the typed
+    ``RATELIMIT_ERROR`` code (≥ v0.14.3), legacy ``[429]`` / ``RateLimitException``
+    substrings, or libsignal-net's ``RetryLaterException`` / "Retry after N seconds"
+    leaked through AttachmentInvalidException during upload (substring is the only signal)."""
     if isinstance(err, dict) and err.get("code") == SIGNAL_RPC_ERROR_RATELIMIT:
         return True
     message = _error_message(err)
@@ -99,21 +91,14 @@ def _is_signal_rate_limit_error(err: Any) -> bool:
 def _format_wait(seconds: float) -> str:
     """Human-friendly wait label for user-facing pacing notices."""
     s = max(0.0, seconds)
-    if s < 90:
-        return f"{int(round(s))}s"
-    return f"{max(1, int(round(s / 60)))} min"
+    return f"{int(round(s))}s" if s < 90 else f"{max(1, int(round(s / 60)))} min"
 
 
 def _signal_send_timeout(num_attachments: int) -> float:
-    """HTTP timeout for a Signal ``send`` RPC.
-
-    signal-cli uploads attachments serially inside the call, so the default 30s
-    truncates large batches mid-upload and we log a phantom failure even though the
-    send completes seconds later. Scale at 5s/attachment with a 60s floor.
-    """
-    if num_attachments <= 0:
-        return 30.0
-    return max(60.0, 5.0 * num_attachments)
+    """HTTP timeout for a Signal ``send`` RPC: signal-cli uploads attachments serially inside
+    the call, so the default 30s truncates large batches mid-upload and logs a phantom
+    failure even though the send completes. Scale at 5s/attachment with a 60s floor."""
+    return 30.0 if num_attachments <= 0 else max(60.0, 5.0 * num_attachments)
 
 
 class SignalAttachmentScheduler:
@@ -136,9 +121,9 @@ class SignalAttachmentScheduler:
         self.last_refill = time.monotonic()
         self._lock = asyncio.Lock()
 
-    def _projected_tokens(self) -> float:
-        """Tokens the bucket would hold now, without mutating state."""
-        elapsed = time.monotonic() - self.last_refill
+    def _projected_tokens(self, now: Optional[float] = None) -> float:
+        """Tokens the bucket would hold at ``now``, without mutating state."""
+        elapsed = (time.monotonic() if now is None else now) - self.last_refill
         projected = self.tokens
         if elapsed > 0 and projected < self.capacity:
             projected = min(self.capacity, projected + elapsed * self.refill_rate)
@@ -146,21 +131,15 @@ class SignalAttachmentScheduler:
 
     def _refill(self) -> None:
         now = time.monotonic()
-        elapsed = now - self.last_refill
-        if elapsed > 0 and self.tokens < self.capacity:
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_rate)
+        self.tokens = self._projected_tokens(now)
         self.last_refill = now
 
     def estimate_wait(self, n: int) -> float:
-        """Seconds until ``n`` tokens would be available (lock-free, informational).
-
-        Used to decide whether to emit a user-facing pacing notice *before* an
-        ``acquire`` that may block silently; races vs. concurrent acquires are benign.
-        """
+        """Seconds until ``n`` tokens would be available (lock-free, informational —
+        decides whether to emit a pacing notice *before* a possibly-blocking ``acquire``;
+        races vs. concurrent acquires are benign)."""
         deficit = n - self._projected_tokens()
-        if deficit <= 0:
-            return 0.0
-        return deficit / self.refill_rate
+        return 0.0 if deficit <= 0 else deficit / self.refill_rate
 
     async def acquire(self, n: int) -> float:
         """Block until at least ``n`` tokens are available; return the seconds slept.
@@ -175,8 +154,7 @@ class SignalAttachmentScheduler:
             return 0.0
         if n > self.capacity:
             raise SignalSchedulerError(
-                f"Signal scheduler was called requesting {n} tokens "
-                f"(max is {self.capacity})",
+                f"Signal scheduler was called requesting {n} tokens (max is {self.capacity})",
             )
         total_slept = 0.0
         first_pass = True
@@ -185,11 +163,8 @@ class SignalAttachmentScheduler:
                 self._refill()
                 if self.tokens >= n:
                     if not first_pass or total_slept > 0:
-                        logger.debug(
-                            "Signal scheduler: tokens sufficient for %d "
-                            "(remaining=%.1f, total_slept=%.1fs)",
-                            n, self.tokens, total_slept,
-                        )
+                        logger.debug("Signal scheduler: tokens sufficient for %d (remaining=%.1f, total_slept=%.1fs)",
+                                     n, self.tokens, total_slept)
                     return total_slept
                 deficit = n - self.tokens
             wait = deficit / self.refill_rate
@@ -197,8 +172,7 @@ class SignalAttachmentScheduler:
                 logger.info(
                     "Signal scheduler: pausing %.1fs for %d tokens "
                     "(available=%.1f, deficit=%.1f, refill=%.4f/s ≈ %.1fs/token)",
-                    wait, n, self.tokens, deficit,
-                    self.refill_rate, 1.0 / self.refill_rate,
+                    wait, n, self.tokens, deficit, self.refill_rate, 1.0 / self.refill_rate,
                 )
                 first_pass = False
             await asyncio.sleep(wait)
@@ -222,9 +196,7 @@ class SignalAttachmentScheduler:
             logging.INFO if rpc_duration > 10 and n_attachments > 5 else logging.DEBUG,
             "Signal scheduler: RPC for %d att took %.1fs — "
             "tokens %.1f → %.1f (deducted=%d, no upload refill credited, refill=%.4fs⁻¹)",
-            n_attachments, rpc_duration,
-            token_before, self.tokens,
-            n_attachments, self.refill_rate,
+            n_attachments, rpc_duration, token_before, self.tokens, n_attachments, self.refill_rate,
         )
 
     def feedback(self, retry_after: Optional[float], n_attempted: int) -> None:
@@ -233,11 +205,8 @@ class SignalAttachmentScheduler:
         if retry_after and retry_after > 0:
             new_rate = 1.0 / float(retry_after)
             if new_rate != self.refill_rate:
-                logger.info(
-                    "Signal scheduler: calibrating refill_rate to %.4f tokens/sec "
-                    "(server retry_after=%.1fs per token)",
-                    new_rate, retry_after,
-                )
+                logger.info("Signal scheduler: calibrating refill_rate to %.4f tokens/sec "
+                            "(server retry_after=%.1fs per token)", new_rate, retry_after)
                 self.refill_rate = new_rate
         self.tokens = 0.0
         self.last_refill = time.monotonic()
@@ -260,12 +229,8 @@ def get_scheduler() -> SignalAttachmentScheduler:
     global _scheduler
     if _scheduler is None:
         _scheduler = SignalAttachmentScheduler()
-        logger.info(
-            "Signal scheduler: created (capacity=%d tokens, refill=%.4f/s ≈ %.1fs/token)",
-            int(_scheduler.capacity),
-            _scheduler.refill_rate,
-            1.0 / _scheduler.refill_rate,
-        )
+        logger.info("Signal scheduler: created (capacity=%d tokens, refill=%.4f/s ≈ %.1fs/token)",
+                    int(_scheduler.capacity), _scheduler.refill_rate, 1.0 / _scheduler.refill_rate)
     return _scheduler
 
 
