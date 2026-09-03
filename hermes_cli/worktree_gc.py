@@ -108,23 +108,23 @@ def _archive_untracked(tree: Path, untracked: List[str]) -> Optional[Path]:
         return None
 
 
-def _classify_tree(_cli, repo_root: str, entry: Path, merge_cache, remote_heads) -> tuple[str, str, List[str]]:
+def _classify_tree(_ops, repo_root: str, entry: Path, merge_cache, remote_heads) -> tuple[str, str, List[str]]:
     """Return (verdict, reason, untracked) for one tree under ``.worktrees/``."""
     path = str(entry)
     if _KANBAN_RE.match(entry.name):
         return "keep", "kanban task tree (owned by kanban gc)", []
-    if _cli._worktree_lock_is_live(repo_root, path, timeout=5) == "live":
+    if _ops._worktree_lock_is_live(repo_root, path, timeout=5) == "live":
         return "keep", "in use by a running hermes session", []
     tracked_dirty, untracked = _dirty_split(path)
     if tracked_dirty:
         return "keep", "uncommitted tracked changes (real work)", []
     archive_note = f"{len(untracked)} untracked file(s) will be archived"
-    if _cli._worktree_has_unpushed_commits(path, timeout=5) and not _cli._worktree_commits_all_merged_upstream(
+    if _ops._worktree_has_unpushed_commits(path, timeout=5) and not _ops._worktree_commits_all_merged_upstream(
         path, timeout=30, cache=merge_cache, max_ahead=_MAX_CHERRY_AHEAD):
         # Pushed-branch tier: single-branch fetch refspecs (managed-install default) leave pushed
         # PR branches with no refs/remotes/* entry, so `git log HEAD --not --remotes` reads them
         # as unpushed forever. A head EXACTLY matching the remote branch has nothing origin lacks.
-        if not _cli._worktree_branch_pushed_exact(path, remote_heads, timeout=10):
+        if not _ops._worktree_branch_pushed_exact(path, remote_heads, timeout=10):
             return "keep", "unpushed commits not found upstream", []
         if untracked:
             return "reap-keep-branch", f"pushed to origin (open-PR lane); branch kept; {archive_note}", untracked
@@ -136,18 +136,18 @@ def _classify_tree(_cli, repo_root: str, entry: Path, merge_cache, remote_heads)
 
 def audit_worktrees(repo_root: str, *, with_sizes: bool = True) -> List[TreeRecord]:
     """Classify every tree under ``.worktrees/`` without mutating anything."""
-    import cli as _cli  # lazy: cli.py is heavy
+    from hermes_cli import worktree_ops as _ops
     worktrees_dir = Path(repo_root) / ".worktrees"
     if not worktrees_dir.exists():
         return []
 
-    if _cli._repo_is_shallow(repo_root):
-        _cli._deepen_shallow_repo(repo_root)
+    if _ops._repo_is_shallow(repo_root):
+        _ops._deepen_shallow_repo(repo_root)
 
-    merge_cache = _cli._load_worktree_merge_cache()
+    merge_cache = _ops._load_worktree_merge_cache()
     cache_size_before = len(merge_cache)
     # One ls-remote for the whole sweep; None (offline) degrades pushed-tier verdicts to keep.
-    remote_heads = _cli._fetch_remote_branch_heads(repo_root)
+    remote_heads = _ops._fetch_remote_branch_heads(repo_root)
 
     now = time.time()
     records: List[TreeRecord] = []
@@ -162,14 +162,14 @@ def audit_worktrees(repo_root: str, *, with_sizes: bool = True) -> List[TreeReco
             branch = _git(["branch", "--show-current"], cwd=str(entry), timeout=5).stdout.strip()
         except Exception:
             branch = ""
-        verdict, reason, untracked = _classify_tree(_cli, repo_root, entry, merge_cache, remote_heads)
+        verdict, reason, untracked = _classify_tree(_ops, repo_root, entry, merge_cache, remote_heads)
         records.append(TreeRecord(
             name=entry.name, path=str(entry), branch=branch,
             age_days=age_days, size_mb=_tree_size_mb(entry) if with_sizes else None,
             verdict=verdict, reason=reason, untracked=untracked))
 
     if len(merge_cache) != cache_size_before:
-        _cli._save_worktree_merge_cache(merge_cache)
+        _ops._save_worktree_merge_cache(merge_cache)
     return records
 
 
@@ -225,9 +225,9 @@ def reclaim_worktrees(
 def audit_branches(repo_root: str) -> List[BranchRecord]:
     """Classify EVERY local branch: deletable when fully merged OR every commit is patch-equivalent
     upstream (``git cherry``) and not checked out. The gate is content reachability, not name."""
-    import cli as _cli
-    if _cli._repo_is_shallow(repo_root):
-        _cli._deepen_shallow_repo(repo_root)
+    from hermes_cli import worktree_ops as _ops
+    if _ops._repo_is_shallow(repo_root):
+        _ops._deepen_shallow_repo(repo_root)
 
     def _lines(result) -> List[str]:
         return [b.strip() for b in result.stdout.splitlines() if b.strip()]

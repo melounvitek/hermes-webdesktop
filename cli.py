@@ -14,7 +14,6 @@ import shutil
 import sys
 import json
 import re
-import concurrent.futures  # noqa: F401  (tests monkeypatch cli.concurrent.futures)
 import atexit
 import errno
 import time
@@ -84,10 +83,6 @@ def _lazy_shim(module: str, name: str, alias: str | None = None):
 
     shim.__name__ = shim.__qualname__ = alias or name
     return shim
-
-
-CanonicalUsage = _lazy_shim("agent.usage_pricing", "CanonicalUsage")
-estimate_usage_cost = _lazy_shim("agent.usage_pricing", "estimate_usage_cost")
 
 
 def format_duration_compact(*args, **kwargs):
@@ -162,8 +157,6 @@ def format_token_count_compact(*args, **kwargs):
     return f"{value:,}"
 
 
-is_table_divider = _lazy_shim("agent.markdown_tables", "is_table_divider")
-looks_like_table_row = _lazy_shim("agent.markdown_tables", "looks_like_table_row")
 realign_markdown_tables = _lazy_shim("agent.markdown_tables", "realign_markdown_tables")
 from hermes_cli.banner import format_banner_version_label
 
@@ -171,7 +164,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 
 # ~/.hermes/.env first, project .env as dev fallback; user env files override stale shell exports.
-from hermes_constants import get_hermes_home, display_hermes_home  # noqa: F401  (mixins import via cli)
+from hermes_constants import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
 from utils import base_url_host_matches, base_url_hostname, fast_safe_load
 
@@ -575,9 +568,6 @@ from rich.markup import escape as _escape
 from rich.text import Text as _RichText
 
 # Agent/tool systems load lazily: bare startup only needs the prompt.
-AIAgent = _lazy_shim("run_agent", "AIAgent")
-
-
 def get_tool_definitions(*args, **kwargs):
     from hermes_cli.mcp_startup import wait_for_mcp_discovery
     from model_tools import get_tool_definitions as _get_tool_definitions
@@ -586,12 +576,6 @@ def get_tool_definitions(*args, **kwargs):
     return _get_tool_definitions(*args, **kwargs)
 
 
-get_toolset_for_tool = _lazy_shim("model_tools", "get_toolset_for_tool")
-
-from hermes_cli.banner import build_welcome_banner  # noqa: F401  (CLIInfoMixin imports via cli)
-
-get_all_toolsets = _lazy_shim("toolsets", "get_all_toolsets")
-get_toolset_info = _lazy_shim("toolsets", "get_toolset_info")
 validate_toolset = _lazy_shim("toolsets", "validate_toolset")
 
 
@@ -602,7 +586,6 @@ def _sync_process_session_id(session_id: str) -> None:
     set_current_session_id(session_id)
 
 
-get_job = _lazy_shim("cron", "get_job")
 _cleanup_all_terminals = _lazy_shim("tools.terminal_tool", "cleanup_all_environments", "_cleanup_all_terminals")
 set_sudo_password_callback = _lazy_shim("tools.terminal_tool", "set_sudo_password_callback")
 set_approval_callback = _lazy_shim("tools.terminal_tool", "set_approval_callback")
@@ -1036,39 +1019,14 @@ def _reset_terminal_input_modes_on_exit() -> None:
         tty.flush()
 
 
-from hermes_cli.worktree_ops import (  # noqa: F401  (mixins/tests/worktree_gc import via cli)
-    _PACK_SPRAWL_THRESHOLD,
-    _WORKTREE_MERGE_CACHE_MAX,
-    _classify_prune_candidates,
-    _cleanup_failed_worktree_add,
-    _copy_worktree_includes,
-    _deepen_shallow_repo,
-    _ensure_worktrees_gitignored,
-    _fetch_remote_branch_heads,
-    _git,
+from hermes_cli.worktree_ops import (
     _git_quiet,
     _git_repo_root,
-    _load_worktree_merge_cache,
     _maintain_pack_health,
-    _normalize_git_bash_path,
-    _path_is_within_root,
-    _prune_candidates,
-    _prune_orphaned_branches,
     _prune_stale_worktrees,
-    _reap_prune_verdicts,
     _repo_is_shallow,
-    _resolve_worktree_base,
-    _save_worktree_merge_cache,
     _setup_worktree,
-    _worktree_add,
-    _worktree_branch_pr_merged,
-    _worktree_branch_pushed_exact,
-    _worktree_commits_all_merged_upstream,
-    _worktree_current_branch,
     _worktree_has_unpushed_commits,
-    _worktree_is_dirty,
-    _worktree_lock_is_live,
-    _worktree_merge_cache_path,
 )
 
 # ============================================================================= Git Worktree Isolation
@@ -2239,12 +2197,6 @@ def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
     return text, had_mouse_reports
 
 
-def _strip_leaked_terminal_responses(text: str) -> str:
-    """Compatibility wrapper returning only cleaned text."""
-    cleaned, _ = _strip_leaked_terminal_responses_with_meta(text)
-    return cleaned
-
-
 def _estimate_tui_input_height(
     lines: list[str] | tuple[str, ...], prompt_text: str, terminal_columns: int, *, max_height: int = 8,
 ) -> int:
@@ -2325,7 +2277,6 @@ class ChatConsole:
         """No-op ``console.status`` so slash helpers don't duplicate ``_busy_command()``'s indicator."""
         yield self
 
-from hermes_cli.banner import HERMES_AGENT_LOGO, HERMES_CADUCEUS  # noqa: E402,F401  (re-exported)
 
 
 def _build_compact_banner() -> str:

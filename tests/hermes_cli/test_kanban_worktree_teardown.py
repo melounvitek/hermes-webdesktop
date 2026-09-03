@@ -144,7 +144,9 @@ def test_tree_dirtied_between_check_and_removal_preserved(
     (wt / "late-wip.txt").write_text("dirtied after the check\n", encoding="utf-8")
     # Pre-check lies (as if the file appeared just after it ran) — real git
     # must still refuse the removal.
-    monkeypatch.setattr(cli, "_worktree_is_dirty", lambda _p: False)
+    from hermes_cli import worktree_ops
+
+    monkeypatch.setattr(worktree_ops, "_worktree_is_dirty", lambda _p: False)
     kb._cleanup_worktree_workspace("t_gggg7777", str(wt))
     assert wt.is_dir()
     assert (wt / "late-wip.txt").exists()

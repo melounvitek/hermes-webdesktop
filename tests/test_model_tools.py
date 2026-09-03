@@ -284,7 +284,7 @@ class TestPreToolCallBlocking:
         monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)
         monkeypatch.setattr("model_tools.registry.dispatch",
                             lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not run")))
-        monkeypatch.setattr("tools.file_tools.notify_other_tool_call",
+        monkeypatch.setattr("tools.file_tools_read_tracking.notify_other_tool_call",
                             lambda task_id: notifications.append(task_id))
 
         result = json.loads(handle_function_call("web_search", {"q": "test"}, task_id="t1"))
@@ -327,7 +327,7 @@ class TestPreToolCallBlocking:
             return json.dumps({"ok": True})
 
         monkeypatch.setattr(
-            "hermes_cli.observability.relay_runtime.apply_tool_request_intercepts",
+            "agent.relay_runtime.apply_tool_request_intercepts",
             rewrite,
         )
         monkeypatch.setattr("hermes_cli.plugins.invoke_hook", fake_invoke_hook)

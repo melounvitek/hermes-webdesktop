@@ -180,7 +180,7 @@ def _cleanup_worktree_workspace(
     it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
     branches are kept. Best-effort."""
     try:
-        from cli import _worktree_has_unpushed_commits, _worktree_is_dirty
+        from hermes_cli.worktree_ops import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
         return  # CLI safety predicates unavailable — preserve
     try:

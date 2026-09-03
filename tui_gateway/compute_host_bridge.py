@@ -75,11 +75,7 @@ def _metadata_mirror(session: dict | None) -> dict:
 
 
 def _compute_host_session_info(session: dict) -> dict:
-    # Tolerate a legacy one-arg _session_info (tests patch it that way).
-    try:
-        return _session_info(session.get("agent"), session)
-    except TypeError:
-        return _session_info(session.get("agent"))
+    return _session_info(session.get("agent"), session)
 
 
 def _compute_host_adopt_frame_meta(session: dict, frame: dict) -> None:

@@ -749,7 +749,7 @@ class TestGitBashPathNormalization:
 
     def test_posix_noop(self):
         """Must NOT mutate paths on Linux/macOS."""
-        from cli import _normalize_git_bash_path
+        from hermes_cli.worktree_ops import _normalize_git_bash_path
         if sys.platform != "win32":
             assert _normalize_git_bash_path("/home/teknium/foo") == "/home/teknium/foo"
             assert _normalize_git_bash_path("/c/Users/foo") == "/c/Users/foo"

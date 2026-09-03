@@ -27,7 +27,8 @@ def _system_package_install_cmd(pkg: str) -> str:
 
 def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
     """Return an actionable SQLite upgrade hint for this install layout."""
-    from hermes_cli.doctor import PROJECT_ROOT, detect_install_method
+    from hermes_cli.doctor import PROJECT_ROOT
+    from hermes_cli.config import detect_install_method
     method = install_method or detect_install_method(PROJECT_ROOT)
     cmd = recommended_update_command_for_method(method)
     action = cmd if is_nix_install_method(method) else {  # nix: prose guidance, not a shell command
@@ -81,7 +82,7 @@ def _read_journal_mode(db_path: Path) -> tuple[str | None, str | None]:
 
 
 def _format_db_size(db_path: Path) -> str:
-    from hermes_cli.backup import _format_size  # backup.py owns size formatting
+    from hermes_cli.sizefmt import format_bytes as _format_size
     try:
         return _format_size(db_path.stat().st_size)
     except OSError:
@@ -91,7 +92,7 @@ def _format_db_size(db_path: Path) -> str:
 def _report_database_journal_modes(hermes_home: Path | None = None, version_info: tuple[int, ...] | None = None) -> None:
     """List each database's journal mode; warn on WAL under a vulnerable SQLite."""
     from hermes_cli.doctor import HERMES_HOME
-    from hermes_state import _wal_reset_repair_hint, is_sqlite_wal_reset_vulnerable
+    from hermes_state_wal import _wal_reset_repair_hint, is_sqlite_wal_reset_vulnerable
     vulnerable = is_sqlite_wal_reset_vulnerable(version_info)
     try:
         databases = _hermes_database_paths(hermes_home if hermes_home is not None else HERMES_HOME)
@@ -261,7 +262,6 @@ def check_macos_tcc_grants() -> None:
 
     See #86385.
     """
-    from hermes_cli.doctor import _desktop_app_bundle, _macos_desktop_dr
     app = _desktop_app_bundle() if sys.platform == "darwin" else None
     if app is None:
         return
@@ -379,7 +379,7 @@ def _check_python_environment(should_fix: bool, f: Finding) -> None:
     # python-build-standalone can keep a vulnerable SQLite across upgrades).
     with warn_on_error("SQLite version probe failed: {e}", ""):
         import sqlite3
-        from hermes_state import is_sqlite_wal_reset_vulnerable, sqlite_source_id
+        from hermes_state_wal import is_sqlite_wal_reset_vulnerable, sqlite_source_id
         src = sqlite_source_id()
         # Warn-only: Hermes already refuses WAL on fresh DBs and runtime repair is best-effort.
         check_bool(not is_sqlite_wal_reset_vulnerable(), f"SQLite {sqlite3.sqlite_version}",

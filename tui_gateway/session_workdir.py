@@ -69,13 +69,6 @@ def _terminal_task_cwd_with_source(session: dict | None) -> tuple[str, str]:
     return _completion_cwd(), "process"
 
 
-# Git probing lives in git_probe; these keep the in-server names call sites use.
-_git_branch_for_cwd = git_probe.branch
-_git_repo_root_for_cwd = git_probe.repo_root
-_git_common_repo_root_for_cwd = git_probe.common_repo_root
-_resolve_cwd_git = git_probe.resolve
-
-
 def _session_cwd(session: dict | None) -> str:
     return str(session["cwd"]) if session and session.get("cwd") else _completion_cwd()
 
@@ -116,7 +109,7 @@ def _heal_dead_cwd(cwd: str) -> str:
     if not os.path.isdir(probe):
         return raw
     with contextlib.suppress(Exception):
-        return _git_common_repo_root_for_cwd(probe) or _git_repo_root_for_cwd(probe) or probe
+        return git_probe.common_repo_root(probe) or git_probe.repo_root(probe) or probe
     return probe
 
 
@@ -170,11 +163,11 @@ def _reconcile_session_cwd_from_terminal(session: dict | None) -> bool:
         return False
     # Worktree ROOTS (folding to the common root would hide the move), both in a git tree, different from each other,
     # sharing the SAME common .git dir.
-    landed, current_root = _git_repo_root_for_cwd(resolved), _git_repo_root_for_cwd(current)
+    landed, current_root = git_probe.repo_root(resolved), git_probe.repo_root(current)
     if not landed or not current_root or landed == current_root:
         return False
-    landed_common = _git_common_repo_root_for_cwd(resolved)
-    if not landed_common or landed_common != _git_common_repo_root_for_cwd(current):
+    landed_common = git_probe.common_repo_root(resolved)
+    if not landed_common or landed_common != git_probe.common_repo_root(current):
         return False
     # This is the session's workspace now (a desktop launch-artifact cwd earns a real row); the settle marker keeps it
     # overridable by the NEXT settle.
@@ -490,7 +483,7 @@ def _persist_session_git_meta(session: dict, cwd: str, generation: int) -> None:
 
     def _run() -> None:
         try:
-            branch, root = _git_branch_for_cwd(cwd), _git_common_repo_root_for_cwd(cwd)
+            branch, root = git_probe.branch(cwd), git_probe.common_repo_root(cwd)
             if not (branch or root):
                 return
             with _session_db(db_session) as db:

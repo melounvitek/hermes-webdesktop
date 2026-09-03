@@ -125,7 +125,7 @@ def _(rid, params, pdb, conn) -> dict:
     proj = pdb.project_for_path(conn, cwd)
     return _ok(rid, {
         "project": proj.to_dict() if proj else None, "cwd": cwd,
-        "branch": _git_branch_for_cwd(cwd)})
+        "branch": git_probe.branch(cwd)})
 
 
 def _non_workspace_dirs() -> set[str]:
@@ -277,7 +277,7 @@ def _discover_repos_payload(
     cwd_to_root: dict[str, str] = {}
     for row in cwd_rows:
         cwd = str(row.get("cwd") or "")
-        root = _git_common_repo_root_for_cwd(cwd)
+        root = git_probe.common_repo_root(cwd)
         if not root:
             continue
         cwd_to_root[cwd] = root
@@ -386,7 +386,7 @@ def _build_project_tree(
         [str(f.get("path") or "") for p in projects for f in (p.get("folders") or [])]
         + [str(r.get("root") or "") for r in discovered])
     tree = project_tree.build_tree(
-        projects, sessions, discovered, _resolve_cwd_git, preview_limit=preview_limit,
+        projects, sessions, discovered, git_probe.resolve, preview_limit=preview_limit,
         hydrate=hydrate, is_junk_root=_is_repo_junk, is_junk_cwd=_is_session_cwd_junk,
         exists=_dir_exists_cached)
     return tree, active_id

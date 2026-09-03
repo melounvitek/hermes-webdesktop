@@ -452,7 +452,7 @@ def bounded_git_probe(argv: Sequence[str], *, timeout: float) -> str:
     ``text`` with UTF-8 ``errors="replace"`` decoding, and the hidden-window ``creationflags`` on Windows
     only. On POSIX the probe is additionally placed in its own process group (``process_group=0``, Python
     ≥3.11) so timeout cleanup can take down descendants — credential helpers, ``git-remote-https``, hook
-    children — with the launcher instead of orphaning them (see :func:`_kill_git_process_tree`; port of
+    children — with the launcher instead of orphaning them (see :func:`kill_process_tree`; port of
     openai/codex#36793). ``process_group`` only changes which group the child belongs to; it does not detach
     the terminal or alter the fast path.
     """
@@ -461,6 +461,3 @@ def bounded_git_probe(argv: Sequence[str], *, timeout: float) -> str:
         return ""
     return (result.stdout or "").strip()
 
-
-# Backward-compat alias — existing call sites/tests import the historical name.
-_kill_git_process_tree = kill_process_tree

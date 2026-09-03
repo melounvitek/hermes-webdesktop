@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import functools
-import importlib.metadata  # noqa: F401 — tests patch ``plugins_cmd.importlib.metadata.entry_points``
 import json
 import logging
 import os

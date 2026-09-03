@@ -76,7 +76,8 @@ class CLIInfoMixin:
 
     def show_banner(self):
         """Display the welcome banner in Claude Code style."""
-        from cli import _build_compact_banner, build_welcome_banner, get_tool_definitions, logger
+        from cli import _build_compact_banner, get_tool_definitions, logger
+        from hermes_cli.banner import build_welcome_banner
         self.console.clear()
         ctx_len = None
         if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
@@ -333,7 +334,8 @@ class CLIInfoMixin:
 
     def show_tools(self):
         """Display available tools with kawaii ASCII art."""
-        from cli import get_tool_definitions, get_toolset_for_tool
+        from cli import get_tool_definitions
+        from model_tools import get_toolset_for_tool
         # Pre-assembly list: /tools is a discovery surface, so it must show the full catalog
         # including tools deferred behind the tool_search bridge (users verify MCP installs here).
         tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True,
@@ -367,7 +369,7 @@ class CLIInfoMixin:
 
     def show_toolsets(self):
         """Display available toolsets with kawaii ASCII art."""
-        from cli import get_all_toolsets, get_toolset_info
+        from toolsets import get_all_toolsets, get_toolset_info
         all_toolsets = get_all_toolsets()
 
         print()
@@ -475,7 +477,7 @@ class CLIInfoMixin:
 
     def _show_gateway_status(self):
         """Show status of the gateway and connected messaging platforms."""
-        from cli import display_hermes_home
+        from hermes_constants import display_hermes_home
         from gateway.config import load_gateway_config, Platform
 
         print()

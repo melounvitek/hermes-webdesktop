@@ -23,7 +23,6 @@ from utils import (
     _preserve_file_mode, _preserve_file_owner, _restore_file_mode, _restore_file_owner, atomic_replace,
 )
 
-# Private alias kept: claw.py and the backup tests import ``_format_size`` from here.
 from hermes_cli.sizefmt import format_bytes as _format_size
 
 logger = logging.getLogger(__name__)

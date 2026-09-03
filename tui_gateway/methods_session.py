@@ -117,7 +117,7 @@ def _cwd_info(session: dict, cwd: str, branch=None) -> dict:
     """session.info after a cwd change: the full agent view, or the lazy shape."""
     if (agent := session.get("agent")) is not None:
         return _session_info(agent, session)
-    return {"cwd": cwd, "branch": _git_branch_for_cwd(cwd) if branch is None else branch,
+    return {"cwd": cwd, "branch": git_probe.branch(cwd) if branch is None else branch,
             "project": _project_info_for_cwd(cwd), "lazy": True}
 
 
@@ -355,7 +355,7 @@ def _(rid, params: dict) -> dict:
         # Reflect the override now so the client doesn't clobber its sticky pick.
         "info": {"model": override.get("model") if override else _resolve_model(),
                  **({"provider": override["provider"]} if override.get("provider") else {}),
-                 "tools": {}, "skills": {}, "cwd": cwd, "branch": _git_branch_for_cwd(cwd),
+                 "tools": {}, "skills": {}, "cwd": cwd, "branch": git_probe.branch(cwd),
                  "project": _project_info_for_cwd(cwd), "lazy": True, "desktop_contract": DESKTOP_BACKEND_CONTRACT,
                  "profile_name": _response_profile_name(profile)}})
 
@@ -851,7 +851,7 @@ def _(rid, params: dict) -> dict:
     with _sessions_lock:
         live_sid, live = next(
             ((sid, sess) for sid, sess in list(_sessions.items()) if sess.get("session_key") == target), ("", None))
-    branch, root = _git_branch_for_cwd(resolved), _git_common_repo_root_for_cwd(resolved)
+    branch, root = git_probe.branch(resolved), git_probe.common_repo_root(resolved)
     with _profile_db(params) as db:
         if db is None:
             return _db_unavailable_error(rid, code=5007)

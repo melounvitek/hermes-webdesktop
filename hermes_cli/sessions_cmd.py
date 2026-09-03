@@ -13,9 +13,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
-from hermes_cli.sessions_cmd_browse import (  # noqa: F401  (re-exports)
-    _annotate_session_statuses, _relative_time, _session_browse_picker, _session_status_tag,
-)
+from hermes_cli.sessions_cmd_browse import _relative_time, _session_browse_picker
 
 
 def get_hermes_home():
@@ -88,7 +86,8 @@ def _write_output(output, text, summary) -> None:
 # -- handlers that must run BEFORE SessionDB() is opened ----------------------
 
 def _cmd_repair(args):
-    from hermes_state import DEFAULT_DB_PATH as db_path, SessionDB, _db_opens_cleanly, repair_state_db_schema
+    from hermes_state import DEFAULT_DB_PATH as db_path, SessionDB
+    from hermes_state_repair import _db_opens_cleanly, repair_state_db_schema
     if not db_path.exists():
         print(f"No session database at {db_path} (nothing to repair).")
         return
@@ -250,7 +249,7 @@ def _default_exclude(args):
 
 
 def _cmd_list(db, args):
-    from hermes_state import workspace_key as _ws_key
+    from hermes_state_sessions import workspace_key as _ws_key
     sessions = db.list_sessions_rich(source=args.source, exclude_sources=_default_exclude(args), limit=args.limit)
 
     # Workspace filter: workspace key (git repo root, else cwd) — path substring or exact basename.

@@ -74,14 +74,6 @@ class TestSubprocessCompatDelegation:
 
         assert shell_hooks.kill_process_tree is _subprocess_compat.kill_process_tree
 
-    def test_backcompat_alias_preserved(self):
-        from hermes_cli import _subprocess_compat
-
-        assert (
-            _subprocess_compat._kill_git_process_tree
-            is _subprocess_compat.kill_process_tree
-        )
-
 
 # ---------------------------------------------------------------------------
 # (2) tools.browser_tool._kill_process_tree
@@ -108,7 +100,7 @@ class TestBrowserToolDelegation:
         monkeypatch.setattr(deadline_mod, "kill_process_tree", _boom)
         legacy_calls = []
         monkeypatch.setattr(
-            browser_tool, "_legacy_kill_process_tree", lambda proc: legacy_calls.append(proc)
+            "tools.browser_tool_lifecycle._legacy_kill_process_tree", lambda proc: legacy_calls.append(proc)
         )
         proc = _FakeProc(pid=4444)
         browser_tool._kill_process_tree(proc)  # must not raise

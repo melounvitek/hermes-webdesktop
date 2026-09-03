@@ -398,9 +398,9 @@ def _refresh_tui_before_print(cli) -> None:
 def _print_lightpanda_engine_status() -> None:
     """``/browser status`` line(s) about ``browser.engine: lightpanda`` — silent unless set;
     says whether it is in use or which higher-precedence setting shadows it."""
-    if not _probe("tools.browser_tool", "_using_lightpanda_engine", False):
+    if not _probe("tools.browser_tool_lightpanda_fallback", "_using_lightpanda_engine", False):
         return
-    used, reason = _probe("tools.browser_tool", "lightpanda_engine_status", (None, None))
+    used, reason = _probe("tools.browser_tool_lightpanda_fallback", "lightpanda_engine_status", (None, None))
     if reason is None:
         return
     if not used:
@@ -521,7 +521,7 @@ def _browser_connect(cli, cdp_url: str) -> None:
                           "debugging and retry /browser connect")
     os.environ["BROWSER_CDP_URL"] = found
     # Eagerly start the CDP supervisor so pending_dialogs + frame_tree show up in the next snapshot.
-    _probe("tools.browser_tool", "_ensure_cdp_supervisor", None, "default")
+    _probe("tools.browser_tool_cdp", "_ensure_cdp_supervisor", None, "default")
     _say_block("🌐 Browser connected to live Chromium-family browser via CDP", f"   Endpoint: {found}")
     # Tell the model the CDP browser was made available on purpose.
     if hasattr(cli, '_pending_input'):
@@ -543,7 +543,8 @@ def _browser_disconnect(cli) -> None:
                           "(already using default mode)")
     os.environ.pop("BROWSER_CDP_URL", None)
     with suppress(Exception):
-        from tools.browser_tool import cleanup_all_browsers, _stop_cdp_supervisor
+        from tools.browser_tool import cleanup_all_browsers
+        from tools.browser_tool_cdp import _stop_cdp_supervisor
         _stop_cdp_supervisor("default")
         cleanup_all_browsers()
     _say_block("🌐 Browser disconnected from live Chromium-family browser",
@@ -590,7 +591,7 @@ def _browser_status() -> None:
             print(f"🌐 Browser: {provider.provider_name()} (cloud)")
             _print_lightpanda_engine_status()
         else:
-            engine = _probe("tools.browser_tool", "_get_browser_engine", "auto")
+            engine = _probe("tools.browser_tool_cloud", "_get_browser_engine", "auto")
             _pr(*_LOCAL_ENGINE_LINES.get(engine, _LOCAL_ENGINE_LINES["auto"]))
             if engine == "lightpanda":
                 _print_lightpanda_engine_status()
@@ -1708,7 +1709,7 @@ class CLICommandsMixin:
         print(f"  Next run: {result['next_run_at']}")
 
     def _cron_edit(self, subcommand: str, opts: dict) -> None:
-        from cli import get_job
+        from cron import get_job
         positionals = opts["positionals"]
         if not positionals:
             return print("(._.) Usage: /cron edit <job_id> "

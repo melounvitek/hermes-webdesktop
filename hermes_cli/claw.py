@@ -340,7 +340,8 @@ def _apply_migration(run_migrator: Callable[[bool], dict], opts: SimpleNamespace
     backup_archive: Optional[Path] = None
     if not opts.no_backup:
         try:
-            from hermes_cli.backup import create_pre_migration_backup, _format_size
+            from hermes_cli.backup import create_pre_migration_backup
+            from hermes_cli.sizefmt import format_bytes as _format_size
             backup_archive = create_pre_migration_backup(hermes_home=opts.hermes_home)
             if backup_archive:
                 print()

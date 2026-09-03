@@ -12,11 +12,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from hermes_cli.colors import Colors, color
 
-# Re-exported: ``tools/terminal_tool.py`` imports it from here to hard-block the same
-# gateway-lifecycle commands at execution time when ``_HERMES_GATEWAY=1``.
-from cron.lifecycle_guard import (  # noqa: F401
-    contains_gateway_lifecycle_command as _contains_gateway_lifecycle_command)
-
 
 def _normalize_skills(single_skill=None, skills: Optional[Iterable[str]] = None) -> Optional[List[str]]:
     """Deduped, stripped skill names; None when neither argument was given."""

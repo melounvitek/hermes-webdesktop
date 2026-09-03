@@ -401,7 +401,7 @@ def _set_cwd(rid, params, key, value, session):
         return _err(rid, 4002, f"working directory does not exist: {raw}")
     _write_config_key("terminal.cwd", cwd)
     os.environ["TERMINAL_CWD"] = cwd
-    return _kv(rid, "terminal.cwd", cwd, cwd=cwd, branch=_git_branch_for_cwd(cwd))
+    return _kv(rid, "terminal.cwd", cwd, cwd=cwd, branch=git_probe.branch(cwd))
 
 
 @_cfgset_guarded

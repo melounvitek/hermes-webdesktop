@@ -24,7 +24,7 @@ def _user_turn_indices(history: list) -> list[int]:
     """Indices of *real* user turns: excludes ephemeral scaffolding, display_kind timeline
     rows and compaction handoffs — the same predicate as resume turn counting."""
     from agent.context_compressor import user_originated_turn_view
-    from run_agent import _is_ephemeral_scaffolding
+    from agent.session_persistence import _is_ephemeral_scaffolding
 
     return [
         i for i, m in enumerate(history)
@@ -244,7 +244,7 @@ class CLISessionMixin:
 
     def _show_session_status(self):
         """Show gateway-style status for the current CLI session."""
-        from cli import display_hermes_home
+        from hermes_constants import display_hermes_home
         session_meta = {}
         if self._session_db:
             with contextlib.suppress(Exception):
@@ -715,7 +715,7 @@ class CLISessionMixin:
             user_originated_turn_view)
         from agent.memory_manager import sanitize_context
         from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
-        from run_agent import _is_ephemeral_scaffolding
+        from agent.session_persistence import _is_ephemeral_scaffolding
 
         def _persistence_content(content: Any) -> Any:
             """Project warm content exactly as the session DB flush does."""

@@ -15,7 +15,8 @@ from typing import Any
 import pytest
 
 from hermes_cli import lifecycle, plugins
-from hermes_cli.observability import relay_runtime, relay_shared_metrics
+from agent import relay_runtime
+from hermes_cli.observability import relay_shared_metrics
 from hermes_cli.plugins import PluginManager
 
 

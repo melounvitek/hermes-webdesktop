@@ -145,7 +145,7 @@ def _apply_project_workspace(task_id: str, path: str, _name: str = "") -> None:
     try:
         agent = session.get("agent")
         info = _session_info(agent, session) if agent is not None else {
-            "cwd": resolved, "branch": _git_branch_for_cwd(resolved),
+            "cwd": resolved, "branch": git_probe.branch(resolved),
             "project": _project_info_for_cwd(resolved), "lazy": True}
         _emit("session.info", sid, info)
     except Exception:

@@ -632,16 +632,16 @@ class TestRoundTrip:
 
 class TestFormatSize:
     def test_bytes(self):
-        from hermes_cli.backup import _format_size
+        from hermes_cli.sizefmt import format_bytes as _format_size
         assert _format_size(512) == "512 B"
 
     def test_kilobytes(self):
-        from hermes_cli.backup import _format_size
+        from hermes_cli.sizefmt import format_bytes as _format_size
         assert "KB" in _format_size(2048)
 
 
     def test_terabytes(self):
-        from hermes_cli.backup import _format_size
+        from hermes_cli.sizefmt import format_bytes as _format_size
         assert "TB" in _format_size(2 * 1024 ** 4)
 
 

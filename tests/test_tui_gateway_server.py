@@ -20726,7 +20726,7 @@ def test_fallback_session_info_reports_session_cwd_not_launch_dir(monkeypatch):
     wrong project for any session resumed without a built agent (#71254).
     """
     monkeypatch.setattr(server, "_default_session_cwd", lambda: "/gateway/launch/dir")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "bb/feature")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "bb/feature")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
@@ -20743,7 +20743,7 @@ def test_fallback_session_info_always_emits_branch(monkeypatch):
     after switching into a non-git session.
     """
     monkeypatch.setattr(server, "_default_session_cwd", lambda: "/gateway/launch/dir")
-    monkeypatch.setattr(server, "_git_branch_for_cwd", lambda cwd: "")
+    monkeypatch.setattr(server.git_probe, "branch", lambda cwd: "")
     monkeypatch.setattr(server, "_project_info_for_cwd", lambda cwd: None)
     monkeypatch.setattr(server, "_resolve_model", lambda: "test-model")
 
@@ -22238,13 +22238,13 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server, "_profile_db", _fake_db)
     monkeypatch.setattr(
-        server,
-        "_git_branch_for_cwd",
+        server.git_probe,
+        "branch",
         lambda cwd: "main",
     )
     monkeypatch.setattr(
-        server,
-        "_git_common_repo_root_for_cwd",
+        server.git_probe,
+        "common_repo_root",
         lambda cwd: str(new_cwd),
     )
 

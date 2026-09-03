@@ -139,7 +139,7 @@ def _cfg_get_provider(params):
 def _cfg_get_project(params):
     raw = str(params.get("cwd", "") or (_load_cfg().get("terminal") or {}).get("cwd", "") or "").strip()
     cwd = _completion_cwd({"cwd": raw} if raw else {})
-    return {"cwd": cwd, "branch": _git_branch_for_cwd(cwd)}
+    return {"cwd": cwd, "branch": git_probe.branch(cwd)}
 
 
 def _cfg_get_personality(params):
