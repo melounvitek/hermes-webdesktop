@@ -178,11 +178,9 @@ def _models_dev_info(canonical: str, allow_network: bool = True):
 
 
 def _overlay_pdef(canonical, ov: HermesOverlay, name, env_vars, base_url, doc, source) -> ProviderDef:
-    return ProviderDef(
-        id=canonical, name=name, transport=ov.transport, api_key_env_vars=env_vars, base_url=base_url,
-        base_url_env_var=ov.base_url_env_var, is_aggregator=ov.is_aggregator, auth_type=ov.auth_type, doc=doc,
-        source=source,
-    )
+    return ProviderDef(id=canonical, name=name, transport=ov.transport, api_key_env_vars=env_vars, base_url=base_url,
+                       base_url_env_var=ov.base_url_env_var, is_aggregator=ov.is_aggregator, auth_type=ov.auth_type, doc=doc,
+                       source=source)
 
 
 def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderDef]:
@@ -197,15 +195,11 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
         for ev in ov.extra_env_vars:
             if ev not in env_vars:
                 env_vars.append(ev)
-        return _overlay_pdef(
-            canonical, ov, mdev_info.name, tuple(env_vars), ov.base_url_override or mdev_info.api, mdev_info.doc,
-            "models.dev",
-        )
+        return _overlay_pdef(canonical, ov, mdev_info.name, tuple(env_vars), ov.base_url_override or mdev_info.api,
+                             mdev_info.doc, "models.dev")
     if overlay is not None:
-        return _overlay_pdef(
-            canonical, overlay, _LABEL_OVERRIDES.get(canonical, canonical), overlay.extra_env_vars,
-            overlay.base_url_override, "", "hermes",
-        )
+        return _overlay_pdef(canonical, overlay, _LABEL_OVERRIDES.get(canonical, canonical), overlay.extra_env_vars,
+                             overlay.base_url_override, "", "hermes")
     # Plugin-registered profiles (plugins/model-providers/<name>/) absent from models.dev and
     # HERMES_OVERLAYS would otherwise be "Unknown provider" in /model, --provider and model-switch
     # even though the picker lists them. Only profiles with a concrete endpoint resolve here:
@@ -217,12 +211,10 @@ def get_provider(name: str, *, allow_network: bool = True) -> Optional[ProviderD
         _prof = _profile(canonical)
         if _prof is not None and (_prof.base_url or "").strip():
             _api_mode_to_transport = {v: k for k, v in TRANSPORT_TO_API_MODE.items()}
-            return ProviderDef(
-                id=canonical, name=_prof.display_name or _prof.name or canonical,
-                transport=_api_mode_to_transport.get(_prof.api_mode, "openai_chat"),
-                api_key_env_vars=tuple(_prof.env_vars or ()), base_url=_prof.base_url or "",
-                auth_type=_prof.auth_type or "api_key", source="plugin-profile",
-            )
+            return ProviderDef(id=canonical, name=_prof.display_name or _prof.name or canonical,
+                               transport=_api_mode_to_transport.get(_prof.api_mode, "openai_chat"),
+                               api_key_env_vars=tuple(_prof.env_vars or ()), base_url=_prof.base_url or "",
+                               auth_type=_prof.auth_type or "api_key", source="plugin-profile")
     except Exception:
         pass
     return None
@@ -334,10 +326,8 @@ def determine_api_mode(provider: str, base_url: str = "", model: str = "") -> st
 
 def _user_pdef(pid: str, name: str, base_url: str, key_env: str, transport: str = "openai_chat") -> ProviderDef:
     """``source="user-config"`` ProviderDef shared by ``providers:`` and ``custom_providers:`` entries."""
-    return ProviderDef(
-        id=pid, name=name, transport=transport, api_key_env_vars=(key_env,) if key_env else (),
-        base_url=base_url, is_aggregator=False, auth_type="api_key", source="user-config",
-    )
+    return ProviderDef(id=pid, name=name, transport=transport, api_key_env_vars=(key_env,) if key_env else (),
+                       base_url=base_url, is_aggregator=False, auth_type="api_key", source="user-config")
 
 
 def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[ProviderDef]:
@@ -347,12 +337,10 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
     entry = user_config.get(name)
     if not isinstance(entry, dict):
         return None
-    return _user_pdef(
-        name, entry.get("name", "") or name,
-        entry.get("api", "") or entry.get("url", "") or entry.get("base_url", "") or "",
-        entry.get("key_env") or entry.get("api_key_env") or "",
-        entry.get("transport", "openai_chat") or "openai_chat",
-    )
+    return _user_pdef(name, entry.get("name", "") or name,
+                      entry.get("api", "") or entry.get("url", "") or entry.get("base_url", "") or "",
+                      entry.get("key_env") or entry.get("api_key_env") or "",
+                      entry.get("transport", "openai_chat") or "openai_chat")
 
 
 def custom_provider_slug(display_name: str, provider_key: str = "") -> str:
@@ -398,9 +386,8 @@ def resolve_custom_provider(name: str, custom_providers: Optional[List[Dict[str,
         if not display_name or not api_url:
             continue
         provider_key = (entry.get("provider_key") or "").strip()
-        pdef = _user_pdef(
-            custom_provider_slug(display_name, provider_key), display_name, api_url, (entry.get("key_env") or "").strip()
-        )
+        pdef = _user_pdef(custom_provider_slug(display_name, provider_key), display_name, api_url,
+                          (entry.get("key_env") or "").strip())
         if first_valid is None:
             first_valid = pdef
         if requested in custom_provider_aliases(display_name, provider_key):
@@ -422,11 +409,9 @@ def _lossy_alias_registry_pdef(raw: str, canonical: str) -> Optional[ProviderDef
         if _pcfg is None:
             return None
         if sum(1 for _rid in _AUTH_PROVIDER_REGISTRY if normalize_provider(_rid) == canonical) > 1:
-            return ProviderDef(
-                id=_pcfg.id, name=_pcfg.name, transport="openai_chat",
-                api_key_env_vars=tuple(_pcfg.api_key_env_vars or ()), base_url=_pcfg.inference_base_url or "",
-                source="hermes-auth-registry",
-            )
+            return ProviderDef(id=_pcfg.id, name=_pcfg.name, transport="openai_chat",
+                               api_key_env_vars=tuple(_pcfg.api_key_env_vars or ()), base_url=_pcfg.inference_base_url or "",
+                               source="hermes-auth-registry")
     except Exception:
         pass
     return None
@@ -443,16 +428,12 @@ def _llamacpp_pdef() -> Optional[ProviderDef]:
         endpoint = None
     if not endpoint:
         return None
-    return ProviderDef(
-        id="llamacpp", name="Local", transport="openai_chat", api_key_env_vars=(), base_url=endpoint["base_url"],
-        source="local-runtime",
-    )
+    return ProviderDef(id="llamacpp", name="Local", transport="openai_chat", api_key_env_vars=(), base_url=endpoint["base_url"],
+                       source="local-runtime")
 
 
-def resolve_provider_full(
-    name: str, user_providers: Optional[Dict[str, Any]] = None,
-    custom_providers: Optional[List[Dict[str, Any]]] = None,
-) -> Optional[ProviderDef]:
+def resolve_provider_full(name: str, user_providers: Optional[Dict[str, Any]] = None,
+                          custom_providers: Optional[List[Dict[str, Any]]] = None) -> Optional[ProviderDef]:
     """Full resolution chain: user ``providers.<raw name>`` -> lossy-alias registry id -> built-in
     (models.dev + overlays) -> user providers (canonical, then raw) -> ``custom_providers`` ->
     managed llamacpp -> models.dev directly. User-defined ``providers.<name>`` is tried FIRST on
@@ -486,10 +467,8 @@ def resolve_provider_full(
     try:
         mdev_info = _models_dev_info(canonical)
         if mdev_info is not None:
-            return ProviderDef(
-                id=canonical, name=mdev_info.name, transport="openai_chat", api_key_env_vars=mdev_info.env,
-                base_url=mdev_info.api, source="models.dev",
-            )
+            return ProviderDef(id=canonical, name=mdev_info.name, transport="openai_chat", api_key_env_vars=mdev_info.env,
+                               base_url=mdev_info.api, source="models.dev")
     except Exception:
         pass
     return None

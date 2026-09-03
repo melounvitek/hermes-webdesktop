@@ -147,9 +147,7 @@ def _resolve_plain_custom_api_mode(model_cfg: Dict[str, Any], base_url: str) -> 
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
     detected_mode = _detect_api_mode_for_url(base_url)
     if configured_mode == "codex_responses" and detected_mode != "codex_responses":
-        logger.info(
-            "Ignoring persisted custom api_mode=codex_responses for non-OpenAI endpoint %s", base_url or "(unknown)",
-        )
+        logger.info("Ignoring persisted custom api_mode=codex_responses for non-OpenAI endpoint %s", base_url or "(unknown)")
         configured_mode = None
     return configured_mode or detected_mode or "chat_completions"
 
@@ -207,9 +205,8 @@ def _azure_inferred_api_mode(effective_model: str, api_mode: str) -> str:
     return inferred or api_mode
 
 
-def _configured_or_fallback_api_mode(
-    provider: str, model_cfg: Dict[str, Any], base_url: str, effective_model: Any, *, opencode_by_model: bool
-) -> str:
+def _configured_or_fallback_api_mode(provider: str, model_cfg: Dict[str, Any], base_url: str, effective_model: Any, *,
+                                     opencode_by_model: bool) -> str:
     """Persisted ``model.api_mode`` when it belongs to this provider, else URL/transport fallback.
     OpenCode Zen/Go serve both anthropic_messages and chat_completions models, so (when
     ``opencode_by_model``) their mode is always re-derived from the effective model."""
@@ -218,9 +215,8 @@ def _configured_or_fallback_api_mode(
     return _configured_api_mode(provider, model_cfg) or _fallback_api_mode(provider, base_url, effective_model)
 
 
-def _api_key_provider_api_mode(
-    provider: str, model_cfg: Dict[str, Any], api_key: str, base_url: str, effective_model: Any, *, opencode_by_model: bool
-) -> str:
+def _api_key_provider_api_mode(provider: str, model_cfg: Dict[str, Any], api_key: str, base_url: str, effective_model: Any, *,
+                               opencode_by_model: bool) -> str:
     """api_mode for a registry ``api_key`` provider (explicit and env/config paths)."""
     if provider == "copilot":
         return _copilot_runtime_api_mode(model_cfg, api_key, target_model=effective_model)
@@ -498,10 +494,9 @@ def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_u
     return _configured_or_fallback_api_mode(provider, model_cfg, base_url, effective_model, opencode_by_model=True), base_url
 
 
-def _resolve_runtime_from_pool_entry(
-    *, provider: str, entry: PooledCredential, requested_provider: str, model_cfg: Optional[Dict[str, Any]] = None,
-    pool: Optional[CredentialPool] = None, target_model: Optional[str] = None,
-) -> Dict[str, Any]:
+def _resolve_runtime_from_pool_entry(*, provider: str, entry: PooledCredential, requested_provider: str,
+                                     model_cfg: Optional[Dict[str, Any]] = None, pool: Optional[CredentialPool] = None,
+                                     target_model: Optional[str] = None) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
     api_mode, base_url = _pool_entry_mode_and_url(provider, entry, model_cfg, _effective_model(model_cfg, target_model),
                                                   _pool_entry_base_url(entry).rstrip("/"))
@@ -542,9 +537,8 @@ def _refresh_nous_pool_entry(pool: CredentialPool, entry: Any, pool_api_key: str
     return entry, pool_api_key
 
 
-def _resolve_from_pool(
-    provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key, explicit_base_url, target_model
-) -> Optional[Dict[str, Any]]:
+def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key, explicit_base_url,
+                       target_model) -> Optional[Dict[str, Any]]:
     """Runtime from the provider's credential pool, or None to continue down the ladder."""
     should_use_pool = provider != "openrouter" or _openrouter_should_use_pool(requested_provider, model_cfg, explicit_api_key,
                                                                              explicit_base_url)
@@ -650,10 +644,9 @@ _EXPLICIT_RESOLVERS: Dict[str, Callable[..., Dict[str, Any]]] = {
 }
 
 
-def _resolve_explicit_runtime(
-    *, provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
+def _resolve_explicit_runtime(*, provider: str, requested_provider: str, model_cfg: Dict[str, Any],
+                              explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None,
+                              target_model: Optional[str] = None) -> Optional[Dict[str, Any]]:
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
     if not explicit_api_key and not explicit_base_url:
@@ -713,11 +706,9 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
     api_mode = spec.api_mode
     if callable(api_mode):
         api_mode = api_mode(_effective_model(model_cfg, target_model))
-    return _runtime(
-        provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
-        creds.get("api_key", ""), source=creds.get("source", spec.default_source),
-        **{spec.expiry_key: creds.get(spec.expiry_key)}, requested_provider=requested_provider,
-    )
+    return _runtime(provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
+                    creds.get("api_key", ""), source=creds.get("source", spec.default_source),
+                    **{spec.expiry_key: creds.get(spec.expiry_key)}, requested_provider=requested_provider)
 
 
 def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, Any]]:
@@ -891,10 +882,8 @@ def _opencode_free_runtime(provider, requested_provider, model_cfg, target_model
     return free_runtime
 
 
-def resolve_runtime_provider(
-    *, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
-) -> Dict[str, Any]:
+def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
+                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)

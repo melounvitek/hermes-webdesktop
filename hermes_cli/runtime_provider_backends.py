@@ -61,10 +61,9 @@ def _azure_foundry_api_key(rp, explicit_api_key: str) -> str:
     return api_key
 
 
-def _resolve_azure_foundry_runtime(
-    *, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
-) -> Dict[str, Any]:
+def _resolve_azure_foundry_runtime(*, requested_provider: str, model_cfg: Dict[str, Any],
+                                   explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None,
+                                   target_model: Optional[str] = None) -> Dict[str, Any]:
     """Azure Foundry: ``model.base_url`` + ``model.api_mode`` (or explicit overrides), API key from
     ``.env``/env or a per-request Entra ID token, trailing ``/v1`` stripped for Anthropic-style
     endpoints (the Anthropic SDK appends /v1/messages itself)."""
@@ -100,15 +99,11 @@ def _resolve_azure_foundry_runtime(
             api_key, source, auth_mode, entra = _azure_entra_credentials(cfg_entra), "entra_id", "entra_id", (
                 {"scope": scope} if scope else {}
             )
-        return rp._runtime(
-            "azure-foundry", cfg_api_mode, base_url, api_key,
-            auth_mode=auth_mode, entra=entra, source=source, requested_provider=requested_provider,
-        )
-    return rp._runtime(
-        "azure-foundry", cfg_api_mode, base_url, _azure_foundry_api_key(rp, explicit_api_key),
-        auth_mode="api_key", source="explicit" if (explicit_api_key or explicit_base_url) else "config",
-        requested_provider=requested_provider,
-    )
+        return rp._runtime("azure-foundry", cfg_api_mode, base_url, api_key, auth_mode=auth_mode, entra=entra, source=source,
+                           requested_provider=requested_provider)
+    return rp._runtime("azure-foundry", cfg_api_mode, base_url, _azure_foundry_api_key(rp, explicit_api_key),
+                       auth_mode="api_key", source="explicit" if (explicit_api_key or explicit_base_url) else "config",
+                       requested_provider=requested_provider)
 
 
 # ── OpenRouter / bare custom fallback ──────────────────────────────────────────────────────
@@ -168,10 +163,8 @@ def _resolve_openrouter_runtime(
     cfg_api_mode = rp._parse_api_mode(model_cfg.get("api_mode"))
     # Explicit "custom" stays "custom" rather than relabeling to "openrouter".
     if requested_norm != "custom":
-        return rp._runtime(
-            "openrouter", cfg_api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions",
-            base_url, api_key, source=source,
-        )
+        return rp._runtime("openrouter", cfg_api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
+                           api_key, source=source)
     if base_url:
         # provider_name makes pool lookup prefer name match over base_url (fixes credential
         # mix-ups when multiple custom providers share a base_url).
@@ -205,10 +198,9 @@ def _resolve_bedrock_runtime(requested_provider: str, model_cfg: Dict[str, Any],
     Claude → AnthropicBedrock SDK (prompt caching, thinking budgets); others → Converse API.
     AWS_BEARER_TOKEN_BEDROCK auth is unsupported by AnthropicBedrock (SigV4 only), so bearer users
     go through Converse regardless of model."""
-    from agent.bedrock_adapter import (
-        bedrock_openai_base_url, has_aws_credentials, is_anthropic_bedrock_model, is_openai_bedrock_model,
-        resolve_aws_auth_env_var, resolve_bedrock_bearer_token, resolve_bedrock_runtime_region,
-    )
+    from agent.bedrock_adapter import (bedrock_openai_base_url, has_aws_credentials, is_anthropic_bedrock_model,
+                                       is_openai_bedrock_model, resolve_aws_auth_env_var, resolve_bedrock_bearer_token,
+                                       resolve_bedrock_runtime_region)
     from hermes_cli.config import load_config  # direct (not the origin delegate), as before
     rp = _rp()
     # Explicitly selected bedrock trusts boto3's credential chain (IMDS, ECS/Lambda roles, SSO)
@@ -230,16 +222,12 @@ def _resolve_bedrock_runtime(requested_provider: str, model_cfg: Dict[str, Any],
     guardrail_config = _bedrock_guardrail_config(bedrock_cfg)
     current_model = str(target_model or model_cfg.get("default") or "").strip()
     has_bearer_token = bool(os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip())
-    runtime = rp._runtime(
-        "bedrock", "bedrock_converse", f"https://bedrock-runtime.{region}.amazonaws.com", "aws-sdk",
-        source=auth_source, region=region, requested_provider=requested_provider,
-    )
+    runtime = rp._runtime("bedrock", "bedrock_converse", f"https://bedrock-runtime.{region}.amazonaws.com", "aws-sdk",
+                          source=auth_source, region=region, requested_provider=requested_provider)
     if is_openai_bedrock_model(current_model):
         bearer = resolve_bedrock_bearer_token()
-        runtime.update(
-            api_mode="codex_responses", base_url=bedrock_openai_base_url(region), api_key=bearer or "aws-sdk",
-            source="AWS_BEARER_TOKEN_BEDROCK" if bearer else auth_source, model=current_model, bedrock_openai=True,
-        )
+        runtime.update(api_mode="codex_responses", base_url=bedrock_openai_base_url(region), api_key=bearer or "aws-sdk",
+                       source="AWS_BEARER_TOKEN_BEDROCK" if bearer else auth_source, model=current_model, bedrock_openai=True)
     elif is_anthropic_bedrock_model(current_model) and not has_bearer_token:
         runtime.update(api_mode="anthropic_messages", bedrock_anthropic=True)
     if guardrail_config:
@@ -274,8 +262,6 @@ def _is_external_process_provider(provider: str) -> bool:
 def _resolve_external_process_runtime(provider: str, requested_provider: str) -> Dict[str, Any]:
     rp = _rp()
     creds = rp.resolve_external_process_provider_credentials(provider)
-    return rp._runtime(
-        provider, "chat_completions", creds.get("base_url", "").rstrip("/"), creds.get("api_key", ""),
-        command=creds.get("command", ""), args=list(creds.get("args") or []),
-        source=creds.get("source", "process"), requested_provider=requested_provider,
-    )
+    return rp._runtime(provider, "chat_completions", creds.get("base_url", "").rstrip("/"), creds.get("api_key", ""),
+                       command=creds.get("command", ""), args=list(creds.get("args") or []),
+                       source=creds.get("source", "process"), requested_provider=requested_provider)
