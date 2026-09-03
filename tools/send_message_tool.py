@@ -16,7 +16,7 @@ from tools.send_message_targets import (  # noqa: F401
     _HOME_CHANNEL_ENV_OVERRIDES, _SLACK_USER_ID_RE, _parse_target_ref, resolve_send_target)
 from tools.send_message_senders import (  # noqa: F401
     _AUDIO_EXTS, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _TELEGRAM_CAPTION_LIMIT, _VIDEO_EXTS,
-    _VOICE_EXTS, _adapter_media_method, _error, _live_adapter, _media_caption_split, _plugin_standalone_sender,
+    _NO_DELIVERABLE, _VOICE_EXTS, _adapter_media_method, _error, _live_adapter, _media_caption_split, _plugin_standalone_sender,
     _registry_standalone_send, _resolve_slack_user_target, _sanitize_error_text,
     _send_bluebubbles, _send_matrix_via_adapter, _send_qqbot, _send_signal, _send_telegram,
     _send_weixin, _send_yuanbao)
@@ -335,9 +335,9 @@ async def _send_live_adapter_media(
         if adapter_method is None or adapter_method is getattr(BasePlatformAdapter, method_name):
             return {"error": (f"Live adapter does not implement native {media_kind} delivery; "
                               f"media file {index + 1}/{total} was not sent")}
-        kwargs = {"caption": caption if index == 0 else None, "reply_to": thread_id, "metadata": metadata}
         try:
-            last_result = await getattr(adapter, method_name)(chat_id, media_path, **kwargs)
+            last_result = await getattr(adapter, method_name)(
+                chat_id, media_path, caption=caption if index == 0 else None, reply_to=thread_id, metadata=metadata)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -349,7 +349,7 @@ async def _send_live_adapter_media(
         return {"error": f"Adapter media send failed after {index}/{total} files: {detail}"}
 
     if last_result is None:
-        return {"error": "No deliverable text or media remained after processing MEDIA tags"}
+        return {"error": _NO_DELIVERABLE}
     return {"success": True, "message_id": last_result.message_id, "media_delivered": True}
 
 
@@ -388,8 +388,7 @@ async def _send_via_adapter(
                         **({"publish_topic": chat_id} if platform_name == "ntfy" and chat_id else {})} or None
             if media_files:
                 return await _dispatch_on_gateway_loop(
-                    runner,
-                    lambda: _send_live_adapter_media(
+                    runner, lambda: _send_live_adapter_media(
                         adapter, chat_id, chunk, media_files,
                         thread_id=thread_id, metadata=metadata, force_document=force_document),
                     "send_message: failed to schedule media send on gateway loop")

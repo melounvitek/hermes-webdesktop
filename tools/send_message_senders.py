@@ -258,8 +258,7 @@ def _telegram_format(message):
     """``(formatted, parse_mode, has_html)``: text already containing HTML tags is sent as
     HTML; otherwise Markdown -> MarkdownV2 via the adapter's ``format_message``."""
     from telegram.constants import ParseMode
-    has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
-    if has_html:
+    if re.search(r'<[a-zA-Z/][^>]*>', message):
         return message, ParseMode.HTML, True
     try:
         from plugins.platforms.telegram.adapter import TelegramAdapter
@@ -276,7 +275,6 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         formatted, send_parse_mode, _has_html = _telegram_format(message)
         bot = _telegram_bot(token)
         from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
-
         # Telegram accepts a numeric chat_id OR an @username string; never force-int.
         int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
@@ -285,15 +283,14 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         text_kwargs = {**thread_kwargs, **({"disable_web_page_preview": True} if disable_link_previews else {})}
         last_msg, warnings = None, []
 
-        # MEDIA caption: a single captionable file + short text rides on the bubble as
-        # its *formatted* caption. Formatting can inflate a raw <1024 string past
-        # Telegram's cap, so re-check in UTF-16 units and fall back to a separate body.
+        # MEDIA caption: a single captionable file + short text rides on the bubble as its
+        # *formatted* caption. Formatting can inflate a raw <1024 string past Telegram's
+        # cap, so re-check in UTF-16 units and fall back to a separate body.
         _tg_caption = None
         from gateway.platforms.base import BasePlatformAdapter, utf16_len
         _cap, _ = _media_caption_split(message, media_files, max_caption_len=_TELEGRAM_CAPTION_LIMIT)
         if _cap is not None and utf16_len(formatted) <= _TELEGRAM_CAPTION_LIMIT:
-            _tg_caption = formatted
-            formatted = ""  # suppress the separate text send below
+            _tg_caption, formatted = formatted, ""  # suppress the separate text send below
 
         if formatted.strip():
             # Chunk *after* formatting, in UTF-16 units: MarkdownV2/HTML escaping inflates
