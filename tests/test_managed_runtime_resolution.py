@@ -95,7 +95,7 @@ _ALLOWED: dict[tuple[str, str], str] = {
     ("hermes_cli/main_install_repair.py", "npm"): (
         "_resolve_node_runtime_npm()'s WSL re-scan: PATH minus /mnt/* IS the question."
     ),
-    ("tools/browser_tool.py", "npx"): (
+    ("tools/browser_tool_install.py", "npx"): (
         "agent-browser runs via `npx`, resolved against the extended browser "
         "PATH that _merge_browser_path() already seeds with the managed dirs."
     ),

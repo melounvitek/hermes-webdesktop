@@ -4,6 +4,7 @@ When browser.backend is "browser-use", the model gets ``browser_exec`` tool
 instead of default browser tools
 """
 
+import contextlib
 import importlib
 import json
 import logging
@@ -91,19 +92,35 @@ _URL_RE = re.compile(r"https?://[^\s'\"\\)]+", re.IGNORECASE)
 _FHS_BIN_DIRS = ("/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin")
 
 
+def _quiet(fn: Callable[[], Any], default: Any, log_prefix: str = "") -> Any:
+    """``fn()``, or ``default`` on any exception (debug-logged when ``log_prefix`` is set)."""
+    try:
+        return fn()
+    except Exception as e:
+        if log_prefix:
+            logger.debug("%s: %s", log_prefix, e)
+        return default
+
+
 def _lazy_call(module: str, name: str, default: Any, log_prefix: str) -> Any:
     """Call ``module.name()`` resolved at call time (so tests can stub the module or
     patch the attribute); on any failure log ``log_prefix`` and return ``default``."""
-    try:
-        return getattr(importlib.import_module(module), name)()
-    except Exception as e:
-        logger.debug("%s: %s", log_prefix, e)
-        return default
+    return _quiet(lambda: getattr(importlib.import_module(module), name)(), default, log_prefix)
 
 
 def _camofox_active(context: str = "") -> bool:
     """True when the Camofox backend is selected; False (logged) if the probe fails."""
     return _lazy_call("tools.browser_camofox", "is_camofox_mode", False, f"Camofox activity check failed{context}")
+
+
+def _real_profile_consented() -> bool:
+    """Whether the user opted in to real-profile local browsing (config read)."""
+    return _lazy_call("tools.browser_tool", "_use_real_profile", False, "real-profile consent lookup failed")
+
+
+def _lightpanda_engine_in_use() -> bool:
+    return _lazy_call("tools.browser_tool", "lightpanda_engine_status", (False, ""),
+                      "lightpanda engine status unavailable")[0]
 
 
 def _set_cdp_env(env: dict, cdp: str) -> None:
@@ -142,9 +159,9 @@ def _blocked_url_in_code(code: str) -> Optional[str]:
 def _base_subprocess_env() -> dict:
     from tools.browser_tool import _build_browser_env
     env = _build_browser_env()
-    # The CLI runs under its own Python (uv tool / uvx); inherited
-    # PYTHONPATH/PYTHONHOME (Hermes's venv) win over its site-packages → wrong-ABI
-    # C-extensions (pydantic_core) and a crash. Strip both.
+    # The CLI runs under its own Python (uv tool / uvx); inherited PYTHONPATH/PYTHONHOME
+    # (Hermes's venv) win over its site-packages → wrong-ABI C-extensions (pydantic_core)
+    # and a crash. Strip both.
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     env["PATH"] = _floor_subprocess_path(env.get("PATH", ""))
@@ -153,24 +170,18 @@ def _base_subprocess_env() -> dict:
 
 
 def _floor_subprocess_path(path: str) -> str:
-    """Guarantee core system dirs survive onto the CLI subprocess PATH.
-
-    Profile workers (kanban bots, cron) can inherit a PATH of only version-manager
-    dirs; the uv browser-use binary's POSIX sh trampoline resolves
-    ``dirname``/``realpath`` through PATH and dies (exit 127) without /usr/bin.
-    Reuses browser_tool's ``_merge_browser_path`` floor, else appends FHS bin
-    dirs. Windows .cmd shims don't trampoline through PATH, so no-op there.
-    """
+    """Guarantee core system dirs survive onto the CLI subprocess PATH: profile workers
+    (kanban bots, cron) can inherit a PATH of only version-manager dirs, and the uv
+    browser-use binary's POSIX sh trampoline resolves ``dirname``/``realpath`` through
+    PATH and dies (exit 127) without /usr/bin. Reuses browser_tool's ``_merge_browser_path``
+    floor, else appends FHS bin dirs. Windows .cmd shims don't trampoline: no-op there."""
     if os.name == "nt":
         return path
-    try:
+    with contextlib.suppress(Exception):
         from tools.browser_tool import _merge_browser_path
         return _merge_browser_path(path or "")
-    except Exception:
-        pass
     parts = [p for p in (path or "").split(os.pathsep) if p]
-    existing = set(parts)
-    parts.extend(d for d in _FHS_BIN_DIRS if d not in existing and os.path.isdir(d))
+    parts.extend(d for d in _FHS_BIN_DIRS if d not in set(parts) and os.path.isdir(d))
     return os.pathsep.join(parts)
 
 
@@ -183,6 +194,10 @@ def _read_browser_cfg() -> dict:
     except Exception as e:
         logger.debug("Could not read browser config section: %s", e)
         return {}
+
+
+def _use_gateway(browser_cfg: dict) -> bool:
+    return is_truthy_value(browser_cfg.get("use_gateway"), default=False)
 
 
 def get_browser_backend() -> str:
@@ -198,16 +213,14 @@ def get_browser_backend() -> str:
 
 
 def is_legacy_browser_use_cloud_config(browser_cfg: dict) -> bool:
-    """True for pre-CLI direct-API Browser Use cloud configs"""
+    """True for pre-CLI direct-API Browser Use cloud configs. An explicit backend or
+    a non-Browser-Use cloud_provider wins; Camofox is selected via env var, not
+    cloud_provider, so a Camofox user with a stray BROWSER_USE_API_KEY keeps it."""
     if not isinstance(browser_cfg, dict) or browser_cfg.get("backend"):
-        return False  # an explicit backend choice wins
-    provider = str(browser_cfg.get("cloud_provider") or "").strip().lower()
-    if provider not in {"browser-use", ""}:
-        return False  # explicit local/Browserbase/… choices win
-    if is_truthy_value(browser_cfg.get("use_gateway"), default=False):
         return False
-    # Camofox is selected via env var, not cloud_provider — a Camofox user
-    # with a stray BROWSER_USE_API_KEY must keep their explicit choice.
+    provider = str(browser_cfg.get("cloud_provider") or "").strip().lower()
+    if provider not in {"browser-use", ""} or _use_gateway(browser_cfg):
+        return False
     if _camofox_active(" during migration"):
         return False
     return bool(os.getenv("BROWSER_USE_API_KEY"))
@@ -217,21 +230,17 @@ def is_browser_use_cli_mode() -> bool:
     """True when the Browser Use CLI replaces the built-in browser stack.
 
     Browser Use mode is the DEFAULT: unset ``browser.backend`` ("") enables it
-    whenever the CLI is runnable (installed binary or uvx); ``browser.backend:
-    off`` (or ``/browser use off``) keeps the built-in browser_* tools. Camofox
-    always falls back to the built-in tools regardless — Firefox-based with a
-    custom HTTP API and no CDP surface, so the CDP-only harness cannot drive it.
+    whenever the CLI is runnable (installed binary or uvx), so browsing never
+    silently breaks; ``browser.backend: off`` (or ``/browser use off``) keeps the
+    built-in browser_* tools. Camofox always falls back to the built-in tools —
+    Firefox-based with a custom HTTP API and no CDP surface for the harness.
     """
     if _camofox_active():
         return False
     backend = get_browser_backend()
     if backend:
         return backend == _BACKEND_KEY
-    if is_legacy_browser_use_cloud_config(_read_browser_cfg()):
-        return True
-    # Default (backend unset): Browser Use mode when the CLI can run at all;
-    # otherwise keep the built-in tools so browsing never silently breaks.
-    return _find_cli() is not None
+    return is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None
 
 
 _NOTICE_STAMP_NAME = ".browser_use_default_notice"
@@ -246,16 +255,12 @@ def default_downgrade_notice() -> Optional[str]:
         if get_browser_backend() or _camofox_active() or _find_cli() is not None:
             return None  # explicit choice / Camofox / CLI present — nothing downgraded
         stamp = Path(get_hermes_home()) / "cache" / _NOTICE_STAMP_NAME
-        try:
+        with contextlib.suppress(OSError):
             if 0 <= time.time() - stamp.stat().st_mtime < _NOTICE_INTERVAL_S:
                 return None
-        except OSError:
-            pass
-        try:
+        with contextlib.suppress(OSError):
             stamp.parent.mkdir(parents=True, exist_ok=True)
             stamp.touch()
-        except OSError:
-            pass
         return ("Browser Use CLI not found — using the built-in browser tools. "
                 "Run `hermes tools` (Browser Automation → Browser Use) to install it, "
                 "or `browser.backend: off` in config.yaml to silence this.")
@@ -296,27 +301,25 @@ def _find_cli() -> Optional[List[str]]:
 
 
 def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
-    """Install the browser-use CLI persistently via ``uv tool install``
-    (managed uv via ``ensure_uv`` → uv on PATH), linking the binary into
-    ``$HERMES_HOME/bin`` (``UV_TOOL_BIN_DIR``) so ``_find_cli()`` resolves it for
-    every profile without touching the user's PATH. Returns ``(ok, message)``;
-    never raises.
+    """Install the browser-use CLI persistently via ``uv tool install`` (managed uv
+    via ``ensure_uv`` → uv on PATH), linking the binary into ``$HERMES_HOME/bin``
+    (``UV_TOOL_BIN_DIR``) so ``_find_cli()`` resolves it for every profile without
+    touching the user's PATH. Returns ``(ok, message)``; never raises.
+
+    MANAGED-FIRST: only the managed copy short-circuits. A browser-use on PATH is a
+    user-level side install and must NOT prevent provisioning the canonical
+    Hermes-managed copy (version drift, no updates via hermes tools).
     """
-    # MANAGED-FIRST: only the managed copy short-circuits. A browser-use on PATH
-    # is a user-level side install and must NOT prevent provisioning the
-    # canonical Hermes-managed copy (version drift, no updates via hermes tools).
     bin_dir = _managed_bin_dir()
     managed = shutil.which("browser-use", path=bin_dir)
     if managed:
         return True, f"browser-use CLI already installed ({managed})"
 
-    uv_bin: Optional[str] = None
-    try:
+    def _managed_uv() -> Optional[str]:
         from hermes_cli.managed_uv import ensure_uv
-        uv_bin = str(ensure_uv() or "") or None
-    except Exception as e:
-        logger.debug("Managed uv bootstrap unavailable: %s", e)
-    uv_bin = uv_bin or shutil.which("uv")
+        return str(ensure_uv() or "") or None
+
+    uv_bin = _quiet(_managed_uv, None, "Managed uv bootstrap unavailable") or shutil.which("uv")
     if not uv_bin:
         return False, ("uv is not available and could not be bootstrapped. Install uv "
                        "(https://docs.astral.sh/uv/) and run `uv tool install browser-use`.")
@@ -385,9 +388,9 @@ def _native_screenshot_result(result: Dict[str, Any], path: str) -> Optional[Dic
 
         if not _should_use_native_vision_fast_path():
             return None
-        # History-reuse cap: this data URL bakes into the tool result and is
-        # re-sent every later turn — same policy as the vision_analyze /
-        # browser_vision native embeds (256 KB / 1568 px, JPEG quality ladder).
+        # History-reuse cap: this data URL bakes into the tool result and is re-sent
+        # every later turn — same policy as the vision_analyze / browser_vision native
+        # embeds (256 KB / 1568 px, JPEG quality ladder).
         data_url = _resize_image_for_vision(
             Path(path), mime_type="image/png", max_base64_bytes=_EMBED_TARGET_BYTES,
             max_dimension=_EMBED_MAX_DIMENSION, force_jpeg=True,
@@ -418,13 +421,9 @@ def _resolve_lightpanda_cdp(env: dict, task_id: Optional[str], session_name: str
     private to this session and the own-tab preamble is skipped."""
     try:
         from tools.browser_tool import _get_session_info, _using_lightpanda_engine
-    except Exception as e:  # pragma: no cover — stubbed browser_tool in tests
-        logger.debug("browser_tool lightpanda resolution unavailable: %s", e)
-        return None
-    try:
         if not _using_lightpanda_engine():
             return None
-    except Exception as e:
+    except Exception as e:  # stubbed browser_tool in tests / engine lookup failure
         logger.debug("browser engine lookup failed: %s", e)
         return None
     err = _export_session_cdp(
@@ -460,29 +459,22 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
         logger.debug("browser_tool backend resolution unavailable: %s", e)
         return None
 
-    try:
-        override = _get_cdp_override()
-    except Exception:
-        override = ""
+    override = _quiet(_get_cdp_override, "")
     if override:
         _set_cdp_env(env, override)
         return None
 
-    try:
-        provider = _get_cloud_provider()
-    except Exception as e:
-        logger.debug("Cloud provider lookup failed: %s", e)
-        provider = None
+    provider = _quiet(_get_cloud_provider, None, "Cloud provider lookup failed")
     if provider is None:
         return _resolve_lightpanda_cdp(env, task_id, session_name)
 
-    # Browser Use direct-API configs: the CLI talks to BU cloud natively
-    # (BU_AUTOSPAWN / auth login) — the legacy provider would create a second,
-    # redundant session. The Nous-gateway variant (use_gateway: true) DOES resolve
-    # through the provider: the gateway provisions the browser server-side and
-    # returns its CDP URL, giving subscribers CLI mode with no raw key.
+    # Browser Use direct-API configs: the CLI talks to BU cloud natively (BU_AUTOSPAWN /
+    # auth login) — the legacy provider would create a second, redundant session. The
+    # Nous-gateway variant (use_gateway: true) DOES resolve through the provider: the
+    # gateway provisions the browser server-side and returns its CDP URL, giving
+    # subscribers CLI mode with no raw key.
     provider_key = str(getattr(provider, "name", "") or "").strip().lower()
-    if provider_key == _BACKEND_KEY and not is_truthy_value(_read_browser_cfg().get("use_gateway"), default=False):
+    if provider_key == _BACKEND_KEY and not _use_gateway(_read_browser_cfg()):
         env[_PRIVATE_BROWSER_SENTINEL] = "1"  # named BU cloud browsers are exclusive to their daemon
         return None
 
@@ -499,11 +491,6 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     if err is None and session_name:
         env[_PRIVATE_BROWSER_SENTINEL] = "1"
     return err
-
-
-def _real_profile_consented() -> bool:
-    """Whether the user opted in to real-profile local browsing (config read)."""
-    return _lazy_call("tools.browser_tool", "_use_real_profile", False, "real-profile consent lookup failed")
 
 
 def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
@@ -527,19 +514,14 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
         logger.debug("real-profile backend resolution unavailable: %s", e)
         return None
 
-    try:
-        if _get_cdp_override_raw():
-            return None
-    except Exception:
-        pass
+    if _quiet(_get_cdp_override_raw, ""):
+        return None
 
     if not force_local:
-        # Only auto-upgrade genuinely-local attaches; any cloud path (provider or
-        # legacy BU cloud config) stays on its backend unless the model passes local=true.
-        try:
-            if _get_cloud_provider() is not None:
-                return None
-        except Exception:
+        # Only auto-upgrade genuinely-local attaches; any cloud path (provider, provider
+        # lookup failure, or legacy BU cloud config) stays on its backend unless the model
+        # passes local=true.
+        if _quiet(_get_cloud_provider, object()) is not None:
             return None
         if is_legacy_browser_use_cloud_config(_read_browser_cfg()):
             return None
@@ -576,14 +558,13 @@ def _windows_popen_kwargs() -> dict:
     """Hide the console the .cmd shim would flash on Windows (as browser_tool does)."""
     if os.name != "nt":
         return {}
-    try:
+    def _flags() -> dict:
         from hermes_cli._subprocess_compat import windows_hide_flags
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         return {"creationflags": windows_hide_flags(), "startupinfo": si}
-    except Exception as e:
-        logger.debug("Windows hide-flags unavailable: %s", e)
-        return {}
+
+    return _quiet(_flags, {}, "Windows hide-flags unavailable")
 
 
 def _clamp_timeout(timeout_s: Any) -> int:
@@ -746,21 +727,12 @@ _HELPERS_DIGEST = (
 # lives with the session, not in the process-wide TTL-cached check_fn.
 
 
-def _lightpanda_engine_in_use() -> bool:
-    return _lazy_call("tools.browser_tool", "lightpanda_engine_status", (False, ""),
-                      "lightpanda engine status unavailable")[0]
-
-
 def _description_header() -> str:
     """Header tailored to whether the active model can see images natively"""
     if _lightpanda_engine_in_use():  # no screenshots at all, whatever the model can see
         return _HEADER_BASE + _HEADER_TEXT_ONLY + _HEADER_LIGHTPANDA
-    try:
-        from tools.vision_tools import _should_use_native_vision_fast_path
-        if _should_use_native_vision_fast_path():
-            return _HEADER_BASE + _HEADER_VISION
-    except Exception:
-        pass
+    if _lazy_call("tools.vision_tools", "_should_use_native_vision_fast_path", False, ""):
+        return _HEADER_BASE + _HEADER_VISION
     return _HEADER_BASE + _HEADER_TEXT_ONLY
 
 

@@ -32,7 +32,6 @@ _CDP_PRIVATE_PAGE_ALLOWED_METHODS = {
     "Page.stopLoading",
 }
 
-
 # method → result paths that are ALWAYS opaque base64 (protocol-declared binary).
 # redact_sensitive_text's Fernet pattern ("gAAAA" + base64 alphabet) can match
 # arbitrary spans inside such payloads and corrupt the decoded bytes; the payload
@@ -55,49 +54,41 @@ _CDP_FLAGGED_BINARY_PATHS: Dict[str, tuple] = {
 }
 
 
-def _redact_cdp_output(
-    value: Any,
-    *,
-    always_paths: tuple = (),
-    flagged_paths: tuple = (),
-) -> Any:
+def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: tuple = ()) -> Any:
     """Redact browser-originated CDP result text; opaque bytes stay byte-identical.
 
     Exemptions come ONLY from the calling method's spec as exact result paths.
     Path suffixes propagate only into the matching subtree, so ``base64Encoded``
     is honored solely as a sibling on the trusted carrier object — never as
-    ambient trust a ``Runtime.evaluate`` by-value object could spoof (#94142).
+    ambient trust a ``Runtime.evaluate`` by-value object could spoof.
     """
     from agent.redact import redact_sensitive_text
 
     if isinstance(value, str):
         return redact_sensitive_text(value, force=True)
-    if isinstance(value, list):
-        return [_redact_cdp_output(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_redact_cdp_output(item) for item in value)
-    if isinstance(value, dict):
-        base64_flagged = value.get("base64Encoded") is True
+    if isinstance(value, (list, tuple)):
+        return type(value)(_redact_cdp_output(item) for item in value)
+    if not isinstance(value, dict):
+        return value
+    base64_flagged = value.get("base64Encoded") is True
 
-        def leaf(paths: tuple, key: str) -> bool:
-            return any(len(p) == 1 and p[0] == key for p in paths)
+    def leaf(paths: tuple, key: str) -> bool:
+        return any(len(p) == 1 and p[0] == key for p in paths)
 
-        def descend(paths: tuple, key: str) -> tuple:
-            return tuple(p[1:] for p in paths if len(p) > 1 and p[0] == key)
+    def descend(paths: tuple, key: str) -> tuple:
+        return tuple(p[1:] for p in paths if len(p) > 1 and p[0] == key)
 
-        redacted: Dict[str, Any] = {}
-        for key, item in value.items():
-            opaque = leaf(always_paths, key) or (leaf(flagged_paths, key) and base64_flagged)
-            if isinstance(item, str) and opaque:
-                redacted[key] = item
-            else:
-                redacted[key] = _redact_cdp_output(
-                    item,
-                    always_paths=descend(always_paths, key),
-                    flagged_paths=descend(flagged_paths, key),
-                )
-        return redacted
-    return value
+    redacted: Dict[str, Any] = {}
+    for key, item in value.items():
+        opaque = leaf(always_paths, key) or (leaf(flagged_paths, key) and base64_flagged)
+        if isinstance(item, str) and opaque:
+            redacted[key] = item
+        else:
+            redacted[key] = _redact_cdp_output(
+                item, always_paths=descend(always_paths, key), flagged_paths=descend(flagged_paths, key),
+            )
+    return redacted
+
 
 # ``websockets`` is a direct dependency; wrap so a stale env yields a clean error.
 try:
@@ -117,13 +108,11 @@ def _run_async(coro):
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-
     if loop and loop.is_running():
         import concurrent.futures
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(asyncio.run, coro)
-            return future.result()
+            return pool.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
 
 
@@ -163,30 +152,25 @@ _METHOD_PARAM_GUARDS = {
 }
 
 
-def _browser_cdp_private_guard(
-    *,
-    task_id: str,
-    method: str,
-    params: Dict[str, Any],
-) -> Optional[str]:
+def _browser_cdp_private_guard(*, task_id: str, method: str, params: Dict[str, Any]) -> Optional[str]:
     """Apply the browser SSRF/private-page guard to raw CDP calls.
 
     Raw CDP shares the cloud/private-network boundary of ``browser_snapshot`` /
     ``browser_console`` / ``browser_eval`` and must not become their bypass.
+    Guard probes are best-effort; a probe failure never breaks local/custom CDP
+    workflows.
     """
     try:
         from tools import browser_tool as bt  # type: ignore[import-not-found]
 
         if not bt._eval_ssrf_guard_active(task_id):  # type: ignore[attr-defined]
             return None
-
         guard = _METHOD_PARAM_GUARDS.get(method)
         if guard is not None:
             probe, template = guard
             literal = probe(bt, params or {})
             if literal:
                 return _blocked(template.format(literal), method)
-
         if method not in _CDP_PRIVATE_PAGE_ALLOWED_METHODS:
             blocked_url = bt._current_page_private_url(task_id)  # type: ignore[attr-defined]
             if blocked_url:
@@ -197,17 +181,12 @@ def _browser_cdp_private_guard(
                     method,
                 )
     except Exception as exc:  # noqa: BLE001
-        # Guard probes are best-effort; never break local/custom CDP workflows.
         logger.debug("browser_cdp: private-page guard probe failed: %s", exc)
     return None
 
 
 async def _cdp_call(
-    ws_url: str,
-    method: str,
-    params: Dict[str, Any],
-    target_id: Optional[str],
-    timeout: float,
+    ws_url: str, method: str, params: Dict[str, Any], target_id: Optional[str], timeout: float,
 ) -> Dict[str, Any]:
     """Make a single CDP call, optionally attaching to a target first.
 
@@ -232,22 +211,18 @@ async def _cdp_call(
             next_id += 1
             await ws.send(json.dumps({"id": call_id, **req}))
             deadline = asyncio.get_running_loop().time() + timeout
-            while True:
+            while True:  # ignore events / out-of-order responses
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
                     raise TimeoutError(f"Timed out {what}")
                 msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=remaining))
                 if msg.get("id") == call_id:
                     return msg
-                # Ignore events / out-of-order responses
 
         session_id: Optional[str] = None
         if target_id:
             msg = await _send(
-                {
-                    "method": "Target.attachToTarget",
-                    "params": {"targetId": target_id, "flatten": True},
-                },
+                {"method": "Target.attachToTarget", "params": {"targetId": target_id, "flatten": True}},
                 f"attaching to target {target_id}",
             )
             if "error" in msg:
@@ -266,11 +241,7 @@ async def _cdp_call(
 
 
 def _browser_cdp_via_supervisor(
-    task_id: str,
-    frame_id: str,
-    method: str,
-    params: Optional[Dict[str, Any]],
-    timeout: float,
+    task_id: str, frame_id: str, method: str, params: Optional[Dict[str, Any]], timeout: float,
 ) -> str:
     """Route a CDP call through the live supervisor session for an OOPIF frame."""
     try:
@@ -291,11 +262,9 @@ def _browser_cdp_via_supervisor(
             f"frame_tree with frame_ids you can pass here."
         )
 
-    snap = supervisor.snapshot()
-    tree = snap.frame_tree
+    tree = supervisor.snapshot().frame_tree
     frame_info: Optional[Dict[str, Any]] = next(
-        (f for f in [tree.get("top"), *(tree.get("children") or [])]
-         if f and f.get("frame_id") == frame_id),
+        (f for f in [tree.get("top"), *(tree.get("children") or [])] if f and f.get("frame_id") == frame_id),
         None,
     )
     if frame_info is None:
@@ -304,7 +273,6 @@ def _browser_cdp_via_supervisor(
             raw = supervisor._frames.get(frame_id)  # type: ignore[attr-defined]
         if raw is not None:
             frame_info = raw.to_dict()
-
     if frame_info is None:
         return tool_error(
             f"frame_id {frame_id!r} not found in supervisor state. "
@@ -325,10 +293,7 @@ def _browser_cdp_via_supervisor(
 
     loop = supervisor._loop  # type: ignore[attr-defined]
     if loop is None or not loop.is_running():
-        return tool_error(
-            "CDP supervisor loop is not running. Try reconnecting with "
-            "/browser connect."
-        )
+        return tool_error("CDP supervisor loop is not running. Try reconnecting with /browser connect.")
 
     try:
         from agent.async_utils import safe_schedule_threadsafe
@@ -337,25 +302,20 @@ def _browser_cdp_via_supervisor(
             loop,
         )
         if fut is None:
-            return tool_error(
-                "CDP call via supervisor failed: loop unavailable",
-                cdp_docs=CDP_DOCS_URL,
-            )
+            return tool_error("CDP call via supervisor failed: loop unavailable", cdp_docs=CDP_DOCS_URL)
         result_msg = fut.result(timeout=timeout + 2)
     except Exception as exc:
         return tool_error(
-            f"CDP call via supervisor failed: {type(exc).__name__}: {exc}",
-            cdp_docs=CDP_DOCS_URL,
+            f"CDP call via supervisor failed: {type(exc).__name__}: {exc}", cdp_docs=CDP_DOCS_URL,
         )
 
-    payload: Dict[str, Any] = {
+    return json.dumps({
         "success": True,
         "method": method,
         "frame_id": frame_id,
         "session_id": child_sid,
         "result": result_msg.get("result", {}),
-    }
-    return json.dumps(payload, ensure_ascii=False)
+    }, ensure_ascii=False)
 
 
 def browser_cdp(
@@ -372,40 +332,26 @@ def browser_cdp(
     (OOPIF from ``browser_snapshot.frame_tree``) routes through the supervisor's
     live WebSocket instead — the only reliable way to evaluate inside an iframe
     on backends where fresh per-call connections hit signed-URL expiry
-    (Browserbase). Returns JSON ``{"success": True, "method", "result"}`` or
-    ``{"error": ...}``.
+    (Browserbase). Both paths share the same private-page/SSRF guard. Returns
+    JSON ``{"success": True, "method", "result"}`` or ``{"error": ...}``.
     """
     effective_task_id = task_id or "default"
 
     if frame_id:
-        # Same private-page/SSRF boundary as the stateless path below.
-        blocked = _browser_cdp_private_guard(
-            task_id=effective_task_id,
-            method=method,
-            params=params or {},
-        )
+        blocked = _browser_cdp_private_guard(task_id=effective_task_id, method=method, params=params or {})
         if blocked:
             return blocked
         return _browser_cdp_via_supervisor(
-            task_id=effective_task_id,
-            frame_id=frame_id,
-            method=method,
-            params=params,
-            timeout=timeout,
+            task_id=effective_task_id, frame_id=frame_id, method=method, params=params, timeout=timeout,
         )
 
     if not method or not isinstance(method, str):
-        return tool_error(
-            "'method' is required (e.g. 'Target.getTargets')",
-            cdp_docs=CDP_DOCS_URL,
-        )
-
+        return tool_error("'method' is required (e.g. 'Target.getTargets')", cdp_docs=CDP_DOCS_URL)
     if not _WS_AVAILABLE:
         return tool_error(
             "The 'websockets' Python package is required but not installed. "
             "Install it with: pip install websockets"
         )
-
     endpoint = _resolve_cdp_endpoint()
     if not endpoint:
         return tool_error(
@@ -415,7 +361,6 @@ def browser_cdp(
             "and does not expose CDP.",
             cdp_docs=CDP_DOCS_URL,
         )
-
     if not endpoint.startswith(("ws://", "wss://")):
         return tool_error(
             f"CDP endpoint is not a WebSocket URL: {endpoint!r}. "
@@ -423,18 +368,11 @@ def browser_cdp(
             "resolver should have rewritten this. Check that a Chromium-family "
             "browser is actually listening on the debug port."
         )
-
     call_params: Dict[str, Any] = params or {}
     if not isinstance(call_params, dict):
-        return tool_error(
-            f"'params' must be an object/dict, got {type(call_params).__name__}"
-        )
+        return tool_error(f"'params' must be an object/dict, got {type(call_params).__name__}")
 
-    blocked = _browser_cdp_private_guard(
-        task_id=effective_task_id,
-        method=method,
-        params=call_params,
-    )
+    blocked = _browser_cdp_private_guard(task_id=effective_task_id, method=method, params=call_params)
     if blocked:
         return blocked
 
@@ -445,14 +383,9 @@ def browser_cdp(
     safe_timeout = max(1.0, min(safe_timeout, 300.0))
 
     try:
-        result = _run_async(
-            _cdp_call(endpoint, method, call_params, target_id, safe_timeout)
-        )
+        result = _run_async(_cdp_call(endpoint, method, call_params, target_id, safe_timeout))
     except asyncio.TimeoutError as exc:
-        return tool_error(
-            f"CDP call timed out after {safe_timeout}s: {exc}",
-            method=method,
-        )
+        return tool_error(f"CDP call timed out after {safe_timeout}s: {exc}", method=method)
     except (TimeoutError, RuntimeError) as exc:
         return tool_error(str(exc), method=method)
     except WebSocketException as exc:
@@ -463,10 +396,7 @@ def browser_cdp(
         )
     except Exception as exc:  # pragma: no cover — unexpected
         logger.exception("browser_cdp unexpected error")
-        return tool_error(
-            f"Unexpected error: {type(exc).__name__}: {exc}",
-            method=method,
-        )
+        return tool_error(f"Unexpected error: {type(exc).__name__}: {exc}", method=method)
 
     payload: Dict[str, Any] = {
         "success": True,
@@ -586,6 +516,8 @@ def _browser_cdp_check() -> bool:
     Camofox (REST-only), default local agent-browser (hidden CDP port) and cloud
     providers whose per-session ``cdp_url`` isn't surfaced are gated out. Thin
     wrapper so ``registry.register`` stays a top-level statement (AST scan).
+    Raw (no-I/O) gate: check_fns run at every startup; resolving the endpoint
+    over HTTP here would block launch on a stale endpoint.
     """
     try:
         from tools.browser_tool import (  # type: ignore[import-not-found]
@@ -595,11 +527,7 @@ def _browser_cdp_check() -> bool:
     except ImportError as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp check: browser_tool import failed: %s", exc)
         return False
-    if not check_browser_requirements():
-        return False
-    # Raw (no-I/O) gate: check_fns run at every startup; resolving the
-    # endpoint over HTTP here would block launch on a stale endpoint.
-    return bool(_get_cdp_override_raw())
+    return bool(check_browser_requirements() and _get_cdp_override_raw())
 
 
 registry.register(

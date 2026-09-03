@@ -58,8 +58,7 @@ def lightpanda_engine_status() -> Tuple[bool, str]:
     if bu_mode:
         try:
             from tools.browser_use_cli import (
-                _read_browser_cfg,
-                is_legacy_browser_use_cloud_config,
+                _read_browser_cfg, is_legacy_browser_use_cloud_config
             )
 
             if is_legacy_browser_use_cloud_config(_read_browser_cfg()):
@@ -131,16 +130,13 @@ def _needs_lightpanda_fallback(engine: str, command: str, result: Dict[str, Any]
 def _annotate_lightpanda_fallback(result: Dict[str, Any], reason: str) -> Dict[str, Any]:
     """Add a user-visible Chrome fallback warning to a browser command result."""
     warning = (
-        "⚠ Lightpanda fallback: Chrome was used for this browser action. "
-        f"{reason}"
+        "⚠ Lightpanda fallback: Chrome was used for this browser action. " f"{reason}"
     )
     annotated = dict(result)
     annotated["fallback_warning"] = warning
     annotated["browser_engine"] = "chrome"
     annotated["browser_engine_fallback"] = {
-        "from": "lightpanda",
-        "to": "chrome",
-        "reason": reason,
+        "from": "lightpanda", "to": "chrome", "reason": reason
     }
     data = annotated.get("data")
     if isinstance(data, dict):
@@ -148,8 +144,7 @@ def _annotate_lightpanda_fallback(result: Dict[str, Any], reason: str) -> Dict[s
         data.setdefault("fallback_warning", warning)
         data.setdefault("browser_engine", "chrome")
         data.setdefault(
-            "browser_engine_fallback",
-            {"from": "lightpanda", "to": "chrome", "reason": reason},
+            "browser_engine_fallback", {"from": "lightpanda", "to": "chrome", "reason": reason}
         )
         annotated["data"] = data
     return annotated
@@ -165,10 +160,7 @@ def _copy_fallback_warning(target: Dict[str, Any], result: Dict[str, Any]) -> Di
 
 
 def _run_chrome_fallback_command(
-    task_id: str,
-    command: str,
-    args: List[str],
-    timeout: int,
+    task_id: str, command: str, args: List[str], timeout: int
 ) -> Dict[str, Any]:
     """Run a browser command in a temporary Chrome session at the current URL.
 
@@ -259,9 +251,7 @@ def _run_chrome_fallback_command(
 
 
 def _chrome_fallback_screenshot(
-    task_id: str,
-    args: List[str],
-    timeout: int,
+    task_id: str, args: List[str], timeout: int
 ) -> Dict[str, Any]:
     """Take a screenshot using a temporary Chrome session."""
     _bt = _origin()

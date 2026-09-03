@@ -25,8 +25,7 @@ logger = logging.getLogger(__name__)
 
 LIGHTPANDA_INSTALL_URL = "https://lightpanda.io/docs/run-locally/installation/one-liner"
 LIGHTPANDA_INSTALL_HINT = (
-    f"Install Lightpanda from {LIGHTPANDA_INSTALL_URL} and make sure "
-    "`lightpanda` is on PATH"
+    f"Install Lightpanda from {LIGHTPANDA_INSTALL_URL} and make sure " "`lightpanda` is on PATH"
 )
 
 _READY_TIMEOUT_S = 10.0
@@ -57,8 +56,7 @@ class LightpandaServer:
 def _home_candidates() -> list:
     home = Path.home()
     candidates = [
-        home / ".lightpanda" / "lightpanda",
-        home / ".local" / "bin" / "lightpanda",
+        home / ".lightpanda" / "lightpanda", home / ".local" / "bin" / "lightpanda"
     ]
     try:
         from hermes_constants import get_hermes_home
@@ -285,8 +283,7 @@ def launch_lightpanda(
     with _servers_lock:
         _servers[session_name] = server
     logger.info(
-        "Started lightpanda serve (pid %s, port %s) for session %s",
-        proc.pid, port, session_name,
+        "Started lightpanda serve (pid %s, port %s) for session %s", proc.pid, port, session_name
     )
     return server, None
 
