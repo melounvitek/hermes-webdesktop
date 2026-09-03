@@ -156,8 +156,7 @@ class VercelSandboxEnvironment(BaseEnvironment):
         if disk not in {0, _DEFAULT_CONTAINER_DISK_MB}:
             raise ValueError(
                 "Vercel Sandbox does not support configurable container_disk. "
-                "Use the default shared setting."
-            )
+                "Use the default shared setting.")
         self._persistent = persistent_filesystem
         self._task_id = task_id
         self._requested_cwd = cwd
@@ -173,8 +172,7 @@ class VercelSandboxEnvironment(BaseEnvironment):
         resources = Resources(vcpus=vcpus, memory=memory_mb) if vcpus is not None or memory_mb is not None else None
         self._create_kwargs = {
             "timeout": max(timedelta(seconds=max(self.timeout, 0)), timedelta(minutes=5)),
-            "runtime": runtime or None, "resources": resources,
-        }
+            "runtime": runtime or None, "resources": resources}
         self._attach_fresh_sandbox(cwd)
         self._sync_manager.sync(force=True)
         self.init_session()

@@ -15,8 +15,7 @@ from typing import Any, Optional
 from hermes_constants import get_hermes_home
 from tools.environments.base import BaseEnvironment, _ThreadedProcessHandle, _load_json_store, _save_json_store
 from tools.environments.file_sync import (
-    FileSyncManager, iter_sync_files, quoted_mkdir_command, quoted_rm_command, unique_parent_dirs,
-)
+    FileSyncManager, iter_sync_files, quoted_mkdir_command, quoted_rm_command, unique_parent_dirs)
 from tools.environments.remote_common import bash_argv, ensure_lazy_dep
 
 logger = logging.getLogger(__name__)
@@ -71,8 +70,7 @@ def _resolve_modal_image(image_spec: Any) -> Any:
         return _modal.Image.from_id(image_spec)
     setup_commands = [
         "RUN rm -rf /usr/local/lib/python*/site-packages/pip* 2>/dev/null; "
-        "python -m ensurepip --upgrade --default-pip 2>/dev/null || true",
-    ]
+        "python -m ensurepip --upgrade --default-pip 2>/dev/null || true"]
     if any(base in image_spec.lower() for base in ("ubuntu", "debian")):
         setup_commands.insert(0,
             "RUN apt-get update -qq && apt-get install -y -qq python3 python3-venv > /dev/null 2>&1 || true")
