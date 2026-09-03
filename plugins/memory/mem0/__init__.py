@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -49,10 +50,8 @@ def _truthy(value: Any, falsy_strings: tuple[str, ...] | None = None) -> bool:
 def _read_mem0_json(config_path: Path) -> dict:
     """Best-effort read of mem0.json; missing/corrupt file -> {}."""
     if config_path.exists():
-        try:
+        with suppress(Exception):
             return json.loads(config_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
     return {}
 
 
@@ -62,8 +61,7 @@ def _load_config() -> dict:
     like ``api_key`` that the user set in ``.env``."""
     from hermes_constants import get_hermes_home
     config = {"mode": os.environ.get("MEM0_MODE", "platform"), "api_key": get_secret("MEM0_API_KEY", ""), "host": os.environ.get("MEM0_HOST", ""), "agent_id": os.environ.get("MEM0_AGENT_ID", "hermes"), "oss": {}}
-    # Only carry user_id when explicitly configured so initialize() can fall back to the gateway-native id.
-    if os.environ.get("MEM0_USER_ID"):
+    if os.environ.get("MEM0_USER_ID"):  # only when explicitly configured, so initialize() can fall back to the gateway-native id
         config["user_id"] = os.environ["MEM0_USER_ID"]
     file_cfg = _read_mem0_json(get_hermes_home() / "mem0.json")
     config.update({k: v for k, v in file_cfg.items() if v is not None and v != ""})
@@ -146,11 +144,9 @@ class Mem0MemoryProvider(MemoryProvider):
     def _create_backend(self):
         # Lazy-install the mem0 SDK before the backend imports it (honors security.allow_lazy_installs);
         # on failure the backend import raises the canonical error, captured below.
-        try:
+        with suppress(Exception):
             from tools.lazy_deps import ensure as _lazy_ensure
             _lazy_ensure("memory.mem0", prompt=False)
-        except Exception:
-            pass
         try:
             from . import _backend
             if self._mode == "oss":
@@ -203,17 +199,14 @@ class Mem0MemoryProvider(MemoryProvider):
             return None
 
     def initialize(self, session_id: str, **kwargs) -> None:
-        self._config = _load_config()
-        self._mode = self._config.get("mode", "platform")
-        self._api_key = self._config.get("api_key", "")
-        self._host = self._config.get("host", "")
+        self._config = cfg = _load_config()
+        self._mode, self._api_key, self._host, self._agent_id = cfg.get("mode", "platform"), cfg.get("api_key", ""), cfg.get("host", ""), cfg.get("agent_id", "hermes")
         # user_id precedence: operator-configured (env/mem0.json) > gateway-native id (kwargs) > _DEFAULT_USER_ID.
         # The literal placeholder counts as unset so wizard users still get gateway-native ids.
-        configured = self._config.get("user_id")
+        configured = cfg.get("user_id")
         self._user_id = (None if configured == _DEFAULT_USER_ID else configured) or kwargs.get("user_id") or _DEFAULT_USER_ID
-        self._agent_id = self._config.get("agent_id", "hermes")
         # Persisted rerank preference: default for mem0_search when the model omits ``rerank``. Platform-only.
-        self._rerank_default = _truthy(self._config.get("rerank", False))
+        self._rerank_default = _truthy(cfg.get("rerank", False))
         self._channel = kwargs.get("platform") or "cli"
         self._backend = self._create_backend()
         if self._backend and not self._atexit_registered:
@@ -354,12 +347,10 @@ class Mem0MemoryProvider(MemoryProvider):
             return tool_error(self._format_error(label, e))
 
     def _shutdown_backend(self):
-        try:
+        with suppress(Exception):
             if self._backend:
                 self._backend.close()
                 self._backend = None
-        except Exception:
-            pass
 
     def shutdown(self) -> None:
         for t in (self._prefetch_thread, self._sync_thread):

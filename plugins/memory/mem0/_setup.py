@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import getpass
 import json
+from contextlib import suppress
 import os
 import shutil
 import socket
@@ -83,13 +84,11 @@ def _print_dry_run(summary: str, env_writes: dict, check=None) -> None:
     print("  [dry-run] No files written.\n")
 
 
-_FLAG_KEYS = (
-    "mode", "api_key", "host", "oss_llm", "oss_llm_key", "oss_llm_model", "oss_llm_url", "oss_embedder", "oss_embedder_key", "oss_embedder_model", "oss_embedder_url",
-    "oss_vector", "oss_vector_path", "oss_vector_url", "oss_vector_host", "oss_vector_port", "oss_vector_user", "oss_vector_password", "oss_vector_dbname", "user_id",
-)
-_FLAG_DEFAULTS = {"oss_llm": "openai", "oss_embedder": "openai", "oss_vector": "qdrant"}
 # --oss-vector-<key> flags accepted per vector store (also the pgvector key order).
 _VECTOR_FLAG_KEYS = {"qdrant": ("path", "url"), "pgvector": ("host", "port", "user", "password", "dbname")}
+_FLAG_KEYS = ("mode", "api_key", "host", *(f"oss_{s}{k}" for s in ("llm", "embedder") for k in ("", "_key", "_model", "_url")),
+              "oss_vector", *(f"oss_vector_{k}" for ks in _VECTOR_FLAG_KEYS.values() for k in ks), "user_id")
+_FLAG_DEFAULTS = {"oss_llm": "openai", "oss_embedder": "openai", "oss_vector": "qdrant"}
 
 
 def parse_flags(argv: list[str] | None = None) -> dict[str, str]:
@@ -306,8 +305,7 @@ def _ensure_pgvector(host: str = "localhost", port: int = 5432) -> dict | None:
     if not shutil.which("docker"):
         print("  Docker not found. Install Docker to auto-start pgvector,\n  or run PostgreSQL with pgvector manually.")
         return None
-    # Restart our own container if it exists but is stopped.
-    try:
+    with suppress(Exception):  # restart our own container if it exists but is stopped
         result = _docker("inspect", _PGVECTOR_CONTAINER, "--format", "{{.State.Status}}", timeout=10, text=True, encoding='utf-8', errors='replace')
         if result.returncode == 0 and "exited" in result.stdout:
             print(f"  Found stopped container '{_PGVECTOR_CONTAINER}', restarting...")
@@ -315,8 +313,6 @@ def _ensure_pgvector(host: str = "localhost", port: int = 5432) -> dict | None:
             if _pg_ready(host, port, 15):
                 print("  ✓ PostgreSQL container restarted")
                 return None
-    except Exception:
-        pass
     if input("  Start pgvector via Docker? [Y/n]: ").strip().lower() in ("", "y", "yes"):
         return _start_pgvector_docker(host, port)
     print("  Skipping Docker setup. Make sure PostgreSQL with pgvector is running.")
@@ -538,24 +534,18 @@ def _run_connectivity_checks(oss_config: dict) -> None:
 
 _MODE_HANDLERS = {"oss": _setup_oss, "selfhosted": _setup_selfhosted, "self-hosted": _setup_selfhosted, "platform": _setup_platform}
 # Interactive picker order: Platform, Self-hosted server, Open Source.
-_MODE_ITEMS = [
-    ("Platform", "Mem0 Cloud API (lightweight, just needs an API key)"),
-    ("Self-hosted server", "Connect to an existing self-hosted Mem0 server (Docker/FastAPI)"),
-    ("Open Source", "Run Mem0 locally (self-hosted LLM + vector store)"),
-]
+_MODE_ITEMS = [("Platform", "Mem0 Cloud API (lightweight, just needs an API key)"), ("Self-hosted server", "Connect to an existing self-hosted Mem0 server (Docker/FastAPI)"), ("Open Source", "Run Mem0 locally (self-hosted LLM + vector store)")]
 _MODE_PICKER = (_setup_platform, _setup_selfhosted, _setup_oss)
 
 
 def post_setup(hermes_home: str, config: dict) -> None:
     """Entry point for `hermes memory setup`: routes on --mode (platform / selfhosted / oss), else shows a picker.
     OSS is non-interactive only when the mode came from the flag."""
-    try:  # mem0ai must meet the minimum version from plugin.yaml
+    with suppress(Exception):  # mem0ai must meet the minimum version from plugin.yaml
         import mem0
         installed_ver = getattr(mem0, "__version__", None)
         if installed_ver and tuple(int(x) for x in installed_ver.split(".")[:3]) < (2, 0, 7):
             print(f"\n  ⚠ mem0ai {installed_ver} installed but >=2.0.7 required.\n  Run: uv pip install --python {sys.executable} 'mem0ai>=2.0.7'")
-    except Exception:
-        pass
     flags = parse_flags(sys.argv[1:])
     handler = _MODE_HANDLERS.get(flags["mode"])
     flags["_mode_from_flag"] = handler is not None

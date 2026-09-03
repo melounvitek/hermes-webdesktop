@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from contextlib import closing
+from contextlib import closing, suppress
 from typing import Any
 
 
@@ -93,10 +93,8 @@ class SelfHostedBackend(Mem0Backend):
         self._json("DELETE", f"/memories/{memory_id}")
 
     def close(self) -> None:
-        try:
+        with suppress(Exception):
             self._client.close()
-        except Exception:
-            pass
 
 
 _DIRECT_OPENAI_PROVIDER = "hermes_openai"
@@ -164,7 +162,7 @@ class OSSBackend(Mem0Backend):
     def _recreate_collection_if_dims_changed(provider: str, vs_config: dict, expected_dims: int) -> None:
         """Delete stale vector collection when embedding dimensions change."""
         collection_name = vs_config.get("collection_name", "mem0")
-        try:
+        with suppress(Exception):
             if provider == "qdrant":
                 from qdrant_client import QdrantClient
                 path, url = vs_config.get("path"), vs_config.get("url")
@@ -195,8 +193,6 @@ class OSSBackend(Mem0Backend):
                         row = cur.fetchone()
                         if row and row[0] > 0 and row[0] != expected_dims:
                             cur.execute(pgsql.SQL("DROP TABLE IF EXISTS {}").format(pgsql.Identifier(collection_name)))
-        except Exception:
-            pass
 
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]:
         return _unwrap_results(self._memory.search(query, filters=filters, top_k=top_k))
@@ -211,17 +207,13 @@ class OSSBackend(Mem0Backend):
         self._memory.delete(memory_id)
 
     def close(self):
-        try:
+        with suppress(Exception):
             telemetry = getattr(self._memory, "telemetry", None)
             if telemetry and hasattr(telemetry, "posthog"):
-                try:
+                with suppress(Exception):
                     telemetry.posthog.shutdown()
-                except Exception:
-                    pass
             vs = getattr(self._memory, "vector_store", None)
             # Memory, then its vector store, then the store's raw client; the first failure aborts the chain.
             for obj in filter(None, (self._memory, vs, getattr(vs, "client", None))):
                 if hasattr(obj, "close"):
                     obj.close()
-        except Exception:
-            pass
