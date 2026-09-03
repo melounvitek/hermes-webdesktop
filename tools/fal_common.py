@@ -15,8 +15,7 @@ from urllib.parse import urlencode
 def import_fal_client() -> Any:
     """Import ``fal_client`` (via ``lazy_deps`` when available); raises ImportError if unavailable.
 
-    Not imported at cold start (~64 ms per CLI invocation). Callers cache the result on their
-    own module global so tests can monkeypatch that module's ``fal_client`` attribute.
+    Callers cache the result on their own module global so tests can monkeypatch it.
     """
     try:
         from tools.lazy_deps import ensure as _lazy_ensure
@@ -54,30 +53,24 @@ def _require(value: Any, what: str) -> Any:
 
 
 class _ManagedFalSyncClient:
-    """Per-instance wrapper driving a Nous-managed fal-queue gateway via ``fal_client.SyncClient`` primitives.
-
-    Carries its own ``fal_client`` reference instead of a module global so the caller decides
-    which module's (possibly test-patched) ``fal_client`` is used.
-    """
+    """Drives a Nous-managed fal-queue gateway via ``fal_client.SyncClient`` primitives; carries
+    its own ``fal_client`` reference so the caller decides which (possibly test-patched) module is used."""
 
     def __init__(self, fal_client: Any, *, key: str, queue_run_origin: str):
         sync_client_class = _require(getattr(fal_client, "SyncClient", None), "fal_client.SyncClient")
         client_module = _require(getattr(fal_client, "client", None), "fal_client.client")
-
         self._queue_url_format = _normalize_fal_queue_url_format(queue_run_origin)
         self._sync_client = sync_client_class(key=key)
-        self._http_client = getattr(self._sync_client, "_client", None)
+        self._http_client = _require(getattr(self._sync_client, "_client", None), "fal_client.SyncClient._client")
         self._maybe_retry_request = getattr(client_module, "_maybe_retry_request", None)
         self._raise_for_status = getattr(client_module, "_raise_for_status", None)
-        self._request_handle_class = getattr(client_module, "SyncRequestHandle", None)
+        if self._maybe_retry_request is None or self._raise_for_status is None:
+            raise RuntimeError("fal_client.client request helpers are required for managed FAL gateway mode")
+        self._request_handle_class = _require(
+            getattr(client_module, "SyncRequestHandle", None), "fal_client.client.SyncRequestHandle")
         self._add_hint_header = getattr(client_module, "add_hint_header", None)
         self._add_priority_header = getattr(client_module, "add_priority_header", None)
         self._add_timeout_header = getattr(client_module, "add_timeout_header", None)
-
-        _require(self._http_client, "fal_client.SyncClient._client")
-        if self._maybe_retry_request is None or self._raise_for_status is None:
-            raise RuntimeError("fal_client.client request helpers are required for managed FAL gateway mode")
-        _require(self._request_handle_class, "fal_client.client.SyncRequestHandle")
 
     def submit(
         self, application: str, arguments: Dict[str, Any], *, path: str = "",
@@ -89,7 +82,6 @@ class _ManagedFalSyncClient:
             url += "/" + path.lstrip("/")
         if webhook_url is not None:
             url += "?" + urlencode({"fal_webhook": webhook_url})
-
         request_headers = dict(headers or {})
         if hint is not None and self._add_hint_header is not None:
             self._add_hint_header(hint, request_headers)
@@ -101,15 +93,11 @@ class _ManagedFalSyncClient:
             if self._add_timeout_header is None:
                 raise RuntimeError("fal_client.client.add_timeout_header is required for timeout requests")
             self._add_timeout_header(start_timeout, request_headers)
-
         response = self._maybe_retry_request(
             self._http_client, "POST", url, json=arguments,
-            timeout=getattr(self._sync_client, "default_timeout", 120.0), headers=request_headers,
-        )
+            timeout=getattr(self._sync_client, "default_timeout", 120.0), headers=request_headers)
         self._raise_for_status(response)
-
         data = response.json()
         return self._request_handle_class(
             request_id=data["request_id"], response_url=data["response_url"],
-            status_url=data["status_url"], cancel_url=data["cancel_url"], client=self._http_client,
-        )
+            status_url=data["status_url"], cancel_url=data["cancel_url"], client=self._http_client)
