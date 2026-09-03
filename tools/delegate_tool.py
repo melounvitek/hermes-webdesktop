@@ -13,13 +13,11 @@ tool calls or reasoning.
 
 import json
 import logging
-import re
 import time
 import weakref
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from toolsets import TOOLSETS
 
 from tools.terminal_tool import set_approval_callback as _set_subagent_approval_cb  # noqa: F401  (used via _await_child)
 from utils import is_truthy_value
@@ -41,7 +39,7 @@ from tools.delegate_tool_config import (  # noqa: F401
     _get_max_async_children, _get_max_concurrent_children, _get_max_spawn_depth,
     _get_orchestrator_enabled, _get_subagent_approval_callback, _get_worktree_isolation,
     _inherit_parent_base_url, _inherit_parent_capabilities, _load_config, _merge_request_overrides,
-    _resolve_child_credential_pool, _require_pinned_command, _resolve_delegation_credentials,
+    _resolve_child_credential_pool, _require_pinned_command, _resolve_child_runtime, _resolve_delegation_credentials,
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import (  # noqa: F401
@@ -58,21 +56,16 @@ from tools.delegate_tool_registry import (  # noqa: F401
     _register_subagent, _unregister_subagent, get_subagent_attribution, interrupt_subagent,
     is_spawn_paused, list_active_subagents, set_spawn_paused, steer_subagent,
 )
+from tools.delegate_tool_tasks import _coerce_task_schemas, _normalize_task_list  # noqa: F401
+from tools.delegate_tool_toolsets import (  # noqa: F401
+    DEFAULT_TOOLSETS, DELEGATE_BLOCKED_TOOLS, _expand_parent_toolsets, _resolve_child_toolsets,
+    _strip_blocked_tools,
+)
 from tools.delegate_tool_results import (  # noqa: F401
     _apply_summary_budget, _build_child_preserving_parent_tools, _finalize_child_results,
     _run_child_lifecycle, _summarize_tool_arguments,
 )
 
-# Tools that children must never have access to
-DELEGATE_BLOCKED_TOOLS = frozenset(
-    [
-        "delegate_task",  # no recursive delegation
-        "clarify",  # no user interaction
-        "memory",  # no writes to shared MEMORY.md
-        "send_message",  # no cross-platform side effects
-        "cronjob_manage",  # no scheduling more work in the parent's name
-    ]
-)
 
 # Nested delegation is granted by depth/role in _build_child_agent, never by the
 # model naming toolsets (there is no model-facing toolsets argument).
@@ -86,51 +79,6 @@ def _normalize_role(r: Optional[str]) -> str:
     logger.warning("Unknown delegate_task role=%r, coercing to 'leaf'", r)
     return "leaf"
 
-def _is_mcp_toolset_name(name: str) -> bool:
-    """Return True for canonical MCP toolsets and their registered aliases."""
-    if not name:
-        return False
-    if str(name).startswith("mcp-"):
-        return True
-    try:
-        from tools.registry import registry
-
-        target = registry.get_toolset_alias_target(str(name))
-    except Exception:
-        target = None
-    return bool(target and str(target).startswith("mcp-"))
-
-def _expand_parent_toolsets(parent_toolsets: set) -> set:
-    """Add every toolset whose tools are a subset of the parent's tools.
-
-    A parent on a composite like ``hermes-cli`` must still let a child request
-    ``web``/``terminal``; bare name intersection would reject them.
-    """
-    parent_tool_names: set = set()
-    for ts_name in parent_toolsets:
-        ts_def = TOOLSETS.get(ts_name)
-        if ts_def:
-            parent_tool_names.update(ts_def.get("tools", []))
-
-    if not parent_tool_names:
-        return set(parent_toolsets)
-
-    expanded = set(parent_toolsets)
-    for ts_name, ts_def in TOOLSETS.items():
-        if ts_name in expanded:
-            continue
-        ts_tools = ts_def.get("tools", [])
-        if ts_tools and set(ts_tools).issubset(parent_tool_names):
-            expanded.add(ts_name)
-    return expanded
-
-def _preserve_parent_mcp_toolsets(child_toolsets: List[str], parent_toolsets: set[str]) -> List[str]:
-    """Append any parent MCP toolsets that are missing from a narrowed child."""
-    preserved = list(child_toolsets)
-    for toolset_name in sorted(parent_toolsets):
-        if _is_mcp_toolset_name(toolset_name) and toolset_name not in preserved:
-            preserved.append(toolset_name)
-    return preserved
 
 DEFAULT_MAX_ITERATIONS = 250
 _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during delegation
@@ -141,209 +89,11 @@ _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during de
 # is much higher so legitimately long tools can finish.
 _HEARTBEAT_STALE_CYCLES_IDLE = 15  # 450s idle between turns → stale
 _HEARTBEAT_STALE_CYCLES_IN_TOOL = 40  # 1200s stuck on same tool → stale
-DEFAULT_TOOLSETS = ["terminal", "file", "web"]
 
 def check_delegate_requirements() -> bool:
     """Delegation has no external requirements -- always available."""
     return True
 
-def _strip_blocked_tools(toolsets: List[str]) -> List[str]:
-    """Remove toolsets whose tools are ALL blocked (derived from DELEGATE_BLOCKED_TOOLS
-    so the two can't drift) plus composite toolsets children must never get."""
-    _COMPOSITE_BLOCKED_TOOLSETS = frozenset({"delegation"})
-    blocked_toolset_names = {
-        name
-        for name, defn in TOOLSETS.items()
-        if name in _COMPOSITE_BLOCKED_TOOLSETS
-        or all(t in DELEGATE_BLOCKED_TOOLS for t in defn.get("tools", []))
-    }
-    blocked_toolset_names.add("kanban")
-    return [t for t in toolsets if t not in blocked_toolset_names]
-
-def _blocked_toolsets_for_role(role: str) -> List[str]:
-    """One-tool deny toolsets for the role; passed as ``disabled_toolsets`` so
-    blocked names inside mixed bundles are subtracted AFTER composite expansion."""
-    blocked_names = set(DELEGATE_BLOCKED_TOOLS)
-    if role == "orchestrator":
-        blocked_names.discard("delegate_task")
-    return sorted(
-        name
-        for name, defn in TOOLSETS.items()
-        if defn.get("tools")
-        and set(defn.get("tools", ())).issubset(blocked_names)
-    )
-
-def _resolve_child_toolsets(
-    parent_agent, toolsets: Optional[List[str]], effective_role: str
-) -> tuple[List[str], List[str]]:
-    """Return ``(enabled_toolsets, disabled_toolsets)`` for a child.
-
-    Children never gain tools the parent lacks: explicit ``toolsets`` are
-    intersected with the parent's (composite-expanded) set, else the parent's
-    enabled set is inherited. Blocked tools are stripped twice — whole blocked
-    toolsets here, and exact one-tool deny toolsets via ``disabled_toolsets`` so
-    blocked names inside mixed bundles (hermes-cli) are subtracted AFTER
-    composite expansion and survive registry refreshes. Orchestrators get
-    ``delegation`` re-added unconditionally (role-granted, not inherited).
-    """
-    # enabled_toolsets=None means "all tools", so derive from loaded tool names.
-    parent_enabled = getattr(parent_agent, "enabled_toolsets", None)
-    if parent_enabled is not None:
-        parent_toolsets = set(parent_enabled)
-    elif parent_agent and hasattr(parent_agent, "valid_tool_names"):
-        import model_tools
-
-        parent_toolsets = {
-            ts
-            for name in parent_agent.valid_tool_names
-            if (ts := model_tools.get_toolset_for_tool(name)) is not None
-        }
-    else:
-        parent_toolsets = set(DEFAULT_TOOLSETS)
-
-    if toolsets:
-        expanded_parent = _expand_parent_toolsets(parent_toolsets)
-        child_toolsets = [t for t in toolsets if t in expanded_parent]
-        if _get_inherit_mcp_toolsets():
-            child_toolsets = _preserve_parent_mcp_toolsets(child_toolsets, parent_toolsets)
-        child_toolsets = _strip_blocked_tools(child_toolsets)
-    elif parent_agent and parent_enabled is not None:
-        child_toolsets = _strip_blocked_tools(parent_enabled)
-    elif parent_toolsets:
-        child_toolsets = _strip_blocked_tools(sorted(parent_toolsets))
-    else:
-        child_toolsets = _strip_blocked_tools(DEFAULT_TOOLSETS)
-
-    raw_parent_disabled = getattr(parent_agent, "disabled_toolsets", None)
-    inherited_disabled = (
-        [str(name) for name in raw_parent_disabled] if isinstance(raw_parent_disabled, (list, tuple, set)) else []
-    )
-    if effective_role == "orchestrator":
-        inherited_disabled = [name for name in inherited_disabled if name != "delegation"]
-        if "delegation" not in child_toolsets:
-            child_toolsets.append("delegation")
-    child_disabled_toolsets = list(
-        dict.fromkeys(inherited_disabled + _blocked_toolsets_for_role(effective_role) + ["kanban"])
-    )
-    return child_toolsets, child_disabled_toolsets
-
-# OpenRouter routing filters: inherited from the parent, but reset to these
-# defaults under a pinned provider — parent filters (e.g. only=["Anthropic"])
-# would silently force the child back onto the parent's provider.
-# openrouter_min_coding_score stays inherited: model-gated, no-op elsewhere.
-_ROUTING_FILTER_DEFAULTS = (
-    ("providers_allowed", None),
-    ("providers_ignored", None),
-    ("providers_order", None),
-    ("provider_sort", None),
-    ("provider_require_parameters", False),
-    ("provider_data_collection", ""),
-)
-_NOUS_PROVIDERS = frozenset({"nous", "nous-portal", "nousresearch"})
-
-def _resolve_child_runtime(
-    parent_agent,
-    delegation_cfg: dict,
-    parent_api_key: Any,
-    *,
-    model: Optional[str],
-    override_provider: Optional[str],
-    override_base_url: Optional[str],
-    override_api_key: Optional[str],
-    override_api_mode: Optional[str],
-    override_max_tokens: Optional[int],
-    override_acp_command: Optional[str],
-    override_acp_args: Optional[List[str]],
-) -> Dict[str, Any]:
-    """Resolve the child's credentials, transport and routing (config override >
-    parent inherit) as ``AIAgent`` keyword arguments.
-
-    Rules that are easy to break: api_mode is re-derived (not inherited) when
-    the child's provider differs from the parent's or is Nous Portal (dual-wire);
-    a pinned ``delegation.command`` must exist on PATH or the spawn fails loudly;
-    ``override_provider`` clears the parent's ACP transport, fallback chain and
-    OpenRouter routing filters so the pinned provider is actually honoured.
-    """
-    effective_model = model or parent_agent.model
-    effective_provider = override_provider or getattr(parent_agent, "provider", None)
-    effective_base_url = override_base_url or _inherit_parent_base_url(parent_agent, parent_agent.base_url)
-    # api_mode: each provider has its own wire, so a different provider re-derives
-    # (None) instead of inheriting (404s otherwise). Nous Portal is dual-wire
-    # within one provider (anthropic/* → Messages, else chat_completions), so
-    # same-provider inheritance would pin the child on the wrong wire — re-derive.
-    _parent_provider = getattr(parent_agent, "provider", None) or ""
-    if override_api_mode is not None:
-        effective_api_mode = override_api_mode
-    elif (effective_provider or "").strip().lower() in _NOUS_PROVIDERS:
-        from hermes_cli.providers import nous_api_mode
-
-        effective_api_mode = nous_api_mode(effective_model)
-    elif effective_provider != _parent_provider:
-        effective_api_mode = None  # force re-derivation from provider's defaults
-    else:
-        effective_api_mode = getattr(parent_agent, "api_mode", None)
-    # A pinned transport that cannot run must fail the spawn loudly, never fall
-    # back silently (delegate_task pre-validates; this covers direct callers).
-    _require_pinned_command(
-        override_acp_command,
-        f"Pinned delegation command '{override_acp_command}' was not "
-        f"found on PATH. Install it or remove delegation.command from "
-        f"config.yaml.",
-    )
-    effective_acp_command = override_acp_command or getattr(parent_agent, "acp_command", None)
-    effective_acp_args = list(
-        override_acp_args if override_acp_args is not None else (getattr(parent_agent, "acp_args", []) or [])
-    )
-    # A pinned provider must use direct API calls; inheriting the parent's ACP
-    # transport would bypass the override credentials entirely.
-    if override_provider and not override_acp_command:
-        effective_acp_command, effective_acp_args = None, []
-    if override_acp_command:
-        # Forced ACP transport requires provider copilot-acp for run_agent to init the client.
-        effective_provider, effective_api_mode = "copilot-acp", "chat_completions"
-
-    # Reasoning: delegation.reasoning_effort > parent. Keep the raw value — a
-    # YAML ``false`` must disable thinking, not coerce to "" and inherit.
-    child_reasoning = getattr(parent_agent, "reasoning_config", None)
-    try:
-        delegation_effort = delegation_cfg.get("reasoning_effort")
-        if delegation_effort or delegation_effort is False:
-            from hermes_constants import parse_reasoning_effort
-
-            parsed = parse_reasoning_effort(delegation_effort)
-            if parsed is not None:
-                child_reasoning = parsed
-            else:
-                logger.warning("Unknown delegation.reasoning_effort '%s', inheriting parent level", delegation_effort)
-    except Exception as exc:
-        logger.debug("Could not load delegation reasoning_effort: %s", exc)
-
-    kwargs: Dict[str, Any] = {
-        "base_url": effective_base_url,
-        "api_key": override_api_key or parent_api_key,
-        "model": effective_model,
-        "provider": effective_provider,
-        "capabilities": _inherit_parent_capabilities(parent_agent, override_provider, override_base_url),
-        "api_mode": effective_api_mode,
-        "acp_command": effective_acp_command,
-        "acp_args": effective_acp_args,
-        "reasoning_config": child_reasoning,
-        # Inherit the parent's fallback chain EXCEPT under a pinned provider: a
-        # mid-run 429/auth failure must not silently reroute the quiet child onto
-        # the parent's fallbacks. Predictability > liveness for explicit pins.
-        "fallback_model": None if override_provider else (getattr(parent_agent, "_fallback_chain", None) or None),
-        "openrouter_min_coding_score": getattr(parent_agent, "openrouter_min_coding_score", None),
-    }
-    for attr, pinned_default in _ROUTING_FILTER_DEFAULTS:
-        kwargs[attr] = pinned_default if override_provider else getattr(parent_agent, attr, pinned_default)
-    if not override_provider:
-        kwargs["provider_data_collection"] = kwargs["provider_data_collection"] or ""
-    child_max_tokens = (
-        override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
-    )
-    if isinstance(child_max_tokens, int):
-        kwargs["max_tokens"] = child_max_tokens
-    return kwargs
 
 def _open_child_session_db(parent_agent) -> Any:
     """DEDICATED SessionDB handle for the child, or None.
@@ -690,77 +440,6 @@ def _run_single_child(
             close_deferred=_child_close_deferred,
         )
 
-def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    if not isinstance(tasks, str):
-        return None, None
-    raw = tasks.strip()
-    if not raw:
-        return None, "Provide either 'goal' (single task) or 'tasks' (batch)."
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return None, (
-            "tasks must be a JSON array of task objects; received a string "
-            f"that could not be parsed as JSON ({exc.msg})."
-        )
-    if not isinstance(parsed, list):
-        return None, (f"tasks must be a JSON array of task objects; parsed " f"{type(parsed).__name__} instead.")
-    return parsed, None
-
-# Placeholder shapes for batch goal validation: bare 'TODO' / 'task N' labels,
-# or unexpanded template markers. The marker regex is deliberately NARROW —
-# only snake_case / space-separated placeholder identifiers (`<feature_name>`,
-# `{file path}`, `<FEATURE-NAME>`), the shape LLM templates leave behind. Bare
-# single-word brackets must never be rejected: legitimate goals are full of
-# generics (`Vec<T>`), HTML tags (`<div>`), dict snippets (`{"key": 1}`), glob
-# braces (`{a,b}`) and f-string style (`{i}`).
-_PLACEHOLDER_GOAL_RE = re.compile(r"^(todo|task\s*\d+)$", re.IGNORECASE)
-_TEMPLATE_MARKER_RE = re.compile(
-    r"<[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+>"
-    r"|\{[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+\}"
-)
-_MIN_BATCH_GOAL_LEN = 10
-
-def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
-    """Validate a tasks=[...] batch beyond per-task goal presence; actionable
-    error string or None.
-
-    No minimum count: a one-entry array is the canonical single-task shape
-    (legacy top-level `goal` is wrapped into one). Duplicate goals are
-    deliberately NOT rejected — identical-goal fan-outs (best-of-N / ensemble
-    sampling) are legitimate and blocking them broke real workflows.
-    """
-    for i, task in enumerate(task_list):
-        goal = str(task.get("goal", "")).strip()
-        normalized = " ".join(goal.lower().split())
-
-        if _PLACEHOLDER_GOAL_RE.match(normalized):
-            return (
-                f"Task {i} has a placeholder goal ({goal!r}). Replace it "
-                "with a specific, self-contained description of what the "
-                "subagent should accomplish."
-            )
-        marker = _TEMPLATE_MARKER_RE.search(goal)
-        if marker:
-            return (
-                f"Task {i} goal contains an unexpanded template marker "
-                f"({marker.group(0)!r}). Substitute the real value before "
-                "calling delegate_task — subagents cannot resolve "
-                "placeholders."
-            )
-        if len(goal) < _MIN_BATCH_GOAL_LEN and len(task_list) >= 2:
-            # Multi-task fan-outs with terse goals are usually unexpanded
-            # templates; a SINGLE task legitimately uses short goals
-            # ("Fix the tests"), so one-entry arrays keep the historical
-            # single-`goal` exemption.
-            return (
-                f"Task {i} goal is too short ({goal!r}). Write a specific, "
-                "self-contained goal of at least "
-                f"{_MIN_BATCH_GOAL_LEN} characters so the subagent knows "
-                "exactly what to do."
-            )
-    return None
-
 
 @dataclass
 class _Batch:
@@ -780,73 +459,6 @@ class _Batch:
     origin_owner_session_record: Any
     overall_start: float
 
-def _normalize_task_list(
-    goal, context, tasks, output_schema, top_role: str, max_children: int
-) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """``(task_list, None)`` from ``tasks=[...]`` or the legacy single ``goal``, else ``(None, error)``."""
-    recovered_tasks, tasks_error = _recover_tasks_from_json_string(tasks)
-    if tasks_error:
-        return None, tasks_error
-    if recovered_tasks is not None:
-        tasks = recovered_tasks
-    # Small models emit tasks=[] alongside a single goal: treat as "no batch".
-    if isinstance(tasks, list) and not tasks:
-        tasks = None
-
-    if tasks and isinstance(tasks, list):
-        if len(tasks) > max_children:
-            return None, (
-                f"Too many tasks: {len(tasks)} provided, but "
-                f"max_concurrent_children is {max_children}. "
-                f"Either reduce the task count, split into multiple "
-                f"delegate_task calls, or increase "
-                f"delegation.max_concurrent_children in config.yaml."
-            )
-        task_list = tasks
-    elif goal and isinstance(goal, str) and goal.strip():
-        single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
-        if output_schema is not None:
-            single_task["output_schema"] = output_schema
-        task_list = [single_task]
-    else:
-        return None, (
-            "No tasks provided. Pass tasks=[{goal: '...', context: '...'}, "
-            "...] — one entry per subagent (a single task is a one-entry "
-            "array)."
-        )
-
-    for i, task in enumerate(task_list):
-        if not isinstance(task, dict):
-            return None, f"Task {i} must be an object, got {type(task).__name__}."
-        if not task.get("goal", "").strip():
-            return None, f"Task {i} is missing a 'goal'."
-
-    # Batch-only quality gate (placeholders, template markers); the single-goal
-    # form is exempt because short goals are valid there.
-    if tasks is not None and isinstance(tasks, list):
-        batch_error = _validate_batch_tasks(task_list)
-        if batch_error:
-            return None, batch_error
-    return task_list, None
-
-def _coerce_task_schemas(
-    task_list: List[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
-) -> tuple[List[Optional[Dict[str, Any]]], Optional[str]]:
-    """Per-task coerced output schemas. A malformed output_schema fails the whole
-    call before any child spawns; schema-less tasks resolve to None and take no
-    new code paths downstream."""
-    from tools.delegation_output_schema import coerce_output_schema
-
-    task_schemas: List[Optional[Dict[str, Any]]] = []
-    for i, task in enumerate(task_list):
-        raw_schema = task.get("output_schema")
-        if raw_schema is None and len(task_list) == 1 and output_schema is not None:
-            raw_schema = output_schema
-        coerced_schema, schema_err = coerce_output_schema(raw_schema)
-        if schema_err:
-            return [], f"Task {i} output_schema invalid: {schema_err}"
-        task_schemas.append(coerced_schema)
-    return task_schemas, None
 
 def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) -> None:
     """Announce the batch tag once so interleaved ``[tag n/N]`` lines are attributable."""

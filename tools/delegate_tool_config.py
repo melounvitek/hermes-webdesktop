@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 from utils import base_url_hostname, is_truthy_value
 
 # Log-record parity with the origin module.
@@ -486,3 +486,122 @@ def _load_config() -> dict:
         return cfg if isinstance(cfg, dict) else {}
     except Exception:
         return {}
+
+# OpenRouter routing filters: inherited from the parent, but reset to these
+# defaults under a pinned provider — parent filters (e.g. only=["Anthropic"])
+# would silently force the child back onto the parent's provider.
+# openrouter_min_coding_score stays inherited: model-gated, no-op elsewhere.
+_ROUTING_FILTER_DEFAULTS = (
+    ("providers_allowed", None),
+    ("providers_ignored", None),
+    ("providers_order", None),
+    ("provider_sort", None),
+    ("provider_require_parameters", False),
+    ("provider_data_collection", ""),
+)
+
+_NOUS_PROVIDERS = frozenset({"nous", "nous-portal", "nousresearch"})
+
+def _resolve_child_runtime(
+    parent_agent,
+    delegation_cfg: dict,
+    parent_api_key: Any,
+    *,
+    model: Optional[str],
+    override_provider: Optional[str],
+    override_base_url: Optional[str],
+    override_api_key: Optional[str],
+    override_api_mode: Optional[str],
+    override_max_tokens: Optional[int],
+    override_acp_command: Optional[str],
+    override_acp_args: Optional[List[str]],
+) -> Dict[str, Any]:
+    """Resolve the child's credentials, transport and routing (config override >
+    parent inherit) as ``AIAgent`` keyword arguments.
+
+    Rules that are easy to break: api_mode is re-derived (not inherited) when
+    the child's provider differs from the parent's or is Nous Portal (dual-wire);
+    a pinned ``delegation.command`` must exist on PATH or the spawn fails loudly;
+    ``override_provider`` clears the parent's ACP transport, fallback chain and
+    OpenRouter routing filters so the pinned provider is actually honoured.
+    """
+    effective_model = model or parent_agent.model
+    effective_provider = override_provider or getattr(parent_agent, "provider", None)
+    effective_base_url = override_base_url or _inherit_parent_base_url(parent_agent, parent_agent.base_url)
+    # api_mode: each provider has its own wire, so a different provider re-derives
+    # (None) instead of inheriting (404s otherwise). Nous Portal is dual-wire
+    # within one provider (anthropic/* → Messages, else chat_completions), so
+    # same-provider inheritance would pin the child on the wrong wire — re-derive.
+    _parent_provider = getattr(parent_agent, "provider", None) or ""
+    if override_api_mode is not None:
+        effective_api_mode = override_api_mode
+    elif (effective_provider or "").strip().lower() in _NOUS_PROVIDERS:
+        from hermes_cli.providers import nous_api_mode
+
+        effective_api_mode = nous_api_mode(effective_model)
+    elif effective_provider != _parent_provider:
+        effective_api_mode = None  # force re-derivation from provider's defaults
+    else:
+        effective_api_mode = getattr(parent_agent, "api_mode", None)
+    # A pinned transport that cannot run must fail the spawn loudly, never fall
+    # back silently (delegate_task pre-validates; this covers direct callers).
+    _require_pinned_command(
+        override_acp_command,
+        f"Pinned delegation command '{override_acp_command}' was not "
+        f"found on PATH. Install it or remove delegation.command from "
+        f"config.yaml.",
+    )
+    effective_acp_command = override_acp_command or getattr(parent_agent, "acp_command", None)
+    effective_acp_args = list(
+        override_acp_args if override_acp_args is not None else (getattr(parent_agent, "acp_args", []) or [])
+    )
+    # A pinned provider must use direct API calls; inheriting the parent's ACP
+    # transport would bypass the override credentials entirely.
+    if override_provider and not override_acp_command:
+        effective_acp_command, effective_acp_args = None, []
+    if override_acp_command:
+        # Forced ACP transport requires provider copilot-acp for run_agent to init the client.
+        effective_provider, effective_api_mode = "copilot-acp", "chat_completions"
+
+    # Reasoning: delegation.reasoning_effort > parent. Keep the raw value — a
+    # YAML ``false`` must disable thinking, not coerce to "" and inherit.
+    child_reasoning = getattr(parent_agent, "reasoning_config", None)
+    try:
+        delegation_effort = delegation_cfg.get("reasoning_effort")
+        if delegation_effort or delegation_effort is False:
+            from hermes_constants import parse_reasoning_effort
+
+            parsed = parse_reasoning_effort(delegation_effort)
+            if parsed is not None:
+                child_reasoning = parsed
+            else:
+                logger.warning("Unknown delegation.reasoning_effort '%s', inheriting parent level", delegation_effort)
+    except Exception as exc:
+        logger.debug("Could not load delegation reasoning_effort: %s", exc)
+
+    kwargs: Dict[str, Any] = {
+        "base_url": effective_base_url,
+        "api_key": override_api_key or parent_api_key,
+        "model": effective_model,
+        "provider": effective_provider,
+        "capabilities": _inherit_parent_capabilities(parent_agent, override_provider, override_base_url),
+        "api_mode": effective_api_mode,
+        "acp_command": effective_acp_command,
+        "acp_args": effective_acp_args,
+        "reasoning_config": child_reasoning,
+        # Inherit the parent's fallback chain EXCEPT under a pinned provider: a
+        # mid-run 429/auth failure must not silently reroute the quiet child onto
+        # the parent's fallbacks. Predictability > liveness for explicit pins.
+        "fallback_model": None if override_provider else (getattr(parent_agent, "_fallback_chain", None) or None),
+        "openrouter_min_coding_score": getattr(parent_agent, "openrouter_min_coding_score", None),
+    }
+    for attr, pinned_default in _ROUTING_FILTER_DEFAULTS:
+        kwargs[attr] = pinned_default if override_provider else getattr(parent_agent, attr, pinned_default)
+    if not override_provider:
+        kwargs["provider_data_collection"] = kwargs["provider_data_collection"] or ""
+    child_max_tokens = (
+        override_max_tokens if override_max_tokens is not None else getattr(parent_agent, "max_tokens", None)
+    )
+    if isinstance(child_max_tokens, int):
+        kwargs["max_tokens"] = child_max_tokens
+    return kwargs
