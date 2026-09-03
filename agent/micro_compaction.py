@@ -37,10 +37,8 @@ class MicroCompactionMixin:
     """Rolling micro-compaction; host must be a ``ContextCompressor``."""
 
     def _resolve_compact_cursor(self, messages: List[Dict[str, Any]], head_end: int, tail_start: int) -> int:
-        """Index of the first message not yet absorbed into the rolling summary.
-
-        Uses the in-memory cursor when valid; otherwise scans for the last summary marker.
-        """
+        """Index of the first message not yet absorbed into the rolling summary: the in-memory
+        cursor when valid, else just past the last summary marker."""
         if head_end < self._micro_compact_cursor < tail_start:
             return self._micro_compact_cursor
         summaries = (i for i in range(head_end, tail_start) if self._is_context_summary_message(messages[i]))
@@ -64,11 +62,9 @@ class MicroCompactionMixin:
     def _find_one_exchange(
         self, messages: List[Dict[str, Any]], start: int, tail_start: int,
     ) -> Optional[tuple[int, int]]:
-        """Find the next complete exchange (full agent turn) starting at *start*.
-
-        Returns ``(exchange_start, exchange_end)`` or ``None``. Spans assistant+tool rows up to the
-        next user message; user turns are never absorbed (alternation safety, verbatim user text).
-        """
+        """Find the next complete exchange (full agent turn) starting at *start*; returns
+        ``(exchange_start, exchange_end)`` or ``None``. Spans assistant+tool rows up to the next
+        user message; user turns are never absorbed (alternation safety, verbatim user text)."""
         limit = min(tail_start, len(messages))
 
         def _turn_row(idx: int, roles: tuple) -> bool:
@@ -196,11 +192,9 @@ class MicroCompactionMixin:
         self._micro_compact_last_failure_cursor = -1
 
     def _micro_compact(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Run one round of micro-compaction; public entry point from ``finalize_turn()``.
-
-        Returns the (possibly modified) list and syncs the session DB via ``archive_and_compact``
-        (the append-only flush alone would double-load on resume).
-        """
+        """Run one round of micro-compaction (entry point from ``finalize_turn()``). Returns the
+        (possibly modified) list and syncs the session DB via ``archive_and_compact`` (the
+        append-only flush alone would double-load on resume)."""
         if not self._micro_compact_enabled:
             return messages
 
@@ -302,12 +296,9 @@ class MicroCompactionMixin:
         return (body[:end] if end != -1 else body).strip()
 
     def _cursor_after_splice(self, result: List[Dict[str, Any]], fallback: int) -> int:
-        """Cursor position just past the summary marker in *result*.
-
-        Must derive from the SPLICED list: a splice collapses several rows into one marker
-        (and may drop a superseded one), so pre-splice indices land inside a later exchange
-        and silently skip it.
-        """
+        """Cursor position just past the summary marker in *result*. Must derive from the SPLICED
+        list: a splice collapses several rows into one marker (and may drop a superseded one), so
+        pre-splice indices land inside a later exchange and silently skip it."""
         return next((idx + 1 for idx in range(len(result) - 1, -1, -1) if _is_summary_marker(result[idx])), fallback)
 
     def _emit_micro_compaction_telemetry(
@@ -397,11 +388,9 @@ class MicroCompactionMixin:
 
     @staticmethod
     def _merge_adjacent_user_turns(result: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Merge consecutive plain-text real user turns left by a supersede.
-
-        Same ``\\n\\n`` join as ``repair_message_sequence`` pass 2, done here so the marker
-        and cursor are never collateral damage of the downstream repair. Lists untouched.
-        """
+        """Merge consecutive plain-text real user turns left by a supersede. Same ``\\n\\n`` join as
+        ``repair_message_sequence`` pass 2, done here so the marker and cursor are never collateral
+        damage of the downstream repair. Lists untouched."""
         from agent.turn_context import drop_stale_api_content
 
         def _plain_user(m: Any) -> bool:

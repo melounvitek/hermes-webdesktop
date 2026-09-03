@@ -60,12 +60,9 @@ def _sanitize_structure(payload: Any, fix: Callable[[str], str]) -> bool:
 
 
 def _sanitize_messages(messages: list, fix: Callable[[str], str], *, deep: bool) -> bool:
-    """Apply ``fix`` to the string fields of every message dict in-place.
-
-    Covers content / content-part text, name, tool_call arguments, and every non-core
-    top-level str field. ``deep=True`` additionally covers tool_call ids, function names,
-    and NESTED non-core fields (``reasoning_details`` arrays from byte-level reasoning models).
-    """
+    """Apply ``fix`` to the string fields of every message dict in-place (content / part text,
+    name, tool_call arguments, non-core top-level str fields). ``deep=True`` adds tool_call ids,
+    function names, and NESTED non-core fields (``reasoning_details`` from byte-level models)."""
     found = False
     for msg in messages:
         if not isinstance(msg, dict):
@@ -186,12 +183,10 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
 
 
 def close_interrupted_tool_sequence(messages: list, final_response: Any = None) -> bool:
-    """Append a synthetic assistant turn when an interrupted tail is a tool result.
-
-    A transcript ending on a raw ``tool`` message makes the next user message land as
-    ``tool → user`` — an alternation violation strict providers (Gemini, Claude) answer by
-    hallucinating a continuation. Mutates in place; True if a closing turn was appended.
-    """
+    """Append a synthetic assistant turn when an interrupted tail is a tool result: a transcript
+    ending on a raw ``tool`` message makes the next user message land as ``tool → user``, an
+    alternation violation strict providers (Gemini, Claude) answer by hallucinating a
+    continuation. Mutates in place; True if a closing turn was appended."""
     last = messages[-1] if messages else None
     if not isinstance(last, dict) or last.get("role") != "tool":
         return False
@@ -339,11 +334,9 @@ def tool_result_id_variants(tool_call_id: Any) -> frozenset[str]:
 
 
 def coalesce_tool_call_id(tc: Any) -> str:
-    """Effective call id of a tool_call entry (dict or object); ``""`` when none.
-
-    Codex Responses calls carry ``call_id`` (authoritative pairing key), Chat Completions
-    carry ``id`` only, and bridge ids may be ``call_id|response_item_id``.
-    """
+    """Effective call id of a tool_call entry (dict or object); ``""`` when none. Codex Responses
+    carry ``call_id`` (authoritative pairing key), Chat Completions ``id`` only, and bridge ids
+    may be ``call_id|response_item_id``."""
     for raw in (_tc_field(tc, "call_id"), _tc_field(tc, "id")):
         value = raw.strip() if isinstance(raw, str) else ""
         if value:
