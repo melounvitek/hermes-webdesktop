@@ -40,7 +40,8 @@ _SKILL_HUB_SOURCE_LABELS = {
     "github": "GitHub",
     "clawhub": "ClawHub",
     "lobehub": "LobeHub",
-    "browse-sh": "browse.sh"}
+    "browse-sh": "browse.sh",
+}
 
 
 def _hub_sources(profile: Optional[str]):
@@ -78,12 +79,8 @@ def _flag(obj, attr: str) -> bool:
 
 def _skill_meta_to_payload(m) -> dict:
     return {
-        "name": m.name,
-        "description": m.description,
-        "source": m.source,
-        "identifier": m.identifier,
-        "trust_level": m.trust_level,
-        "repo": m.repo,
+        "name": m.name, "description": m.description, "source": m.source,
+        "identifier": m.identifier, "trust_level": m.trust_level, "repo": m.repo,
         "tags": list(m.tags or [])}
 
 
@@ -104,10 +101,8 @@ def _clear_skills_prompt_cache() -> None:
 async def install_skill_hub(body: SkillInstallRequest, profile: Optional[str] = None):
     identifier = require(body.identifier, "identifier is required")
     return spawn_profile_action(
-        body.profile or profile,
-        ["skills", "install", identifier, "--yes"],
-        _hub_action_name("install", identifier),
-        log_msg="Failed to spawn skills install",
+        body.profile or profile, ["skills", "install", identifier, "--yes"],
+        _hub_action_name("install", identifier), log_msg="Failed to spawn skills install",
         prefix="Failed to install skill")
 
 
@@ -115,10 +110,8 @@ async def install_skill_hub(body: SkillInstallRequest, profile: Optional[str] = 
 async def uninstall_skill_hub(body: SkillUninstallRequest, profile: Optional[str] = None):
     name = require(body.name, "name is required")
     return spawn_profile_action(
-        body.profile or profile,
-        ["skills", "uninstall", name, "--yes"],
-        _hub_action_name("uninstall", name),
-        log_msg="Failed to spawn skills uninstall",
+        body.profile or profile, ["skills", "uninstall", name, "--yes"],
+        _hub_action_name("uninstall", name), log_msg="Failed to spawn skills uninstall",
         prefix="Failed to uninstall skill")
 
 
@@ -126,17 +119,13 @@ async def uninstall_skill_hub(body: SkillUninstallRequest, profile: Optional[str
 async def update_skills_hub(
     body: Optional[SkillsUpdateRequest] = None, profile: Optional[str] = None):
     return spawn_profile_action(
-        (body.profile if body else None) or profile,
-        ["skills", "update"],
-        "skills-update",
-        log_msg="Failed to spawn skills update",
-        prefix="Failed to update skills")
+        (body.profile if body else None) or profile, ["skills", "update"], "skills-update",
+        log_msg="Failed to spawn skills update", prefix="Failed to update skills")
 
 
 @hub_router.get("/api/skills/hub/official")
 async def list_official_skills(profile: Optional[str] = None):
-    """The ENTIRE built-in optional-skills catalog (local scan, no network),
-    each row marked installed-or-not for ``profile``."""
+    """The ENTIRE optional-skills catalog (local scan), marked installed for ``profile``."""
 
     def _run():
         from tools.skills_hub import OptionalSkillSource
@@ -160,9 +149,8 @@ async def list_official_skills(profile: Optional[str] = None):
 
 @hub_router.get("/api/skills/hub/sources")
 async def list_skills_hub_sources(profile: Optional[str] = None):
-    """Configured skill-hub sources + installed-skill provenance, so the
-    Browse-hub tab has something to show before a search runs.  ``profile``
-    scopes the installed-skill provenance."""
+    """Configured skill-hub sources + installed-skill provenance (scoped to
+    ``profile``), so the Browse-hub tab has something before a search runs."""
 
     def _run():
         sources = _hub_sources(profile)
@@ -190,9 +178,7 @@ async def list_skills_hub_sources(profile: Optional[str] = None):
         for entry in out:
             entry["searchable"] = not (index_available and entry["id"] in _API_SOURCE_IDS)
         return {
-            "sources": out,
-            "index_available": index_available,
-            "featured": featured,
+            "sources": out, "index_available": index_available, "featured": featured,
             "installed": _installed_hub_identifiers(profile)}
 
     with http_failure("skills hub sources listing failed", 502, "Hub sources failed"):
@@ -202,8 +188,7 @@ async def list_skills_hub_sources(profile: Optional[str] = None):
 @hub_router.get("/api/skills/hub/search")
 async def search_skills_hub(
     q: str = "", source: str = "all", limit: int = 20, profile: Optional[str] = None):
-    """Search the skill hub across all configured sources (network-bound,
-    runs in a thread).  Results install by identifier via /hub/install."""
+    """Search the skill hub across all configured sources (network-bound)."""
     query = (q or "").strip()
     if not query:
         return {"results": [], "source_counts": {}, "timed_out": [], "installed": {}}
@@ -220,15 +205,14 @@ async def search_skills_hub(
         _rank = {"builtin": 2, "trusted": 1, "community": 0}
         seen = {}
         for r in all_results:
-            if r.identifier not in seen or _rank.get(r.trust_level, 0) > _rank.get(seen[r.identifier].trust_level, 0):
+            prev = seen.get(r.identifier)
+            if prev is None or _rank.get(r.trust_level, 0) > _rank.get(prev.trust_level, 0):
                 seen[r.identifier] = r
         deduped = list(seen.values())[:capped]
 
         return {
-            "results": [_skill_meta_to_payload(m) for m in deduped],
-            "source_counts": source_counts,
-            "timed_out": timed_out,
-            "installed": _installed_hub_identifiers(profile)}
+            "results": [_skill_meta_to_payload(m) for m in deduped], "source_counts": source_counts,
+            "timed_out": timed_out, "installed": _installed_hub_identifiers(profile)}
 
     with http_failure("skills hub search failed", 502, "Hub search failed"):
         return await asyncio.to_thread(_run)
@@ -245,9 +229,8 @@ async def _hub_lookup(fn, ident: str, log_msg: str, prefix: str):
 
 @hub_router.get("/api/skills/hub/preview")
 async def preview_skill_hub(identifier: str = "", profile: Optional[str] = None):
-    """A hub skill's SKILL.md + file manifest WITHOUT installing it.  Scoped to
-    ``profile`` so a profile with different hub taps resolves against ITS
-    source router."""
+    """A hub skill's SKILL.md + file manifest WITHOUT installing it; scoped to
+    ``profile`` so different hub taps resolve against THAT source router."""
     ident = require(identifier, "identifier is required")
 
     def _run():
@@ -272,25 +255,21 @@ async def preview_skill_hub(identifier: str = "", profile: Optional[str] = None)
 
         m = meta or bundle
         return {
-            "name": getattr(m, "name", ident),
-            "description": getattr(m, "description", "") or "",
+            "name": getattr(m, "name", ident), "description": getattr(m, "description", "") or "",
             "source": getattr(m, "source", "") or "",
             "identifier": getattr(m, "identifier", ident) or ident,
             "trust_level": getattr(m, "trust_level", "community") or "community",
-            "repo": getattr(m, "repo", None),
-            "tags": list(getattr(m, "tags", None) or []),
-            "skill_md": skill_md,
-            "files": sorted(files.keys())}
+            "repo": getattr(m, "repo", None), "tags": list(getattr(m, "tags", None) or []),
+            "skill_md": skill_md, "files": sorted(files.keys())}
 
     return await _hub_lookup(_run, ident, "skills hub preview failed", "Hub preview failed")
 
 
 @hub_router.get("/api/skills/hub/scan")
 async def scan_skill_hub(identifier: str = "", profile: Optional[str] = None):
-    """Run the install-time security scan on a hub skill WITHOUT installing it
-    (same ``scan_skill`` / ``should_allow_install`` pipeline as the CLI, on a
-    quarantined bundle that is cleaned up afterwards).  Scoped to ``profile``
-    so the bundle resolves where an install would pull it from."""
+    """Install-time security scan of a hub skill WITHOUT installing it (the CLI's
+    ``scan_skill`` / ``should_allow_install`` pipeline on a quarantined bundle);
+    scoped to ``profile`` so the bundle resolves where an install would."""
     ident = require(identifier, "identifier is required")
 
     def _run():
@@ -306,12 +285,12 @@ async def scan_skill_hub(identifier: str = "", profile: Optional[str] = None):
         if bundle.source == "official":
             scan_source = "official"
         else:
-            scan_source = getattr(bundle, "identifier", "") or getattr(meta, "identifier", "") or ident
+            scan_source = (
+                getattr(bundle, "identifier", "") or getattr(meta, "identifier", "") or ident)
 
-        q_path = None
         tier1 = None
+        q_path = quarantine_bundle(bundle)
         try:
-            q_path = quarantine_bundle(bundle)
             result = scan_skill(q_path, source=scan_source)
             # Advisory SkillEvaluator Tier 1 second opinion: optional binary,
             # never blocks, errors degrade to no data (same as the CLI installer).
@@ -325,29 +304,22 @@ async def scan_skill_hub(identifier: str = "", profile: Optional[str] = None):
                             "incomplete_checks": t1.incomplete_checks,
                             "findings": [
                                 {
-                                    "check": f.check,
-                                    "validator": f.validator,
-                                    "severity": f.severity,
-                                    "message": f.message,
-                                    "file": f.file,
-                                    "line": f.line,
+                                    "check": f.check, "validator": f.validator,
+                                    "severity": f.severity, "message": f.message,
+                                    "file": f.file, "line": f.line,
                                     "secrets_class": f.is_secrets_class}
                                 for f in t1.findings]}
             except Exception:
                 _log.debug("Tier 1 advisory scan skipped", exc_info=True)
         finally:
-            if q_path is not None:
-                _shutil.rmtree(q_path, ignore_errors=True)
+            _shutil.rmtree(q_path, ignore_errors=True)
 
         # `allowed` may be None ("ask") for agent-created/dangerous gates.
         allowed, reason = should_allow_install(result, force=False)
         findings = [
             {
-                "severity": f.severity,
-                "category": f.category,
-                "file": f.file,
-                "line": f.line,
-                "description": f.description}
+                "severity": f.severity, "category": f.category, "file": f.file,
+                "line": f.line, "description": f.description}
             for f in result.findings]
         counts = {sev: 0 for sev in ("critical", "high", "medium", "low")}
         for f in result.findings:
@@ -443,9 +415,8 @@ async def get_skill_content(name: str, profile: Optional[str] = None):
 
 @router.post("/api/skills")
 async def create_skill(body: SkillCreate):
-    """Create a custom skill via the same validated write path as the agent's
-    ``skill_manage`` tool, minus the agent write-approval gate — a write from
-    the authenticated dashboard IS the user acting directly."""
+    """Create a skill via the agent's ``skill_manage`` write path, minus the
+    write-approval gate — an authenticated dashboard write IS the user."""
     from tools.skill_manager_tool import _create_skill
 
     result = await scoped_to_thread(

@@ -116,7 +116,8 @@ _BACKEND_PROBES = {
     "singularity": _probe_singularity_backend,
     "ssh": _probe_ssh_backend,
     "modal": _probe_modal_backend,
-    "daytona": _probe_daytona_backend}
+    "daytona": _probe_daytona_backend,
+}
 
 
 def _probe_terminal_backend(name: str, terminal_cfg: dict) -> tuple:
@@ -176,7 +177,8 @@ def _category_providers(ts_key: str, config: dict) -> list:
     return _visible_providers(cat, config, force_fresh=True) if cat else []
 
 
-def _find_toolset_provider_row(ts_key: str, config: dict, provider: Optional[str]) -> Optional[dict]:
+def _find_toolset_provider_row(
+    ts_key: str, config: dict, provider: Optional[str]) -> Optional[dict]:
     """Resolve a provider picker row by name, or the active row when omitted."""
     from hermes_cli.tools_config import _is_provider_active
 
@@ -186,17 +188,12 @@ def _find_toolset_provider_row(ts_key: str, config: dict, provider: Optional[str
     return next((p for p in rows if _is_provider_active(p, config, force_fresh=True)), None)
 
 
-def _terminal_backend_names() -> set:
-    """Valid ``terminal.backend`` values, including plugin backends."""
-    return {row["name"] for row in _terminal_backend_rows()}
-
-
 def _require_known_toolset(name: str) -> None:
     """400 for toolset keys outside the effective configurable set."""
     from hermes_cli.tools_config import _get_effective_configurable_toolsets
 
     if name not in {ts_key for ts_key, _, _ in _get_effective_configurable_toolsets()}:
-        raise HTTPException(status_code=400, detail=f"Unknown toolset: {name}")
+        raise _bad_request(f"Unknown toolset: {name}")
 
 
 def _dict_section(config: dict, key: str) -> dict:
@@ -208,35 +205,30 @@ def _dict_section(config: dict, key: str) -> dict:
     return section
 
 
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=detail)
+
+
 def _no_models(name: str) -> dict:
     return {"name": name, "has_models": False, "models": [], "current": None, "default": None}
-
-
-def _model_catalog_section(name: str) -> str:
-    section = _MODEL_CATALOG_TOOLSETS.get(name)
-    if section is None:
-        raise HTTPException(status_code=400, detail=f"Toolset has no model catalog: {name}")
-    return section
 
 
 @router.get("/api/tools/toolsets")
 async def get_toolsets(profile: Optional[str] = None):
     from hermes_cli.tools_config import (
-        _CONFIG_ONLY_TOOLSETS,
-        _get_effective_configurable_toolsets,
-        _get_platform_tools,
-        _toolset_configuration_platform,
-        _toolset_has_keys,
-        get_nous_subscription_features,
+        _CONFIG_ONLY_TOOLSETS, _get_effective_configurable_toolsets, _get_platform_tools,
+        _toolset_configuration_platform, _toolset_has_keys, get_nous_subscription_features,
         gui_toolset_label)
     from hermes_cli.platforms import platform_label
     from toolsets import resolve_toolset
+    from utils import is_truthy_value
 
     def _read():
         with _profile_scope(profile):
             config = load_config()
             toolset_rows = _get_effective_configurable_toolsets()
-            target_platforms = {_toolset_configuration_platform(name) for name, _, _ in toolset_rows}
+            target_platforms = {
+                _toolset_configuration_platform(name) for name, _, _ in toolset_rows}
             enabled_by_platform = {
                 platform: _get_platform_tools(config, platform, include_default_mcp_servers=False)
                 for platform in target_platforms}
@@ -254,23 +246,17 @@ async def get_toolsets(profile: Optional[str] = None):
         if name in _CONFIG_ONLY_TOOLSETS:
             # Config-only capabilities (stt) have no per-platform toolset —
             # their switch is their own config section (e.g. stt.enabled).
-            from utils import is_truthy_value
-
             section = config.get(name)
             section = section if isinstance(section, dict) else {}
             is_enabled = is_truthy_value(section.get("enabled", True), default=True)
         else:
             is_enabled = name in enabled_by_platform[target_platform]
         result.append({
-            "name": name,
-            "label": gui_toolset_label(label),
-            "description": desc,
+            "name": name, "label": gui_toolset_label(label), "description": desc,
             "platform": target_platform,
             "platform_label": gui_toolset_label(platform_label(target_platform, target_platform)),
-            "enabled": is_enabled,
-            "available": is_enabled,
-            "configured": _toolset_has_keys(name, config, features=features),
-            "tools": tools})
+            "enabled": is_enabled, "available": is_enabled,
+            "configured": _toolset_has_keys(name, config, features=features), "tools": tools})
     return result
 
 
@@ -280,9 +266,7 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
     (``platform_toolsets.cli`` for most; platform-restricted toolsets target
     their own platform) via the same ``_save_platform_tools`` the CLI uses."""
     from hermes_cli.tools_config import (
-        _CONFIG_ONLY_TOOLSETS,
-        _get_platform_tools,
-        _save_platform_tools,
+        _CONFIG_ONLY_TOOLSETS, _get_platform_tools, _save_platform_tools,
         _toolset_configuration_platform)
 
     _require_known_toolset(name)
@@ -298,7 +282,8 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
                 _dict_section(config, name)["enabled"] = bool(body.enabled)
                 save_config(config)
                 return
-            enabled = set(_get_platform_tools(config, target_platform, include_default_mcp_servers=False))
+            enabled = set(
+                _get_platform_tools(config, target_platform, include_default_mcp_servers=False))
             if body.enabled:
                 enabled.add(name)
             else:
@@ -307,11 +292,10 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
 
     await asyncio.to_thread(_run)
 
-    # Install-on-enable: a provider with a post_setup hook whose install-state
-    # predicate is UNSATISFIED (cua-driver binary missing, etc.) gets the same
-    # background install `hermes tools` runs interactively — otherwise the
-    # toggle "saves" but the tool never appears because its check_fn can't
-    # find the binary.  Best-effort: a spawn failure never fails the toggle.
+    # Install-on-enable: a provider whose post_setup install predicate is
+    # UNSATISFIED (cua-driver binary missing, etc.) gets the same background
+    # install `hermes tools` runs — otherwise the toggle "saves" but the tool
+    # never appears.  Best-effort: a spawn failure never fails the toggle.
     post_setup_started: Optional[str] = None
     if body.enabled and name not in _CONFIG_ONLY_TOOLSETS:
         def _pending_install_key() -> Optional[str]:
@@ -323,11 +307,8 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
                 return None
             with _profile_scope(scope_profile):
                 config = load_config()
-                for prov in _visible_providers(cat, config):
-                    key = prov.get("post_setup")
-                    if key and not _post_setup_already_installed(key):
-                        return key
-            return None
+                keys = [prov.get("post_setup") for prov in _visible_providers(cat, config)]
+                return next((k for k in keys if k and not _post_setup_already_installed(k)), None)
 
         try:
             pending_key = await asyncio.to_thread(_pending_install_key)
@@ -340,24 +321,16 @@ async def toggle_toolset(name: str, body: ToolsetToggle, profile: Optional[str] 
             _log.exception("install-on-enable post-setup spawn failed for %s", name)
 
     return {
-        "ok": True,
-        "name": name,
-        "platform": target_platform,
-        "enabled": body.enabled,
+        "ok": True, "name": name, "platform": target_platform, "enabled": body.enabled,
         "post_setup_started": post_setup_started}
 
 
 @router.get("/api/tools/toolsets/{name}/config")
 async def get_toolset_config(name: str, profile: Optional[str] = None):
-    """Provider matrix + key status for a toolset's config panel: the same rows
-    the CLI ``hermes tools`` picker shows, each env var annotated with
-    ``is_set``.  No ``TOOL_CATEGORIES`` entry -> empty list, ``has_category:
-    false``."""
+    """Provider matrix + key status for a toolset's config panel (the CLI picker
+    rows, each env var annotated ``is_set``); no category -> ``has_category: false``."""
     from hermes_cli.tools_config import (
-        TOOL_CATEGORIES,
-        _is_provider_active,
-        _visible_providers,
-        provider_readiness_status,
+        TOOL_CATEGORIES, _is_provider_active, _visible_providers, provider_readiness_status,
         web_provider_capabilities)
     from hermes_cli.config import get_env_value
     from hermes_cli.nous_subscription import get_nous_subscription_features
@@ -370,18 +343,14 @@ async def get_toolset_config(name: str, profile: Optional[str] = None):
             cat = TOOL_CATEGORIES.get(name)
             providers = []
             active_provider = None
-            active_search_backend = None
-            active_extract_backend = None
             if cat:
                 # Entitlement state fetched once for the whole matrix.
                 features = get_nous_subscription_features(config, force_fresh=True)
                 for prov in _visible_providers(cat, config, force_fresh=True):
                     env_vars = [
                         {
-                            "key": e["key"],
-                            "prompt": e.get("prompt", e["key"]),
-                            "url": e.get("url"),
-                            "default": e.get("default"),
+                            "key": e["key"], "prompt": e.get("prompt", e["key"]),
+                            "url": e.get("url"), "default": e.get("default"),
                             "is_set": bool(get_env_value(e["key"]))}
                         for e in prov.get("env_vars", [])]
                     # Same active-provider determination as the CLI picker, so the
@@ -412,30 +381,24 @@ async def get_toolset_config(name: str, profile: Optional[str] = None):
                         # (tts.<key>.*) holding the provider's voice/model settings.
                         row["tts_provider"] = prov["tts_provider"]
                     providers.append(row)
+            payload = {
+                "name": name, "has_category": cat is not None, "providers": providers,
+                "active_provider": active_provider}
             if name == "web":
                 # Resolve active backends exactly as the web_search/web_extract
                 # dispatchers do, so badges reflect what a call would hit now.
                 try:
                     from tools.web_tools import _get_extract_backend, _get_search_backend
 
-                    active_search_backend = _get_search_backend()
-                    active_extract_backend = _get_extract_backend()
+                    search_backend = _get_search_backend()
+                    extract_backend = _get_extract_backend()
                 except Exception:
-                    active_search_backend = None
-                    active_extract_backend = None
-        return cat, providers, active_provider, active_search_backend, active_extract_backend
+                    search_backend = extract_backend = None
+                payload["active_search_backend"] = search_backend
+                payload["active_extract_backend"] = extract_backend
+        return payload
 
-    cat, providers, active_provider, active_search_backend, active_extract_backend = await asyncio.to_thread(_read)
-
-    payload = {
-        "name": name,
-        "has_category": cat is not None,
-        "providers": providers,
-        "active_provider": active_provider}
-    if name == "web":
-        payload["active_search_backend"] = active_search_backend
-        payload["active_extract_backend"] = active_extract_backend
-    return payload
+    return await asyncio.to_thread(_read)
 
 
 @router.get("/api/tools/toolsets/{name}/models")
@@ -465,29 +428,17 @@ async def get_toolset_models(
                     current = raw.strip()
             if current not in catalog:
                 current = default_model if default_model in catalog else None
-        return row, plugin, catalog, default_model, current
+        models = [
+            {
+                "id": model_id, "display": meta.get("display", model_id),
+                "speed": meta.get("speed", ""), "strengths": meta.get("strengths", ""),
+                "price": meta.get("price", "")}
+            for model_id, meta in catalog.items()]
+        return {
+            "name": name, "has_models": bool(models), "provider": row.get("name"),
+            "plugin": plugin, "models": models, "current": current, "default": default_model}
 
-    resolved = await asyncio.to_thread(_read)
-    if resolved is None:
-        return _no_models(name)
-    row, plugin, catalog, default_model, current = resolved
-
-    models = [
-        {
-            "id": model_id,
-            "display": meta.get("display", model_id),
-            "speed": meta.get("speed", ""),
-            "strengths": meta.get("strengths", ""),
-            "price": meta.get("price", "")}
-        for model_id, meta in catalog.items()]
-    return {
-        "name": name,
-        "has_models": bool(models),
-        "provider": row.get("name") if row else None,
-        "plugin": plugin,
-        "models": models,
-        "current": current,
-        "default": default_model}
+    return await asyncio.to_thread(_read) or _no_models(name)
 
 
 @router.put("/api/tools/toolsets/{name}/model")
@@ -495,10 +446,12 @@ async def select_toolset_model(
     name: str, body: ToolsetModelSelect, profile: Optional[str] = None):
     """Persist a backend model selection (``image_gen.model`` /
     ``video_gen.model``), validated against the resolved backend's catalog."""
-    section = _model_catalog_section(name)
+    section = _MODEL_CATALOG_TOOLSETS.get(name)
+    if section is None:
+        raise _bad_request(f"Toolset has no model catalog: {name}")
     model_id = (body.model or "").strip()
     if not model_id:
-        raise HTTPException(status_code=400, detail="model is required")
+        raise _bad_request("model is required")
 
     def _run():
         with config_write_scope(body.profile or profile):
@@ -506,13 +459,11 @@ async def select_toolset_model(
             row = _find_toolset_provider_row(name, config, body.provider)
             plugin = _resolve_toolset_model_plugin(name, row) if row else None
             if not plugin:
-                raise HTTPException(
-                    status_code=400, detail=f"No model-capable backend is active for {name}")
+                raise _bad_request(f"No model-capable backend is active for {name}")
 
             catalog, _default = _toolset_model_catalog(name, plugin)
             if model_id not in catalog:
-                raise HTTPException(
-                    status_code=400, detail=f"Unknown model {model_id!r} for backend {plugin!r}")
+                raise _bad_request(f"Unknown model {model_id!r} for backend {plugin!r}")
 
             _dict_section(config, section)["model"] = model_id
             save_config(config)
@@ -525,19 +476,14 @@ async def select_toolset_model(
 @router.put("/api/tools/toolsets/{name}/provider")
 async def select_toolset_provider(
     name: str, body: ToolsetProviderSelect, profile: Optional[str] = None):
-    """Persist a provider selection via ``apply_provider_selection`` (the
-    non-interactive core shared with ``hermes tools``, so both write identical
-    config keys).  Keys and post-setup are separate endpoints.
+    """Persist a provider selection via ``apply_provider_selection`` (shared with
+    ``hermes tools``, so both write identical keys).
 
-    ``web`` only: ``capability`` ('search' | 'extract') scopes the write to
-    ``web.<capability>_backend`` (the per-capability override the runtime
-    dispatchers resolve first); the provider must support that capability.
-    Omitted -> legacy whole-provider write of ``web.backend``.
-
-    Managed Nous rows report Portal entitlement: the GUI has no inline login,
-    so an unentitled selection would write config and never activate.  The
-    response adds ``needs_nous_auth: true`` + ``feature`` so the client can
-    drive the Nous Portal OAuth flow and refetch.
+    ``web`` only: ``capability`` ('search' | 'extract') writes
+    ``web.<capability>_backend`` (the override the dispatchers resolve first);
+    omitted -> legacy ``web.backend``.  Managed Nous rows report Portal
+    entitlement (``needs_nous_auth`` + ``feature``): the GUI has no inline
+    login, so an unentitled selection would write config and never activate.
     """
     from hermes_cli.tools_config import apply_provider_selection, web_provider_capabilities
     from hermes_cli.nous_subscription import (
@@ -547,13 +493,10 @@ async def select_toolset_provider(
 
     if body.capability is not None:
         if name != "web":
-            raise HTTPException(
-                status_code=400, detail="capability selection is only supported for the web toolset"
-            )
+            raise _bad_request("capability selection is only supported for the web toolset")
         if body.capability not in ("search", "extract"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Unknown capability: {body.capability!r} (expected 'search' or 'extract')")
+            raise _bad_request(
+                f"Unknown capability: {body.capability!r} (expected 'search' or 'extract')")
 
     def _provider_row(config):
         return next(
@@ -569,24 +512,19 @@ async def select_toolset_provider(
                     # resolving through the shared fallback chain.
                     prov = _provider_row(config)
                     if prov is None:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Unknown provider {body.provider!r} for toolset {name!r}")
+                        raise _bad_request(
+                            f"Unknown provider {body.provider!r} for toolset {name!r}")
                     backend = prov.get("web_backend")
                     if not backend:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Provider {body.provider!r} has no web backend key")
+                        raise _bad_request(f"Provider {body.provider!r} has no web backend key")
                     if body.capability not in web_provider_capabilities(backend):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"{body.provider} does not support {body.capability}")
+                        raise _bad_request(f"{body.provider} does not support {body.capability}")
                     _dict_section(config, "web")[f"{body.capability}_backend"] = backend
                 else:
                     try:
                         apply_provider_selection(name, body.provider, config)
                     except KeyError as exc:
-                        raise HTTPException(status_code=400, detail=str(exc).strip('"'))
+                        raise _bad_request(str(exc).strip('"'))
                 save_config(config)
                 response: Dict[str, Any] = {"ok": True, "name": name, "provider": body.provider}
                 if body.capability is not None:
@@ -635,9 +573,8 @@ async def save_toolset_env(name: str, body: ToolsetEnvUpdate, profile: Optional[
 
             unknown = [k for k in body.env if k not in allowed]
             if unknown:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown env var(s) for toolset {name}: {', '.join(sorted(unknown))}")
+                raise _bad_request(
+                    f"Unknown env var(s) for toolset {name}: {', '.join(sorted(unknown))}")
 
             saved: List[str] = []
             skipped: List[str] = []
@@ -646,7 +583,7 @@ async def save_toolset_env(name: str, body: ToolsetEnvUpdate, profile: Optional[
                     try:
                         save_env_value(key, value.strip())
                     except ValueError as exc:
-                        raise HTTPException(status_code=400, detail=str(exc))
+                        raise _bad_request(str(exc))
                     saved.append(key)
                 else:
                     skipped.append(key)
@@ -661,23 +598,18 @@ async def save_toolset_env(name: str, body: ToolsetEnvUpdate, profile: Optional[
 @router.post("/api/tools/toolsets/{name}/post-setup")
 async def run_toolset_post_setup(
     name: str, body: ToolsetPostSetup, profile: Optional[str] = None):
-    """Spawn ``hermes tools post-setup <key>`` (long-running installs: npm,
-    pip, cua-driver fetch) as a background action the frontend tails via
-    ``GET /api/actions/tools-post-setup/status``.  The key is validated
-    against the declared allowlist; ``profile`` is threaded so hooks that
-    touch config see the same HERMES_HOME as the drawer's other writes."""
+    """Spawn ``hermes tools post-setup <key>`` (long-running installs) as a
+    background action tailed via ``GET /api/actions/tools-post-setup/status``;
+    ``profile`` is threaded so hooks see the drawer's HERMES_HOME."""
     from hermes_cli.tools_config import valid_post_setup_keys
 
     _require_known_toolset(name)
     if body.key not in valid_post_setup_keys():
-        raise HTTPException(status_code=400, detail=f"Unknown post-setup key: {body.key}")
+        raise _bad_request(f"Unknown post-setup key: {body.key}")
 
     result = spawn_profile_action(
-        body.profile or profile,
-        ["tools", "post-setup", body.key],
-        "tools-post-setup",
-        log_msg="Failed to spawn tools post-setup",
-        prefix="Failed to run post-setup")
+        body.profile or profile, ["tools", "post-setup", body.key], "tools-post-setup",
+        log_msg="Failed to spawn tools post-setup", prefix="Failed to run post-setup")
     result["key"] = body.key
     return result
 
@@ -702,12 +634,8 @@ async def get_terminal_backends(profile: Optional[str] = None):
             for row in rows:
                 status, detail = _probe_terminal_backend(row["name"], terminal_cfg)
                 backends.append({
-                    "name": row["name"],
-                    "label": row["label"],
-                    "description": row["description"],
-                    "active": row["name"] == active,
-                    "status": status,
-                    "detail": detail})
+                    "name": row["name"], "label": row["label"], "description": row["description"],
+                    "active": row["name"] == active, "status": status, "detail": detail})
         return {"active": active, "backends": backends}
 
     return await asyncio.to_thread(_read)
@@ -719,11 +647,10 @@ async def select_terminal_backend(
     """Persist ``terminal.backend``.  A backend that still needs setup is
     allowed — the picker shows guidance instead of blocking, like the CLI."""
     backend = (body.backend or "").strip().lower()
-    valid_names = _terminal_backend_names()
+    valid_names = {row["name"] for row in _terminal_backend_rows()}
     if backend not in valid_names:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown terminal backend: {body.backend!r}. "
+        raise _bad_request(
+            f"Unknown terminal backend: {body.backend!r}. "
             f"Use one of: {', '.join(sorted(valid_names))}")
 
     def _run():
@@ -751,11 +678,8 @@ async def grant_computer_use_permissions(profile: Optional[str] = None):
     CuaDriver via LaunchServices so the TCC dialog is attributed correctly).
     The frontend polls ``GET /api/actions/computer-use-grant/status``."""
     if sys.platform != "darwin":
-        raise HTTPException(
-            status_code=400, detail="Computer Use permission grants are a macOS concept.")
+        raise _bad_request("Computer Use permission grants are a macOS concept.")
     return spawn_profile_action(
-        profile,
-        ["computer-use", "permissions", "grant"],
-        "computer-use-grant",
+        profile, ["computer-use", "permissions", "grant"], "computer-use-grant",
         log_msg="Failed to spawn computer-use permissions grant",
         prefix="Failed to request permissions")

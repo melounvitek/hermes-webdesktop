@@ -10,6 +10,7 @@ import logging
 import asyncio
 import atexit
 import concurrent.futures
+import contextlib
 import hmac
 import os
 import re
@@ -26,35 +27,21 @@ from hermes_cli.pty_session import PtySessionRegistry
 _log = logging.getLogger("hermes_cli.web_server")
 
 
-# /api/pty — PTY-over-WebSocket bridge for the dashboard "Chat" tab: spawns the
-# same ``hermes --tui`` binary the CLI uses behind a pseudo-terminal and forwards
-# bytes + resize escapes; the browser renders the ANSI through xterm.js.
-# Auth: ``?token=<session_token>`` query param (browsers can't set Authorization
-# on the WS upgrade), same ephemeral ``_SESSION_TOKEN`` as REST.
-
-# PTY bridge: POSIX uses pty_bridge (fcntl/termios/ptyprocess); native Windows
-# uses win_pty_bridge (pywinpty/ConPTY).  Both expose the same surface —
-# spawn/read/write/resize/close/is_available — so the handler needs no guards.
-if sys.platform.startswith("win"):
-    try:
+# /api/pty spawns ``hermes --tui`` behind a pseudo-terminal and forwards bytes +
+# resize escapes to xterm.js.  POSIX uses pty_bridge (fcntl/termios); native
+# Windows uses win_pty_bridge (pywinpty/ConPTY); same surface, no handler guards.
+try:
+    if sys.platform.startswith("win"):
         from hermes_cli.win_pty_bridge import WinPtyBridge as PtyBridge, PtyUnavailableError
-        _PTY_BRIDGE_AVAILABLE = True
-    except ImportError:  # pragma: no cover - pywinpty missing
-        PtyBridge = None  # type: ignore[assignment]
-        _PTY_BRIDGE_AVAILABLE = False
-
-        class PtyUnavailableError(RuntimeError):  # type: ignore[no-redef]
-            """Stub when win_pty_bridge cannot be imported."""
-else:
-    try:
+    else:
         from hermes_cli.pty_bridge import PtyBridge, PtyUnavailableError
-        _PTY_BRIDGE_AVAILABLE = True
-    except ImportError:  # pragma: no cover - dev env without ptyprocess
-        PtyBridge = None  # type: ignore[assignment]
-        _PTY_BRIDGE_AVAILABLE = False
+    _PTY_BRIDGE_AVAILABLE = True
+except ImportError:  # pragma: no cover - pywinpty / ptyprocess missing
+    PtyBridge = None  # type: ignore[assignment]
+    _PTY_BRIDGE_AVAILABLE = False
 
-        class PtyUnavailableError(RuntimeError):  # type: ignore[no-redef]
-            """Stub on platforms where pty_bridge can't be imported."""
+    class PtyUnavailableError(RuntimeError):  # type: ignore[no-redef]
+        """Stub when the platform PTY bridge cannot be imported."""
 _RESIZE_RE = re.compile(rb"\x1b\[RESIZE:(\d+);(\d+)\]")
 _PTY_READ_CHUNK_TIMEOUT = 0.2
 
@@ -84,21 +71,15 @@ async def _legacy_pump(ws: "WebSocket", bridge) -> None:
                 except Exception:
                     return
         finally:
-            # Child exited (EOF) or the send side broke.  Close the WebSocket so
-            # the writer loop's ``ws.receive()`` returns instead of blocking
-            # forever on a half-open browser socket (no FIN, common on
-            # macOS/launchd) — otherwise the PTY's fds leak and auto-reconnect
-            # stacks a fresh PTY on each orphan.  Reap the bridge here too
-            # (close() is idempotent): if the handler task is cancelled the
-            # instant we close the WS, the writer's ``finally`` can be skipped.
-            try:
+            # Close the WS so the writer's ``ws.receive()`` returns instead of
+            # blocking forever on a half-open browser socket (fds would leak and
+            # auto-reconnect stacks a fresh PTY on each orphan).  Reap the bridge
+            # here too (idempotent): cancelling the handler the instant the WS
+            # closes can skip the writer's ``finally``.
+            with contextlib.suppress(Exception):
                 await asyncio.to_thread(bridge.close)
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 await ws.close()
-            except Exception:
-                pass
 
     reader_task = asyncio.create_task(pump_pty_to_ws())
 
@@ -128,10 +109,8 @@ async def _legacy_pump(ws: "WebSocket", bridge) -> None:
         pass
     finally:
         reader_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await reader_task
-        except (asyncio.CancelledError, Exception):
-            pass
         await asyncio.to_thread(bridge.close)
 
 
@@ -143,14 +122,11 @@ _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "testclient"})
 def _ws_client_reason(ws: "WebSocket") -> Optional[str]:
     """Return a rejection reason token for the peer IP, or None when allowed.
 
-    Loopback bind: only loopback clients — the legacy ``?token=`` is the only
-    auth, so LAN hosts must not get to guess it.  Explicit non-loopback bind
-    (``--host 0.0.0.0``/``::``/LAN IP, always with ``--insecure``): any peer;
-    DNS-rebinding is still blocked by :func:`_ws_host_origin_reason`.  Gated
-    mode: any peer — ``proxy_headers=True`` rewrites ``ws.client.host`` to the
-    X-Forwarded-For value and the OAuth gate + ``?ticket=`` is the auth.
-    An empty peer on a loopback bind fails closed (misconfigured proxy / unix
-    socket must not reach a loopback-only surface).
+    Loopback bind: only loopback peers (the legacy ``?token=`` is the only auth,
+    LAN hosts must not get to guess it); an empty peer fails closed.  Explicit
+    non-loopback bind (``--insecure``) or gated mode: any peer — DNS-rebinding is
+    blocked by :func:`_ws_host_origin_reason`, and in gated mode
+    ``ws.client.host`` is the X-Forwarded-For value anyway.
     """
     from hermes_cli.web_server import app
     if getattr(app.state, "auth_required", False):
@@ -172,34 +148,27 @@ def _ws_client_is_allowed(ws: "WebSocket") -> bool:
 
 
 def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
-    """Return a Host/Origin rejection reason (``host_mismatch …`` /
-    ``origin_mismatch …``), or None when allowed.
+    """Return ``host_mismatch …`` / ``origin_mismatch …``, or None when allowed.
 
     HTTP middleware does not run for WebSocket routes, so the DNS-rebinding
-    Host check is repeated here before accepting the upgrade; a browser Origin
-    header, when present, must target the same bound host.  Non-web origins
-    (packaged Electron: file://, null, app://) are trusted — the upstream
-    credential check is the real auth boundary there.
+    Host check is repeated here; an Origin header, when present, must target the
+    bound host.  Non-web origins (packaged Electron: file://, null, app://) are
+    trusted — the credential check is the real auth boundary there.
     """
     from hermes_cli.web_server import _is_accepted_host, app
     bound_host = getattr(app.state, "bound_host", None)
     if not bound_host:
         return None
-
     trusted_public_hosts = getattr(app.state, "trusted_public_hosts", frozenset())
-
     host_header = ws.headers.get("host", "")
     if not _is_accepted_host(host_header, bound_host, trusted_public_hosts):
         return f"host_mismatch host={host_header or '?'} bound={bound_host}"
-
     origin = ws.headers.get("origin", "")
     if not origin:
         return None
-
     parsed = urllib.parse.urlparse(origin)
     if parsed.scheme not in {"http", "https"}:
         return None
-
     if not parsed.netloc or not _is_accepted_host(parsed.netloc, bound_host, trusted_public_hosts):
         return f"origin_mismatch origin={origin} bound={bound_host}"
     return None
@@ -237,19 +206,15 @@ def _gateway_ws_ticket_from_subprotocol(ws: "WebSocket") -> tuple[str, str]:
 def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
     """Validate WS-upgrade auth; return ``(reason, credential)``.
 
-    ``reason`` is None when accepted, else ``no_credential`` / ``token_mismatch``
-    / ``ticket_invalid`` / ``internal_invalid``; ``credential`` names what was
-    presented (``ticket``, ``ticket-subprotocol``, ``internal``, ``token``,
-    ``none``) so the accept path can log *how* a peer authed.
+    ``reason`` is None when accepted, else a short token (``no_credential``,
+    ``token_mismatch``, ``ticket_invalid``, ``internal_invalid``);
+    ``credential`` names what was presented so the accept path can log *how*.
 
-    Loopback / ``--insecure``: legacy ``?token=<_SESSION_TOKEN>``, constant-time
-    compared.  Gated: ``?ticket=`` (browser-minted, single-use, 30s TTL) or
-    ``?internal=`` (process-lifetime credential used only by WS clients the
-    server spawns itself — multi-use so the PTY child can reconnect; never
-    injected into the SPA, see ``dashboard_auth.ws_tickets``).  The legacy
-    token is unconditionally rejected in gated mode: a leaked ``_SESSION_TOKEN``
-    must not grant WS access once the gate is engaged.  Rejections are
-    audit-logged so "WS keeps closing" can be debugged from the log.
+    Loopback / ``--insecure``: legacy ``?token=`` (constant-time compared).
+    Gated: ``?ticket=`` (browser-minted, single-use, 30s TTL) or ``?internal=``
+    (process-lifetime, multi-use, only for server-spawned WS clients so the PTY
+    child can reconnect; never injected into the SPA).  The legacy token is
+    rejected in gated mode: a leaked ``_SESSION_TOKEN`` must not grant access.
     """
     from hermes_cli.web_server import _SESSION_TOKEN, app
     auth_required = bool(getattr(app.state, "auth_required", False))
@@ -262,10 +227,8 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
 
         def _reject(reason: str) -> None:
             audit_log(
-                AuditEvent.WS_TICKET_REJECTED,
-                reason=reason,
-                ip=(ws.client.host if ws.client else ""),
-                path=ws.url.path)
+                AuditEvent.WS_TICKET_REJECTED, reason=reason,
+                ip=(ws.client.host if ws.client else ""), path=ws.url.path)
 
         def _stamp_identity(info) -> None:
             # Server-minted {user_id, provider} stamped onto the WS object is the
@@ -320,32 +283,20 @@ def _ws_auth_ok(ws: "WebSocket") -> bool:
 
 
 def _resolve_chat_argv(
-    resume: Optional[str] = None,
-    sidecar_url: Optional[str] = None,
-    profile: Optional[str] = None,
+    resume: Optional[str] = None, sidecar_url: Optional[str] = None, profile: Optional[str] = None,
     active_session_file: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve the argv + cwd + env for the chat PTY (what ``hermes --tui`` runs).
 
-    Tests monkeypatch this to inject a tiny fake command so nothing has to
-    build the TUI bundle.  Env contract with the child:
-
-    * ``HERMES_TUI_RESUME`` — session resume (``ui-tui`` does not parse argv, so
-      ``--resume`` cannot be appended); resolved to the newest descendant first.
-    * ``HERMES_TUI_GATEWAY_URL`` — attach to this process's in-memory
-      ``tui_gateway`` instead of spawning a Python gateway subprocess.  SKIPPED
-      for profile-scoped chats: the dashboard's gateway runs under the
-      dashboard's own profile, so a scoped chat must spawn its own.
-    * ``HERMES_TUI_SIDECAR_URL`` — mirror dispatcher emits to ``/api/pub``.
-    * ``HERMES_TUI_ACTIVE_SESSION_FILE`` — the TUI writes its current session id
-      there, a cross-process breadcrumb for reconnecting after a WS drop.
-    * ``profile`` scopes the ENTIRE chat by pointing ``HERMES_HOME`` at the
-      profile dir; every spawned process resolves ``get_hermes_home()`` from
-      that at import, the same propagation ``hermes -p <name>`` performs.
+    Tests monkeypatch this with a tiny fake command.  Env contract: resume goes
+    through ``HERMES_TUI_RESUME`` (``ui-tui`` does not parse argv), resolved to
+    the newest descendant; ``HERMES_TUI_GATEWAY_URL`` attaches to this process's
+    in-memory gateway but is SKIPPED for profile-scoped chats (that gateway runs
+    under the dashboard's own profile, so a scoped chat spawns its own);
+    ``profile`` scopes the ENTIRE chat by pointing ``HERMES_HOME`` at the profile
+    dir, the same propagation ``hermes -p <name>`` performs.
     """
     from hermes_cli.web_server import (
-        _config_profile_scope,
-        _open_session_db_for_profile,
-        _resolve_profile_dir,
+        _config_profile_scope, _open_session_db_for_profile, _resolve_profile_dir,
         _session_latest_descendant)
     from hermes_cli.main import PROJECT_ROOT, _apply_tui_python_env, _make_tui_argv
 
@@ -355,9 +306,8 @@ def _resolve_chat_argv(
         profile_dir = _resolve_profile_dir(requested)
 
     argv, cwd = _make_tui_argv(PROJECT_ROOT / "ui-tui", tui_dev=False)
-    # Build via the single spawn-env factory (profile-home contract applied;
-    # secrets kept — the spawned agent needs provider creds).  An explicit
-    # profile scope overrides HERMES_HOME before config is bridged into the env.
+    # Secrets kept — the spawned agent needs provider creds.  An explicit profile
+    # scope overrides HERMES_HOME before config is bridged into the env.
     from tools.environments.local import build_subprocess_env
     env = build_subprocess_env(scrub_secrets=False, inherit_profile_home=True)
     if profile_dir is not None:
@@ -367,10 +317,8 @@ def _resolve_chat_argv(
             apply_terminal_config_to_env, read_raw_config, terminal_config_owned_env_vars)
 
         if profile_dir is not None:
-            # The dashboard already bridged its own terminal config into
-            # os.environ at startup. Remove only keys explicitly owned by that
-            # launch profile before applying the selected profile; operator
-            # exports for keys the launch profile omits remain valid fallbacks.
+            # Drop only the terminal keys the launch profile owns before applying
+            # the selected profile; operator exports for other keys stay valid.
             raw_launch_terminal = read_raw_config().get("terminal")
             for env_var in terminal_config_owned_env_vars(raw_launch_terminal):
                 env.pop(env_var, None)
@@ -386,10 +334,8 @@ def _resolve_chat_argv(
     # transcript scrolling; disable it for the dashboard PTY only.
     env.setdefault("HERMES_TUI_DISABLE_MOUSE", "1")
     env.setdefault("HERMES_TUI_INLINE", "1")
-    # xterm.js always renders 24-bit RGB, but chalk in the child picks its
-    # depth from the SERVER env — hosted deploys under a process manager have
-    # no COLORTERM, so hex colors snap to the 256 palette (bronze -> salmon).
-    # Backfill; setdefault so an explicit operator value still wins.
+    # chalk in the child picks its color depth from the SERVER env; hosted
+    # deploys have no COLORTERM, so hex colors would snap to the 256 palette.
     env.setdefault("COLORTERM", "truecolor")
     env["HERMES_TUI_DASHBOARD"] = "1"
 
@@ -418,61 +364,44 @@ def _resolve_chat_argv(
     return list(argv), str(cwd) if cwd else None, env
 
 
-# Hosts that mean "listen on every interface" — bind to them, but an
-# in-container client must NOT dial them: 0.0.0.0 routes through the wildcard
-# stack and behind a forward proxy (HTTPS_PROXY without 0.0.0.0 in NO_PROXY)
-# gets MITM'd into a failed handshake.  Clients dial loopback instead.
+# Wildcard bind hosts an in-container client must NOT dial: behind a forward
+# proxy (HTTPS_PROXY without 0.0.0.0 in NO_PROXY) the handshake gets MITM'd.
 _WILDCARD_HOSTS = frozenset({"0.0.0.0", "::"})
 
 
 def _resolve_client_ws_host() -> Optional[str]:
-    """Return the host the in-container WS client should dial.
-
-    ``HERMES_DASHBOARD_WS_HOST`` wins always (operators behind a forward proxy
-    pin a routable host); a wildcard bind becomes ``127.0.0.1`` (dashboard and
-    TUI child share the container); any other bind host is preserved verbatim.
-    """
+    """Host the in-container WS client should dial: ``HERMES_DASHBOARD_WS_HOST``
+    wins always; a wildcard bind becomes ``127.0.0.1``; others verbatim."""
     from hermes_cli.web_server import app
     explicit = os.environ.get("HERMES_DASHBOARD_WS_HOST", "").strip()
     if explicit:
         return explicit
-
     host = getattr(app.state, "bound_host", None)
     if not host:
         return None
-
-    if host in _WILDCARD_HOSTS:
-        return "127.0.0.1"
-
-    return host
+    return "127.0.0.1" if host in _WILDCARD_HOSTS else host
 
 
 def _server_internal_ws_url(path: str, **extra_qs) -> Optional[str]:
-    """``ws://<client host>:<port><path>?<auth>&<extra>`` for server-spawned WS
-    clients, or None when unbound.
+    """``ws://<host>:<port><path>?<auth>&<extra>`` for server-spawned WS clients,
+    or None when unbound.
 
-    Loopback / ``--insecure``: ``?token=<_SESSION_TOKEN>``.  Gated: the legacy
-    token is rejected by ``_ws_auth_ok``, so the PTY child authenticates with
-    the process-lifetime internal credential (``?internal=``) — NOT a single-use
+    Gated mode uses the process-lifetime internal credential, NOT a single-use
     browser ticket: the child reads the URL once and reuses it on every
     reconnect, and a 30s-TTL ticket can expire before a slow cold boot dials.
     """
     from hermes_cli.web_server import _SESSION_TOKEN, app
     host = _resolve_client_ws_host()
     port = getattr(app.state, "bound_port", None)
-
     if not host or not port:
         return None
-
     netloc = f"[{host}]:{port}" if ":" in host and not host.startswith("[") else f"{host}:{port}"
-
     if getattr(app.state, "auth_required", False):
         from hermes_cli.dashboard_auth.ws_tickets import internal_ws_credential
 
         auth = {"internal": internal_ws_credential()}
     else:
         auth = {"token": _SESSION_TOKEN}
-
     return f"ws://{netloc}{path}?{urllib.parse.urlencode({**auth, **extra_qs})}"
 
 
@@ -487,17 +416,10 @@ def _build_sidecar_url(channel: str) -> Optional[str]:
 
 
 async def _resolve_chat_argv_async(
-    resume: Optional[str] = None,
-    sidecar_url: Optional[str] = None,
-    profile: Optional[str] = None,
+    resume: Optional[str] = None, sidecar_url: Optional[str] = None, profile: Optional[str] = None,
     active_session_file: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
-    """Resolve chat argv without blocking the dashboard event loop.
-
-    ``_resolve_chat_argv`` may run ``npm install`` / ``npm run build``; keep
-    that off the WebSocket loop so keepalives keep flowing.  The async lock
-    preserves one-build-at-a-time when several tabs connect at once without
-    occupying worker threads while queued connections wait.
-    """
+    """Resolve chat argv off the event loop (it may run ``npm run build``); the
+    async lock keeps one-build-at-a-time without parking worker threads."""
     from hermes_cli.web_server import _get_chat_argv_lock, _resolve_chat_argv, app
     kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
     if active_session_file is not None:
@@ -511,21 +433,15 @@ def _active_session_file_for_channel(app: "FastAPI", channel: str) -> Path:
     """Return the per-channel file where a dashboard TUI writes its active sid."""
     from hermes_cli.web_server import _get_pty_active_session_files
     files = _get_pty_active_session_files(app)
-    existing = files.get(channel)
-    if existing is not None:
-        return existing
-
-    fd, raw_path = tempfile.mkstemp(prefix="hermes-pty-active-", suffix=".json")
-    os.close(fd)
-    path = Path(raw_path)
-    files[channel] = path
-    return path
+    if files.get(channel) is None:
+        fd, raw_path = tempfile.mkstemp(prefix="hermes-pty-active-", suffix=".json")
+        os.close(fd)
+        files[channel] = Path(raw_path)
+    return files[channel]
 
 
-# Console commands run in a worker thread; on timeout asyncio cancels the
-# awaitable but the thread keeps running, so a stuck worker would exhaust the
-# shared default pool.  A small dedicated pool caps the leak and bounds
-# concurrent console execution regardless of reconnects.
+# On timeout asyncio cancels the awaitable but the console thread keeps running;
+# a small dedicated pool caps the leak instead of exhausting the default pool.
 _CONSOLE_EXECUTOR_MAX_WORKERS = 4
 _console_executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 _console_executor_lock = threading.Lock()

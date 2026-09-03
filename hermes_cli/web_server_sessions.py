@@ -1,9 +1,9 @@
 """Session-DB access for the dashboard: per-profile SessionDB opening with schema
 heal, latest-descendant lookup and the auto-archive ticker.
 
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
+Split out of ``hermes_cli.web_server``, which re-imports every external name so
+``web_server.<name>`` keeps resolving (and monkeypatching); helpers tests patch
+there are reached lazily through it.
 """
 
 import logging
@@ -79,13 +79,9 @@ _session_db_bootstrap_lock = threading.Lock()
 
 
 def _session_db_read_probe_statements() -> tuple:
-    """Stale-schema probes for read-only opens, derived from SCHEMA_SQL.
-
-    Read-only opens skip _reconcile_columns(), so an older store would 500 on
-    every poll until something opened it writable. Deriving the probe from the
-    schema means any new column is probed automatically (a hand-written list
-    went stale once and left the sidebar empty after `hermes update`).
-    """
+    """Stale-schema probes for read-only opens (which skip _reconcile_columns()).
+    Derived from SCHEMA_SQL so a new column is probed automatically — a
+    hand-written list once went stale and emptied the sidebar after update."""
     from hermes_state_schema import schema_read_probe_statements
 
     return schema_read_probe_statements()
@@ -110,14 +106,9 @@ def _is_stale_schema_error(exc: BaseException) -> bool:
 def _open_session_db_at_path(db_path: Path, *, read_only: bool):
     """Open a SessionDB at an explicit path with an explicit access mode.
 
-    Writable opens keep the full init and repair path. Read-only opens bootstrap
-    a missing or zero-byte store once, and heal an older or malformed schema
-    through one writable open before reopening read-only; the healthy read path
-    never takes a write lock or requests a checkpoint.
-
-    The probe covers every table/column in SCHEMA_SQL, so ANY schema addition
-    escalates a stale store to a one-time writable open (the same reconcile the
-    store's backend runs at startup). Tables created outside SCHEMA_SQL
+    Read-only opens bootstrap a missing/zero-byte store once and heal a stale or
+    malformed schema through ONE writable open before reopening read-only; the
+    healthy read path never takes a write lock.  Tables outside SCHEMA_SQL
     (telemetry ``tel_*``, FTS shadow tables) are outside both probe and heal.
     """
     from hermes_cli.web_server import (
@@ -213,12 +204,9 @@ _last_auto_archive_check: Dict[str, float] = {}
 
 
 def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
-    """Run the config-gated stale-session auto-archive for ``profile``. Never raises.
-
-    The Desktop backend (``hermes serve``) runs neither the CLI nor the gateway
-    startup hooks, so the session-list path is what makes
-    ``sessions.auto_archive`` take effect there.
-    """
+    """Config-gated stale-session auto-archive for ``profile``; never raises.
+    ``hermes serve`` runs neither CLI nor gateway startup hooks, so this
+    session-list trigger is what makes ``sessions.auto_archive`` work there."""
     from hermes_cli.web_server import _open_session_db_for_profile
     try:
         key = profile or ""
