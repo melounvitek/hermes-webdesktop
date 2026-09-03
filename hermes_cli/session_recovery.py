@@ -81,9 +81,7 @@ def _resolved_output_path(path: Path) -> Path:
 
 
 def _validate_paths(
-    source_path: Path,
-    output_path: Optional[Path] = None,
-    work_dir: Optional[Path] = None,
+    source_path: Path, output_path: Optional[Path] = None, work_dir: Optional[Path] = None,
 ) -> tuple[Path, Optional[Path], Path]:
     source = source_path.expanduser().resolve(strict=True)
     if not source.is_file():
@@ -248,10 +246,7 @@ def _immediate_transaction(conn: sqlite3.Connection) -> Iterator[None]:
 
 
 def _compatible_columns(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    table: str,
-    result: dict[str, Any],
+    source: sqlite3.Connection, destination: sqlite3.Connection, table: str, result: dict[str, Any],
 ) -> Optional[list[str]]:
     """Columns shared by source and destination; sets a terminal status and returns None otherwise."""
     source_columns = _table_columns(source, table)
@@ -273,17 +268,9 @@ def _quoted_columns(columns: list[str]) -> tuple[str, str]:
 
 
 def _copy_rows(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    select_sql: str,
-    params: tuple[Any, ...],
-    insert_sql: str,
-    *,
-    table: str,
-    chunk_size: int,
-    progress_cb: Optional[ProgressCallback],
-    expected_rows: Optional[int],
-    result: dict[str, Any],
+    source: sqlite3.Connection, destination: sqlite3.Connection, select_sql: str, params: tuple[Any, ...],
+    insert_sql: str, *, table: str, chunk_size: int, progress_cb: Optional[ProgressCallback],
+    expected_rows: Optional[int], result: dict[str, Any],
 ) -> dict[str, Any]:
     """Chunked straight copy; fills ``status``/``error`` on ``result``."""
     try:
@@ -351,8 +338,7 @@ def _inspect_connection(conn: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _snapshot_and_inspect(
-    source: Path,
-    work_root: Path,
+    source: Path, work_root: Path,
 ) -> tuple[tempfile.TemporaryDirectory[str], Path, dict[str, Any]]:
     before = _source_fingerprint(source)
     temp_dir = tempfile.TemporaryDirectory(prefix="hermes-session-recovery-", dir=str(work_root))
@@ -425,14 +411,8 @@ def _fresh_destination(output: Path, *, topic_tables: bool = False) -> sqlite3.C
 
 
 def _copy_table(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    table: str,
-    *,
-    salvage: bool,
-    chunk_size: int,
-    progress_cb: Optional[ProgressCallback],
-    source_rows: Optional[int],
+    source: sqlite3.Connection, destination: sqlite3.Connection, table: str, *, salvage: bool, chunk_size: int,
+    progress_cb: Optional[ProgressCallback], source_rows: Optional[int],
 ) -> dict[str, Any]:
     """Copy one canonical table: straight chunked copy, or rowid-range salvage when ``salvage``."""
     copy_kwargs = dict(chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows)
@@ -446,16 +426,9 @@ def _copy_table(
         return result
     quoted, placeholders = _quoted_columns(columns)
     return _copy_rows(
-        source,
-        destination,
-        f'SELECT {quoted} FROM "{table}"',
-        (),
-        f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})',
-        table=table,
-        chunk_size=chunk_size,
-        progress_cb=progress_cb,
-        expected_rows=source_rows,
-        result=result,
+        source, destination, f'SELECT {quoted} FROM "{table}"', (),
+        f'INSERT INTO "{table}" ({quoted}) VALUES ({placeholders})', table=table, chunk_size=chunk_size,
+        progress_cb=progress_cb, expected_rows=source_rows, result=result,
     )
 
 
@@ -544,18 +517,9 @@ class _RowidRangeSalvage:
     """Bisecting rowid-range copy for one table; counters live on the shared ``result`` dict."""
 
     def __init__(
-        self,
-        source: sqlite3.Connection,
-        destination: sqlite3.Connection,
-        table: str,
-        columns: list[str],
-        *,
-        chunk_size: int,
-        progress_cb: Optional[ProgressCallback],
-        source_rows: Optional[int],
-        insert_prefix: str,
-        row_filter: Optional[Callable[[tuple[Any, ...], tuple[str, ...]], bool]],
-        result: dict[str, Any],
+        self, source: sqlite3.Connection, destination: sqlite3.Connection, table: str, columns: list[str], *,
+        chunk_size: int, progress_cb: Optional[ProgressCallback], source_rows: Optional[int], insert_prefix: str,
+        row_filter: Optional[Callable[[tuple[Any, ...], tuple[str, ...]], bool]], result: dict[str, Any],
     ) -> None:
         self.source, self.destination, self.table = source, destination, table
         self.chunk_size, self.progress_cb, self.source_rows = chunk_size, progress_cb, source_rows
@@ -647,14 +611,8 @@ class _RowidRangeSalvage:
 
 
 def _copy_table_salvage(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    table: str,
-    *,
-    chunk_size: int,
-    progress_cb: Optional[ProgressCallback],
-    source_rows: Optional[int],
-    insert_prefix: str = "INSERT",
+    source: sqlite3.Connection, destination: sqlite3.Connection, table: str, *, chunk_size: int,
+    progress_cb: Optional[ProgressCallback], source_rows: Optional[int], insert_prefix: str = "INSERT",
     row_filter: Optional[Callable[[tuple[Any, ...], tuple[str, ...]], bool]] = None,
 ) -> dict[str, Any]:
     """Best-effort rowid-range copy that continues past damaged source pages."""
@@ -680,16 +638,8 @@ def _copy_table_salvage(
         return result
 
     salvage = _RowidRangeSalvage(
-        source,
-        destination,
-        table,
-        columns,
-        chunk_size=chunk_size,
-        progress_cb=progress_cb,
-        source_rows=source_rows,
-        insert_prefix=insert_prefix,
-        row_filter=row_filter,
-        result=result,
+        source, destination, table, columns, chunk_size=chunk_size, progress_cb=progress_cb, source_rows=source_rows,
+        insert_prefix=insert_prefix, row_filter=row_filter, result=result,
     )
     salvage.copy_range(int(bounds["low"]), int(bounds["high"]))
     skipped_ranges = result["skipped_rowid_ranges"]
@@ -721,11 +671,7 @@ def _state_meta_result(source_rows: Optional[int], **extra: Any) -> dict[str, An
 
 
 def _state_meta_precheck(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    source_rows: Optional[int],
-    *,
-    salvage: bool,
+    source: sqlite3.Connection, destination: sqlite3.Connection, source_rows: Optional[int], *, salvage: bool,
 ) -> Optional[dict[str, Any]]:
     """Terminal ``state_meta`` result when the key/value schema is unusable, else ``None``.
 
@@ -755,13 +701,8 @@ def _state_meta_precheck(
 
 
 def _copy_state_meta(
-    source: sqlite3.Connection,
-    destination: sqlite3.Connection,
-    *,
-    salvage: bool,
-    chunk_size: int,
-    progress_cb: Optional[ProgressCallback],
-    source_rows: Optional[int],
+    source: sqlite3.Connection, destination: sqlite3.Connection, *, salvage: bool, chunk_size: int,
+    progress_cb: Optional[ProgressCallback], source_rows: Optional[int],
 ) -> dict[str, Any]:
     """Copy user metadata rows; derived FTS/topic keys (``_GENERATED_META_KEYS``) are regenerated, not copied."""
     problem = _state_meta_precheck(source, destination, source_rows, salvage=salvage)
@@ -773,14 +714,8 @@ def _copy_state_meta(
             return str(row[columns.index("key")]) not in _GENERATED_META_KEYS
 
         result = _copy_table_salvage(
-            source,
-            destination,
-            "state_meta",
-            chunk_size=chunk_size,
-            progress_cb=progress_cb,
-            source_rows=source_rows,
-            insert_prefix="INSERT OR REPLACE",
-            row_filter=keep_user_meta,
+            source, destination, "state_meta", chunk_size=chunk_size, progress_cb=progress_cb,
+            source_rows=source_rows, insert_prefix="INSERT OR REPLACE", row_filter=keep_user_meta,
         )
         result["source_meta_rows"] = result.pop("source_rows")
         result["excluded_keys"] = sorted(_GENERATED_META_KEYS)
@@ -797,16 +732,9 @@ def _copy_state_meta(
         pass  # the copy loop below will return the concrete read error
 
     return _copy_rows(
-        source,
-        destination,
-        f"SELECT key, value FROM state_meta WHERE key NOT IN ({placeholders})",
-        params,
-        "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)",
-        table="state_meta",
-        chunk_size=chunk_size,
-        progress_cb=progress_cb,
-        expected_rows=filtered_source_rows,
-        result=_state_meta_result(source_rows),
+        source, destination, f"SELECT key, value FROM state_meta WHERE key NOT IN ({placeholders})", params,
+        "INSERT OR REPLACE INTO state_meta(key, value) VALUES (?, ?)", table="state_meta", chunk_size=chunk_size,
+        progress_cb=progress_cb, expected_rows=filtered_source_rows, result=_state_meta_result(source_rows),
     )
 
 
@@ -967,13 +895,8 @@ def _verify_fts_indexes(conn: sqlite3.Connection, verification: dict[str, Any]) 
 
 
 def _verify_row_counts(
-    conn: sqlite3.Connection,
-    verification: dict[str, Any],
-    *,
-    expected_counts: dict[str, Optional[int]],
-    copy_report: dict[str, dict[str, Any]],
-    allow_partial: bool,
-    orphan_cleanup: Optional[dict[str, Any]],
+    conn: sqlite3.Connection, verification: dict[str, Any], *, expected_counts: dict[str, Optional[int]],
+    copy_report: dict[str, dict[str, Any]], allow_partial: bool, orphan_cleanup: Optional[dict[str, Any]],
 ) -> None:
     """Compare recovered counts and copy statuses against the source; classify shortfalls as loss."""
 
@@ -1039,12 +962,8 @@ def _verify_row_counts(
 
 
 def _verify_recovered_database(
-    output: Path,
-    *,
-    expected_counts: dict[str, Optional[int]],
-    copy_report: dict[str, dict[str, Any]],
-    allow_partial: bool = False,
-    orphan_cleanup: Optional[dict[str, Any]] = None,
+    output: Path, *, expected_counts: dict[str, Optional[int]], copy_report: dict[str, dict[str, Any]],
+    allow_partial: bool = False, orphan_cleanup: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     verification: dict[str, Any] = {"errors": [], "warnings": [], "loss_detected": False}
 
@@ -1057,11 +976,7 @@ def _verify_recovered_database(
     try:
         _verify_structure(conn, verification)
         _verify_row_counts(
-            conn,
-            verification,
-            expected_counts=expected_counts,
-            copy_report=copy_report,
-            allow_partial=allow_partial,
+            conn, verification, expected_counts=expected_counts, copy_report=copy_report, allow_partial=allow_partial,
             orphan_cleanup=orphan_cleanup,
         )
         _verify_fts_indexes(conn, verification)
@@ -1103,14 +1018,8 @@ def _finalize_derived_metadata(destination: sqlite3.Connection) -> dict[str, Any
 
 
 def _recover_via_lost_and_found(
-    *,
-    source: Path,
-    snapshot_source: Path,
-    snapshot_dir: Path,
-    output: Path,
-    inspection: dict[str, Any],
-    disk_space: dict[str, Any],
-    missing_required: list[str],
+    *, source: Path, snapshot_source: Path, snapshot_dir: Path, output: Path, inspection: dict[str, Any],
+    disk_space: dict[str, Any], missing_required: list[str],
 ) -> dict[str, Any]:
     """Best-effort page-level salvage when table schemas are unreadable: the sqlite3 CLI's ``.recover``
     (shell-only, not in Python's ``sqlite3``) rebuilds rows into a scratch lost_and_found database which
@@ -1164,10 +1073,7 @@ def _recover_via_lost_and_found(
         "messages_removed": 0, "total_removed_or_relinked": 0,
     }
     verification = _verify_recovered_database(
-        output,
-        expected_counts={"sessions": None, "messages": None},
-        copy_report=copy_report,
-        allow_partial=True,
+        output, expected_counts={"sessions": None, "messages": None}, copy_report=copy_report, allow_partial=True,
         orphan_cleanup=orphan_cleanup,
     )
     verification["loss_detected"] = True
@@ -1187,14 +1093,8 @@ def _recover_via_lost_and_found(
 
 
 def _recovery_report(
-    source: Path,
-    output: Path,
-    inspection: dict[str, Any],
-    disk_space: dict[str, Any],
-    verification: dict[str, Any],
-    *,
-    on_source_change: str,
-    **fields: Any,
+    source: Path, output: Path, inspection: dict[str, Any], disk_space: dict[str, Any], verification: dict[str, Any],
+    *, on_source_change: str, **fields: Any,
 ) -> dict[str, Any]:
     """The ``recover`` report: shared header, mode-specific ``fields``, then the verdict. A source bundle
     that changed during recovery is a verification error and also clears ``verification[on_source_change]``.
@@ -1225,13 +1125,8 @@ def _recovery_report(
 
 
 def recover_session_database(
-    source_path: Path,
-    output_path: Path,
-    *,
-    work_dir: Optional[Path] = None,
-    chunk_size: int = 1_000,
-    progress_cb: Optional[ProgressCallback] = None,
-    allow_partial: bool = False,
+    source_path: Path, output_path: Path, *, work_dir: Optional[Path] = None, chunk_size: int = 1_000,
+    progress_cb: Optional[ProgressCallback] = None, allow_partial: bool = False,
 ) -> dict[str, Any]:
     """Recover canonical rows into a separate current-schema database. The source and its sidecars are
     copied before SQLite opens anything; ``output_path`` must not exist and is never swapped into place."""
@@ -1266,8 +1161,7 @@ def recover_session_database(
         destination_conn: Optional[sqlite3.Connection] = None
         try:
             destination_conn = _fresh_destination(
-                output,
-                topic_tables=any(inspection["tables"][table].get("available") for table in _TOPIC_TABLES),
+                output, topic_tables=any(inspection["tables"][table].get("available") for table in _TOPIC_TABLES),
             )
 
             copy_report: dict[str, dict[str, Any]] = {}

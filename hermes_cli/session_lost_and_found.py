@@ -83,11 +83,7 @@ def _cli_supports_recover(binary: str) -> bool:
 
 
 def run_cli_lost_and_found_recover(
-    source: Path,
-    lf_path: Path,
-    sqlite3_bin: str,
-    *,
-    timeout: float = 3600.0,
+    source: Path, lf_path: Path, sqlite3_bin: str, *, timeout: float = 3600.0,
 ) -> dict[str, Any]:
     """Run ``sqlite3 <source> .recover`` streamed into a fresh scratch DB."""
     attempts: list[dict[str, Any]] = []
@@ -213,10 +209,7 @@ def _heuristic_started_at(cells: tuple[Any, ...]) -> float:
 
 
 def _insert_prefix_row(
-    dest: sqlite3.Connection,
-    table: str,
-    dest_columns: list[str],
-    values: list[Any],
+    dest: sqlite3.Connection, table: str, dest_columns: list[str], values: list[Any],
     notnull_substitutes: Optional[dict[int, Any]] = None,
 ) -> bool:
     if notnull_substitutes:

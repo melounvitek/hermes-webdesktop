@@ -526,8 +526,7 @@ def _export_markdown_single(db, args, export_one, output_dir, lineage_is_logical
     for target_id in delete_target_ids:
         try:
             data, exported_path = export_one(
-                target_id,
-                include_lineage=(target_id == resolved_session_id and lineage_is_logical),
+                target_id, include_lineage=(target_id == resolved_session_id and lineage_is_logical),
             )
         except FileExistsError as e:
             print(f"Export already exists: {e}. Pass --force to overwrite.")
