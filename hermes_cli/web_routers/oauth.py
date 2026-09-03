@@ -528,7 +528,7 @@ def _clear_anthropic_auth() -> bool:
     """Clear only the Hermes-managed PKCE file and auth-store entry (never ~/.claude/*)."""
     cleared = False
     try:
-        from agent.anthropic_adapter import _get_hermes_oauth_file
+        from agent.anthropic_credentials import _get_hermes_oauth_file
         oauth_file = _get_hermes_oauth_file()
         if oauth_file.exists():
             oauth_file.unlink()

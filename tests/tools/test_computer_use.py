@@ -406,7 +406,7 @@ class TestCuaCaptureImageDimensions:
 
 class TestAnthropicAdapterMultimodal:
     def test_multimodal_envelope_becomes_tool_result_with_image_block(self):
-        from agent.anthropic_adapter import convert_messages_to_anthropic
+        from agent.anthropic_message_convert import convert_messages_to_anthropic
 
         fake_png = "iVBORw0KGgo="
         messages = [
@@ -446,7 +446,7 @@ class TestAnthropicAdapterMultimodal:
 
     def test_old_screenshots_are_evicted_beyond_max_keep(self):
         """Image blocks in old tool_results get replaced with placeholders."""
-        from agent.anthropic_adapter import convert_messages_to_anthropic
+        from agent.anthropic_message_convert import convert_messages_to_anthropic
 
         fake_png = "iVBORw0KGgo="
 

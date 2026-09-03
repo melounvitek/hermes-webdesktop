@@ -64,7 +64,7 @@ class TestOAuthFlagOnRefresh:
         agent._is_anthropic_oauth = False
 
         with (
-            patch("agent.anthropic_adapter.resolve_anthropic_token",
+            patch("agent.anthropic_credentials.resolve_anthropic_token",
                   return_value=_OAUTH_LIKE_TOKEN),
             patch("agent.anthropic_adapter.build_anthropic_client",
                   return_value=MagicMock()),
@@ -111,7 +111,7 @@ class TestOAuthFlagOnConstruction:
                   return_value=MagicMock()),
             # Simulate a stale ANTHROPIC_TOKEN in the env — the init code
             # MUST NOT fall back to it when provider != anthropic.
-            patch("agent.anthropic_adapter.resolve_anthropic_token",
+            patch("agent.anthropic_credentials.resolve_anthropic_token",
                   return_value=_OAUTH_LIKE_TOKEN),
         ):
             agent = AIAgent(
@@ -136,7 +136,7 @@ class TestOAuthFlagOnFallbackActivation:
 
     def test_fallback_to_third_party_does_not_flip_oauth(self, agent):
         """Directly mimic the post-fallback assignment at line ~6537."""
-        from agent.anthropic_adapter import _is_oauth_token
+        from agent.anthropic_credentials import _is_oauth_token
 
         # Emulate the relevant lines of _try_activate_fallback without
         # running the entire recovery stack (which pulls in streaming,
@@ -153,6 +153,6 @@ class TestApiKeyTokensAlwaysSafe:
     """Regression: plain API-key shapes must always resolve to non-OAuth, any provider."""
 
     def test_native_anthropic_with_api_key_token(self):
-        from agent.anthropic_adapter import _is_oauth_token
+        from agent.anthropic_credentials import _is_oauth_token
         assert _is_oauth_token(_API_KEY_TOKEN) is False
 

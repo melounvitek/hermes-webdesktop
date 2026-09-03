@@ -670,7 +670,7 @@ class TestAnthropicOAuthFlag:
 
     def test_api_key_no_oauth_flag(self, monkeypatch):
         """Regular API keys (sk-ant-api-*) should create client with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api03-testkey1234"), \
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="sk-ant-api03-testkey1234"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -695,7 +695,7 @@ class TestAnthropicOAuthFlag:
 
         with (
             patch("agent.auxiliary_client.load_pool", return_value=_Pool()),
-            patch("agent.anthropic_adapter.resolve_anthropic_token", side_effect=AssertionError("legacy path should not run")),
+            patch("agent.anthropic_credentials.resolve_anthropic_token", side_effect=AssertionError("legacy path should not run")),
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()) as mock_build,
         ):
             from agent.auxiliary_client import _try_anthropic
@@ -961,7 +961,7 @@ class TestExplicitProviderRouting:
 
     def test_explicit_anthropic_api_key(self, monkeypatch):
         """provider='anthropic' + regular API key should work with is_oauth=False."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-api-regular-key"), \
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="sk-ant-api-regular-key"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -1217,7 +1217,7 @@ class TestVisionClientFallback:
             patch("agent.auxiliary_client._read_main_provider", return_value="anthropic"),
             patch("agent.auxiliary_client._read_main_model", return_value="claude-sonnet-4"),
             patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()),
-            patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="***"),
+            patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="***"),
         ):
             backends = get_available_vision_backends()
 
@@ -4027,7 +4027,7 @@ class TestAnthropicExplicitApiKey:
 
     def test_try_anthropic_uses_explicit_api_key_over_env(self):
         """_try_anthropic(explicit_api_key) must use the supplied key, not the env fallback."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="env-fallback-key"), \
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="env-fallback-key"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -4041,7 +4041,7 @@ class TestAnthropicExplicitApiKey:
 
     def test_try_anthropic_without_explicit_key_falls_back_to_resolve(self):
         """Without explicit_api_key, _try_anthropic falls back to resolve_anthropic_token."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="env-fallback-key"), \
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="env-fallback-key"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()
@@ -4052,7 +4052,7 @@ class TestAnthropicExplicitApiKey:
 
     def test_resolve_provider_client_passes_explicit_api_key_to_anthropic(self):
         """resolve_provider_client(provider='anthropic', explicit_api_key=...) must propagate the key."""
-        with patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="env-key"), \
+        with patch("agent.anthropic_credentials.resolve_anthropic_token", return_value="env-key"), \
              patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.auxiliary_client._select_pool_entry", return_value=(False, None)):
             mock_build.return_value = MagicMock()

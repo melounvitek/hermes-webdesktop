@@ -535,11 +535,11 @@ class TestHasAnyProviderConfigured:
         monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda _pid: {})
         # Simulate valid Claude Code credentials
         monkeypatch.setattr(
-            "agent.anthropic_adapter.read_claude_code_credentials",
+            "agent.anthropic_credentials.read_claude_code_credentials",
             lambda: {"accessToken": "sk-ant-test", "refreshToken": "ref-tok"},
         )
         monkeypatch.setattr(
-            "agent.anthropic_adapter.is_claude_code_token_valid",
+            "agent.anthropic_credentials.is_claude_code_token_valid",
             lambda creds: True,
         )
         from hermes_cli.main import _has_any_provider_configured

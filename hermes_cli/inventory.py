@@ -439,7 +439,7 @@ def _anthropic_oauth_credentials_present() -> bool:
     """True when the user explicitly authenticated Anthropic via OAuth (Hermes device flow or Claude Code
     login) — those leave no trace in active_provider / model.provider / API-key env vars."""
     try:
-        from agent.anthropic_adapter import read_claude_code_credentials, read_hermes_oauth_credentials
+        from agent.anthropic_credentials import read_claude_code_credentials, read_hermes_oauth_credentials
 
         readers = (read_hermes_oauth_credentials, read_claude_code_credentials)
         if any((read() or {}).get("accessToken") for read in readers):

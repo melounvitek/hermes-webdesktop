@@ -723,7 +723,8 @@ def _print_key_banner(key, label: str, warn_missing: bool = False) -> None:
 
 def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     """anthropic_messages: native Anthropic SDK (or AnthropicBedrock for Bedrock+Claude)."""
-    from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+    from agent.anthropic_adapter import build_anthropic_client
+    from agent.anthropic_credentials import resolve_anthropic_token
     agent.client = None
     agent._client_kwargs = {}
     agent._anthropic_base_url = base_url
@@ -766,7 +767,7 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     # Third-party providers (MiniMax, Kimi, GLM, LiteLLM proxies) that accept the Anthropic protocol must
     # never trip OAuth code paths — doing so injects Claude-Code identity headers and system prompts that
     # cause 401/403 on their endpoints. See #1739.
-    from agent.anthropic_adapter import _is_oauth_token as _is_oat
+    from agent.anthropic_credentials import _is_oauth_token as _is_oat
     agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
     agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
     if not agent.quiet_mode:

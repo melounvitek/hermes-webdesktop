@@ -747,7 +747,7 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
         # The pool gates anthropic behind is_provider_explicitly_configured() (aux tasks must not
         # consume Claude Code tokens); the picker is discovery-oriented, so read the files directly.
         try:
-            from agent.anthropic_adapter import read_claude_code_credentials, read_hermes_oauth_credentials
+            from agent.anthropic_credentials import read_claude_code_credentials, read_hermes_oauth_credentials
             hermes_creds = read_hermes_oauth_credentials()
             cc_creds = read_claude_code_credentials()
             if (hermes_creds and hermes_creds.get("accessToken")) or (cc_creds and cc_creds.get("accessToken")):

@@ -44,12 +44,12 @@ class AnthropicTransport(ProviderTransport):
 
     def convert_messages(self, messages: List[Dict[str, Any]], **kwargs) -> Any:
         """Convert OpenAI messages to an Anthropic (system, messages) tuple; ``base_url`` affects thinking-signature handling."""
-        from agent.anthropic_adapter import convert_messages_to_anthropic
+        from agent.anthropic_message_convert import convert_messages_to_anthropic
         return convert_messages_to_anthropic(messages, base_url=kwargs.get("base_url"))
 
     def convert_tools(self, tools: List[Dict[str, Any]]) -> Any:
         """Convert OpenAI tool schemas to Anthropic input_schema format."""
-        from agent.anthropic_adapter import convert_tools_to_anthropic
+        from agent.anthropic_message_convert import convert_tools_to_anthropic
         return convert_tools_to_anthropic(tools)
 
     def build_kwargs(
@@ -65,7 +65,7 @@ class AnthropicTransport(ProviderTransport):
     def normalize_response(self, response: Any, **kwargs) -> NormalizedResponse:
         """Parse content blocks (text/thinking/tool_use), map stop_reason, collect reasoning_details."""
         import json
-        from agent.anthropic_adapter import _sanitize_replay_block, _to_plain_data
+        from agent.anthropic_message_convert import _sanitize_replay_block, _to_plain_data
         strip_tool_prefix = kwargs.get("strip_tool_prefix", False)
         text_parts, reasoning_parts, reasoning_details, tool_calls = [], [], [], []
         # Anthropic signs each thinking block against the blocks PRECEDING it; when thinking

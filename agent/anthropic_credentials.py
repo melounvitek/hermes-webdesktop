@@ -5,8 +5,7 @@
 ``auth.json`` credential pool. ``~/.hermes/.anthropic_oauth.json`` (Hermes PKCE) and
 the Claude Code file are *singletons*: ``credential_pool._seed_from_singletons()``
 re-reads them on every ``load_pool()``, so a failed write here is a failed refresh
-(``CredentialPersistError``), not a cache miss. ``agent.anthropic_adapter`` re-exports
-every public name below.
+(``CredentialPersistError``), not a cache miss.
 """
 
 import base64
@@ -33,11 +32,9 @@ logger = logging.getLogger(__name__)
 
 _OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # platform.claude.com is the live token host; console.anthropic.com 404s but is kept as a fallback.
-# _OAUTH_TOKEN_URL stays for backward-compatible imports.
 _OAUTH_TOKEN_URLS = [
     "https://platform.claude.com/v1/oauth/token", "https://console.anthropic.com/v1/oauth/token"
 ]
-_OAUTH_TOKEN_URL = _OAUTH_TOKEN_URLS[0]
 # Anthropic 429s token-endpoint requests whose UA starts with ``claude-code/`` (or Mozilla); the real CLI uses
 # bare axios there. Inference (build_anthropic_kwargs) still needs claude-code/.
 _OAUTH_TOKEN_USER_AGENT = "axios/1.7.9"

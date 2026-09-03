@@ -2,7 +2,7 @@
 schemas, and the message list (content blocks, thinking blocks and their signatures,
 tool_use/tool_result pairing, cache_control placement, screenshot eviction, blank-block
 scrubbing). Endpoint predicates come from ``agent/anthropic_endpoints.py`` so this module never
-imports the adapter (no cycle); ``agent.anthropic_adapter`` re-exports the public names."""
+imports the adapter (no cycle)."""
 
 import copy
 import json

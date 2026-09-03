@@ -2,38 +2,26 @@
 OpenAI-style internals. Auth: API keys (``sk-ant-api*``) -> x-api-key; OAuth setup-tokens
 (``sk-ant-oat*``) and Claude Code credentials -> Bearer + beta header. Endpoint predicates,
 payload conversion and credentials live in ``agent/anthropic_{endpoints,message_convert,
-credentials}.py`` and are re-exported here for long-standing imports."""
+credentials}.py``; import them from there."""
 
 import logging
 import math
 import re
 import subprocess
 from contextlib import suppress
-from pathlib import Path  # noqa: F401  (tests patch ``anthropic_adapter.Path.home``)
 from typing import Any, Dict, List, Optional
 
 from utils import normalize_proxy_env_vars
 
-from agent.anthropic_endpoints import (  # noqa: F401
+from agent.anthropic_credentials import _is_oauth_token
+from agent.anthropic_endpoints import (
     _base_url_needs_context_1m_beta, _is_azure_anthropic_endpoint, _is_kimi_coding_endpoint,
     _is_minimax_anthropic_endpoint, _is_nous_portal_endpoint, _is_opencode_endpoint,
     _is_third_party_anthropic_endpoint, _model_name_is_kimi_family, _normalize_base_url_text,
     _requires_bearer_auth,
 )
-from agent.anthropic_message_convert import (  # noqa: F401
-    _EMPTY_TEXT_PLACEHOLDER, _convert_assistant_message, _convert_content_part_to_anthropic,
-    _convert_user_message, _ensure_leading_user_turn, _is_bedrock_model_id, _safe_text,
-    _sanitize_replay_block, _scrub_blank_text_blocks, _to_plain_data, convert_messages_to_anthropic,
-    convert_tools_to_anthropic, normalize_model_name,
-)
-from agent.anthropic_credentials import (  # noqa: F401
-    _OAUTH_TOKEN_USER_AGENT, CredentialPersistError, _get_hermes_oauth_file, _getenv, _is_oauth_token,
-    _read_claude_code_credentials_from_keychain, _refresh_oauth_token, _resolve_anthropic_pool_token,
-    _resolve_claude_code_token_from_credentials, _write_claude_code_credentials,
-    _write_hermes_oauth_credentials, claude_code_credentials_path, is_claude_code_token_valid,
-    is_rotation_consumed_uncommitted, mark_rotation_consumed_uncommitted, read_claude_code_credentials,
-    read_hermes_oauth_credentials, refresh_anthropic_oauth_pure, resolve_anthropic_token,
-    run_hermes_oauth_login_pure, run_oauth_setup_token,
+from agent.anthropic_message_convert import (
+    convert_messages_to_anthropic, convert_tools_to_anthropic, normalize_model_name,
 )
 
 from hermes_cli import __version__ as _HERMES_VERSION

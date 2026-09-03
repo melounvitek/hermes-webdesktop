@@ -1668,7 +1668,7 @@ def _fetch_anthropic_models(
     ``api_key``, else ``resolve_anthropic_token()`` (env / OAuth / Claude Code), else a read-only
     API-key credential_pool entry."""
     try:
-        from agent.anthropic_adapter import resolve_anthropic_token, _is_oauth_token
+        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
     except ImportError:
         return None
 

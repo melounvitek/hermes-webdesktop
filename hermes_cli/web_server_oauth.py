@@ -51,7 +51,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
     ``claude-code`` entry, and counting it here would shadow a real ANTHROPIC_API_KEY.
     """
     try:
-        from agent.anthropic_adapter import read_hermes_oauth_credentials, _get_hermes_oauth_file
+        from agent.anthropic_credentials import read_hermes_oauth_credentials, _get_hermes_oauth_file
         hermes_creds = read_hermes_oauth_credentials()
     except Exception:
         hermes_creds = None
@@ -79,7 +79,7 @@ def _anthropic_oauth_status() -> Dict[str, Any]:
 def _claude_code_only_status() -> Dict[str, Any]:
     """Claude Code CLI credentials as their own entry, independent of the Anthropic card."""
     try:
-        from agent.anthropic_adapter import read_claude_code_credentials
+        from agent.anthropic_credentials import read_claude_code_credentials
         creds = read_claude_code_credentials()
     except Exception:
         creds = None

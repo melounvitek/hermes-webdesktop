@@ -179,7 +179,7 @@ def _format_exhausted_status(entry) -> str:
 
 
 def _anthropic_oauth_login(args) -> dict:
-    from agent import anthropic_adapter as anthropic_mod
+    from agent import anthropic_credentials as anthropic_mod
     creds = anthropic_mod.run_hermes_oauth_login_pure()
     if not creds:
         raise SystemExit("Anthropic OAuth login did not return credentials.")

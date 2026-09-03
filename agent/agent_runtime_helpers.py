@@ -1499,7 +1499,7 @@ def anthropic_prompt_cache_policy(
     # 64K-token prompts and re-billing the full prompt on every turn. Observed within-turn progression with
     # cache enabled: 1% → 67% → 84% → 97% (#25970). Reuses the canonical family matcher (covers bare
     # k1./k2./k25 release slugs the substring check missed).
-    from agent.anthropic_adapter import _model_name_is_kimi_family
+    from agent.anthropic_endpoints import _model_name_is_kimi_family
     is_kimi = _model_name_is_kimi_family(eff_model) or "moonshot" in model_lower
     is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
     # Nous Portal proxies to OpenRouter; treat as OpenRouter-equivalent for cache layout.
@@ -1859,7 +1859,8 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         agent.client = build_moa_facade(agent, agent.model)
         return
     if api_mode == "anthropic_messages":
-        from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+        from agent.anthropic_adapter import build_anthropic_client
+        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
         # Only fall back to ANTHROPIC_TOKEN for native Anthropic; other anthropic_messages providers
         # must never receive Anthropic credentials.
         is_native_anthropic = new_provider == "anthropic"

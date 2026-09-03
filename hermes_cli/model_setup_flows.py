@@ -999,7 +999,7 @@ def _model_flow_anthropic(config, current_model=""):
     existing_key = get_anthropic_key()
     cc_available = False
     with contextlib.suppress(Exception):
-        from agent.anthropic_adapter import read_claude_code_credentials, is_claude_code_token_valid, _is_oauth_token
+        from agent.anthropic_credentials import read_claude_code_credentials, is_claude_code_token_valid, _is_oauth_token
         cc_creds = read_claude_code_credentials()
         if cc_creds and is_claude_code_token_valid(cc_creds):
             cc_available = True

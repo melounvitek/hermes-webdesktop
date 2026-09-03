@@ -644,7 +644,7 @@ def _stepfun_base_url_for_region(region: str) -> str:
 
 def _run_anthropic_oauth_flow(save_env_value):
     """Run the Claude OAuth setup-token flow. Returns True if credentials were saved."""
-    from agent.anthropic_adapter import run_oauth_setup_token, read_claude_code_credentials, is_claude_code_token_valid
+    from agent.anthropic_credentials import run_oauth_setup_token, read_claude_code_credentials, is_claude_code_token_valid
     from hermes_cli.config import save_anthropic_oauth_token, use_anthropic_claude_code_credentials
 
     def _activate_claude_code_credentials_if_available() -> bool:

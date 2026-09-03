@@ -273,7 +273,7 @@ def _anthropic_cfg_base_url(model_cfg: Dict[str, Any]) -> str:
 
 
 def _anthropic_token_or_raise() -> str:
-    from agent.anthropic_adapter import resolve_anthropic_token
+    from agent.anthropic_credentials import resolve_anthropic_token
     token = resolve_anthropic_token()
     if not token:
         raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)

@@ -5,7 +5,7 @@ headers, and request quirks (MiniMax, Kimi/Moonshot, DeepSeek, OpenCode, Azure A
 Portal, Bedrock). Every such difference is decided from the configured base URL, so the
 predicates live together here as pure functions (no I/O, SDK or credentials) that both
 ``agent/anthropic_adapter.py`` and ``agent/anthropic_message_convert.py`` can import without a
-cycle. ``agent.anthropic_adapter`` re-exports every name below.
+cycle.
 """
 
 from urllib.parse import urlparse

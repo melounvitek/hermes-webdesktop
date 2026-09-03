@@ -1922,7 +1922,8 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
     """Install the fallback client(s) in place, honoring request_timeout_seconds (None = SDK default)."""
     timeout = get_provider_request_timeout(fb_provider, fb_model)
     if fb_api_mode == "anthropic_messages":
-        from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
+        from agent.anthropic_adapter import build_anthropic_client
+        from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
         is_anthropic = fb_provider == "anthropic"
         effective_key = fb_client.api_key or (resolve_anthropic_token() if is_anthropic else None) or ""
         agent.api_key = agent._anthropic_api_key = effective_key

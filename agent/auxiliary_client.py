@@ -1600,7 +1600,7 @@ class _AnthropicCompletionsAdapter:
             candidate = str(getattr(real_client, "base_url", "") or "") or None
             if candidate:
                 with contextlib.suppress(Exception):
-                    from agent.anthropic_adapter import _is_nous_portal_endpoint
+                    from agent.anthropic_endpoints import _is_nous_portal_endpoint
                     if _is_nous_portal_endpoint(candidate):
                         self._base_url = candidate
 
@@ -2810,7 +2810,8 @@ def _try_azure_foundry(
 
 def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optional[str]]:
     try:
-        from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token
+        from agent.anthropic_adapter import build_anthropic_client
+        from agent.anthropic_credentials import resolve_anthropic_token
     except ImportError:
         return None, None
     pool_present, entry = _select_pool_entry("anthropic")
@@ -2835,7 +2836,7 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
                 cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
                 if cfg_base_url and _is_anthropic_compatible_host(cfg_base_url):
                     base_url = cfg_base_url
-    from agent.anthropic_adapter import _is_oauth_token
+    from agent.anthropic_credentials import _is_oauth_token
     is_oauth = _is_oauth_token(token)
     model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
     if _aux_probe_active():

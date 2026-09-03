@@ -1164,10 +1164,7 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     # configured — having Claude Code installed isn't consent to use its tokens.
     if _has_hermes_config and not strict_profile_scope:
         try:
-            from agent.anthropic_adapter import (
-                read_claude_code_credentials,
-                is_claude_code_token_valid,
-            )
+            from agent.anthropic_credentials import read_claude_code_credentials, is_claude_code_token_valid
 
             creds = read_claude_code_credentials()
             if creds and (

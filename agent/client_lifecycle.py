@@ -420,7 +420,7 @@ class ClientLifecycleMixin:
 
     def _anthropic_oauth_flag(self, token: str) -> bool:
         """OAuth flag only on native Anthropic; third-party Anthropic-protocol endpoints must not trip OAuth paths."""
-        from agent.anthropic_adapter import _is_oauth_token
+        from agent.anthropic_credentials import _is_oauth_token
         return _is_oauth_token(token) if self.provider == "anthropic" else False
 
     def _build_anthropic_client_for_key(self, key: tuple) -> Any:
@@ -752,7 +752,7 @@ class ClientLifecycleMixin:
         ):
             return False
         try:
-            from agent.anthropic_adapter import resolve_anthropic_token
+            from agent.anthropic_credentials import resolve_anthropic_token
             new_token = resolve_anthropic_token()
         except Exception as exc:
             logger.debug("Anthropic credential refresh failed: %s", exc)
