@@ -1,8 +1,8 @@
 """hermes import-agent — import Claude Code / Codex CLI setups into Hermes.
 
-Secrets are NEVER imported: credential files (.credentials.json, auth.json) are ignored, and MCP
-server env vars with secret-looking names (KEY, TOKEN, SECRET, PASSWORD, ...) are stripped and
-reported so the user can re-add them deliberately via ``hermes setup`` or config.yaml.
+Secrets are NEVER imported: credential files are never read, and MCP env vars with secret-looking
+names (KEY, TOKEN, SECRET, PASSWORD, ...) are stripped and reported so the user re-adds them via
+``hermes setup`` or config.yaml.
 """
 
 from __future__ import annotations
@@ -13,42 +13,28 @@ import re
 import shutil
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import yaml
 
 from utils import atomic_write_text, atomic_yaml_write
 
 logger = logging.getLogger(__name__)
 
-# Same entry delimiter as the Hermes memory store and the openclaw migration
-# script — memories/MEMORY.md entries are separated by bare "§" lines.
+# Entry delimiter of the Hermes memory store (memories/MEMORY.md) and the openclaw script.
 ENTRY_DELIMITER = "\n§\n"
-
-# Character budget for merged memory files (matches the openclaw script's
-# default memory limit).
+# Character budget for merged memory files (openclaw script default).
 MEMORY_CHAR_LIMIT = 20_000
-
 SUPPORTED_AGENTS = ("claude-code", "codex")
-
-_AGENT_DEFAULT_DIRS = {
-    "claude-code": ".claude",
-    "codex": ".codex",
-}
-
-_SKILL_CATEGORY = {
-    "claude-code": "claude-code-imports",
-    "codex": "codex-imports",
-}
+_AGENT_DEFAULT_DIRS = {"claude-code": ".claude", "codex": ".codex"}
+_SKILL_CATEGORY = {"claude-code": "claude-code-imports", "codex": "codex-imports"}
 
 # Env var names that look like credentials — never copied into config.yaml.
 _SECRET_KEY_RE = re.compile(
     r"(?:^|_)(?:API[_-]?KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|"
-    r"AUTH|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)(?:_|$)|KEY$",
-    re.IGNORECASE,
-)
-
-# Files inside the source tree that hold credentials — never read.
-_CREDENTIAL_FILENAMES = (".credentials.json", "auth.json", "credentials.json")
+    r"AUTH|PRIVATE[_-]?KEY|ACCESS[_-]?KEY)(?:_|$)|KEY$", re.IGNORECASE)
 
 
 def is_secret_key(key: str) -> bool:
@@ -65,92 +51,59 @@ def read_text(path: Path) -> str:
 
 
 class ConfigReadError(RuntimeError):
-    """An existing config file is present but cannot be read or parsed.
-
-    Signals that a read-modify-write round trip must be abandoned: the caller has no idea what the
-    file holds, so writing a merged result back would replace real settings with only the keys it
-    merged.
-    """
+    """Existing config file present but unreadable/unparseable: the read-modify-write round trip
+    must be abandoned, else the merged result would replace real settings with only merged keys."""
 
 
 def load_yaml_file(path: Path) -> Dict[str, Any]:
-    """Load a YAML mapping, distinguishing "absent" from "unreadable".
-
-    - Absent, or present but empty -> ``{}``; first-time creation still works. - Present but
-    unreadable, unparseable, or not a mapping -> raise :class:`ConfigReadError` so the caller
-    refuses and leaves the file byte-identical.
-    """
-    import yaml
-
+    """Load a YAML mapping: absent/empty -> ``{}``; unreadable/unparseable/non-mapping ->
+    :class:`ConfigReadError` so the caller refuses and leaves the file byte-identical."""
     if not path.exists():
         return {}
     fix_hint = "Fix it with `hermes config edit` (or move it aside), then re-run the import."
+
+    def refusal(detail: str) -> ConfigReadError:
+        return ConfigReadError(f"Refusing to overwrite {path}: {detail}")
+
     try:
         raw = read_text(path)
     except OSError as exc:
-        raise ConfigReadError(
-            f"Refusing to overwrite {path}: the existing file cannot be read "
-            f"({exc}). Fix the file permissions or move it aside first."
-        ) from exc
+        raise refusal(f"the existing file cannot be read ({exc}). "
+                      "Fix the file permissions or move it aside first.") from exc
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        raise ConfigReadError(
-            f"Refusing to overwrite {path}: the existing file is not valid YAML ({exc}). {fix_hint}"
-        ) from exc
-    # An empty file parses to None — a legitimate state with nothing to lose.
-    if data is None:
+        raise refusal(f"the existing file is not valid YAML ({exc}). {fix_hint}") from exc
+    if data is None:  # empty file — a legitimate state with nothing to lose
         return {}
     if not isinstance(data, dict):
-        raise ConfigReadError(
-            f"Refusing to overwrite {path}: expected the existing file to hold a "
-            f"YAML mapping but found {type(data).__name__}. {fix_hint}"
-        )
+        raise refusal(f"expected the existing file to hold a YAML mapping but found "
+                      f"{type(data).__name__}. {fix_hint}")
     return data
 
 
 def dump_yaml_file(path: Path, data: Dict[str, Any]) -> None:
-    """Write ``data`` as YAML atomically (temp file + fsync + rename).
-
-    Only ever reached after :func:`load_yaml_file` has successfully read the same path, so the
-    mapping being written is the real file's content plus the merged section — never a silently-
-    empty stand-in.
-    """
+    """Atomic YAML write; only reached after :func:`load_yaml_file` succeeded on the same path."""
     atomic_yaml_write(path, data)
 
 
-# ---------------------------------------------------------------------------
-# Memory-entry primitives (ported from openclaw_to_hermes.py)
-# ---------------------------------------------------------------------------
-
 def extract_markdown_entries(text: str) -> List[str]:
-    """Split a markdown document into individual memory entries.
-
-    Headings become context prefixes; bullets and paragraphs become entries; code blocks and
-    tables are skipped.
-    """
+    """Split markdown into memory entries: headings become context prefixes; bullets and
+    paragraphs become entries; code blocks and tables are skipped."""
     entries: List[str] = []
     headings: List[str] = []
     paragraph_lines: List[str] = []
 
-    def context_prefix() -> str:
-        filtered = [
-            h for h in headings
-            if h and not re.search(
-                r"\b(MEMORY|USER|SOUL|AGENTS|TOOLS|IDENTITY|CLAUDE)\.md\b",
-                h, re.I,
-            )
-        ]
-        return " > ".join(filtered)
-
     def add_entry(content: str) -> None:
-        prefix = context_prefix()
+        prefix = " > ".join(
+            h for h in headings
+            if h and not re.search(r"\b(MEMORY|USER|SOUL|AGENTS|TOOLS|IDENTITY|CLAUDE)\.md\b",
+                                   h, re.I))
         entries.append(f"{prefix}: {content}" if prefix else content)
 
     def flush_paragraph() -> None:
-        nonlocal paragraph_lines
         block = " ".join(line.strip() for line in paragraph_lines).strip()
-        paragraph_lines = []
+        paragraph_lines.clear()
         if block:
             add_entry(block)
 
@@ -158,98 +111,54 @@ def extract_markdown_entries(text: str) -> List[str]:
     for raw_line in (text or "").splitlines():
         line = raw_line.rstrip()
         stripped = line.strip()
-
         if stripped.startswith("```"):
             in_code_block = not in_code_block
             flush_paragraph()
             continue
         if in_code_block:
             continue
-
         heading_match = re.match(r"^(#{1,6})\s+(.*\S)\s*$", stripped)
         if heading_match:
             flush_paragraph()
-            level = len(heading_match.group(1))
-            value = heading_match.group(2).strip()
-            while len(headings) >= level:
-                headings.pop()
-            headings.append(value)
+            # Drop deeper (and same-level) headings, then push this one.
+            headings[len(heading_match.group(1)) - 1:] = [heading_match.group(2).strip()]
             continue
-
         bullet_match = re.match(r"^\s*(?:[-*]|\d+\.)\s+(.*\S)\s*$", line)
         if bullet_match:
             flush_paragraph()
             add_entry(bullet_match.group(1).strip())
             continue
-
-        if not stripped:
-            flush_paragraph()
+        if not stripped or (stripped.startswith("|") and stripped.endswith("|")):
+            flush_paragraph()  # blank line or table row ends the paragraph
             continue
-
-        if stripped.startswith("|") and stripped.endswith("|"):
-            flush_paragraph()
-            continue
-
         paragraph_lines.append(stripped)
 
     flush_paragraph()
-
     deduped: List[str] = []
     seen = set()
     for entry in entries:
         normalized = normalize_text(entry)
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        deduped.append(entry.strip())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            deduped.append(entry.strip())
     return deduped
 
 
 def parse_existing_memory_entries(path: Path) -> List[str]:
-    """Parse the DESTINATION memory store into entries.
-
-    ``memories/MEMORY.md`` is the entry-delimited store written by ``MemoryStore._write_file``
-    (tools/memory_tool.py), not a markdown document, so this splits on ``ENTRY_DELIMITER`` only —
-    exactly what ``MemoryStore._parse_entries`` does.
-
-    Do NOT fall back to :func:`extract_markdown_entries` here. That extractor is correct for
-    CLAUDE.md / AGENTS.md *sources*, but it drops fenced code blocks and table rows and splits a
-    block into one entry per bullet — and the merged result is written straight back over the user's
-    store, so the loss is permanent.
-    """
+    """Parse the DESTINATION memory store (``ENTRY_DELIMITER``-split, as ``MemoryStore`` does).
+    Do NOT fall back to :func:`extract_markdown_entries`: it drops code blocks/table rows and
+    splits bullets, and the merged result overwrites the user's store — the loss is permanent."""
     if not path.exists():
         return []
-    raw = read_text(path)
-    if not raw.strip():
-        return []
-    return [e.strip() for e in raw.split(ENTRY_DELIMITER) if e.strip()]
+    return [e.strip() for e in read_text(path).split(ENTRY_DELIMITER) if e.strip()]
 
 
-def backup_memory_file(path: Path) -> Optional[Path]:
-    """Snapshot ``path`` before a destructive rewrite; return the backup path.
-
-    Restores parity with the openclaw migration script this module was ported from, which calls
-    ``maybe_backup(destination)`` before rewriting a memory store. Uses the same
-    ``<name>.bak.<unix_ts>`` naming as ``MemoryStore._backup_drifted_file``. Returns None when there
-    is nothing to back up.
-    """
-    if not path.exists():
-        return None
-    backup = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
-    shutil.copy2(path, backup)
-    return backup
-
-
-def merge_entries(
-    existing: Sequence[str],
-    incoming: Sequence[str],
-    limit: int,
-) -> Tuple[List[str], Dict[str, int]]:
+def merge_entries(existing: Sequence[str], incoming: Sequence[str],
+                  limit: int) -> Tuple[List[str], Dict[str, int]]:
     merged = list(existing)
     seen = {normalize_text(e) for e in existing if e.strip()}
     stats = {"existing": len(existing), "added": 0, "duplicates": 0, "overflowed": 0}
-
-    current_len = len(ENTRY_DELIMITER.join(merged)) if merged else 0
+    current_len = len(ENTRY_DELIMITER.join(merged))
     for entry in incoming:
         normalized = normalize_text(entry)
         if not normalized:
@@ -257,10 +166,8 @@ def merge_entries(
         if normalized in seen:
             stats["duplicates"] += 1
             continue
-        candidate_len = (
-            len(entry) if not merged
-            else current_len + len(ENTRY_DELIMITER) + len(entry)
-        )
+        candidate_len = (len(entry) if not merged
+                         else current_len + len(ENTRY_DELIMITER) + len(entry))
         if candidate_len > limit:
             stats["overflowed"] += 1
             continue
@@ -271,43 +178,22 @@ def merge_entries(
     return merged, stats
 
 
-# ---------------------------------------------------------------------------
-# Claude Code permission rules → Hermes command patterns
-# ---------------------------------------------------------------------------
-
 _BASH_RULE_RE = re.compile(r"^Bash\((?P<inner>.*)\)$")
 
 
 def claude_rule_to_command_pattern(rule: str) -> Optional[str]:
-    """Convert a Claude Code ``Bash(...)`` permission rule into a Hermes glob.
-
-    ``Bash(npm run test:*)`` -> ``npm run test*`` (Claude ':*' is a prefix match). Bare ``Bash``
-    and non-Bash rules (``Read(...)``, ``WebFetch(...)``) return None: the former is too broad to
-    import, the latter gate Claude-specific tools with no command-allowlist equivalent.
-    """
-    rule = (rule or "").strip()
-    m = _BASH_RULE_RE.match(rule)
-    if not m:
-        return None
-    inner = m.group("inner").strip()
+    """``Bash(npm run test:*)`` -> ``npm run test*`` (Claude ':*' is a prefix match). Bare ``Bash``
+    (too broad) and non-Bash rules (Claude-only tools, no allowlist equivalent) return None."""
+    m = _BASH_RULE_RE.match((rule or "").strip())
+    inner = m.group("inner").strip() if m else ""
     if not inner:
         return None
-    if inner.endswith(":*"):
-        inner = inner[:-2] + "*"
-    return inner
-
-
-# ---------------------------------------------------------------------------
-# Detection
-# ---------------------------------------------------------------------------
-
-def default_source_dir(agent: str) -> Path:
-    return Path.home() / _AGENT_DEFAULT_DIRS[agent]
+    return inner[:-2] + "*" if inner.endswith(":*") else inner
 
 
 def detect_agents() -> List[str]:
     """Return the list of supported agents whose default dirs exist."""
-    return [a for a in SUPPORTED_AGENTS if default_source_dir(a).is_dir()]
+    return [a for a in SUPPORTED_AGENTS if (Path.home() / _AGENT_DEFAULT_DIRS[a]).is_dir()]
 
 
 def sanitize_mcp_env(env: Any) -> Tuple[Dict[str, str], List[str]]:
@@ -316,13 +202,6 @@ def sanitize_mcp_env(env: Any) -> Tuple[Dict[str, str], List[str]]:
         return {}, []
     kept = {str(k): v for k, v in env.items() if not is_secret_key(str(k))}
     return kept, [str(k) for k in env if str(k) not in kept]
-
-
-def _copy_skill_dir(skill_dir: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(skill_dir, destination)
 
 
 def _translate_mcp_server(name: str, srv: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
@@ -343,35 +222,20 @@ def _translate_mcp_server(name: str, srv: Dict[str, Any]) -> Tuple[Dict[str, Any
         hermes_srv["url"] = srv["url"]
         headers = srv.get("headers")
         if isinstance(headers, dict):
-            kept_headers = {
-                k: v for k, v in headers.items()
-                if not is_secret_key(str(k)) and "authorization" not in str(k).lower()
-            }
+            kept_headers = {k: v for k, v in headers.items()
+                            if not is_secret_key(str(k)) and "authorization" not in str(k).lower()}
             if kept_headers:
                 hermes_srv["headers"] = kept_headers
             stripped.extend(f"mcp_servers.{name}.headers.{k}" for k in headers if k not in kept_headers)
     return hermes_srv, stripped
 
 
-# ---------------------------------------------------------------------------
-# Importer
-# ---------------------------------------------------------------------------
-
 class AgentImporter:
-    """Detect/parse/map/apply importer for a single agent source tree.
+    """Detect/parse/map/apply importer for one agent source tree. ``execute=False`` runs the full
+    plan without touching disk; every item is recorded as imported/skipped/conflict/error."""
 
-    ``execute=False`` runs the full plan without touching disk (dry run). Every item is recorded
-    as imported/skipped/conflict/error with a reason so the CLI can print a per-item report.
-    """
-
-    def __init__(
-        self,
-        agent: str,
-        source_root: Path,
-        target_root: Path,
-        execute: bool = False,
-        overwrite: bool = False,
-    ) -> None:
+    def __init__(self, agent: str, source_root: Path, target_root: Path,
+                 execute: bool = False, overwrite: bool = False) -> None:
         if agent not in SUPPORTED_AGENTS:
             raise ValueError(f"Unsupported agent: {agent!r}")
         self.agent = agent
@@ -382,27 +246,16 @@ class AgentImporter:
         self.items: List[Dict[str, Any]] = []
         self.stripped_secrets: List[str] = []
 
-    # -- reporting ---------------------------------------------------------
-
     def record(self, kind: str, source, destination, status: str,
                reason: str = "", **details) -> None:
-        item: Dict[str, Any] = {
-            "kind": kind,
-            "source": str(source) if source else None,
-            "destination": str(destination) if destination else None,
-            "status": status,
-            "reason": reason,
-        }
-        item.update(details)
-        self.items.append(item)
+        self.items.append({"kind": kind, "source": str(source) if source else None,
+                           "destination": str(destination) if destination else None,
+                           "status": status, "reason": reason, **details})
 
-    def load_target_config(self, kind: str, source, destination: Path
-                           ) -> Optional[Dict[str, Any]]:
-        """Read the destination config.yaml, or record a refusal and return None.
-
-        Deliberately runs in dry-run too: ``--dry-run`` must report the refusal, not preview an
-        ``imported`` that would destroy the config.
-        """
+    def load_target_config(self, kind: str, source,
+                           destination: Path) -> Optional[Dict[str, Any]]:
+        """Read the destination config.yaml, or record a refusal and return None. Runs in dry-run
+        too: ``--dry-run`` must report the refusal, not preview an ``imported`` that destroys it."""
         try:
             return load_yaml_file(destination)
         except ConfigReadError as exc:
@@ -412,88 +265,74 @@ class AgentImporter:
     def apply(self, kind: str, source, destination, would: str, action,
               details: Optional[Dict[str, Any]] = None) -> None:
         """Record ``imported`` (reason ``would`` in dry-run); in execute mode run ``action`` first.
-
         ``action`` may add keys to ``details`` (shared by reference) and returns an error string
-        to record ``error`` instead, or None on success.
-        """
+        (recorded as ``error``) or None."""
         details = details or {}
-        if not self.execute:
-            self.record(kind, source, destination, "imported", would, **details)
-            return
-        error = action()
-        self.record(kind, source, destination, "error" if error else "imported", error or "", **details)
+        error = action() if self.execute else None
+        self.record(kind, source, destination, "error" if error else "imported",
+                    error or ("" if self.execute else would), **details)
 
     def build_report(self) -> Dict[str, Any]:
         summary = {"imported": 0, "skipped": 0, "conflict": 0, "error": 0}
         for item in self.items:
             summary[item["status"]] = summary.get(item["status"], 0) + 1
-        report: Dict[str, Any] = {
-            "agent": self.agent,
-            "source": str(self.source_root),
-            "target": str(self.target_root),
-            "dry_run": not self.execute,
-            "items": self.items,
-            "summary": summary,
-        }
+        report: Dict[str, Any] = {"agent": self.agent, "source": str(self.source_root),
+                                  "target": str(self.target_root), "dry_run": not self.execute,
+                                  "items": self.items, "summary": summary}
         if self.stripped_secrets:
             report["stripped_secrets"] = sorted(set(self.stripped_secrets))
         return report
-
-    # -- orchestration -----------------------------------------------------
 
     def run(self) -> Dict[str, Any]:
         if not self.source_root.is_dir():
             self.record("source", self.source_root, None, "error",
                         "Source directory does not exist")
-            return self.build_report()
-        {"claude-code": self._run_claude_code, "codex": self._run_codex}[self.agent]()
+        else:
+            {"claude-code": self._run_claude_code, "codex": self._run_codex}[self.agent]()
         return self.build_report()
 
     def _run_claude_code(self) -> None:
-        settings = self._load_claude_settings()
-        self.import_context_file(self.source_root / "CLAUDE.md", kind="claude-md")
-        self.import_permission_allowlist(settings)
-        self.import_permission_denylist(settings)
-        self.import_mcp_servers(self._claude_mcp_servers(settings), kind="mcp-servers")
+        settings = self._load_source_mapping(
+            "settings", self.source_root / "settings.json", json.loads, self._JSON_ERRORS,
+            record_missing=True, non_mapping_error="settings.json is not a JSON object")
+        self.import_context_file(self.source_root / "CLAUDE.md", "claude-md")
+        self._import_permission_rules(settings, "allow")
+        self._import_permission_rules(settings, "deny")
+        # mcpServers: ~/.claude.json (preferred; lives NEXT TO ~/.claude/) then settings.json
+        claude_json = self._load_source_mapping(
+            "mcp-servers", self.source_root.parent / ".claude.json", json.loads, self._JSON_ERRORS)
+        servers: Dict[str, Any] = {}
+        for source in (claude_json.get("mcpServers"), settings.get("mcpServers")):
+            if isinstance(source, dict):
+                for name, srv in source.items():
+                    servers.setdefault(name, srv)
+        self.import_mcp_servers(servers, kind="mcp-servers")
         self.import_skills(self.source_root / "skills")
         commands_dir = self.source_root / "commands"
         if commands_dir.is_dir() and any(commands_dir.glob("*.md")):
-            self.record(
-                "slash-commands", commands_dir, None, "skipped",
-                "Claude slash commands have no direct Hermes equivalent — "
-                "consider converting them into skills",
-            )
+            self.record("slash-commands", commands_dir, None, "skipped",
+                        "Claude slash commands have no direct Hermes equivalent — "
+                        "consider converting them into skills")
 
     def _run_codex(self) -> None:
-        config = self._load_codex_config()
-        self.import_context_file(self.source_root / "AGENTS.md", kind="agents-md")
+        config = self._load_source_mapping("config", self.source_root / "config.toml",
+                                           tomllib.loads, Exception, record_missing=True)
+        self.import_context_file(self.source_root / "AGENTS.md", "agents-md")
         mcp = config.get("mcp_servers")
         self.import_mcp_servers(mcp if isinstance(mcp, dict) else {}, kind="mcp-servers")
-        self.import_memories_dir(self.source_root / "memories")
+        memories_dir = self.source_root / "memories"
+        self._import_markdown_files(
+            "memories", memories_dir,
+            sorted(memories_dir.glob("*.md")) if memories_dir.is_dir() else None,
+            "No memories directory found")
         self.import_skills(self.source_root / "skills")
 
-    # -- parsers (fail soft: bad files become per-item error records) -------
-
     _JSON_ERRORS = (json.JSONDecodeError, OSError)
-
-    def _load_claude_settings(self) -> Dict[str, Any]:
-        return self._load_source_mapping(
-            "settings", self.source_root / "settings.json", json.loads, self._JSON_ERRORS,
-            record_missing=True, non_mapping_error="settings.json is not a JSON object",
-        )
-
-    def _load_codex_config(self) -> Dict[str, Any]:
-        import tomllib
-
-        return self._load_source_mapping(
-            "config", self.source_root / "config.toml", tomllib.loads, Exception,
-            record_missing=True,
-        )
 
     def _load_source_mapping(self, kind: str, path: Path, parse, errors, *,
                              record_missing: bool = False,
                              non_mapping_error: str = "") -> Dict[str, Any]:
-        """Parse ``path`` into a mapping; problems become per-item error records, result ``{}``."""
+        """Parse ``path`` into a mapping; problems become per-item error records and ``{}``."""
         if not path.exists():
             if record_missing:
                 self.record(kind, None, None, "skipped", f"No {path.name} found")
@@ -509,46 +348,20 @@ class AgentImporter:
             self.record(kind, path, None, "error", non_mapping_error)
         return {}
 
-    def _claude_mcp_servers(self, settings: Dict[str, Any]) -> Dict[str, Any]:
-        """Collect mcpServers from ~/.claude.json (preferred) and settings.json."""
-        # ~/.claude.json lives NEXT TO ~/.claude/, not inside it
-        data = self._load_source_mapping(
-            "mcp-servers", self.source_root.parent / ".claude.json", json.loads, self._JSON_ERRORS)
-        servers: Dict[str, Any] = {}
-        if isinstance(data.get("mcpServers"), dict):
-            servers.update(data["mcpServers"])
-        from_settings = settings.get("mcpServers")
-        if isinstance(from_settings, dict):
-            for name, srv in from_settings.items():
-                servers.setdefault(name, srv)
-        return servers
-
-    # -- mappers -------------------------------------------------------------
-
     def import_context_file(self, source: Path, kind: str) -> None:
         """CLAUDE.md / AGENTS.md → memory entries in memories/MEMORY.md."""
-        if not source.exists():
-            self.record(kind, None, self.target_root / "memories" / "MEMORY.md",
-                        "skipped", f"No {source.name} found")
-            return
-        self._import_markdown_files(kind, source, [source], single_file=True)
+        self._import_markdown_files(kind, source, [source] if source.exists() else None,
+                                    f"No {source.name} found", single_file=True)
 
-    def import_memories_dir(self, memories_dir: Path) -> None:
-        """codex memories/*.md → memory entries in memories/MEMORY.md."""
-        if not memories_dir.is_dir():
-            self.record("memories", None, self.target_root / "memories" / "MEMORY.md",
-                        "skipped", "No memories directory found")
-            return
-        self._import_markdown_files("memories", memories_dir, sorted(memories_dir.glob("*.md")))
-
-    def _import_markdown_files(self, kind: str, source: Path, files: List[Path],
-                               single_file: bool = False) -> None:
-        """Extract entries from ``files`` and merge them into memories/MEMORY.md.
-
+    def _import_markdown_files(self, kind: str, source: Path, files: Optional[List[Path]],
+                               missing_reason: str, single_file: bool = False) -> None:
+        """Extract entries from ``files`` (None = source missing) and merge into memories/MEMORY.md.
         An unreadable file records an error; a directory import then still reports "no entries"
-        when nothing was extracted, while a single-file import stops at the error.
-        """
+        when nothing was extracted, while a single-file import stops at the error."""
         destination = self.target_root / "memories" / "MEMORY.md"
+        if files is None:
+            self.record(kind, None, destination, "skipped", missing_reason)
+            return
         incoming: List[str] = []
         failed = False
         for md_file in files:
@@ -561,35 +374,29 @@ class AgentImporter:
             if not (failed and single_file):
                 self.record(kind, source, destination, "skipped", "No importable entries found")
             return
-        self._merge_memory_entries(kind, source, destination, incoming)
-
-    def _merge_memory_entries(self, kind: str, source: Path,
-                              destination: Path, incoming: List[str]) -> None:
         existing = parse_existing_memory_entries(destination)
         merged, stats = merge_entries(existing, incoming, MEMORY_CHAR_LIMIT)
-        details = {
-            "existing_entries": stats["existing"],
-            "added_entries": stats["added"],
-            "duplicate_entries": stats["duplicates"],
-            "overflowed_entries": stats["overflowed"],
-        }
+        details = {"existing_entries": stats["existing"], "added_entries": stats["added"],
+                   "duplicate_entries": stats["duplicates"],
+                   "overflowed_entries": stats["overflowed"]}
         if stats["added"] == 0:
             self.record(kind, source, destination, "skipped", "No new entries to import", **details)
             return
 
         def write() -> Optional[str]:
             destination.parent.mkdir(parents=True, exist_ok=True)
+            # Snapshot first (``<name>.bak.<unix_ts>``, as MemoryStore does); never rewrite the
+            # store when the safety net failed.
+            step = "back up existing"
             try:
-                backup = backup_memory_file(destination)
-            except OSError as exc:
-                # Never rewrite the store when the safety net failed.
-                return f"Could not back up existing memory file: {exc}"
-            if backup is not None:
-                details["backup"] = str(backup)
-            try:
+                if destination.exists():
+                    backup = destination.with_suffix(f"{destination.suffix}.bak.{int(time.time())}")
+                    shutil.copy2(destination, backup)
+                    details["backup"] = str(backup)
+                step = "write merged"
                 atomic_write_text(destination, ENTRY_DELIMITER.join(merged) + ("\n" if merged else ""))
             except OSError as exc:
-                return f"Could not write merged memory file: {exc}"
+                return f"Could not {step} memory file: {exc}"
             return None
 
         self.apply(kind, source, destination, "Would merge entries", write, details)
@@ -597,18 +404,10 @@ class AgentImporter:
     # (settings key, item kind, config path, dry-run tracks unmapped rules)
     _PERMISSION_RULES = {
         "allow": ("command-allowlist", ("command_allowlist",), True),
-        "deny": ("command-denylist", ("approvals", "deny"), False),
-    }
-
-    def import_permission_allowlist(self, settings: Dict[str, Any]) -> None:
-        """settings.json permissions.allow → config.yaml command_allowlist."""
-        self._import_permission_rules(settings, "allow")
-
-    def import_permission_denylist(self, settings: Dict[str, Any]) -> None:
-        """settings.json permissions.deny → config.yaml approvals.deny."""
-        self._import_permission_rules(settings, "deny")
+        "deny": ("command-denylist", ("approvals", "deny"), False)}
 
     def _import_permission_rules(self, settings: Dict[str, Any], key: str) -> None:
+        """settings.json permissions.allow/deny → config.yaml command_allowlist / approvals.deny."""
         kind, config_path, track_unmapped = self._PERMISSION_RULES[key]
         label = f"settings.json permissions.{key}"
         destination = self.target_root / "config.yaml"
@@ -617,18 +416,9 @@ class AgentImporter:
         if not isinstance(rules, list) or not rules:
             self.record(kind, None, destination, "skipped", f"No permissions.{key} rules found")
             return
-
-        patterns: List[str] = []
-        skipped_rules: List[str] = []
-        for rule in rules:
-            if not isinstance(rule, str):
-                continue
-            pattern = claude_rule_to_command_pattern(rule)
-            if pattern:
-                patterns.append(pattern)
-            else:
-                skipped_rules.append(rule)
-        patterns = sorted(dict.fromkeys(patterns))
+        mapped = [(r, claude_rule_to_command_pattern(r)) for r in rules if isinstance(r, str)]
+        patterns = sorted(dict.fromkeys(p for _, p in mapped if p))
+        skipped_rules = [r for r, p in mapped if not p]
         unmapped: Dict[str, Any] = {"unmapped_rules": skipped_rules} if track_unmapped else {}
         if not patterns:
             self.record(kind, None, destination, "skipped",
@@ -636,7 +426,6 @@ class AgentImporter:
             return
         if not skipped_rules:
             unmapped = {}
-
         config = self.load_target_config(kind, label, destination)
         if config is None:
             return
@@ -644,18 +433,15 @@ class AgentImporter:
         parent: Dict[str, Any] = config
         for part in config_path[:-1]:
             child = parent.get(part)
-            if not isinstance(child, dict):
-                child = {}
-            parent[part] = child
-            parent = child
+            parent[part] = parent = child if isinstance(child, dict) else {}
         current = parent.get(config_path[-1], [])
-        if not isinstance(current, list):
-            current = []
+        current = current if isinstance(current, list) else []
         merged = sorted(dict.fromkeys(list(current) + patterns))
         added = [p for p in merged if p not in current]
         if not added:
             self.record(kind, label, destination, "skipped", "All patterns already present")
             return
+
         def write() -> None:
             parent[config_path[-1]] = merged
             dump_yaml_file(destination, config)
@@ -669,13 +455,11 @@ class AgentImporter:
         if not servers:
             self.record(kind, None, destination, "skipped", "No MCP servers found")
             return
-
         config = self.load_target_config(kind, None, destination)
         if config is None:
             return
         existing = config.get("mcp_servers")
-        if not isinstance(existing, dict):
-            existing = {}
+        existing = existing if isinstance(existing, dict) else {}
         added = 0
         for name, srv in servers.items():
             if not isinstance(srv, dict):
@@ -685,32 +469,26 @@ class AgentImporter:
                 self.record(kind, name, f"mcp_servers.{name}", "conflict",
                             "MCP server already exists in Hermes config")
                 continue
-
             hermes_srv, stripped = _translate_mcp_server(name, srv)
             self.stripped_secrets.extend(stripped)
             if not hermes_srv:
                 self.record(kind, name, None, "skipped", "Server has neither a command nor a url")
                 continue
-
             existing[name] = hermes_srv
             added += 1
             self.record(kind, name, f"config.yaml mcp_servers.{name}", "imported")
-
         if added > 0 and self.execute:
             config["mcp_servers"] = existing
             dump_yaml_file(destination, config)
 
     def import_skills(self, source_root: Path) -> None:
         """skills/<name>/SKILL.md dirs → HERMES_HOME/skills/<category>/<name>."""
-        category = _SKILL_CATEGORY[self.agent]
-        destination_root = self.target_root / "skills" / category
+        destination_root = self.target_root / "skills" / _SKILL_CATEGORY[self.agent]
         if not source_root.is_dir():
             self.record("skills", None, destination_root, "skipped", "No skills directory found")
             return
-        skill_dirs = [
-            p for p in sorted(source_root.iterdir())
-            if p.is_dir() and (p / "SKILL.md").exists()
-        ]
+        skill_dirs = [p for p in sorted(source_root.iterdir())
+                      if p.is_dir() and (p / "SKILL.md").exists()]
         if not skill_dirs:
             self.record("skills", source_root, destination_root, "skipped",
                         "No skills with SKILL.md found")
@@ -721,26 +499,25 @@ class AgentImporter:
                 self.record("skill", skill_dir, destination, "conflict",
                             "Destination skill already exists")
                 continue
-            self.apply("skill", skill_dir, destination, "Would copy skill directory",
-                       lambda: _copy_skill_dir(skill_dir, destination))
 
+            def copy(skill_dir=skill_dir, destination=destination) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    shutil.rmtree(destination)
+                shutil.copytree(skill_dir, destination)
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+            self.apply("skill", skill_dir, destination, "Would copy skill directory", copy)
+
 
 def import_agent_command(args) -> None:
     """Handle ``hermes import-agent`` (invoked from hermes_cli.main)."""
     from hermes_cli.config import get_config_path, load_config, save_config
     from hermes_constants import get_hermes_home
-    from hermes_cli.setup import (
-        Colors, color, print_header, print_info, print_success, print_error, prompt_yes_no,
-    )
+    from hermes_cli.setup import (Colors, color, print_header, print_info, print_success,
+                                  print_error, prompt_yes_no)
 
-    agent, explicit_source = args.agent, args.source
-    dry_run, overwrite, auto_yes = args.dry_run, args.overwrite, args.yes
+    agent, explicit_source, overwrite = args.agent, args.source, args.overwrite
 
-    # -- detect --------------------------------------------------------------
     if agent is None:
         detected = detect_agents()
         if not detected:
@@ -754,20 +531,17 @@ def import_agent_command(args) -> None:
             print_info("Pick one: hermes import-agent claude-code   or   hermes import-agent codex")
             return
         agent = detected[0]
-
-    source_dir = Path(explicit_source) if explicit_source else default_source_dir(agent)
+    source_dir = Path(explicit_source or Path.home() / _AGENT_DEFAULT_DIRS[agent])
 
     print()
     print(color("┌─────────────────────────────────────────────────────────┐", Colors.MAGENTA))
     print(color("│          ⚕ Hermes — Import From Another Agent          │", Colors.MAGENTA))
     print(color("└─────────────────────────────────────────────────────────┘", Colors.MAGENTA))
-
     if not source_dir.is_dir():
         print()
         print_error(f"Agent directory not found: {source_dir}")
         print_info(f"Specify a custom path: hermes import-agent {agent} --source /path/to/{_AGENT_DEFAULT_DIRS[agent]}")
         return
-
     hermes_home = get_hermes_home()
     print()
     print_header("Import Settings")
@@ -776,48 +550,41 @@ def import_agent_command(args) -> None:
     print_info(f"Target:      {hermes_home}")
     print_info(f"Overwrite:   {'yes' if overwrite else 'no (skip conflicts)'}")
     print_info("Secrets:     never imported — run 'hermes setup' for credentials")
-
     # Ensure config.yaml exists before the import tries to merge into it
-    config_path = get_config_path()
-    if not config_path.exists():
+    if not get_config_path().exists():
         save_config(load_config())
 
-    # -- Phase 1: preview (always) --------------------------------------------
-    def run_import(execute: bool) -> Dict[str, Any]:
-        return AgentImporter(
-            agent=agent,
-            source_root=source_dir.resolve(),
-            target_root=hermes_home.resolve(),
-            execute=execute,
-            overwrite=overwrite,
-        ).run()
+    def run_import(execute: bool, phase: str) -> Optional[Dict[str, Any]]:
+        """Run the importer; on failure print the error and return None."""
+        try:
+            return AgentImporter(agent, source_dir.resolve(), hermes_home.resolve(),
+                                 execute=execute, overwrite=overwrite).run()
+        except Exception as e:
+            print()
+            print_error(f"Import{phase} failed: {e}")
+            logger.debug(f"import-agent{phase} error", exc_info=True)
+            return None
 
-    try:
-        preview = run_import(execute=False)
-    except Exception as e:
-        print()
-        print_error(f"Import preview failed: {e}")
-        logger.debug("import-agent preview error", exc_info=True)
+    # Phase 1: preview (always)
+    preview = run_import(False, " preview")
+    if preview is None:
         return
-
     summary = preview.get("summary", {})
     if summary.get("imported", 0) == 0 and summary.get("conflict", 0) == 0:
         print()
         print_info(f"Nothing to import from {agent}.")
         print_import_report(preview, dry_run=True)
         return
-
     print()
     print_header(f"Import Preview — {summary.get('imported', 0)} item(s) would be imported")
     print_info("No changes have been made yet. Review the list below:")
     print_import_report(preview, dry_run=True)
-
-    if dry_run:
+    if args.dry_run:
         return
 
-    # -- Phase 2: confirm and execute -----------------------------------------
+    # Phase 2: confirm and execute
     print()
-    if not auto_yes:
+    if not args.yes:
         if not sys.stdin.isatty():
             print_info("Non-interactive session — preview only.")
             print_info(f"To execute, re-run with: hermes import-agent {agent} --yes")
@@ -825,15 +592,9 @@ def import_agent_command(args) -> None:
         if not prompt_yes_no("Proceed with import?", default=True):
             print_info("Import cancelled.")
             return
-
-    try:
-        report = run_import(execute=True)
-    except Exception as e:
-        print()
-        print_error(f"Import failed: {e}")
-        logger.debug("import-agent error", exc_info=True)
+    report = run_import(True, "")
+    if report is None:
         return
-
     print_import_report(report, dry_run=False)
     print()
     print_success("Import complete.")
@@ -845,47 +606,36 @@ def print_import_report(report: Dict[str, Any], dry_run: bool) -> None:
     """Print a formatted per-item import report (claw-migrate style)."""
     from hermes_cli.setup import Colors, color, print_header, print_info
 
-    summary = report.get("summary", {})
     print()
+    print_header("Dry Run Results" if dry_run else "Import Results")
     if dry_run:
-        print_header("Dry Run Results")
         print_info("No files were modified. This is a preview of what would happen.")
-    else:
-        print_header("Import Results")
     print()
-
-    items = report.get("items", [])
+    # (status, colour, group heading, summary label)
     groups = (
-        ("imported", Colors.GREEN, "✓ Would import" if dry_run else "✓ Imported"),
-        ("conflict", Colors.YELLOW, "⚠ Conflicts (skipped — use --overwrite to force)"),
-        ("skipped", Colors.DIM, "─ Skipped"),
-        ("error", Colors.RED, "✗ Errors"),
-    )
-    for status, col, label in groups:
-        group_items = [i for i in items if i.get("status") == status]
+        ("imported", Colors.GREEN, "✓ Would import" if dry_run else "✓ Imported",
+         "would import" if dry_run else "imported"),
+        ("conflict", Colors.YELLOW, "⚠ Conflicts (skipped — use --overwrite to force)",
+         "conflict(s)"),
+        ("skipped", Colors.DIM, "─ Skipped", "skipped"),
+        ("error", Colors.RED, "✗ Errors", "error(s)"))
+    for status, col, label, _ in groups:
+        group_items = [i for i in report.get("items", []) if i.get("status") == status]
         if not group_items:
             continue
         print(color(f"  {label}:", col))
         for item in group_items:
-            tail = (
-                "→ " + str(item.get("destination") or "").replace(str(Path.home()), "~")
-                if status == "imported" else f" {item.get('reason', '')}"
-            )
+            tail = ("→ " + str(item.get("destination") or "").replace(str(Path.home()), "~")
+                    if status == "imported" else f" {item.get('reason', '')}")
             print(f"      {item.get('kind', 'unknown'):<22s} {tail}")
         print()
-
-    stripped = report.get("stripped_secrets") or []
-    if stripped:
+    if stripped := report.get("stripped_secrets"):
         print(color("  ⚷ Secrets stripped (never imported):", Colors.YELLOW))
         for name in stripped:
             print(f"      {name}")
         print_info("Re-add credentials deliberately via 'hermes setup' or ~/.hermes/.env.")
         print()
-
-    labels = (
-        ("imported", "would import" if dry_run else "imported"),
-        ("conflict", "conflict(s)"), ("skipped", "skipped"), ("error", "error(s)"),
-    )
-    parts = [f"{summary[k]} {label}" for k, label in labels if summary.get(k)]
+    summary = report.get("summary", {})
+    parts = [f"{summary[k]} {label}" for k, _, _, label in groups if summary.get(k)]
     if parts:
         print_info(f"Summary: {', '.join(parts)}")
