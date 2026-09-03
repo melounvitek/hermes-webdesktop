@@ -1,8 +1,4 @@
-"""``hermes browser`` subcommand parser.
-
-Extracted from ``hermes_cli/main.py:main()`` (god-file Phase 2 follow-up).
-Handlers are injected or imported lazily so this module never imports ``main``.
-"""
+"""``hermes browser`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -12,34 +8,25 @@ import sys
 def build_browser_parser(subparsers) -> None:
     """Attach the ``browser`` subcommand to ``subparsers``."""
     browser_parser = subparsers.add_parser(
-        "browser",
-        help="Real-profile browsing helpers (close a browser locking its profile)",
-        description=(
-            "Helpers for real-profile browsing (browser.use_real_profile). "
+        "browser", help="Real-profile browsing helpers (close a browser locking its profile)",
+        description="Helpers for real-profile browsing (browser.use_real_profile). "
             "close-profile terminates the browser process tree holding your "
             "default profile so Hermes can copy it — DESTRUCTIVE (unsaved tabs "
             "in that browser are lost). The agent runs this only after you "
-            "approve closing the browser."
-        ),
-    )
+            "approve closing the browser.")
     browser_subparsers = browser_parser.add_subparsers(dest="browser_action")
     browser_close = browser_subparsers.add_parser(
         "close-profile",
         help="Close the browser locking your real profile (asks nothing — "
-             "run only with the user's explicit OK; loses unsaved tabs)",
-    )
+             "run only with the user's explicit OK; loses unsaved tabs)")
     browser_close.add_argument(
         "--browser",
-        help="Override detected default browser (chrome/edge/brave/brave-origin/chromium)",
-    )
+        help="Override detected default browser (chrome/edge/brave/brave-origin/chromium)")
 
     def _dispatch_browser(_args):
         from hermes_cli.browser_connect import (
-            UNSUPPORTED_CHANNEL,
-            close_browser_holding_profile,
-            detect_default_chromium,
-            real_profile_data_dir,
-        )
+            UNSUPPORTED_CHANNEL, close_browser_holding_profile, detect_default_chromium,
+            real_profile_data_dir)
 
         action = getattr(_args, "browser_action", None)
         if action != "close-profile":

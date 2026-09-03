@@ -1,8 +1,4 @@
-"""``hermes moa`` subcommand parser.
-
-Extracted from ``hermes_cli/main.py:main()`` (god-file Phase 2 follow-up).
-Handlers are injected or imported lazily so this module never imports ``main``.
-"""
+"""``hermes moa`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -12,10 +8,8 @@ def build_moa_parser(subparsers) -> None:
     from hermes_cli.moa_cmd import cmd_moa
 
     moa_parser = subparsers.add_parser(
-        "moa",
-        help="Configure Mixture of Agents provider/model slots",
-        description="Configure the provider/model set used by /moa <prompt>.",
-    )
+        "moa", help="Configure Mixture of Agents provider/model slots",
+        description="Configure the provider/model set used by /moa <prompt>.")
     moa_subparsers = moa_parser.add_subparsers(dest="moa_command")
     moa_subparsers.add_parser("list", aliases=["ls"], help="Show current MoA model slots")
     moa_configure = moa_subparsers.add_parser("configure", aliases=["config"], help="Interactively pick MoA models")
