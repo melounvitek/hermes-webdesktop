@@ -64,12 +64,9 @@ def get_model_info(profile: Optional[str] = None):
 
         try:
             from agent.model_metadata import get_model_context_length
-            auto_ctx = get_model_context_length(
-                model=model_name,
-                base_url=base_url,
-                provider=provider,
-                config_context_length=None,  # ignore override — we want the auto value
-            )
+            # config_context_length=None: ignore the override — we want the auto value
+            auto_ctx = get_model_context_length(model=model_name, base_url=base_url, provider=provider,
+                                                config_context_length=None)
         except Exception:
             auto_ctx = 0
 
@@ -106,14 +103,11 @@ async def get_model_options(
     include_unconfigured: bool = False,
     explicit_only: bool = False,
 ):
-    """Authenticated providers + curated model lists — REST twin of the
-    ``model.options`` JSON-RPC on tui_gateway, same response shape so
-    ``ModelPickerDialog`` shares the types.
-
-    ``profile`` scopes the picker context so the Models page reads the SAME
-    profile /api/model/set writes. ``refresh`` busts the per-provider model-id
-    disk cache (picker's explicit "Refresh Models"); normal opens stay on the 1h cache.
-    """
+    """Authenticated providers + curated model lists — REST twin of the ``model.options``
+    JSON-RPC on tui_gateway, same response shape so ``ModelPickerDialog`` shares the types.
+    ``profile`` scopes the picker context so the Models page reads the SAME profile
+    /api/model/set writes. ``refresh`` busts the per-provider model-id disk cache
+    (picker's explicit "Refresh Models"); normal opens stay on the 1h cache."""
     with http_failure("GET /api/model/options failed", 500, detail="Failed to list model options"):
         skew_msg = _dashboard_code_skew_guard()
         if skew_msg:
@@ -123,18 +117,14 @@ async def get_model_options(
         from hermes_cli.inventory import build_model_options_payload, load_picker_context
 
         def _build_payload_scoped() -> dict:
-            # The full sync picker build runs off the event loop under the
-            # requested profile. _config_profile_scope (contextvar only, no
-            # skill-module lock): the build can block 15s on a models.dev cache
-            # miss, and _profile_scope's RLock held across that starves
-            # concurrent /api/config and freezes the server.
+            # Full sync picker build off the event loop under the requested profile.
+            # _config_profile_scope (contextvar only, no skill-module lock): the build can
+            # block 15s on a models.dev cache miss, and _profile_scope's RLock held across
+            # that starves concurrent /api/config and freezes the server.
             with _config_profile_scope(profile):
                 return build_model_options_payload(
-                    load_picker_context(),
-                    explicit_only=bool(explicit_only),
-                    include_unconfigured=bool(include_unconfigured),
-                    refresh=bool(refresh),
-                )
+                    load_picker_context(), explicit_only=bool(explicit_only),
+                    include_unconfigured=bool(include_unconfigured), refresh=bool(refresh))
 
         return await run_in_threadpool(_build_payload_scoped)
 
@@ -152,9 +142,9 @@ def _nous_recommended_default() -> dict:
     except Exception:
         portal_url = ""
 
-    # This endpoint picks the model a user lands on without choosing it, so an
-    # unreachable one here is worse than in a picker. Narrow to policy before
-    # the tier split, so a rescued id still has to pass the free/paid predicate.
+    # This endpoint picks the model a user lands on without choosing it, so an unreachable
+    # one is worse than in a picker. Narrow to policy BEFORE the tier split, so a rescued
+    # id still has to pass the free/paid predicate.
     policy_allowed = m.nous_policy_allowed_ids()
     union = m.union_with_portal_free_recommendations if free_tier else m.union_with_portal_paid_recommendations
     model_ids, pricing = union(model_ids, pricing, portal_url)
@@ -170,15 +160,12 @@ def _nous_recommended_default() -> dict:
 def get_recommended_default_model(provider: str = ""):
     """Recommended default model for a freshly-authenticated provider, mirroring
     ``hermes model``'s curation so GUI onboarding lands on a sensible default.
-
     Nous honors the user's free/paid tier. Any other provider gets the preferred
-    silent default when its curated list carries it, else the first curated model
-    — aggregator lists lead with the priciest Anthropic flagship, which must never
-    be the model a user lands on without explicitly picking it.
-
-    Response: {"provider", "model", "free_tier": bool | None} — free_tier only
-    for Nous; ``model`` may be empty (caller degrades gracefully).
-    """
+    silent default when its curated list carries it, else the first curated model —
+    aggregator lists lead with the priciest Anthropic flagship, which must never be
+    the model a user lands on without explicitly picking it.
+    Response: {"provider", "model", "free_tier": bool | None} — free_tier only for
+    Nous; ``model`` may be empty (caller degrades gracefully)."""
     slug = (provider or "").strip().lower()
 
     if slug == "nous":
@@ -206,11 +193,9 @@ def get_recommended_default_model(provider: str = ""):
 @router.get("/api/model/auxiliary")
 def get_auxiliary_models(profile: Optional[str] = None):
     """Current auxiliary task assignments: ``{"tasks": [{task, provider, model,
-    base_url}, ...], "main": {provider, model}}``.
-
-    ``profile`` scopes the read — without it the Models page would show the
-    dashboard profile's pins while /api/model/set wrote the selected profile's.
-    """
+    base_url}, ...], "main": {provider, model}}``. ``profile`` scopes the read —
+    without it the Models page would show the dashboard profile's pins while
+    /api/model/set wrote the selected profile's."""
     with http_failure("GET /api/model/auxiliary failed", 500, detail="Failed to read auxiliary config"):
         cfg = _load_config_scoped(profile)
         aux_cfg = cfg.get("auxiliary", {})
@@ -277,17 +262,15 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
             else:
                 raw = _preset_dict(body)  # legacy flat payload from older clients
 
-            # Reject-don't-repair: normalize_moa_config() silently swaps any
-            # preset containing incomplete slots for the hardcoded defaults —
-            # correct tolerance at READ time, silent data loss at WRITE time
-            # (desktop autosave of a half-filled slot replaced the user's whole
-            # preset). Refuse loudly so no client can corrupt config here.
+            # Reject-don't-repair: normalize_moa_config() silently swaps any preset with
+            # incomplete slots for the hardcoded defaults — correct tolerance at READ time,
+            # silent data loss at WRITE time (desktop autosave of a half-filled slot replaced
+            # the user's whole preset). Refuse loudly so no client can corrupt config here.
             problems = validate_moa_payload(raw)
             if problems:
                 raise HTTPException(status_code=422, detail="Invalid MoA config: " + "; ".join(problems))
             normalized = normalize_moa_config(raw)
-            # Merge instead of overwrite so hand-edited keys not declared in
-            # MoaConfigPayload (e.g. save_traces, trace_dir) survive a GUI save.
+            # Merge, don't overwrite: hand-edited keys not in MoaConfigPayload (save_traces, trace_dir) survive.
             cfg.setdefault("moa", {}).update(normalized)
             save_config(cfg)
             return {"ok": True, **normalized}
@@ -295,11 +278,9 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
 
 @router.post("/api/model/set")
 async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = None):
-    """Assign a model to the main slot or an auxiliary task slot.
-
-    Writes ``~/.hermes/config.yaml`` — applies to **new** sessions only; a
-    running chat PTY hot-swaps via the ``/model`` slash command instead.
-    """
+    """Assign a model to the main slot or an auxiliary task slot. Writes
+    ``~/.hermes/config.yaml`` — applies to **new** sessions only; a running chat
+    PTY hot-swaps via the ``/model`` slash command instead."""
     scope, task = (body.scope or "").strip().lower(), (body.task or "").strip().lower()
     provider, model = (body.provider or "").strip(), (body.model or "").strip()
     base_url, api_key = (body.base_url or "").strip(), (body.api_key or "").strip()
@@ -308,19 +289,15 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
         raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
 
     with http_failure("POST /api/model/set failed", 500, detail="Failed to save model assignment"):
-        # Expensive-model warning runs BEFORE the profile scope is entered:
-        # _profile_scope must never be held across an await (the RLock is
-        # reentrant per-thread, so a second coroutine interleaving on the
-        # event-loop thread could cross-restore the module globals).
+        # Expensive-model warning runs BEFORE the profile scope is entered: _profile_scope
+        # must never be held across an await (the RLock is reentrant per-thread, so a second
+        # coroutine interleaving on the event-loop thread could cross-restore module globals).
         if model and not body.confirm_expensive_model:
             try:
                 from hermes_cli.model_selection_guards import combined_selection_warning
 
-                # Pricing lookup can hit models.dev / a /models endpoint on a
-                # cache miss — keep it off the event loop.
-                warning = await asyncio.to_thread(
-                    combined_selection_warning, model, provider=provider, base_url=base_url
-                )
+                # Pricing lookup can hit models.dev / a /models endpoint on a cache miss — off the loop.
+                warning = await asyncio.to_thread(combined_selection_warning, model, provider=provider, base_url=base_url)
             except Exception:
                 warning = None
             if warning is not None:

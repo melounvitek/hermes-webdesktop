@@ -47,10 +47,9 @@ def _set_dashboard_key(key: str, value) -> None:
 
 @router.get("/api/dashboard/themes")
 async def get_dashboard_themes():
-    """Available themes and the active one. Built-ins ship name/label/description
-    only (the frontend owns their definitions in `web/src/themes/presets.ts`);
-    user themes from `~/.hermes/dashboard-themes/*.yaml` ship their normalised
-    definition under `definition` so the client can apply them without a stub."""
+    """Available themes + the active one. Built-ins ship name/label/description only
+    (the frontend owns their definitions in `web/src/themes/presets.ts`); user themes
+    from `~/.hermes/dashboard-themes/*.yaml` ship their normalised `definition`."""
     def _run():
         config = load_config()
         active = cfg_get(config, "dashboard", "theme", default="default")
@@ -73,10 +72,9 @@ async def set_dashboard_theme(body: ThemeSetBody):
     return {"ok": True, "theme": body.name}
 
 
-# Curated font-override ids, kept in sync with FONT_CHOICES in web/src/themes/fonts.ts.
-# The frontend owns the stacks + webfont URLs; the backend only needs the id
-# allow-list so it can reject anything not in the vetted catalog (the webfont URL
-# is injected as a <link>, so we never accept an arbitrary user-supplied id/URL).
+# Curated font-override ids, kept in sync with FONT_CHOICES in web/src/themes/fonts.ts. The
+# frontend owns the stacks + webfont URLs; the backend only needs the id allow-list to reject
+# anything unvetted (the webfont URL is injected as a <link>, so never accept arbitrary ids/URLs).
 _FONT_DEFAULT_ID = "theme"
 _FONT_CHOICES = frozenset({
     "system-sans", "system-serif", "system-mono",
@@ -98,8 +96,8 @@ async def get_dashboard_font():
 
 @router.put("/api/dashboard/font")
 async def set_dashboard_font(body: FontSetBody):
-    """Set the dashboard font override (persists to config.yaml). Unknown ids are
-    coerced to ``"theme"`` rather than 400'd so a stale client can't wedge the picker."""
+    """Set the font override (config.yaml). Unknown ids coerce to ``"theme"`` rather than
+    400 so a stale client can't wedge the picker."""
     font = body.font if body.font in _FONT_CHOICES else _FONT_DEFAULT_ID
     await asyncio.to_thread(_set_dashboard_key, "font", font)
     return {"ok": True, "font": font}
@@ -115,9 +113,9 @@ def _plugin_enable_sets() -> tuple[set, set]:
 
 
 def _plugin_activated(plugin: dict, enabled_set: set, disabled_set: set) -> bool:
-    """Gate: user plugins must be in plugins.enabled and not in plugins.disabled;
-    bundled plugins must not be explicitly disabled. Keeps the frontend from
-    loading JS/CSS from plugins the user never activated."""
+    """Gate: user plugins must be in plugins.enabled and not in plugins.disabled; bundled
+    plugins must not be explicitly disabled — the frontend must never load JS/CSS from
+    plugins the user never activated."""
     name = plugin.get("name", "")
     source = plugin.get("source")
     if source == "user":
@@ -164,8 +162,8 @@ async def get_plugins_hub(request: Request):
 
 
 def _plugin_action(result: dict, fallback_error: str, *, rescan: bool) -> dict:
-    """Common tail of the agent-plugin mutations: 400 on ``ok=False``, then
-    invalidate caches (rescanning discovery when files changed on disk)."""
+    """Common tail of agent-plugin mutations: 400 on ``ok=False``, then invalidate caches
+    (rescanning discovery when files changed on disk)."""
     if not result.get("ok"):
         raise HTTPException(status_code=400, detail=result.get("error") or fallback_error)
     if rescan:
@@ -271,9 +269,8 @@ async def post_plugin_visibility(request: Request, name: str, body: _PluginVisib
     return await asyncio.to_thread(_run)
 
 
-# Browser-asset suffix allowlist. Everything outside this set is 404'd so we
-# never leak ``.py`` backend sources, READMEs, ``.env.example`` templates, etc.
-# Add to it deliberately when a new asset type comes up; do NOT add a fallback.
+# Browser-asset suffix allowlist. Everything else is 404'd so we never leak ``.py`` backend
+# sources, READMEs, ``.env.example`` etc. Extend deliberately; do NOT add a fallback.
 _PLUGIN_ASSET_CONTENT_TYPES = {
     ".js": "application/javascript", ".mjs": "application/javascript", ".css": "text/css",
     ".json": "application/json", ".html": "text/html", ".svg": "image/svg+xml",
@@ -287,14 +284,12 @@ _PLUGIN_ASSET_CONTENT_TYPES = {
 async def serve_plugin_asset(plugin_name: str, file_path: str):
     """Serve static assets from a dashboard plugin's ``dashboard/`` directory.
 
-    Unauthenticated on purpose: the SPA loads plugin JS via ``<script src>``
-    and CSS via ``<link href>``, which cannot attach an auth header. That is
-    why the suffix allowlist exists — user plugins ship a ``plugin_api.py``
-    backend the browser never fetches, and without it anyone on the loopback
-    port could curl a private plugin's source. Path traversal is blocked via
-    ``resolve().is_relative_to()``; user plugins must be enabled (bundled ones
-    not disabled) before their assets are served (GHSA-mcfc-hp25-cjv7).
-    """
+    Unauthenticated on purpose: the SPA loads plugin JS via ``<script src>`` and CSS
+    via ``<link href>``, which cannot attach an auth header. Hence the suffix
+    allowlist — user plugins ship a ``plugin_api.py`` backend the browser never
+    fetches, and without it anyone on the loopback port could curl a private
+    plugin's source. Path traversal is blocked via ``resolve().is_relative_to()``;
+    user plugins must be enabled (bundled ones not disabled) (GHSA-mcfc-hp25-cjv7)."""
     plugins = _get_dashboard_plugins()
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
     if not plugin or not _plugin_activated(plugin, *_plugin_enable_sets()):
