@@ -297,11 +297,8 @@ def _no_proxy_entry_matches(entry: str, host: str, port: int | None = None) -> b
         return False
     host_ip = _ip_or_none(host)
     network = _ip_or_none(token_host, lambda v: ipaddress.ip_network(v, strict=False))
-    if network is not None:
+    if network is not None:  # CIDR or bare IP literal (a /32 / /128 network)
         return host_ip is not None and host_ip in network
-    token_ip = _ip_or_none(token_host)
-    if token_ip is not None:
-        return host_ip == token_ip
     if token_host.startswith("*."):
         return host.endswith(token_host[1:])
     if token_host.startswith("."):
@@ -874,9 +871,7 @@ def _parse_docker_volume_mounts() -> List[Tuple[Path, Path]]:
     except Exception:
         return []
     mounts: List[Tuple[Path, Path]] = []
-    if not isinstance(parsed, list):
-        return mounts
-    for entry in parsed:
+    for entry in parsed if isinstance(parsed, list) else ():
         spec = entry.strip() if isinstance(entry, str) else ""
         # Prefer the first ':/' so absolute container paths are unambiguous.
         sep = spec.find(":/")
@@ -1021,11 +1016,9 @@ def _translate_docker_container_media_path(candidate: Path, session_key: str = "
         return None
     matched.sort(key=lambda m: -m[2])
     for host_root, container_root, _score in matched:
-        try:
-            translated = (host_root / candidate.relative_to(container_root)).resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if translated == host_root or _path_is_within(translated, host_root):
+        translated = _resolve_path(host_root / candidate.relative_to(container_root), strict=True)
+        if translated is not None and (
+                translated == host_root or _path_is_within(translated, host_root)):
             return translated
     _warn_unresolved_docker_media(candidate, session_key, "host file missing from sandbox")
     return None
@@ -1867,24 +1860,22 @@ class BasePlatformAdapter(ABC):
         from gateway.stream_events import ToolCallChunk
         if not isinstance(event, ToolCallChunk):
             return None
-        from agent.display import get_tool_emoji
-        emoji = get_tool_emoji(event.tool_name, default="⚙️")
+        from agent.display import get_tool_emoji, prepare_tool_preview
+        head = f"{get_tool_emoji(event.tool_name, default='⚙️')} {event.tool_name}"
         if mode == "verbose" and event.args:
             import json
             args_str = json.dumps(event.args, ensure_ascii=False, default=str)
             if preview_max_len > 0 and len(args_str) > preview_max_len:
                 args_str = args_str[:preview_max_len - 3] + "..."
-            return f"{emoji} {event.tool_name}({list(event.args.keys())})\n{args_str}"
-        if event.preview:
-            if mode == "verbose":
-                return f"{emoji} {event.tool_name}: \"{event.preview}\""
-            # "all" / "new": short capped preview (default 40; progress bubbles persist as messages).
-            from agent.display import prepare_tool_preview
-            cap = preview_max_len if preview_max_len > 0 else 40
-            prepared = prepare_tool_preview(
-                event.tool_name, event.args, fallback=event.preview, max_len=cap)
-            return f"{emoji} {event.tool_name}: \"{self.format_tool_preview(prepared)}\""
-        return f"{emoji} {event.tool_name}..."
+            return f"{head}({list(event.args.keys())})\n{args_str}"
+        if not event.preview:
+            return f"{head}..."
+        if mode == "verbose":
+            return f'{head}: "{event.preview}"'
+        # "all" / "new": short capped preview (default 40; progress bubbles persist as messages).
+        cap = preview_max_len if preview_max_len > 0 else 40
+        prepared = prepare_tool_preview(event.tool_name, event.args, fallback=event.preview, max_len=cap)
+        return f'{head}: "{self.format_tool_preview(prepared)}"'
 
     def format_tool_preview(self, preview: "ToolPreview") -> str:
         """Platform-native formatting of a compact tool preview; rich-text adapters may use
@@ -2099,19 +2090,22 @@ class BasePlatformAdapter(ABC):
         non-boolean is "unknown", never an authorization that gates a credentialed side effect."""
         if not user_id or self._authorization_check is None:
             return None
-        extra: Dict[str, Any] = {**({"is_bot": True} if is_bot else {}),
-                                 **({"thread_id": thread_id} if thread_id is not None else {})}
+        extra: Dict[str, Any] = {}
+        if is_bot:
+            extra["is_bot"] = True
+        if thread_id is not None:
+            extra["thread_id"] = thread_id
         try:
             result = self._authorization_check(user_id, chat_type, chat_id, **extra)
-            if result is True or result is False:
-                return result
-            logger.warning("[%s] Authorization check returned %s for user %s; treating as unknown",
-                           self.name, type(result).__name__, user_id)
-            return None
         except Exception:
             logger.warning("[%s] Authorization check raised for user %s; treating as unknown",
                            self.name, user_id, exc_info=True)
             return None
+        if result is True or result is False:
+            return result
+        logger.warning("[%s] Authorization check returned %s for user %s; treating as unknown",
+                       self.name, type(result).__name__, user_id)
+        return None
 
     def set_session_store(self, session_store: Any) -> None:
         """Set the session store (e.g. Slack checks for an active thread session
@@ -2839,20 +2833,23 @@ class BasePlatformAdapter(ABC):
             # Same-or-newer generation: chain so both fire in registration order.
             if callable(existing_cb) and (
                 existing_gen is None or generation is None or int(existing_gen) == int(generation)):
-                _chain = (existing_cb, callback)
-
-                async def _chained() -> None:
-                    # Async so coroutines returned by async hooks are awaited, not dropped.
-                    for _cb in _chain:
-                        try:
-                            _result = _cb()
-                            if inspect.isawaitable(_result):
-                                await _result
-                        except Exception:
-                            logger.debug("Post-delivery callback failed", exc_info=True)
-                callback = _chained
+                callback = self._chain_callbacks(existing_cb, callback)
         self._post_delivery_callbacks[session_key] = (
             callback if generation is None else (int(generation), callback))
+
+    @staticmethod
+    def _chain_callbacks(*callbacks: Callable) -> Callable[[], Awaitable[None]]:
+        """Async wrapper running ``callbacks`` in order with per-callback exception isolation;
+        async so coroutines returned by async hooks are awaited, not dropped."""
+        async def _chained() -> None:
+            for _cb in callbacks:
+                try:
+                    _result = _cb()
+                    if inspect.isawaitable(_result):
+                        await _result
+                except Exception:
+                    logger.debug("Post-delivery callback failed", exc_info=True)
+        return _chained
 
     def pop_post_delivery_callback(
         self, session_key: str, *, generation: int | None = None) -> Callable | None:
@@ -2886,16 +2883,14 @@ class BasePlatformAdapter(ABC):
         add: Any = getattr(self, "_add_reaction", None)
         remove: Any = getattr(self, "_remove_reaction", None)
         enabled = getattr(self, "_reactions_enabled", None)
-        if not callable(add) or not callable(remove) or (callable(enabled) and not enabled()):
-            return
         chat_id = getattr(event.source, "chat_id", None)
         message_id = getattr(event, "message_id", None)
-        if not chat_id or not message_id:
+        if (not callable(add) or not callable(remove) or (callable(enabled) and not enabled())
+                or not chat_id or not message_id):
             return
         await remove(chat_id, message_id)
-        emoji = (
-            self._OK_EMOJI if outcome == ProcessingOutcome.SUCCESS
-            else self._FAIL_EMOJI if outcome == ProcessingOutcome.FAILURE else None)
+        emoji = {ProcessingOutcome.SUCCESS: self._OK_EMOJI,
+                 ProcessingOutcome.FAILURE: self._FAIL_EMOJI}.get(outcome)
         if emoji:
             await add(chat_id, message_id, emoji)
 
@@ -3124,9 +3119,8 @@ class BasePlatformAdapter(ABC):
             return False
         state.cancel_timer(unless=asyncio.current_task())
         state.task = None
-        existing_pending = self._pending_messages.get(session_key)
-        if (existing_pending is not None
-            and not self._can_merge_text_debounce_events(existing_pending, state.event)):
+        pending = self._pending_messages.get(session_key)
+        if pending is not None and not self._can_merge_text_debounce_events(pending, state.event):
             return False
         store.pop(session_key, None)
         merge_pending_message_event(self._pending_messages, session_key, state.event, merge_text=True)
@@ -3483,13 +3477,12 @@ class BasePlatformAdapter(ABC):
             else:
                 result = await self.send_document(chat_id=chat_id, file_path=path, metadata=metadata)
             if not result.success:
-                label = "media" if media_tag else "local file"
-                logger.warning("[%s] Failed to send %s (%s): %s", self.name, label, ext, result.error)
+                logger.warning("[%s] Failed to send %s (%s): %s", self.name,
+                               "media" if media_tag else "local file", ext, result.error)
                 await self._notify_media_delivery_failure(chat_id, path, is_voice=is_voice, metadata=metadata)
-        _non_image_media = [(p, v) for p, v in media_files if v or not _as_image(p)]
-        if _non_image_media:
-            logger.info("[%s] Delivering %d non-image MEDIA attachment(s)", self.name, len(_non_image_media))
-        queue = [(p, v, True) for p, v in _non_image_media]
+        queue = [(p, v, True) for p, v in media_files if v or not _as_image(p)]
+        if queue:
+            logger.info("[%s] Delivering %d non-image MEDIA attachment(s)", self.name, len(queue))
         queue += [(p, False, False) for p in local_files if not _as_image(p)]
         for path, is_voice, media_tag in queue:
             if human_delay > 0:
@@ -3596,16 +3589,14 @@ class BasePlatformAdapter(ABC):
         if not is_ephemeral_response:
             local_files, text_content = self.extract_local_files(text_content)
             local_files = self.filter_local_delivery_paths(local_files, session_key=session_key)
-            _history_media_paths = (
-                await self._bounded_history_media_paths_for_session(session_key)
-                if local_files else None)
-            if _history_media_paths:
-                _suppressed = [p for p in local_files if p in _history_media_paths]
-                if _suppressed:
-                    logger.info(
-                        "[%s] Suppressing %d bare local file path(s) already "
-                        "delivered in this session: %s", self.name, len(_suppressed), _suppressed)
-                local_files = [p for p in local_files if p not in _history_media_paths]
+            history = (await self._bounded_history_media_paths_for_session(session_key)
+                       if local_files else None)
+            if history:
+                suppressed = [p for p in local_files if p in history]
+                if suppressed:
+                    logger.info("[%s] Suppressing %d bare local file path(s) already delivered in "
+                                "this session: %s", self.name, len(suppressed), suppressed)
+                    local_files = [p for p in local_files if p not in history]
             if local_files:
                 logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
         if not (text_content or images or local_files or media_files):
@@ -3684,10 +3675,10 @@ class BasePlatformAdapter(ABC):
                 text_content, media_files = extracted.text_content, extracted.media_files
                 # Final content gets notify=True; typing metadata stays unmarked (thread-strict).
                 _final_thread_metadata = _mark_notify_metadata(_thread_metadata)
-                _tts_paths, _tts_requested_path = (
-                    await self._synthesize_auto_tts(text_content)
-                    if self._wants_auto_tts(event, session_key, interrupt_event, text_content, media_files)
-                    else ([], None))
+                _tts_paths, _tts_requested_path = [], None
+                if self._wants_auto_tts(
+                        event, session_key, interrupt_event, text_content, media_files):
+                    _tts_paths, _tts_requested_path = await self._synthesize_auto_tts(text_content)
                 # TTS plays before text; generated files are removed afterwards.
                 _tts_caption_delivered = False
                 for _tts_index, _tts_path in enumerate(_tts_paths):
@@ -3833,11 +3824,10 @@ class BasePlatformAdapter(ABC):
                       parent_chat_id=_opt(parent_chat_id), message_id=_opt(message_id))
         profile = None  # from configured routes; None when no match / no routes
         profile_route_rejected = False
-        runner = self.gateway_runner
-        if runner is not None:
+        if self.gateway_runner is not None:
             from gateway.profile_routing import ProfileRouteRejected
             try:
-                profile = runner._profile_name_for_source(SessionSource(**fields))
+                profile = self.gateway_runner._profile_name_for_source(SessionSource(**fields))
             except ProfileRouteRejected:
                 profile_route_rejected = True
             except Exception:
@@ -3923,12 +3913,9 @@ class BasePlatformAdapter(ABC):
             full_chunk = prefix + chunk_body
             # Walk only chunk_body (not the prepended prefix) for the fence state.
             in_code, lang = fence_state_after(chunk_body, carry_lang is not None, carry_lang or "")
-            if in_code:
-                full_chunk += FENCE_CLOSE  # Close the orphaned fence so the chunk stands alone
-                carry_lang = lang
-            else:
-                carry_lang = None
-            chunks.append(full_chunk)
+            carry_lang = lang if in_code else None
+            # Close the orphaned fence so the chunk stands alone.
+            chunks.append(full_chunk + FENCE_CLOSE if in_code else full_chunk)
         if len(chunks) > 1:
             chunks = [f"{chunk} ({i + 1}/{len(chunks)})" for i, chunk in enumerate(chunks)]
         return chunks
