@@ -1,12 +1,11 @@
 """Generic slash-command confirmation primitive (gateway-side).
 
-Slash commands with an expensive side effect (currently only ``/reload-mcp``,
-which invalidates the provider prompt cache) route through here. Button-UI
-adapters render Approve Once / Always Approve / Cancel and call ``resolve()``;
-text-only adapters get a prompt and the gateway intercepts ``/approve``,
-``/always``, ``/cancel``. State is module-level (like ``tools.approval``) so
-adapters can resolve without a ``GatewayRunner`` backreference. The CLI has its
-own synchronous variant (``_prompt_slash_confirm`` in ``cli.py``).
+Slash commands with an expensive side effect (currently only ``/reload-mcp``, which invalidates
+the provider prompt cache) route through here. Button-UI adapters render Approve Once / Always
+Approve / Cancel and call ``resolve()``; text-only adapters get a prompt and the gateway
+intercepts ``/approve``, ``/always``, ``/cancel``. State is module-level (like ``tools.approval``)
+so adapters can resolve without a ``GatewayRunner`` backreference. The CLI has its own
+synchronous variant (``_prompt_slash_confirm`` in ``cli.py``).
 """
 
 from __future__ import annotations
@@ -22,17 +21,13 @@ logger = logging.getLogger(__name__)
 _pending: Dict[str, Dict[str, Any]] = {}
 _lock = threading.RLock()
 
-# A pending confirm older than this is discarded when the next message arrives
-# for the same session (buttons live as long as the adapter keeps callback_data).
+# Older pending confirms are discarded when the session's next message arrives (buttons live
+# as long as the adapter keeps callback_data).
 DEFAULT_TIMEOUT_SECONDS = 300
 
 
-def register(
-    session_key: str,
-    confirm_id: str,
-    command: str,
-    handler: Callable[[str], Awaitable[Optional[str]]],
-) -> None:
+def register(session_key: str, confirm_id: str, command: str,
+             handler: Callable[[str], Awaitable[Optional[str]]]) -> None:
     """Register a pending confirm, superseding any prior one for the session."""
     with _lock:
         _pending[session_key] = {"confirm_id": confirm_id, "command": command,
@@ -60,29 +55,24 @@ def clear_if_stale(session_key: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -
     """Drop the pending confirm if older than ``timeout`` seconds; True if dropped."""
     with _lock:
         entry = _pending.get(session_key)
-        if entry and _is_stale(entry, timeout):
+        stale = bool(entry and _is_stale(entry, timeout))
+        if stale:
             _pending.pop(session_key, None)
-            return True
-        return False
+        return stale
 
 
-async def resolve(
-    session_key: str,
-    confirm_id: str,
-    choice: str,
-    timeout: float = DEFAULT_TIMEOUT_SECONDS,
-) -> Optional[str]:
+async def resolve(session_key: str, confirm_id: str, choice: str,
+                  timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Optional[str]:
     """Run the pending handler with ``choice`` ("once" / "always" / "cancel").
 
-    Returns the handler's output string, or None if the confirm was stale,
-    already resolved, or the confirm_id doesn't match (superseded prompt).
+    Returns the handler's output string, or None if the confirm was stale, already resolved,
+    or the confirm_id doesn't match (superseded prompt).
     """
     with _lock:
         entry = _pending.get(session_key)
         if not entry or entry.get("confirm_id") != confirm_id:
             return None
-        # Pop before running so duplicate callbacks (button double-click)
-        # cannot run the handler twice.
+        # Pop before running so duplicate callbacks (button double-click) cannot run it twice.
         _pending.pop(session_key, None)
         if _is_stale(entry, timeout):
             return None
