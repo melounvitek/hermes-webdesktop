@@ -85,6 +85,11 @@ _RE_SINGLE_ENTITY = (
 )
 _RE_AKA = re.compile(r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)', re.IGNORECASE)
 _ENTITY_NAMES_SQL = "SELECT e.name FROM entities e JOIN fact_entities fe ON fe.entity_id = e.entity_id WHERE fe.fact_id = ?"
+# Entity lookup order: exact name, then aliases (comma-separated; wrapped in commas for whole-alias matching).
+_ENTITY_LOOKUPS = (
+    "SELECT entity_id FROM entities WHERE name LIKE ?",
+    "SELECT entity_id FROM entities WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'",
+)
 
 
 def _clamp_trust(value: float) -> float:
@@ -113,9 +118,7 @@ class MemoryStore:
         self.default_trust = _clamp_trust(default_trust)
         self.hrr_dim = hrr_dim
         self._hrr_available = hrr._HAS_NUMPY
-
-        # resolve() so symlinked/relative paths to the same file share ONE connection.
-        try:
+        try:  # resolve() so symlinked/relative paths to the same file share ONE connection
             self._key = str(self.db_path.resolve())
         except OSError:
             self._key = str(self.db_path)
@@ -140,12 +143,9 @@ class MemoryStore:
         from hermes_state import apply_wal_with_fallback
         apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
         self._conn.executescript(_SCHEMA)
-        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
-        if "hrr_vector" not in columns:
+        if "hrr_vector" not in {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         self._conn.commit()
-
-    # -- SQL helpers ----------------------------------------------------------
 
     def _one(self, sql: str, params=()):
         return self._conn.execute(sql, params).fetchone()
@@ -220,9 +220,7 @@ class MemoryStore:
 
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
         """Adjust trust asymmetrically: helpful -> +0.05 and helpful_count += 1; unhelpful -> -0.10.
-
-        Returns {fact_id, old_trust, new_trust, helpful_count}. Raises KeyError if fact_id is unknown.
-        """
+        Returns {fact_id, old_trust, new_trust, helpful_count}. Raises KeyError if fact_id is unknown."""
         with self._lock:
             row = self._one("SELECT fact_id, trust_score, helpful_count FROM facts WHERE fact_id = ?", (fact_id,))
             if row is None:
@@ -256,9 +254,7 @@ class MemoryStore:
 
     def _resolve_entity(self, name: str) -> int:
         """Return the entity_id for a case-insensitive name or alias match, creating the entity if absent."""
-        # Name first, then aliases (comma-separated; wrapped in commas for whole-alias matching).
-        for sql in ("SELECT entity_id FROM entities WHERE name LIKE ?",
-                    "SELECT entity_id FROM entities WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'"):
+        for sql in _ENTITY_LOOKUPS:
             row = self._one(sql, (name,))
             if row is not None:
                 return int(row["entity_id"])
@@ -268,9 +264,9 @@ class MemoryStore:
         """Compute and store the HRR vector for a fact (linked entities as roles). No-op without numpy."""
         if not self._hrr_available:
             return
-        rows = self._conn.execute(_ENTITY_NAMES_SQL, (fact_id,)).fetchall()
-        vector = hrr.encode_fact(content, [row["name"] for row in rows], self.hrr_dim)
-        self._write("UPDATE facts SET hrr_vector = ? WHERE fact_id = ?", (hrr.phases_to_bytes(vector), fact_id))
+        entities = [row["name"] for row in self._conn.execute(_ENTITY_NAMES_SQL, (fact_id,)).fetchall()]
+        blob = hrr.phases_to_bytes(hrr.encode_fact(content, entities, self.hrr_dim))
+        self._write("UPDATE facts SET hrr_vector = ? WHERE fact_id = ?", (blob, fact_id))
 
     def _rebuild_bank(self, category: str) -> None:
         """Full rebuild of a category's memory bank from all its fact vectors."""

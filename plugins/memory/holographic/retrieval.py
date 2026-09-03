@@ -23,6 +23,22 @@ _FACT_COLUMNS = (
 _ROLE_ENTITY = "__hrr_role_entity__"
 _ROLE_CONTENT = "__hrr_role_content__"
 _PUNCT = ".,;:!?\"'()[]{}#@<>"
+_FTS_OPERATORS = str.maketrans("", "", '"()*^:-+')
+# Stopwords dropped before FTS5 OR-expansion: short English function words that
+# carry no retrieval signal and force false-negative AND matches.
+_FTS_STOPWORDS = frozenset("""
+    a about above after again all am an and any are as at be because been before being between both but by
+    can could did do does doing don down during each few for from further had has have having he her here hers
+    herself him himself his how i if in into is it its itself just me more most my myself no nor not now of off
+    on once only or other our ours ourselves out over own same she should so some such than that the their theirs
+    them themselves then there these they this those through to too under until up very was we were what when
+    where which while who whom why will with would you your yours yourself yourselves
+""".split())
+
+
+def _shift(sim: float) -> float:
+    """Cosine similarity [-1, 1] -> [0, 1]."""
+    return (sim + 1.0) / 2.0
 
 
 class FactRetriever:
@@ -45,36 +61,31 @@ class FactRetriever:
     def _atom(self, word: str):
         return hrr.encode_atom(word, self.hrr_dim)
 
-    def search(self, query: str, category: str | None = None, min_trust: float = 0.3, limit: int = 10) -> list[dict]:
-        """Hybrid search: FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust
-        weighting → optional temporal decay 0.5^(age_days / half_life).
+    def _phases(self, blob: bytes):
+        return hrr.bytes_to_phases(blob, dim=self.hrr_dim)
 
-        Returns fact dicts with a 'score' field, sorted by score desc.
-        """
+    def search(self, query: str, category: str | None = None, min_trust: float = 0.3, limit: int = 10) -> list[dict]:
+        """Hybrid search: FTS5 candidates (limit*3) → Jaccard + HRR rerank → trust weighting →
+        optional temporal decay 0.5^(age_days / half_life). Returns fact dicts with 'score', sorted desc."""
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
         if not candidates:
             return []
-
         query_tokens = self._tokenize(query)
         # Query vector is loop-invariant; encode lazily on the first candidate that carries
         # an HRR vector so stores whose hrr_vector was never backfilled don't pay for it.
         query_vec = None
         for fact in candidates:
-            all_tokens = self._tokenize(fact["content"]) | self._tokenize(fact.get("tags", ""))
-            jaccard = self._jaccard_similarity(query_tokens, all_tokens)
+            jaccard = self._jaccard_similarity(query_tokens, self._tokenize(fact["content"]) | self._tokenize(fact.get("tags", "")))
             hrr_sim = 0.5  # neutral
             if self.hrr_weight > 0 and fact.get("hrr_vector"):
-                fact_vec = hrr.bytes_to_phases(fact["hrr_vector"], dim=self.hrr_dim)
+                fact_vec = self._phases(fact["hrr_vector"])
                 if query_vec is None:
                     query_vec = hrr.encode_text(query, self.hrr_dim)
-                hrr_sim = (hrr.similarity(query_vec, fact_vec) + 1.0) / 2.0  # shift to [0,1]
-            relevance = (self.fts_weight * fact.get("fts_rank", 0.0)
-                         + self.jaccard_weight * jaccard
-                         + self.hrr_weight * hrr_sim)
+                hrr_sim = _shift(hrr.similarity(query_vec, fact_vec))
+            relevance = self.fts_weight * fact.get("fts_rank", 0.0) + self.jaccard_weight * jaccard + self.hrr_weight * hrr_sim
             fact["score"] = relevance * fact["trust_score"]
             if self.half_life > 0:
                 fact["score"] *= self._temporal_decay(fact.get("updated_at") or fact.get("created_at"))
-
         candidates.sort(key=lambda x: x["score"], reverse=True)
         results = candidates[:limit]
         for fact in results:
@@ -87,22 +98,13 @@ class FactRetriever:
         Not keyword search. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
-
         role_entity = self._atom(_ROLE_ENTITY)
         probe_key = hrr.bind(self._atom(entity.lower()), role_entity)
-
-        # Try the category-specific bank first, then individual fact vectors
-        if category:
-            bank_row = self.store._conn.execute(
-                "SELECT vector FROM memory_banks WHERE bank_name = ?",
-                (f"cat:{category}",),
-            ).fetchone()
+        if category:  # category bank first, then individual fact vectors
+            bank_row = self.store._conn.execute("SELECT vector FROM memory_banks WHERE bank_name = ?", (f"cat:{category}",)).fetchone()
             if bank_row:
-                extracted = hrr.unbind(hrr.bytes_to_phases(bank_row["vector"], dim=self.hrr_dim), probe_key)
-                return self._rank_by_vector(
-                    self._vector_rows(category), lambda _f, fact_vec: hrr.similarity(extracted, fact_vec), limit,
-                )
-
+                extracted = hrr.unbind(self._phases(bank_row["vector"]), probe_key)
+                return self._rank_by_vector(self._vector_rows(category), lambda _f, fact_vec: hrr.similarity(extracted, fact_vec), limit)
         rows = self._vector_rows(category)
         if not rows:
             return self.search(entity, category=category, limit=limit)
@@ -120,7 +122,6 @@ class FactRetriever:
         *about* it as in probe. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
-
         entity_vec = self._atom(entity.lower())  # bare atom, not role-bound: ANY structural match
         rows = self._vector_rows(category)
         if not rows:
@@ -139,7 +140,6 @@ class FactRetriever:
         play structural roles. Falls back to FTS5 without numpy."""
         if not hrr._HAS_NUMPY or not entities:
             return self.search(" ".join(entities), category=category, limit=limit)
-
         role_entity = self._atom(_ROLE_ENTITY)
         probe_keys = [hrr.bind(self._atom(entity.lower()), role_entity) for entity in entities]
         rows = self._vector_rows(category)
@@ -158,17 +158,11 @@ class FactRetriever:
         content-vector similarity (different claims). Empty without numpy."""
         if not hrr._HAS_NUMPY:
             return []
-
-        rows = self._vector_rows(
-            category,
-            columns="fact_id, content, category, tags, trust_score, created_at, updated_at, hrr_vector",
-        )
+        rows = self._vector_rows(category, columns="fact_id, content, category, tags, trust_score, created_at, updated_at, hrr_vector")
         if len(rows) < 2:
             return []
-        # O(n²) guard: above 500 facts only compare the most recently updated ones.
-        if len(rows) > 500:
+        if len(rows) > 500:  # O(n²) guard: only compare the most recently updated facts
             rows = sorted(rows, key=lambda r: r["updated_at"] or r["created_at"], reverse=True)[:500]
-
         facts = [dict(r) for r in rows]
         for fact in facts:
             entity_rows = self.store._conn.execute(
@@ -176,7 +170,7 @@ class FactRetriever:
                 (fact["fact_id"],),
             ).fetchall()
             fact["_entities"] = {r["name"].lower() for r in entity_rows}
-            fact["_vec"] = hrr.bytes_to_phases(fact.pop("hrr_vector"), dim=self.hrr_dim)
+            fact["_vec"] = self._phases(fact.pop("hrr_vector"))
 
         def _public(fact: dict) -> dict:
             return {k: v for k, v in fact.items() if k not in ("_entities", "_vec")}
@@ -191,18 +185,15 @@ class FactRetriever:
                 if entity_overlap < 0.3:
                     continue  # not enough shared subject to be contradictory
                 content_sim = hrr.similarity(f1["_vec"], f2["_vec"])
-                # High entity overlap + low content similarity = contradiction
-                contradiction_score = entity_overlap * (1.0 - (content_sim + 1.0) / 2.0)
+                contradiction_score = entity_overlap * (1.0 - _shift(content_sim))  # high overlap + low similarity
                 if contradiction_score >= threshold:
                     contradictions.append({
-                        "fact_a": _public(f1),
-                        "fact_b": _public(f2),
+                        "fact_a": _public(f1), "fact_b": _public(f2),
                         "entity_overlap": round(entity_overlap, 3),
                         "content_similarity": round(content_sim, 3),
                         "contradiction_score": round(contradiction_score, 3),
                         "shared_entities": sorted(ents1 & ents2),
                     })
-
         contradictions.sort(key=lambda x: x["contradiction_score"], reverse=True)
         return contradictions[:limit]
 
@@ -210,21 +201,14 @@ class FactRetriever:
 
     def _vector_rows(self, category: str | None, columns: str = _FACT_COLUMNS + ", hrr_vector") -> list:
         """All facts that carry an HRR vector, optionally filtered by category."""
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
-        if category:
-            where += " AND category = ?"
-            params.append(category)
-        return self.store._conn.execute(f"SELECT {columns} FROM facts {where}", params).fetchall()
+        where = "WHERE hrr_vector IS NOT NULL" + (" AND category = ?" if category else "")
+        return self.store._conn.execute(f"SELECT {columns} FROM facts {where}", [category] if category else []).fetchall()
 
     def _rank_by_vector(self, rows: list, sim_fn: Callable[[dict, object], float], limit: int) -> list[dict]:
         """Score each row as (sim + 1) / 2 * trust_score (sim shifted to [0, 1]), sorted desc."""
-        scored = []
-        for row in rows:
-            fact = dict(row)
-            fact_vec = hrr.bytes_to_phases(fact.pop("hrr_vector"), dim=self.hrr_dim)
-            fact["score"] = (sim_fn(fact, fact_vec) + 1.0) / 2.0 * fact["trust_score"]
-            scored.append(fact)
+        scored = [dict(row) for row in rows]
+        for fact in scored:
+            fact["score"] = _shift(sim_fn(fact, self._phases(fact.pop("hrr_vector")))) * fact["trust_score"]
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
 
@@ -241,13 +225,11 @@ class FactRetriever:
             "ORDER BY facts_fts.rank LIMIT ?"
         )
         try:
-            rows = self.store._conn.execute(sql, params).fetchall()
+            results = [dict(row) for row in self.store._conn.execute(sql, params).fetchall()]
         except Exception:
             return []  # FTS5 MATCH can fail on malformed queries
-        if not rows:
+        if not results:
             return []
-
-        results = [dict(row) for row in rows]
         # FTS5 rank is negative (lower = better); normalize |rank| / max to [0, 1]
         max_rank = max(max(abs(f["fts_rank_raw"]) for f in results), 1e-6)  # avoid div by zero
         for fact in results:
@@ -257,25 +239,10 @@ class FactRetriever:
     @staticmethod
     def _tokenize(text: str) -> set[str]:
         """Lowercase whitespace tokens with surrounding punctuation stripped (no stemming)."""
-        if not text:
-            return set()
-        return {c for c in (w.strip(_PUNCT) for w in text.lower().split()) if c}
+        return {c for c in (w.strip(_PUNCT) for w in text.lower().split()) if c} if text else set()
 
-    # Stopwords dropped before FTS5 OR-expansion: short English function words
-    # that carry no retrieval signal and force false-negative AND matches.
-    _FTS_STOPWORDS = frozenset("""
-        a about above after again all am an and any are as at be because been before being
-        between both but by can could did do does doing don down during each few for from
-        further had has have having he her here hers herself him himself his how i if in
-        into is it its itself just me more most my myself no nor not now of off on once
-        only or other our ours ourselves out over own same she should so some such than that
-        the their theirs them themselves then there these they this those through to too under
-        until up very was we were what when where which while who whom why will with would
-        you your yours yourself yourselves
-    """.split())
-
-    @classmethod
-    def _sanitize_fts_query(cls, query: str) -> str:
+    @staticmethod
+    def _sanitize_fts_query(query: str) -> str:
         """Natural-language query -> FTS5-safe OR expression of quoted tokens.
 
         FTS5 AND-joins a multi-word MATCH by default, which tanks recall on prose. Drops
@@ -284,12 +251,8 @@ class FactRetriever:
         """
         if not query:
             return ""
-        strip_special = str.maketrans("", "", '"()*^:-+')
-        tokens = [
-            f'"{cleaned}"'
-            for cleaned in (raw.strip(_PUNCT).translate(strip_special) for raw in query.lower().split())
-            if len(cleaned) >= 2 and cleaned not in cls._FTS_STOPWORDS
-        ]
+        tokens = [f'"{c}"' for c in (raw.strip(_PUNCT).translate(_FTS_OPERATORS) for raw in query.lower().split())
+                  if len(c) >= 2 and c not in _FTS_STOPWORDS]
         return " OR ".join(tokens) if tokens else query
 
     @staticmethod

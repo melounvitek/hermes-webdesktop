@@ -109,6 +109,15 @@ def _limit(args: dict) -> int:
     return int(args.get("limit", 10))
 
 
+def _tool_handler(actions: dict):
+    """Return a bound-style handler dispatching on args["action"] over ``actions`` (unknown -> tool_error)."""
+    def handle(self, args: dict) -> str:
+        action = args["action"]
+        handler = actions.get(action)
+        return handler(self, args) if handler is not None else tool_error(f"Unknown action: {action}")
+    return handle
+
+
 class HolographicMemoryProvider(MemoryProvider):
     """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
 
@@ -153,18 +162,13 @@ class HolographicMemoryProvider(MemoryProvider):
         from hermes_constants import get_hermes_home
         _hermes_home = str(get_hermes_home())
         db_path = self._config.get("db_path", _hermes_home + "/memory_store.db")
-        # Expand $HERMES_HOME so configured paths resolve to the active profile's directory.
-        if isinstance(db_path, str):
+        if isinstance(db_path, str):  # expand $HERMES_HOME so paths resolve to the active profile
             db_path = db_path.replace("$HERMES_HOME", _hermes_home).replace("${HERMES_HOME}", _hermes_home)
         hrr_dim = int(self._config.get("hrr_dim", 1024))
-        self._store = MemoryStore(
-            db_path=db_path, default_trust=float(self._config.get("default_trust", 0.5)), hrr_dim=hrr_dim,
-        )
+        self._store = MemoryStore(db_path=db_path, default_trust=float(self._config.get("default_trust", 0.5)), hrr_dim=hrr_dim)
         self._retriever = FactRetriever(
-            store=self._store,
-            temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)),
-            hrr_weight=float(self._config.get("hrr_weight", 0.3)),
-            hrr_dim=hrr_dim,
+            store=self._store, temporal_decay_half_life=int(self._config.get("temporal_decay_half_life", 0)),
+            hrr_weight=float(self._config.get("hrr_weight", 0.3)), hrr_dim=hrr_dim,
         )
         self._session_id = session_id
 
@@ -189,16 +193,11 @@ class HolographicMemoryProvider(MemoryProvider):
             return ""
         try:
             results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
-            if not results:
-                return ""
             lines = [f"- [{r.get('trust_score', r.get('trust', 0)):.1f}] {r.get('content', '')}" for r in results]
-            return "## Holographic Memory\n" + "\n".join(lines)
+            return "## Holographic Memory\n" + "\n".join(lines) if results else ""
         except Exception as e:
             logger.debug("Holographic prefetch failed: %s", e)
             return ""
-
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        pass  # facts are stored explicitly via tools; on_session_end handles auto-extraction
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return [FACT_STORE_SCHEMA, FACT_FEEDBACK_SCHEMA]
@@ -239,50 +238,42 @@ class HolographicMemoryProvider(MemoryProvider):
         self._store = None
         self._retriever = None
 
-    # Tool handlers. KeyError from args[...] / Exception -> tool_error in handle_tool_call.
+    # -- Tool handlers: KeyError from args[...] / Exception -> tool_error in handle_tool_call. ---
     # Argument coercion order (and therefore which error surfaces first) mirrors the call order.
 
-    def _handle_fact_store(self, args: dict) -> str:
-        action = args["action"]
-        handler = self._FACT_STORE_ACTIONS.get(action)
-        if handler is None:
-            return tool_error(f"Unknown action: {action}")
-        return handler(self, args)
-
-    def _entity_query(self, method: str, args: dict) -> str:
+    def _entity_query(self, method: str, a: dict) -> str:
         """'probe' / 'related': single-entity retriever queries."""
-        return _results(getattr(self._retriever, method)(args["entity"], category=args.get("category"), limit=_limit(args)))
+        return _results(getattr(self._retriever, method)(a["entity"], category=a.get("category"), limit=_limit(a)))
 
-    def _act_reason(self, args: dict) -> str:
-        entities = args.get("entities", [])
+    def _act_reason(self, a: dict) -> str:
+        entities = a.get("entities", [])
         if not entities:
             return tool_error("reason requires 'entities' list")
-        return _results(self._retriever.reason(entities, category=args.get("category"), limit=_limit(args)))
+        return _results(self._retriever.reason(entities, category=a.get("category"), limit=_limit(a)))
 
-    def _act_update(self, args: dict) -> str:
+    def _act_update(self, a: dict) -> str:
         updated = self._store.update_fact(
-            int(args["fact_id"]), content=args.get("content"),
-            trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
-            tags=args.get("tags"), category=args.get("category"),
+            int(a["fact_id"]), content=a.get("content"),
+            trust_delta=float(a["trust_delta"]) if "trust_delta" in a else None,
+            tags=a.get("tags"), category=a.get("category"),
         )
         return json.dumps({"updated": updated})
 
-    _FACT_STORE_ACTIONS = {
-        "add": lambda self, a: json.dumps({"fact_id": self._store.add_fact(
-            a["content"], category=a.get("category", "general"), tags=a.get("tags", "")), "status": "added"}),
-        "search": lambda self, a: _results(self._retriever.search(
-            a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
-        "probe": lambda self, a: self._entity_query("probe", a),
-        "related": lambda self, a: self._entity_query("related", a),
-        "reason": _act_reason,
-        "contradict": lambda self, a: _results(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
-        "update": _act_update,
-        "remove": lambda self, a: json.dumps({"removed": self._store.remove_fact(int(a["fact_id"]))}),
-        "list": lambda self, a: _results(self._store.list_facts(
-            category=a.get("category"), min_trust=float(a.get("min_trust", 0.0)), limit=_limit(a)), key="facts"),
-    }
     _TOOL_HANDLERS = {
-        "fact_store": _handle_fact_store,
+        "fact_store": _tool_handler({
+            "add": lambda self, a: json.dumps({"fact_id": self._store.add_fact(
+                a["content"], category=a.get("category", "general"), tags=a.get("tags", "")), "status": "added"}),
+            "search": lambda self, a: _results(self._retriever.search(
+                a["query"], category=a.get("category"), min_trust=float(a.get("min_trust", self._min_trust)), limit=_limit(a))),
+            "probe": lambda self, a: self._entity_query("probe", a),
+            "related": lambda self, a: self._entity_query("related", a),
+            "reason": _act_reason,
+            "contradict": lambda self, a: _results(self._retriever.contradict(category=a.get("category"), limit=_limit(a))),
+            "update": _act_update,
+            "remove": lambda self, a: json.dumps({"removed": self._store.remove_fact(int(a["fact_id"]))}),
+            "list": lambda self, a: _results(self._store.list_facts(
+                category=a.get("category"), min_trust=float(a.get("min_trust", 0.0)), limit=_limit(a)), key="facts"),
+        }),
         "fact_feedback": lambda self, a: json.dumps(self._store.record_feedback(int(a["fact_id"]), helpful=a["action"] == "helpful")),
     }
 
@@ -328,6 +319,7 @@ class HolographicMemoryProvider(MemoryProvider):
                         pass
         if extracted:
             logger.info("Auto-extracted %d facts from conversation", extracted)
+
 
 def register(ctx) -> None:
     """Register the holographic memory provider with the plugin system."""
