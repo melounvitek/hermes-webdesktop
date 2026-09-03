@@ -26,8 +26,7 @@ import sqlite3
 import pytest
 
 from gateway.config import GatewayConfig
-from gateway.session import SessionStore
-from gateway.session_transcript import TranscriptReadError
+from gateway.session import SessionStore, TranscriptReadError
 
 
 @pytest.fixture
@@ -84,7 +83,7 @@ class TestLoadTranscriptReadFailure:
 
 class TestSlashCommandsOnUnreadableTranscript:
     def test_history_unreadable_text_is_explicit(self):
-        from gateway.slash_commands_status import HISTORY_UNREADABLE
+        from gateway.slash_commands import HISTORY_UNREADABLE
 
         assert "unreadable" in HISTORY_UNREADABLE
         assert "not a new conversation" in HISTORY_UNREADABLE

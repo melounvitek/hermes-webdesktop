@@ -1,7 +1,7 @@
 """Content/file search tier for ``tools.file_operations``.
 
 ``ShellFileOperations`` inherits ``SearchMixin``; module-level helpers are pure
-(no I/O) and re-imported into ``tools.file_operations`` for back-compat.
+(no I/O).
 """
 
 import os

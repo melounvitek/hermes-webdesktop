@@ -2,16 +2,16 @@
 """File operations (read, write, patch, search) over any terminal backend.
 
 Every operation is a shell command run through the backend's ``execute()``, so one
-implementation serves every environment (local, docker, ssh, modal, ...). Companions,
-re-exported here: ``file_operations_common`` (result dataclasses, text helpers),
-``file_operations_lint`` (LintMixin), ``file_operations_search`` (SearchMixin).
+implementation serves every environment (local, docker, ssh, modal, ...). Companions:
+``file_operations_common`` (result dataclasses, text helpers), ``file_operations_lint``
+(LintMixin), ``file_operations_search`` (SearchMixin).
 """
 
 import base64
 import binascii
 import os
 import re
-import sys  # noqa: F401  (tests monkeypatch tools.file_operations.sys.platform)
+import sys
 import difflib
 import hashlib
 import json
@@ -23,19 +23,13 @@ from typing import Optional, Dict
 from pathlib import Path
 
 from tools.binary_extensions import BINARY_EXTENSIONS
-from agent.file_safety import get_write_denied_error, is_write_denied as _is_write_denied  # noqa: F401
-from tools.file_operations_common import (  # noqa: F401  (re-exported)
-    ExecuteResult, LintResult, PatchResult, ReadResult, SearchMatch, SearchResult, WriteResult,
+from agent.file_safety import get_write_denied_error
+from tools.file_operations_common import (
+    ExecuteResult, PatchResult, ReadResult, SearchResult, WriteResult,
     _UTF8_BOM, _detect_line_ending, _has_bom, _normalize_line_endings, _strip_bom,
     _strip_terminal_fence_leaks, normalize_read_pagination, normalize_search_pagination)
 from tools.file_operations_lint import LINTERS_INPROC, LintMixin, _FAIL_CLOSED_INPROC_EXTS
-from tools.file_operations_search import (  # noqa: F401  (re-exported)
-    SearchMixin, _ACTIVE_FILENAME_SEARCH_ROOTS, _FILENAME_SEARCH_ADMISSION,
-    _acquire_filename_search_roots, _filename_search_root_keys,
-    _macos_protected_search_exclusions, _normalized_filename_search_root,
-    _parse_search_context_line, _pattern_has_regex_newline,
-    _release_filename_search_roots, _search_stdout_and_limit, _split_tool_diagnostics)
-from tools import interrupt as tool_interrupt  # noqa: F401  (tests patch it via this module)
+from tools.file_operations_search import SearchMixin
 
 logger = logging.getLogger(__name__)
 

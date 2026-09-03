@@ -3026,7 +3026,7 @@ def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
     omitted; later reads return stubs, and stub-hit counters restart at the same boundary (#84857).
     """
     with contextlib.suppress(Exception):
-        from tools.file_tools import reset_file_dedup
+        from tools.file_tools_read_tracking import reset_file_dedup
         reset_file_dedup(task_id)
     if not skills:
         return

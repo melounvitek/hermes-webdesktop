@@ -254,7 +254,7 @@ def apply_v4a_operations(operations: List[PatchOperation], file_ops: Any) -> 'Pa
     """Two-phase: validate everything, then apply (atomic on validation failure). A phase-2
     failure (validate/apply race) carries a ``git diff`` note since state may be inconsistent.
     ``file_ops`` needs read_file_raw/write_file/delete_file/move_file."""
-    from tools.file_operations import PatchResult  # avoid circular import
+    from tools.file_operations_common import PatchResult  # avoid circular import
 
     def _bullets(errs: List[str]) -> str:
         return "\n".join(f"  • {e}" for e in errs)

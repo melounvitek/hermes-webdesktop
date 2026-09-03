@@ -73,7 +73,7 @@ def _workspace_folder() -> str:
     """Absolute workspace root for ``${workspaceFolder}``: the session's authoritative root
     (terminal cwd / task override / $TERMINAL_CWD), else cwd."""
     try:
-        from tools.file_tools import _authoritative_workspace_root
+        from tools.file_tools_paths import _authoritative_workspace_root
         root = _authoritative_workspace_root()
     except Exception:
         root = None

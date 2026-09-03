@@ -82,7 +82,7 @@ def _ensure_file_checkpoint(agent, function_name: str, function_args: dict, effe
     file_path = function_args.get("path", "")
     if not file_path:
         return
-    from tools.file_tools import _resolve_path_for_task
+    from tools.file_tools_paths import _resolve_path_for_task
 
     resolved_path = _resolve_path_for_task(file_path, effective_task_id or "default")
     agent._checkpoint_mgr.ensure_checkpoint(
@@ -1511,10 +1511,10 @@ def _resolve_sequential_dispatch(agent, ref: _ToolCallRef, messages: list) -> _S
 
     # Registry tools: post hook is owned by this executor (inner observer suppressed).
     def _execute(next_args: dict) -> Any:
-        from model_tools import suppress_post_tool_call_hook
+        import model_tools
 
-        with suppress_post_tool_call_hook():
-            return _ra().handle_function_call(
+        with model_tools.suppress_post_tool_call_hook():
+            return model_tools.handle_function_call(
                 function_name,
                 next_args,
                 effective_task_id,

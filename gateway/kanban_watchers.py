@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from gateway.kanban_watchers_common import (
+from gateway.kanban_watchers_common import (  # noqa: F401  (tests import via origin)
     _acquire_singleton_lock,
     _kanban_dispatch_allowed,
     _release_singleton_lock,
@@ -24,7 +24,11 @@ from gateway.kanban_watchers_common import (
     _to_thread_process_service,
     logger,
 )
-from gateway.kanban_watchers_notifier import _KanbanNotification, _notifier_collect
+from gateway.kanban_watchers_notifier import (  # noqa: F401  (_wake_scope_id: tests import via origin)
+    _KanbanNotification,
+    _notifier_collect,
+    _wake_scope_id,
+)
 from gateway.kanban_watchers_dispatcher import (
     _KanbanDispatcher,
     _log_spawn_results,

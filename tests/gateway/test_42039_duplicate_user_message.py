@@ -24,8 +24,7 @@ import pytest
 import gateway.run as gateway_run
 from gateway.config import GatewayConfig, Platform
 from gateway.platforms.base import MessageEvent
-from gateway.session import SessionEntry, SessionSource
-from gateway.session_transcript import TranscriptReadError
+from gateway.session import SessionEntry, SessionSource, TranscriptReadError
 
 
 def _bootstrap(monkeypatch, tmp_path):

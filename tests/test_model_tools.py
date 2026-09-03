@@ -394,19 +394,19 @@ class TestCoerceNumberInfNan:
     float('nan') are not JSON-compliant under strict serialization."""
 
     def test_inf_returns_original_string(self):
-        from model_tools import _coerce_number
+        from tools.arg_coercion import _coerce_number
         assert _coerce_number("inf") == "inf"
 
 
     def test_nan_returns_original_string(self):
-        from model_tools import _coerce_number
+        from tools.arg_coercion import _coerce_number
         assert _coerce_number("nan") == "nan"
 
 
 
     def test_normal_numbers_still_coerce(self):
         """Guard against over-correction — real numbers still coerce."""
-        from model_tools import _coerce_number
+        from tools.arg_coercion import _coerce_number
         assert _coerce_number("42") == 42
         assert _coerce_number("3.14") == 3.14
         assert _coerce_number("1e3") == 1000

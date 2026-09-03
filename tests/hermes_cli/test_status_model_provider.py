@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from hermes_cli.nous_account import NousPaidServiceAccessInfo, NousPortalAccountInfo
 from hermes_cli.nous_subscription import NousFeatureState, NousSubscriptionFeatures
+import subprocess
 
 
 def _patch_common_status_deps(monkeypatch, status_mod, tmp_path, *, openai_base_url=""):
@@ -24,7 +25,7 @@ def _patch_common_status_deps(monkeypatch, status_mod, tmp_path, *, openai_base_
     )
     monkeypatch.setattr(auth_mod, "get_codex_auth_status", lambda: {}, raising=False)
     monkeypatch.setattr(
-        status_mod.subprocess,
+        subprocess,
         "run",
         lambda *args, **kwargs: SimpleNamespace(stdout="inactive\n", returncode=3),
     )

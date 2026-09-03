@@ -959,7 +959,7 @@ class TestRunsProviderAuthFailure:
 
 
 def _use_idempotency_db(adapter, path):
-    from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+    from gateway.platforms.api_server import RunIdempotencyStore
 
     adapter._run_idempotency_store.close()
     adapter._run_idempotency_store = RunIdempotencyStore(str(path))
@@ -1114,7 +1114,7 @@ class TestRunIdempotency:
         assert calls == 1
 
     def test_restart_durability_and_terminal_semantics(self, tmp_path):
-        from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+        from gateway.platforms.api_server import RunIdempotencyStore
 
         path = tmp_path / "idem.db"
         for terminal in ("completed", "failed", "cancelled"):
@@ -1141,7 +1141,7 @@ class TestRunIdempotency:
             restarted.close()
 
     def test_tenant_isolation_and_retention(self, tmp_path):
-        from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+        from gateway.platforms.api_server import RunIdempotencyStore
 
         store = RunIdempotencyStore(str(tmp_path / "idem.db"))
         assert (
@@ -1157,7 +1157,7 @@ class TestRunIdempotency:
     def test_retention_never_releases_an_active_idempotency_reservation(
         self, tmp_path
     ):
-        from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+        from gateway.platforms.api_server import RunIdempotencyStore
 
         store = RunIdempotencyStore(str(tmp_path / "idem.db"))
         with patch("gateway.platforms.api_server.time.time", return_value=100):
@@ -1375,7 +1375,7 @@ class TestRunIdempotency:
     async def test_dead_owner_nonterminal_status_becomes_interrupted(
         self, tmp_path
     ):
-        from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
+        from gateway.platforms.api_server import RunIdempotencyStore
 
         path = tmp_path / "idem.db"
         scope = hashlib.sha256(

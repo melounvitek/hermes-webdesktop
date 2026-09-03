@@ -251,7 +251,7 @@ def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
         if recorded and os.path.isdir(recorded):
             return recorded
         try:
-            from tools.file_tools import _registered_task_cwd_override
+            from tools.file_tools_paths import _registered_task_cwd_override
             session_cwd = _registered_task_cwd_override(task_id)
         except Exception:
             session_cwd = None

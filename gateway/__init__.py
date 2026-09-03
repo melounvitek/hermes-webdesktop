@@ -1,10 +1,11 @@
 """Hermes Gateway - multi-platform messaging integration (sessions, context
 injection, delivery routing, platform-specific toolsets)."""
 
-from .config import GatewayConfig, PlatformConfig, HomeChannel, SessionResetPolicy, load_gateway_config
+from .config import GatewayConfig, PlatformConfig, HomeChannel, load_gateway_config
 from .session import (
     SessionContext,
     SessionStore,
+    SessionResetPolicy,
     build_session_context_prompt,
 )
 from .delivery import DeliveryRouter, DeliveryTarget

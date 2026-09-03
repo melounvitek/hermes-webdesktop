@@ -1,23 +1,15 @@
 """``hermes doctor`` — diagnose (and with --fix, repair) a Hermes install.
 
 ``run_doctor`` walks ``DOCTOR_CHECKS`` in order; each check prints its own rows and returns a ``Finding``.
-Check bodies live in the ``doctor_*`` siblings and are re-exported here so ``hermes_cli.doctor.<name>``
-stays the stable import/monkeypatch surface.
+Check bodies live in the ``doctor_*`` siblings.
 """
 
-# stdlib modules stay bound here: tests patch doctor.shutil.which / .subprocess.run / .importlib.util.find_spec / .Path.home / .sys.platform / .os.listdir.
 import os
 import sys
-import subprocess  # noqa: F401
-import shutil  # noqa: F401
-import importlib.util  # noqa: F401
-from pathlib import Path  # noqa: F401
 
-from hermes_cli.config import (  # noqa: F401  (detect_install_method: tests patch doctor.detect_install_method)
-    detect_install_method, get_env_path, get_hermes_home, get_project_root,
-)
+from hermes_cli.config import get_env_path, get_hermes_home, get_project_root
 from hermes_cli.env_loader import load_hermes_dotenv
-from hermes_constants import display_hermes_home, is_termux as _is_termux  # noqa: F401  (tests call doctor._is_termux)
+from hermes_constants import display_hermes_home
 
 PROJECT_ROOT = get_project_root()
 HERMES_HOME = get_hermes_home()
@@ -28,20 +20,39 @@ _env_path = get_env_path()
 load_hermes_dotenv(hermes_home=_env_path.parent, project_env=PROJECT_ROOT / ".env")
 
 from hermes_cli.colors import Colors, color
-from hermes_cli.doctor_report import (  # noqa: F401  (re-exported for doctor_live and tests)
-    Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
-    warn_on_error,
-)
-from hermes_cli.doctor_connectivity import (  # noqa: F401  (re-exported; tests import from hermes_cli.doctor)
-    _build_apikey_providers_list, _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes,
-)
-from hermes_cli.doctor_tools import _safe_which  # noqa: F401
-from hermes_cli.sizefmt import format_bytes as _human_bytes  # noqa: F401  (tests import doctor._human_bytes)
+from hermes_cli.doctor_report import Finding, _section, check_bool, check_info, doctor_check, warn_on_error
+from hermes_cli.doctor_connectivity import _has_healthy_oauth_fallback_for_apikey_provider, build_probes, run_probes
+from hermes_cli.doctor_tools import _safe_which
 
-# Every public/private name of the check modules is re-exported: ``hermes_cli.doctor.<name>`` is the stable
-# import + monkeypatch surface for tests (e.g. doctor._check_config_file, doctor._render_state_db_stats).
-for _sub in ("doctor_config", "doctor_platform", "doctor_tools", "doctor_state"):
-    globals().update({k: v for k, v in vars(importlib.import_module(f"hermes_cli.{_sub}")).items() if k[:2] != "__"})
+from hermes_cli.doctor_config import (
+    _check_config_drift,
+    _check_config_file,
+    _check_env_file,
+    _check_mcp_security,
+    _check_xai_retirement,
+)
+from hermes_cli.doctor_platform import (
+    _check_certificates,
+    _check_command_installation,
+    _check_gateway_supervision,
+    _check_python_environment,
+    _check_required_packages,
+    _check_security_advisories,
+)
+from hermes_cli.doctor_tools import (
+    _check_git_and_rg,
+    _check_node_and_browser,
+    _check_npm_audit,
+    _check_terminal_backend,
+    _check_tool_availability,
+)
+from hermes_cli.doctor_state import (
+    _check_directory_structure,
+    _check_memory_provider,
+    _check_profiles,
+    _check_skills_hub,
+    _check_state_db,
+)
 
 _PROVIDER_ENV_HINTS = (
     "DEEPINFRA_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",

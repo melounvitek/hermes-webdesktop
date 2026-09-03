@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 import tools.file_tools as ft
+import tools.file_tools_paths as ftp
 import tools.terminal_tool as terminal_tool
 
 
@@ -112,7 +113,7 @@ def test_container_absolute_input_path_does_not_follow_host_symlink(tmp_path, mo
 
 
 def test_container_path_normalization_uses_posix_path_syntax():
-    resolved = ft._normalize_without_host_deref("/workspace/projects/foo/../bar")
+    resolved = ftp._normalize_without_host_deref("/workspace/projects/foo/../bar")
 
     assert resolved == PurePosixPath("/workspace/projects/bar")
     assert str(resolved) == "/workspace/projects/bar"

@@ -23,6 +23,9 @@ from pathlib import Path
 import pytest
 
 import hermes_cli._early_recovery as er
+import subprocess
+from hermes_cli import doctor_platform
+from hermes_cli import main_install_repair
 
 
 def _fake_certifi(monkeypatch, bundle_path: Path):
@@ -94,7 +97,7 @@ class TestUpdateProbeScriptChecksBundle:
         monkeypatch.setattr(
             main_mod, "_resolve_install_target_python", lambda *a, **k: sys.executable
         )
-        main_mod._detect_broken_lazy_refresh_imports(["pip"])
+        main_install_repair._detect_broken_lazy_refresh_imports(["pip"])
         script = captured["script"]
 
         # Execute the probe script with a fake certifi installed.
@@ -134,7 +137,7 @@ class TestDoctorCertificates:
 
         monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "missing.pem"))
         issues = []
-        doctor_mod.check_certificates(should_fix=False, issues=issues)
+        doctor_platform.check_certificates(should_fix=False, issues=issues)
         out = capsys.readouterr().out
         assert "broken" in out.lower()
         assert issues, "a broken bundle must be funneled into the action list"
@@ -166,10 +169,10 @@ class TestDoctorCertificates:
         monkeypatch.setattr(
             "agent.ssl_guard.verify_ca_bundle_with_fallback", fake_verify
         )
-        monkeypatch.setattr(doctor_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(subprocess, "run", fake_run)
 
         issues = []
-        doctor_mod.check_certificates(should_fix=True, issues=issues)
+        doctor_platform.check_certificates(should_fix=True, issues=issues)
         out = capsys.readouterr().out
 
         assert calls["pip"], "--fix must run a pip force-reinstall of certifi"
@@ -186,8 +189,8 @@ class TestDoctorCertificates:
         def _fail_run(*a, **k):
             raise AssertionError("healthy bundle must not trigger a reinstall")
 
-        monkeypatch.setattr(doctor_mod.subprocess, "run", _fail_run)
-        doctor_mod.check_certificates(should_fix=True, issues=[])
+        monkeypatch.setattr(subprocess, "run", _fail_run)
+        doctor_platform.check_certificates(should_fix=True, issues=[])
         out = capsys.readouterr().out
         assert "valid" in out.lower()
 

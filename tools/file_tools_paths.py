@@ -177,9 +177,6 @@ def _resolve_path_for_task(filepath: str, task_id: str = "default") -> Path | Pu
                    lambda: _resolve_base_dir(task_id, container_paths=container_paths), container_paths)
 
 
-# Back-compat alias (imported by agent.context_references and tests).
-_resolve_path = _resolve_path_for_task
-
 
 def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "default") -> str | None:
     """Warn when a RELATIVE path resolved OUTSIDE the task's workspace root (the

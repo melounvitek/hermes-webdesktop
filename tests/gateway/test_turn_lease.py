@@ -494,3 +494,19 @@ def test_runner_release_turn_lease_is_token_scoped_and_bare_safe():
     _run(scenario())
 
 
+def test_registry_len_reports_tracked_sessions():
+    """``len(registry)`` is public API (plugins/diagnostics size the registry
+    with it): 0 when empty, one per tracked session_id, and it follows eviction."""
+    async def scenario():
+        registry = SessionTurnLeaseRegistry(max_entries=8)
+        assert len(registry) == 0
+        a = await registry.acquire("s1", owner_key="k1", generation=1, timeout=1)
+        assert len(registry) == 1
+        b = await registry.acquire("s2", owner_key="k2", generation=1, timeout=1)
+        assert len(registry) == 2
+        registry.release(a)
+        registry.release(b)
+        # Released (idle) entries stay tracked until eviction, matching _leases.
+        assert len(registry) == len(registry._leases) == 2
+
+    _run(scenario())

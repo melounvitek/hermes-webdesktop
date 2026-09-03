@@ -399,11 +399,11 @@ class TestContextVarInterpolation:
     def test_workspace_folder_falls_back_to_cwd(self, monkeypatch):
         import os
 
-        import tools.file_tools as file_tools
+        import tools.file_tools_paths as file_tools_paths
         from tools.mcp_tool import _workspace_folder
 
         monkeypatch.setattr(
-            file_tools, "_authoritative_workspace_root", lambda task_id="default": None
+            file_tools_paths, "_authoritative_workspace_root", lambda task_id="default": None
         )
         assert _workspace_folder() == os.getcwd()
 

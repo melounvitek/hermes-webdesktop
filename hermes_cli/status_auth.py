@@ -9,6 +9,7 @@ from hermes_cli.nous_account import (
     format_nous_portal_entitlement_message, get_nous_portal_account_info)
 from hermes_cli.nous_subscription import get_nous_subscription_features
 from tools.tool_backend_helpers import managed_nous_tools_enabled
+from hermes_cli import config
 
 
 def _format_iso_timestamp(value) -> str:
@@ -92,7 +93,7 @@ def _render_api_keys(ctx):
     # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
     for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key)):
         value = env_ref() if callable(env_ref) else _status._first_env_value(env_ref)
-        _status._row(name, bool(value), _status.redact_key(value))
+        _status._row(name, bool(value), config.redact_key(value))
 
 
 def _render_auth_providers(ctx):
@@ -175,7 +176,7 @@ def _render_apikey_providers(ctx):
     # LM Studio reachability: probe only when it is the active provider so users with foreign
     # configs see no noise. Auth rejection vs. a silent empty list is the common support case.
     if _status._effective_provider_label() == "LM Studio":
-        from hermes_cli.models import probe_lmstudio_models
+        from hermes_cli.models_local import probe_lmstudio_models
         model_cfg = ctx.config.get("model")
         base = ((model_cfg.get("base_url") if isinstance(model_cfg, dict) else None)
                 or _status.get_env_value("LM_BASE_URL") or "http://127.0.0.1:1234/v1")

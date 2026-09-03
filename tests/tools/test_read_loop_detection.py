@@ -22,9 +22,9 @@ from unittest.mock import patch, MagicMock
 from tools.file_tools import (
     read_file_tool,
     search_tool,
-    notify_other_tool_call,
     _read_tracker,
 )
+from tools.file_tools_read_tracking import notify_other_tool_call
 
 
 class _FakeReadResult:

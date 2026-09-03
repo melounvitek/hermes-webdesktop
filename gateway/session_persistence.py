@@ -341,7 +341,7 @@ class SessionPersistenceMixin:
     def _stale_entry_verdict(self, key: str, entry, row):
         """For a routing entry whose row has ended: ``"prune"``, a replacement entry (repoint), or
         None (keep as-is)."""
-        from gateway.session_lifecycle import _now
+        from gateway.session import _now
         recovered_entry = None
         if entry.origin is not None:
             try:

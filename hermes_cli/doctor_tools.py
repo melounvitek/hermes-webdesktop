@@ -90,7 +90,7 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
 
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
-    from hermes_cli.doctor import _honcho_is_configured_for_doctor
+    from hermes_cli.doctor_state import _honcho_is_configured_for_doctor
     updated_available, updated_unavailable = list(available), []
     for item in unavailable:
         if _is_kanban_worker_env_gate(item):
@@ -117,7 +117,6 @@ def _enabled_cli_toolsets_for_doctor() -> set[str] | None:
 
 def _missing_api_key_toolsets_for_summary(unavailable: list[dict]) -> list[dict]:
     """Filter unavailable API-key toolsets to those enabled for the CLI."""
-    from hermes_cli.doctor import _enabled_cli_toolsets_for_doctor
     api_key_unavailable = [item for item in unavailable if item.get("missing_vars") or item.get("env_vars")]
     enabled_toolsets = _enabled_cli_toolsets_for_doctor()
     return api_key_unavailable if enabled_toolsets is None else [i for i in api_key_unavailable if str(i.get("name") or "") in enabled_toolsets]
@@ -254,7 +253,7 @@ def _check_agent_browser(should_fix: bool) -> bool:
     try:
         # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
         # (or a global/Hermes-managed install) at first use.
-        from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel
+        from tools.browser_tool_install import _find_agent_browser, _is_npx_agent_browser_sentinel
         resolved = _find_agent_browser(validate=False)
     except Exception:
         resolved = None
@@ -262,7 +261,7 @@ def _check_agent_browser(should_fix: bool) -> bool:
         check_ok("agent-browser", "(resolves via npx on first use)")
         if should_fix:
             # Can't tell whether npx's cache is warm — fire the same warm-up `hermes update` does.
-            from tools.browser_tool import warm_agent_browser_npx_cache
+            from tools.browser_tool_install import warm_agent_browser_npx_cache
             check_info("  Warmed npx cache for agent-browser" if warm_agent_browser_npx_cache()
                        else "  Could not warm npx cache (offline or npx unavailable)")
         return True
@@ -296,8 +295,9 @@ def _check_chromium() -> None:
     """
     from hermes_cli.doctor import PROJECT_ROOT
     try:
-        from tools.browser_tool import (_chromium_installed, _is_camofox_mode, _get_cloud_provider,
-                                        _get_cdp_override_raw, _using_lightpanda_engine)
+        from tools.browser_tool import _is_camofox_mode, _get_cloud_provider, _get_cdp_override_raw
+        from tools.browser_tool_install import _chromium_installed
+        from tools.browser_tool_lightpanda_fallback import _using_lightpanda_engine
     except Exception:
         return
     if _is_camofox_mode() or bool(_get_cdp_override_raw()) or _get_cloud_provider() is not None or _using_lightpanda_engine():
@@ -311,7 +311,7 @@ def _check_chromium() -> None:
 def _check_lightpanda() -> None:
     """Lightpanda engine (browser.engine / AGENT_BROWSER_ENGINE); independent of Node since Browser Use mode spawns ``lightpanda serve`` itself."""
     try:
-        from tools.browser_tool import _using_lightpanda_engine, lightpanda_engine_status
+        from tools.browser_tool_lightpanda_fallback import _using_lightpanda_engine, lightpanda_engine_status
         from tools.browser_lightpanda import LIGHTPANDA_INSTALL_HINT, find_lightpanda_binary
     except Exception:
         return
@@ -421,7 +421,7 @@ def _check_npm_audit(should_fix: bool, f: Finding) -> None:
 
 @doctor_check("Could not check tool availability", "({e})")
 def _check_tool_availability(should_fix: bool, f: Finding) -> None:
-    from hermes_cli.doctor import PROJECT_ROOT, _doctor_web_capability_rows
+    from hermes_cli.doctor import PROJECT_ROOT
     sys.path.insert(0, str(PROJECT_ROOT))
     from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
     available, unavailable = _apply_doctor_tool_availability_overrides(*check_tool_availability())

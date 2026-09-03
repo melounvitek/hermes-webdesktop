@@ -13,11 +13,15 @@ from dataclasses import dataclass, field, fields
 from typing import Dict, List, Optional, Any
 
 from .config import Platform, GatewayConfig, HomeChannel
+from .config import SessionResetPolicy  # noqa: F401 — re-exported via gateway/__init__.py
 from .whatsapp_identity import canonical_whatsapp_identifier
-from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED
+from .whatsapp_identity import normalize_whatsapp_identifier  # noqa: F401 — re-exported
+from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED  # noqa: F401
 from gateway.session_recovery import SessionRecoveryMixin
-from gateway.session_lifecycle import SessionLifecycleMixin, _iso, _new_session_id, _now, _parse_iso
-from gateway.session_transcript import SessionTranscriptMixin
+from gateway.session_lifecycle import (  # noqa: F401 — _now & co. re-exported for callers/tests
+    SessionLifecycleMixin, _iso, _new_session_id, _now, _parse_iso, auto_continue_freshness_window,
+)
+from gateway.session_transcript import SessionTranscriptMixin, TranscriptReadError  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

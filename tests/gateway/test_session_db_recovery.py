@@ -109,8 +109,7 @@ def test_runtime_health_is_sanitized_and_recovers() -> None:
 def test_session_store_and_runner_reopen_after_failed_construction(monkeypatch, tmp_path) -> None:
     import hermes_state
     from gateway.run import GatewayRunner, _SESSION_DB_UNPINNED
-    from gateway.session import SessionStore
-    from gateway.session_persistence import _DB_UNPINNED
+    from gateway.session import SessionStore, _DB_UNPINNED
 
     db_path = tmp_path / "state.db"
     clock = _Clock()
@@ -261,8 +260,7 @@ def test_close_all_preserves_inflight_failure() -> None:
 def test_recovered_db_rows_survive_fallback_structural_save(monkeypatch, tmp_path) -> None:
     import hermes_state
     from gateway.config import GatewayConfig, Platform
-    from gateway.session import SessionEntry, SessionSource, SessionStore
-    from gateway.session_lifecycle import _now
+    from gateway.session import SessionEntry, SessionSource, SessionStore, _now
 
     db_path = tmp_path / "state.db"
     sessions_dir = tmp_path / "sessions"

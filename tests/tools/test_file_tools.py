@@ -718,8 +718,8 @@ class TestDedupInvalidationTaskResolution:
 
         # The task resolves the relative path into the workspace; the default
         # task (the old buggy resolution) would resolve into proc.
-        correct = str(ft._resolve_path("data.txt", task_id))
-        buggy = str(ft._resolve_path("data.txt"))
+        correct = str(ft._resolve_path_for_task("data.txt", task_id))
+        buggy = str(ft._resolve_path_for_task("data.txt"))
         assert correct != buggy, "test precondition: cwds must diverge"
 
         # Populate the dedup cache via a real read.
@@ -728,7 +728,8 @@ class TestDedupInvalidationTaskResolution:
         assert correct in keys, keys
 
         # Invalidate as write_file_tool does; the entry must be gone.
-        ft._invalidate_dedup_for_path("data.txt", task_id)
+        from tools.file_tools_read_tracking import _invalidate_dedup_for_path
+        _invalidate_dedup_for_path("data.txt", task_id)
         remaining = [k[0] for k in ft._read_tracker.get(task_id, {}).get("dedup", {})]
         assert correct not in remaining, remaining
 
@@ -916,8 +917,8 @@ class TestNotFoundCache:
             _check_not_found_cache,
             _record_not_found,
             _read_tracker,
-            _NOT_FOUND_TTL_SECONDS,
         )
+        from tools.file_tools_read_tracking import _NOT_FOUND_TTL_SECONDS
         import tools.file_tools as ft
 
         tid = "neg-cache-ttl-6"
@@ -998,8 +999,8 @@ class TestNotFoundCache:
             _check_not_found_cache,
             _record_not_found,
             _read_tracker,
-            notify_other_tool_call,
         )
+        from tools.file_tools_read_tracking import notify_other_tool_call
 
         tid = "neg-cache-notify"
         _read_tracker.pop(tid, None)

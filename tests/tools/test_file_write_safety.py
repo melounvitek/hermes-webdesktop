@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.file_operations import _is_write_denied
+from agent.file_safety import is_write_denied as _is_write_denied
 
 
 class TestStaticDenyList:

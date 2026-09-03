@@ -10,7 +10,8 @@ import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from hermes_cli.doctor import _section, check_fail, check_info, check_ok, check_warn
+from hermes_cli.doctor import _section, check_info
+from hermes_cli.doctor_report import check_fail, check_ok, check_warn
 
 DEFAULT_PROBE_TIMEOUT = 10.0
 
@@ -71,7 +72,7 @@ def _browser_available() -> bool:
     # probes above. Mirror the rung hermes_cli.doctor uses so this probe can't diverge from it, including
     # the Termux carve-out (bare npx is too fragile to advertise as ready there).
     try:
-        from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
+        from tools.browser_tool_install import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
         browser_cmd = _find_agent_browser(validate=False)
     except Exception:
         return False

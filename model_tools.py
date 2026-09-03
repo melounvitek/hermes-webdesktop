@@ -21,10 +21,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from tools.registry import CHECK_FN_CACHE_BYPASS, check_fn_cache_scope, discover_builtin_tools, registry, tool_error
 from tools.registry import _MAX_TOOL_ERROR_CHARS as _TOOL_ERROR_MAX_LEN
 from toolsets import resolve_toolset, validate_toolset
-from tools.arg_coercion import (  # noqa: F401  # re-exported: tests and tools/ import these from model_tools
-    _coerce_boolean, _coerce_json, _coerce_number, _coerce_value, _normalize_json_strings_for_schema,
-    _schema_accepts_kind, _schema_allows_null, coerce_tool_args,
-)
+from tools.arg_coercion import coerce_tool_args
 
 logger = logging.getLogger(__name__)
 
@@ -862,7 +859,7 @@ def handle_function_call(
         # Any non-read/search tool resets the consecutive-read-loop counter.
         if function_name not in _READ_SEARCH_TOOLS:
             try:
-                from tools.file_tools import notify_other_tool_call
+                from tools.file_tools_read_tracking import notify_other_tool_call
                 notify_other_tool_call(task_id or "default")
             except Exception:
                 pass  # file_tools may not be loaded yet
