@@ -121,7 +121,6 @@ def _timeouts_section() -> dict:
     """Read the ``timeouts:`` root section from config.yaml (read-only, fail-open)."""
     try:
         from hermes_cli.config import load_config_readonly
-
         section = load_config_readonly().get("timeouts")
         return section if isinstance(section, dict) else {}
     except Exception:
@@ -353,7 +352,6 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
     if sys.platform == "win32":
         try:
             from hermes_cli._subprocess_compat import windows_hide_flags
-
             creationflags = windows_hide_flags()
         except Exception:
             creationflags = 0
@@ -369,13 +367,11 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
             return False
 
     import signal as _signal
-
     if sig is None:
         sig = _signal.SIGKILL
 
     try:
         import psutil
-
         descendants = psutil.Process(int(pid)).children(recursive=True)
     except Exception:
         # Already gone, or psutil unavailable — the group signal still covers same-session descendants.

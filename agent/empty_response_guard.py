@@ -106,7 +106,6 @@ def _normalized_usage(agent: Any, response: Any, what: str) -> Any:
         return None
     try:
         from agent.usage_pricing import normalize_usage
-
         return normalize_usage(raw_usage, provider=getattr(agent, "provider", None),
                                api_mode=getattr(agent, "api_mode", None))
     except Exception:  # noqa: BLE001 — pricing must never break the loop
@@ -121,7 +120,6 @@ def _estimate_attempt_cost(agent: Any, response: Any) -> Optional[Decimal]:
         return None
     try:
         from agent.usage_pricing import estimate_usage_cost
-
         result = estimate_usage_cost(
             getattr(agent, "model", "") or "", canonical, provider=getattr(agent, "provider", None),
             base_url=getattr(agent, "base_url", None), api_key=getattr(agent, "api_key", None),

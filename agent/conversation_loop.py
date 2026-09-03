@@ -96,10 +96,7 @@ def _midturn_request_pressure_tokens(
     estimate overstates the wire on compacted sessions, #96995), else messages+tools.
     The system prompt is counted exactly once."""
     try:
-        from agent.codex_responses_adapter import (
-            estimate_native_responses_preflight_tokens,
-        )
-
+        from agent.codex_responses_adapter import (estimate_native_responses_preflight_tokens)
         native = estimate_native_responses_preflight_tokens(
             agent, api_messages, system_prompt=effective_system or "",
             tools=getattr(agent, "tools", None) or None,
@@ -183,7 +180,6 @@ def _should_skip_model_call_for_reference_handoff(
 ) -> bool:
     """Guard post-compaction continues against sole-handoff active turns (#80622)."""
     from agent.context_compressor import reference_handoff_would_drive_next_model_call
-
     # A restored ask is an actionable non-synthetic user row appended after the
     # handoff — by construction the handoff no longer drives.
     return reference_handoff_would_drive_next_model_call(messages) and not (
@@ -235,9 +231,7 @@ _LOCAL_PROCESSING_MODULES = frozenset({
     "message_sanitization",
     "chat_completion_helpers",  # only local when NOT also an API-call module
 })
-_API_CALL_MODULES = frozenset({
-    "chat_completion_helpers",
-})
+_API_CALL_MODULES = frozenset({"chat_completion_helpers"})
 
 # Max outer-loop exceptions per user turn before giving up; only exceptions that
 # ESCAPE the inner retry/fallback machinery count, so this can be small (#92450).
@@ -249,7 +243,6 @@ def _is_interpreter_shutdown_error(exc: Exception) -> bool:
     stays here: a ValueError carrying similar text must not match (#93269)."""
     if isinstance(exc, RuntimeError):
         from tools.interpreter_shutdown import interpreter_shutting_down
-
         return interpreter_shutting_down(exc)
     return False
 
@@ -317,7 +310,6 @@ def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text
             # does not re-heal it every call (#88955). Never _INTERRUPT_SCAFFOLD_MARKER:
             # as assistant text the model echoes it (#81841).
             from agent.agent_runtime_helpers import _INTERRUPTED_PLACEHOLDER
-
             placeholder["api_content"] = _INTERRUPTED_PLACEHOLDER
         append_message(messages, placeholder)
     # Transcript shows the user's own words; the provider replays the scaffolded form.
@@ -374,7 +366,6 @@ def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str
         request_tokens, len(getattr(agent, "tools", None) or []),
         getattr(agent, "session_id", None) or "none",
     )
-
     return (
         f"Ollama loaded `{model}` with only {runtime_ctx:,} tokens of runtime context, but Hermes "
         f"needs at least {MINIMUM_CONTEXT_LENGTH:,} tokens for reliable tool use.\n\n"
@@ -398,7 +389,6 @@ def _maybe_grow_local_window(agent: Any, compressor: Any,
         return None
     try:
         from hermes_cli.local_runtime.growth import maybe_grow_window
-
         current_window = int(getattr(compressor, "context_length", 0) or 0)
         if current_window <= 0:
             return None
@@ -423,7 +413,6 @@ def _nous_entitlement_message(capability: str) -> str:
             format_nous_portal_entitlement_message,
             get_nous_portal_account_info,
         )
-
         account_info = get_nous_portal_account_info(force_fresh=True)
         return format_nous_portal_entitlement_message(account_info, capability=capability) or ""
     except Exception:
@@ -514,7 +503,6 @@ def _billing_or_entitlement_message(
     # Provider-agnostic billing URL so every text surface shows the same actionable link.
     try:
         from agent.billing_links import build_billing_block
-
         _link = build_billing_block(provider=provider, base_url=base_url, model=model)
         if _link.provider_label:
             provider_label = _link.provider_label
@@ -539,7 +527,6 @@ def _billing_block_dict(
     """Best-effort structured billing descriptor (None if billing_links is unavailable)."""
     try:
         from agent.billing_links import build_billing_block
-
         block = build_billing_block(
             provider=provider, base_url=str(base_url), model=model, message=message
         ).to_dict()
@@ -627,11 +614,9 @@ def _bot_chat_prompt_stale(agent, stored_prompt: str) -> bool:
             stored_bot_chat_prompt_needs_upgrade,
             stored_prompt_capability_stale,
         )
-
         home = None
         try:
             from agent.system_prompt import _agent_home
-
             home = _agent_home(agent)
         except Exception:
             pass
@@ -662,7 +647,6 @@ def _persist_system_prompt(agent, failure_message: str, *, persist_tools: bool =
         agent._session_db.update_system_prompt(agent.session_id, agent._cached_system_prompt)
         if persist_tools:
             from tools.mcp_tool import persist_agent_tool_names
-
             persist_agent_tool_names(agent)
     except Exception as exc:
         logger.warning(failure_message, agent.session_id, exc)
@@ -703,7 +687,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             # dir; a capability refresh must rebuild THROUGH it or new skills are lost.
             try:
                 from agent.prompt_builder import clear_skills_system_prompt_cache
-
                 clear_skills_system_prompt_cache(clear_snapshot=True)
             except Exception:
                 pass
@@ -725,7 +708,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             saved_tools = session_row.get("tool_names") if session_row else None
             if saved_tools:
                 from tools.mcp_tool import restore_agent_tool_prefix
-
                 restore_agent_tool_prefix(agent, json.loads(saved_tools))
         except Exception:
             logger.debug("tool prefix restore skipped", exc_info=True)
@@ -735,7 +717,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
         # fresh-per-turn gateway agents fall back to the single-breakpoint layout
         # (reconstruct_static_prefix gates on _use_prompt_caching, fails open to legacy).
         from agent.system_prompt import reconstruct_static_prefix, restore_plugin_prompt_sections
-
         restore_plugin_prompt_sections(agent, stored_prompt)
         reconstruct_static_prefix(agent, system_message=system_message)
         return
@@ -774,7 +755,6 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
     # session open, so this is idempotent (skips when _credits_state exists). Fail-open.
     try:
         from agent.credits_tracker import seed_credits_at_session_start
-
         seed_credits_at_session_start(agent)
     except Exception:
         logger.debug("cold-start credits seed failed (fail-open)", exc_info=True)
@@ -936,10 +916,7 @@ def _clone_message_for_send(msg):
             for k, v in msg.items()
         }
     if isinstance(msg, list):
-        return [
-            _clone_message_for_send(v) if isinstance(v, (dict, list)) else v
-            for v in msg
-        ]
+        return [_clone_message_for_send(v) if isinstance(v, (dict, list)) else v for v in msg]
     return msg
 
 
@@ -1091,9 +1068,7 @@ def _rewrite_system_content_blocks(system_message: dict, effective: str) -> bool
     content = system_message.get("content")
     if not isinstance(content, list) or not content:
         return False
-    if not all(
-        isinstance(part, dict) and part.get("type") == "text" for part in content
-    ):
+    if not all(isinstance(part, dict) and part.get("type") == "text" for part in content):
         return False
     if len(content) == 1:
         content[0]["text"] = effective
@@ -1139,7 +1114,6 @@ def _ensure_cached_system_prompt_static(agent, system_message=None) -> None:
     restored under a cache-off primary would otherwise fall back to the legacy layout after
     failover to a cache-on provider."""
     from agent.system_prompt import reconstruct_static_prefix
-
     reconstruct_static_prefix(agent, system_message=system_message, log_label="failover redecoration")
 
 
@@ -1149,7 +1123,6 @@ def _peel_moa_guidance(
 ) -> List[Dict[str, Any]]:
     """Remove MoA reference guidance attached by ``_attach_reference_guidance``."""
     from agent.moa_loop import peel_reference_guidance
-
     return peel_reference_guidance(messages, guidance)
 
 
@@ -1173,7 +1146,6 @@ def _redecorate_prompt_cache_for_provider(
     planned_tools = strip_anthropic_tool_cache_control(
         tools_for_api if tools_for_api is not None else getattr(agent, "tools", [])
     )
-
     if prepared is not None and getattr(agent, "provider", None) == "moa":
         # Prepared MoA state is canonical: the synchronous acting-aggregator
         # sender owns its destination-local cache plan after it resolves the slot.
@@ -1191,7 +1163,6 @@ def _redecorate_prompt_cache_for_provider(
             agent, "_direct_native_anthropic_tool_cache_capability", lambda: False
         )()
         from agent.prompt_caching import envelope_tool_part_cache_markers_supported
-
         plan = build_prompt_cache_plan(
             messages,
             planned_tools,
@@ -1229,7 +1200,6 @@ def _engine_overrides_hook(engine: Any, name: str) -> bool:
         return False
     try:
         from agent.context_engine import ContextEngine as _CE
-
         return getattr(hook, "__func__", None) is not getattr(_CE, name)
     except Exception:
         return True
@@ -1318,7 +1288,6 @@ def _decode_inline_moa_turn(user_message, persist_user_message):
     moa_config, persist_user_message)``, unchanged with ``moa_config=None`` otherwise."""
     try:
         from hermes_cli.moa_config import decode_moa_turn
-
         _decoded_message, _decoded_moa_config = decode_moa_turn(user_message)
         if _decoded_moa_config is not None:
             if persist_user_message is None:
@@ -1338,7 +1307,6 @@ def _preflight_timeout_result(agent, exc, conversation_history) -> Dict[str, Any
     # Clear the tripwire slot note_turn_start registered (the early return skips the persist
     # funnel). The user row is deliberately NOT persisted (#7100).
     from agent.agent_runtime_helpers import note_turn_persisted
-
     note_turn_persisted(agent)
     # Not _COMPRESSION_TIMEOUT_FINAL_RESPONSE — that describes a different state
     # (compression ran, could not reduce); the exception text carries the guidance.
@@ -1460,6 +1428,38 @@ def _run_phase(fn, agent, state: _LoopState, **extra):
     return verdict
 
 
+def _run_api_retry_loop(agent, s: _LoopState) -> Optional[Dict[str, Any]]:
+    """One API call with its retry/recovery loop (guard → build → call → check, error handlers).
+
+    Returns a turn result dict when a phase ends the turn, else None once the loop is left
+    (success, a restart armed on ``s._retry``, interrupt, or retries exhausted)."""
+    while s.retry_count < s.max_retries:
+        _ng = _run_phase(nous_rate_limit_guard, agent, s)
+        if _ng.action == "return":
+            return _ng.result
+        if _ng.action == "break":
+            return None
+        try:
+            _run_phase(build_api_request, agent, s)
+            if _run_phase(perform_api_call, agent, s).action == "break":
+                return None
+            _rc = _run_phase(check_api_response, agent, s)
+            if _rc.action == "return":
+                return _rc.result
+            if _rc.action == "break":
+                return None
+        except InterruptedError:
+            if _run_phase(handle_api_interrupt, agent, s).action == "break":
+                return None
+        except Exception as api_error:
+            _ae = _run_phase(handle_api_error, agent, s, api_error=api_error)
+            if _ae.action == "return":
+                return _ae.result
+            if _ae.action == "break":
+                return None
+    return None
+
+
 def run_conversation(
     agent,
     user_message: Any,
@@ -1553,7 +1553,6 @@ def run_conversation(
         _preflight_compression_blocked=_ctx.preflight_compression_blocked,
         max_compression_attempts=getattr(agent, "max_compression_attempts", 3),
     )
-
     # Opt-in runtime: api_mode == codex_app_server hands the whole turn to the codex
     # app-server subprocess (see agent/transports/codex_app_server_session.py).
     if agent.api_mode == "codex_app_server":
@@ -1587,35 +1586,9 @@ def run_conversation(
         s.api_request_id = f"{s.turn_id}:api:{s.api_call_count}"
         agent._current_api_request_id = s.api_request_id
 
-        while s.retry_count < s.max_retries:
-            _ng = _run_phase(nous_rate_limit_guard, agent, s)
-            if _ng.action == "return":
-                return _ng.result
-            if _ng.action == "break":
-                break
-
-            try:
-                _run_phase(build_api_request, agent, s)
-                if _run_phase(perform_api_call, agent, s).action == "break":
-                    break
-                _rc = _run_phase(check_api_response, agent, s)
-                if _rc.action == "return":
-                    return _rc.result
-                if _rc.action == "break":
-                    break
-                if _rc.action == "continue":
-                    continue
-            except InterruptedError:
-                if _run_phase(handle_api_interrupt, agent, s).action == "break":
-                    break
-            except Exception as api_error:
-                _ae = _run_phase(handle_api_error, agent, s, api_error=api_error)
-                if _ae.action == "return":
-                    return _ae.result
-                if _ae.action == "break":
-                    break
-                if _ae.action == "continue":
-                    continue
+        early_result = _run_api_retry_loop(agent, s)
+        if early_result is not None:
+            return early_result
 
         _rs = _run_phase(apply_retry_restarts, agent, s)
         if _rs.action == "break":
@@ -1629,22 +1602,15 @@ def run_conversation(
                 return _ri.result
             if _ri.action == "continue":
                 continue
-            if s.assistant_message.tool_calls:
-                _tr = _run_phase(run_tool_round, agent, s)
-                if _tr.action == "return":
-                    return _tr.result
-                if _tr.action == "break":
-                    break
-                if _tr.action == "continue":
-                    continue
-            else:
-                _fr = _run_phase(finish_text_response, agent, s)
-                if _fr.action == "return":
-                    return _fr.result
-                if _fr.action == "break":
-                    break
-                if _fr.action == "continue":
-                    continue
+            _v = _run_phase(
+                run_tool_round if s.assistant_message.tool_calls else finish_text_response, agent, s
+            )
+            if _v.action == "return":
+                return _v.result
+            if _v.action == "break":
+                break
+            if _v.action == "continue":
+                continue
         except Exception as e:
             if _run_phase(handle_outer_loop_error, agent, s, e=e).action == "break":
                 break
