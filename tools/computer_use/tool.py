@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 _approval_callback = None
 
 def set_approval_callback(cb) -> None:
-    """Register the CLI approval prompt (terminal_tool._approval_callback pattern).
-    ``cb(action, args, summary)`` -> "approve_once" | "approve_session" | "always_approve" | "deny"."""
+    """Register the CLI approval prompt (terminal_tool pattern); ``cb(action, args, summary)`` ->
+    "approve_once" | "approve_session" | "always_approve" | "deny"."""
     global _approval_callback
     _approval_callback = cb
 
@@ -117,7 +117,7 @@ def _warn_bypass_escalation(session_id: str) -> None:
         "version-3 computer_use.capability_manifest to keep a ceiling on bypassed runs.", configured, configured)
 
 def _configured_permission_mode() -> str:
-    """Configured cua mode (standard | bounded); "standard" if unresolvable. bounded needs
+    """Configured cua mode (standard | bounded); "standard" if unresolvable. bounded needs a
     computer_use.capability_manifest; the backend fails loudly without it."""
     try:
         from tools.computer_use.cua_backend import _cua_configured_permission_mode
@@ -169,8 +169,8 @@ def _detach_locked(sid: str) -> Tuple[Optional[ComputerUseBackend], Optional[thr
     return backend, call_lock
 
 def _stop_backend(backend: ComputerUseBackend, call_lock: Optional[threading.RLock]) -> None:
-    """Stop under the session call lock (if any) so an in-flight action finishes first. Never called
-    under ``_backend_lock``: unrelated sessions stay free meanwhile. Raises."""
+    """Stop under the session call lock (if any) so an in-flight action finishes first. Never called under
+    ``_backend_lock`` (unrelated sessions stay free). Raises."""
     with call_lock if call_lock is not None else contextlib.nullcontext():
         backend.stop()
 
@@ -241,8 +241,7 @@ def _shutdown_backend_atexit() -> None:
 
 atexit.register(_shutdown_backend_atexit)
 
-def reset_backend_for_tests() -> None:  # pragma: no cover
-    """Test helper — tear down the cached backend and per-session state."""
+def reset_backend_for_tests() -> None:  # pragma: no cover — tear down the cached backend and per-session state
     _shutdown_backend_atexit()
     _AUX_VISION_ROUTE_CACHE.clear()
 
@@ -351,17 +350,13 @@ def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
         return f"{action} element #{args['element']}{fg}"
     return f"{action} at {tuple(args['coordinate'])}{fg}" if args.get("coordinate") else action + fg
 
-def _summarize_type(action: str, args: Dict[str, Any], fg: str) -> str:
-    text = args.get("text", "")
-    return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "") + fg
-
 # action -> (action, args, fg_suffix) -> one-line approval-prompt summary
 _ACTION_SUMMARIES: Dict[str, Callable[[str, Dict[str, Any], str], str]] = {
     **dict.fromkeys(_CLICK_VARIANTS, _summarize_click),
     "drag": lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
                                  f"{args.get('to_element') or args.get('to_coordinate')}{fg}"),
     "scroll": lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}",
-    "type": _summarize_type,
+    "type": lambda a, args, fg: f"type {args.get('text', '')[:60]!r}" + ("..." if len(args.get("text", "")) > 60 else "") + fg,
     "key": lambda a, args, fg: f"key {args.get('keys', '')!r}{fg}",
     "focus_app": lambda a, args, fg: f"focus {args.get('app', '')!r}" + (" (raise)" if args.get("raise_window") else ""),
 }
@@ -385,8 +380,8 @@ def _do_capture(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
 def _do_focus_app(backend: ComputerUseBackend, args: Dict[str, Any]) -> Any:
     if not args.get("app"):
         return json.dumps({"error": "focus_app requires `app`"})
-    res = backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))
-    return _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
+    return _maybe_follow_capture(backend, backend.focus_app(args["app"], raise_window=bool(args.get("raise_window"))),
+                                 bool(args.get("capture_after")))
 
 def _listing(key: str, items: List[Dict[str, Any]]) -> str:
     return json.dumps({key: items, "count": len(items)})
@@ -479,8 +474,8 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
 # ── Response shaping ────────────────────────────────────────────────────────
 
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
-    """Next ladder step from semantic evidence, in precedence order. Escalation is advisory: it never
-    overrides a confirmed effect nor licenses repeating input."""
+    """Next ladder step from semantic evidence, in precedence order. Escalation is advisory: it never overrides
+    a confirmed effect nor licenses repeating input."""
     if res.effect == "confirmed" or res.verified is True:
         return {"decision": "done"}
     if res.effect == "unverifiable":
@@ -503,8 +498,7 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
 _VERDICT_FIELDS = ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code")
 
 def _present(**fields: Any) -> Dict[str, Any]:
-    """Only the truthy optional fields, in the given order."""
-    return {k: v for k, v in fields.items() if v}
+    return {k: v for k, v in fields.items() if v}  # only the truthy optional fields, in the given order
 
 def _action_payload(res: ActionResult) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"ok": res.ok, "action": res.action, **_present(message=res.message)}
@@ -518,22 +512,18 @@ def _action_payload(res: ActionResult) -> Dict[str, Any]:
 def _text_response(res: ActionResult) -> str:
     return json.dumps(_action_payload(res))
 
-# Cap for the AX `elements` array: dense UIs publish 500+ AX nodes, which would exhaust context after one
-# capture. The full tree spills to `elements_file`.
+# AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file.
 _DEFAULT_MAX_ELEMENTS = 100
 # Some providers reject images below 8x8 before the model sees the result; such captures fall back to text.
 _MIN_PROVIDER_IMAGE_DIMENSION = 8
 # Some AX trees (Discord/Slack via UIA, Electron chat clients) expose ENTIRE message bodies as labels; uncapped
 # they blew the tool-result budget and leaked private chat text. Labels identify a control, not text extraction.
 _MAX_ELEMENT_LABEL_CHARS = 120
-# Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's
-# periodic media-cache cleanup.
-_MAX_SPILL_FILES = 20
-_MAX_CAPTURE_FILES = 20
+# Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup.
+_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
 
 def _image_dimensions_from_b64(image_b64: str) -> Optional[Tuple[int, int]]:
-    """(width, height) of an inline PNG/JPEG screenshot, or None."""
-    try:
+    try:  # (width, height) of an inline PNG/JPEG screenshot, or None
         return image_dimensions_from_bytes(base64.b64decode(image_b64, validate=False)) if image_b64 else None
     except Exception:
         return None
@@ -543,8 +533,7 @@ def _capture_mime(cap: CaptureResult) -> str:
     return cap.image_mime_type or ("image/jpeg" if (cap.png_b64 or "").startswith("/9j/") else "image/png")
 
 def _capture_image_ext(cap: CaptureResult) -> str:
-    """File extension matching the on-disk bytes so MIME sniffing agrees."""
-    return ".jpg" if _capture_mime(cap).lower() == "image/jpeg" else ".png"
+    return ".jpg" if _capture_mime(cap).lower() == "image/jpeg" else ".png"  # matches on-disk bytes for MIME sniffing
 
 def _bounds_unknown(bounds) -> bool:
     """True when the AX tree reported no real geometry. KDE/Qt apps report ``[0, 0, 0, 0]`` for elements clickable
@@ -585,13 +574,11 @@ def _bounds_divergence(elements: List[UIElement], image_width: int, image_height
         max_x, max_y = max(max_x, int(x) + int(w)), max(max_y, int(y) + int(h))
     return None if max_x <= image_width * 1.05 and max_y <= image_height * 1.05 else (max_x, max_y)
 
-def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
-                  ) -> Tuple[Optional[float], Optional[str]]:
+def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int) -> Tuple[Optional[float], Optional[str]]:
     """(scale, note) when element bounds live in a different coordinate space than the screenshot, else
     (None, None). On HiDPI displays AX bounds are native while the screenshot is downscaled, so coordinate=
     clicks read off the screenshot miss by the scale factor. Scale heuristic: larger axis ratio wins."""
-    extent = _bounds_divergence(elements, image_width, image_height)
-    if extent is None:
+    if (extent := _bounds_divergence(elements, image_width, image_height)) is None:
         return None, None
     note = (f"element bounds are in native desktop coordinates (extend to ~{extent[0]}x{extent[1]}), "
             f"NOT screenshot pixels ({image_width}x{image_height}). coordinate= clicks expect the native "
@@ -606,8 +593,8 @@ def _bounds_space_note(elements: List[UIElement], image_width: int, image_height
 
 @dataclass
 class _CaptureView:
-    """One capture's derived facts, computed once and shared by every response branch. ``width``/``height`` are
-    the decoded screenshot dims when an image is present, else the backend's; ``visible`` is the capped list."""
+    """One capture's derived facts, computed once for every response branch. ``width``/``height`` are the decoded
+    screenshot dims when an image is present, else the backend's; ``visible`` is the capped element list."""
     cap: CaptureResult
     visible: List[UIElement]
     total: int
@@ -663,8 +650,7 @@ def _capture_summary_lines(v: _CaptureView) -> List[str]:
     return lines
 
 def _multimodal_capture(v: _CaptureView, summary: str) -> Dict[str, Any]:
-    """Envelope carrying the screenshot (not the elements array, so no truncation note)."""
-    cap = v.cap
+    cap = v.cap  # envelope carrying the screenshot (not the elements array, so no truncation note)
     return {
         "_multimodal": True,
         "content": [{"type": "text", "text": summary},
@@ -750,9 +736,8 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
 
 def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int = 0):
     """Path for a new file under ``$HERMES_HOME/<subdir>`` (dir created). With ``pattern``/``cap``, first unlinks
-    the oldest matching files so at most ``cap - 1`` remain (best-effort). Lazy import so tests can patch
-    ``hermes_constants.get_hermes_dir``."""
-    from hermes_constants import get_hermes_dir
+    the oldest matching files so at most ``cap - 1`` remain (best-effort)."""
+    from hermes_constants import get_hermes_dir  # lazy so tests can patch get_hermes_dir
     cache_dir = get_hermes_dir(subdir, legacy)
     cache_dir.mkdir(parents=True, exist_ok=True)
     if pattern:
@@ -763,8 +748,8 @@ def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int
     return cache_dir / name
 
 def _persist_capture_image(cap: CaptureResult) -> Optional[str]:
-    """Save a bounded copy of the capture in Hermes' media cache so attachment surfaces can deliver it; returns
-    the path. Best-effort: an unwritable cache must never break control."""
+    """Bounded copy of the capture in Hermes' media cache so attachment surfaces can deliver it; returns the path.
+    Best-effort: an unwritable cache must never break control."""
     if not cap.png_b64:
         return None
     try:
@@ -861,7 +846,7 @@ _VISION_PROMPT = ("Describe what is visible in this desktop application screensh
                   "cross-reference:\n")
 
 def _vision_analysis_text(result_json: Any) -> str:
-    """The ``analysis`` field of vision_analyze_tool's JSON result; raw text when it isn't JSON."""
+    # The ``analysis`` field of vision_analyze_tool's JSON result; raw text when it isn't JSON.
     if not isinstance(result_json, str):
         return ""
     try:
@@ -878,17 +863,13 @@ def _route_capture_through_aux_vision(
     merge the description with the AX/SOM summary into one text payload. JSON, or None on any failure."""
     if not cap.png_b64:
         return None
-    problem = "aux-vision import failed"
+    problem, temp_image_path = "aux-vision import failed", None
     try:
         from model_tools import _run_async
         from tools.vision_tools import vision_analyze_tool
         problem = "failed to decode capture base64"
         raw = base64.b64decode(cap.png_b64, validate=False)
-    except Exception as exc:
-        logger.debug("computer_use: %s: %s", problem, exc)
-        return None
-    temp_image_path = None
-    try:
+        problem = None  # from here on failures are loud (warning)
         ext = _capture_image_ext(cap)
         temp_image_path = _cache_file("cache/vision", "temp_vision_images", f"computer_use_{uuid.uuid4().hex}{ext}")
         raw, scale_note = _shrink_capture_for_vision(raw, ext)
@@ -896,8 +877,11 @@ def _route_capture_through_aux_vision(
         prompt = _VISION_PROMPT + summary + (f"\n\nNote: {scale_note}" if scale_note else "")
         result_json = _run_async(vision_analyze_tool(str(temp_image_path), prompt))
     except Exception as exc:
-        logger.warning("computer_use: auxiliary.vision pre-analysis failed (%s); "
-                       "returning to caller without aux analysis", exc)
+        if problem:
+            logger.debug("computer_use: %s: %s", problem, exc)
+        else:
+            logger.warning("computer_use: auxiliary.vision pre-analysis failed (%s); "
+                           "returning to caller without aux analysis", exc)
         return None
     finally:
         if temp_image_path is not None:
@@ -917,8 +901,7 @@ def _route_capture_through_aux_vision(
 # ── Availability check (used by the tool registry check_fn) ─────────────────
 
 def check_computer_use_requirements() -> bool:
-    """True iff computer_use can run here: macOS/Windows/Linux + cua-driver binary (or env override). `hermes
-    computer-use doctor` names blocked Linux checks."""
+    """macOS/Windows/Linux + cua-driver binary (or env override). `hermes computer-use doctor` names blocked checks."""
     if sys.platform not in ("darwin", "win32", "linux"):
         return False
     from tools.computer_use.cua_backend import cua_driver_binary_available
