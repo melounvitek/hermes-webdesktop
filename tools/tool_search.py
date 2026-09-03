@@ -39,18 +39,14 @@ class ToolSearchConfig:
     """Resolved, validated tool-search configuration for a single assembly."""
 
     enabled: str  # "auto" | "on" | "off" — "auto" is an alias of "on" today
-    # Listing budget as % of context. Does NOT gate activation; bounds how much
-    # the embedded listing may consume before it degrades (full -> names -> bare).
+    # Listing budget as % of context; does NOT gate activation, only bounds how much
+    # the embedded manifest may consume before it degrades (full -> names -> bare).
     threshold_pct: float  # 0..100
     search_default_limit: int
     max_search_limit: int
-    # Embedded name + short-description manifest keeping deferred tools
-    # DISCOVERABLE. "auto"/"on" = include when it fits; "off" = bare bridge.
-    listing: str = "auto"  # "auto" | "on" | "off"
-    # Effective budget = min(listing_max_tokens, threshold_pct% of context).
-    listing_max_tokens: int = 4000
-    # Core/GUI names deferred behind the bridge. None = curated default; an
-    # explicit config list replaces it wholesale ([] = defer no core tools).
+    listing: str = "auto"  # "auto"/"on" = embed the manifest when it fits; "off" = bare bridge
+    listing_max_tokens: int = 4000  # budget = min(this, threshold_pct% of context)
+    # None = curated default; an explicit list replaces it wholesale ([] = defer no core tools).
     defer_tools: Optional[frozenset] = None
 
     @property
@@ -59,8 +55,8 @@ class ToolSearchConfig:
 
     @classmethod
     def from_raw(cls, raw: Any) -> "ToolSearchConfig":
-        """Build from a raw dict / legacy bool / None. Every field is clamped and
-        unknown values fall back to safe defaults — a config typo must not break the agent."""
+        """Build from a raw dict / legacy bool / None; every field is clamped and unknown
+        values fall back to safe defaults — a config typo must not break the agent."""
         if not isinstance(raw, dict):
             return cls(enabled="off" if raw is False else "auto", threshold_pct=5.0,
                        search_default_limit=5, max_search_limit=25)
@@ -74,10 +70,8 @@ class ToolSearchConfig:
             max_search_limit=max_search_limit,
             listing=_tri_state(raw.get("listing", "auto")),
             listing_max_tokens=_clamped_int(raw.get("listing_max_tokens"), 4000, 200, 60000),
-            # A list replaces the curated default wholesale; anything else = curated.
-            defer_tools=(
-                frozenset(str(n).strip() for n in defer_raw if str(n).strip())
-                if isinstance(defer_raw, (list, tuple, set)) else None))
+            defer_tools=(frozenset(str(n).strip() for n in defer_raw if str(n).strip())
+                         if isinstance(defer_raw, (list, tuple, set)) else None))
 
 
 _TRI_STATE_ALIASES = {"true": "on", "1": "on", "yes": "on", "false": "off", "0": "off", "no": "off"}
@@ -85,8 +79,7 @@ _TRI_STATE_ALIASES = {"true": "on", "1": "on", "yes": "on", "false": "off", "0":
 
 def _tri_state(value: Any) -> str:
     """Normalize an ``auto``/``on``/``off`` setting (bool-ish aliases accepted)."""
-    text = str(value).strip().lower()
-    text = _TRI_STATE_ALIASES.get(text, text)
+    text = _TRI_STATE_ALIASES.get(str(value).strip().lower(), str(value).strip().lower())
     return text if text in ("auto", "on", "off") else "auto"
 
 
@@ -110,8 +103,8 @@ def _config_from_loader(loader_name: str) -> ToolSearchConfig:
     """Tool-search config via ``hermes_cli.config.<loader_name>`` (defaults on any failure)."""
     try:
         import hermes_cli.config as _cfg_mod
-        cfg = getattr(_cfg_mod, loader_name)() or {}
-        tools_cfg = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
+        tools_cfg = (getattr(_cfg_mod, loader_name)() or {}).get("tools")
+        tools_cfg = tools_cfg if isinstance(tools_cfg, dict) else {}
         return ToolSearchConfig.from_raw(tools_cfg.get("tool_search"))
     except Exception as e:
         logger.debug("Failed to load tool-search config: %s", e)
@@ -128,8 +121,7 @@ def load_config_readonly() -> ToolSearchConfig:
 
 
 def _core_tool_names() -> frozenset[str]:
-    """Tool names that never defer by default (lazy import: ``toolsets`` imports
-    ``tools.registry``, so a module-level import would be a cycle)."""
+    """Names that never defer by default (lazy: ``toolsets`` imports ``tools.registry``)."""
     try:
         from toolsets import _HERMES_CORE_TOOLS
         return frozenset(_HERMES_CORE_TOOLS)
@@ -137,16 +129,14 @@ def _core_tool_names() -> frozenset[str]:
         return frozenset()
 
 
-# Session-gated GUI toolsets: off ``_HERMES_CORE_TOOLS`` so non-GUI clients never
-# pay their schema; once enabled they stay direct unless the deferral list names them.
+# Session-gated GUI toolsets: off ``_HERMES_CORE_TOOLS`` so non-GUI clients never pay
+# their schema; once enabled they stay direct unless the deferral list names them.
 _DIRECT_SURFACE_TOOLSETS = frozenset({"desktop_ui", "project"})
 
-# Curated event-triggered core tools deferred BY DEFAULT — reached for when
-# something specific happens, so a catalog stub suffices. ``tools.tool_search.defer``
-# replaces this list wholesale ([] = legacy everything-eager). Names are POST-rename.
-# ``clarify`` is deliberately NOT here: A/B showed deferring it collapsed
-# structured-clarify usage (18/18 -> 7/18) — the ask-the-user affordance must
-# be ambient to fire; a stub is not enough.
+# Event-triggered core tools deferred BY DEFAULT (a catalog stub suffices); the ``defer``
+# config replaces this wholesale ([] = everything eager). POST-rename names. ``clarify``
+# is deliberately absent: A/B showed deferring it collapsed structured-clarify usage
+# (18/18 -> 7/18) — the ask-the-user affordance must be ambient, a stub is not enough.
 _DEFAULT_DEFERRED_TOOLS = frozenset({
     "computer_use", "session_search", "image_generate",
     "todo_list", "process_manage", "cronjob_manage",
@@ -158,9 +148,9 @@ _DEFAULT_DEFERRED_TOOLS = frozenset({
 
 
 def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) -> bool:
-    """True if a tool is *eligible* for deferral: named in ``defer_tools``
-    (curated core set or user override), OR an MCP tool, OR neither core nor a
-    session-gated GUI surface (i.e. a plugin tool). Bridge names never defer."""
+    """True if a tool is *eligible* for deferral: named in ``defer_tools`` (curated set or
+    user override), OR an MCP tool, OR neither core nor a session-gated GUI surface (i.e. a
+    plugin tool). Bridge names never defer."""
     if name in BRIDGE_TOOL_NAMES:
         return False
     if defer_tools is not None and name in defer_tools:
@@ -168,11 +158,9 @@ def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) 
     if name in _core_tool_names():
         return False
     entry = _registry_entry(name)
-    if entry is None:
-        return False
     try:
         return entry.toolset.startswith("mcp-") or entry.toolset not in _DIRECT_SURFACE_TOOLSETS
-    except Exception:  # malformed entry (no str toolset) is never deferrable
+    except Exception:  # unregistered, or malformed entry (no str toolset): never deferrable
         return False
 
 
@@ -184,26 +172,23 @@ def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
 def classify_tools(
     tool_defs: List[Dict[str, Any]],
     defer_tools: Optional[frozenset] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Split a tool-defs list into (visible, deferrable). Bridge tools are
-    dropped (they are re-added after classification)."""
+    """Split a tool-defs list into (visible, deferrable); bridge tools are dropped (re-added
+    after classification)."""
     visible: List[Dict[str, Any]] = []
     deferrable: List[Dict[str, Any]] = []
     for td, name in zip(tool_defs, _tool_def_names(tool_defs)):
-        if name in BRIDGE_TOOL_NAMES:
-            continue
-        (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
+        if name not in BRIDGE_TOOL_NAMES:
+            (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
     return visible, deferrable
 
 
 def _deferrable_in(tool_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Deferrable subset of a pre-assembly ``tool_defs`` list under the current
-    (read-only) user config — the universe the bridge tools operate on."""
+    """Deferrable subset of pre-assembly ``tool_defs`` under the read-only user config."""
     return classify_tools(tool_defs, load_config_readonly().effective_defer_tools)[1]
 
 
 def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
-    """Token cost of a tool-defs list via the chars/4 rule (order-of-magnitude
-    precision is all the activation gate needs)."""
+    """Token cost via the chars/4 rule (order-of-magnitude precision suffices)."""
     total_chars = 0
     for td in tool_defs:
         try:
@@ -217,38 +202,30 @@ def should_activate(
     config: ToolSearchConfig,
     deferrable_tokens: int,
     context_length: Optional[int]) -> bool:
-    """``"off"`` never activates; ``"on"``/``"auto"`` activate whenever any deferrable
-    tool exists ("auto" is reserved for a future budget-gated mode — do not distinguish
-    them without that design). ``context_length`` is kept for caller compatibility."""
+    """``"off"`` never activates; ``"on"``/``"auto"`` activate whenever any deferrable tool
+    exists ("auto" is reserved for a future budget-gated mode — do not distinguish them
+    without that design). ``context_length`` is kept for caller compatibility."""
     return config.enabled != "off" and deferrable_tokens > 0
 
 
 def listing_token_budget(config: ToolSearchConfig, context_length: Optional[int]) -> int:
-    """``min(listing_max_tokens, threshold_pct% of context)``; unknown context
-    uses a 10K percentage leg (5% of a typical 200K window)."""
-    if context_length and context_length > 0:
-        pct_leg = int(context_length * (config.threshold_pct / 100.0))
-    else:
-        pct_leg = 10_000
+    """``min(listing_max_tokens, threshold_pct% of context)``; unknown context uses a 10K
+    percentage leg (5% of a typical 200K window)."""
+    pct_leg = (int(context_length * (config.threshold_pct / 100.0))
+               if context_length and context_length > 0 else 10_000)
     return max(0, min(config.listing_max_tokens, pct_leg))
 
 
 def _bridge_schema(name: str, description: str, properties: Dict[str, Any],
                    required: List[str]) -> Dict[str, Any]:
     """One OpenAI-style function schema (key order is part of the frozen bytes)."""
-    return {
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": {"type": "object", "properties": properties, "required": required},
-        },
-    }
+    return {"type": "function", "function": {
+        "name": name, "description": description,
+        "parameters": {"type": "object", "properties": properties, "required": required}}}
 
 
 def _search_description(deferred_count: int, listing: Optional[str], listing_form: str) -> str:
-    """tool_search bridge description with the listing embedded; ``listing_form``
-    picks the framing (see :func:`bridge_tool_schemas`)."""
+    """tool_search bridge description with the listing embedded (framing per ``listing_form``)."""
     desc = (
         f"Search {deferred_count} additional tools that are loaded on demand. "
         "Takes a list of queries searched in parallel against the same "
@@ -284,11 +261,10 @@ def bridge_tool_schemas(
     deferred_count: int,
     listing: Optional[str] = None,
     listing_form: str = "") -> List[Dict[str, Any]]:
-    """Bridge tool schemas injected in place of deferred tools. Kept short —
-    every byte is paid on every turn. ``listing`` is embedded in the tool_search
-    description; ``listing_form`` picks the framing (per-tool forms say "skip
-    search when you see the exact name", "groups" says which domains exist and
-    that search is mandatory)."""
+    """Bridge tool schemas injected in place of deferred tools. Kept short — every byte is
+    paid on every turn. ``listing`` is embedded in the tool_search description; per-tool
+    ``listing_form``s say "skip search when you see the exact name", "groups" says which
+    domains exist and that search is mandatory."""
     return [
         _bridge_schema(
             TOOL_SEARCH_NAME,
@@ -346,8 +322,7 @@ class AssemblyResult:
     deferred_count: int = 0
     deferred_tokens: int = 0
     threshold_tokens: int = 0
-    # 0 = passthrough; 1 = bridge + per-tool listing (full/names/mixed);
-    # 2 = bare bridge / server-summary only (tools reachable only via tool_search).
+    # 0 = passthrough; 1 = bridge + per-tool listing; 2 = bare bridge / server summary only.
     tier: int = 0
     listing_form: str = "none"  # "full" | "names" | "mixed" | "groups" | "none"
 
@@ -366,15 +341,12 @@ def assemble_tool_defs(
     visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
     if not deferrable:
         return AssemblyResult(tool_defs=incoming, activated=False)
-
     deferrable_tokens = estimate_tokens_from_schemas(deferrable)
     if not should_activate(config, deferrable_tokens, context_length):
         return AssemblyResult(
             tool_defs=incoming, activated=False, deferred_count=len(deferrable),
             deferred_tokens=deferrable_tokens,
-            threshold_tokens=int((context_length or 0) * (config.threshold_pct / 100.0)),
-            tier=0)
-
+            threshold_tokens=int((context_length or 0) * (config.threshold_pct / 100.0)), tier=0)
     listing, listing_form = None, "none"
     listing_budget = listing_token_budget(config, context_length)
     if config.listing != "off":
@@ -403,18 +375,15 @@ def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
     fn = schema.get("function")
     params = fn.get("parameters") if isinstance(fn, dict) else None
     required = params.get("required") if isinstance(params, dict) else None
-    if not isinstance(required, list):
-        required = []
-    return {
-        "source": entry.source,
-        "source_name": entry.source_name,
-        "description": (entry.description or "")[:400],  # cap chatty MCP descriptions
-        "required": [r[:64] for r in required if isinstance(r, str)][:32]}
+    return {"source": entry.source, "source_name": entry.source_name,
+            "description": (entry.description or "")[:400],  # cap chatty MCP descriptions
+            "required": [r[:64] for r in (required if isinstance(required, list) else [])
+                         if isinstance(r, str)][:32]}
 
 
 def _available_source_summary(catalog: List[CatalogEntry]) -> List[Dict[str, Any]]:
-    """Deterministic ``[{name, tool_count}]`` of connected sources, attached to
-    empty query groups so a lexical miss is not read as a missing capability."""
+    """Deterministic ``[{name, tool_count}]`` of connected sources (attached to empty query
+    groups so a lexical miss is not read as a missing capability)."""
     counts = Counter(_listing_group_label(entry.source_name) for entry in catalog)
     return [{"name": name, "tool_count": counts[name]} for name in sorted(counts)]
 
@@ -435,27 +404,18 @@ def _string_list_arg(
         if text and (not dedupe or text not in out):
             out.append(text)
     if not out:
-        return None, tool_error(
-            f"{key} is required and must contain at least one non-empty string")
+        return None, tool_error(f"{key} is required and must contain at least one non-empty string")
     if len(out) > max_items:
-        return None, tool_error(
-            f"too many {key}: {len(out)} > max {max_items}. {retry_hint}")
+        return None, tool_error(f"too many {key}: {len(out)} > max {max_items}. {retry_hint}")
     return out, None
 
 
-def dispatch_tool_search(args: Dict[str, Any],
-                         *,
-                         current_tool_defs: List[Dict[str, Any]],
+def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[str, Any]],
                          config: Optional[ToolSearchConfig] = None) -> str:
-    """Execute the ``tool_search`` bridge tool. Returns JSON::
-
-        {"queries": [...], "total_available": N,
-         "results": [{"query": ..., "matches": [names...]}, ...],
-         "tools": {name: {"source", "source_name", "description", "required"}}}
-
-    ``limit`` applies PER QUERY. Empty query groups get ``available_sources`` +
-    ``hint`` so a lexical miss is not mistaken for a missing capability.
-    """
+    """Execute the ``tool_search`` bridge tool -> JSON ``{queries, total_available,
+    results: [{query, matches: [names]}], tools: {name: {source, source_name, description,
+    required}}}``. ``limit`` applies PER QUERY; empty groups get ``available_sources`` +
+    ``hint`` so a lexical miss is not mistaken for a missing capability."""
     if config is None:
         config = load_config()
     queries, err = _string_list_arg(
@@ -466,7 +426,6 @@ def dispatch_tool_search(args: Dict[str, Any],
     raw_limit = args.get("limit")
     limit = (config.search_default_limit if raw_limit is None
              else _clamped_int(raw_limit, config.search_default_limit, 1, config.max_search_limit))
-
     catalog = build_catalog(_deferrable_in(current_tool_defs))
     results: List[Dict[str, Any]] = []
     tools_map: Dict[str, Dict[str, Any]] = {}
@@ -485,26 +444,15 @@ def dispatch_tool_search(args: Dict[str, Any],
                 "tool_search with the service name plus a concrete action or "
                 "object before concluding the capability is unavailable.")
         results.append(group)
-    return json.dumps({
-        "queries": queries,
-        "total_available": len(catalog),
-        "results": results,
-        "tools": tools_map,
-    }, ensure_ascii=False)
+    return json.dumps({"queries": queries, "total_available": len(catalog), "results": results,
+                       "tools": tools_map}, ensure_ascii=False)
 
 
-def dispatch_tool_describe(args: Dict[str, Any],
-                           *,
-                           current_tool_defs: List[Dict[str, Any]],
+def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict[str, Any]],
                            config: Optional[ToolSearchConfig] = None) -> str:
-    """Execute the ``tool_describe`` bridge tool. Returns JSON::
-
-        {"tools": {name: {"description", "parameters"}},
-         "not_found": [...],   # unknown / not in this assembly (never fails the call)
-         "errors": {name: msg}}  # registered but non-deferrable names
-
-    Duplicates are deduped silently.
-    """
+    """Execute the ``tool_describe`` bridge tool -> JSON ``{tools: {name: {description,
+    parameters}}, not_found: [...]  (unknown / not in this assembly; never fails the call),
+    errors: {name: msg}  (registered but non-deferrable)}``. Duplicates dedupe silently."""
     if config is None:
         config = load_config_readonly()
     names, err = _string_list_arg(
@@ -512,7 +460,6 @@ def dispatch_tool_describe(args: Dict[str, Any],
         retry_hint="Retry with fewer names per call.")
     if err:
         return err
-
     deferrable = _deferrable_in(current_tool_defs)
     by_name = {name: _fn(td) for td, name in zip(deferrable, _tool_def_names(deferrable)) if name}
     tools: Dict[str, Dict[str, Any]] = {}
@@ -521,9 +468,8 @@ def dispatch_tool_describe(args: Dict[str, Any],
     for name in names:
         fn = by_name.get(name)
         if fn is not None:
-            tools[name] = {
-                "description": fn.get("description", ""),
-                "parameters": fn.get("parameters", {})}
+            tools[name] = {"description": fn.get("description", ""),
+                           "parameters": fn.get("parameters", {})}
         elif _registry_entry(name) is not None and not is_deferrable_tool_name(
             name, load_config_readonly().effective_defer_tools):
             # Registered but bridge/core/GUI-surface: a real name, wrong door.
@@ -532,7 +478,6 @@ def dispatch_tool_describe(args: Dict[str, Any],
                 "already, call it directly; otherwise check the spelling against tool_search.")
         else:
             not_found.append(name)
-
     result: Dict[str, Any] = {"tools": tools}
     if not_found:
         result["not_found"] = not_found
@@ -547,9 +492,8 @@ def scoped_deferrable_names(tool_defs: List[Dict[str, Any]]) -> frozenset[str]:
     universe ``tool_call`` may reach. Gates bridge dispatch AND the executor unwrap so a
     restricted session cannot invoke an out-of-scope tool via the bridge."""
     defer_tools = load_config_readonly().effective_defer_tools
-    return frozenset(
-        name for name in _tool_def_names(tool_defs)
-        if name and is_deferrable_tool_name(name, defer_tools))
+    return frozenset(n for n in _tool_def_names(tool_defs)
+                     if n and is_deferrable_tool_name(n, defer_tools))
 
 
 def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
