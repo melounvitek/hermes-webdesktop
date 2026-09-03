@@ -773,8 +773,8 @@ def _resolve_alias_fallback(
     AmbiguousAliasError propagates: the alias exists on this provider, the user just has to
     choose — trying the next provider would silently switch them somewhere they didn't ask for.
     """
-    return next((r for r in (resolve_alias(raw_input, p) for p in authenticated_providers or ("openrouter", "nous"))
-                 if r is not None), None)
+    results = (resolve_alias(raw_input, p) for p in authenticated_providers or ("openrouter", "nous"))
+    return next((r for r in results if r is not None), None)
 
 
 def resolve_display_context_length(
@@ -794,8 +794,7 @@ def resolve_display_context_length(
         try:
             from hermes_cli.route_identity import should_clear_context_pin
             if should_clear_context_pin(
-                configured_model, model, configured_base_url, base_url, configured_provider, provider,
-            ):
+                    configured_model, model, configured_base_url, base_url, configured_provider, provider):
                 config_context_length = None
         except Exception:
             config_context_length = None

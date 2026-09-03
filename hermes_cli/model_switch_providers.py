@@ -485,10 +485,19 @@ def _discover_flag(entry: dict):
 
 def _display_prefix(name: str) -> str:
     """Text before the per-model separator Hermes's own writer uses ("—" / " - ")."""
-    for sep in ("—", " - "):
-        if sep in name:
-            return name.split(sep)[0].strip()
-    return name
+    return next((name.split(sep)[0].strip() for sep in ("—", " - ") if sep in name), name)
+
+
+def _group_display_name(display_name: str) -> str:
+    """Section-3 row label: strip the per-model suffix and trailing version tokens ("Palantir
+    Claude 4.7 Opus" -> "Palantir Claude") — cut at the first token containing a digit, only when
+    >= 2 words remain (avoids over-trimming)."""
+    grp_display = _display_prefix(display_name)
+    toks = grp_display.split()
+    cut_at = next((i for i, t in enumerate(toks) if any(c.isdigit() for c in t.strip(".,()"))), None)
+    if cut_at is not None and cut_at >= 2:
+        grp_display = " ".join(toks[:cut_at]).strip()
+    return grp_display or display_name
 
 
 def _discover_endpoint_models(
@@ -831,18 +840,10 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
         group_key = (_norm_url(api_url), cred_identity, _entry_api_mode(ep_cfg), tuple(sorted(headers.items())))
 
         if group_key not in ep_groups:
-            # Strip the per-model suffix and trailing version tokens ("Palantir Claude 4.7 Opus"
-            # -> "Palantir Claude"): cut at the first token with a digit, only when >=2 words
-            # remain (avoids over-trimming).
-            grp_display = _display_prefix(display_name)
-            toks = grp_display.split()
-            cut_at = next((i for i, t in enumerate(toks) if any(c.isdigit() for c in t.strip(".,()"))), None)
-            if cut_at is not None and cut_at >= 2:
-                grp_display = " ".join(toks[:cut_at]).strip()
             # slug = first ep_name encountered; probe key from the first member (inline api_key,
             # else key_env through the per-profile secret scope).
             ep_groups[group_key] = {
-                "slug": ep_name, "name": grp_display or display_name, "api_url": api_url, "models": [],
+                "slug": ep_name, "name": _group_display_name(display_name), "api_url": api_url, "models": [],
                 "has_explicit_models": False, "api_key": inline_api_key or _scoped_key_env(key_env),
                 "headers": headers, "api_mode": ep_cfg.get("api_mode"),
                 "discovery_allowed": bool(api_url) and _discover_flag(ep_cfg), "raw_names": [], "aliases": set()}
