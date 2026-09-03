@@ -94,7 +94,6 @@ class GatewayNotificationsMixin:
         adapter = self._adapter_for_source(source)
         if not adapter:
             return
-
         config = getattr(self, "config", None)
         chat_id = getattr(source, "chat_id", None)
         if config and getattr(source, "platform", None) == Platform.SLACK and _is_slack_ignored_channel(config, chat_id):
@@ -115,7 +114,6 @@ class GatewayNotificationsMixin:
                     "[%s] send_private_notice failed, falling back to public",
                     getattr(source, "platform", "?"), exc_info=True,
                 )
-
         await adapter.send(source.chat_id, content, metadata=metadata)
 
     async def _resolve_compression_lineage_target(
@@ -127,14 +125,12 @@ class GatewayNotificationsMixin:
         except Exception:
             logger.debug("Async-delegation compression-tip lookup failed for %s", pinned_session_id, exc_info=True)
             target_session_id = None
-
         if not target_session_id or target_session_id == pinned_session_id:
             logger.warning(
                 "Async-delegation completion pinned to compressed session %s "
                 "without a continuation; dropping injection.", pinned_session_id,
             )
             return None
-
         try:
             tip_row = await session_db.get_session(target_session_id)
         except Exception:
@@ -145,7 +141,6 @@ class GatewayNotificationsMixin:
                 target_session_id, "unknown" if tip_row is None else "ended",
             )
             return None
-
         route_owns_lineage = session_entry.session_id in {pinned_session_id, target_session_id}
         if not route_owns_lineage:
             # A delegation may survive several compression rotations: accept an intermediate stale
@@ -162,7 +157,6 @@ class GatewayNotificationsMixin:
             except Exception:
                 route_tip = None
             route_owns_lineage = route_tip == target_session_id
-
         if not route_owns_lineage:
             logger.warning(
                 "Async-delegation completion for compression lineage %s -> %s "
@@ -189,20 +183,17 @@ class GatewayNotificationsMixin:
                 "dropping injection (#55578 fail-closed)."
             )
             return None
-
         pinned_row = None
         try:
             pinned_row = await session_db.get_session(pinned_session_id)
         except Exception:
             logger.debug("Async-delegation parent lookup failed for %s", pinned_session_id, exc_info=True)
-
         if pinned_row is None:
             logger.warning(
                 "Async-delegation completion has unknown spawning session %s; "
                 "dropping injection (#55578 fail-closed).", pinned_session_id,
             )
             return None
-
         target_session_id = pinned_session_id
         follows_compression = False
         if pinned_row.get("ended_at"):
@@ -224,17 +215,14 @@ class GatewayNotificationsMixin:
                     _end_reason or "idle", pinned_session_id, session_entry.session_id,
                 )
                 return session_entry
-
             follows_compression = True
             target_session_id = await self._resolve_compression_lineage_target(
                 session_db, session_entry, pinned_session_id,
             )
             if target_session_id is None:
                 return None
-
         if target_session_id == session_entry.session_id:
             return session_entry
-
         prior_session_id = session_entry.session_id
         if follows_compression:
             switched = await self.async_session_store.advance_compression_session(
@@ -248,7 +236,6 @@ class GatewayNotificationsMixin:
                 "owning session %s; dropping injection.", session_entry.session_key, target_session_id,
             )
             return None
-
         logger.info(
             "Pinned async-delegation completion to owning session %s (was %s) for routing key %s (#57498)",
             target_session_id, prior_session_id, session_entry.session_key,
@@ -268,20 +255,17 @@ class GatewayNotificationsMixin:
             # Capture [[as_document]] before extract_media strips it: image files then go through
             # send_document (preserving bytes), not send_multiple_images (Telegram recompresses).
             force_document_attachments = "[[as_document]]" in response
-
             from gateway.platforms.base import BasePlatformAdapter, should_send_media_as_audio
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
             # Strip image URLs for parity with the non-streaming chain; no extract_local_files here.
             adapter.extract_images(cleaned)
-
             _thread_meta = (
                 dict(thread_metadata)
                 if thread_metadata is not None
                 else self._thread_metadata_for_source(event.source, self._reply_anchor_for_event(event))
             )
             chat_id = event.source.chat_id
-
             # Images go out as one batch (e.g. Signal's multi-attachment RPC) unless [[as_document]].
             def _is_photo(media_path: str, is_voice: bool) -> bool:
                 ext = Path(media_path).suffix.lower()
@@ -289,14 +273,12 @@ class GatewayNotificationsMixin:
 
             image_paths = [p for p, v in media_files if _is_photo(p, v)]
             non_image_media = [(p, v) for p, v in media_files if not _is_photo(p, v)]
-
             if image_paths:
                 try:
                     images = [(f"file://{_quote(p)}", "") for p in image_paths]
                     await adapter.send_multiple_images(chat_id=chat_id, images=images, metadata=_thread_meta)
                 except Exception as e:
                     logger.warning("[%s] Post-stream image batch delivery failed: %s", adapter.name, e)
-
             for media_path, is_voice in non_image_media:
                 try:
                     ext = Path(media_path).suffix.lower()
@@ -346,12 +328,10 @@ class GatewayNotificationsMixin:
                         logger.debug("Queued-lane reconcile edit failed (%s); falling back to send.", _qe)
                 if not _reconciled:
                     await adapter.send(source.chat_id, text_content, metadata=metadata)
-
         # Failed turns deliver their (normalized failure) text but must not upload attachments as if
         # they succeeded — mirrors the ``not agent_result.get("failed")`` completed-turn guard.
         if not deliver_media:
             return
-
         synthetic_event = MessageEvent(text="", source=source, message_id=event_message_id)
         await self._deliver_media_from_response(response, synthetic_event, adapter, thread_metadata=metadata)
 
@@ -360,7 +340,6 @@ class GatewayNotificationsMixin:
         existing_task = getattr(self, "_update_notification_task", None)
         if existing_task and not existing_task.done():
             return
-
         try:
             self._update_notification_task = asyncio.create_task(self._watch_update_progress())
         except RuntimeError:
@@ -488,13 +467,11 @@ class GatewayNotificationsMixin:
         paths = self._update_paths()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-
         target = self._resolve_update_target(paths)
         if target is None:
             await self._watch_update_completion_only(paths, deadline, poll_interval)
             return
         session_key = target.session_key
-
         bytes_sent = 0
         last_stream_time = loop.time()
         buffer = ""
@@ -528,11 +505,9 @@ class GatewayNotificationsMixin:
                     logger.info("Update finished (exit=%s), notified %s", exit_code, session_key)
                 self._clear_update_markers(paths, session_key)
                 return
-
             _read_new_output()
             if buffer.strip() and (loop.time() - last_stream_time) >= stream_interval:
                 await _flush_buffer()
-
             # Forward a prompt only when none is still awaiting a response; otherwise the watcher
             # would re-read the same .update_prompt.json every poll and spam duplicate prompts.
             _pending_state = self._peek_session_state(session_key) if session_key else None
@@ -548,9 +523,7 @@ class GatewayNotificationsMixin:
                         await self._forward_update_prompt(target, prompt_text, prompt_data.get("default", ""))
                 except (json.JSONDecodeError, OSError) as e:
                     logger.debug("Failed to read update prompt: %s", e)
-
             await asyncio.sleep(poll_interval)
-
         if not paths.exit_code.exists():
             logger.warning("Update watcher timed out after %.0fs", timeout)
             paths.exit_code.write_text("124", encoding="utf-8")
@@ -568,7 +541,6 @@ class GatewayNotificationsMixin:
         paths = self._update_paths()
         if not paths.any_pending():
             return False
-
         cleanup = True
         active_pending_path = paths.claimed
 
@@ -589,17 +561,13 @@ class GatewayNotificationsMixin:
                         return True
             elif not paths.claimed.exists():
                 return True
-
             pending = json.loads(paths.claimed.read_text(encoding="utf-8"))
             platform_str = pending.get("platform")
             chat_id = pending.get("chat_id")
-
             if not paths.exit_code.exists():
                 return _defer("Update notification deferred: update still running")
-
             exit_code = self._update_exit_code(paths)
             output = paths.output.read_bytes().decode("utf-8", errors="replace") if paths.output.exists() else ""
-
             platform = Platform(platform_str)
             adapter = self.adapters.get(platform)
             if chat_id and not adapter:
@@ -628,7 +596,6 @@ class GatewayNotificationsMixin:
             if cleanup:
                 for p in (active_pending_path, paths.claimed, paths.output, paths.exit_code):
                     p.unlink(missing_ok=True)
-
         return True
 
     async def _send_restart_notification(self) -> Optional[tuple[str, str, Optional[str]]]:
@@ -637,29 +604,24 @@ class GatewayNotificationsMixin:
         notify_path = _hermes_home / ".restart_notify.json"
         if not notify_path.exists():
             return None
-
         try:
             data = json.loads(notify_path.read_text(encoding="utf-8"))
             platform_str = data.get("platform")
             chat_id = data.get("chat_id")
             thread_id = data.get("thread_id")
-
             if not platform_str or not chat_id:
                 return None
-
             platform = Platform(platform_str)
             transport = resolve_delivery_transport(platform, self.config, self.adapters)
             if transport is None:
                 logger.debug("Restart notification skipped: no live transport for %s", platform_str)
                 return None
-
             platform_cfg = self.config.platforms.get(platform)
             if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                 logger.info(
                     "Restart notification suppressed: %s has gateway_restart_notification=false", platform_str
                 )
                 return None
-
             metadata = self._pending_marker_metadata(platform, chat_id, data, transport.adapter)
             if data.get("delivered_via_upstream_relay") is True:
                 metadata = dict(metadata or {})
@@ -677,7 +639,6 @@ class GatewayNotificationsMixin:
                     "Restart notification to %s:%s was not delivered: %s", platform_str, chat_id, _send_error(result),
                 )
                 return None
-
             logger.info("Sent restart notification to %s:%s", platform_str, chat_id)
             return str(platform_str), str(chat_id), str(thread_id) if thread_id else None
         except Exception as e:
@@ -733,7 +694,6 @@ class GatewayNotificationsMixin:
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
         message = "♻️ Gateway online — Hermes is back and ready."
-
         for platform, platform_cfg, home, transport in self._home_channel_transports():
             if not platform_cfg.gateway_restart_notification:
                 logger.info(
@@ -741,17 +701,14 @@ class GatewayNotificationsMixin:
                     platform.value,
                 )
                 continue
-
             target = _notice_target_key(platform.value, home.chat_id, home.thread_id)
             if target in skipped or target in delivered:
                 continue
-
             if await self._send_home_channel_message(
                 platform, home, transport, message, "Home-channel startup notification failed for %s:%s: %s",
             ):
                 delivered.add(target)
                 logger.info("Sent home-channel startup notification to %s:%s", platform.value, home.chat_id)
-
         return delivered
 
     async def _send_session_db_warning_notifications(self) -> None:
@@ -764,7 +721,6 @@ class GatewayNotificationsMixin:
         error = getattr(self, "_session_db_init_error", None)
         if not error:
             return
-
         from hermes_state import classify_persistence_error, format_session_db_unavailable
         if classify_persistence_error(error) == "corrupt":
             message = (
@@ -779,9 +735,7 @@ class GatewayNotificationsMixin:
                 f"⚠️ Session database unavailable — messages may not be persisted. "
                 f"{format_session_db_unavailable()}\nRun `hermes doctor` for diagnostics."
             )
-
         logger.warning("Broadcasting state.db failure warning to home channels: %s", error)
-
         for platform, _platform_cfg, home, transport in self._home_channel_transports():
             await self._send_home_channel_message(
                 platform, home, transport, message, "state.db warning notification failed for %s:%s: %s",
@@ -795,7 +749,6 @@ class GatewayNotificationsMixin:
         from gateway.run import _parse_session_key
         session_key = str(evt.get("session_key") or "").strip()
         derived = {}
-
         if session_key:
             try:
                 self.session_store._ensure_loaded()
@@ -804,13 +757,10 @@ class GatewayNotificationsMixin:
                     return entry.origin
             except Exception as exc:
                 logger.debug("Synthetic process-event session-store lookup failed for %s: %s", session_key, exc)
-
             cached_source = self._get_cached_session_source(session_key)
             if cached_source is not None:
                 return cached_source
-
             derived = _parse_session_key(session_key) or {}
-
         platform_name = str(evt.get("platform") or derived.get("platform") or "").strip().lower()
         chat_type = str(evt.get("chat_type") or derived.get("chat_type") or "").strip().lower()
         chat_id = str(evt.get("chat_id") or derived.get("chat_id") or "").strip()
@@ -821,7 +771,6 @@ class GatewayNotificationsMixin:
                 session_key, platform_name, chat_type, chat_id, evt.get("type", "?"),
             )
             return None
-
         try:
             platform = Platform(platform_name)
             # Reject dynamic pseudo-members: plugin platforms must be registered.
@@ -863,7 +812,6 @@ class GatewayNotificationsMixin:
         watch_events = _drain_gateway_watch_events(completion_queue)
         if self._load_background_notifications_mode() == "off":
             return
-
         for evt in watch_events:
             synth_text = _format_gateway_process_notification(evt)
             if not synth_text:
@@ -1094,7 +1042,6 @@ class GatewayNotificationsMixin:
                     return claim
         elif evt_type != "completion":
             return claim
-
         # Background completions carry only session_key, so after /new the OLD session's notification
         # would land in the chat's NEW session. Stamped events get the same pre-flight as async
         # delegations; unstamped ones deliver.
@@ -1139,18 +1086,15 @@ class GatewayNotificationsMixin:
             return claim.early_result
         if identity is not None and self._completion_identity_seen(identity, claim=True):
             return None
-
         accepted = False
         try:
             injection_result = await self._inject_watch_notification(synth_text, evt)
             if injection_result is not True:
                 return injection_result
             accepted = True
-
             if identity is not None:
                 with self._completion_delivery_lock:
                     self._mark_completions_delivered_locked((identity,))
-
             # The durable async-delegation row is the authoritative replay state — ack it after
             # adapter acceptance; no parallel ledger here.
             if claim.claim_id:
@@ -1224,7 +1168,6 @@ class GatewayNotificationsMixin:
             if not entries:
                 return
             synth_text = entries[0][0] if len(entries) == 1 else self._format_coalesced_process_completions(entries)
-
             # A duplicate primary can legitimately return None from the lifecycle dedupe seam; try the
             # next batch identity so a fresh sibling is never discarded with that duplicate.
             delivered = None
@@ -1270,7 +1213,6 @@ class GatewayNotificationsMixin:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-
         # Defensive cleanup for an orphaned queue with no live flush task.
         batches = getattr(self, "_completion_notification_batches", {})
         for entries in batches.values():
@@ -1291,10 +1233,8 @@ class GatewayNotificationsMixin:
         ):
             if not hasattr(self, attr):
                 setattr(self, attr, default())
-
         if self._completion_notification_batches_stopping:
             return False
-
         key = self._event_route_key(evt, self._COMPLETION_BATCH_KEY_FIELDS)
         future = asyncio.get_running_loop().create_future()
         self._completion_notification_batches.setdefault(key, []).append((synth_text, evt, future))
@@ -1348,13 +1288,11 @@ class GatewayNotificationsMixin:
             if identity is not None and self._completion_identity_seen(identity):
                 continue
             deliverable.append((evt, synth_text))
-
         if not deliverable:
             return None
         if len(deliverable) == 1:
             evt, synth_text = deliverable[0]
             return await self._deliver_completion_notification(synth_text, evt)
-
         from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
         primary_evt, primary_text = deliverable[0]
         blocks = [primary_text]
@@ -1367,10 +1305,8 @@ class GatewayNotificationsMixin:
                 continue
             siblings.append((evt, claim_id))
             blocks.append(synth_text)
-
         if not siblings:
             return await self._deliver_completion_notification(primary_text, primary_evt)
-
         header = (
             f"[IMPORTANT: {len(blocks)} background subagent delegations "
             "completed for this session. Treat these results as one "
@@ -1528,10 +1464,8 @@ class GatewayNotificationsMixin:
         thread_id = watcher.get("thread_id", "")
         agent_notify = watcher.get("notify_on_complete", False)
         notify_mode = self._load_background_notifications_mode()
-
         logger.debug("Process watcher started: %s (every %ss, notify=%s, agent_notify=%s)",
                       session_id, interval, notify_mode, agent_notify)
-
         silent = notify_mode == "off" and not agent_notify
         last_output_len = 0
         while True:
@@ -1547,7 +1481,6 @@ class GatewayNotificationsMixin:
             current_output_len = len(session.output_buffer)
             has_new_output = current_output_len > last_output_len
             last_output_len = current_output_len
-
             if session.exited:
                 # Agent-triggered completion: inject a synthetic message unless the agent already consumed
                 # the result via wait/log. poll() is read-only and deliberately does NOT mark consumed —
@@ -1563,7 +1496,6 @@ class GatewayNotificationsMixin:
                         # of suppressing the result.
                         continue
                     break
-
                 # Normal text-only notification. Skip when the agent already consumed this completion via
                 # wait/log (output returned inline) — the raw "finished" message would be a duplicate.
                 # The agent_notify skip FALLS THROUGH here, hence this check. poll() is read-only.
@@ -1579,7 +1511,6 @@ class GatewayNotificationsMixin:
                     message_text = self._format_process_final_message(session_id, session, notify_mode)
                     await self._send_watcher_message(platform_name, chat_id, thread_id, message_text)
                 break
-
             elif has_new_output and notify_mode == "all" and not agent_notify:
                 # New output — deliver a status update (only in "all" mode; agent_notify watchers
                 # only care about completion).
@@ -1588,5 +1519,4 @@ class GatewayNotificationsMixin:
                     platform_name, chat_id, thread_id,
                     f"[Background process {session_id} is still running~ New output:\n{new_output}]",
                 )
-
         logger.debug("Process watcher ended%s: %s", " (silent)" if silent else "", session_id)
