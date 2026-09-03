@@ -361,8 +361,7 @@ class SessionUsageMixin:
         caller's write txn after the ``sessions`` UPDATE. A missing model/provider falls
         back to the session row (same COALESCE behaviour as the summary update) — except
         for aux rows (``task`` set), which must NOT inherit the main-loop route (vision
-        on gemini while the main loop runs anthropic): missing info stays 'unknown'/empty.
-        """
+        on gemini while the main loop runs anthropic): missing info stays 'unknown'/empty."""
         row = conn.execute(
             "SELECT model, billing_provider, billing_base_url, billing_mode "
             "FROM sessions WHERE id = ?", (session_id,),

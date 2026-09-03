@@ -79,8 +79,7 @@ class SessionTitlesMixin:
         nothing overwrites a user name, re-running the titler on an llm row is a no-op).
         No writer may move a hidden canonical Bot Chat off its title. Read and write are
         one compare-and-swap transaction, so a manual ``/title`` racing an in-flight
-        generation is not clobbered.
-        """
+        generation is not clobbered."""
         title = self.sanitize_title(title)
         is_user = source == self.TITLE_SOURCE_USER
         new_rank = self._title_rank(source) if not is_user else None
