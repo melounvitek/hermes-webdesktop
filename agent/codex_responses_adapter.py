@@ -181,6 +181,17 @@ def _input_image_part(url: str, detail: Any) -> Dict[str, Any]:
     return image_part
 
 
+def _image_part_for_role(part: Dict[str, Any], role: str, *, keep_empty_url: bool) -> Optional[Dict[str, Any]]:
+    """Responses image part for ``role``: assistant → text placeholder (an assistant
+    ``input_image`` 400s every replay); user → ``input_image`` (None for an empty url unless kept)."""
+    if role == "assistant":
+        return {"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER}
+    url, detail = _resolve_image_ref(part)
+    if _nonempty_str(url):
+        return _input_image_part(url, detail)
+    return _input_image_part(str(url or ""), detail) if keep_empty_url else None
+
+
 def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> List[Dict[str, Any]]:
     """Chat-style multimodal content → Responses API input parts ([] if not a list).
 
@@ -190,14 +201,11 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
     text_type = _text_type_for(role)
     converted: List[Dict[str, Any]] = []
     for kind, payload in _iter_content_parts(content if isinstance(content, list) else []):
+        image_part = None if kind == "text" else _image_part_for_role(payload, role, keep_empty_url=False)
         if kind == "text":
             converted.append({"type": text_type, "text": payload})
-        elif role == "assistant":
-            converted.append({"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER})
-        else:
-            url, detail = _resolve_image_ref(payload)
-            if _nonempty_str(url):
-                converted.append(_input_image_part(url, detail))
+        elif image_part is not None:
+            converted.append(image_part)
     return converted
 
 
@@ -711,12 +719,7 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _Pre
             text = part.get("text", "")
             validated.append({"type": text_type, "text": ctx.sanitize_text(text if isinstance(text, str) else str(text or ""))})
         elif ptype in _IMAGE_PART_TYPES:
-            if role == "assistant":
-                # Same output-message invariant as normal history replay.
-                validated.append({"type": "output_text", "text": _ASSISTANT_IMAGE_PLACEHOLDER})
-            else:
-                url, detail = _resolve_image_ref(part)
-                validated.append(_input_image_part(url if isinstance(url, str) else str(url or ""), detail))
+            validated.append(_image_part_for_role(part, role, keep_empty_url=True))
         else:
             raise ValueError(
                 f"Codex Responses input[{idx}].content[{part_idx}] has unsupported type {part.get('type')!r}."

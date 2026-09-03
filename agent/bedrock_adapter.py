@@ -696,9 +696,20 @@ class _ResponseParts:
         self.reasoning_details: List[Dict[str, Any]] = []
         self.tool_calls: List[SimpleNamespace] = []
 
-    def add_redacted(self, encoded: Optional[str]) -> None:
+    def absorb_reasoning(self, reasoning: Any, block: Dict[str, Any], on_text=None) -> None:
+        """Fold a Converse ``reasoningContent`` payload into the accumulators and ``block``."""
+        if not isinstance(reasoning, dict):
+            return
+        thinking_text = reasoning.get("text", "")
+        if thinking_text:
+            self.reasoning_parts.append(str(thinking_text))
+            if on_text:
+                on_text(thinking_text)
+            block["text"] = block.get("text", "") + str(thinking_text)
+        encoded = _encode_redacted(reasoning.get("redactedContent"))
         if encoded:
             self.reasoning_details.append({"type": "redacted_thinking", "data": encoded})
+            block["redactedContentBase64"] = encoded
 
     def build(self, ordered_blocks: List[Dict[str, Any]], usage_data: Dict[str, int], stop_reason: str, model: str) -> SimpleNamespace:
         """Assemble the OpenAI-shaped response. Converse's inputTokens EXCLUDES cache
@@ -741,18 +752,8 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
             parts.text_parts.append(block["text"])
             ordered_blocks.append({"text": block["text"]})
         elif "reasoningContent" in block:
-            reasoning = block["reasoningContent"]
-            if not isinstance(reasoning, dict):
-                continue
-            thinking_text = reasoning.get("text", "")
-            encoded = _encode_redacted(reasoning.get("redactedContent"))
-            ordered_reasoning = {}
-            if thinking_text:
-                parts.reasoning_parts.append(str(thinking_text))
-                ordered_reasoning["text"] = str(thinking_text)
-            if encoded:
-                parts.add_redacted(encoded)
-                ordered_reasoning["redactedContentBase64"] = encoded
+            ordered_reasoning: Dict[str, Any] = {}
+            parts.absorb_reasoning(block["reasoningContent"], ordered_reasoning)
             if ordered_reasoning:
                 ordered_blocks.append({"reasoningContent": ordered_reasoning})
         elif "toolUse" in block:
@@ -804,19 +805,10 @@ def stream_converse_with_callbacks(
             current_text_buffer.clear()
 
     def on_reasoning(reasoning: Any) -> None:
-        if not isinstance(reasoning, dict):
+        if not isinstance(reasoning, dict) or not (reasoning.get("text", "") or _encode_redacted(reasoning.get("redactedContent"))):
             return
-        thinking_text = reasoning.get("text", "")
-        if thinking_text:
-            parts.reasoning_parts.append(str(thinking_text))
-            if on_reasoning_delta:
-                on_reasoning_delta(thinking_text)
-            block = current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})
-            block["text"] = block.get("text", "") + str(thinking_text)
-        encoded = _encode_redacted(reasoning.get("redactedContent"))
-        if encoded:
-            parts.add_redacted(encoded)
-            current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})["redactedContentBase64"] = encoded
+        block = current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})
+        parts.absorb_reasoning(reasoning, block, on_reasoning_delta)
     for event in event_stream.get("stream", []):
         if on_event is not None:
             try:
