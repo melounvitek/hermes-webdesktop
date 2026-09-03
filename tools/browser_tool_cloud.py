@@ -26,17 +26,6 @@ def _memo(_bt, resolved_attr: str, cache_attr: str, compute: Callable[[], object
     return getattr(_bt, cache_attr)
 
 
-def _is_legacy_provider_registry_overridden() -> bool:
-    """True when a test has patched ``_PROVIDER_REGISTRY`` (identity check per key; extra keys count too)."""
-    _bt = _origin()
-    try:
-        return len(_bt._PROVIDER_REGISTRY) != len(_bt._DEFAULT_PROVIDER_REGISTRY) or any(
-            _bt._PROVIDER_REGISTRY.get(key) is not default_cls for key, default_cls in _bt._DEFAULT_PROVIDER_REGISTRY.items()
-        )
-    except Exception:
-        return False
-
-
 def _ensure_browser_plugins_loaded() -> None:
     """Idempotently trigger plugin discovery (standalone scripts/tests may never import ``model_tools``)."""
     try:
@@ -80,18 +69,13 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
 def _instantiate_explicit_cloud_provider(provider_key: str) -> Optional[CloudBrowserProvider]:
     """Build the provider named by ``browser.cloud_provider``.
 
-    A patched ``_PROVIDER_REGISTRY`` (test fixtures) drives the legacy dict; otherwise the plugin registry is
-    consulted. Strict: an unregistered name raises ``ValueError`` (never a silent reroute to auto-detect); any
+    Strict: an unregistered name raises ``ValueError`` (never a silent reroute to auto-detect); any
     other instantiation error is logged and yields None so the next call retries.
     """
     _bt = _origin()
     try:
-        if _is_legacy_provider_registry_overridden():
-            factory = _bt._PROVIDER_REGISTRY.get(provider_key)
-            resolved = factory() if factory is not None else None
-        else:
-            _ensure_browser_plugins_loaded()
-            resolved = _registry_get_browser_provider(provider_key)
+        _ensure_browser_plugins_loaded()
+        resolved = _registry_get_browser_provider(provider_key)
         if resolved is None:
             from tools.tool_backend_helpers import selection_error
             raise ValueError(selection_error(

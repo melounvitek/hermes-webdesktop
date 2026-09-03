@@ -250,13 +250,12 @@ class TestCloudProviderCachePolicy:
     def test_explicit_provider_instantiation_failure_does_not_cache(
         self, monkeypatch, caplog
     ):
-        """If `_PROVIDER_REGISTRY[key]()` raises, log warning and don't cache."""
-        def exploding_factory():
+        """If instantiating the registered provider raises, log warning and don't cache."""
+        def exploding_factory(name):
             raise RuntimeError("missing dependency")
 
-        monkeypatch.setattr(
-            browser_tool, "_PROVIDER_REGISTRY", {"browser-use": exploding_factory}
-        )
+        monkeypatch.setattr("tools.browser_tool_cloud._ensure_browser_plugins_loaded", lambda: None)
+        monkeypatch.setattr("tools.browser_tool_cloud._registry_get_browser_provider", exploding_factory)
         monkeypatch.setattr(
             "hermes_cli.config.read_raw_config",
             lambda: {"browser": {"cloud_provider": "browser-use"}},

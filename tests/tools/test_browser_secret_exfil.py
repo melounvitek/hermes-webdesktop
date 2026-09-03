@@ -275,7 +275,8 @@ class TestBrowserSupervisorRedaction:
     """Verify supervisor dialog snapshots redact page-originated secrets."""
 
     def test_pending_and_recent_dialog_messages_redacted(self):
-        from tools.browser_supervisor import DialogRecord, PendingDialog, SupervisorSnapshot
+        from tools.browser_supervisor import SupervisorSnapshot
+        from tools.browser_supervisor_dialogs import DialogRecord, PendingDialog
 
         fake_key = "sk-" + "SUPERVISORDIALOGSECRET1234567890"
         snapshot = SupervisorSnapshot(

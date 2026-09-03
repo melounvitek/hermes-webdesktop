@@ -72,9 +72,6 @@ except ImportError:
     # with only ``get_provider``; no mutable registry → constant generation.
     def _browser_registry_generation(*, scope=None):
         return (0, 0)
-from plugins.browser.browserbase.provider import BrowserbaseBrowserProvider
-from plugins.browser.browser_use.provider import BrowserUseBrowserProvider
-from plugins.browser.firecrawl.provider import FirecrawlBrowserProvider
 # Optional backends: Camofox (CAMOFOX_URL routes everything through its REST API)
 # and the Browser Use CLI.
 try:
@@ -225,17 +222,6 @@ def _get_vision_model() -> Optional[str]:
 
 
 from tools import browser_tool_cdp as _cdp
-
-# ----------------------------------------------------------------------------
-# Cloud provider registry — legacy class-name dict is a backward-compat shim:
-# honoured when a test monkeypatches it, otherwise agent.browser_registry wins.
-# ----------------------------------------------------------------------------
-
-_PROVIDER_REGISTRY: Dict[str, type] = {
-    "browserbase": BrowserbaseBrowserProvider, "browser-use": BrowserUseBrowserProvider, "firecrawl": FirecrawlBrowserProvider,
-}
-# Frozen import-time copy used to detect test-time monkeypatching. NEVER mutate.
-_DEFAULT_PROVIDER_REGISTRY: Dict[str, type] = dict(_PROVIDER_REGISTRY)
 
 from tools import browser_tool_cloud as _cloud
 
