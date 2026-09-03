@@ -490,9 +490,7 @@ def _browser_connect(cli, cdp_url: str) -> None:
         return
     cdp_url, port = normalized
     # Clear any existing browser sessions so the next tool call uses the new backend
-    with suppress(Exception):
-        from tools.browser_tool import cleanup_all_browsers
-        cleanup_all_browsers()
+    _probe("tools.browser_tool", "cleanup_all_browsers", None)
     print()
     # Already serving CDP? For the default-local URL probe both loopbacks: a squatter
     # on 127.0.0.1:<port> (e.g. an IDE debugger) can push the browser to bind [::1] only.
@@ -510,13 +508,10 @@ def _browser_connect(cli, cdp_url: str) -> None:
     if not found:
         return _say_block("Browser not connected — start a Chromium-family browser with remote "
                           "debugging and retry /browser connect")
-    cdp_url = found
-    os.environ["BROWSER_CDP_URL"] = cdp_url
+    os.environ["BROWSER_CDP_URL"] = found
     # Eagerly start the CDP supervisor so pending_dialogs + frame_tree show up in the next snapshot.
-    with suppress(Exception):
-        from tools.browser_tool import _ensure_cdp_supervisor  # type: ignore[import-not-found]
-        _ensure_cdp_supervisor("default")
-    _say_block("🌐 Browser connected to live Chromium-family browser via CDP", f"   Endpoint: {cdp_url}")
+    _probe("tools.browser_tool", "_ensure_cdp_supervisor", None, "default")
+    _say_block("🌐 Browser connected to live Chromium-family browser via CDP", f"   Endpoint: {found}")
     # Tell the model the CDP browser was made available on purpose.
     if hasattr(cli, '_pending_input'):
         cli._pending_input.put(
@@ -546,7 +541,6 @@ def _browser_disconnect(cli) -> None:
         cli._pending_input.put(
             "[System note: The user has disconnected the browser tools from their live Chromium-family browser. "
             "Browser tools are back to default mode (headless local browser or cloud provider).]")
-
 
 
 # /browser status headline per local browser.engine value.
@@ -1268,9 +1262,7 @@ class CLICommandsMixin:
             return _cp("  Already on that session.")
         old_session_id = self.session_id
         _end_current_session(self, "resumed_other")
-        self.session_id = target_id
-        self._resumed = True
-        self._pending_title = None
+        self.session_id, self._resumed, self._pending_title = target_id, True, None
         _sync_process_session_id(target_id)
         # One lineage SELECT, two projections: model_history is alternation-repaired for live
         # replay (heals a durable user;user once); display_history is verbatim (as startup --resume).
@@ -1356,33 +1348,25 @@ class CLICommandsMixin:
         # even after the parent is re-ended with a different end_reason.
         try:
             self._session_db.create_session(
-                session_id=new_session_id,
-                source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                model=self.model,
-                model_config={
-                    "max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
-                    "_branched_from": parent_session_id},
-                parent_session_id=parent_session_id)
+                session_id=new_session_id, source=os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                model=self.model, parent_session_id=parent_session_id,
+                model_config={"max_iterations": self.max_turns, "reasoning_config": self.reasoning_config,
+                              "_branched_from": parent_session_id})
         except Exception as e:
             return _cp(f"  Failed to create branch session: {e}")
         # Best-effort chunked copy (a failed copy still yields a usable branch); the api_content
         # sidecar lets the branch's first turn replay the parent's exact wire bytes (warm cache).
         with suppress(Exception):
-            self._session_db.append_messages_batch(
-                new_session_id,
-                [{"role": msg.get("role", "user"),
-                  "tool_name": msg.get("tool_name") or msg.get("name"),
-                  "api_content": extract_api_content_sidecar(msg),
-                  **{k: msg.get(k) for k in _BRANCH_COPY_KEYS}}
-                 for msg in self.conversation_history],
-                chunk_rows=500)
+            self._session_db.append_messages_batch(new_session_id, [
+                {"role": msg.get("role", "user"), "tool_name": msg.get("tool_name") or msg.get("name"),
+                 "api_content": extract_api_content_sidecar(msg),
+                 **{k: msg.get(k) for k in _BRANCH_COPY_KEYS}}
+                for msg in self.conversation_history], chunk_rows=500)
         with suppress(Exception):
             self._session_db.set_session_title(new_session_id, branch_title)
         # Switch to the new session
         self._transfer_session_yolo(self.session_id, new_session_id)
-        self.session_id = new_session_id
-        self.session_start = now
-        self._pending_title = None
+        self.session_id, self.session_start, self._pending_title = new_session_id, now, None
         self._resumed = True  # Prevents auto-title generation
         _sync_process_session_id(new_session_id)
         if self.agent:
@@ -1539,12 +1523,8 @@ class CLICommandsMixin:
         low = arg.lower()
         if not arg or low == "toggle":
             enabled, name, err = toggle_pet_display()
-            if err:
-                print(f"(x_x) {err}")
-            elif enabled:
-                print(f"(^_^)b {name} is out — it'll pop in shortly.")
-            else:
-                print(f"(-_-)zzZ {name} put away." if name else "(-_-)zzZ Pet put away.")
+            print(f"(x_x) {err}" if err else f"(^_^)b {name} is out — it'll pop in shortly." if enabled
+                  else f"(-_-)zzZ {name} put away." if name else "(-_-)zzZ Pet put away.")
         elif low in ("list", "gallery", "browse", "all"):
             print_pet_gallery()
         elif low == "scale" or low.startswith("scale "):
