@@ -1,13 +1,12 @@
 """Discord server introspection and management tool (REST API + bot token).
 
-Talks to the Discord REST API directly; only in the hermes-discord toolset. The
-model-visible schema is filtered by two gates: privileged intents from
-GET /applications/@me (search_members / member_info need GUILD_MEMBERS; fetch_messages /
-list_pins are annotated when MESSAGE_CONTENT is missing) and the ``discord.server_actions``
-config allowlist. Per-guild permissions are NOT pre-checked — a call-time 403 is mapped to
-guidance by :func:`_enrich_403`.
+The model-visible schema is filtered by two gates: privileged intents from GET /applications/@me
+(search_members / member_info need GUILD_MEMBERS; fetch_messages / list_pins are annotated when
+MESSAGE_CONTENT is missing) and the ``discord.server_actions`` config allowlist. Per-guild
+permissions are NOT pre-checked — a call-time 403 is mapped to guidance by :func:`_enrich_403`.
 """
 
+import functools
 import hashlib
 import json
 import logging
@@ -71,18 +70,16 @@ def _discord_request(
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             if resp.status == 204:
                 return None
-            response_body = _read_limited_response_body(
-                resp, _DISCORD_RESPONSE_BODY_MAX_BYTES, label="response body")
-            return json.loads(response_body.decode("utf-8"))
+            body = _read_limited_response_body(resp, _DISCORD_RESPONSE_BODY_MAX_BYTES, label="response body")
+            return json.loads(body.decode("utf-8"))
     except urllib.error.HTTPError as e:
-        error_body = ""
         try:
             error_body = _read_limited_response_body(
                 e, _DISCORD_ERROR_BODY_MAX_BYTES, label="error body").decode("utf-8", errors="replace")
         except DiscordAPIError as too_large:
             error_body = too_large.body
         except Exception:
-            pass
+            error_body = ""
         raise DiscordAPIError(e.code, error_body) from e
 
 
@@ -125,34 +122,33 @@ def _token_cache_key(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 
+def _read_caps_file(path: Path) -> Dict[str, Any]:
+    """Disk cache contents ({token_key: {"caps", "ts"}}); {} when missing/corrupt."""
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def _load_caps_from_disk(token: str) -> Optional[Dict[str, Any]]:
     """Return fresh disk-cached capabilities for *token*, or None."""
     try:
-        with _capability_disk_cache_path().open("r", encoding="utf-8") as f:
-            entry = json.load(f).get(_token_cache_key(token))
-        if not isinstance(entry, dict):
-            return None
-        if time.time() - float(entry.get("ts", 0)) > _CAPABILITY_DISK_TTL_SECONDS:
+        entry = _read_caps_file(_capability_disk_cache_path()).get(_token_cache_key(token))
+        if not isinstance(entry, dict) or time.time() - float(entry.get("ts", 0)) > _CAPABILITY_DISK_TTL_SECONDS:
             return None
         caps = entry.get("caps")
-        if isinstance(caps, dict) and "has_members_intent" in caps:
-            return caps
+        return caps if isinstance(caps, dict) and "has_members_intent" in caps else None
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _save_caps_to_disk(token: str, caps: Dict[str, Any]) -> None:
     try:
         path = _capability_disk_cache_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                data = {}
-        except Exception:
-            data = {}
+        data = _read_caps_file(path)
         data[_token_cache_key(token)] = {"caps": caps, "ts": time.time()}
         tmp = path.with_suffix(".json.tmp")
         with tmp.open("w", encoding="utf-8") as f:
@@ -271,16 +267,13 @@ def _message_summary(msg: Dict[str, Any]) -> Dict[str, Any]:
         "pinned": msg.get("pinned", False)}
 
 
-def _int_or(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return default
-
-
 def _limit_param(limit: Any, default: int) -> str:
     """Discord caps list endpoints at 100 per page."""
-    return str(min(_int_or(limit, default), 100))
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = default
+    return str(min(limit, 100))
 
 
 def _list_guilds(token: str, **_kwargs: Any) -> str:
@@ -305,27 +298,19 @@ def _server_info(token: str, guild_id: str, **_kwargs: Any) -> str:
 def _list_channels(token: str, guild_id: str, **_kwargs: Any) -> str:
     """All channels grouped by category (uncategorized first), each sorted by position."""
     channels = _discord_request("GET", f"/guilds/{guild_id}/channels", token)
-    categories: Dict[Optional[str], Dict[str, Any]] = {  # type 4 == category
-        ch["id"]: {"id": ch["id"], "name": ch["name"], "position": ch.get("position", 0), "channels": []}
-        for ch in channels if ch["type"] == 4}
-    uncategorized: List[Dict[str, Any]] = []
+    cats = sorted((ch for ch in channels if ch["type"] == 4), key=lambda c: c.get("position", 0))
+    groups: Dict[Optional[str], List[Dict[str, Any]]] = {None: [], **{c["id"]: [] for c in cats}}
     for ch in channels:
-        if ch["type"] == 4:
+        if ch["type"] == 4:  # category
             continue
-        entry = {
-            "id": ch["id"], "name": ch.get("name", ""), "type": _channel_type_name(ch["type"]),
-            "position": ch.get("position", 0), "topic": ch.get("topic"), "nsfw": ch.get("nsfw", False)}
         parent = ch.get("parent_id")
-        (categories[parent]["channels"] if parent and parent in categories else uncategorized).append(entry)
-
-    sorted_cats = sorted(categories.values(), key=lambda c: c["position"])
-    for cat in sorted_cats:
-        cat["channels"].sort(key=lambda c: c["position"])
-    uncategorized.sort(key=lambda c: c["position"])
-
-    result: List[Dict[str, Any]] = [{"category": None, "channels": uncategorized}] if uncategorized else []
-    result.extend(
-        {"category": {"id": cat["id"], "name": cat["name"]}, "channels": cat["channels"]} for cat in sorted_cats)
+        groups[parent if parent in groups else None].append({
+            "id": ch["id"], "name": ch.get("name", ""), "type": _channel_type_name(ch["type"]),
+            "position": ch.get("position", 0), "topic": ch.get("topic"), "nsfw": ch.get("nsfw", False)})
+    for group in groups.values():
+        group.sort(key=lambda c: c["position"])
+    result = [{"category": None, "channels": groups[None]}] if groups[None] else []
+    result += [{"category": {"id": c["id"], "name": c["name"]}, "channels": groups[c["id"]]} for c in cats]
     return json.dumps({"channel_groups": result, "total_channels": sum(len(g["channels"]) for g in result)})
 
 
@@ -570,12 +555,8 @@ def _get_dynamic_schema(action_subset: Dict[str, Any], tool_name: str) -> Option
     return _build_schema(actions, caps, tool_name=tool_name) if actions else None
 
 
-def get_dynamic_schema_core() -> Optional[Dict[str, Any]]:
-    return _get_dynamic_schema(_CORE_ACTIONS, "discord")
-
-
-def get_dynamic_schema_admin() -> Optional[Dict[str, Any]]:
-    return _get_dynamic_schema(_ADMIN_ACTIONS, "discord_admin")
+get_dynamic_schema_core = functools.partial(_get_dynamic_schema, _CORE_ACTIONS, "discord")
+get_dynamic_schema_admin = functools.partial(_get_dynamic_schema, _ADMIN_ACTIONS, "discord_admin")
 
 
 # ── 403 error enrichment ─────────────────────────────────────────────────────
@@ -655,14 +636,10 @@ def _run_discord_action(action: str, valid_actions: Dict[str, Any], tool_label: 
         return tool_error(f"Unexpected error: {e}")
 
 
-def discord_core(action: str, **kwargs) -> str:
-    """Execute a core Discord action (fetch_messages, search_members, create_thread)."""
-    return _run_discord_action(action, _CORE_ACTIONS, "discord", **kwargs)
-
-
-def discord_admin_handler(action: str, **kwargs) -> str:
-    """Execute a Discord admin action (server management)."""
-    return _run_discord_action(action, _ADMIN_ACTIONS, "discord_admin", **kwargs)
+# ``discord`` = core participation trio; ``discord_admin`` = server management.
+discord_core = functools.partial(_run_discord_action, valid_actions=_CORE_ACTIONS, tool_label="discord")
+discord_admin_handler = functools.partial(
+    _run_discord_action, valid_actions=_ADMIN_ACTIONS, tool_label="discord_admin")
 
 
 # Static (un-detected) schemas at import; the intent/config-filtered ones come from
