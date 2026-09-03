@@ -7,6 +7,7 @@ import os
 import shutil
 from hermes_cli.doctor_report import (
     Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
+    warn_on_error,
 )
 
 
@@ -22,8 +23,7 @@ _DEPRECATED_CONFIG_KEYS: tuple[tuple[str, str, str], ...] = (
     ("display", "tool_progress_overrides", "display.platforms"),
     ("delegation", "max_async_children", "delegation.max_concurrent_children"),
     ("compression", "summary_model", "auxiliary.compression"),
-    ("compression", "summary_provider", "auxiliary.compression"),
-    ("compression", "summary_base_url", "auxiliary.compression"),
+    ("compression", "summary_provider", "auxiliary.compression"), ("compression", "summary_base_url", "auxiliary.compression"),
 )
 
 
@@ -33,10 +33,8 @@ _DEPRECATED_CONFIG_KEYS: tuple[tuple[str, str, str], ...] = (
 _DEPRECATED_ENV_VARS: tuple[tuple[str, str], ...] = (
     ("HERMES_TOOL_PROGRESS", "display.tool_progress in config.yaml — ignored/unsupported since config floor v12"),
     ("HERMES_TOOL_PROGRESS_MODE", "display.tool_progress in config.yaml"),
-    ("TERMINAL_CWD", "terminal.cwd in config.yaml"),
-    ("MESSAGING_CWD", "terminal.cwd in config.yaml"),
-    ("QQ_HOME_CHANNEL", "QQBOT_HOME_CHANNEL"),
-    ("QQ_HOME_CHANNEL_NAME", "QQBOT_HOME_CHANNEL_NAME"),
+    ("TERMINAL_CWD", "terminal.cwd in config.yaml"), ("MESSAGING_CWD", "terminal.cwd in config.yaml"),
+    ("QQ_HOME_CHANNEL", "QQBOT_HOME_CHANNEL"), ("QQ_HOME_CHANNEL_NAME", "QQBOT_HOME_CHANNEL_NAME"),
 )
 
 
@@ -44,11 +42,8 @@ def collect_deprecated_config_keys(raw_config: dict | None) -> list[tuple[str, s
     """``(legacy_path, replacement)`` for deprecated keys in the on-disk YAML (empty containers still count)."""
     if not isinstance(raw_config, dict):
         return []
-    return [
-        (f"{section}.{key}", replacement)
-        for section, key, replacement in _DEPRECATED_CONFIG_KEYS
-        if isinstance(raw_config.get(section), dict) and key in raw_config[section]
-    ]
+    return [(f"{section}.{key}", replacement) for section, key, replacement in _DEPRECATED_CONFIG_KEYS
+            if isinstance(raw_config.get(section), dict) and key in raw_config[section]]
 
 
 def collect_deprecated_env_vars(env_map: dict | None) -> list[tuple[str, str]]:
@@ -62,9 +57,8 @@ def collect_deprecated_env_vars(env_map: dict | None) -> list[tuple[str, str]]:
 
 def collect_relay_plugin_cutover_findings(raw_config: dict | None, env_map: dict | None) -> list[tuple[str, str]]:
     """Return actionable findings for the removed Hermes Relay plugin."""
-    from hermes_cli.relay_plugin_cutover import (
-        LEGACY_RELAY_EXPORT_ENV_VARS, RELAY_PLUGINS_CONFIG_ENV, configured_legacy_relay_env_vars, legacy_relay_plugin_keys,
-    )
+    from hermes_cli.relay_plugin_cutover import (LEGACY_RELAY_EXPORT_ENV_VARS, RELAY_PLUGINS_CONFIG_ENV,
+                                                 configured_legacy_relay_env_vars, legacy_relay_plugin_keys)
     findings: list[tuple[str, str]] = []
     plugins = raw_config.get("plugins") if isinstance(raw_config, dict) else None
     if isinstance(plugins, dict):
@@ -104,15 +98,13 @@ def report_deprecated_config_and_env(raw_config: dict | None = None, env_map: di
 def managed_scope_check() -> None:
     """Report the active managed scope (resolved dir + pinned key counts); silent when none. A HERMES_MANAGED_DIR
     override is surfaced too — a redirected scope is the documented foot-gun (docs/design/managed-scope.md §7)."""
-    try:
+    managed_dir = None
+    with warn_on_error(""):  # diagnostics must never crash
         from hermes_cli import managed_scope
         managed_dir = managed_scope.get_managed_dir()
-    except Exception:  # noqa: BLE001 — diagnostics must never crash
-        return
     if managed_dir is None:
         return
-    n_cfg = len(managed_scope.managed_config_keys())
-    n_env = len(managed_scope.load_managed_env())
+    n_cfg, n_env = len(managed_scope.managed_config_keys()), len(managed_scope.load_managed_env())
     check_ok(f"Managed scope active: {n_cfg} config key(s), {n_env} env key(s) pinned by {managed_dir}")
     if os.environ.get("HERMES_MANAGED_DIR", "").strip():
         check_info(f"managed dir set via HERMES_MANAGED_DIR={managed_dir}")
@@ -125,14 +117,13 @@ def _check_mcp_security(should_fix: bool, f: Finding) -> None:
     from hermes_cli.mcp_security import validate_mcp_server_entry
     servers = load_config().get("mcp_servers") or {}
     suspicious = 0
-    if isinstance(servers, dict):
-        for name, entry in sorted(servers.items()):
-            issues_found = validate_mcp_server_entry(name, entry) if isinstance(entry, dict) else None
-            if not issues_found:
-                continue
-            suspicious += 1
-            check_warn(f"MCP server '{name}' has suspicious stdio command", "; ".join(issues_found))
-            f.manual_issues.append(f"Review/remove mcp_servers.{name} in config.yaml; rotate any credentials that may have been exposed.")
+    for name, entry in sorted(servers.items()) if isinstance(servers, dict) else ():
+        issues_found = validate_mcp_server_entry(name, entry) if isinstance(entry, dict) else None
+        if not issues_found:
+            continue
+        suspicious += 1
+        check_warn(f"MCP server '{name}' has suspicious stdio command", "; ".join(issues_found))
+        f.manual_issues.append(f"Review/remove mcp_servers.{name} in config.yaml; rotate any credentials that may have been exposed.")
     if suspicious == 0:
         check_ok("No suspicious MCP stdio commands")
 
@@ -160,10 +151,8 @@ def _check_env_file(should_fix: bool, f: Finding) -> None:
             env_path.parent.mkdir(parents=True, exist_ok=True)
             env_path.touch()
             # .env holds API keys — touch() obeys umask (commonly 0o022, world-readable); tighten explicitly.
-            try:
+            with warn_on_error(""):
                 os.chmod(str(env_path), 0o600)
-            except OSError:
-                pass
             check_ok(f"Created empty {_DHH}/.env")
             check_info("Run 'hermes setup' to configure API keys")
             f.fixed += 1
@@ -178,20 +167,14 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
     known: set = set()
     resolve_auth = normalize = resolve_full = aliases = None
     custom_providers: list = []
-    try:
+    with warn_on_error(""):
         from hermes_cli.auth import PROVIDER_REGISTRY, resolve_provider as resolve_auth
         known = set(PROVIDER_REGISTRY.keys()) | {"openrouter", "custom", "auto", "moa"}
-    except Exception:
-        pass
-    try:
+    with warn_on_error(""):
         from hermes_cli.config import get_compatible_custom_providers
         from hermes_cli.providers import custom_provider_aliases as aliases, normalize_provider as normalize, resolve_provider_full as resolve_full
-        try:
+        with warn_on_error(""):
             custom_providers = get_compatible_custom_providers(cfg)
-        except Exception:
-            custom_providers = []
-    except Exception:
-        pass
     user_providers = cfg.get("providers")
     if isinstance(user_providers, dict):
         from hermes_cli.config import is_provider_enabled
@@ -207,8 +190,8 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
 # Vendor/model slugs are valid on aggregators and any custom provider; Fireworks' native IDs are slash-form
 # (accounts/fireworks/models/...) and DeepInfra's catalog is exclusively vendor/model.
 _VENDOR_SLUG_PROVIDERS = {
-    "openrouter", "auto", "ai-gateway", "kilocode", "opencode-zen", "huggingface",
-    "lmstudio", "nous", "nvidia", "fireworks", "deepinfra",
+    "openrouter", "auto", "ai-gateway", "kilocode", "opencode-zen", "huggingface", "lmstudio", "nous", "nvidia",
+    "fireworks", "deepinfra",
 }
 
 
@@ -268,14 +251,12 @@ def _validate_model_config(config_path, issues: list) -> None:
                       "Either set model.provider to 'openrouter', or drop the vendor prefix.")
     if runtime_provider and runtime_provider not in ("auto", "custom"):
         from hermes_cli.doctor import _DHH
-        try:
+        with warn_on_error(""):
             if not _provider_has_credentials(runtime_provider):
                 _fail_and_issue(f"model.provider '{runtime_provider}' is set but no API key is configured",
                                 "(check ~/.hermes/.env or run 'hermes setup')",
                                 f"No credentials found for provider '{runtime_provider}'. Run 'hermes setup' or set the provider's "
                                 f"API key in {_DHH}/.env, or switch providers with 'hermes config set model.provider <name>'", issues)
-        except Exception:
-            pass
 
 
 @doctor_check()
@@ -285,10 +266,8 @@ def _check_config_file(should_fix: bool, f: Finding) -> None:
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
         check_ok(f"{_DHH}/config.yaml exists")
-        try:
+        with warn_on_error("Could not validate model/provider config"):
             _validate_model_config(config_path, f.issues)
-        except Exception as e:
-            check_warn("Could not validate model/provider config", f"({e})")
     elif (PROJECT_ROOT / 'cli-config.yaml').exists():
         check_ok("cli-config.yaml exists (in project directory)")
     elif should_fix:
@@ -308,8 +287,8 @@ def _check_config_file(should_fix: bool, f: Finding) -> None:
 def _drift_config_version(f: Finding, should_fix: bool, config_path) -> None:
     from hermes_cli.config import check_config_version, migrate_config
     current_ver, latest_ver = check_config_version()
-    if check_bool(current_ver >= latest_ver, f"Config version up to date (v{current_ver})",
-                  (f"Config version outdated (v{current_ver} → v{latest_ver})", "(new settings available)")):
+    outdated = (f"Config version outdated (v{current_ver} → v{latest_ver})", "(new settings available)")
+    if check_bool(current_ver >= latest_ver, f"Config version up to date (v{current_ver})", outdated):
         return
     if not should_fix:
         f.issues.append("Run 'hermes doctor --fix' or 'hermes setup' to migrate config")
@@ -380,10 +359,9 @@ def _drift_deprecations(f: Finding, should_fix: bool, config_path) -> None:
     """Warn-only deprecation sweep over the raw file + on-disk .env (process env would false-positive)."""
     from hermes_cli.config import load_env, read_user_config_raw
     raw = read_user_config_raw(config_path) if config_path is not None else {}
-    try:
+    env = {}
+    with warn_on_error(""):
         env = load_env()
-    except Exception:
-        env = {}
     report_deprecated_config_and_env(raw, env)
 
 
@@ -402,11 +380,7 @@ def _drift_structure(f: Finding, should_fix: bool, config_path) -> None:
 
 
 _CONFIG_DRIFT_STEPS = (
-    _drift_config_version,
-    _drift_stale_root_keys,
-    _drift_max_iterations_ghost,
-    _drift_deprecations,
-    _drift_structure,
+    _drift_config_version, _drift_stale_root_keys, _drift_max_iterations_ghost, _drift_deprecations, _drift_structure,
 )
 
 
@@ -421,10 +395,8 @@ def _check_config_drift(should_fix: bool, f: Finding) -> None:
     if not config_path.exists():
         config_path = None
     for step in _CONFIG_DRIFT_STEPS if config_path else (_drift_deprecations,):
-        try:
+        with warn_on_error(""):
             step(f, should_fix, config_path)
-        except Exception:
-            pass
 
 
 @doctor_check("xAI retirement check skipped", "({e})")

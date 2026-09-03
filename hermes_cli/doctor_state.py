@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from hermes_cli.doctor_report import (
     Finding, _fail_and_issue, _section, check_bool, check_info, check_ok, check_warn, doctor_check, ensure_dir,
+    warn_on_error,
 )
 from hermes_cli.sizefmt import format_bytes as _human_bytes
 
@@ -30,11 +31,9 @@ def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
         if not config_path.exists():
             return {}
         config = _expand_env_vars(read_user_config_raw(config_path))
-        try:
+        with warn_on_error(""):
             from hermes_cli import managed_scope
             config = managed_scope.apply_managed_overlay(config)
-        except Exception:
-            pass
         section = config.get("memory") if isinstance(config, dict) else None
         return section if isinstance(section, dict) else {}
     except Exception:
@@ -115,11 +114,10 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     # SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
     if soul_path.exists():
-        # Template comments only (no real content)?
         lines = soul_path.read_text(encoding="utf-8").strip().splitlines()
         if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in lines):
             check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
-        else:
+        else:  # template comments only (no real content)
             check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
     else:
         check_warn(f"{_DHH}/SOUL.md not found", "(create it to give Hermes a custom personality)")
@@ -133,20 +131,15 @@ def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     # must not read as active memory usage.
     memories_dir = hermes_home / "memories"
     if not memory_on:
-        check_info("Built-in memory files disabled by config")
-    elif not memories_dir.exists():
-        check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
-        if should_fix:
-            memories_dir.mkdir(parents=True, exist_ok=True)
-            check_ok(f"Created {_DHH}/memories/")
-            f.fixed += 1
-    else:
-        check_ok(f"{_DHH}/memories/ directory exists")
-        for fname in [n for on, n in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")) if on]:
-            if (memories_dir / fname).exists():
-                check_ok(f"{fname} exists ({len((memories_dir / fname).read_text(encoding='utf-8').strip())} chars)")
-            else:
-                check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
+        return check_info("Built-in memory files disabled by config")
+    existed = memories_dir.exists()
+    ensure_dir(f, should_fix, memories_dir, f"{_DHH}/memories/ directory exists", f"Created {_DHH}/memories/",
+               f"{_DHH}/memories/ not found")
+    for fname in [n for on, n in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")) if on and existed]:
+        if (memories_dir / fname).exists():
+            check_ok(f"{fname} exists ({len((memories_dir / fname).read_text(encoding='utf-8').strip())} chars)")
+        else:
+            check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
 
 
 def _session_count(state_db_path: Path):
@@ -175,8 +168,7 @@ def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, kind: st
     """Shared --fix path for both state.db corruption classes (FTS write health, malformed schema)."""
     ok_label, not_fixed_label, failed_issue, fix_hint = _STATE_DB_REPAIRS[kind]
     if not should_fix:
-        f.issues.append(fix_hint)
-        return
+        return f.issues.append(fix_hint)
     from hermes_state import repair_state_db_schema
     report = repair_state_db_schema(state_db_path)
     if not report.get("repaired"):
@@ -206,8 +198,7 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
     except Exception as e:
         from hermes_state import is_malformed_db_error
         if not is_malformed_db_error(e):
-            check_warn(f"{_DHH}/state.db exists but has issues: {e}")
-            return
+            return check_warn(f"{_DHH}/state.db exists but has issues: {e}")
         # sqlite_master itself is malformed (e.g. duplicate messages_fts): every statement fails before it runs,
         # so this is NOT a plain FTS rebuild — repair sqlite_master in place (backup first).
         check_warn(f"{_DHH}/state.db schema is malformed (sessions hidden until repaired)", f"({e})")
@@ -217,7 +208,7 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
 def _state_db_stats(issues: list, state_db_path: Path) -> None:
     """Health/stats snapshot: strictly read-only (mode=ro) so it is safe against a live DB held by
     the gateway; any failure degrades to one info line rather than failing doctor."""
-    try:
+    with warn_on_error("state.db stats unavailable ({e})", "", report=lambda t, _d: check_info(t)):
         from hermes_state import collect_state_db_stats, count_db_holders
         rows = _render_state_db_stats(collect_state_db_stats(state_db_path), holders=count_db_holders(state_db_path))
         for _kind, _text, _detail in rows:
@@ -228,31 +219,26 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
             if "auto_prune" in _detail:
                 issues.append("state.db is large — enable sessions.auto_prune in config.yaml"
                               + (" and run 'hermes sessions optimize-storage' offline (gateway stopped)" if "optimize-storage" in _detail else ""))
-    except Exception as _stats_exc:
-        check_info(f"state.db stats unavailable ({_stats_exc})")
 
 
 def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
     """WAL file size (unbounded growth indicates missed checkpoints)."""
     wal_path = state_db_path.parent / "state.db-wal"
-    try:
-        wal_size = wal_path.stat().st_size if wal_path.exists() else 0
-        if wal_size > 50 * 1024 * 1024:  # 50 MB
-            check_warn(f"WAL file is large ({wal_size // (1024*1024)} MB)", "(may indicate missed checkpoints)")
+    wal_size = lambda: wal_path.stat().st_size if wal_path.exists() else 0  # noqa: E731
+    with warn_on_error(""):
+        size = wal_size()
+        if size > 50 * 1024 * 1024:  # 50 MB
+            check_warn(f"WAL file is large ({size // (1024*1024)} MB)", "(may indicate missed checkpoints)")
             if not should_fix:
-                f.issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
-                return
+                return f.issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
             import sqlite3
             conn = sqlite3.connect(str(state_db_path))
             conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
             conn.close()
-            new_size = wal_path.stat().st_size if wal_path.exists() else 0
-            check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
+            check_ok(f"WAL checkpoint performed ({size // 1024}K → {wal_size() // 1024}K)")
             f.fixed += 1
-        elif wal_size > 10 * 1024 * 1024:  # 10 MB
-            check_info(f"WAL file is {wal_size // (1024*1024)} MB (normal for active sessions)")
-    except Exception:
-        pass
+        elif size > 10 * 1024 * 1024:  # 10 MB
+            check_info(f"WAL file is {size // (1024*1024)} MB (normal for active sessions)")
 
 
 @doctor_check()
@@ -284,12 +270,10 @@ def _check_skills_hub(should_fix: bool, f: Finding) -> None:
     if check_bool(hub_dir.exists(), "Skills Hub directory exists", ("Skills Hub directory not initialized", "(run: hermes skills list)")):
         lock_file = hub_dir / "lock.json"
         if lock_file.exists():
-            try:
+            with warn_on_error("Lock file", "(corrupted or unreadable)"):
                 import json
                 count = len(json.loads(lock_file.read_text(encoding="utf-8")).get("installed", {}))
                 check_ok(f"Lock file OK ({count} hub-installed skill(s))")
-            except Exception:
-                check_warn("Lock file", "(corrupted or unreadable)")
         quarantine = hub_dir / "quarantine"
         q_count = sum(1 for d in quarantine.iterdir() if d.is_dir()) if quarantine.exists() else 0
         if q_count > 0:
@@ -321,8 +305,7 @@ def _memory_provider_honcho(issues: list) -> None:
         reset_honcho_client()
         try:
             get_honcho_client(hcfg)
-            check_ok("Honcho connected",
-                     f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}")
+            check_ok("Honcho connected", f"workspace={hcfg.workspace_id} mode={hcfg.recall_mode} freq={hcfg.write_frequency}")
         except Exception as _e:
             _fail_and_issue("Honcho connection failed", str(_e), f"Honcho unreachable: {_e}", issues)
 
@@ -389,25 +372,17 @@ def _check_profiles(should_fix: bool, f: Finding) -> None:
     check_ok(f"{len(named_profiles)} profile(s) found")
     wrapper_dir = _get_wrapper_dir()
     for p in named_profiles:
-        parts = []
-        if p.gateway_running:
-            parts.append("gateway running")
-        if p.model:
-            parts.append(p.model[:30])
-        for missing, text in (("config.yaml", "⚠ missing config"), (".env", "no .env")):
-            if not (p.path / missing).exists():
-                parts.append(text)
-        if not (wrapper_dir / p.name).exists():
-            parts.append("no alias")
+        parts = [text for cond, text in (
+            (p.gateway_running, "gateway running"), (p.model, (p.model or "")[:30]),
+            (not (p.path / "config.yaml").exists(), "⚠ missing config"), (not (p.path / ".env").exists(), "no .env"),
+            (not (wrapper_dir / p.name).exists(), "no alias")) if cond]
         check_ok(f"  {p.name}: {', '.join(parts) if parts else 'configured'}")
     # Orphan wrappers
     if wrapper_dir.is_dir():
         for wrapper in wrapper_dir.iterdir():
             if not wrapper.is_file():
                 continue
-            try:
+            with warn_on_error(""):
                 _m = _re.search(r"hermes -p (\S+)", wrapper.read_text(encoding="utf-8"))
                 if _m and not profile_exists(_m.group(1)):
                     check_warn(f"Orphan alias: {wrapper.name} → profile '{_m.group(1)}' no longer exists")
-            except Exception:
-                pass
