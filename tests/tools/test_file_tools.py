@@ -317,7 +317,7 @@ class TestWindowsMsysPathResolution:
         """Windows-only: ``_resolve_path_for_task`` hands the translated path
         to ``ntpath``/``Path``, and only a real Windows ``Path`` renders
         ``C:\\Users\\...`` — faking ``sys.platform`` left PosixPath in place."""
-        import tools.file_tools as file_tools
+        import tools.file_tools_paths as file_tools
 
         monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": False)
 
@@ -332,7 +332,7 @@ class TestWindowsMsysPathResolution:
         Windows-only: the translation this guards against only happens when
         the host really is Windows, so the negative is only meaningful there.
         """
-        import tools.file_tools as file_tools
+        import tools.file_tools_paths as file_tools
 
         monkeypatch.setattr(file_tools, "_uses_container_paths", lambda task_id="default": True)
         monkeypatch.setattr(

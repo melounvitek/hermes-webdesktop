@@ -140,7 +140,10 @@ def _terminate_bridge_process(proc, *, force: bool = False) -> None:
     action = "kill" if force else "terminate"
     if _IS_WINDOWS:
         try:
-            result = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T"] + (["/F"] if force else []), timeout=10, **_RUN_TEXT)
+            result = subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T"] + (["/F"] if force else []),
+                capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10,
+            )
         except FileNotFoundError:
             return getattr(proc, action)()
         if result.returncode != 0:
