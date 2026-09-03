@@ -41,15 +41,13 @@ class GatewaySessionWatchersMixin:
     """Session expiry / stall / catalog-refresh watcher loops for GatewayRunner."""
 
     async def _session_expiry_watcher(self, interval: int = 300):
-        """Background task that finalizes expired sessions (``on_session_finalize`` hooks, cached
-        agent teardown, cache eviction, ``expiry_finalized`` flag) and runs the cache/store sweeps.
-        """
+        """Finalize expired sessions (``on_session_finalize`` hooks, cached agent teardown, cache
+        eviction, ``expiry_finalized`` flag) and run the cache/store sweeps."""
         await asyncio.sleep(60)  # initial delay — let the gateway fully start
         finalize_failures: dict[str, int] = {}  # session_id -> consecutive failure count
         while self._running:
             try:
-                expired = await self._collect_expired_sessions()
-                if expired:
+                if expired := await self._collect_expired_sessions():
                     platforms = Counter(_platform_of_key(k, "unknown") for k, _ in expired)
                     logger.info(
                         "Session expiry: %d sessions to finalize (%s)",
@@ -70,24 +68,20 @@ class GatewaySessionWatchersMixin:
 
     async def _collect_expired_sessions(self) -> list:
         """Return ``[(session_key, entry)]`` for expired, not-yet-finalized sessions."""
-        await self.async_session_store._ensure_loaded()
-        expired = []
-        for key, entry in list(self.session_store._entries.items()):
-            if entry.expiry_finalized:
-                continue
-            if await self.async_session_store._is_session_expired(entry):
-                expired.append((key, entry))
-        return expired
+        store = self.async_session_store
+        await store._ensure_loaded()
+        return [
+            (key, entry) for key, entry in list(self.session_store._entries.items())
+            if not entry.expiry_finalized and await store._is_session_expired(entry)
+        ]
 
     async def _finalize_expired_sessions(self, expired: list, failures: dict[str, int]) -> None:
         """Finalize each entry; after ``_MAX_FINALIZE_RETRIES`` consecutive failures mark it
-        finalized anyway (without clearing the model override) to stop an infinite retry loop.
-        """
+        finalized anyway (without clearing the model override) to stop an infinite retry loop."""
         for key, entry in expired:
             sid = entry.session_id
             try:
                 await self._finalize_expired_session(key, entry)
-                failures.pop(sid, None)
             except Exception as e:
                 count = failures[sid] = failures.get(sid, 0) + 1
                 if count < _MAX_FINALIZE_RETRIES:
@@ -103,7 +97,20 @@ class GatewaySessionWatchersMixin:
                 )
                 store = self.async_session_store
                 await store.set_expiry_finalized(entry, clear_model_override=False)
-                failures.pop(sid, None)
+            failures.pop(sid, None)
+
+    def _agent_for_expired_session(self, key: str):
+        """Idle agents live in _agent_cache (not _running_agents); fall back to the running turn's
+        agent in case the session is still mid-turn when the expiry fires."""
+        cache_lock = getattr(self, "_agent_cache_lock", None)  # tests build runners without it
+        if cache_lock is not None:
+            with cache_lock:
+                cached = self._agent_cache.get(key)
+            agent = cached[0] if isinstance(cached, tuple) else cached if cached else None
+            if agent is not None:
+                return agent
+        state = self._peek_session_state(key)
+        return state.turn.agent if state else None
 
     async def _finalize_expired_session(self, key: str, entry) -> None:
         """Run finalize hooks, tear down the cached agent, clear conversation scope, persist."""
@@ -119,17 +126,7 @@ class GatewaySessionWatchersMixin:
             )
         except Exception:
             pass
-        # Idle agents live in _agent_cache (not _running_agents); fall back to the running
-        # turn's agent in case the session is still mid-turn when the expiry fires.
-        agent = None
-        cache_lock = getattr(self, "_agent_cache_lock", None)
-        if cache_lock is not None:
-            with cache_lock:
-                cached = self._agent_cache.get(key)
-                agent = cached[0] if isinstance(cached, tuple) else cached if cached else None
-        if agent is None:
-            state = self._peek_session_state(key)
-            agent = state.turn.agent if state else None
+        agent = self._agent_for_expired_session(key)
         if agent and agent is not _AGENT_PENDING_SENTINEL:
             await self._cleanup_agent_resources_off_loop(agent, context="session expiry")
         # Evict so the AIAgent (LLM clients, tool schemas, memory refs) can be GC'd, then drop every
@@ -177,7 +174,7 @@ class GatewaySessionWatchersMixin:
     def _iter_gateway_adapters(self):
         """Yield every live platform adapter (default + multiplex profiles), deduped by identity."""
         seen: set[int] = set()
-        maps = [getattr(self, "adapters", {}), *getattr(self, "_profile_adapters", {}).values()]
+        maps = (getattr(self, "adapters", {}), *getattr(self, "_profile_adapters", {}).values())
         for amap in maps:
             for adapter in list(amap.values()):
                 if adapter is not None and id(adapter) not in seen:
@@ -185,9 +182,8 @@ class GatewaySessionWatchersMixin:
                     yield adapter
 
     def _session_activity_for_stall(self, session_key: str) -> Optional[dict]:
-        """Return the shared activity snapshot for stall progress: the single source is
-        ``AIAgent.get_activity_summary()``; no turn-start or pending-inbound clocks.
-        """
+        """Activity snapshot for stall progress: the single source is
+        ``AIAgent.get_activity_summary()``; no turn-start or pending-inbound clocks."""
         from gateway.run import _AGENT_PENDING_SENTINEL
         agent = (getattr(self, "_running_agents", None) or {}).get(session_key)
         if agent is None or agent is _AGENT_PENDING_SENTINEL:
@@ -226,8 +222,7 @@ class GatewaySessionWatchersMixin:
 
     async def _check_session_stalls(self, timeout_seconds: float) -> int:
         """Scan pending inbound sessions and notify once per stall episode; returns the number of
-        notifications sent this pass (for tests).
-        """
+        notifications sent this pass (for tests)."""
         from gateway.session_stall import (
             resolve_session_idle_seconds_from_activity,
             should_clear_session_stall_notification,
@@ -237,9 +232,7 @@ class GatewaySessionWatchersMixin:
         notified_map = getattr(self, "_session_stall_notified", None)
         if notified_map is None:
             notified_map = self._session_stall_notified = {}
-        sent = 0
-        now = time.time()
-        candidates = self._stall_candidates()
+        sent, now, candidates = 0, time.time(), self._stall_candidates()
         # Every candidate carries a non-None pending event, so has_pending_inbound is always True.
         for session_key, (adapter, pending_event) in list(candidates.items()):
             activity = self._session_activity_for_stall(session_key)
@@ -266,46 +259,11 @@ class GatewaySessionWatchersMixin:
                 notified_map.pop(key, None)
         return sent
 
-    async def _notify_session_stall(
-        self, session_key: str, adapter, pending_event, idle_seconds: float, activity: dict,
-        timeout_seconds: float, notified_map: dict,
-    ) -> bool:
-        """Log one stall episode and deliver the notice. True only when sent (latched);
-        undeliverable (no chat_id) latches without sending; send failures never latch."""
+    async def _send_stall_notice(self, session_key: str, adapter, source, idle_seconds) -> bool:
+        """Deliver one stall notice, bounded and failure-tolerant; True only when delivered."""
         from gateway.run import _STALL_NOTIFY_SEND_TIMEOUT_SECONDS
-        from gateway.session_stall import (
-            format_session_stall_notification,
-            resolve_session_idle_seconds_from_activity,
-        )
+        from gateway.session_stall import format_session_stall_notification
 
-        logger.warning(
-            "Session stall detected: session=%s idle=%.0fs (timeout=%.0fs, ~%d min); pending "
-            "inbound present | last_activity=%s | provenance=%s (agent.session_stall_timeout)",
-            session_key, idle_seconds, timeout_seconds, max(1, int(idle_seconds // 60)),
-            activity.get("last_activity_desc") or activity.get("last_activity_description")
-            or "unknown",
-            activity.get("provenance") or activity.get("last_activity_provenance") or "unknown",
-        )
-        source = getattr(pending_event, "source", None)
-        if not (chat_id := getattr(source, "chat_id", None)):
-            logger.warning("Session stall notify skipped (no chat_id): session=%s", session_key)
-            notified_map[session_key] = True  # cannot deliver; latch to avoid log spam every tick
-            return False
-        # Re-read pending state + activity IMMEDIATELY before delivery: the snapshot ages while
-        # earlier candidates await sends; an agent that progressed (or drained its queue) must not
-        # get a false stall notice. Abort with the latch un-set so the next tick re-evaluates.
-        still_pending = self._session_still_pending(adapter, session_key)
-        fresh_idle = resolve_session_idle_seconds_from_activity(
-            self._session_activity_for_stall(session_key), now=time.time()
-        )
-        if not still_pending or (fresh_idle is not None and fresh_idle < timeout_seconds):
-            logger.info(
-                "Session stall notify aborted (no longer stale): "
-                "session=%s pending=%s fresh_idle=%s",
-                session_key, still_pending, fresh_idle,
-            )
-            notified_map.pop(session_key, None)  # re-arm so a FUTURE genuine stall notifies again
-            return False
         try:
             metadata = self._thread_metadata_for_source(source)
             notice = format_session_stall_notification(idle_seconds)
@@ -313,7 +271,7 @@ class GatewaySessionWatchersMixin:
             # block the watcher pass — siblings would go unevaluated and the watcher stop.
             try:
                 result = await asyncio.wait_for(
-                    adapter.send(str(chat_id), notice, metadata=metadata),
+                    adapter.send(str(source.chat_id), notice, metadata=metadata),
                     timeout=_STALL_NOTIFY_SEND_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
@@ -332,13 +290,52 @@ class GatewaySessionWatchersMixin:
         except Exception as exc:
             logger.warning("Session stall notify failed for %s: %s", session_key, exc)
             return False
+        return True
+
+    async def _notify_session_stall(
+        self, session_key: str, adapter, pending_event, idle_seconds: float, activity: dict,
+        timeout_seconds: float, notified_map: dict,
+    ) -> bool:
+        """Log one stall episode and deliver the notice. True only when sent (latched);
+        undeliverable (no chat_id) latches without sending; send failures never latch."""
+        from gateway.session_stall import resolve_session_idle_seconds_from_activity
+
+        logger.warning(
+            "Session stall detected: session=%s idle=%.0fs (timeout=%.0fs, ~%d min); pending "
+            "inbound present | last_activity=%s | provenance=%s (agent.session_stall_timeout)",
+            session_key, idle_seconds, timeout_seconds, max(1, int(idle_seconds // 60)),
+            activity.get("last_activity_desc") or activity.get("last_activity_description")
+            or "unknown",
+            activity.get("provenance") or activity.get("last_activity_provenance") or "unknown",
+        )
+        source = getattr(pending_event, "source", None)
+        if not getattr(source, "chat_id", None):
+            logger.warning("Session stall notify skipped (no chat_id): session=%s", session_key)
+            notified_map[session_key] = True  # cannot deliver; latch to avoid log spam every tick
+            return False
+        # Re-read pending state + activity IMMEDIATELY before delivery: the snapshot ages while
+        # earlier candidates await sends; an agent that progressed (or drained its queue) must not
+        # get a false stall notice. Abort with the latch un-set so the next tick re-evaluates.
+        still_pending = self._session_still_pending(adapter, session_key)
+        fresh_idle = resolve_session_idle_seconds_from_activity(
+            self._session_activity_for_stall(session_key), now=time.time()
+        )
+        if not still_pending or (fresh_idle is not None and fresh_idle < timeout_seconds):
+            logger.info(
+                "Session stall notify aborted (no longer stale): "
+                "session=%s pending=%s fresh_idle=%s",
+                session_key, still_pending, fresh_idle,
+            )
+            notified_map.pop(session_key, None)  # re-arm so a FUTURE genuine stall notifies again
+            return False
+        if not await self._send_stall_notice(session_key, adapter, source, idle_seconds):
+            return False
         notified_map[session_key] = True
         return True
 
     async def _model_catalog_refresh_watcher(self) -> None:
         """Refresh the /model picker's remote catalogs every TTL window. The picker itself only
-        refreshes on a cold/stale open, so if nobody opens ``/model`` the cache never updates.
-        """
+        refreshes on a cold/stale open, so if nobody opens ``/model`` the cache never updates."""
         from hermes_cli.model_catalog import refresh_catalogs, refresh_interval_seconds
 
         await asyncio.sleep(30)  # let startup settle
@@ -364,8 +361,7 @@ class GatewaySessionWatchersMixin:
         await asyncio.sleep(min(30.0, max(1.0, float(interval))))
         while self._running:
             try:
-                timeout = self._session_stall_timeout_seconds()
-                if timeout > 0:
+                if (timeout := self._session_stall_timeout_seconds()) > 0:
                     await self._check_session_stalls(timeout)
             except Exception as exc:
                 logger.debug("Session stall watcher error: %s", exc)

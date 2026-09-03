@@ -1,12 +1,10 @@
 """Gateway streaming-TTS consumer — LLM deltas to adapter PCM audio sink.
 
-Bridges the sync agent ``stream_delta_callback`` (worker thread) to a voice-capable adapter's
-streaming-audio contract so playback begins while the LLM is still generating. ``on_delta``
-never blocks (SentenceChunker -> thread-safe queue); the ``_run`` task on the gateway loop
-drains, synthesises via a ``StreamingTTSProvider`` and writes PCM. Outcome: full success ->
-``completed``; failure before any audible output -> ``suppress_whole_file=False`` (gateway
-falls back to whole-file TTS); failure after partial audio -> ``partial`` + suppress (never
-replay the response from the beginning).
+``on_delta`` (agent worker thread) never blocks: SentenceChunker -> thread-safe queue. The
+``_run`` task on the gateway loop drains, synthesises via a ``StreamingTTSProvider`` and writes
+PCM so playback starts mid-generation. Outcome: success -> ``completed``; failure before audible
+output -> ``suppress_whole_file=False`` (gateway falls back to whole-file TTS); failure after
+partial audio -> ``partial`` + suppress (never replay the response from the beginning).
 """
 
 from __future__ import annotations
@@ -41,10 +39,7 @@ class StreamingTTSConsumer:
     ) -> None:
         from tools.tts_streaming import SentenceChunker, resolve_streaming_provider
 
-        self._adapter = adapter
-        self._chat_id = chat_id
-        self._loop = loop
-        self._metadata = metadata
+        self._adapter, self._chat_id, self._loop, self._metadata = adapter, chat_id, loop, metadata
         # Resolved once; None => inactive, gateway falls back to whole-file TTS.
         self._streamer = resolve_streaming_provider(tts_config)
         self._chunker = SentenceChunker()
@@ -64,20 +59,13 @@ class StreamingTTSConsumer:
         self._lock = threading.Lock()
         self._strip_markdown = None  # lazily imported to avoid import cycles
 
-    # usable streaming provider resolved
-    active = property(lambda self: self._streamer is not None)
-    # streaming audio fully delivered
-    completed = property(lambda self: self._completed)
-    # some audio was audible before a failure/drop
-    partial = property(lambda self: self._partial)
-    # first PCM chunk has been written
-    audible = property(lambda self: bool(self._handle and self._handle.audible))
-    # queue saturation dropped at least one clause
-    dropped = property(lambda self: self._dropped)
-    # gateway should skip whole-file TTS fallback
-    suppress_whole_file = property(lambda self: self._suppress_whole_file)
-    # async drain task has terminated
-    done = property(lambda self: self._task is not None and self._task.done())
+    active = property(lambda self: self._streamer is not None)  # usable streaming provider
+    completed = property(lambda self: self._completed)  # streaming audio fully delivered
+    partial = property(lambda self: self._partial)  # some audio audible before a failure/drop
+    audible = property(lambda self: bool(self._handle and self._handle.audible))  # PCM written
+    dropped = property(lambda self: self._dropped)  # queue saturation dropped >= 1 clause
+    suppress_whole_file = property(lambda self: self._suppress_whole_file)  # skip whole-file TTS
+    done = property(lambda self: self._task is not None and self._task.done())  # drain task ended
 
     def _enqueue_clauses(self, clauses, full_msg: str, *, log_errors: bool) -> None:
         try:
@@ -100,8 +88,7 @@ class StreamingTTSConsumer:
 
     def finish(self) -> None:
         """Signal end-of-text, flush the chunker tail, then enqueue ``_DONE`` after all flushed
-        clauses so the drain loop terminates deterministically without racing a late ``on_delta``.
-        """
+        clauses so the drain loop ends deterministically without racing a late ``on_delta``."""
         if self._finished:
             return
         self._finished = True
@@ -121,13 +108,13 @@ class StreamingTTSConsumer:
             self._queue.put_nowait(sentinel)
             return True
         except queue.Full:
-            try:
-                self._queue.get_nowait()
-                if mark_dropped:
-                    self._dropped = True
-            except queue.Empty:
-                return not mark_dropped
-            return False
+            pass
+        try:
+            self._queue.get_nowait()
+        except queue.Empty:
+            return not mark_dropped
+        self._dropped = self._dropped or mark_dropped
+        return False
 
     def start(self) -> asyncio.Task:
         """Create (once) and return the async drain task on the gateway loop."""
@@ -138,20 +125,18 @@ class StreamingTTSConsumer:
     def _settle(self, *, failed: bool) -> None:
         """Set outcome flags from what was audible: never report completion after a failure or a
         dropped clause; keep suppression whenever audio was audible (no replay from the start)."""
-        audible = self._handle.audible
-        degraded = failed or self._dropped
+        audible, degraded = self._handle.audible, failed or self._dropped
         self._completed = audible and not degraded
-        if audible and degraded:
-            self._partial = True
+        self._partial = self._partial or (audible and degraded)
         self._suppress_whole_file = audible
 
-    async def _run(self) -> None:
-        """Drain clauses from the queue, synthesise, and write to the adapter."""
+    async def _open_handle(self) -> bool:
+        """Open the adapter's streaming-audio handle; False when unsupported or begin failed."""
         if not self.active:
-            return
+            return False
         if not self._adapter.supports_streaming_tts(self._chat_id, self._audio_format):
             logger.debug("adapter %s does not support streaming TTS", getattr(self._adapter, "name", "?"))
-            return
+            return False
         try:
             self._handle = await self._adapter.begin_streaming_tts(
                 self._chat_id, self._audio_format, metadata=self._metadata
@@ -159,27 +144,36 @@ class StreamingTTSConsumer:
         except Exception as exc:
             logger.debug("begin_streaming_tts failed: %s", exc)
             self._handle = None
-            return
-        if self._handle is None:
+        return self._handle is not None
+
+    async def _drain(self) -> bool:
+        """Synthesise queued clauses until a sentinel/abort; False when a clause failed."""
+        while not self._aborted:
+            try:
+                item = await asyncio.to_thread(self._queue.get, True, 0.1)
+            except queue.Empty:
+                continue
+            if item is _ABORT or item is _DONE or self._aborted:
+                break
+            if not isinstance(item, str):
+                continue
+            try:
+                await self._synthesise_and_write(item)
+            except Exception as exc:
+                logger.warning("streaming TTS clause failed: %s", exc)
+                self._settle(failed=True)
+                await self._safe_abort(str(exc))
+                return False
+        return True
+
+    async def _run(self) -> None:
+        """Drain clauses from the queue, synthesise, and write to the adapter."""
+        if not await self._open_handle():
             return
         self._suppress_whole_file = False
         try:
-            while not self._aborted:
-                try:
-                    item = await asyncio.to_thread(self._queue.get, True, 0.1)
-                except queue.Empty:
-                    continue
-                if item is _ABORT or item is _DONE or self._aborted:
-                    break
-                if not isinstance(item, str):
-                    continue
-                try:
-                    await self._synthesise_and_write(item)
-                except Exception as exc:
-                    logger.warning("streaming TTS clause failed: %s", exc)
-                    self._settle(failed=True)
-                    await self._safe_abort(str(exc))
-                    return
+            if not await self._drain():
+                return
             if not self._aborted and self._handle is not None:
                 try:
                     await self._adapter.finish_streaming_tts(self._handle, interrupted=self._aborted)

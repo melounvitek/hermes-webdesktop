@@ -16,6 +16,8 @@ import re
 import sys
 import time
 from contextlib import suppress
+from difflib import SequenceMatcher
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 from gateway.config import Platform
@@ -30,49 +32,47 @@ logger = logging.getLogger("gateway.run")
 
 # Adapter-side per-chat auto-TTS override sets (``/voice off`` vs explicit ``/voice on``/``tts``).
 _OFF_SET, _ON_SET = "_auto_tts_disabled_chats", "_auto_tts_enabled_chats"
+_VOICE_MODES = {"off", "voice_only", "all"}
 
 
 class GatewayVoiceMixin:
     """Voice-channel / auto-TTS methods for GatewayRunner."""
 
     def _voice_key(self, platform: Platform, chat_id: str, profile: Optional[str] = None) -> str:
-        """Voice-mode state key: ``<profile>:<platform>:<chat_id>`` under multiplexing (profile
-        whose bot speaks — else two bots in one channel share a key and one ``/voice`` flips the
-        other's); the default profile keeps ``<platform>:<chat_id>`` so persisted state stays valid.
-        """
+        """``<profile>:<platform>:<chat_id>`` under multiplexing (profile whose bot speaks — else
+        two bots in one channel share a key and one ``/voice`` flips the other's); the default
+        profile keeps ``<platform>:<chat_id>`` so persisted state stays valid."""
         base = f"{platform.value}:{chat_id}"
         profile = profile.strip() if isinstance(profile, str) else ""
         return base if not profile or profile == "default" else f"{profile}:{base}"
 
     def _voice_key_for_source(self, source: SessionSource) -> str:
-        """Voice-state key for an inbound source. Voice mode belongs to the (bot, chat) pair, so the
-        namespace is the profile that OWNS the receiving adapter, not the routed profile."""
+        """Voice mode belongs to the (bot, chat) pair: namespace is the profile that OWNS the
+        receiving adapter, not the routed profile."""
         profile = self._adapter_profile_for_source(source)
         return self._voice_key(source.platform, source.chat_id, profile=profile)
 
     def _bind_voice_input_callback(self, adapter) -> None:
         """Route voice transcripts back through the adapter that captured them."""
         if hasattr(adapter, "_voice_input_callback"):
-            cb = functools.partial(self._handle_voice_channel_input, adapter=adapter)
-            adapter._voice_input_callback = cb
+            adapter._voice_input_callback = functools.partial(
+                self._handle_voice_channel_input, adapter=adapter
+            )
 
     def _load_voice_modes(self) -> Dict[str, str]:
         try:
             data = json.loads(self._VOICE_MODE_PATH.read_text(encoding="utf-8"))
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             return {}
-        result = {}
-        for chat_id, mode in (data.items() if isinstance(data, dict) else ()):
-            if mode not in {"off", "voice_only", "all"}:
-                continue
-            if ":" in str(chat_id):
-                result[str(chat_id)] = mode
-            else:  # legacy unprefixed key: warn and skip
-                logger.warning(
-                    "Skipping legacy unprefixed voice mode key %r during migration. "
-                    "Re-enable voice mode on that chat to rebuild the prefixed key.", str(chat_id),
-                )
-        return result
+        if not isinstance(data, dict):
+            return {}
+        items = {str(k): m for k, m in data.items() if m in _VOICE_MODES}
+        for chat_id in (k for k in items if ":" not in k):  # legacy unprefixed key: warn and skip
+            logger.warning(
+                "Skipping legacy unprefixed voice mode key %r during migration. "
+                "Re-enable voice mode on that chat to rebuild the prefixed key.", chat_id,
+            )
+        return {k: m for k, m in items.items() if ":" in k}
 
     def _save_voice_modes(self) -> None:
         try:
@@ -84,20 +84,19 @@ class GatewayVoiceMixin:
 
     @staticmethod
     def _toggle_adapter_auto_tts_set(adapter, chat_id: str, on: bool, *, enable: bool) -> None:
-        """Add/discard ``chat_id`` in the adapter's enabled (``enable=True``) or disabled set; adding
-        also clears the other set (``/voice off`` and ``/voice on``/``tts`` override each other).
-        """
+        """Add/discard ``chat_id`` in the adapter's enabled (``enable=True``) or disabled set;
+        adding also clears the other set (``/voice off`` and ``/voice on``/``tts`` override each
+        other)."""
         add_to, clear_from = (_ON_SET, _OFF_SET) if enable else (_OFF_SET, _ON_SET)
         target = getattr(adapter, add_to, None)
-        other = getattr(adapter, clear_from, None)
         if not isinstance(target, set):
             return
         if not on:
             target.discard(chat_id)
-        else:
-            target.add(chat_id)
-            if isinstance(other, set):
-                other.discard(chat_id)
+            return
+        target.add(chat_id)
+        if isinstance(other := getattr(adapter, clear_from, None), set):
+            other.discard(chat_id)
 
     def _set_adapter_auto_tts_disabled(self, adapter, chat_id: str, disabled: bool) -> None:
         """Update an adapter's in-memory auto-TTS suppression set if present."""
@@ -108,18 +107,17 @@ class GatewayVoiceMixin:
         self._toggle_adapter_auto_tts_set(adapter, chat_id, enabled, enable=True)
 
     def _sync_voice_mode_state_to_adapter(self, adapter) -> None:
-        """Restore persisted /voice state into a live platform adapter: ``_auto_tts_default`` from
-        ``voice.auto_tts``; ``_auto_tts_enabled_chats`` (modes ``voice_only``/``all``) and
-        ``_auto_tts_disabled_chats`` (mode ``off``) from ``self._voice_mode``.
-        """
+        """Restore persisted /voice state into a live adapter: ``_auto_tts_default`` from
+        ``voice.auto_tts``; enabled (``voice_only``/``all``) and disabled (``off``) chat sets from
+        ``self._voice_mode``."""
         platform = getattr(adapter, "platform", None)
         if not isinstance(platform, Platform):
             return
         chat_sets = [
-            (getattr(adapter, name, None), modes)
+            (chats, modes)
             for name, modes in ((_OFF_SET, {"off"}), (_ON_SET, {"voice_only", "all"}))
+            if isinstance(chats := getattr(adapter, name, None), set)
         ]
-        chat_sets = [(chats, modes) for chats, modes in chat_sets if isinstance(chats, set)]
         if not chat_sets:
             return
         # Lazy import: no module-level dep from gateway -> hermes_cli.
@@ -144,9 +142,7 @@ class GatewayVoiceMixin:
         raw = getattr(event, "raw_message", None)
         if getattr(raw, "guild_id", None):  # slash command interaction
             return int(raw.guild_id)
-        if getattr(raw, "guild", None):  # regular message
-            return raw.guild.id
-        return None
+        return raw.guild.id if getattr(raw, "guild", None) else None  # regular message
 
     async def _handle_voice_channel_join(self, event: MessageEvent) -> str:
         """Join the user's current Discord voice channel."""
@@ -177,12 +173,10 @@ class GatewayVoiceMixin:
         except Exception as e:
             logger.warning("Failed to join voice channel: %s", e)
             adapter._voice_input_callback = None
-            if any(tok in str(e).lower() for tok in ("pynacl", "nacl", "davey")):
-                return (
-                    "Voice dependencies are missing (PyNaCl / davey). "
-                    f"Install with: `{sys.executable} -m pip install PyNaCl`"
-                )
-            return f"Failed to join voice channel: {e}"
+            if not any(tok in str(e).lower() for tok in ("pynacl", "nacl", "davey")):
+                return f"Failed to join voice channel: {e}"
+            return ("Voice dependencies are missing (PyNaCl / davey). "
+                    f"Install with: `{sys.executable} -m pip install PyNaCl`")
         if not success:
             adapter._voice_input_callback = None
             return "Failed to join voice channel. Check bot permissions (Connect + Speak)."
@@ -200,11 +194,9 @@ class GatewayVoiceMixin:
         """Leave the Discord voice channel."""
         adapter = self._adapter_for_source(event.source)
         guild_id = self._get_guild_id(event)
-        if (
-            not guild_id
-            or not hasattr(adapter, "leave_voice_channel")
-            or not hasattr(adapter, "is_in_voice_channel")
-            or not adapter.is_in_voice_channel(guild_id)
+        if not (
+            guild_id and hasattr(adapter, "leave_voice_channel")
+            and hasattr(adapter, "is_in_voice_channel") and adapter.is_in_voice_channel(guild_id)
         ):
             return "Not in a voice channel."
         try:
@@ -220,10 +212,7 @@ class GatewayVoiceMixin:
 
     def _handle_voice_timeout_cleanup(self, chat_id: str, *, adapter=None) -> None:
         """Adapter callback on voice-channel timeout: clear runner-side voice_mode state.
-
-        ``adapter`` is the Discord adapter that timed out (bound at join time); under multiplexing
-        that is a specific profile's bot, not necessarily ``self.adapters[DISCORD]``.
-        """
+        ``adapter`` (bound at join) is that profile's bot, not always ``self.adapters[DISCORD]``."""
         if adapter is None:
             adapter = self.adapters.get(Platform.DISCORD)
         profile = getattr(adapter, "_owner_profile", None)
@@ -239,8 +228,6 @@ class GatewayVoiceMixin:
         """Suppress repeated STT outputs for the same recent utterance (voice capture can emit an
         utterance twice a few seconds apart -> a second queued run and overlapping spoken replies).
         """
-        from difflib import SequenceMatcher
-
         normalized = re.sub(r"[^\w\s]", "", re.sub(r"\s+", " ", transcript).strip().lower())
         if not normalized:
             return False
@@ -250,43 +237,53 @@ class GatewayVoiceMixin:
         if not isinstance(recent_store, dict):
             recent_store = self._recent_voice_transcripts = {}
         recent = [(ts, txt) for ts, txt in recent_store.get(key, []) if now - ts <= 12.0]
-        for _, prior in recent:
-            if prior == normalized or (
+        if any(
+            prior == normalized or (
                 len(prior) >= 16 and len(normalized) >= 16
                 and SequenceMatcher(None, prior, normalized).ratio() >= 0.95
-            ):
-                recent_store[key] = recent
-                return True
-        recent.append((now, normalized))
-        recent_store[key] = recent[-5:]
+            )
+            for _, prior in recent
+        ):
+            recent_store[key] = recent
+            return True
+        recent_store[key] = (recent + [(now, normalized)])[-5:]
         return False
+
+    @staticmethod
+    def _voice_input_source(adapter, guild_id: int, user_id: int, text_ch_id) -> SessionSource:
+        """Bound text channel's own source when available (voice shares the text conversation's
+        session), else a synthetic one."""
+        if source_data := getattr(adapter, "_voice_sources", {}).get(guild_id):
+            source = SessionSource.from_dict(source_data)
+            source.user_id = source.user_name = str(user_id)
+            return source
+        return SessionSource(
+            platform=Platform.DISCORD, chat_id=str(text_ch_id), user_id=str(user_id),
+            user_name=str(user_id), chat_type="channel",
+            profile=getattr(adapter, "_owner_profile", None),
+        )
+
+    @staticmethod
+    def _voice_channel_prompt(adapter, text_ch_id) -> Optional[str]:
+        """Bound text channel's channel_prompt: voice input gets the same per-channel context."""
+        if callable(resolver := getattr(adapter, "_resolve_channel_prompt", None)):
+            with suppress(Exception):
+                resolved = resolver(str(text_ch_id))
+                return resolved if isinstance(resolved, str) else None
+        return None
 
     async def _handle_voice_channel_input(
         self, guild_id: int, user_id: int, transcript: str, *, adapter=None
     ):
-        """Handle transcribed voice from a user in a voice channel.
-
-        ``adapter`` is the Discord adapter that captured the audio (bound via
-        ``_bind_voice_input_callback``); under multiplexing each profile's bot must dispatch
-        through its own adapter, never the default profile's.
-        """
+        """Handle transcribed voice from a voice channel. ``adapter`` captured the audio (bound
+        via ``_bind_voice_input_callback``); under multiplexing each profile's bot dispatches
+        through its own adapter, never the default profile's."""
         if adapter is None:
             adapter = self.adapters.get(Platform.DISCORD)
         text_ch_id = adapter._voice_text_channels.get(guild_id) if adapter else None
         if not text_ch_id:
             return
-        # Reuse the linked text channel's source metadata when available so voice input shares
-        # the same session as the bound text conversation.
-        source_data = getattr(adapter, "_voice_sources", {}).get(guild_id)
-        if source_data:
-            source = SessionSource.from_dict(source_data)
-            source.user_id = source.user_name = str(user_id)
-        else:
-            source = SessionSource(
-                platform=Platform.DISCORD, chat_id=str(text_ch_id), user_id=str(user_id),
-                user_name=str(user_id), chat_type="channel",
-                profile=getattr(adapter, "_owner_profile", None),
-            )
+        source = self._voice_input_source(adapter, guild_id, user_id, text_ch_id)
         if not self._is_user_authorized(source):
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
             return
@@ -302,34 +299,22 @@ class GatewayVoiceMixin:
             if channel:
                 safe_text = transcript[:2000].replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
                 await channel.send(f"**[Voice]** <@{user_id}>: {safe_text}")
-        # Bound text channel's channel_prompt, so voice input gets the same per-channel context
-        # as typed messages.
-        channel_prompt = None
-        resolver = getattr(adapter, "_resolve_channel_prompt", None)
-        if callable(resolver):
-            with suppress(Exception):
-                resolved = resolver(str(text_ch_id))
-                channel_prompt = resolved if isinstance(resolved, str) else None
         # Synthetic MessageEvent for the normal pipeline; the SimpleNamespace raw_message lets
         # _get_guild_id() extract guild_id so _send_voice_reply() plays audio in the voice channel.
-        from types import SimpleNamespace
         event = MessageEvent(
             source=source, text=transcript, message_type=MessageType.VOICE,
             raw_message=SimpleNamespace(guild_id=guild_id, guild=None),
-            channel_prompt=channel_prompt,
+            channel_prompt=self._voice_channel_prompt(adapter, text_ch_id),
         )
         await adapter.handle_message(event)
 
     def _should_send_voice_reply(
         self, event: MessageEvent, response: str, agent_messages: list, already_sent: bool = False
     ) -> bool:
-        """Decide whether the runner should send a TTS voice reply.
-
-        False when voice_mode is off for this chat, the response is empty/an error, the agent
-        already called text_to_speech this turn (dedup), or voice input + base adapter auto-TTS
-        already handled it — UNLESS streaming consumed the response (already_sent=True), since
-        then the base adapter has no text for auto-TTS and the runner must handle it.
-        """
+        """False when voice_mode is off for this chat, the response is empty/an error, the agent
+        already called text_to_speech this turn, or voice input + base adapter auto-TTS handled
+        it — UNLESS streaming consumed the response (already_sent): then the base adapter has no
+        text for auto-TTS and the runner must handle it."""
         if not response or response.startswith("Error:"):
             return False
         chat_id = event.source.chat_id
@@ -353,14 +338,13 @@ class GatewayVoiceMixin:
             )
             return False
         # Dedup: agent already called the TTS tool in THIS turn (from the last user message on).
-        turn_messages = agent_messages
-        for i in range(len(agent_messages) - 1, -1, -1):
-            if agent_messages[i].get("role") == "user":
-                turn_messages = agent_messages[i:]
-                break
+        start = next(
+            (i for i, m in reversed(list(enumerate(agent_messages))) if m.get("role") == "user"),
+            0,
+        )
         if any(
             (tc.get("function") or {}).get("name") == "text_to_speech"
-            for msg in turn_messages if msg.get("role") == "assistant"
+            for msg in agent_messages[start:] if msg.get("role") == "assistant"
             for tc in (msg.get("tool_calls") or [])
         ):
             return False
@@ -373,12 +357,39 @@ class GatewayVoiceMixin:
         """Return whether inbound voice/STT transcripts should be echoed to chat."""
         return bool(getattr(self.config, "stt_echo_transcripts", True))
 
+    @staticmethod
+    async def _synthesize_voice_reply(text: str, audio_path: str) -> List[str]:
+        """Run the TTS tool for ``text`` into ``audio_path``; return the produced file paths (one
+        combined file, or several separately valid ones when combination is unavailable / over a
+        platform limit; legacy single-file results keep working) — ``[]`` on failure."""
+        from tools.tts_tool import text_to_speech_tool
+
+        result_json = await asyncio.to_thread(
+            text_to_speech_tool, text=text, output_path=audio_path
+        )
+        try:
+            result = json.loads(result_json)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning(
+                "Auto voice reply TTS returned invalid JSON: %s",
+                result_json[:200] if result_json else result_json,
+            )
+            return []
+        actual_paths = [
+            str(p) for p in (result.get("file_paths") or [result.get("file_path", audio_path)])
+            if p and os.path.isfile(p)
+        ]
+        if not result.get("success") or not actual_paths:
+            logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
+            return []
+        return actual_paths
+
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply."""
         audio_path = None
         actual_paths: List[str] = []
         try:
-            from tools.tts_tool import text_to_speech_tool, _strip_markdown_for_tts
+            from tools.tts_tool import _strip_markdown_for_tts
 
             tts_text = _strip_markdown_for_tts(text)
             if not tts_text:
@@ -386,24 +397,9 @@ class GatewayVoiceMixin:
             # Platforms whose native voice bubbles require Ogg/Opus (OPUS_VOICE_PLATFORMS) get an
             # explicit .ogg path; the TTS tool's container repair guarantees real Ogg/Opus bytes.
             audio_path = build_auto_tts_output_path(event.source.platform)
-            result_json = await asyncio.to_thread(
-                text_to_speech_tool, text=tts_text, output_path=audio_path
-            )
-            try:
-                result = json.loads(result_json)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning("Auto voice reply TTS returned invalid JSON: %s", result_json[:200] if result_json else result_json)
-                return
-            # One combined file or several separately valid files (combination unavailable or
-            # over a platform limit); legacy single-file results keep working.
-            actual_paths = [
-                str(p) for p in (result.get("file_paths") or [result.get("file_path", audio_path)])
-                if p and os.path.isfile(p)
-            ]
-            if not result.get("success") or not actual_paths:
-                logger.warning("Auto voice reply TTS failed: %s", result.get("error"))
-                return
-            await self._deliver_voice_reply(event, actual_paths)
+            actual_paths = await self._synthesize_voice_reply(tts_text, audio_path)
+            if actual_paths:
+                await self._deliver_voice_reply(event, actual_paths)
         except Exception as e:
             logger.warning("Auto voice reply failed: %s", e, exc_info=True)
         finally:
@@ -417,12 +413,11 @@ class GatewayVoiceMixin:
         guild_id = self._get_guild_id(event)
         play = getattr(adapter, "play_in_voice_channel", None)
         is_in_vc = getattr(adapter, "is_in_voice_channel", None)
-        send_voice = getattr(adapter, "send_voice", None)
         if guild_id and callable(play) and callable(is_in_vc) and is_in_vc(guild_id):
             for path in audio_paths:
                 await play(guild_id, path)
             return
-        if not callable(send_voice):
+        if not callable(send_voice := getattr(adapter, "send_voice", None)):
             return
         reply_anchor = self._reply_anchor_for_event(event)
         # Mark the auto voice reply notify-worthy (mirrors the final-text path in platforms/base.py)

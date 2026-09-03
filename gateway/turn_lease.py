@@ -3,13 +3,12 @@
 Busy guards are keyed by ROUTING KEY but the transcript is owned by SESSION_ID, and
 ``switch_session()`` makes key->id many-to-one (/resume from a second chat, CLI-continuity,
 delegation pinning, topic tip-walks): two keys ran concurrent turns on one transcript and
-interleaved flushes (``user;user`` wedge). The lease serializes per RESOLVED session_id:
-acquired post-resolution right before the transcript load, released in the dispatch layer's
-``finally``. Release is generation-scoped and identity-checked (a stale unwind never frees a
-newer turn's lease); a timed-out waiter fails CLOSED (:class:`TurnLeaseTimeoutError`, the turn
-is rejected with a resend notice, never run unserialized); eviction only drops idle entries.
-Known limits: CLI-continuity processes are outside this in-process lock; mid-turn compression
-rotation leaves an alias window closed by :meth:`SessionTurnLeaseRegistry.rebind`.
+interleaved flushes (``user;user`` wedge). The lease serializes per RESOLVED session_id: acquired
+post-resolution right before the transcript load, released in the dispatch layer's ``finally``.
+Release is generation-scoped and identity-checked; a timed-out waiter fails CLOSED
+(:class:`TurnLeaseTimeoutError`); eviction only drops idle entries. Known limits: CLI-continuity
+processes are outside this in-process lock; mid-turn compression rotation leaves an alias window
+closed by :meth:`SessionTurnLeaseRegistry.rebind`.
 """
 
 import asyncio
@@ -58,10 +57,8 @@ class TurnLeaseToken:
         self.released = False
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
-        return (
-            f"TurnLeaseToken(session_id={self.session_id!r}, owner_key={self.owner_key!r}, "
-            f"generation={self.generation}, released={self.released})"
-        )
+        return (f"TurnLeaseToken(session_id={self.session_id!r}, owner_key={self.owner_key!r}, "
+                f"generation={self.generation}, released={self.released})")
 
 
 class _SessionLease:
@@ -100,16 +97,12 @@ class SessionTurnLeaseRegistry:
         return lease
 
     def _evict_idle(self) -> None:
-        """Drop oldest idle entries so a new lease fits under the cap; never a held/contended one.
-        """
-        overflow = len(self._leases) - self._max_entries + 1
-        if overflow <= 0:
+        """Drop oldest idle entries to fit a new lease under the cap; never a held/contended one."""
+        if (overflow := len(self._leases) - self._max_entries + 1) <= 0:
             return
-        idle_ids = sorted(
-            (sid for sid, lease in self._leases.items() if lease.idle),
-            key=lambda sid: self._leases[sid].last_used,
-        )
-        for sid in idle_ids[:overflow]:
+        idle = sorted((sid for sid, l in self._leases.items() if l.idle),
+                      key=lambda sid: self._leases[sid].last_used)
+        for sid in idle[:overflow]:
             self._leases.pop(sid, None)
 
     async def acquire(
@@ -158,15 +151,11 @@ class SessionTurnLeaseRegistry:
 
     def rebind(self, token: Optional[TurnLeaseToken], new_session_id: str) -> bool:
         """Alias a HELD lease onto ``new_session_id`` after mid-turn session_id rotation
-        (compression), so the flush target stays serialized. The SAME ``_SessionLease`` is
-        registered under the new id (old mapping stays until idle-evicted) — no lock state moves;
-        only the current holder may rebind and the token follows. If the new id already has a
-        live lease, log loudly and keep the old id (fail-open: a holder cannot wait mid-turn).
-        """
+        (compression) so the flush target stays serialized: the SAME ``_SessionLease`` is registered
+        under the new id (old mapping stays until idle-evicted), only the current holder may rebind,
+        the token follows. A live lease on the new id: log loudly, keep the old id (fail-open)."""
         if (
-            token is None
-            or token.released
-            or not new_session_id
+            token is None or token.released or not new_session_id
             or new_session_id == token.session_id
         ):
             return False
