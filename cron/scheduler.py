@@ -101,8 +101,7 @@ def _fallback_chain_phrase() -> str:
         return "Fallback chain was exhausted or unavailable."
     return (
         "No fallback chain configured — add one with `hermes fallback add`, "
-        "or set a cron fleet default via `cron.model` + `cron.model_provider` "
-        "in config.yaml."
+        "or set a cron fleet default via `cron.model` + `cron.model_provider` in config.yaml."
     )
 
 
@@ -1375,8 +1374,7 @@ def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> Opt
         return None
 
     logger.warning(
-        "Job '%s' (ID: %s): BLOCKED by pre-dispatch config "
-        "validation — %s (no LLM call was made)",
+        "Job '%s' (ID: %s): BLOCKED by pre-dispatch config validation — %s (no LLM call was made)",
         job_name, job_id, _pf_reason)
     already_alerted = False
     try:
@@ -1395,8 +1393,7 @@ def _preflight_or_block(job: dict, job_id: str, job_name: str, cfg: dict) -> Opt
         f"**Reason:** {_pf_reason}\n\n"
         "The job will stay blocked (without re-alerting) until the "
         "configuration is fixed; the next healthy run clears this "
-        "state. Set `cron.preflight: false` in config.yaml to "
-        "disable this validation."
+        "state. Set `cron.preflight: false` in config.yaml to disable this validation."
     )
     return False, blocked_doc, "", f"{marker} {_pf_reason}"
 
@@ -1516,21 +1513,17 @@ def _check_model_drift(
     if _finite_oneshot:
         _remediation = (
             "This finite one-shot job is consumed by this attempted run; "
-            "create a new one-shot job at a future time with an explicit "
-            "provider and model."
+            "create a new one-shot job at a future time with an explicit provider and model."
         )
     else:
         _remediation = (
-            "To run on the new config, on the host running Hermes "
-            "pin it explicitly: "
+            "To run on the new config, on the host running Hermes pin it explicitly: "
             f"`hermes cron edit {job_id} --provider <provider> "
-            "--model <model>` (or pin the original values to keep "
-            "them)."
+            "--model <model>` (or pin the original values to keep them)."
         )
     logger.warning(
         "Job '%s': SKIPPED — global inference config drifted since "
-        "creation (%s) and this job is unpinned. Skipped to prevent "
-        "unintended spend. %s",
+        "creation (%s) and this job is unpinned. Skipped to prevent unintended spend. %s",
         job_id, _changes, _remediation)
     # Alert-once via drift_alerted bit (silent marker suppresses delivery); a successful run
     # clears it and re-arms the alert.
@@ -1606,8 +1599,7 @@ def _open_cron_session_db(job: dict):
     except concurrent.futures.TimeoutError:
         logger.error(
             "Job '%s': SessionDB init did not return within %.0fs — proceeding "
-            "without a session store for this run instead of blocking it "
-            "forever",
+            "without a session store for this run instead of blocking it forever",
             job.get("id", "?"), _session_db_timeout)
     except Exception as e:
         logger.debug("Job '%s': SQLite session store not available: %s", job.get("id", "?"), e)
@@ -2430,8 +2422,7 @@ def _compose_run_delivery(
             f"⛔ Cron '{job.get('name') or job['id']}' blocked by "
             f"configuration validation (no LLM call was made): "
             f"{_pf_text} "
-            "This alert is sent once; the job stays blocked until "
-            "the configuration is fixed."
+            "This alert is sent once; the job stays blocked until the configuration is fixed."
         )
     elif success:
         deliver_content = final_response
