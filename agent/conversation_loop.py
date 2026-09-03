@@ -416,32 +416,27 @@ def _is_stale_copilot_credential_error(status_code: Optional[int], error_message
 
 def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str]:
     """Return a user-facing error when Ollama is loaded with too little context."""
-    if not getattr(agent, "tools", None):
-        return None
-
     runtime_ctx = getattr(agent, "_ollama_num_ctx", None)
-    if not isinstance(runtime_ctx, int) or runtime_ctx <= 0:
-        return None
-    if runtime_ctx >= MINIMUM_CONTEXT_LENGTH:
+    if (
+        not getattr(agent, "tools", None)
+        or not isinstance(runtime_ctx, int)
+        or not 0 < runtime_ctx < MINIMUM_CONTEXT_LENGTH
+    ):
         return None
 
     model = getattr(agent, "model", "") or "the selected model"
-    base_url = getattr(agent, "base_url", "") or "unknown base URL"
-    provider = getattr(agent, "provider", "") or "unknown"
-    tool_count = len(getattr(agent, "tools", None) or [])
-
     logger.warning(
         "Ollama runtime context too small for Hermes tool use: "
         "model=%s provider=%s base_url=%s runtime_context=%d "
         "minimum_context=%d estimated_request_tokens=%d tool_count=%d "
         "session=%s",
         model,
-        provider,
-        base_url,
+        getattr(agent, "provider", "") or "unknown",
+        getattr(agent, "base_url", "") or "unknown base URL",
         runtime_ctx,
         MINIMUM_CONTEXT_LENGTH,
         request_tokens,
-        tool_count,
+        len(getattr(agent, "tools", None) or []),
         getattr(agent, "session_id", None) or "none",
     )
 
@@ -540,12 +535,8 @@ def _system_prompt_for_hooks(api_kwargs: Any, request_messages: Any) -> Any:
 
 
 def _is_nous_inference_route(provider: str, base_url: str) -> bool:
-    provider = (provider or "").strip().lower()
-    if provider == "nous":
-        return True
-    base = str(base_url or "")
-    return (
-        base_url_host_matches(base, "inference-api.nousresearch.com")
+    return (provider or "").strip().lower() == "nous" or base_url_host_matches(
+        str(base_url or ""), "inference-api.nousresearch.com"
     )
 
 
@@ -940,31 +931,21 @@ def _stored_prompt_matches_runtime(agent, prompt: str) -> bool:
                     return candidate[len(prefix):].strip()
         return ""
 
-    stored_model = line_value("Model")
-    current_model = str(getattr(agent, "model", "") or "").strip()
-    if stored_model and current_model and stored_model != current_model:
-        return False
-
-    stored_provider = line_value("Provider")
-    current_provider = str(getattr(agent, "provider", "") or "").strip()
-    if stored_provider and current_provider and stored_provider != current_provider:
-        return False
-
-    # cwd drift check. Compare against resolve_agent_cwd() — the SAME resolver used to
-    # build the prompt — so TERMINAL_CWD sessions are not falsely rejected.
-    stored_cwd = host_info_value("Current working directory")
-    if stored_cwd:
-        if stored_cwd != str(resolve_agent_cwd()):
+    # Model/provider identity, then cwd drift, then runtime-surface drift (reusing a
+    # desktop-built prompt on a terminal session would inject the wrong runtime hints).
+    for label, attr in (("Model", "model"), ("Provider", "provider")):
+        stored = line_value(label)
+        current = str(getattr(agent, attr, "") or "").strip()
+        if stored and current and stored != current:
             return False
-
-    # Runtime-surface drift: reusing a desktop-built prompt on a terminal session (or
-    # vice versa) would inject the wrong runtime hints.
+    # Compare against resolve_agent_cwd() — the SAME resolver used to build the
+    # prompt — so TERMINAL_CWD sessions are not falsely rejected.
+    stored_cwd = host_info_value("Current working directory")
+    if stored_cwd and stored_cwd != str(resolve_agent_cwd()):
+        return False
     stored_platform = line_value("Platform")
     current_platform = str(getattr(agent, "platform", "") or "").strip()
-    if stored_platform and current_platform and stored_platform != current_platform:
-        return False
-
-    return True
+    return not (stored_platform and current_platform and stored_platform != current_platform)
 
 
 # Named constants for the _get_continuation_prompt variants so
@@ -1119,24 +1100,15 @@ def _canonicalize_api_tool_calls(api_messages) -> None:
         new_tcs = []
         for tc in tcs:
             if isinstance(tc, dict) and "function" in tc:
+                fn = tc["function"]
                 try:
-                    tc = {**tc, "function": {
-                        **tc["function"],
-                        "arguments": _canonicalize_tool_call_arguments(
-                            tc["function"]["arguments"]
-                        ),
-                    }}
+                    args = _canonicalize_tool_call_arguments(fn["arguments"])
                 except Exception:
-                    # Copy-on-write as defense in depth: callers may pass shallow
-                    # copies, and writing into a shared tc["function"] rewrote the
-                    # stored turn with "{}" on the unrepairable path (#80498).
-                    tc = {**tc, "function": {
-                        **tc["function"],
-                        "arguments": _repair_tool_call_arguments(
-                            tc["function"]["arguments"],
-                            tc["function"].get("name", "?"),
-                        ),
-                    }}
+                    args = _repair_tool_call_arguments(fn["arguments"], fn.get("name", "?"))
+                # Copy-on-write as defense in depth: callers may pass shallow copies, and
+                # writing into a shared tc["function"] rewrote the stored turn with "{}"
+                # on the unrepairable path (#80498).
+                tc = {**tc, "function": {**fn, "arguments": args}}
             new_tcs.append(tc)
         am["tool_calls"] = new_tcs
 
@@ -1192,13 +1164,13 @@ def _compression_deferred_result(
     Both ``reason="lock"`` and ``reason="transient_block"`` must end as
     ``compression_deferred``, never ``compression_exhausted`` — the gateway wipes the
     session on exhaustion (#9893/#35809). ``failed`` stays False; the turn persists."""
+    session = agent.session_id or "none"
     if reason == "transient_block":
         block = getattr(agent, "_compression_blocked_transient", None)
         logger.info(
             "turn deferred: compression transiently blocked (%s) "
             "(session=%s) — not counting as compression exhaustion",
-            block if isinstance(block, str) else "unknown guard",
-            agent.session_id or "none",
+            block if isinstance(block, str) else "unknown guard", session,
         )
         _final = (
             "Context compression is temporarily paused after a recent "
@@ -1210,8 +1182,7 @@ def _compression_deferred_result(
         logger.info(
             "turn deferred: compression lock held by another path "
             "(session=%s holder=%s) — not counting as compression exhaustion",
-            agent.session_id or "none",
-            holder if isinstance(holder, str) else "unconfirmed",
+            session, holder if isinstance(holder, str) else "unconfirmed",
         )
         _final = (
             "Context compression is already running for this session. "
@@ -1385,13 +1356,9 @@ def _redecorate_prompt_cache_for_provider(
         if callable(rebase):
             prepared = rebase(prepared, messages)
             messages = prepared["messages"]
-        if tools_for_api is None:
-            return messages, prepared
-        return messages, prepared, planned_tools
-
     # Direct attribute access, not getattr: the flags are always initialized on
     # AIAgent, and a default would mask a real init bug as silent cache-off.
-    if agent._use_prompt_caching:
+    elif agent._use_prompt_caching:
         _ensure_cached_system_prompt_static(agent, system_message=system_message)
         static = getattr(agent, "_cached_system_prompt_static", None)
         direct_tool_cache = getattr(
@@ -1428,6 +1395,22 @@ def _redecorate_prompt_cache_for_provider(
     return messages, prepared, planned_tools
 
 
+def _engine_overrides_hook(engine: Any, name: str) -> bool:
+    """True when ``engine`` implements ContextEngine hook ``name`` itself.
+
+    Non-implementing engines must pay nothing per turn; ``hasattr`` is not enough because
+    the ABC defines a no-op default. Lazy import avoids a cycle with agent.context_engine."""
+    hook = getattr(engine, name, None)
+    if engine is None or not callable(hook):
+        return False
+    try:
+        from agent.context_engine import ContextEngine as _CE
+
+        return getattr(hook, "__func__", None) is not getattr(_CE, name)
+    except Exception:
+        return True
+
+
 def _apply_context_engine_selection(
     agent: Any,
     api_messages: List[Dict[str, Any]],
@@ -1441,17 +1424,8 @@ def _apply_context_engine_selection(
     Returns the (possibly replaced) request list. Fail-open: a missing hook, exception,
     or invalid return yields ``api_messages`` unchanged; history is never mutated."""
     engine = getattr(agent, "context_compressor", None)
-    if engine is None or not hasattr(engine, "select_context"):
+    if not _engine_overrides_hook(engine, "select_context"):
         return api_messages
-
-    # Skip the no-op base ``select_context`` so non-implementing engines pay nothing;
-    # ``hasattr`` is not enough: the ABC defines a default. Lazy import avoids a cycle.
-    try:
-        from agent.context_engine import ContextEngine as _CE
-        if getattr(engine.select_context, "__func__", None) is _CE.select_context:
-            return api_messages
-    except Exception:
-        pass
 
     session_label = getattr(agent, "session_id", None) or "-"
     # Structural clones: the engine must not be able to write through nested
@@ -1503,21 +1477,10 @@ def _notify_context_engine_turn_complete(
     Fail-open: a missing/no-op hook or any exception is swallowed. ``messages`` is
     passed as a copy so the engine cannot mutate the persisted transcript."""
     engine = getattr(agent, "context_compressor", None)
-    hook = getattr(engine, "on_turn_complete", None)
-    if engine is None or not callable(hook):
+    if not _engine_overrides_hook(engine, "on_turn_complete"):
         return
-
-    # Skip the no-op base ``on_turn_complete`` so non-implementing engines pay nothing
-    # per turn. Lazy import avoids an import cycle with agent.context_engine.
     try:
-        from agent.context_engine import ContextEngine as _CE
-        if getattr(hook, "__func__", None) is _CE.on_turn_complete:
-            return
-    except Exception:
-        pass
-
-    try:
-        hook(
+        engine.on_turn_complete(
             # Structural clones: dict(m) would let a hook write into nested containers
             # of the persisted transcript (#80498).
             [_clone_message_for_send(m) for m in messages],
