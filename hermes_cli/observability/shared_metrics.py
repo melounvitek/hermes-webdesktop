@@ -400,10 +400,9 @@ class SharedMetricsStore:
                 "SELECT 1 FROM package_outbox WHERE substr(created_at, 1, 10) >= ? LIMIT 1",
                 (now.date().isoformat(),),
             ).fetchone()
-            if package_created_today is not None:
-                return
-            while self._create_package_in_transaction(connection, now) is not None:
-                pass
+            if package_created_today is None:
+                while self._create_package_in_transaction(connection, now) is not None:
+                    pass
 
     def _create_package(self) -> dict[str, Any] | None:
         with self._write() as connection:
@@ -451,27 +450,19 @@ class SharedMetricsStore:
             "metrics": [self._package_metric(row) for row in rows],
         }
         connection.execute(
-            """
-                INSERT INTO package_outbox(
-                    package_id, period_start, period_end, payload_json, created_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
+            "INSERT INTO package_outbox( package_id, period_start, period_end, payload_json,"
+            " created_at ) VALUES (?, ?, ?, ?, ?)",
             (
-                payload["package_id"],
-                payload["period_start"],
-                payload["period_end"],
-                _compact_json(payload),
-                payload["generated_at"],
+                payload["package_id"], payload["period_start"], payload["period_end"],
+                _compact_json(payload), payload["generated_at"],
             ),
         )
         # Advance the data high-water mark. This is the ONLY writer of the 'data' mark:
         # it clamps consent-window opens so a rolled-back clock can never open a window
         # underneath packages that already exist.
         connection.execute(
-            """
-            INSERT INTO consent_marks(name, stamp) VALUES ('data', ?)
-            ON CONFLICT(name) DO UPDATE SET stamp = MAX(stamp, excluded.stamp)
-            """,
+            "INSERT INTO consent_marks(name, stamp) VALUES ('data', ?)"
+            " ON CONFLICT(name) DO UPDATE SET stamp = MAX(stamp, excluded.stamp)",
             (payload["period_end"],),
         )
         for row in rows:
@@ -496,9 +487,7 @@ class SharedMetricsStore:
         ):
             raise ValueError(f"Unsupported dimensions for shared metric: {metric_name}")
         return {
-            "name": metric_name,
-            "type": "counter",
-            "dimensions": dimensions,
+            "name": metric_name, "type": "counter", "dimensions": dimensions,
             "value": row["value"] - row["packaged_value"],
         }
 
