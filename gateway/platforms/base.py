@@ -2056,10 +2056,10 @@ class BasePlatformAdapter(ABC):
         """Invoke plugin-registered native handler factories (``ctx.register_platform_handler``)
         with ``(native, adapter)``; adapters call this from ``connect()`` once the native
         client exists. Each factory is isolated so a bad plugin can't block connecting."""
-        platform_name = getattr(self.platform, "value", str(self.platform))
         try:
             from hermes_cli.plugins import get_plugin_manager
-            factories = get_plugin_manager().get_platform_handler_factories(platform_name)
+            factories = get_plugin_manager().get_platform_handler_factories(
+                getattr(self.platform, "value", str(self.platform)))
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("[%s] Could not load plugin handler factories: %s", self.name, e)
             return
@@ -2106,10 +2106,10 @@ class BasePlatformAdapter(ABC):
             return
         try:
             recovered = recover(source)
+            if recovered is None or str(recovered) == str(source.thread_id or ""):
+                return
         except Exception:
             logger.debug("topic recovery hook failed", exc_info=True)
-            return
-        if recovered is None or str(recovered) == str(source.thread_id or ""):
             return
         try:
             event.source = dataclasses.replace(source, thread_id=str(recovered))
@@ -2179,24 +2179,23 @@ class BasePlatformAdapter(ABC):
                 return candidate
         store = getattr(self, "_session_store", None)
         resolver = getattr(store, "_resolve_profile_for_key", None) if store else None
-        if callable(resolver):
-            try:
-                resolved = resolver(source)
-            except Exception:
-                return None
-            if isinstance(resolved, str) and resolved.strip():
-                return resolved
-        return None
+        if not callable(resolver):
+            return None
+        try:
+            resolved = resolver(source)
+        except Exception:
+            return None
+        return resolved if isinstance(resolved, str) and resolved.strip() else None
 
     # ── Inbound text batching (adapters that merge split messages): subclasses supply
     # ``_pending_text_batches`` / ``_pending_text_batch_tasks`` dicts and ``_flush_text_batch(key)``.
 
     def _event_session_key(self, event: "MessageEvent") -> str:
         """Adapter-level session key for ``event``, profile-namespaced like the agent run."""
+        extra = self.config.extra
         return build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+            event.source, group_sessions_per_user=extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=extra.get("thread_sessions_per_user", False),
             profile=self._session_key_profile(event.source))
 
     def _text_batch_key(self, event: "MessageEvent") -> str:
@@ -2207,17 +2206,15 @@ class BasePlatformAdapter(ABC):
         """Buffer a text event (merging into a pending one) and restart the flush timer."""
         key = self._text_batch_key(event)
         existing = self._pending_text_batches.get(key)
-        chunk_len = len(event.text or "")
         if existing is None:
-            event._last_chunk_len = chunk_len  # type: ignore[attr-defined]
-            self._pending_text_batches[key] = event
+            existing = self._pending_text_batches[key] = event
         else:
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
-            existing._last_chunk_len = chunk_len  # type: ignore[attr-defined]
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
+        existing._last_chunk_len = len(event.text or "")  # type: ignore[attr-defined]
         prior_task = self._pending_text_batch_tasks.get(key)
         if prior_task and not prior_task.done():
             prior_task.cancel()
@@ -2254,8 +2251,7 @@ class BasePlatformAdapter(ABC):
                 history.remove(last_reply)
         if not history:
             return None
-        # Avoid circular import: gateway.run already imports this module.
-        from gateway.run import _collect_history_media_paths
+        from gateway.run import _collect_history_media_paths  # lazy: gateway.run imports us
         return _collect_history_media_paths(history)
 
     async def _bounded_history_media_paths_for_session(self, session_key: str) -> Optional[set]:
@@ -2433,8 +2429,7 @@ class BasePlatformAdapter(ABC):
             try:
                 from tools import clarify_gateway as _cg
                 with _cg._lock:
-                    _entry = _cg._entries.get(clarify_id)
-                _is_multi = bool(_entry and getattr(_entry, "multi_select", False))
+                    _is_multi = bool(getattr(_cg._entries.get(clarify_id), "multi_select", False))
             except Exception:
                 _is_multi = False
             hint = (
@@ -2709,7 +2704,7 @@ class BasePlatformAdapter(ABC):
     def _mask_json_string_media(content: str) -> str:
         """Blank ``MEDIA:<bare-path>`` tags inside JSON string *values* (stored tool-result text
         like ``{"result": "MEDIA:/x/stale.png"}``) so they are never re-delivered. Only
-        value-context strings (``:,{[`` before the ``"``) and bare paths (``/``, ``~/``, ``X:\``)
+        value-context strings (``:,{[`` before the ``"``) and bare paths (``/``, ``~/``, ``X:\\``)
         count; ``MEDIA:"..."`` quoted tags and line-start/prose tags are untouched. Offsets
         preserved."""
         if '"' not in content or "MEDIA:" not in content:
@@ -2797,10 +2792,12 @@ class BasePlatformAdapter(ABC):
             else:
                 # Most common reason a promised file never arrives — log the gap.
                 logger.info("Skipping bare file path in reply (no file on disk): %s", _log_safe_path(raw))
+        if not unique:
+            return [], content
         cleaned = content
         for raw in unique.values():
             cleaned = cleaned.replace(raw, '')
-        return list(unique), re.sub(r'\n{3,}', '\n\n', cleaned).strip() if unique else cleaned
+        return list(unique), re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
     async def _keep_typing(self, chat_id: str, interval: float = 2.0, metadata=None,
                            stop_event: asyncio.Event | None = None) -> None:
@@ -2838,8 +2835,7 @@ class BasePlatformAdapter(ABC):
         finally:
             # A send_typing after an outer stop_typing() may have recreated the
             # platform typing loop; cancelling this task alone won't clean it up.
-            if hasattr(self, "stop_typing"):
-                await self._stop_typing_quietly(chat_id, metadata)
+            await self._stop_typing_quietly(chat_id, metadata)
             self._typing_paused.discard(chat_id)
             # getattr-guard: tests build adapters via object.__new__ without _status_text.
             getattr(self, "_status_text", {}).pop(str(chat_id), None)
@@ -2855,8 +2851,6 @@ class BasePlatformAdapter(ABC):
                 # Slow adapter cleanup must not block delivery/shutdown.
                 with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(typing_task), timeout=timeout)
-            if not hasattr(self, "stop_typing"):
-                return
             for attempt in range(max(1, stop_attempts)):
                 if attempt:
                     await asyncio.sleep(0)
@@ -2879,9 +2873,8 @@ class BasePlatformAdapter(ABC):
 
     async def interrupt_session_activity(self, session_key: str, chat_id: str, metadata=None) -> None:
         """Signal the active session loop to stop and clear typing immediately."""
-        interrupt_event = self._active_sessions.get(session_key) if session_key else None
-        if interrupt_event is not None:
-            interrupt_event.set()
+        if session_key and session_key in self._active_sessions:
+            self._active_sessions[session_key].set()
         await self._stop_typing_quietly(chat_id, metadata)
 
     def register_post_delivery_callback(
@@ -3015,8 +3008,7 @@ class BasePlatformAdapter(ABC):
             chat_id=event.source.chat_id, content=text, reply_to=_reply_anchor_for_event(event),
             metadata=_mark_notify_metadata(thread_meta))
         if eph_ttl > 0 and result.success and result.message_id:
-            self._schedule_ephemeral_delete(
-                chat_id=event.source.chat_id, message_id=result.message_id, ttl_seconds=eph_ttl)
+            self._schedule_ephemeral_delete(event.source.chat_id, result.message_id, eph_ttl)
 
     def _final_delivery_adapter(self, source: Optional[SessionSource]) -> "BasePlatformAdapter":
         """The runner's CURRENT adapter for a new final-response send: a reconnect can swap the
@@ -3052,9 +3044,9 @@ class BasePlatformAdapter(ABC):
             # A server-requested retry_after (Telegram FloodWait) overrides backoff, once per send.
             server_retry_after = result.retry_after
             for attempt in range(1, max_retries + 1):
-                backoff = base_delay * (2 ** (attempt - 1))
-                if server_retry_after is not None:
-                    backoff = server_retry_after
+                backoff = server_retry_after
+                if backoff is None:
+                    backoff = base_delay * (2 ** (attempt - 1))
                 delay = backoff + random.uniform(0, 1)
                 server_retry_after = None
                 logger.warning("[%s] Send failed (attempt %d/%d, retrying in %.1fs): %s", self.name,
@@ -3065,8 +3057,7 @@ class BasePlatformAdapter(ABC):
                     logger.info("[%s] Send succeeded on retry %d", self.name, attempt)
                     return result
                 error_str = result.error or ""
-                if result.retry_after is not None:
-                    server_retry_after = result.retry_after
+                server_retry_after = result.retry_after  # None unless the server asked again
                 if not (result.retryable or self._is_retryable_error(error_str)):
                     break  # non-transient now — fall through to plain-text fallback
             else:  # retries exhausted — notify user
@@ -3418,12 +3409,11 @@ class BasePlatformAdapter(ABC):
         mode = os.getenv("HERMES_HUMAN_DELAY_MODE", "off").lower()
         if mode == "off":
             return 0.0
-        if mode == "natural":
-            return random.uniform(800 / 1000.0, 2500 / 1000.0)
-        def _ms(name: str, default: int) -> int:  # custom mode tolerates malformed env vars
-            return _or_default(lambda: int(os.getenv(name, str(default))), default)
-        return random.uniform(_ms("HERMES_HUMAN_DELAY_MIN_MS", 800) / 1000.0,
-                              _ms("HERMES_HUMAN_DELAY_MAX_MS", 2500) / 1000.0)
+        lo, hi = 800, 2500
+        if mode != "natural":  # custom mode tolerates malformed env vars
+            lo = _or_default(lambda: int(os.getenv("HERMES_HUMAN_DELAY_MIN_MS", str(lo))), lo)
+            hi = _or_default(lambda: int(os.getenv("HERMES_HUMAN_DELAY_MAX_MS", str(hi))), hi)
+        return random.uniform(lo / 1000.0, hi / 1000.0)
 
     async def _synthesize_auto_tts(self, text_content: str) -> Tuple[List[str], Optional[str]]:
         """Synthesize auto-TTS audio -> ``(existing_paths, requested_path)``; empty/None on failure
@@ -3601,8 +3591,7 @@ class BasePlatformAdapter(ABC):
             await self._finalize_delivery_obligation(_obligation_id, result, event, delivery_adapter)
         if ephemeral_ttl and ephemeral_ttl > 0 and result.success and result.message_id:
             delivery_adapter._schedule_ephemeral_delete(
-                chat_id=event.source.chat_id, message_id=result.message_id,
-                ttl_seconds=ephemeral_ttl)
+                event.source.chat_id, result.message_id, ephemeral_ttl)
 
     async def _notify_turn_error(self, event: MessageEvent, e: BaseException) -> Optional[dict]:
         """Tell the user a turn failed rather than leaving radio silence (last resort:
@@ -3798,9 +3787,7 @@ class BasePlatformAdapter(ABC):
             if session_key in self._pending_messages:
                 pending_event = self._pending_messages.pop(session_key)
                 logger.debug("[%s] Processing queued follow-up message", self.name)
-                _active = self._active_sessions.get(session_key)
-                if _active is not None:
-                    _active.clear()
+                self._clear_session_guard(session_key)
                 await self._stop_typing_refresh(event.source.chat_id, typing_task, metadata=_thread_metadata)
                 self._spawn_drain_task(pending_event, session_key)
                 return  # Drain task owns the session now.
@@ -3835,11 +3822,15 @@ class BasePlatformAdapter(ABC):
         """Hand the session to a fresh task for a queued follow-up — never recurse (chained
         follow-ups grew the C stack to SIGSEGV). Clearing (not deleting) the Event keeps the guard
         live for concurrent inbound; ownership moves so stale-lock detection works."""
+        self._clear_session_guard(session_key)
+        self._track_session_task(
+            session_key, asyncio.create_task(self._process_message_background(pending_event, session_key)))
+
+    def _clear_session_guard(self, session_key: str) -> None:
+        """Clear (not delete) the session's interrupt Event so the guard stays live for inbound."""
         _active = self._active_sessions.get(session_key)
         if _active is not None:
             _active.clear()
-        self._track_session_task(
-            session_key, asyncio.create_task(self._process_message_background(pending_event, session_key)))
 
     def _cleanup_finished_session_task(
         self, session_key: str, interrupt_event: Optional[asyncio.Event]) -> None:
@@ -3871,17 +3862,14 @@ class BasePlatformAdapter(ABC):
                                "releasing tracking and letting them unwind in the background",
                                self.name, len([t for t in tasks if not t.done()]))
                 break
-        self._background_tasks.clear()
-        self._expected_cancelled_tasks.clear()
-        self._session_tasks.clear()
         with contextlib.suppress(Exception):  # flush pending messages to disk before clearing
             from gateway.shutdown_flush import flush_pending_to_file
             flush_pending_to_file(self._pending_messages, reason="adapter_shutdown")
-        self._pending_messages.clear()
-        self._active_sessions.clear()
-        for state in list(self._text_debounce_store().values()):
+        for state in self._text_debounce_store().values():
             state.cancel_timer()
-        self._text_debounce_store().clear()
+        for bucket in (self._background_tasks, self._expected_cancelled_tasks, self._session_tasks,
+                       self._pending_messages, self._active_sessions, self._text_debounce_store()):
+            bucket.clear()
 
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
