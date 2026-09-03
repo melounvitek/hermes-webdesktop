@@ -34,8 +34,7 @@ READ_WINDOW_BELOW_SCHEMA = {
         "retrying. Metadata only; never captures pixels."
     ),
     "parameters": {
-        "type": "object",
-        "properties": {},
+        "type": "object", "properties": {}
     },
 }
 

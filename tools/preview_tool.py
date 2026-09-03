@@ -27,7 +27,8 @@ _ACTIONS = {
     "open": lambda args: open_preview_tool(url=args.get("url", ""), label=args.get("label", "")),
     "close": lambda args: preview_close(url=args.get("url", "")),
     # read needs the GUI callback and is dispatched at the agent level.
-    "read": lambda args: tool_error("preview read must run inside a desktop session (no GUI callback here)."),
+    "read": lambda args: tool_error(
+        "preview read must run inside a desktop session (no GUI callback here)."),
 }
 
 
