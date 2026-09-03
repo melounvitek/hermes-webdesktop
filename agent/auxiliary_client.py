@@ -7150,17 +7150,35 @@ _ANTHROPIC_COMPAT_PROVIDERS = frozenset({"minimax", "minimax-oauth", "minimax-cn
 
 def _is_anthropic_compat_endpoint(provider: str, base_url: str) -> bool:
     """True for known Anthropic-compatible providers or any ``/anthropic`` URL path."""
-    if provider in _ANTHROPIC_COMPAT_PROVIDERS:
-        return True
-    url_lower = (base_url or "").lower()
-    return "/anthropic" in url_lower
+    return provider in _ANTHROPIC_COMPAT_PROVIDERS or "/anthropic" in (base_url or "").lower()
+
+
+# OpenAI block type → (Anthropic block type, default media type for data: URLs).
+# MiniMax's Anthropic-compatible endpoint wants type="video" (not "video_url"/
+# "input_video") with the same ``source`` shape as "image".
+_ANTHROPIC_MEDIA_BLOCKS = {
+    "image_url": ("image", "image/png"),
+    "video_url": ("video", "video/mp4"),
+}
+
+
+def _anthropic_media_block(openai_type: str, url: str) -> dict:
+    """Build the Anthropic ``image``/``video`` block for one OpenAI media URL."""
+    block_type, media_type = _ANTHROPIC_MEDIA_BLOCKS[openai_type]
+    if not url.startswith("data:"):
+        return {"type": block_type, "source": {"type": "url", "url": url}}
+    header, _, b64data = url.partition(",")
+    if ":" in header and ";" in header:
+        media_type = header.split(":", 1)[1].split(";", 1)[0]
+    return {
+        "type": block_type,
+        "source": {"type": "base64", "media_type": media_type, "data": b64data},
+    }
 
 
 def _convert_openai_images_to_anthropic(messages: list) -> list:
-    """Convert OpenAI ``image_url``/``video_url`` blocks to Anthropic ``image``/``video``.
-
-    Only list-content messages with such blocks change; everything else passes through.
-    """
+    """Convert OpenAI ``image_url``/``video_url`` blocks to Anthropic ``image``/``video``;
+    only list-content messages with such blocks change."""
     converted = []
     for msg in messages:
         content = msg.get("content")
@@ -7170,56 +7188,10 @@ def _convert_openai_images_to_anthropic(messages: list) -> list:
         new_content = []
         changed = False
         for block in content:
-            if block.get("type") == "image_url":
-                image_url_val = (block.get("image_url") or {}).get("url", "")
-                if image_url_val.startswith("data:"):
-                    header, _, b64data = image_url_val.partition(",")
-                    media_type = "image/png"
-                    if ":" in header and ";" in header:
-                        media_type = header.split(":", 1)[1].split(";", 1)[0]
-                    new_content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64data,
-                        },
-                    })
-                else:
-                    new_content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "url",
-                            "url": image_url_val,
-                        },
-                    })
-                changed = True
-            elif block.get("type") == "video_url":
-                # MiniMax's Anthropic-compatible endpoint expects type="video" (not
-                # "video_url"/"input_video"); source shape mirrors the "image" block.
-                # https://platform.minimax.io/docs/api-reference/text-anthropic-api
-                video_url_val = (block.get("video_url") or {}).get("url", "")
-                if video_url_val.startswith("data:"):
-                    header, _, b64data = video_url_val.partition(",")
-                    media_type = "video/mp4"
-                    if ":" in header and ";" in header:
-                        media_type = header.split(":", 1)[1].split(";", 1)[0]
-                    new_content.append({
-                        "type": "video",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": b64data,
-                        },
-                    })
-                else:
-                    new_content.append({
-                        "type": "video",
-                        "source": {
-                            "type": "url",
-                            "url": video_url_val,
-                        },
-                    })
+            block_type = block.get("type")
+            if block_type in _ANTHROPIC_MEDIA_BLOCKS:
+                url = (block.get(block_type) or {}).get("url", "")
+                new_content.append(_anthropic_media_block(block_type, url))
                 changed = True
             else:
                 new_content.append(block)
@@ -7245,13 +7217,11 @@ def _contains_profile_reasoning_fields(value: Any) -> bool:
     """Return whether a profile payload contains a reasoning wire control."""
     if not isinstance(value, dict):
         return False
-    for key, nested in value.items():
-        normalized = str(key).strip().lower()
-        if normalized in _PROFILE_REASONING_KEYS:
-            return True
-        if _contains_profile_reasoning_fields(nested):
-            return True
-    return False
+    return any(
+        str(key).strip().lower() in _PROFILE_REASONING_KEYS
+        or _contains_profile_reasoning_fields(nested)
+        for key, nested in value.items()
+    )
 
 
 _NOUS_PROVIDER_NAMES = frozenset({"nous", "nous-portal", "nousresearch"})
@@ -7266,146 +7236,129 @@ def _nous_on_messages_wire(provider_norm: str, model: str) -> bool:
     return nous_api_mode(model) == "anthropic_messages"
 
 
+_NVIDIA_PROVIDER_NAMES = {"nvidia", "nvidia-nim", "nim", "build-nvidia", "nemotron"}
+_GEMINI_NATIVE_PROVIDER_NAMES = {"gemini", "google", "google-gemini", "google-ai-studio"}
+
+
+def _is_gemini_native_route(provider_norm: str, effective_base: str) -> bool:
+    """Gemini native by provider name, else (best-effort) by base URL shape."""
+    if provider_norm in _GEMINI_NATIVE_PROVIDER_NAMES:
+        return True
+    if not effective_base:
+        return False
+    try:
+        from agent.gemini_native_adapter import is_native_gemini_base_url
+        return is_native_gemini_base_url(effective_base)
+    except Exception:
+        return False
+
+
 def _forwards_max_tokens(
     provider: str, provider_norm: str, model: str, effective_base: str, task: Optional[str],
 ) -> bool:
     """Whether an explicit max_tokens is forwarded on this route.
 
-    No default output cap: omitted max_tokens means "model's max output" on most
-    providers and sidesteps wire quirks (max_completion_tokens on GPT-5/Copilot,
-    ZAI vision rejecting it). Forward only where mandatory or meaningfully honored:
-    Anthropic Messages wire (hard 400 without it); NVIDIA NIM (some models return
-    200 with empty choices[] when omitted); MoA reference slots; Gemini native
-    (fixed 65,535 ceiling when omitted, so MoA reference_max_tokens needs the cap);
-    OpenRouter (budgets credit against the FULL output window when omitted → 402
-    on low-credit accounts); managed local llama-server (uncapped decode with no
-    EOS burns the GPU to the full context window).
+    No default cap elsewhere (omitted = model max; avoids max_completion_tokens /
+    ZAI-vision quirks). Forward only where mandatory or honored: Anthropic Messages
+    wire (400 without it); NVIDIA NIM (empty choices[] when omitted); MoA reference
+    slots; Gemini native (fixed 65,535 ceiling otherwise); OpenRouter (budgets the
+    FULL window when omitted → 402 on low credit); managed local llama-server
+    (uncapped decode with no EOS burns the GPU to the context window).
     """
-    if _is_anthropic_compat_endpoint(provider, effective_base):
-        return True
-    if _nous_on_messages_wire(provider_norm, model):
-        return True
-    if (
-        provider_norm in {"nvidia", "nvidia-nim", "nim", "build-nvidia", "nemotron"}
+    return (
+        _is_anthropic_compat_endpoint(provider, effective_base)
+        or _nous_on_messages_wire(provider_norm, model)
+        or provider_norm in _NVIDIA_PROVIDER_NAMES
         or base_url_host_matches(effective_base, "integrate.api.nvidia.com")
-    ):
-        return True
-    if bool(task) and str(task) == "moa_reference":
-        return True
-    is_gemini_native = provider_norm in {"gemini", "google", "google-gemini", "google-ai-studio"}
-    if not is_gemini_native and effective_base:
-        try:
-            from agent.gemini_native_adapter import is_native_gemini_base_url
-            is_gemini_native = is_native_gemini_base_url(effective_base)
-        except Exception:
-            pass
-    if is_gemini_native:
-        return True
-    if provider_norm == "openrouter" or base_url_host_matches(effective_base, "openrouter.ai"):
-        return True
-    return _is_managed_local_endpoint(effective_base)
+        or str(task) == "moa_reference"
+        or _is_gemini_native_route(provider_norm, effective_base)
+        or provider_norm == "openrouter"
+        or base_url_host_matches(effective_base, "openrouter.ai")
+        or _is_managed_local_endpoint(effective_base)
+    )
 
 
-def _build_call_kwargs(
-    provider: str,
-    model: str,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-    tools: Optional[list] = None,
-    timeout: float = 30.0,
-    extra_body: Optional[dict] = None,
-    reasoning_config: Optional[dict] = None,
-    base_url: Optional[str] = None,
-    task: Optional[str] = None,
-) -> dict:
-    """Build kwargs for .chat.completions.create() with model/provider adjustments."""
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "timeout": timeout,
-    }
-
+def _effective_aux_temperature(
+    model: str, base_url: Optional[str], temperature: Optional[float],
+) -> Optional[float]:
+    """Apply per-model fixed/omitted temperature, then Opus 4.7+ sampling bans."""
     fixed_temperature = _fixed_temperature_for_model(model, base_url)
     if fixed_temperature is OMIT_TEMPERATURE:
         temperature = None  # strip — let server choose
     elif fixed_temperature is not None:
         temperature = fixed_temperature
-
     # Opus 4.7+ rejects any non-default temperature/top_p/top_k; drop silently so
     # aux callers that hardcode temperature don't 400 when the aux model flips.
     if temperature is not None:
         from agent.anthropic_adapter import _forbids_sampling_params
         if _forbids_sampling_params(model):
             temperature = None
+    return temperature
 
-    if temperature is not None:
-        kwargs["temperature"] = temperature
 
-    effective_base = base_url or (
-        _current_custom_base_url() if provider == "custom" else ""
-    )
-    provider_norm = str(provider or "").strip().lower()
+def _dedupe_tool_names(tools: list, provider: str, model: str) -> list:
+    """Drop duplicate tool names (Vertex/Azure/Bedrock 400 on them) with a warning."""
+    seen: set = set()
+    deduped: list = []
+    for tool in tools:
+        name = (tool.get("function") or {}).get("name", "")
+        if name and name in seen:
+            logger.warning(
+                "_build_call_kwargs: duplicate tool name '%s' removed "
+                "(provider=%s model=%s)",
+                name, provider, model,
+            )
+            continue
+        if name:
+            seen.add(name)
+        deduped.append(tool)
+    return deduped
 
-    if max_tokens is not None and _forwards_max_tokens(
-        provider, provider_norm, model, effective_base, task,
-    ):
-        # auxiliary_max_tokens_param() picks max_completion_tokens where needed.
-        kwargs.update(auxiliary_max_tokens_param(max_tokens, model=model))
 
-    if tools:
-        # Vertex/Azure/Bedrock 400 on duplicate tool names; upstream dedups
-        # already, this turns a regression into a warning instead of a hard fail.
-        _seen: set = set()
-        _deduped: list = []
-        for _t in tools:
-            _tname = (_t.get("function") or {}).get("name", "")
-            if _tname and _tname in _seen:
-                logger.warning(
-                    "_build_call_kwargs: duplicate tool name '%s' removed "
-                    "(provider=%s model=%s)",
-                    _tname, provider, model,
-                )
-                continue
-            if _tname:
-                _seen.add(_tname)
-            _deduped.append(_t)
-        kwargs["tools"] = _deduped
+class _ProfileProjection(NamedTuple):
+    body: Dict[str, Any]
+    reasoning_extra: Dict[str, Any]
+    top_level: Dict[str, Any]
+    handles_reasoning: bool
 
-    # Provider profiles are the source of truth for reasoning wire shapes
-    # (top-level, nested body, or extra_body.reasoning); providers without a
-    # reasoning-aware profile keep the generic ``extra_body.reasoning`` fallback.
-    profile_body: Dict[str, Any] = {}
-    profile_reasoning_extra: Dict[str, Any] = {}
-    profile_top_level: Dict[str, Any] = {}
-    profile_handles_reasoning = False
+
+def _project_provider_profile(
+    provider: str,
+    provider_norm: str,
+    model: str,
+    effective_base: str,
+    reasoning_config: Optional[dict],
+) -> _ProfileProjection:
+    """Provider profile's extra_body / kwargs projection; partial on failure."""
+    body: Dict[str, Any] = {}
+    reasoning_extra: Dict[str, Any] = {}
+    top_level: Dict[str, Any] = {}
+    handles_reasoning = False
     try:
         from providers import get_provider_profile
         from providers.base import ProviderProfile
 
         profile = get_provider_profile(provider_norm)
         if profile is not None:
-            profile_body = profile.build_extra_body(
+            body = profile.build_extra_body(
                 model=model,
                 base_url=effective_base,
                 reasoning_config=reasoning_config,
             ) or {}
-            profile_reasoning_extra, profile_top_level = (
-                profile.build_api_kwargs_extras(
-                    reasoning_config=reasoning_config,
-                    supports_reasoning=reasoning_config is not None,
-                    model=model,
-                    base_url=effective_base,
-                )
+            reasoning_extra, top_level = profile.build_api_kwargs_extras(
+                reasoning_config=reasoning_config,
+                supports_reasoning=reasoning_config is not None,
+                model=model,
+                base_url=effective_base,
             )
-            profile_reasoning_extra = profile_reasoning_extra or {}
-            profile_top_level = profile_top_level or {}
-            profile_handles_reasoning = (
+            reasoning_extra = reasoning_extra or {}
+            top_level = top_level or {}
+            handles_reasoning = (
                 type(profile).build_api_kwargs_extras
                 is not ProviderProfile.build_api_kwargs_extras
-                or _contains_profile_reasoning_fields(profile_body)
-                or _contains_profile_reasoning_fields(profile_reasoning_extra)
-                or _contains_profile_reasoning_fields(profile_top_level)
+                or _contains_profile_reasoning_fields(body)
+                or _contains_profile_reasoning_fields(reasoning_extra)
+                or _contains_profile_reasoning_fields(top_level)
             )
     except Exception as exc:
         logger.debug(
@@ -7413,15 +7366,23 @@ def _build_call_kwargs(
             provider,
             exc,
         )
+    return _ProfileProjection(body, reasoning_extra, top_level, handles_reasoning)
 
-    kwargs.update(profile_top_level)
+
+def _merge_aux_extra_body(
+    extra_body: Optional[dict],
+    projection: _ProfileProjection,
+    reasoning_config: Optional[dict],
+    provider_norm: str,
+) -> Dict[str, Any]:
+    """Caller extra_body + profile body/reasoning + generic reasoning fallback + Nous tags."""
     merged_extra = dict(extra_body or {})
-    merged_extra.update(profile_body)
-    merged_extra.update(profile_reasoning_extra)
+    merged_extra.update(projection.body)
+    merged_extra.update(projection.reasoning_extra)
     if (
         reasoning_config
         and isinstance(reasoning_config, dict)
-        and not profile_handles_reasoning
+        and not projection.handles_reasoning
     ):
         if reasoning_config.get("enabled") is False:
             merged_extra["reasoning"] = {"enabled": False}
@@ -7443,6 +7404,56 @@ def _build_call_kwargs(
                 sticky_key = None
             if sticky_key:
                 merged_extra["session_id"] = sticky_key
+    return merged_extra
+
+
+def _build_call_kwargs(
+    provider: str,
+    model: str,
+    messages: list,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    tools: Optional[list] = None,
+    timeout: float = 30.0,
+    extra_body: Optional[dict] = None,
+    reasoning_config: Optional[dict] = None,
+    base_url: Optional[str] = None,
+    task: Optional[str] = None,
+) -> dict:
+    """Build kwargs for .chat.completions.create() with model/provider adjustments."""
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "timeout": timeout,
+    }
+    temperature = _effective_aux_temperature(model, base_url, temperature)
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+
+    effective_base = base_url or (
+        _current_custom_base_url() if provider == "custom" else ""
+    )
+    provider_norm = str(provider or "").strip().lower()
+
+    if max_tokens is not None and _forwards_max_tokens(
+        provider, provider_norm, model, effective_base, task,
+    ):
+        # auxiliary_max_tokens_param() picks max_completion_tokens where needed.
+        kwargs.update(auxiliary_max_tokens_param(max_tokens, model=model))
+
+    if tools:
+        kwargs["tools"] = _dedupe_tool_names(tools, provider, model)
+
+    # Provider profiles are the source of truth for reasoning wire shapes
+    # (top-level, nested body, or extra_body.reasoning); providers without a
+    # reasoning-aware profile keep the generic ``extra_body.reasoning`` fallback.
+    projection = _project_provider_profile(
+        provider, provider_norm, model, effective_base, reasoning_config,
+    )
+    kwargs.update(projection.top_level)
+    merged_extra = _merge_aux_extra_body(
+        extra_body, projection, reasoning_config, provider_norm,
+    )
     if merged_extra:
         kwargs["extra_body"] = merged_extra
 
@@ -7468,18 +7479,13 @@ def _validate_llm_response(
     provider: Optional[str] = None,
     base_url: Optional[str] = None,
 ) -> Any:
-    """Validate that an LLM response has the expected .choices[0].message shape.
+    """Validate the .choices[0].message shape (fail fast, not a downstream AttributeError).
 
-    Fails fast instead of letting malformed payloads crash downstream with a
-    misleading AttributeError. Also the single accounting chokepoint for aux
-    usage (``agent.aux_accounting``): every successful non-streaming response
-    passes here exactly once. Recording is best-effort; *provider*/*base_url*
-    are optional accounting hints.
+    Also the single aux-usage accounting chokepoint: every successful non-streaming
+    response passes here exactly once; *provider*/*base_url* are optional hints.
     """
     if response is None:
-        raise RuntimeError(
-            f"Auxiliary {task or 'call'}: LLM returned None response"
-        )
+        raise RuntimeError(f"Auxiliary {task or 'call'}: LLM returned None response")
     from agent.aux_accounting import record_aux_usage
     record_aux_usage(response, task, provider=provider, base_url=base_url)
     # Adapter SimpleNamespace responses are fine — they have .choices[0].message.
@@ -7489,18 +7495,14 @@ def _validate_llm_response(
             raise AttributeError("missing choices[0].message")
     except (AttributeError, TypeError, IndexError) as exc:
         recovered = _recover_aux_response_message(response)
-        if recovered is not None:
-            _record_relay_auxiliary_response_model(response)
-            _complete_relay_auxiliary_call()
-            return recovered
-        response_type = type(response).__name__
-        response_preview = str(response)[:120]
-        raise RuntimeError(
-            f"Auxiliary {task or 'call'}: LLM returned invalid response "
-            f"(type={response_type}): {response_preview!r}. "
-            f"Expected object with .choices[0].message — check provider "
-            f"adapter or custom endpoint compatibility."
-        ) from exc
+        if recovered is None:
+            raise RuntimeError(
+                f"Auxiliary {task or 'call'}: LLM returned invalid response "
+                f"(type={type(response).__name__}): {str(response)[:120]!r}. "
+                f"Expected object with .choices[0].message — check provider "
+                f"adapter or custom endpoint compatibility."
+            ) from exc
+        response = recovered
     _record_relay_auxiliary_response_model(response)
     _complete_relay_auxiliary_call()
     return response
@@ -7527,10 +7529,7 @@ def _record_relay_auxiliary_response_model(response: Any) -> None:
     context = _RELAY_AUX_CALL_CONTEXT.get()
     if context is None:
         return
-    if isinstance(response, dict):
-        model = response.get("model")
-    else:
-        model = getattr(response, "model", None)
+    model = _field(response, "model")
     if isinstance(model, str) and model.strip():
         context["response_model"] = model
 
@@ -7540,18 +7539,12 @@ def _fail_relay_auxiliary_call() -> None:
     try:
         _complete_relay_auxiliary_call(outcome="failed")
     except Exception:
-        logger.warning(
-            "Relay auxiliary failure finalization failed",
-            exc_info=True,
-        )
+        logger.warning("Relay auxiliary failure finalization failed", exc_info=True)
 
 
 def _recover_aux_response_message(response: Any) -> Optional[Any]:
-    """Synthesize chat-completions shape from Responses-style text fields.
-
-    Some compatible endpoints return text outside ``choices`` (``output_text``,
-    ``output`` items); preserve it before declaring the response malformed.
-    """
+    """Synthesize chat-completions shape from Responses-style text (``output_text``,
+    ``output`` items) that some compatible endpoints return outside ``choices``."""
     text = _extract_aux_response_text(response)
     if not text:
         return None
@@ -7574,6 +7567,7 @@ def _recover_aux_response_message(response: Any) -> Optional[Any]:
 
 
 def _extract_aux_response_text(response: Any) -> str:
+    """Text from Responses-style ``output_text`` or ``output[].content[].text``."""
     output_text = _field(response, "output_text")
     if isinstance(output_text, str) and output_text.strip():
         return output_text.strip()
@@ -7588,8 +7582,7 @@ def _extract_aux_response_text(response: Any) -> str:
         if item_type and item_type != "message":
             continue
         for part in (_field(item, "content") or []):
-            part_type = _field(part, "type")
-            if part_type in {"output_text", "text", None}:
+            if _field(part, "type") in {"output_text", "text", None}:
                 text = _field(part, "text")
                 if isinstance(text, str) and text.strip():
                     parts.append(text.strip())
@@ -7597,21 +7590,17 @@ def _extract_aux_response_text(response: Any) -> str:
 
 
 # ── Streamed aggregation for progress-hooked auxiliary calls ─────────────
-# With a progress hook installed (today: context compression), the primary
-# attempt streams and re-aggregates: ``timeout`` becomes an inter-chunk idle
-# timeout (httpx read timeout is per read) and each chunk ticks outer watchdogs.
-# _aux_stream_total_ceiling() still bounds a 1-token-per-idle-window stream.
+# With a progress hook (context compression) the primary attempt streams and
+# re-aggregates: ``timeout`` becomes an inter-chunk idle timeout (httpx read timeout
+# is per read), each chunk ticks outer watchdogs; the total ceiling bounds trickles.
 
 _AUX_STREAM_CEILING_FLOOR_SECONDS = 600.0
 _AUX_STREAM_CEILING_MULTIPLIER = 4.0
 
 
 def _aux_stream_total_ceiling(effective_timeout: Optional[float]) -> float:
-    """Absolute wall-clock bound for a progress-hooked streamed aux call.
-
-    Generous by design: the idle timeout is the real guard; this only stops a
-    stream trickling one token per idle window forever.
-    """
+    """Absolute wall-clock bound for a streamed aux call; generous by design (the idle
+    timeout is the real guard — this only stops a one-token-per-idle-window trickle)."""
     try:
         timeout = float(effective_timeout) if effective_timeout is not None else 0.0
     except (TypeError, ValueError):
@@ -7623,11 +7612,9 @@ def _aux_stream_total_ceiling(effective_timeout: Optional[float]) -> float:
 def _client_streams_internally(client: Any) -> bool:
     """Adapters that stream inside .create() tick the hook themselves (Codex,
     Anthropic) or cannot stream (Bedrock); none accept ``stream=True`` from us."""
-    return isinstance(client, (
-        CodexAuxiliaryClient,
-        AnthropicAuxiliaryClient,
-        BedrockAuxiliaryClient,
-    ))
+    return isinstance(
+        client, (CodexAuxiliaryClient, AnthropicAuxiliaryClient, BedrockAuxiliaryClient),
+    )
 
 
 _MANAGED_LOCAL_STATE_TTL_S = 15.0
@@ -7635,17 +7622,13 @@ _managed_local_cache: "tuple[float, str]" = (0.0, "")
 
 
 def _managed_local_netloc() -> str:
-    """host:port of the managed local llama-server, or "" when none.
-
-    Read from the supervisor's state file with a short TTL; same source provider
-    resolution uses, so the match is exact (no false positives on localhost).
-    """
+    """host:port of the managed local llama-server ("" when none), read with a short
+    TTL from the supervisor state file provider resolution also uses (exact match)."""
     global _managed_local_cache
     now = time.monotonic()
     ts, cached = _managed_local_cache
     if now - ts < _MANAGED_LOCAL_STATE_TTL_S:
         return cached
-    netloc = ""
     try:
         from hermes_cli.local_runtime.supervisor import state_path
 
@@ -7672,37 +7655,29 @@ def _is_managed_local_endpoint(base_url: Optional[str]) -> bool:
 
 
 def _provider_requires_stream(provider: str, base_url: Optional[str]) -> bool:
-    """Detect providers that only accept streaming (non-stream = HTTP 400).
-
-    Known hosts (Tencent Copilot) plus any URL substring listed in
-    ``auxiliary.stream_only_base_urls``. The managed local llama-server is
-    streamed for cancellation: it only notices a dead client on socket write, so
-    a non-streamed abandoned request decodes to the end of the context window.
-    """
+    """Providers that only accept streaming (non-stream = 400): Tencent Copilot, any
+    ``auxiliary.stream_only_base_urls`` substring, and the managed local llama-server
+    (streamed for cancellation — it only notices a dead client on socket write)."""
     _url = str(base_url or "").lower()
     if not _url:
         return False
-    if base_url_host_matches(_url, "copilot.tencent.com"):
-        return True
-    if _is_managed_local_endpoint(_url):
+    if base_url_host_matches(_url, "copilot.tencent.com") or _is_managed_local_endpoint(_url):
         return True
     try:
         from hermes_cli.config import load_config
-        aux_cfg = (load_config() or {}).get("auxiliary", {})
-        markers = aux_cfg.get("stream_only_base_urls") or []
+        markers = (load_config() or {}).get("auxiliary", {}).get("stream_only_base_urls") or []
         if isinstance(markers, (list, tuple)):
-            for marker in markers:
-                if isinstance(marker, str) and marker.strip() and marker.strip().lower() in _url:
-                    return True
+            return any(
+                isinstance(marker, str) and marker.strip() and marker.strip().lower() in _url
+                for marker in markers
+            )
     except Exception:
         # Config read is best-effort; never break an aux call over it.
         pass
     return False
 
 
-_AFFORDABLE_TOKENS_RE = re.compile(
-    r"can only afford\s+([0-9][0-9,]*)", re.IGNORECASE
-)
+_AFFORDABLE_TOKENS_RE = re.compile(r"can only afford\s+([0-9][0-9,]*)", re.IGNORECASE)
 
 # Below this the affordable budget can't fit a useful aux output — treat as exhaustion.
 _AFFORDABLE_RETRY_FLOOR_TOKENS = 512
@@ -7711,12 +7686,9 @@ _AFFORDABLE_RETRY_MARGIN_TOKENS = 64
 
 
 def _affordable_max_tokens_from_error(exc: Exception) -> Optional[int]:
-    """Extract the affordable output budget from a credit-limited 402.
-
-    OpenRouter's rejection states it ("...but can only afford 7117"): the account
-    HAS credit, the cap was just too large. Returns affordable minus a margin, or
-    ``None`` when no count is present or the budget is too small to be useful.
-    """
+    """Affordable output budget (minus margin) from an OpenRouter credit-limited 402
+    ("...but can only afford 7117": credit exists, the cap was too large); ``None``
+    when no count is present or the budget is too small to be useful."""
     if not _is_payment_error(exc):
         return None
     match = _AFFORDABLE_TOKENS_RE.search(str(exc))
@@ -7727,9 +7699,7 @@ def _affordable_max_tokens_from_error(exc: Exception) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     capped = affordable - _AFFORDABLE_RETRY_MARGIN_TOKENS
-    if capped < _AFFORDABLE_RETRY_FLOOR_TOKENS:
-        return None
-    return capped
+    return capped if capped >= _AFFORDABLE_RETRY_FLOOR_TOKENS else None
 
 
 def _create_with_progress(
@@ -7739,12 +7709,8 @@ def _create_with_progress(
     *,
     force_stream: bool = False,
 ) -> Any:
-    """Credit-aware wrapper over :func:`_create_with_progress_once`.
-
-    A 402 naming an affordable budget is not terminal exhaustion: retry ONCE with
-    the provider-stated cap (only ever lowering an existing cap). Anything else
-    re-raises for the normal recovery chains.
-    """
+    """Credit-aware :func:`_create_with_progress_once`: a 402 naming an affordable
+    budget retries ONCE with that cap (only ever lowering); anything else re-raises."""
     try:
         return _create_with_progress_once(
             client, kwargs, task, force_stream=force_stream,
@@ -7775,6 +7741,18 @@ def _create_with_progress(
         )
 
 
+def _stream_request_plan(kwargs: Dict[str, Any]) -> "Tuple[Dict[str, Any], str, float]":
+    """(stream kwargs, model name, total ceiling) for a streamed re-aggregation."""
+    stream_kwargs = dict(kwargs)
+    stream_kwargs["stream"] = True
+    stream_kwargs["stream_options"] = {"include_usage": True}
+    return (
+        stream_kwargs,
+        str(kwargs.get("model") or ""),
+        _aux_stream_total_ceiling(kwargs.get("timeout")),
+    )
+
+
 def _create_with_progress_once(
     client: Any,
     kwargs: Dict[str, Any],
@@ -7782,14 +7760,10 @@ def _create_with_progress_once(
     *,
     force_stream: bool = False,
 ) -> Any:
-    """chat.completions.create() that streams when a progress hook is active
-    or the provider only accepts streamed requests.
-
-    Identical to plain ``create(**kwargs)`` when neither trigger applies or the
-    adapter streams internally. Otherwise sends ``stream=True`` and aggregates,
-    ticking the hook for substantive chunks. Streaming rejections fall back to a
-    plain call — except under ``force_stream``, where the original error surfaces.
-    """
+    """create() that streams (and re-aggregates, ticking the hook per substantive
+    chunk) when a progress hook is active or the provider is stream-only; plain
+    ``create(**kwargs)`` otherwise or when the adapter streams internally. Streaming
+    rejections fall back to a plain call — except under ``force_stream``."""
     _notify_aux_dispatch()
     _notify_aux_progress()  # Preserve the watchdog's historical dispatch tick.
     if (not _aux_progress_active() and not force_stream) or _client_streams_internally(client):
@@ -7798,10 +7772,7 @@ def _create_with_progress_once(
             _notify_aux_provider_response()
         return response
 
-    total_ceiling = _aux_stream_total_ceiling(kwargs.get("timeout"))
-    stream_kwargs = dict(kwargs)
-    stream_kwargs["stream"] = True
-    stream_kwargs["stream_options"] = {"include_usage": True}
+    stream_kwargs, model, total_ceiling = _stream_request_plan(kwargs)
     try:
         chunks = client.chat.completions.create(**stream_kwargs)
     except Exception as exc:
@@ -7831,9 +7802,21 @@ def _create_with_progress_once(
     if hasattr(chunks, "choices"):
         _notify_aux_provider_response()
         return chunks
-    return _aggregate_chat_stream(
-        chunks, model=str(kwargs.get("model") or ""), total_ceiling=total_ceiling,
+    return _aggregate_chat_stream(chunks, model=model, total_ceiling=total_ceiling)
+
+
+def _close_chunk_stream(chunks: Any, *, allow_aclose: bool = False) -> Any:
+    """Best-effort ``close()`` (or ``aclose()``); returns a pending awaitable or None."""
+    close_fn = getattr(chunks, "close", None) or (
+        getattr(chunks, "aclose", None) if allow_aclose else None
     )
+    if not callable(close_fn):
+        return None
+    try:
+        result = close_fn()
+    except Exception:
+        return None
+    return result if inspect.isawaitable(result) else None
 
 
 def _aggregate_chat_stream(
@@ -7842,12 +7825,8 @@ def _aggregate_chat_stream(
     model: str = "",
     total_ceiling: Optional[float] = None,
 ) -> Any:
-    """Consume a chat.completions chunk stream into a complete response.
-
-    Ticks the aux progress hook only for substantive fragments. Raises
-    TimeoutError (phrased "timed out" so ``_is_timeout_error`` matches) when
-    *total_ceiling* elapses. Accumulation shared via :class:`_ChatStreamAccumulator`.
-    """
+    """Consume a chunk stream into a complete response; TimeoutError (phrased "timed
+    out" so ``_is_timeout_error`` matches) when *total_ceiling* elapses."""
     acc = _ChatStreamAccumulator(
         model=model,
         total_ceiling=total_ceiling,
@@ -7857,13 +7836,12 @@ def _aggregate_chat_stream(
         for chunk in chunks:
             acc.feed(chunk)
     finally:
-        close_fn = getattr(chunks, "close", None)
-        if callable(close_fn):
-            try:
-                close_fn()
-            except Exception:
-                pass
+        _close_chunk_stream(chunks)
     return acc.finish()
+
+
+# Reasoning-detail fields whose non-empty text counts as forward progress.
+_REASONING_DETAIL_TEXT_FIELDS = ("summary", "thinking", "content", "text")
 
 
 class _ChatStreamAccumulator:
@@ -7889,29 +7867,66 @@ class _ChatStreamAccumulator:
         self.resp_id = ""
         self.resp_model = model or ""
 
-    def feed(self, chunk: Any) -> None:
-        # Every frame records transport timing (TTFP); only a substantive
-        # payload ticks the forward-progress hook that keeps compression alive.
-        _notify_aux_timing_response()
-        made_progress = False
-        if (
-            self._total_ceiling is not None
-            and (time.monotonic() - self._started) >= self._total_ceiling
-        ):
+    def _check_deadlines(self) -> None:
+        """Raise TimeoutError past the total ceiling or the host deadline."""
+        now = time.monotonic()
+        if self._total_ceiling is not None and (now - self._started) >= self._total_ceiling:
             raise TimeoutError(
                 f"Auxiliary streamed call timed out after {self._total_ceiling:.0f}s "
                 "total ceiling (stream still open but over budget)"
             )
-        if (
-            self._host_deadline is not None
-            and time.monotonic() >= self._host_deadline
-        ):
+        if self._host_deadline is not None and now >= self._host_deadline:
             raise TimeoutError(
                 "Auxiliary streamed call timed out at the host compression "
                 f"deadline after {time.monotonic() - self._started:.0f}s "
                 "(the caller already stopped waiting; streaming on would only "
                 "pin its session lease)"
             )
+
+    def _feed_reasoning_details(self, delta: Any) -> bool:
+        """Collect ``reasoning_details`` (OpenRouter-style thinking); True only when a
+        detail carries text, so structural/signed envelopes can't keep a stall alive."""
+        reasoning_details = getattr(delta, "reasoning_details", None)
+        if reasoning_details is None:
+            model_extra = getattr(delta, "model_extra", None)
+            if isinstance(model_extra, dict):
+                reasoning_details = model_extra.get("reasoning_details")
+        if not isinstance(reasoning_details, list):
+            return False
+        made_progress = False
+        for detail in reasoning_details:
+            self.reasoning_details.append(detail)
+            if isinstance(detail, dict) and any(
+                isinstance(detail.get(field), str) and detail[field]
+                for field in _REASONING_DETAIL_TEXT_FIELDS
+            ):
+                made_progress = True
+        return made_progress
+
+    def _feed_tool_calls(self, delta: Any) -> bool:
+        """Merge tool-call fragments by index; True when any fragment carried data."""
+        made_progress = False
+        for tc in (getattr(delta, "tool_calls", None) or []):
+            idx = getattr(tc, "index", 0) or 0
+            acc = self.tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": []})
+            if getattr(tc, "id", None):
+                acc["id"] = tc.id
+                made_progress = True
+            fn = getattr(tc, "function", None)
+            if fn is not None:
+                if getattr(fn, "name", None):
+                    acc["name"] = fn.name
+                    made_progress = True
+                if getattr(fn, "arguments", None):
+                    acc["arguments"].append(fn.arguments)
+                    made_progress = True
+        return made_progress
+
+    def feed(self, chunk: Any) -> None:
+        # Every frame records transport timing (TTFP); only a substantive
+        # payload ticks the forward-progress hook that keeps compression alive.
+        _notify_aux_timing_response()
+        self._check_deadlines()
         self.resp_id = getattr(chunk, "id", None) or self.resp_id
         self.resp_model = getattr(chunk, "model", None) or self.resp_model
         chunk_usage = getattr(chunk, "usage", None)
@@ -7925,6 +7940,7 @@ class _ChatStreamAccumulator:
         delta = getattr(choice, "delta", None)
         if delta is None:
             return
+        made_progress = False
         piece = getattr(delta, "content", None)
         if piece:
             self.content_parts.append(piece)
@@ -7936,41 +7952,9 @@ class _ChatStreamAccumulator:
         if reasoning_piece and isinstance(reasoning_piece, str):
             self.reasoning_parts.append(reasoning_piece)
             made_progress = True
-        # OpenRouter-style models may stream thinking via ``reasoning_details``;
-        # only details with actual text count as progress, so structural/signed
-        # envelopes can't keep a stalled compression alive.
-        reasoning_details = getattr(delta, "reasoning_details", None)
-        if reasoning_details is None:
-            model_extra = getattr(delta, "model_extra", None)
-            if isinstance(model_extra, dict):
-                reasoning_details = model_extra.get("reasoning_details")
-        if isinstance(reasoning_details, list):
-            for detail in reasoning_details:
-                self.reasoning_details.append(detail)
-                if isinstance(detail, dict) and any(
-                    isinstance(detail.get(field), str) and detail[field]
-                    for field in ("summary", "thinking", "content", "text")
-                ):
-                    made_progress = True
-        for tc in (getattr(delta, "tool_calls", None) or []):
-            idx = getattr(tc, "index", 0) or 0
-            acc = self.tool_calls_acc.setdefault(
-                idx, {"id": "", "name": "", "arguments": []}
-            )
-            tool_fragment = False
-            if getattr(tc, "id", None):
-                acc["id"] = tc.id
-                tool_fragment = True
-            fn = getattr(tc, "function", None)
-            if fn is not None:
-                if getattr(fn, "name", None):
-                    acc["name"] = fn.name
-                    tool_fragment = True
-                if getattr(fn, "arguments", None):
-                    acc["arguments"].append(fn.arguments)
-                    tool_fragment = True
-            made_progress = made_progress or tool_fragment
-
+        # Evaluate both unconditionally: they accumulate state, not just progress.
+        made_progress |= self._feed_reasoning_details(delta)
+        made_progress |= self._feed_tool_calls(delta)
         if made_progress:
             _notify_aux_progress()
 
@@ -8025,14 +8009,10 @@ async def _aggregate_chat_stream_async(
         async for chunk in chunks:
             acc.feed(chunk)
     finally:
-        close_fn = getattr(chunks, "close", None) or getattr(chunks, "aclose", None)
-        if callable(close_fn):
-            try:
-                result = close_fn()
-                if inspect.isawaitable(result):
-                    await result
-            except Exception:
-                pass
+        pending = _close_chunk_stream(chunks, allow_aclose=True)
+        if pending is not None:
+            with contextlib.suppress(Exception):
+                await pending
     return acc.finish()
 
 
@@ -8043,17 +8023,12 @@ async def _acreate_with_stream(
 ) -> Any:
     """Async chat.completions.create() for stream-only providers: sends
     ``stream=True`` and aggregates the async chunk stream."""
-    total_ceiling = _aux_stream_total_ceiling(kwargs.get("timeout"))
-    stream_kwargs = dict(kwargs)
-    stream_kwargs["stream"] = True
-    stream_kwargs["stream_options"] = {"include_usage": True}
+    stream_kwargs, model, total_ceiling = _stream_request_plan(kwargs)
     chunks = await client.chat.completions.create(**stream_kwargs)
     # Defensive: shims may hand back a complete response despite stream=True.
     if hasattr(chunks, "choices"):
         return chunks
-    return await _aggregate_chat_stream_async(
-        chunks, model=str(kwargs.get("model") or ""), total_ceiling=total_ceiling,
-    )
+    return await _aggregate_chat_stream_async(chunks, model=model, total_ceiling=total_ceiling)
 
 
 # ── Shared request head + recovery ladder for call_llm / async_call_llm ────────
