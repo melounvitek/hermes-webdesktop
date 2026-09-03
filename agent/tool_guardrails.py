@@ -17,12 +17,11 @@ from agent.tool_result_classification import file_mutation_result_landed
 
 
 IDEMPOTENT_TOOL_NAMES = frozenset({
-    "read_file", "search_files", "web_search", "web_extract", "session_search", "skill_view",
-    "skills_list", "browser_snapshot", "browser_console", "browser_get_images",
-    "mcp_filesystem_read_file", "mcp_filesystem_read_text_file",
-    "mcp_filesystem_read_multiple_files", "mcp_filesystem_list_directory",
-    "mcp_filesystem_list_directory_with_sizes", "mcp_filesystem_directory_tree",
-    "mcp_filesystem_get_file_info", "mcp_filesystem_search_files",
+    "read_file", "search_files", "web_search", "web_extract", "session_search", "skill_view", "skills_list",
+    "browser_snapshot", "browser_console", "browser_get_images", "mcp_filesystem_read_file",
+    "mcp_filesystem_read_text_file", "mcp_filesystem_read_multiple_files", "mcp_filesystem_list_directory",
+    "mcp_filesystem_list_directory_with_sizes", "mcp_filesystem_directory_tree", "mcp_filesystem_get_file_info",
+    "mcp_filesystem_search_files",
 })
 
 MUTATING_TOOL_NAMES = frozenset({
@@ -41,19 +40,19 @@ STALL_GUARD_IDENTICAL_CALL_THRESHOLD = 3
 IDENTICAL_RESULT_STUB_MIN_CHARS = 512
 _RESULT_STUB_ARGS_PREVIEW_CHARS = 120
 
-# Tools whose "failure" is normal work output (red test run, empty grep, page
-# timeout). same_tool_failure (DIFFERENT commands) never halts these; only an
-# exact-args replay with no intervening change, or an identical-result streak, can.
+# Tools whose "failure" is normal work output (red test run, empty grep, page timeout).
+# same_tool_failure (DIFFERENT commands) never halts these; only an exact-args replay with
+# no intervening change, or an identical-result streak, can.
 FAILURE_TOLERANT_TOOL_NAMES = frozenset({
     "terminal", "execute_code", "process_manage", "process", "browser_navigate", "web_extract",
 })
 
-# A successful call to one of these marks progress for every failing signature
-# still counted this turn: the next retry is a new experiment (edit -> re-run), not a replay.
+# A successful call to one of these marks progress for every failing signature still counted
+# this turn: the next retry is a new experiment (edit -> re-run), not a replay.
 PROGRESS_RESET_TOOL_NAMES = frozenset({
-    "write_file", "patch", "terminal", "execute_code", "browser_click", "browser_type",
-    "browser_press", "browser_navigate", "process_manage", "process", "delegate_task",
-    "send_message", "cronjob", "cronjob_manage", "todo", "todo_list", "memory", "skill_manage",
+    "write_file", "patch", "terminal", "execute_code", "browser_click", "browser_type", "browser_press",
+    "browser_navigate", "process_manage", "process", "delegate_task", "send_message", "cronjob",
+    "cronjob_manage", "todo", "todo_list", "memory", "skill_manage",
 })
 
 _BOOL_FIELDS = ("warnings_enabled", "hard_stop_enabled", "non_interactive_hard_stop_enabled")
@@ -71,10 +70,9 @@ _THRESHOLD_SOURCES: dict[str, tuple[str, str]] = {
 _DEFAULT_MAX_WEB_SEARCHES_PER_TURN = 50
 _DEFAULT_MAX_SUBAGENTS_PER_TURN = 50
 
-_INTERACTIVE_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp"})
-# Bounded supervised task loops (subagent stopped by its parent; api_server has a live
-# client) doing real edit -> re-run work keep the interactive warn-only default.
-_SUPERVISED_TASK_PLATFORMS = frozenset({"subagent", "api_server"})
+# Interactive surfaces plus bounded supervised task loops (subagent stopped by its parent;
+# api_server has a live client) doing real edit -> re-run work keep the warn-only default.
+_ATTENDED_PLATFORMS = frozenset({"cli", "tui", "desktop", "acp", "subagent", "api_server"})
 
 
 def is_stall_guard_repeatable(tool_name: str) -> bool:
@@ -86,17 +84,13 @@ def _is_non_interactive_platform(platform: str | None) -> bool:
     """True for gateway/cron sessions where tool loops are unattended."""
     if not isinstance(platform, str) or not platform.strip():
         return False
-    key = platform.strip().lower()
-    return key not in _INTERACTIVE_PLATFORMS and key not in _SUPERVISED_TASK_PLATFORMS
+    return platform.strip().lower() not in _ATTENDED_PLATFORMS
 
 
 @dataclass(frozen=True)
 class LoopCapConfig:
-    """Per-turn hard ceilings on web_search calls / subagent spawns.
-
-    Unlike the loop detector these count total calls within the turn and fire
-    regardless of ``hard_stop_enabled``. ``0`` disables a cap.
-    """
+    """Per-turn hard ceilings on web_search calls / subagent spawns; count total calls (not
+    repeats), fire regardless of ``hard_stop_enabled``; ``0`` disables a cap."""
 
     max_web_searches: int = _DEFAULT_MAX_WEB_SEARCHES_PER_TURN
     max_subagents: int = _DEFAULT_MAX_SUBAGENTS_PER_TURN
@@ -111,12 +105,8 @@ class LoopCapConfig:
 
 @dataclass(frozen=True)
 class ToolCallGuardrailConfig:
-    """Thresholds for per-turn tool-call loop detection.
-
-    Warnings never prevent execution. Hard stops are opt-in for interactive
-    platforms but default on for unattended gateway/cron platforms where nobody
-    can interrupt a model that ignores loop warnings.
-    """
+    """Thresholds for per-turn tool-call loop detection. Warnings never prevent execution; hard
+    stops are opt-in on interactive platforms, default on for unattended gateway/cron platforms."""
 
     warnings_enabled: bool = True
     hard_stop_enabled: bool = False
@@ -135,10 +125,7 @@ class ToolCallGuardrailConfig:
     def from_mapping(
         cls, data: Mapping[str, Any] | None, *, platform: str | None = None,
     ) -> "ToolCallGuardrailConfig":
-        """Build config from the `tool_loop_guardrails` config.yaml section.
-
-        Nested ``warn_after`` / ``hard_stop_after`` keys win over the flat legacy keys.
-        """
+        """Build config from `tool_loop_guardrails`; nested ``warn_after`` / ``hard_stop_after`` win over flat legacy keys."""
         if not isinstance(data, Mapping):
             data = {}
         d = cls()
@@ -427,13 +414,11 @@ class ToolCallGuardrailController:
     ) -> IdenticalCallObservation:
         """Track consecutive identical calls; return notice + dedupe stub info.
 
-        ``notice`` fires from the ``STALL_GUARD_IDENTICAL_CALL_THRESHOLD``-th consecutive
-        identical (tool, args, result) call; observational, pollers exempt. ``stub``
-        replaces the CURRENT result from the 2nd byte-identical repeat — the tool still
-        executed, only the context representation is deduplicated, so polling semantics
-        survive (a changed result flows through whole and resets the streak). Pollers are
-        NOT exempt from stubbing: an unchanged poll is exactly when the stub saves most.
-        Short, failed and non-string results are never stubbed.
+        ``notice`` fires from the threshold-th consecutive identical (tool, args, result) call;
+        observational, pollers exempt. ``stub`` replaces the CURRENT result from the 2nd
+        byte-identical repeat — the tool still executed, only the context representation is
+        deduplicated, so polling semantics survive (a changed result resets the streak). Pollers
+        are NOT exempt from stubbing: an unchanged poll is exactly when it saves most.
         """
         is_plain_str = isinstance(result, str)
         signature = ToolCallSignature.from_call(tool_name, _coerce_args(args))
@@ -503,9 +488,8 @@ class ToolCallGuardrailController:
     ) -> ToolGuardrailDecision | None:
         """Block once a per-turn cap is reached, else advance the counter and return None.
 
-        A cap of 0 disables that limit. Blocking happens BEFORE the call when the count is
-        already at the cap, so the (cap+1)-th call is refused. delegate_task control actions
-        (list/steer/stop) spawn nothing and must keep working after the cap is hit.
+        Blocking happens BEFORE the call when the count is already at the cap, so the (cap+1)-th
+        call is refused. delegate_task control actions spawn nothing and keep working after the cap.
         """
         spec = _LOOP_CAPS.get(tool_name)
         if spec is None:
@@ -582,7 +566,7 @@ def _as_bool(value: Any, default: bool) -> bool:
 
 
 def _int_at_least(value: Any, default: int, minimum: int) -> int:
-    """Int parser: junk/None/below-minimum fall back to default (caps use minimum 0 so 0 = disabled)."""
+    """junk/None/below-minimum fall back to default (caps use minimum 0 so 0 = disabled)."""
     try:
         parsed = int(value)
     except (TypeError, ValueError):
