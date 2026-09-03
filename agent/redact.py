@@ -372,8 +372,7 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
     if stripped == text:
         return text
     orig_idx = [i for i, c in enumerate(text) if not _CONTROL_CHARS_RE.match(c)]
-    out = list(text)
-    matches = []
+    out, matches = list(text), []
     for m in _PREFIX_RE.finditer(stripped):
         start_orig = orig_idx[m.start(1)]
         end_orig = orig_idx[m.end(1) - 1] + 1
@@ -402,15 +401,8 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
 _DISPLAY_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f\x80-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064]")
 
 
-def mask_secret(
-    value: str,
-    *,
-    head: int = 4,
-    tail: int = 4,
-    floor: int = 12,
-    placeholder: str = "***",
-    empty: str = "",
-) -> str:
+def mask_secret(value: str, *, head: int = 4, tail: int = 4, floor: int = 12,
+                placeholder: str = "***", empty: str = "") -> str:
     """Mask a secret for display (``hermes config`` / ``status`` / ``dump``).
 
     Values shorter than ``floor`` (after control-byte stripping) return
@@ -421,14 +413,10 @@ def mask_secret(
     >>> mask_secret("short")
     '***'
     """
+    value = _DISPLAY_CONTROL_RE.sub("", value) if value else value
     if not value:
         return empty
-    value = _DISPLAY_CONTROL_RE.sub("", value)
-    if not value:
-        return empty
-    if len(value) < floor:
-        return placeholder
-    return f"{value[:head]}...{value[-tail:]}"
+    return placeholder if len(value) < floor else f"{value[:head]}...{value[-tail:]}"
 
 
 def _mask_token(token: str) -> str:
@@ -503,16 +491,12 @@ def redact_cdp_url(value: object) -> str:
     redactors. Single source of truth for CDP URLs passed to a log/error.
     """
     text = redact_sensitive_text("" if value is None else str(value))
-    if not text:
-        return text
-    return _redact_url_userinfo(_redact_url_query_params(text))
+    return _redact_url_userinfo(_redact_url_query_params(text)) if text else text
 
 
 def _redact_form_body(text: str) -> str:
     """Redact sensitive values when the ENTIRE text is a clean ``k=v&k=v`` body."""
-    if not text or "\n" in text or "&" not in text:
-        return text
-    if not _FORM_BODY_RE.match(text.strip()):
+    if not text or "\n" in text or "&" not in text or not _FORM_BODY_RE.match(text.strip()):
         return text
     return _redact_query_string(text.strip())
 
@@ -525,10 +509,18 @@ def _mask_token_nonreusable(token: str) -> str:
     corrupted the stored credential into a dead 13-char string. Only the vendor
     prefix label (``ghp_``, ``sk-``) is kept so the credential KIND stays visible.
     """
-    if not token:
-        return "«redacted-secret»"
-    label = next((sub for sub in _PREFIX_SUBSTRINGS if token.startswith(sub)), "")
+    label = next((sub for sub in _PREFIX_SUBSTRINGS if token.startswith(sub)), "") if token else ""
     return f"«redacted:{label}…»" if label else "«redacted-secret»"
+
+
+def _assignment_sub(render, *, check_keyword: bool):
+    """re.sub callback: keep the match unless the key/value pair (groups[0], groups[-1]) needs redaction."""
+    def _sub(m):
+        groups = m.groups()
+        if not _should_redact_assignment(groups[0], groups[-1], check_keyword=check_keyword):
+            return m.group(0)
+        return render(groups)
+    return _sub
 
 
 def _redact_assignments(text: str) -> str:
@@ -538,11 +530,7 @@ def _redact_assignments(text: str) -> str:
     web-URL query params are intentionally passed through (see redact_sensitive_text).
     """
     if "=" in text:
-        def _redact_env(m):
-            name, quote, value = m.group(1), m.group(2), m.group(3)
-            if not _should_redact_assignment(name, value, check_keyword=True):
-                return m.group(0)
-            return f"{name}={quote}{_mask_token(value)}{quote}"
+        _redact_env = _assignment_sub(lambda g: f"{g[0]}={g[1]}{_mask_token(g[2])}{g[1]}", check_keyword=True)
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
         # Lowercase env names; unlike the all-caps regex this one would match URL params.
         if "://" not in text:
@@ -555,22 +543,14 @@ def _redact_assignments(text: str) -> str:
             text = _CFG_ANCHORED_RE.sub(_redact_env, text)
 
     if ":" in text and '"' in text:
-        def _redact_json(m):
-            key, value = m.group(1), m.group(2)
-            if not _should_redact_assignment(key, value, check_keyword=False):
-                return m.group(0)
-            return f'{key}: "{_mask_token(value)}"'
-        text = _JSON_FIELD_RE.sub(_redact_json, text)
+        text = _JSON_FIELD_RE.sub(
+            _assignment_sub(lambda g: f'{g[0]}: "{_mask_token(g[1])}"', check_keyword=False), text)
 
     # Unquoted YAML / colon config, after JSON so quoted values are handled
     # there (_YAML_ASSIGN_RE's lookahead skips quotes).
     if ":" in text and "://" not in text:
-        def _redact_yaml(m):
-            key, sep, value = m.group(1), m.group(2), m.group(3)
-            if not _should_redact_assignment(key, value, check_keyword=True):
-                return m.group(0)
-            return f"{key}{sep}{_mask_token(value)}"
-        text = _YAML_ASSIGN_RE.sub(_redact_yaml, text)
+        text = _YAML_ASSIGN_RE.sub(
+            _assignment_sub(lambda g: f"{g[0]}{g[1]}{_mask_token(g[2])}", check_keyword=True), text)
     return text
 
 
@@ -594,23 +574,16 @@ def _redact_url_credentials(text: str, code_file: bool) -> str:
 
 def _redact_phone(m):
     phone = m.group(1)
-    if len(phone) <= 8:
-        return phone[:2] + "****" + phone[-2:]
-    return phone[:4] + "****" + phone[-4:]
+    keep = 2 if len(phone) <= 8 else 4
+    return phone[:keep] + "****" + phone[-keep:]
 
 
 def _redact_telegram(m):
     return f"{m.group(1) or ''}{m.group(2)}:***"
 
 
-def redact_sensitive_text(
-    text: str,
-    *,
-    force: bool = False,
-    code_file: bool = False,
-    file_read: bool = False,
-    redact_url_credentials: bool = False,
-) -> str:
+def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = False,
+                          file_read: bool = False, redact_url_credentials: bool = False) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe on any string; non-matching text passes through unchanged. Enabled by
@@ -641,9 +614,7 @@ def redact_sensitive_text(
         text = str(text)
     if not text or not (force or _REDACT_ENABLED):
         return text
-
-    if file_read:
-        code_file = True
+    code_file = code_file or file_read
 
     # Known prefixes (sk-, ghp_, etc.). Control/zero-width chars can split a
     # token body so _PREFIX_RE alone misses it — mask those runs first.
@@ -710,6 +681,11 @@ _FILE_READ_COMMANDS = frozenset({
 })
 
 
+def _command_segments(command: str) -> list[str]:
+    """Pipeline/sequence segments of a shell command, stripped, empties dropped."""
+    return [seg.strip() for seg in re.split(r"[|;&]+", command) if seg.strip()]
+
+
 def _command_reads_env_file(command: str | None) -> bool:
     """True if ``command`` reads a ``.env``-style file (by basename) to stdout.
 
@@ -720,10 +696,10 @@ def _command_reads_env_file(command: str | None) -> bool:
     """
     if not command:
         return False
-    for seg in re.split(r"[|;&]+", command):
+    for seg in _command_segments(command):
         # Plain split() rather than shlex: shlex treats backslashes as escapes
         # and mangles Windows paths (``C:\Users\...\.env``).
-        tokens = seg.strip().split()
+        tokens = seg.split()
         if not tokens or tokens[0] not in _FILE_READ_COMMANDS:
             continue
         for arg in tokens[1:]:
@@ -745,10 +721,7 @@ def is_env_dump_command(command: str | None) -> bool:
     """
     if not command or not isinstance(command, str):
         return False
-    for seg in re.split(r"[|;&]+", command):
-        seg = seg.strip()
-        if not seg:
-            continue
+    for seg in _command_segments(command):
         try:
             tokens = shlex.split(seg)
         except ValueError:
@@ -767,8 +740,7 @@ def redact_terminal_output(output: str, command: str | None = None, *, force: bo
     """
     if not output:
         return output
-    cmd = command or ""
-    code_file = not (is_env_dump_command(cmd) or _command_reads_env_file(cmd))
+    code_file = not (is_env_dump_command(command) or _command_reads_env_file(command))
     return redact_sensitive_text(output, force=force, code_file=code_file)
 
 
@@ -798,53 +770,32 @@ def _skip_char_class(pattern: str, i: int) -> int:
     return i
 
 
-def _has_top_level_alternation(pattern: str) -> bool:
-    """True if ``pattern`` contains a ``|`` outside any group or class.
-
-    Defeats the literal-prefix guarantee: for ``ab|.*`` the prefix ``ab`` binds
-    only the first branch. Grouped alternation (``ab(?:x|y)``) stays allowed.
-    """
-    depth = 0
-    i = 0
-    while i < len(pattern):
-        ch = pattern[i]
-        if ch == "\\":
-            i += 2
-            continue
-        if ch == "[":
-            i = _skip_char_class(pattern, i)
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth = max(0, depth - 1)
-        elif ch == "|" and depth == 0:
-            return True
-        i += 1
+def _unbounded_quantifier_follows(pattern: str, j: int) -> bool:
+    """True if an open-ended quantifier (``*``, ``+``, ``{m,}``) starts at ``pattern[j]``."""
+    if j >= len(pattern):
+        return False
+    if pattern[j] in "*+":
+        return True
+    if pattern[j] == "{":
+        k = pattern.find("}", j)
+        body = pattern[j + 1:k] if k != -1 else ""
+        return body[:-1].isdigit() and body.endswith(",")  # {m,} is open-ended; {m} / {m,n} bounded
     return False
 
 
-def _has_nested_unbounded_repeat(pattern: str) -> bool:
-    """True if an unbounded quantifier applies to a group containing one.
+def _pattern_structure(pattern: str) -> tuple[bool, bool]:
+    """One scan → ``(has_top_level_alternation, has_nested_unbounded_repeat)``.
 
-    ``(a+)+`` / ``(?:x*)*`` / ``(a{2,})+`` — the canonical ReDoS shape. Registered
-    patterns run on every log line and tool output, so a pathological plugin
-    pattern would stall the host. Structural nesting only; overlapping
-    alternation branches (``(a|aa)+``) are the plugin author's responsibility.
+    Top-level ``|`` (outside any group/class) defeats the literal-prefix
+    guarantee: for ``ab|.*`` the prefix ``ab`` binds only the first branch;
+    grouped alternation (``ab(?:x|y)``) stays allowed. An unbounded quantifier
+    applied to a group containing one — ``(a+)+`` / ``(?:x*)*`` / ``(a{2,})+`` —
+    is the canonical ReDoS shape, and registered patterns run on every log line.
+    Structural nesting only; overlapping branches (``(a|aa)+``) are the plugin
+    author's responsibility.
     """
-
-    def _unbounded_quantifier_follows(j: int) -> bool:
-        if j >= len(pattern):
-            return False
-        if pattern[j] in "*+":
-            return True
-        if pattern[j] == "{":
-            k = pattern.find("}", j)
-            body = pattern[j + 1:k] if k != -1 else ""
-            return body[:-1].isdigit() and body.endswith(",")  # {m,} is open-ended
-        return False
-
-    # Per-depth flag: does the group at this depth contain an unbounded repeat?
-    contains_unbounded = [False]
+    top_level_alt = nested = False
+    contains_unbounded = [False]  # per open group: does it contain an unbounded repeat?
     i = 0
     while i < len(pattern):
         ch = pattern[i]
@@ -857,15 +808,25 @@ def _has_nested_unbounded_repeat(pattern: str) -> bool:
             contains_unbounded.append(False)
         elif ch == ")":
             inner = contains_unbounded.pop() if len(contains_unbounded) > 1 else False
-            if inner and _unbounded_quantifier_follows(i + 1):
-                return True
+            if inner and _unbounded_quantifier_follows(pattern, i + 1):
+                nested = True
             contains_unbounded[-1] = contains_unbounded[-1] or inner
-        elif _unbounded_quantifier_follows(i):
+        elif ch == "|" and len(contains_unbounded) == 1:
+            top_level_alt = True
+        elif _unbounded_quantifier_follows(pattern, i):
             contains_unbounded[-1] = True
             if ch == "{":
                 i = pattern.find("}", i)  # skip the {m,} body
         i += 1
-    return False
+    return top_level_alt, nested
+
+
+def _has_top_level_alternation(pattern: str) -> bool:
+    return _pattern_structure(pattern)[0]
+
+
+def _has_nested_unbounded_repeat(pattern: str) -> bool:
+    return _pattern_structure(pattern)[1]
 
 
 _PREFIX_SUBSTRINGS = tuple(_extract_literal_prefix(p) for p in _PREFIX_PATTERNS)
