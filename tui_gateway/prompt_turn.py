@@ -74,8 +74,7 @@ def _plan_goal_compression_recovery(
     goal_mgr.pause(reason="context compression exhausted twice consecutively")
     # A later explicit /goal resume gets a fresh bounded recovery cycle.
     session.pop(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS, None)
-    return (
-        None,
+    return None, (
         "Goal paused after context compression was exhausted twice. "
         "Run /compress, then /goal resume to continue.")
 
@@ -505,18 +504,14 @@ def _invoke_agent(
             st.tts_queue.put(delta)
         _emit("message.delta", sid, payload)
 
-    # Interim assistant text (commentary beside tool calls, pre-nudge final answer) is
-    # sealed by the desktop as its own segment instead of being lost when
-    # message.complete replaces the streaming buffer.
-    if _load_interim_assistant_messages():
-        def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
-            _emit("message.interim", sid, {"text": text, "already_streamed": already_streamed})
-        agent.interim_assistant_callback = _interim_assistant_cb
-    else:
-        agent.interim_assistant_callback = None
-    # Feature-detect optional run_conversation parameters.  A synthesized turn is typed at
-    # turn START so a crash persist writes a timeline event, not a raw user bubble; the
-    # post-turn stamp is the fallback for an older agent.
+    # Interim assistant text (commentary beside tool calls, pre-nudge final answer) is sealed
+    # by the desktop as its own segment instead of being lost to message.complete.
+    def _interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
+        _emit("message.interim", sid, {"text": text, "already_streamed": already_streamed})
+    agent.interim_assistant_callback = (
+        _interim_assistant_cb if _load_interim_assistant_messages() else None)
+    # A synthesized turn is typed at turn START so a crash persist writes a timeline event,
+    # not a raw user bubble; the post-turn stamp is the fallback for an older agent.
     st.run_kwargs = run_kwargs = {
         "conversation_history": list(st.history),
         "stream_callback": _stream,
@@ -539,9 +534,8 @@ def _invoke_agent(
     try:
         st.result = agent.run_conversation(run_message, **st.run_kwargs)
     finally:
-        # Stop AND join before anything emits: a tick surviving past message.complete
-        # would roll the client's usage back to a stale snapshot.  The unbounded join only
-        # waits out one in-flight _get_usage/_emit (same worst case as the emit itself).
+        # Stop AND join before anything emits: a tick surviving past message.complete would
+        # roll the client's usage back to a stale snapshot (unbounded join: same worst case).
         _usage_stop.set()
         _usage_thread.join()
 
@@ -625,8 +619,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
         payload["failure_reason"] = result.get("failure_reason")
     if rendered := render_message(raw, cols):
         payload["rendered"] = rendered
-    # {layer, code, retryable} descriptor (advisory), computed before the retain below so
-    # resume replay carries the same one.
+    # Advisory {layer, code, retryable} descriptor; computed before the retain so resume
+    # replay carries the same one.
     _error_surface = None
     if status == "error":
         try:
@@ -639,8 +633,8 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     error_value = result.get("error")
     with session["history_lock"]:
         if status == "error":
-            # Retain the failed turn: if this frame is lost to a disconnect, resume's
-            # inflight payload is the only carrier of the failure.
+            # Retain the failed turn: resume's inflight payload is the only carrier of the
+            # failure if this frame is lost to a disconnect.
             _fail_inflight_turn(session, error_value, error_surface=_error_surface)
             st.error_retained = True
             st.error_detail = _turn_failure_detail(
@@ -655,9 +649,7 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
     if st.terminal_callback is not None:
         st.receipt_attempted = True
         st.terminal_callback({
-            "status": (
-                "cancelled" if status == "interrupted"
-                else "failed" if status == "error" else "settled"),
+            "status": {"interrupted": "cancelled", "error": "failed"}.get(status, "settled"),
             "text": raw if isinstance(raw, str) else str(raw),
             **({"error": str(error_value or raw)} if status == "error" else {})})
         st.receipt_committed = True
@@ -677,8 +669,7 @@ def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseExcept
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')} · sid={sid} ===\n")
             f.write(traceback.format_exc())
     print(f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
-    # A finalizer exception can leave in-memory history at the turn-start snapshot; keep
-    # the partial turn available to the next prompt.
+    # A finalizer exception can leave in-memory history at the turn-start snapshot.
     _restore_agent_history_after_turn_error(session, st.agent)
     if st.terminal_callback is not None and not st.receipt_attempted:
         st.receipt_attempted = True

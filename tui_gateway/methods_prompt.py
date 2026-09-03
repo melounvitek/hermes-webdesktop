@@ -161,7 +161,6 @@ def _pending_reaction_notes(session: dict) -> str:
 
 # ── prompt.submit pieces ────────────────────────────────────────────────────
 
-
 def _typed_stop_phrase_response(rid, text):
     """RPC reply ending the voice chat when a bare stop phrase is TYPED while backend voice
     mode is on (typed twin of the spoken stop phrase), or None for a normal message."""
@@ -186,15 +185,13 @@ def _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback):
     """Validate the hosted-room turn proof carried by an internal submit."""
     if session.get("source") != "bot_room":
         return _err(rid, 4120, "hosted room turns require a bot_room session")
-    if (
-        not isinstance(hosted_task, dict) or not callable(hosted_terminal_callback)
-        or set(hosted_task) != _HOSTED_TASK_FIELDS
-        or not all(
-            isinstance(hosted_task.get(field), str) and hosted_task[field]
-            for field in _HOSTED_TASK_FIELDS - {"execution_generation"})
-        or not isinstance(hosted_task.get("execution_generation"), int)):
-        return _err(rid, 4120, "invalid hosted room turn proof")
-    return None
+    valid = (
+        isinstance(hosted_task, dict) and callable(hosted_terminal_callback)
+        and set(hosted_task) == _HOSTED_TASK_FIELDS
+        and all(isinstance(hosted_task.get(f), str) and hosted_task[f]
+                for f in _HOSTED_TASK_FIELDS - {"execution_generation"})
+        and isinstance(hosted_task.get("execution_generation"), int))
+    return None if valid else _err(rid, 4120, "invalid hosted room turn proof")
 
 
 def _legacy_group_fence_error(rid, session, params):
@@ -214,12 +211,11 @@ def _legacy_group_fence_error(rid, session, params):
         if not hosted:
             from hermes_constants import named_profile_home
             session_profile_home = named_profile_home(str(session.get("profile_home") or ""))
-            requested_profile = (
-                (session_profile_home.name if session_profile_home is not None else "")
-                or str(params.get("profile") or "").strip()
-                or str(_current_profile_name() or "default").strip())
             peer = probe_peer_room_reservation(
-                default_db_path(), room_id=room_id, target_profile=requested_profile)
+                default_db_path(), room_id=room_id, target_profile=(
+                    (session_profile_home.name if session_profile_home is not None else "")
+                    or str(params.get("profile") or "").strip()
+                    or str(_current_profile_name() or "default").strip()))
     except RoomProbeUnavailableError:
         return _err(rid, 5122, _GROUP_PROBE_FAILED_MSG)
     except HostedRoomError:
@@ -468,10 +464,10 @@ def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_termina
             session["running"] = False
             _clear_inflight_turn(session)
             # Without this emit the turn vanishes silently after {"status": "streaming"}.
-            _emit("error", sid, {
-                "message": "Turn cancelled before the agent was ready"
+            _emit("error", sid, {"message": (
+                "Turn cancelled before the agent was ready"
                 if session.get("_turn_cancel_requested")
-                else "Session no longer running before the agent was ready"})
+                else "Session no longer running before the agent was ready")})
             return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind,
@@ -495,7 +491,8 @@ def _lock_in_submit_turn(
         if is_truthy_value(params.get("confirm_truncate")) and not has_truncation:
             return _err(
                 rid, 4004,
-                "confirm_truncate requires truncate_before_user_ordinal, truncate_before_message_id, or truncate_before_row_id"), fields
+                "confirm_truncate requires truncate_before_user_ordinal, truncate_before_message_id, or truncate_before_row_id",
+            ), fields
         if has_truncation:
             err, fields = _truncate_history_for_submit(
                 rid, sid, session, params, requested_rebind_ids)
@@ -605,7 +602,6 @@ def _(rid, params: dict) -> dict:
 
 
 # ── attachments ─────────────────────────────────────────────────────────────
-
 
 def _attached_image_result(session, image_path, **extra) -> dict:
     """Common ``{attached, path, count, ...meta}`` reply after queuing an image."""
@@ -789,7 +785,10 @@ def _(rid, params: dict) -> dict:
         attached_pages = []
         for src in rendered:
             page_num = src.stem.split("-", 1)[-1]
-            page_int = int(page_num) if page_num.isdigit() else first_page + len(attached_pages)
+            try:
+                page_int = int(page_num)
+            except ValueError:
+                page_int = first_page + len(attached_pages)
             dst = _queue_attached_image(
                 session, src.read_bytes(), ".png", prefix=f"pdf_p{page_num}")
             attached_pages.append({"path": str(dst), "page": page_int, **_image_meta(dst)})
@@ -806,9 +805,8 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_building(params, rid)
     if err:
         return err
-    raw = str(params.get("path", "") or "").strip()
-    data_url = str(params.get("data_url", "") or "").strip()
-    name = str(params.get("name", "") or "").strip()
+    raw, data_url, name = (
+        str(params.get(k, "") or "").strip() for k in ("path", "data_url", "name"))
     if not raw and not data_url:
         return _err(rid, 4015, "path or data_url required")
     try:
@@ -865,7 +863,6 @@ def _(rid, params: dict) -> dict:
 
 
 # ── side agents (background / btw / preview.restart) ────────────────────────
-
 
 def _final_response_text(result) -> str:
     return (result.get("final_response", str(result)) if isinstance(result, dict) else str(result))
@@ -975,9 +972,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    url = str(params.get("url") or "").strip()
-    cwd = str(params.get("cwd") or "").strip()
-    context = str(params.get("context") or "").strip()
+    url, cwd, context = (str(params.get(k) or "").strip() for k in ("url", "cwd", "context"))
     if not url:
         return _err(rid, 4012, "url required")
     task_id = f"preview_{uuid.uuid4().hex[:6]}"
@@ -1048,15 +1043,12 @@ _LATE_RESPOND_KEYS = {
     "terminal.read.respond": "text", "preview.read.respond": "text", "preview.act.respond": "text",
     "window.read.respond": "text", "tour.respond": "text", "mcp.setup.respond": "result",
     "sudo.respond": "password", "secret.respond": "value"}
-
-
 for _name, _key in _LATE_RESPOND_KEYS.items():
     method(_name)(lambda rid, params, _k=_key: _respond(rid, params, _k, allow_expired=True))
 del _name, _key
 
 
 # ── approvals ───────────────────────────────────────────────────────────────
-
 
 def _approval_reply(rid, result_key, call):
     """``_ok({result_key: call(tools.approval)})``, 5004 on any failure."""
@@ -1081,8 +1073,7 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
-    request_id = params.get("request_id")
-    if not isinstance(request_id, str) or not request_id:
+    if not isinstance(request_id := params.get("request_id"), str) or not request_id:
         return _err(rid, 4006, "request_id required")
     return _approval_reply(
         rid, "acknowledged", lambda a: a.ack_gateway_approval(session["session_key"], request_id))

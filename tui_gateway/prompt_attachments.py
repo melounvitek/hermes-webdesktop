@@ -28,13 +28,11 @@ del _re  # bodies are rebound onto server globals: import inside functions only
 
 
 def _b64_payload(raw: str, data_url_re: str, flags: int) -> bytes:
-    """Strip an optional ``data:...;base64,`` wrapper and all whitespace, then strictly
-    decode (raises ``binascii.Error``/``ValueError`` on bad base64)."""
+    """Strip an optional ``data:...;base64,`` wrapper and all whitespace, then strictly decode."""
     import base64 as _base64
     import re as _re
     cleaned = (raw or "").strip()
-    m = _re.match(data_url_re, cleaned, flags)
-    if m:
+    if m := _re.match(data_url_re, cleaned, flags):
         cleaned = m.group(1)
     return _base64.b64decode(_re.sub(r"\s+", "", cleaned), validate=True)
 
@@ -64,8 +62,7 @@ def _decode_attach_payload(
 
 
 def _sniff_image_ext(img_bytes: bytes, filename: str = "") -> str:
-    """Extension from the filename hint, else magic bytes (WebP needs the RIFF/WEBP
-    container check), else ``.png``."""
+    """Extension from the filename hint, else magic bytes (WebP: RIFF container), else ``.png``."""
     if filename and (suffix := Path(filename).suffix.lower()):
         return suffix
     head = img_bytes[:16]
@@ -112,8 +109,7 @@ def _queue_attached_image(session: dict, img_bytes: bytes, ext: str, *, prefix: 
 
 
 def _format_ref_value(value: str) -> str:
-    """Quote a context-ref value containing whitespace/brackets/quotes so the staged
-    ``@file:`` ref round-trips through ``agent.context_references``."""
+    """Quote a value with whitespace/brackets/quotes so the ``@file:`` ref round-trips."""
     if not value or not _ATTACHMENT_REF_NEEDS_QUOTING_RE.search(value):
         return value
     for q in ("`", '"', "'"):
@@ -140,13 +136,9 @@ def _sanitize_attachment_name(name: str) -> str:
 def _stage_session_file_attachment(
     session: dict, *, raw_path: str, data_url: str, name: str) -> tuple[Path, bool]:
     """Make a desktop file attachment available to the gateway agent: ``(stored_path, uploaded)``.
-
-    1. Path resolves INSIDE the session workspace -> use as-is (``uploaded=False``).
-    2. Gateway-visible file OUTSIDE the workspace -> copy into ``attachments/`` (registered
-       in ``tools.credential_files._CACHE_DIRS`` and bind-mounted into container backends)
-       so ``@file:`` resolves in the sandbox.
-    3. Not on the gateway (remote client disk) -> decode ``data_url`` bytes into ``attachments/``.
-    """
+    Inside the workspace -> as-is; gateway-visible but outside -> copied into ``attachments/``
+    (bind-mounted into container backends so ``@file:`` resolves in the sandbox); not on the
+    gateway -> ``data_url`` bytes decoded into ``attachments/``."""
     workspace = Path(_session_cwd(session)).resolve()
     resolved = None
     if raw_path:
