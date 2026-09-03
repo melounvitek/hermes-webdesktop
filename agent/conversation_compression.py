@@ -4493,6 +4493,61 @@ def _begin_compression_attempt(
     return snapshot, generation, started_at
 
 
+def _route_codex_compaction(
+    agent: Any,
+    messages: list,
+    system_message: str,
+    *,
+    commit_fence: Optional[CompressionCommitFence],
+    attempt_snapshot: dict,
+    attempt_generation: int,
+    approx_tokens: Optional[int],
+    task_id: str,
+    force: bool,
+) -> Tuple[list, str]:
+    """Codex owns the real thread: run its own compact under the commit fence bracket."""
+    if commit_fence is not None:
+        if not commit_fence.begin_commit(getattr(agent, "_hard_interrupt_requested", None)):
+            _restore_compressor_attempt_state(
+                agent.context_compressor, attempt_snapshot, attempt_generation=attempt_generation
+            )
+            return messages, _existing_system_prompt(agent, system_message)
+    try:
+        return _compress_context_via_codex_app_server(
+            agent, messages, system_message,
+            approx_tokens=approx_tokens, task_id=task_id, force=force,
+        )
+    finally:
+        if commit_fence is not None:
+            commit_fence.finish_commit()
+
+
+def _announce_compression_start(
+    agent: Any, *, message_count: int, approx_tokens: Optional[int], focus_topic: Optional[str], force: bool
+) -> _CompactionLifecycle:
+    """Log the attempt, emit the (engine-customisable) compacting status, return the lifecycle."""
+    logger.info(
+        "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
+        agent.session_id or "none", message_count,
+        f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
+        focus_topic,
+    )
+    status = COMPACTION_STATUS
+    if not force:
+        status = automatic_compaction_status_message(
+            agent.context_compressor,
+            phase="compress",
+            default_message=status,
+            approx_tokens=approx_tokens,
+            message_count=message_count,
+            model=agent.model,
+            focus_topic=focus_topic,
+        )
+    if status:
+        agent._emit_status(status)
+    return _CompactionLifecycle(agent, bool(status))
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -4533,24 +4588,11 @@ def compress_context(
                 "codex_app_server owns the authoritative thread and does not "
                 "expose a truthful pre-compaction transcript boundary"
             )
-        if commit_fence is None:
-            return _compress_context_via_codex_app_server(
-                agent, messages, system_message,
-                approx_tokens=approx_tokens, task_id=task_id, force=force,
-            )
-        if not commit_fence.begin_commit(getattr(agent, "_hard_interrupt_requested", None)):
-            _restore_compressor_attempt_state(
-                agent.context_compressor, _compressor_attempt_snapshot,
-                attempt_generation=_attempt_generation,
-            )
-            return messages, _existing_system_prompt(agent, system_message)
-        try:
-            return _compress_context_via_codex_app_server(
-                agent, messages, system_message,
-                approx_tokens=approx_tokens, task_id=task_id, force=force,
-            )
-        finally:
-            commit_fence.finish_commit()
+        return _route_codex_compaction(
+            agent, messages, system_message, commit_fence=commit_fence,
+            attempt_snapshot=_compressor_attempt_snapshot, attempt_generation=_attempt_generation,
+            approx_tokens=approx_tokens, task_id=task_id, force=force,
+        )
 
     # All automatic entrypoints honor compressor cooldown/breaker state; hygiene's
     # fresh AIAgent loads the persisted streak via bind_session_state() first.
@@ -4558,10 +4600,9 @@ def compress_context(
         return messages, _existing_system_prompt(agent, system_message)
 
     # Lazy feasibility probe (~400ms cold) on first attempt, not __init__; it sets
-    # _compression_warning so status replay still surfaces the warning.
+    # _compression_warning so status replay still surfaces the warning. Marked checked
+    # only after the probe completes (transient failures are swallowed inside).
     if not getattr(agent, "_compression_feasibility_checked", False):
-        # Mark checked only after the probe completes; a raise leaves it unset
-        # harmlessly, transient failures are swallowed inside so it sets next pass.
         check_compression_model_feasibility(agent)
         agent._compression_feasibility_checked = True
 
@@ -4569,27 +4610,10 @@ def compress_context(
     # In-place keeps the SAME session_id (no rotation/child/renumber/re-sync). A
     # missing attribute must default True, not rotation, which can wedge sessions.
     in_place = bool(getattr(agent, "compression_in_place", True))
-    logger.info(
-        "context compression started: session=%s messages=%d tokens=~%s model=%s focus=%r",
-        agent.session_id or "none", _pre_msg_count,
-        f"{approx_tokens:,}" if approx_tokens else "unknown", agent.model,
-        focus_topic,
+    lifecycle = _announce_compression_start(
+        agent, message_count=_pre_msg_count, approx_tokens=approx_tokens,
+        focus_topic=focus_topic, force=force,
     )
-    _compaction_status = COMPACTION_STATUS
-    if not force:
-        _compaction_status = automatic_compaction_status_message(
-            agent.context_compressor,
-            phase="compress",
-            default_message=_compaction_status,
-            approx_tokens=approx_tokens,
-            message_count=_pre_msg_count,
-            model=agent.model,
-            focus_topic=focus_topic,
-        )
-    _compaction_status_emitted = bool(_compaction_status)
-    if _compaction_status:
-        agent._emit_status(_compaction_status)
-    lifecycle = _CompactionLifecycle(agent, _compaction_status_emitted)
 
     lease, _abort_prompt = _acquire_compression_lease(
         agent,
