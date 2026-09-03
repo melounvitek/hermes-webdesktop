@@ -1,133 +1,85 @@
 """Shared device-code / browser / TLS helpers for interactive OAuth logins.
 
-Split out of ``hermes_cli/auth.py``; every moved name is re-imported there, so
-``hermes_cli.auth.<name>`` keeps resolving (and monkeypatching) as before. Origin-internal
-helpers are imported lazily inside each function (no import cycle; patches on
-``hermes_cli.auth.<helper>`` still intercept).
+Split out of ``hermes_cli/auth.py``; every name is re-exported there so ``hermes_cli.auth.<name>``
+keeps resolving (and monkeypatching). Origin-internal helpers are imported lazily inside each
+function (no import cycle; patches on ``hermes_cli.auth.<helper>`` still intercept).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import FrozenSet
 import os
 import ssl
 import sys
 import time
 import webbrowser
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, FrozenSet, Optional
 from urllib.parse import urlparse
 from hermes_cli.auth_constants import (
-    AuthError,
-    DEFAULT_NOUS_PORTAL_URL,
-    DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS,
-    DEVICE_CODE_GRANT_TYPE,
-    OAUTH_OVER_SSH_DOCS_URL,
-    httpx,
-)
+    AuthError, DEFAULT_NOUS_PORTAL_URL, DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS,
+    DEVICE_CODE_GRANT_TYPE, OAUTH_OVER_SSH_DOCS_URL, httpx)
 from utils import is_truthy_value
 
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
+# Console/text-mode browsers that ``webbrowser`` will launch INSIDE the terminal, hijacking the
+# user's TTY with an unusable text browser. When the resolved browser is one of these we refuse
+# to auto-open and fall back to the print-the-URL path, same as a remote session.
+_CONSOLE_BROWSER_NAMES: FrozenSet[str] = frozenset({
+    "w3m", "lynx", "links", "links2", "elinks", "www-browser",
+    "browsh",  # TUI browser — still hijacks the terminal
+})
 
-# Console/text-mode browsers that ``webbrowser`` will happily launch INSIDE
-# the terminal.  Opening one of these is worse than not opening anything —
-# it hijacks the user's TTY with an unusable text browser (the xAI OAuth
-# "Account Management" page rendered in w3m, reported May 2026) instead of
-# letting them copy the URL to a real browser.  When the resolved browser is
-# one of these we refuse to auto-open and fall back to the print-the-URL
-# path, same as a remote session.
-_CONSOLE_BROWSER_NAMES: FrozenSet[str] = frozenset(
-    {
-        "w3m",
-        "lynx",
-        "links",
-        "links2",
-        "elinks",
-        "www-browser",
-        "browsh",  # TUI browser — still hijacks the terminal
-    }
+# Browser-only remote IDEs / cloud shells (they don't set SSH_CLIENT / SSH_TTY). Keep this list
+# narrow — well-known env vars set by the host platform — so a local shell never trips it.
+_REMOTE_IDE_ENV_VARS = (
+    "CLOUD_SHELL",  # GCP Cloud Shell
+    "CODESPACES", "CODESPACE_NAME",  # GitHub Codespaces
+    "GITPOD_WORKSPACE_ID",  # Gitpod
+    "REPL_ID",  # Replit
+    "STACKBLITZ",  # StackBlitz
 )
 
 
 def _is_remote_session() -> bool:
-    """Detect environments where loopback OAuth can't reach the local browser.
+    """Detect environments where loopback OAuth can't reach the local browser."""
+    return bool(
+        os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY")
+        or any(os.getenv(var) for var in _REMOTE_IDE_ENV_VARS))
 
-    These environments typically don't set ``SSH_CLIENT`` / ``SSH_TTY``, so the SSH-only check left
-    them with no guidance and no fallback.
-    """
-    if os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY"):
-        return True
-    # Browser-only remote IDEs / cloud shells.  Keep this list narrow
-    # (well-known, documented env vars set by the host platform) so
-    # we don't falsely trip on a developer's local shell.
-    for var in (
-        "CLOUD_SHELL",         # GCP Cloud Shell
-        "CODESPACES",          # GitHub Codespaces
-        "CODESPACE_NAME",      # GitHub Codespaces (alt)
-        "GITPOD_WORKSPACE_ID", # Gitpod
-        "REPL_ID",             # Replit
-        "STACKBLITZ",          # StackBlitz
-    ):
-        if os.getenv(var):
-            return True
-    return False
+
+def _names_console_browser(value: str) -> bool:
+    token = value.strip().split()[0] if value.strip() else ""
+    return os.path.basename(token).lower() in _CONSOLE_BROWSER_NAMES
 
 
 def _can_open_graphical_browser() -> bool:
     """Return True only when a *graphical* browser is likely to open.
 
-    ``webbrowser.open()`` resolves to whatever the platform offers, and on a headless / CLI-only
-    Linux box with no GUI browser installed that is often a text-mode browser (w3m/lynx/links) which
-    launches inside the terminal and takes over the user's session.
-
-    Heuristics: * Respect ``$BROWSER`` — if it names a known console browser, refuse. * On Linux,
-    require a display server (``$DISPLAY`` / ``$WAYLAND_DISPLAY``) unless ``$BROWSER`` points at
-    something graphical; no display server almost always means no GUI browser.
+    On a headless Linux box ``webbrowser.open()`` often resolves to a text-mode browser that takes
+    over the terminal. Heuristics: a ``$BROWSER`` naming a console browser refuses; on Linux a
+    display server (``$DISPLAY`` / ``$WAYLAND_DISPLAY``) is required unless ``$BROWSER`` is set
+    (a console one already returned False, so a set ``$BROWSER`` here is graphical).
     """
-    import webbrowser as _webbrowser
-
-    def _names_console_browser(value: str) -> bool:
-        token = value.strip().split()[0] if value.strip() else ""
-        base = os.path.basename(token).lower()
-        return base in _CONSOLE_BROWSER_NAMES
-
     browser_env = os.environ.get("BROWSER", "")
     if browser_env and _names_console_browser(browser_env):
         return False
-
     if sys.platform.startswith("linux"):
-        has_display = bool(
-            os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-        )
-        # An explicit graphical $BROWSER can work without $DISPLAY in odd
-        # setups, but a console $BROWSER already returned False above, so the
-        # only way to reach here with a $BROWSER set is a graphical one.
+        has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         if not has_display and not browser_env:
             return False
-
     try:
-        controller = _webbrowser.get()
+        controller = webbrowser.get()
     except Exception:
-        # No browser resolvable at all → definitely don't auto-open.
-        return False
-
-    candidate = (
-        getattr(controller, "name", "")
-        or getattr(controller, "basename", "")
-        or ""
-    )
+        return False  # No browser resolvable at all → definitely don't auto-open.
+    candidate = getattr(controller, "name", "") or getattr(controller, "basename", "") or ""
     return not (candidate and _names_console_browser(candidate))
 
 
 def _ssh_user_at_host() -> str:
-    """Return best-effort 'user@hostname' for the SSH tunnel hint command.
-
-    Falls back to placeholder tokens when the values cannot be determined so the hint is always
-    syntactically valid even if not copy-pasteable.
-    """
+    """Best-effort 'user@hostname' for the SSH tunnel hint; placeholders keep it valid syntax."""
     try:
         import socket as _socket
         hostname = _socket.gethostname() or "<this-host>"
@@ -138,11 +90,10 @@ def _ssh_user_at_host() -> str:
 
 
 def _print_loopback_ssh_hint(redirect_uri: str, *, docs_url: str | None = None) -> None:
-    """Print an SSH tunnel hint when running a loopback-redirect OAuth flow on a remote host. The auth
-    server (Spotify, MCP servers, ...) will redirect the user's browser to
-    ``127.0.0.1:<port>/callback``. If the browser is on a different machine than the loopback
-    listener (the usual SSH case), the redirect can't reach the listener without a local port
-    forward.
+    """Print an SSH tunnel hint when a loopback-redirect OAuth flow runs on a remote host.
+
+    The auth server redirects the browser to ``127.0.0.1:<port>/callback``; when the browser is
+    on another machine (the SSH case) the redirect needs a local port forward to reach us.
     """
     from hermes_cli.auth import _is_remote_session
     if not _is_remote_session():
@@ -177,10 +128,8 @@ def _print_loopback_ssh_hint(redirect_uri: str, *, docs_url: str | None = None) 
 def _default_verify() -> bool | ssl.SSLContext:
     """Platform-aware default SSL verify for httpx clients.
 
-    On macOS with Homebrew Python, the system OpenSSL cannot locate the system trust store and valid
-    public certs fail verification. When certifi is importable we pin its bundle explicitly;
-    elsewhere we defer to httpx's built-in default (certifi via its own dependency). Mirrors the
-    weixin fix in 3a0ec1d93.
+    On macOS with Homebrew Python the system OpenSSL cannot find the system trust store, so pin
+    certifi's bundle when importable; elsewhere defer to httpx's built-in default.
     """
     if sys.platform == "darwin":
         try:
@@ -192,27 +141,17 @@ def _default_verify() -> bool | ssl.SSLContext:
 
 
 def _resolve_verify(
-    *,
-    insecure: Optional[bool] = None,
-    ca_bundle: Optional[str] = None,
-    auth_state: Optional[Dict[str, Any]] = None,
-) -> bool | ssl.SSLContext:
+    *, insecure: Optional[bool] = None, ca_bundle: Optional[str] = None,
+    auth_state: Optional[Dict[str, Any]] = None) -> bool | ssl.SSLContext:
     from hermes_cli.auth import _default_verify
     tls_state = auth_state.get("tls") if isinstance(auth_state, dict) else {}
     tls_state = tls_state if isinstance(tls_state, dict) else {}
-
     effective_insecure = (
         is_truthy_value(insecure, default=False) if insecure is not None
-        else is_truthy_value(tls_state.get("insecure", False), default=False)
-    )
+        else is_truthy_value(tls_state.get("insecure", False), default=False))
     effective_ca = (
-        ca_bundle
-        or tls_state.get("ca_bundle")
-        or os.getenv("HERMES_CA_BUNDLE")
-        or os.getenv("SSL_CERT_FILE")
-        or os.getenv("REQUESTS_CA_BUNDLE")
-    )
-
+        ca_bundle or tls_state.get("ca_bundle") or os.getenv("HERMES_CA_BUNDLE")
+        or os.getenv("SSL_CERT_FILE") or os.getenv("REQUESTS_CA_BUNDLE"))
     if effective_insecure:
         return False
     if effective_ca:
@@ -220,34 +159,24 @@ def _resolve_verify(
         if not os.path.isfile(ca_path):
             logger.warning(
                 "CA bundle path does not exist: %s — falling back to default certificates",
-                ca_path,
-            )
+                ca_path)
             return _default_verify()
         return ssl.create_default_context(cafile=ca_path)
     return _default_verify()
 
 
 def _request_device_code(
-    client: httpx.Client,
-    portal_base_url: str,
-    client_id: str,
-    scope: Optional[str],
+    client: httpx.Client, portal_base_url: str, client_id: str, scope: Optional[str],
 ) -> Dict[str, Any]:
     """POST to the device code endpoint. Returns device_code, user_code, etc."""
     response = client.post(
         f"{portal_base_url}/api/oauth/device/code",
-        data={
-            "client_id": client_id,
-            **({"scope": scope} if scope else {}),
-        },
-    )
+        data={"client_id": client_id, **({"scope": scope} if scope else {})})
     response.raise_for_status()
     data = response.json()
-
     required_fields = [
         "device_code", "user_code", "verification_uri",
-        "verification_uri_complete", "expires_in", "interval",
-    ]
+        "verification_uri_complete", "expires_in", "interval"]
     missing = [f for f in required_fields if f not in data]
     if missing:
         raise ValueError(f"Device code response missing fields: {', '.join(missing)}")
@@ -255,11 +184,7 @@ def _request_device_code(
 
 
 def _nous_device_auth_timeout_message(portal_base_url: str) -> str:
-    """Actionable timeout text for Nous device-code login failures.
-
-    A bare "timed out" gives the user nothing to act on; the usual cause is Portal sign-in failing
-    in the opened browser tab, so point at the Portal login page and the retry command.
-    """
+    """Actionable timeout text: the usual cause is Portal sign-in failing in the browser tab."""
     portal = (portal_base_url or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
     return (
         "Timed out waiting for device authorization.\n"
@@ -267,23 +192,16 @@ def _nous_device_auth_timeout_message(portal_base_url: str) -> str:
         "  If the browser showed a CAPTCHA / 'You did not pass CAPTCHA' error,\n"
         "  finish signing in at the Portal in a normal browser tab, then retry:\n"
         "    hermes portal\n"
-        f"  Portal login: {portal}/login"
-    )
+        f"  Portal login: {portal}/login")
 
 
 def _print_device_code_instructions(
-    verification_url: str,
-    user_code: str,
-    *,
-    open_browser: bool,
-    failure_dash: str = "--",
-    swallow_open_errors: bool = False,
-) -> None:
+    verification_url: str, user_code: str, *, open_browser: bool, failure_dash: str = "--",
+    swallow_open_errors: bool = False) -> None:
     """Print the shared "To continue" device-code block and optionally open the browser.
 
     Callers decide *whether* to open (remote-session / graphical-browser gating differs per
-    provider); the wording of the fallback hint is parameterized so each provider keeps its
-    historical dash style.
+    provider); *failure_dash* keeps each provider's historical hint wording.
     """
     print()
     print("To continue:")
@@ -305,20 +223,16 @@ def _print_device_code_instructions(
 
 
 def _poll_device_token_generic(
-    post: Callable[[], "httpx.Response"],
-    *,
-    expires_in: int,
-    poll_interval: int,
+    post: Callable[[], "httpx.Response"], *, expires_in: int, poll_interval: int,
     validate_success: Callable[[Dict[str, Any]], None],
     on_non_json_error: Callable[["httpx.Response"], Exception],
     on_error: Callable[["httpx.Response", Dict[str, Any]], Exception],
-    on_timeout: Callable[[], Exception],
-) -> Dict[str, Any]:
+    on_timeout: Callable[[], Exception]) -> Dict[str, Any]:
     """RFC 8628 device-code polling loop shared by the Nous and xAI flows.
 
     ``authorization_pending`` sleeps and retries; ``slow_down`` grows the interval by 1s (cap 30s).
-    Every other error, a non-JSON error body, and the deadline are turned into provider-specific
-    exceptions by the supplied factories so each caller keeps its exact error contract.
+    Every other error, a non-JSON error body, and the deadline become provider-specific exceptions
+    via the supplied factories so each caller keeps its exact error contract.
     """
     deadline = time.monotonic() + max(1, expires_in)
     current_interval = poll_interval
@@ -346,13 +260,8 @@ def _poll_device_token_generic(
 
 
 def _poll_for_token(
-    client: httpx.Client,
-    portal_base_url: str,
-    client_id: str,
-    device_code: str,
-    expires_in: int,
-    poll_interval: int,
-) -> Dict[str, Any]:
+    client: httpx.Client, portal_base_url: str, client_id: str, device_code: str,
+    expires_in: int, poll_interval: int) -> Dict[str, Any]:
     """Poll the Nous token endpoint until the user approves or the code expires."""
     def _validate(payload: Dict[str, Any]) -> None:
         if "access_token" not in payload:
@@ -367,21 +276,17 @@ def _poll_for_token(
         lambda: client.post(
             f"{portal_base_url}/api/oauth/token",
             data={
-                "grant_type": DEVICE_CODE_GRANT_TYPE,
-                "client_id": client_id,
-                "device_code": device_code,
-            },
-        ),
+                "grant_type": DEVICE_CODE_GRANT_TYPE, "client_id": client_id,
+                "device_code": device_code}),
         expires_in=expires_in,
         poll_interval=max(1, min(poll_interval, DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS)),
         validate_success=_validate,
-        on_non_json_error=lambda _r: RuntimeError("Token endpoint returned a non-JSON error response"),
+        on_non_json_error=lambda _r: RuntimeError(
+            "Token endpoint returned a non-JSON error response"),
         on_error=_error,
-        # Enriched at the SOURCE so every caller inherits the guidance:
-        # the CLI login (_nous_device_code_login) and the dashboard/desktop
-        # poller (web_server._nous_poller, which surfaces str(e) to the UI).
-        on_timeout=lambda: TimeoutError(_nous_device_auth_timeout_message(portal_base_url)),
-    )
+        # Enriched at the SOURCE so the CLI login and the dashboard/desktop poller
+        # (web_server._nous_poller surfaces str(e) to the UI) both inherit the guidance.
+        on_timeout=lambda: TimeoutError(_nous_device_auth_timeout_message(portal_base_url)))
 
 
 def _prompt_yes_no(prompt: str, *, default: str) -> bool:
@@ -393,7 +298,8 @@ def _prompt_yes_no(prompt: str, *, default: str) -> bool:
     return answer in {"", "y", "yes"} if default == "y" else answer in {"y", "yes"}
 
 
-def _print_login_success(provider_id: str, config_path: Path, *, show_auth_state: bool = False) -> None:
+def _print_login_success(
+    provider_id: str, config_path: Path, *, show_auth_state: bool = False) -> None:
     print()
     print("Login successful!")
     if show_auth_state:
@@ -403,14 +309,9 @@ def _print_login_success(provider_id: str, config_path: Path, *, show_auth_state
 
 
 def _offer_existing_oauth_credentials(
-    provider_id: str,
-    *,
-    resolve: Callable[[], Dict[str, Any]],
-    is_expiring: Callable[[str, int], bool],
-    display_name: str,
-    default_base_url: str,
-    expired_notice: Optional[str] = None,
-) -> bool:
+    provider_id: str, *, resolve: Callable[[], Dict[str, Any]],
+    is_expiring: Callable[[str, int], bool], display_name: str, default_base_url: str,
+    expired_notice: Optional[str] = None) -> bool:
     """Offer to reuse still-valid stored OAuth credentials. Returns True when the user accepted.
 
     *resolve* attempts a refresh, so a resolved token should be valid — but double-check the
@@ -424,8 +325,7 @@ def _offer_existing_oauth_credentials(
             print(f"Existing {display_name} credentials found in Hermes auth store.")
             if _prompt_yes_no("Use existing credentials? [Y/n]: ", default="y"):
                 config_path = _update_config_for_provider(
-                    provider_id, existing.get("base_url", default_base_url),
-                )
+                    provider_id, existing.get("base_url", default_base_url))
                 _print_login_success(provider_id, config_path)
                 return True
         elif expired_notice:
