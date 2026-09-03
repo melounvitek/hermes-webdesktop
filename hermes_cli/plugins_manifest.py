@@ -11,7 +11,7 @@ import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Union
 
 from utils import fast_safe_load
 from hermes_cli.plugin_capabilities import parse_declared_capabilities as _parse_declared_capabilities
@@ -52,9 +52,8 @@ def _plugins_debug() -> bool:
 
 def _portable_skill_namespace(key: str) -> str:
     """Return a readable, collision-resistant namespace for a portable plugin."""
-    slug = "".join(
-        ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-" for ch in key.lower()
-    ).strip("-_") or "plugin"
+    slug = "".join(ch if ch.isascii() and (ch.isalnum() or ch in "_-") else "-" for ch in key.lower())
+    slug = slug.strip("-_") or "plugin"
     digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
     return f"agent-plugin-{slug}-{digest}"
 
@@ -75,70 +74,68 @@ def _manifest_field_of_type(data: Mapping, key: str, field_name: str, typ, what:
     return raw
 
 
+def _manifest_list(data: Mapping, key: str, field_name: str, what: str, coerce: Callable, warn: str) -> list:
+    """Coerce each item of list field ``field_name``; ``coerce`` returning None warns ``warn`` and skips."""
+    out = []
+    for item in _manifest_field_of_type(data, key, field_name, list, what) or []:
+        coerced = coerce(item)
+        if coerced is None:
+            logger.warning(warn, key, item)
+        else:
+            out.append(coerced)
+    return out
+
+
+def _dependency_entry(item: object) -> Optional[Dict[str, Any]]:
+    """``{id, version_range}`` from a requires_plugins item (str shorthand ok); None when malformed."""
+    if isinstance(item, str):
+        return {"id": item, "version_range": None}
+    if isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
+        vr = item.get("version_range")
+        return {"id": item["id"], "version_range": str(vr) if vr is not None else None}
+    return None
+
+
+def _manifest_int(raw: object, key: str, warn: str, fallback: Optional[int]) -> Optional[int]:
+    """``int(raw)``; a non-integer warns ``warn`` (formatted with key, raw) and yields ``fallback``."""
+    try:
+        return int(raw)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        logger.warning(warn, key, raw)
+        return fallback
+
+
 def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
     """Validate/normalize manifest v2 fields into PluginManifest kwargs (warnings, never failures)."""
-    out: Dict[str, Any] = {}
-    # manifest_version — absent means v1 (supported forever).
-    raw_mv = data.get("manifest_version", 1)
-    try:
-        mv = int(raw_mv)
-    except (TypeError, ValueError):
-        logger.warning(
-            "Plugin %s: manifest_version %r is not an integer; treating as 1", key, raw_mv,
-        )
-        mv = 1
+    # manifest_version — absent means v1 (supported forever); api_version is the independent API generation.
+    mv = _manifest_int(data.get("manifest_version", 1), key,
+                       "Plugin %s: manifest_version %r is not an integer; treating as 1", 1)
     if mv > SUPPORTED_MANIFEST_VERSION:
         logger.warning(
             "Plugin %s: manifest_version %d is newer than this Hermes "
-            "supports (%d); loading anyway and ignoring unknown fields",
-            key, mv, SUPPORTED_MANIFEST_VERSION,
+            "supports (%d); loading anyway and ignoring unknown fields", key, mv, SUPPORTED_MANIFEST_VERSION,
         )
-    out["manifest_version"] = mv
-    # api_version — plugin API generation (independent of manifest_version).
     raw_api = data.get("api_version")
-    out["api_version"] = None
-    if raw_api is not None:
-        try:
-            out["api_version"] = int(raw_api)
-        except (TypeError, ValueError):
-            logger.warning("Plugin %s: api_version %r is not an integer; ignoring", key, raw_api)
-    # requires_plugins — list of {id, version_range?} (str shorthand ok).
-    deps: List[Dict[str, Any]] = []
-    for item in _manifest_field_of_type(data, key, "requires_plugins", list, "a list") or []:
-        if isinstance(item, str):
-            deps.append({"id": item, "version_range": None})
-        elif isinstance(item, Mapping) and isinstance(item.get("id"), str) and item["id"]:
-            vr = item.get("version_range")
-            deps.append({"id": item["id"], "version_range": str(vr) if vr is not None else None})
-        else:
-            logger.warning(
-                "Plugin %s: requires_plugins entry %r must be a plugin id "
-                "string or a {id, version_range} mapping; skipping", key, item,
-            )
-    out["requires_plugins"] = deps
-    # python_dependencies — validated and surfaced ONLY; never auto-installed.
-    pydeps: List[str] = []
-    raw_pydeps = _manifest_field_of_type(
-        data, key, "python_dependencies", list, "a list of requirement strings"
+    api = None if raw_api is None else _manifest_int(
+        raw_api, key, "Plugin %s: api_version %r is not an integer; ignoring", None)
+    deps = _manifest_list(
+        data, key, "requires_plugins", "a list", _dependency_entry,
+        "Plugin %s: requires_plugins entry %r must be a plugin id "
+        "string or a {id, version_range} mapping; skipping",
     )
-    for item in raw_pydeps or []:
-        if isinstance(item, str) and item.strip():
-            pydeps.append(item.strip())
-        else:
-            logger.warning(
-                "Plugin %s: python_dependencies entry %r must be a non-empty "
-                "requirement string; skipping", key, item,
-            )
-    out["python_dependencies"] = pydeps
+    # python_dependencies — validated and surfaced ONLY; never auto-installed.
+    pydeps = _manifest_list(
+        data, key, "python_dependencies", "a list of requirement strings",
+        lambda item: item.strip() if isinstance(item, str) and item.strip() else None,
+        "Plugin %s: python_dependencies entry %r must be a non-empty requirement string; skipping",
+    )
     # config_schema — mapping of key -> {type?, default?, description?, required?}.
     schema: Dict[str, Any] = {}
     raw_schema = _manifest_field_of_type(data, key, "config_schema", Mapping, "a mapping")
     for skey, spec in (raw_schema or {}).items():
         if not isinstance(spec, Mapping):
             logger.warning(
-                "Plugin %s: config_schema entry %r must be a mapping "
-                "(e.g. {type: str}); skipping", key, skey,
-            )
+                "Plugin %s: config_schema entry %r must be a mapping (e.g. {type: str}); skipping", key, skey)
             continue
         stype = spec.get("type")
         if stype is not None and str(stype).lower() not in _CONFIG_SCHEMA_TYPES:
@@ -148,20 +145,19 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
                 key, skey, stype, ", ".join(sorted(_CONFIG_SCHEMA_TYPES)),
             )
         schema[str(skey)] = dict(spec)
-    out["config_schema"] = schema
-    out["license"] = str(data.get("license") or "")
-    out["homepage"] = str(data.get("homepage") or "")
-    raw_tags = _manifest_field_of_type(data, key, "tags", list, "a list")
-    out["tags"] = [str(t) for t in (raw_tags or [])]
+    tags = [str(t) for t in (_manifest_field_of_type(data, key, "tags", list, "a list") or [])]
     # Forward compat: unknown fields warn (never fail); v1 manifests only at debug.
     unknown = sorted(set(data.keys()) - _KNOWN_MANIFEST_FIELDS)
     if unknown:
-        log = logger.warning if mv >= 2 else logger.debug
-        log(
+        (logger.warning if mv >= 2 else logger.debug)(
             "Plugin %s: unknown manifest field(s) ignored: %s "
             "(newer manifest schema or typo; plugin still loads)", key, ", ".join(unknown),
         )
-    return out
+    return {
+        "manifest_version": mv, "api_version": api, "requires_plugins": deps, "python_dependencies": pydeps,
+        "config_schema": schema, "license": str(data.get("license") or ""),
+        "homepage": str(data.get("homepage") or ""), "tags": tags,
+    }
 
 
 def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -> List[str]:
@@ -194,11 +190,9 @@ def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -
 
 
 def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List[str]:
-    """Return plugin keys in dependency order: B before A when A requires B; alphabetical ties.
-
-    A cycle warns and falls back to alphabetical order for all; a missing dependency warns once
-    but never removes the dependent plugin (loads never hard-fail on advisory deps).
-    """
+    """Return plugin keys in dependency order: B before A when A requires B; alphabetical ties. A cycle warns
+    and falls back to alphabetical order for all; a missing dependency warns once but never removes the
+    dependent plugin (loads never hard-fail on advisory deps)."""
     import graphlib
     keys = sorted(manifests.keys())
     by_name: Dict[str, str] = {}
@@ -242,9 +236,9 @@ def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List
 
 
 def _detect_kind_from_source(source_text: str) -> Optional[str]:
-    """Kind implied by source markers (mirrors plugins/memory ``_is_memory_provider_dir``):
-    memory-provider markers -> ``exclusive``; ``register_provider`` + ``ProviderProfile`` ->
-    ``model-provider``; else ``None``. Keeps both kinds out of the general manager's eager import."""
+    """Kind implied by source markers (mirrors plugins/memory ``_is_memory_provider_dir``): memory-provider
+    markers -> ``exclusive``; ``register_provider`` + ``ProviderProfile`` -> ``model-provider``; else
+    ``None``. Keeps both kinds out of the general manager's eager import."""
     if "register_memory_provider" in source_text or "MemoryProvider" in source_text:
         return "exclusive"
     if "register_provider" in source_text and "ProviderProfile" in source_text:
@@ -254,12 +248,10 @@ def _detect_kind_from_source(source_text: str) -> Optional[str]:
 
 def _read_source_from_origin(origin: Optional[str], limit: int = 8192) -> str:
     """First ``limit`` chars of a module's source (``.pyc`` mapped back to ``.py``); "" on failure."""
-    if not origin:
-        return ""
     try:
-        if origin.endswith((".pyc", ".pyo")):
+        if origin and origin.endswith((".pyc", ".pyo")):
             origin = importlib.util.source_from_cache(origin)
-        if not origin.endswith(".py"):
+        if not origin or not origin.endswith(".py"):
             return ""
         return Path(origin).read_text(encoding="utf-8", errors="replace")[:limit]
     except Exception:
@@ -267,12 +259,10 @@ def _read_source_from_origin(origin: Optional[str], limit: int = 8192) -> str:
 
 
 def resolve_module_origin(module_name: str) -> Optional[str]:
-    """Return a module's source path WITHOUT importing it, or ``None``.
-
-    ``find_spec`` on a dotted name imports the parent package, so only the top-level name uses it;
-    remaining segments are walked through ``submodule_search_locations`` by hand. Namespace/zipped/
-    extension modules return ``None``. Shared with ``plugins/memory/__init__.py``.
-    """
+    """Return a module's source path WITHOUT importing it, or ``None``. ``find_spec`` on a dotted name imports
+    the parent package, so only the top-level name uses it; remaining segments are walked through
+    ``submodule_search_locations`` by hand. Namespace/zipped/extension modules return ``None``. Shared with
+    ``plugins/memory/__init__.py``."""
     parts = [p for p in module_name.split(".") if p]
     if not parts:
         return None
@@ -286,16 +276,12 @@ def resolve_module_origin(module_name: str) -> Optional[str]:
         if not search_paths:
             return None
         for i, part in enumerate(parts[1:], start=2):
-            found_origin = None
-            next_paths = None
-            for base in search_paths:
-                base = Path(base)
-                pkg_init = base / part / "__init__.py"
+            found_origin = next_paths = None
+            for base in map(Path, search_paths):
+                pkg_init, mod_file = base / part / "__init__.py", base / (part + ".py")
                 if pkg_init.is_file():
-                    found_origin = str(pkg_init)
-                    next_paths = [base / part]
+                    found_origin, next_paths = str(pkg_init), [base / part]
                     break
-                mod_file = base / (part + ".py")
                 if mod_file.is_file():
                     found_origin = str(mod_file)
                     break
@@ -332,21 +318,21 @@ class PluginManifest:
     provides_hooks: List[str] = field(default_factory=list)
     source: str = ""        # "bundled", "user", "project", or "entrypoint"
     path: Optional[str] = None
-    # ``standalone`` (default; opt-in via plugins.enabled) | ``backend`` (pluggable backend for a
-    # core tool; bundled auto-load, user-installed gated) | ``exclusive`` (one active provider,
-    # selected via <category>.provider; own discovery, general scanner skips) | ``platform``
-    # (gateway adapter; bundled auto-load, user-installed gated as untrusted code).
+    # ``standalone`` (default; opt-in via plugins.enabled) | ``backend`` (pluggable backend for a core tool;
+    # bundled auto-load, user-installed gated) | ``exclusive`` (one active provider, selected via
+    # <category>.provider; own discovery, general scanner skips) | ``platform`` (gateway adapter; bundled
+    # auto-load, user-installed gated as untrusted code).
     kind: str = "standalone"
-    # Path-derived registry key used by plugins.enabled/disabled and `hermes plugins list`:
-    # ``disk-cleanup`` for a flat plugin, ``image_gen/openai`` for a category plugin. Empty -> name.
+    # Path-derived registry key used by plugins.enabled/disabled and `hermes plugins list`: ``disk-cleanup``
+    # for a flat plugin, ``image_gen/openai`` for a category plugin. Empty -> name.
     key: str = ""
     portable: bool = False
     skill_namespace: str = ""
-    # Declared capability ids, normalized to KNOWN ids. Declaration is consent metadata, NOT a
-    # grant: live only via plugins.entries.<id>.granted_capabilities or the legacy allow_* key.
+    # Declared capability ids, normalized to KNOWN ids. Declaration is consent metadata, NOT a grant: live
+    # only via plugins.entries.<id>.granted_capabilities or the legacy allow_* key.
     capabilities: List[str] = field(default_factory=list)
-    # Manifest v2 fields — all optional and additive. manifest_version versions the FILE FORMAT
-    # (v1 supported forever); api_version is the runtime plugin API generation (None = current).
+    # Manifest v2 fields — all optional and additive. manifest_version versions the FILE FORMAT (v1 supported
+    # forever); api_version is the runtime plugin API generation (None = current).
     manifest_version: int = 1
     api_version: Optional[int] = None
     # Advisory deps [{"id", "version_range"}]: missing ones warn but load; they order the load.
@@ -379,28 +365,24 @@ def portable_plugin_manifest(child: Path, source: str, prefix: str) -> PluginMan
 
 
 def _manifest_kind(data: Mapping, key: str, plugin_dir: Path) -> str:
-    """Normalize ``kind``; undeclared memory/model providers are auto-detected from ``__init__.py``
-    so they route to their own discovery instead of the general manager."""
+    """Normalize ``kind``; undeclared memory/model providers are auto-detected from ``__init__.py`` so they
+    route to their own discovery instead of the general manager."""
     raw_kind = data.get("kind", "standalone")
-    if not isinstance(raw_kind, str):
-        raw_kind = "standalone"
-    kind = raw_kind.strip().lower()
+    kind = raw_kind.strip().lower() if isinstance(raw_kind, str) else "standalone"
     if kind not in _VALID_PLUGIN_KINDS:
         logger.warning(
             "Plugin %s: unknown kind '%s' (valid: %s); treating as 'standalone'",
             key, raw_kind, ", ".join(sorted(_VALID_PLUGIN_KINDS)),
         )
         kind = "standalone"
-    if kind == "standalone" and "kind" not in data:
-        init_file = plugin_dir / "__init__.py"
-        if init_file.exists():
-            with suppress(Exception):
-                detected = _detect_kind_from_source(
-                    init_file.read_text(errors="replace", encoding="utf-8")[:8192]
-                )
-                if detected:
-                    kind = detected
-                    logger.debug("Plugin %s: detected %s, treating as kind='%s'", key, detected, detected)
+    init_file = plugin_dir / "__init__.py"
+    if kind == "standalone" and "kind" not in data and init_file.exists():
+        with suppress(Exception):
+            source_text = init_file.read_text(errors="replace", encoding="utf-8")[:8192]
+            detected = _detect_kind_from_source(source_text)
+            if detected:
+                kind = detected
+                logger.debug("Plugin %s: detected %s, treating as kind='%s'", key, detected, detected)
     return kind
 
 
@@ -417,9 +399,7 @@ def parse_manifest_file(
         key = f"{prefix}/{plugin_dir.name}" if prefix else name
         kind = _manifest_kind(data, key, plugin_dir)
         logger.debug(
-            "Parsed manifest: key=%s name=%s kind=%s source=%s path=%s",
-            key, name, kind, source, plugin_dir,
-        )
+            "Parsed manifest: key=%s name=%s kind=%s source=%s path=%s", key, name, kind, source, plugin_dir)
         return PluginManifest(
             name=name, version=str(data.get("version", "")),
             description=data.get("description", ""), author=_display_author(data.get("author", "")),

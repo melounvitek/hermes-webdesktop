@@ -38,13 +38,10 @@ def _select_entry_point_group(entry_points: Any, group: str) -> list:
 
 
 def discover_entrypoint_manifests() -> List["PluginManifest"]:
-    """Return metadata-only manifests for installed entry-point plugins.
-
-    Kind comes from an import-free source scan (memory/model providers route to their own
-    discovery). Capabilities come from the companion ``hermes_agent.plugin_capabilities`` group
-    (``<plugin-id>.<capability-id>`` entries pointing at the same object), so consent works without
-    importing plugin code. Failures are isolated per entry point.
-    """
+    """Return metadata-only manifests for installed entry-point plugins. Kind comes from an import-free source
+    scan (memory/model providers route to their own discovery). Capabilities come from the companion
+    ``hermes_agent.plugin_capabilities`` group (``<plugin-id>.<capability-id>`` entries pointing at the same
+    object), so consent works without importing plugin code. Failures are isolated per entry point."""
     manifests: List[PluginManifest] = []
     try:
         eps = importlib.metadata.entry_points()
@@ -55,13 +52,8 @@ def discover_entrypoint_manifests() -> List["PluginManifest"]:
         return manifests
     for ep in group_eps:
         try:
-            capabilities = [
-                capability for capability in VALID_CAPABILITY_IDS
-                if any(
-                    declaration.name == f"{ep.name}.{capability}" and declaration.value == ep.value
-                    for declaration in capability_eps
-                )
-            ]
+            declared = {d.name for d in capability_eps if d.value == ep.value}
+            capabilities = [c for c in VALID_CAPABILITY_IDS if f"{ep.name}.{c}" in declared]
             dist = getattr(ep, "dist", None)
             metadata = getattr(dist, "metadata", None)
             manifests.append(PluginManifest(
@@ -80,9 +72,7 @@ def _classify_entrypoint_value_kind(value: str) -> str:
     """Classify an entry-point target by import-free source scan (unresolvable -> standalone)."""
     try:
         module_name = str(value).split(":", 1)[0].strip()
-        if not module_name:
-            return "standalone"
-        return _detect_kind_from_source(_resolve_module_source(module_name)) or "standalone"
+        return (_detect_kind_from_source(_resolve_module_source(module_name)) if module_name else None) or "standalone"
     except Exception:
         return "standalone"
 
@@ -98,11 +88,9 @@ def _get_disabled_plugins() -> set:
 
 
 def _get_enabled_plugins() -> Optional[set]:
-    """Read the ``plugins.enabled`` allow-list (plugins are opt-in).
-
-    ``None`` = key missing/malformed ("nothing enabled yet"; the first ``migrate_config`` run
-    grandfathers installed user plugins); ``set()`` = explicitly empty; else the allow-list.
-    """
+    """Read the ``plugins.enabled`` allow-list (plugins are opt-in). ``None`` = key missing/malformed ("nothing
+    enabled yet"; the first ``migrate_config`` run grandfathers installed user plugins); ``set()`` = explicitly
+    empty; else the allow-list."""
     try:
         from hermes_cli.config import load_config
         enabled = cfg_get(load_config(), "plugins", "enabled")
@@ -112,46 +100,41 @@ def _get_enabled_plugins() -> Optional[set]:
 
 
 def scan_directory(
-    path: Path, source: str, *, skip_names: Optional[Set[str]] = None, prefix: str = "",
-    depth: int = 0,
+    path: Path, source: str, *, skip_names: Optional[Set[str]] = None, prefix: str = "", depth: int = 0
 ) -> List[PluginManifest]:
     """Read manifests under *path*: flat ``<root>/<name>/plugin.yaml`` (key ``name``) or category
-    ``<root>/<cat>/<name>/plugin.yaml`` (key ``cat/name``; a manifest-less directory recurses one
-    level, depth capped at two). *skip_names* ignores top-level names; portable ``plugin.json``
-    packages are accepted alongside YAML manifests."""
+    ``<root>/<cat>/<name>/plugin.yaml`` (key ``cat/name``; a manifest-less directory recurses one level, depth
+    capped at two). *skip_names* ignores top-level names; portable ``plugin.json`` packages are accepted
+    alongside YAML manifests."""
     manifests: List[PluginManifest] = []
     if not path.is_dir():
         return manifests
     for child in sorted(path.iterdir()):
         if not child.is_dir() or (depth == 0 and skip_names and child.name in skip_names):
             continue
-        manifest_file = child / "plugin.yaml"
-        if not manifest_file.exists():
-            manifest_file = child / "plugin.yml"
-        if manifest_file.exists():
+        manifest_file = next((f for f in (child / "plugin.yaml", child / "plugin.yml") if f.exists()), None)
+        portable_file = child / "plugin.json"
+        if manifest_file is not None:
             manifest = parse_manifest_file(manifest_file, child, source, prefix)
             if manifest is not None:
                 manifests.append(manifest)
-            continue
-        portable_file = child / "plugin.json"
-        if portable_file.exists() or portable_file.is_symlink():
+        elif portable_file.exists() or portable_file.is_symlink():
             try:
                 manifests.append(portable_plugin_manifest(child, source, prefix))
             except Exception as exc:
                 logger.warning("Failed to parse %s: %s", portable_file, exc)
-            continue
-        if depth >= 1:
+        elif depth >= 1:
             logger.debug("Skipping %s (no plugin.yaml, depth cap reached)", child)
-            continue
-        sub_prefix = f"{prefix}/{child.name}" if prefix else child.name
-        manifests.extend(scan_directory(child, source, prefix=sub_prefix, depth=depth + 1))
+        else:
+            sub_prefix = f"{prefix}/{child.name}" if prefix else child.name
+            manifests.extend(scan_directory(child, source, prefix=sub_prefix, depth=depth + 1))
     return manifests
 
 
 def collect_directory_manifests() -> List[PluginManifest]:
-    """Read directory manifests in full-discovery order (bundled top-level, bundled/platforms, user,
-    opt-in project) without loading or mutating anything, so startup probes share the exact
-    precedence/containment rules of the real discovery sweep."""
+    """Read directory manifests in full-discovery order (bundled top-level, bundled/platforms, user, opt-in
+    project) without loading or mutating anything, so startup probes share the exact precedence/containment
+    rules of the real discovery sweep."""
     from hermes_cli import plugins as _origin  # patched names resolve through the origin
     manifests: List[PluginManifest] = []
 
@@ -163,8 +146,7 @@ def collect_directory_manifests() -> List[PluginManifest]:
     # Excluded bundled top-level categories have their own discovery; platforms scan separately.
     repo_plugins = _origin.get_bundled_plugins_dir()
     logger.debug("Scanning bundled plugins: %s", repo_plugins)
-    _scan("bundled (top-level)", repo_plugins, "bundled",
-          {"memory", "context_engine", "platforms", "model-providers"})
+    _scan("bundled (top-level)", repo_plugins, "bundled", {"memory", "context_engine", "platforms", "model-providers"})
     _scan("bundled/platforms", repo_plugins / "platforms", "bundled")
     user_dir = get_hermes_home() / "plugins"
     logger.debug("Scanning user plugins: %s", user_dir)
@@ -191,51 +173,46 @@ class ManifestGate:
 def gate_manifest(
     manifest: PluginManifest, disabled: Set[str], enabled: Optional[Set[str]]
 ) -> ManifestGate:
-    """Decide how one winning manifest is handled. Gate order matters: legacy relay refusal, explicit
-    disable, category-owned kinds (exclusive / model-provider), bundled auto-loads (backend now,
-    platform deferred), then ``plugins.enabled`` opt-in (path-derived key or legacy bare name)."""
+    """Decide how one winning manifest is handled. Gate order matters: legacy relay refusal, explicit disable,
+    category-owned kinds (exclusive / model-provider), bundled auto-loads (backend now, platform deferred),
+    then ``plugins.enabled`` opt-in (path-derived key or legacy bare name)."""
     lookup_key = manifest_key(manifest)
     names = {lookup_key, manifest.name}
+
+    def _placeholder(error: Optional[str], level: int, message: str, *args, enabled: bool = False) -> ManifestGate:
+        return ManifestGate("placeholder", enabled=enabled, error=error, log=(level, message, lookup_key, *args))
+
     # Relay lifecycle is core-owned; an old plugin copy would compete for its registries.
     if names & LEGACY_RELAY_PLUGIN_KEYS:
         error = (
             "removed — Relay lifecycle is owned by Hermes core; configure "
             f"{RELAY_PLUGINS_CONFIG_ENV} instead"
         )
-        return ManifestGate(
-            "placeholder", error=error,
-            log=(logging.WARNING, "Refusing to load removed Hermes Relay plugin '%s'; %s", lookup_key, error),
-        )
+        return _placeholder(error, logging.WARNING, "Refusing to load removed Hermes Relay plugin '%s'; %s", error)
     if names & disabled:
-        return ManifestGate(
-            "placeholder", error="disabled via config",
-            log=(logging.DEBUG, "Skipping disabled plugin '%s'", lookup_key),
-        )
+        return _placeholder("disabled via config", logging.DEBUG, "Skipping disabled plugin '%s'")
     # Exclusive plugins (memory providers) have their own activation path; record only.
     if manifest.kind == "exclusive":
-        return ManifestGate(
-            "placeholder", error="exclusive plugin — activate via <category>.provider config",
-            log=(logging.DEBUG, "Skipping '%s' (exclusive, handled by category discovery)", lookup_key),
+        return _placeholder(
+            "exclusive plugin — activate via <category>.provider config", logging.DEBUG,
+            "Skipping '%s' (exclusive, handled by category discovery)",
         )
-    # Model providers load via providers/__init__.py; a second import here would create two
-    # ProviderProfile instances and break the bundled-vs-user "last writer wins" override.
+    # Model providers load via providers/__init__.py; a second import here would create two ProviderProfile
+    # instances and break the bundled-vs-user "last writer wins" override.
     if manifest.kind == "model-provider":
-        return ManifestGate(
-            "placeholder", enabled=True,
-            log=(logging.DEBUG, "Skipping '%s' (model-provider, handled by providers/ discovery)", lookup_key),
-        )
+        return _placeholder(
+            None, logging.DEBUG, "Skipping '%s' (model-provider, handled by providers/ discovery)", enabled=True)
     if manifest.source == "bundled":
         # Bundled backends auto-load; selection among them is ``<category>.provider`` config.
         if manifest.kind == "backend":
             return ManifestGate("load_now")
-        # Bundled platforms register LAZILY: eagerly importing ~20 heavy SDKs added seconds to every
-        # `hermes` invocation. A deferred loader keeps every platform available on first use.
+        # Bundled platforms register LAZILY: eagerly importing ~20 heavy SDKs added seconds to every `hermes`
+        # invocation. A deferred loader keeps every platform available on first use.
         if manifest.kind == "platform":
             return ManifestGate("defer")
     if enabled is None or not names & enabled:
-        return ManifestGate(
-            "placeholder",
-            error=f"not enabled in config (run `hermes plugins enable {lookup_key}` to activate)",
-            log=(logging.DEBUG, "Skipping '%s' (not in plugins.enabled)", lookup_key),
+        return _placeholder(
+            f"not enabled in config (run `hermes plugins enable {lookup_key}` to activate)", logging.DEBUG,
+            "Skipping '%s' (not in plugins.enabled)",
         )
     return ManifestGate("load")
