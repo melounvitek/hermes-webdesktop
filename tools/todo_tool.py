@@ -71,15 +71,9 @@ class TodoStore:
                     cur["parent"] = parent
                 else:
                     cur.pop("parent", None)
-        # Rebuild preserving original order for existing items.
-        seen = set()
-        rebuilt = []
-        for item in self._items:
-            current = existing.get(item["id"], item)
-            if current["id"] not in seen:
-                rebuilt.append(current)
-                seen.add(current["id"])
-        self._items = self._normalize_order(rebuilt)
+        # Rebuild preserving original order for existing items (first occurrence wins).
+        rebuilt = {item["id"]: existing.get(item["id"], item) for item in self._items}
+        self._items = self._normalize_order(list(rebuilt.values()))
 
     def read(self) -> List[Dict[str, str]]:
         return [item.copy() for item in self._items]
@@ -108,12 +102,9 @@ class TodoStore:
         if not self._items:
             return None
         children: Dict[str, List[Dict[str, str]]] = {}
-        roots: List[Dict[str, str]] = []
         for item in self._items:
             if item.get("parent"):
                 children.setdefault(item["parent"], []).append(item)
-            else:
-                roots.append(item)
 
         def render(item: Dict[str, str], depth: int, out: List[str]) -> bool:
             kid_lines: List[str] = []
@@ -129,8 +120,9 @@ class TodoStore:
             return keep
 
         lines = [TODO_INJECTION_HEADER]
-        for item in roots:
-            render(item, 0, lines)
+        for item in self._items:
+            if not item.get("parent"):
+                render(item, 0, lines)
         return "\n".join(lines) if len(lines) > 1 else None
 
     @staticmethod

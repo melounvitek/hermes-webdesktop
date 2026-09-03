@@ -31,9 +31,7 @@ def _schema_for_local_validation(node: Any) -> Any:
         return normalized
     schema_type = normalized.get("type")
     if isinstance(schema_type, str):
-        if schema_type != "null":
-            normalized["type"] = [schema_type, "null"]
-        return normalized
+        schema_type = [schema_type]
     if isinstance(schema_type, list):
         if "null" not in schema_type:
             normalized["type"] = [*schema_type, "null"]

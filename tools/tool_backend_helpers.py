@@ -216,9 +216,9 @@ def selection_exists(section: str) -> bool:
 
 
 # Backends that once shipped in-tree but were removed; a config still pointing at one would
-# otherwise fail silently at the FIRST tool call with a generic "no registered provider has
-# that name". Consulted by the startup config check and selection_error(). Add removals
-# here, never as one-off string checks:  "web": {"<name>": "the <Name> backend was removed"}
+# otherwise fail silently at the FIRST tool call with a generic "no registered provider has that
+# name". Used by the startup config check and selection_error(); add removals here, never as
+# one-off string checks:  "web": {"<name>": "the <Name> backend was removed in vX (...)"}
 REMOVED_BACKENDS: Dict[str, Dict[str, str]] = {}
 
 

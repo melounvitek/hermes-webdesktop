@@ -36,22 +36,18 @@ class CatalogEntry:
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-# Snowball stemmers carry mutable parsing state and bridge dispatch runs on parallel
-# tool-call threads: one stemmer per thread, created lazily.
 _thread_local = threading.local()
-
-
-def _stemmer() -> Any:
-    st = getattr(_thread_local, "stemmer", None)
-    if st is None:
-        st = _thread_local.stemmer = snowballstemmer.stemmer("english")
-    return st
 
 
 @functools.lru_cache(maxsize=16384)
 def _stem(token: str) -> str:
-    """Stem one token, memoized across stateless catalog rebuilds."""
-    return _stemmer().stemWord(token)
+    """Stem one token, memoized across stateless catalog rebuilds. Snowball stemmers carry
+    mutable parsing state and bridge dispatch runs on parallel tool-call threads, so the
+    stemmer is one-per-thread, created lazily."""
+    st = getattr(_thread_local, "stemmer", None)
+    if st is None:
+        st = _thread_local.stemmer = snowballstemmer.stemmer("english")
+    return st.stemWord(token)
 
 
 def _tokenize(text: str) -> List[str]:
@@ -75,6 +71,12 @@ def _registry_entry(name: str) -> Any:
         return None
 
 
+def _registry_toolset(name: str) -> Optional[str]:
+    """Toolset of a registered tool; None when unregistered or malformed (no str toolset)."""
+    toolset = getattr(_registry_entry(name), "toolset", None)
+    return toolset if isinstance(toolset, str) else None
+
+
 def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
     """Search-text blob: split name words + source label + description + top-level parameter
     names (schema bodies are noise with no recall gain). The ``mcp__`` prefix is dropped — it
@@ -92,11 +94,10 @@ def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
 
 def _classify_source(name: str) -> Tuple[str, str]:
     """Return (source_kind, source_name) for a registered tool name."""
-    entry = _registry_entry(name)
-    try:
-        return ("mcp" if entry.toolset.startswith("mcp-") else "plugin", entry.toolset)
-    except Exception:  # unregistered, or malformed entry (no str toolset)
+    toolset = _registry_toolset(name)
+    if toolset is None:
         return ("other", "")
+    return ("mcp" if toolset.startswith("mcp-") else "plugin", toolset)
 
 
 def build_catalog(tool_defs: List[Dict[str, Any]]) -> List[CatalogEntry]:
@@ -143,9 +144,7 @@ def _corpus_stats(catalog: List[CatalogEntry]) -> _CorpusStats:
     """Compute the BM25 statistics shared by every query over a catalog."""
     doc_lengths = [len(entry._tokens) for entry in catalog]
     avg_dl = sum(doc_lengths) / max(len(doc_lengths), 1)
-    doc_freq: Dict[str, int] = Counter()
-    for entry in catalog:
-        doc_freq.update(set(entry._tokens))
+    doc_freq = Counter(tok for entry in catalog for tok in set(entry._tokens))
     return doc_lengths, avg_dl, dict(doc_freq), len(catalog)
 
 
@@ -201,14 +200,12 @@ def _listing_group_label(source_name: str) -> str:
 
 def build_catalog_listing_with_form(
     deferrable: List[Dict[str, Any]], *, max_tokens: int = 4000) -> Tuple[Optional[str], str]:
-    """Render the skills-style deferred-catalog manifest: ``- name: short desc`` lines grouped
-    under a heading per source (MCP server / plugin toolset). Returns ``(text, form)``; form is
-    ``"full"``, ``"names"``, ``"mixed"`` (oversized servers collapsed to a name + count line,
-    small ones keep per-tool lines), ``"groups"`` (every server summarized) or ``"none"``
+    """Render the deferred-catalog manifest: ``- name: short desc`` lines grouped per source.
+    Returns ``(text, form)``; form is ``"full"``, ``"names"``, ``"mixed"`` (oversized servers
+    collapsed to a name + count line), ``"groups"`` (every server summarized) or ``"none"``
     (over budget even summarized -> text is None). Ordering is deterministic (sorted groups
-    and tools) so the block is byte-stable across assemblies — the request prefix stays
-    cacheable. Degradation is PER SERVER, largest first: one huge server must not cost a
-    small co-attached server its listing."""
+    and tools) so the block is byte-stable — the request prefix stays cacheable. Degradation
+    is PER SERVER, largest first: one huge server must not cost a small one its listing."""
     groups: Dict[str, List[Tuple[str, str]]] = {}
     for td in deferrable:
         fn = _fn(td)

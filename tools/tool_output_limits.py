@@ -56,13 +56,6 @@ def _reset_tool_output_limits_cache() -> None:
     _cached_limits = None
 
 
-def get_max_bytes() -> int:
-    return get_tool_output_limits()["max_bytes"]
-
-
-def get_max_lines() -> int:
-    return get_tool_output_limits()["max_lines"]
-
-
-def get_max_line_length() -> int:
-    return get_tool_output_limits()["max_line_length"]
+def get_max_bytes() -> int: return get_tool_output_limits()["max_bytes"]
+def get_max_lines() -> int: return get_tool_output_limits()["max_lines"]
+def get_max_line_length() -> int: return get_tool_output_limits()["max_line_length"]

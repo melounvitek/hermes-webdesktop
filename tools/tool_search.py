@@ -1,14 +1,14 @@
-"""Progressive tool disclosure ("tool search"): MCP/plugin tools and a curated set
-of event-triggered core tools are replaced in the model-visible array by three
-bridge tools — tool_search / tool_describe / tool_call. Invariants: core tools
-(``toolsets._HERMES_CORE_TOOLS``) and session-gated GUI toolsets never defer unless
-named in ``defer``; ANY deferrable tool activates the bridge (the listing scales
-with budget, not activation); the catalog is stateless — rebuilt from the live
-tool-defs every assembly (a session-keyed one drifts and silently drops tools);
-bridge calls route through ``model_tools.handle_function_call`` (same guardrails)."""
+"""Progressive tool disclosure ("tool search"): MCP/plugin tools and a curated set of
+event-triggered core tools are replaced in the model-visible array by three bridge tools —
+tool_search / tool_describe / tool_call. Invariants: core tools (``toolsets._HERMES_CORE_TOOLS``)
+and session-gated GUI toolsets never defer unless named in ``defer``; ANY deferrable tool
+activates the bridge (the listing scales with budget, not activation); the catalog is
+stateless — rebuilt from the live tool-defs every assembly (a session-keyed one drifts and
+silently drops tools); bridge calls route through ``model_tools.handle_function_call``."""
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -20,13 +20,12 @@ from tools.registry import tool_error
 from tools.tool_search_catalog import (  # noqa: F401 — re-exported public/test names
     BRIDGE_TOOL_NAMES, CHARS_PER_TOKEN, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
     CatalogEntry, _corpus_stats, _entry_search_text, _fn, _listing_group_label,
-    _registry_entry, _short_desc, _stem, _tokenize, build_catalog,
+    _registry_entry, _registry_toolset, _short_desc, _stem, _tokenize, build_catalog,
     build_catalog_listing_with_form, search_catalog)
 from tools.tool_search_validation import validate_deferred_call_args  # noqa: F401
 
 logger = logging.getLogger("tools.tool_search")
-_MAX_QUERIES_PER_CALL = 10  # bound the work one bridge call can request
-_MAX_DESCRIBE_NAMES_PER_CALL = 10
+_MAX_QUERIES_PER_CALL = _MAX_DESCRIBE_NAMES_PER_CALL = 10  # bound the work one bridge call requests
 
 
 @dataclass(frozen=True)
@@ -51,9 +50,8 @@ class ToolSearchConfig:
     def from_raw(cls, raw: Any) -> "ToolSearchConfig":
         """Build from a raw dict / legacy bool / None; every field is clamped and unknown
         values fall back to safe defaults — a config typo must not break the agent."""
-        if not isinstance(raw, dict):
-            return cls(enabled="off" if raw is False else "auto", threshold_pct=5.0,
-                       search_default_limit=5, max_search_limit=25)
+        if not isinstance(raw, dict):  # legacy bool / None
+            raw = {"enabled": "off" if raw is False else "auto"}
         max_search_limit = _clamped_int(raw.get("max_search_limit"), 25, 1, 50)
         defer_raw = raw.get("defer")
         return cls(
@@ -105,12 +103,8 @@ def _config_from_loader(loader_name: str) -> ToolSearchConfig:
         return ToolSearchConfig.from_raw(None)
 
 
-def load_config() -> ToolSearchConfig:
-    return _config_from_loader("load_config")
-
-
-def load_config_readonly() -> ToolSearchConfig:  # no copy of the cached full config
-    return _config_from_loader("load_config_readonly")
+load_config = functools.partial(_config_from_loader, "load_config")
+load_config_readonly = functools.partial(_config_from_loader, "load_config_readonly")  # no copy
 
 
 def _core_tool_names() -> frozenset[str]:
@@ -149,11 +143,9 @@ def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) 
         return True
     if name in _core_tool_names():
         return False
-    entry = _registry_entry(name)
-    try:
-        return entry.toolset.startswith("mcp-") or entry.toolset not in _DIRECT_SURFACE_TOOLSETS
-    except Exception:  # unregistered, or malformed entry (no str toolset): never deferrable
-        return False
+    toolset = _registry_toolset(name)  # None (unregistered/malformed) never defers
+    return toolset is not None and (
+        toolset.startswith("mcp-") or toolset not in _DIRECT_SURFACE_TOOLSETS)
 
 
 def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
@@ -248,10 +240,9 @@ def _search_description(deferred_count: int, listing: Optional[str], listing_for
 
 def bridge_tool_schemas(deferred_count: int, listing: Optional[str] = None,
                         listing_form: str = "") -> List[Dict[str, Any]]:
-    """Bridge tool schemas injected in place of deferred tools. Kept short — every byte is
-    paid on every turn. ``listing`` is embedded in the tool_search description; per-tool
-    ``listing_form``s say "skip search when you see the exact name", "groups" says which
-    domains exist and that search is mandatory."""
+    """Bridge tool schemas injected in place of deferred tools; kept short — every byte is paid
+    every turn. ``listing`` is embedded in the tool_search description; per-tool forms say
+    "skip search when you see the exact name", "groups" says search is mandatory."""
     return [
         _bridge_schema(
             TOOL_SEARCH_NAME,
@@ -353,10 +344,10 @@ def is_bridge_tool(name: str) -> bool:
 def _shared_tool_record(entry: CatalogEntry) -> Dict[str, Any]:
     """One record for the shared ``tools`` map (per-query groups carry names only);
     ``required`` lets the model attempt a trivial call without a ``tool_describe`` round-trip."""
-    schema = entry.schema if isinstance(entry.schema, dict) else {}
-    fn = schema.get("function")
-    params = fn.get("parameters") if isinstance(fn, dict) else None
-    required = params.get("required") if isinstance(params, dict) else None
+    try:
+        required = entry.schema["function"]["parameters"]["required"]
+    except (TypeError, KeyError, AttributeError):
+        required = []
     return {"source": entry.source, "source_name": entry.source_name,
             "description": (entry.description or "")[:400],  # cap chatty MCP descriptions
             "required": [r[:64] for r in (required if isinstance(required, list) else [])
@@ -398,9 +389,8 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
     required}}}``. ``limit`` applies PER QUERY; empty groups get ``available_sources`` +
     ``hint`` so a lexical miss is not mistaken for a missing capability."""
     config = config or load_config()
-    queries, err = _string_list_arg(
-        args, "queries", dedupe=False, max_items=_MAX_QUERIES_PER_CALL,
-        retry_hint="Retry with fewer, more targeted queries.")
+    queries, err = _string_list_arg(args, "queries", dedupe=False, max_items=_MAX_QUERIES_PER_CALL,
+                                    retry_hint="Retry with fewer, more targeted queries.")
     if err:
         return err
     raw_limit = args.get("limit")
@@ -501,9 +491,9 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
 
 __all__ = [
     "TOOL_SEARCH_NAME", "TOOL_DESCRIBE_NAME", "TOOL_CALL_NAME", "BRIDGE_TOOL_NAMES",
-    "ToolSearchConfig", "CatalogEntry", "AssemblyResult", "load_config",
-    "is_deferrable_tool_name", "classify_tools", "estimate_tokens_from_schemas",
-    "should_activate", "build_catalog", "build_catalog_listing_with_form", "listing_token_budget",
-    "search_catalog", "bridge_tool_schemas", "assemble_tool_defs", "is_bridge_tool",
-    "dispatch_tool_search", "dispatch_tool_describe", "resolve_underlying_call",
-    "scoped_deferrable_names", "validate_deferred_call_args"]
+    "ToolSearchConfig", "CatalogEntry", "AssemblyResult", "load_config", "is_deferrable_tool_name",
+    "classify_tools", "estimate_tokens_from_schemas", "should_activate", "build_catalog",
+    "build_catalog_listing_with_form", "listing_token_budget", "search_catalog",
+    "bridge_tool_schemas", "assemble_tool_defs", "is_bridge_tool", "dispatch_tool_search",
+    "dispatch_tool_describe", "resolve_underlying_call", "scoped_deferrable_names",
+    "validate_deferred_call_args"]

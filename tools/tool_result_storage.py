@@ -1,10 +1,9 @@
-"""Tool result persistence -- preserves large outputs instead of truncating.
-Layers against context overflow: (1) per-tool caps inside each tool; (2)
-``maybe_persist_tool_result`` — output over the tool's threshold is persisted and replaced
-by a preview + path. Canonical home is ALWAYS host-side ``$HERMES_HOME/cache/spillover/
-{id}.txt`` (works for sessions that never ran a terminal); remote backends get the
-translated in-sandbox path (probed for readability) else a copy in the sandbox temp dir.
-(3) ``enforce_turn_budget``."""
+"""Tool result persistence -- preserves large outputs instead of truncating. Layers against
+context overflow: (1) per-tool caps inside each tool; (2) ``maybe_persist_tool_result`` —
+output over the tool's threshold is persisted and replaced by a preview + path; canonical home
+is ALWAYS host-side ``$HERMES_HOME/cache/spillover/{id}.txt`` (works for sessions that never
+ran a terminal), remote backends get the translated in-sandbox path (probed for readability)
+else a copy in the sandbox temp dir; (3) ``enforce_turn_budget``."""
 
 import hashlib
 import logging
