@@ -22,49 +22,38 @@ from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
 from tools.approval_context import (  # noqa: F401 -- re-exported for callers/tests
-    _approval_session_key, _approval_turn_id, _approval_tool_call_id,
-    set_hermes_interactive_context, reset_hermes_interactive_context,
-    _is_interactive_cli, _fire_approval_hook, set_current_session_key,
-    reset_current_session_key, set_current_observability_context,
-    reset_current_observability_context, get_current_session_key,
-    _get_session_platform, _is_cron_approval_context,
-    _UNATTENDED_APPROVAL_PLATFORMS, _is_unattended_platform_approval_context,
-    _is_single_query_approval_context, _is_gateway_approval_context,
-    _resolve_cli_approval_callback, _should_fall_through_to_cli_approval,
-    _normalize_approval_mode, _get_approval_config, _get_approval_mode,
-    _get_approval_timeout, _get_cron_approval_mode, _get_single_query_approval_mode,
-    _get_unattended_approval_mode, _tirith_fail_open,
-    _get_approval_transport_config,
+    _approval_session_key, _approval_turn_id, _approval_tool_call_id, set_hermes_interactive_context,
+    reset_hermes_interactive_context, _is_interactive_cli, _fire_approval_hook, set_current_session_key,
+    reset_current_session_key, set_current_observability_context, reset_current_observability_context,
+    get_current_session_key, _get_session_platform, _is_cron_approval_context, _UNATTENDED_APPROVAL_PLATFORMS,
+    _is_unattended_platform_approval_context, _is_single_query_approval_context, _is_gateway_approval_context,
+    _resolve_cli_approval_callback, _should_fall_through_to_cli_approval, _normalize_approval_mode,
+    _get_approval_config, _get_approval_mode, _get_approval_timeout, _get_cron_approval_mode,
+    _get_single_query_approval_mode, _get_unattended_approval_mode, _tirith_fail_open, _get_approval_transport_config,
 )
 from tools.approval_prompt import (  # noqa: F401 -- re-exported for callers/tests
-    prompt_dangerous_approval, get_plugin_manager, _present_with_selected_transport,
-    _transport_choice, request_elicitation_consent,
+    prompt_dangerous_approval, get_plugin_manager, _present_with_selected_transport, _transport_choice,
+    request_elicitation_consent,
 )
 from tools.approval_floors import (  # noqa: F401 -- re-exported for callers/tests
-    _match_user_deny_rule, _user_deny_block_result, _save_blocked_payload,
-    _hardline_block_result, _sudo_stdin_block_result, _has_allowlist_shell_operator,
-    _command_matches_permanent_allowlist,
+    _match_user_deny_rule, _user_deny_block_result, _save_blocked_payload, _hardline_block_result,
+    _sudo_stdin_block_result, _has_allowlist_shell_operator, _command_matches_permanent_allowlist,
 )
 from tools.approval_detection import (  # noqa: F401 -- re-exported for callers/tests
-    HARDLINE_PATTERNS, _check_sudo_stdin_guard,
-    detect_hardline_command, _approval_key_aliases, _rewrite_resolved_user_home,
-    _rewrite_resolved_hermes_home, _MAX_SEPARATOR_FREE_COMMAND_CHARS,
-    _PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION, _bash_exec_payload,
-    _read_shell_word, _deobfuscate_shell_word_for_detection,
-    _iter_shell_command_starts, _command_detection_variants,
+    HARDLINE_PATTERNS, _check_sudo_stdin_guard, detect_hardline_command, _approval_key_aliases,
+    _rewrite_resolved_user_home, _rewrite_resolved_hermes_home, _MAX_SEPARATOR_FREE_COMMAND_CHARS,
+    _PARSER_LIMIT_DESCRIPTION, _MALFORMED_EXEC_DESCRIPTION, _bash_exec_payload, _read_shell_word,
+    _deobfuscate_shell_word_for_detection, _iter_shell_command_starts, _command_detection_variants,
     detect_dangerous_command,
 )
 from tools.approval_human_wait import (  # noqa: F401 -- re-exported for callers/tests
-    _human_wait_lock, _human_wait_states, _HUMAN_WAIT_MAX_SESSIONS,
-    HUMAN_WAIT_MARGIN_S, human_wait_ceiling, human_wait_window, human_wait_seconds,
+    _human_wait_lock, _human_wait_states, _HUMAN_WAIT_MAX_SESSIONS, HUMAN_WAIT_MARGIN_S, human_wait_ceiling,
+    human_wait_window, human_wait_seconds,
 )
 from tools.approval_smart import (  # noqa: F401 -- re-exported for callers/tests
-    _strip_shell_comments, _strip_line_comment, _get_smart_policy, _smart_approve,
-    _smart_verdict,
+    _strip_shell_comments, _strip_line_comment, _get_smart_policy, _smart_approve, _smart_verdict,
 )
-from tools.approval_gateway_wait import (  # noqa: F401 -- re-exported for callers/tests
-    _ApprovalEntry, _await_gateway_decision,
-)
+from tools.approval_gateway_wait import _ApprovalEntry, _await_gateway_decision  # noqa: F401 -- re-exported
 
 logger = logging.getLogger(__name__)
 
@@ -465,15 +454,12 @@ class _Unattended:
     trust: str      # execute_code: "approve only if {trust}"
 
     def mode(self) -> str:
-        # Looked up at call time so tests patching the getters keep working.
-        return _UNATTENDED_MODE_GETTERS[self.name]()
-
-    def hint(self, noun: str, advice: str) -> str:
-        """``{advice} To allow {noun} {scope}, set approvals.<key>: approve in config.yaml.``"""
-        return (f"{advice} To allow {noun} {self.scope}, set approvals.{self.cfg_key}: approve in config.yaml.")
+        # Looked up through the module at call time so tests patching the getters keep working.
+        return globals()[f"_get_{self.name}_approval_mode"]()
 
     def block_message(self, subject: str, *, noun: str, advice: str) -> str:
-        return f"BLOCKED: {subject} but {self.clause}. {self.hint(noun, advice)}"
+        return (f"BLOCKED: {subject} but {self.clause}. {advice} To allow {noun} {self.scope}, set "
+                f"approvals.{self.cfg_key}: approve in config.yaml.")
 
     @property
     def exec_tail(self) -> str:
@@ -481,10 +467,6 @@ class _Unattended:
                 f"instead, or set approvals.{self.cfg_key}: approve only if {self.trust}.")
 
 
-_UNATTENDED_MODE_GETTERS = {
-    "single_query": lambda: _get_single_query_approval_mode(), "cron": lambda: _get_cron_approval_mode(),
-    "unattended": lambda: _get_unattended_approval_mode(),
-}
 _SINGLE_QUERY_CTX = _Unattended(
     "single_query", "single_query_mode",
     "single-query mode (-q) runs without a user present to approve it",
