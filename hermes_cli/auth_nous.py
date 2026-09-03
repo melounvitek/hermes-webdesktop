@@ -176,10 +176,7 @@ def _scope_values(raw_scope: Any) -> set[str]:
 
 
 def _nous_invoke_jwt_status(
-    token: Any,
-    *,
-    scope: Any = None,
-    expires_at: Any = None,
+    token: Any, *, scope: Any = None, expires_at: Any = None,
     min_ttl_seconds: int = NOUS_INVOKE_JWT_MIN_TTL_SECONDS) -> Optional[str]:
     """Return None when the token can be used for inference, else a reason."""
     from hermes_cli.auth import _is_expiring
@@ -199,10 +196,7 @@ def _nous_invoke_jwt_status(
 
 
 def _nous_invoke_jwt_is_usable(
-    token: Any,
-    *,
-    scope: Any = None,
-    expires_at: Any = None,
+    token: Any, *, scope: Any = None, expires_at: Any = None,
     min_ttl_seconds: int = NOUS_INVOKE_JWT_MIN_TTL_SECONDS) -> bool:
     from hermes_cli.auth import _nous_invoke_jwt_status
     return _nous_invoke_jwt_status(

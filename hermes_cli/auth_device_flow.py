@@ -301,8 +301,7 @@ def _prompt_yes_no(prompt: str, *, default: str) -> bool:
 
 
 def _print_login_success(
-    provider_id: str, config_path: Path, *, show_auth_state: bool = False,
-) -> None:
+    provider_id: str, config_path: Path, *, show_auth_state: bool = False) -> None:
     print()
     print("Login successful!")
     if show_auth_state:

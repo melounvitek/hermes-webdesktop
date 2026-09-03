@@ -105,9 +105,7 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
 
 
 def _sync_codex_pool_entries(
-    auth_store: Dict[str, Any],
-    tokens: Dict[str, str],
-    last_refresh: Optional[str],
+    auth_store: Dict[str, Any], tokens: Dict[str, str], last_refresh: Optional[str],
     previous_singleton_tokens: Optional[Dict[str, str]] = None) -> None:
     """Mirror a fresh Codex re-auth into the credential_pool OAuth entries.
 
@@ -185,14 +183,9 @@ def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
 
 
 def _refresh_payload_access_token(
-    response: "httpx.Response",
-    *,
-    provider: str,
-    invalid_json: Tuple[str, str],
-    invalid_response: Optional[Tuple[str, str]],
-    missing_access: Tuple[str, str],
-    relogin_required: bool = True,
-    invalid_json_relogin: Optional[bool] = None,
+    response: "httpx.Response", *, provider: str, invalid_json: Tuple[str, str],
+    invalid_response: Optional[Tuple[str, str]], missing_access: Tuple[str, str],
+    relogin_required: bool = True, invalid_json_relogin: Optional[bool] = None,
     strict_str: bool = True) -> Tuple[Dict[str, Any], str]:
     """Parse a 200 token-refresh response; return ``(payload, stripped access_token)``.
 

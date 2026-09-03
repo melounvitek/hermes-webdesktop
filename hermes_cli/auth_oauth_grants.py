@@ -246,25 +246,19 @@ def _singleton_as_row(path: Path) -> Optional[Dict[str, Any]]:
         "expires_at_ms": data.get("expiresAt")}
 
 
-# One-time heal for installs that ALREADY forked a single-use grant (fleets created before the
-# clone-strip / root-write-through). Those copies are one credential with several owners:
-# whichever profile rotated last holds the only live refresh token and every other copy (root
-# included) is spent; upgrading alone would keep each profile on its own doomed copy.
-# ``heal_forked_single_use_oauth_grants`` runs at profile ``load_pool()`` time: it finds profile
-# rows that share LINEAGE with a root row (same pool id, or same account identity / token
-# material), keeps the copy most likely live (freshest rotation), writes it into ROOT when root's
-# is older, and strips the profile's copy so the profile borrows root from then on. Idempotent,
-# never touches API-key rows, never deletes a row with no root counterpart (an independent
-# ``hermes -p <p> auth add`` grant, or the only surviving copy), and reads only the two auth.json
-# files the existing root fallback already reads — no environ / secret-scope reads.
-
-
 def heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Consolidate a profile's forked copy of a single-use OAuth grant into root.
+    """One-time heal for installs that ALREADY forked a single-use grant into a profile.
 
-    Runs only in profile mode for ``SINGLE_USE_REFRESH_POOL_PROVIDERS``. Returns a summary
-    ``{"adopted": bool, "stripped_ids": [...], "files": [...], "providers_block": bool}`` when
-    something was healed, else ``None``. Never raises.
+    Forked copies are one credential with several owners: whichever profile rotated last holds the
+    only live refresh token and every other copy (root included) is spent. Runs at profile
+    ``load_pool()`` time for ``SINGLE_USE_REFRESH_POOL_PROVIDERS``: finds profile rows sharing
+    LINEAGE with a root row (same pool id, or same account identity / token material), keeps the
+    freshest rotation, writes it into ROOT when root's is older, and strips the profile's copy so
+    the profile borrows root from then on. Idempotent; never touches API-key rows; never deletes a
+    row with no root counterpart (an independent ``hermes -p <p> auth add`` grant, or the only
+    surviving copy); reads only the two auth.json files the root fallback already reads. Returns
+    ``{"adopted", "stripped_ids", "files", "providers_block"}`` when something healed, else None.
+    Never raises.
     """
     if provider_id not in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         return None
@@ -446,6 +440,23 @@ class _HealPass:
     def dirty(self) -> bool:
         return bool(self.profile_changed or self.root_changed or self.summary["adopted"])
 
+    def notice(self, profile_name: str) -> str:
+        summary = self.summary
+        log_bits: List[str] = []
+        if summary["stripped_ids"]:
+            log_bits.append(f"pool rows {summary['stripped_ids']}")
+        if summary["providers_block"]:
+            log_bits.append(f"providers.{self.provider_id} block")
+        if summary["files"]:
+            log_bits.append(", ".join(summary["files"]))
+        verdict = (
+            "profile copy was the live pair; root updated"
+            if summary["adopted"] else "root copy already newest; profile copy dropped")
+        return (
+            f"profile {profile_name}: consolidated forked {self.provider_id} OAuth grant "
+            f"({'; '.join(log_bits) or 'no-op'}) into the root grant — {verdict}; "
+            f"this profile now borrows the root grant (#100339)")
+
 
 def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, Any]]:
     from hermes_cli.auth import (
@@ -508,20 +519,7 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
             if run.profile_changed and profile_path.exists():
                 _save_auth_store(profile_store, target_path=profile_path)
 
-    log_bits: List[str] = []
-    if summary["stripped_ids"]:
-        log_bits.append(f"pool rows {summary['stripped_ids']}")
-    if summary["providers_block"]:
-        log_bits.append(f"providers.{provider_id} block")
-    if summary["files"]:
-        log_bits.append(", ".join(summary["files"]))
-    verdict = (
-        "profile copy was the live pair; root updated"
-        if summary["adopted"] else "root copy already newest; profile copy dropped")
-    message = (
-        f"profile {profile_home.name}: consolidated forked {provider_id} OAuth grant "
-        f"({'; '.join(log_bits) or 'no-op'}) into the root grant — {verdict}; "
-        f"this profile now borrows the root grant (#100339)")
+    message = run.notice(profile_home.name)
     logger.info(message)
     _oauth_heal_notices.append(message)
     return summary
