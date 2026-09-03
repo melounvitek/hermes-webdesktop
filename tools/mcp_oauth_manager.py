@@ -1,16 +1,11 @@
-#!/usr/bin/env python3
 """Central manager for per-server MCP OAuth state (one instance per process).
 
-Holds per-server provider instances and coordinates cross-process token reload (mtime-based
-disk watch, so tokens refreshed by cron/another CLI are picked up without a restart), 401
-deduplication (N concurrent tool calls hitting 401 with the same access_token trigger one
-recovery attempt) and reconnect signalling (``MCPServerTask`` in ``mcp_tool.py`` drives the
-reconnect; the manager decides when it is warranted).
-
-This module is the ONLY place that instantiates the SDK's ``OAuthClientProvider`` for runtime
-use; other code paths go through ``get_manager()``. We lean on the SDK's lazy refresh rather
-than refreshing before every op: one ``stat()`` per tool call is cheaper than an await +
-refresh round-trip.
+Holds per-server providers and coordinates cross-process token reload (mtime-based disk watch,
+so tokens refreshed by cron/another CLI are picked up without a restart), 401 deduplication
+(N concurrent 401s with the same access_token trigger one recovery) and reconnect signalling
+(``MCPServerTask`` drives the reconnect; the manager decides when). The ONLY place that
+instantiates the SDK's ``OAuthClientProvider`` for runtime use. We rely on the SDK's lazy
+refresh: one ``stat()`` per tool call is cheaper than an await + refresh round-trip.
 """
 
 from __future__ import annotations
@@ -27,25 +22,18 @@ from tools.mcp_oauth_provider import HermesProviderMixin
 
 logger = logging.getLogger(__name__)
 
-
-def _same_endpoint(a: str, b: str) -> bool:
-    """True if two URLs target the same endpoint: scheme, host (case-insensitive) and path,
-    ignoring query/fragment. Confirms a rejected response actually came from the OAuth token
-    endpoint before we act on an ``invalid_client`` body."""
-    from urllib.parse import urlsplit
-
-    try:
-        pa, pb = urlsplit(a), urlsplit(b)
-    except ValueError:  # pragma: no cover — malformed URL
-        return False
-    return pa.scheme == pb.scheme and pa.netloc.lower() == pb.netloc.lower() and pa.path.rstrip("/") == pb.path.rstrip("/")
+try:
+    from mcp.client.auth.oauth2 import OAuthClientProvider as _SDKOAuthClientProvider
+    _SDK_BASES: tuple = (_SDKOAuthClientProvider,)
+except ImportError:  # pragma: no cover — SDK required in CI; module must still import
+    _SDK_BASES = ()
 
 
 @dataclass
 class _ProviderEntry:
-    """Per-server OAuth state. ``last_mtime_ns`` is the last-seen tokens-file mtime (0 = never
-    read) for external-refresh detection; ``lock`` binds to whichever asyncio loop first awaits
-    it (the MCP event loop); ``pending_401`` dedupes thundering-herd 401s by failed access_token."""
+    """Per-server OAuth state. ``last_mtime_ns``: last-seen tokens-file mtime (0 = never read)
+    for external-refresh detection; ``lock`` binds to the first asyncio loop awaiting it (the MCP
+    loop); ``pending_401`` dedupes thundering-herd 401s by failed access_token."""
 
     server_url: str
     oauth_config: Optional[dict]
@@ -55,12 +43,11 @@ class _ProviderEntry:
     pending_401: dict[str, "asyncio.Future[bool]"] = field(default_factory=dict)
 
 
-# -- HermesMCPOAuthProvider — OAuthClientProvider subclass with disk-watch ----
-class _HermesRuntimeProviderMixin:
-    """Runtime-only provider behaviour layered over ``HermesProviderMixin``: pre-flow disk-mtime
-    reload, expiry seeding on cold load, pre-flight metadata discovery, dead-client-registration
-    detection and the bidirectional ``async_auth_flow`` bridge. Must precede the SDK class in
-    the MRO."""
+class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
+    """OAuthClientProvider with pre-flow disk-mtime reload (external refreshes become visible to
+    a running session), expiry seeding on cold load, pre-flight metadata discovery, dead-client
+    registration detection and the bidirectional ``async_auth_flow`` bridge. Token-endpoint
+    fixes come from ``HermesProviderMixin``. Only usable when the SDK's OAuth module imported."""
 
     _hermes_logger = logger
 
@@ -71,19 +58,16 @@ class _HermesRuntimeProviderMixin:
         # generator from another task. A binary semaphore keeps mutual exclusion without task
         # ownership; async_auth_flow narrows its scope around resource I/O.
         import anyio
-
         self.context.lock = anyio.Semaphore(1, max_value=1)
         self._hermes_server_name = server_name
         self._hermes_home = ""
-        # A config-supplied (pre-registered) client_id rejected as invalid_client means the
-        # *config* is wrong — re-registration can't help, so only dynamically-registered
-        # clients auto-heal.
+        # A config-supplied client_id rejected as invalid_client means the *config* is wrong —
+        # re-registration can't help, so only dynamically-registered clients auto-heal.
         self._hermes_preregistered = preregistered
 
     def _hermes_storage(self):
         """The context storage when it is a ``HermesTokenStorage``, else None."""
         from tools.mcp_oauth import HermesTokenStorage
-
         storage = self.context.storage
         return storage if isinstance(storage, HermesTokenStorage) else None
 
@@ -93,56 +77,44 @@ class _HermesRuntimeProviderMixin:
     async def _initialize(self) -> None:
         """Load stored state, seed ``token_expiry_time``, restore/prefetch metadata.
 
-        The SDK's ``_initialize`` populates ``current_tokens`` but never calls
-        ``update_token_expiry``, so ``is_token_valid()`` is True for any loaded token regardless
-        of age and a restarted process ships stale Bearer tokens (some providers answer 200 with
-        an app-level auth error the transport can't see). Seeding the expiry makes the SDK take
-        ``can_refresh_token()`` and refresh first; ``HermesTokenStorage`` persists absolute
-        ``expires_at`` so the TTL reflects wall-clock age. Metadata is restored from disk, else
-        discovered pre-flight when we hold tokens but no metadata: otherwise ``_refresh_token``
-        guesses ``{server_url}/token`` (wrong for split-origin providers such as BetterStack),
-        404s, and we fall through to browser reauth.
-        """
+        The SDK's ``_initialize`` never calls ``update_token_expiry``, so ``is_token_valid()`` is
+        True for any loaded token regardless of age and a restarted process ships stale Bearer
+        tokens (some providers answer 200 with an app-level auth error). Seeding the expiry makes
+        the SDK refresh first; ``HermesTokenStorage`` persists absolute ``expires_at`` so the TTL
+        reflects wall-clock age. Metadata is restored from disk, else discovered pre-flight when
+        we hold tokens but no metadata: otherwise ``_refresh_token`` guesses ``{server_url}/token``
+        (wrong for split-origin providers), 404s, and we fall through to browser reauth."""
         await super()._initialize()
         tokens = self.context.current_tokens
         if tokens is not None and tokens.expires_in is not None:
             self.context.update_token_expiry(tokens)
-
         storage = self._hermes_storage()
         if storage is not None and self.context.oauth_metadata is None:
             meta = storage.load_oauth_metadata()
             if meta is not None:
                 self.context.oauth_metadata = meta
-                logger.debug(
-                    "MCP OAuth '%s': restored metadata from disk (token_endpoint=%s)",
-                    self._hermes_server_name, meta.token_endpoint,
-                )
-
+                logger.debug("MCP OAuth '%s': restored metadata from disk (token_endpoint=%s)",
+                             self._hermes_server_name, meta.token_endpoint)
         if tokens is not None and self.context.oauth_metadata is None:
             try:
                 await self._prefetch_oauth_metadata()
-            except Exception as exc:  # pragma: no cover — non-fatal: the SDK's 401-branch discovery runs next request
+            except Exception as exc:  # pragma: no cover — the SDK's 401-branch discovery runs next request
                 self._log_nonfatal("pre-flight metadata discovery", exc)
 
     async def _prefetch_oauth_metadata(self) -> None:
-        """Fetch PRM + ASM from the well-known endpoints and cache on context. Mirrors the SDK's
-        401-branch discovery but runs before the first request, using the SDK's own URL
-        builders/response handlers so we track whatever the pinned SDK version expects."""
+        """Fetch PRM + ASM from the well-known endpoints before the first request, using the
+        SDK's own URL builders/response handlers so we track whatever the pinned SDK expects."""
         # The SDK's httpx flavour, not Hermes' — mcp 2.0 builds on httpx2 and
-        # `create_oauth_metadata_request` returns *its* Request objects, which only its own
-        # AsyncClient can send (tools.mcp_tool.sdk_httpx).
+        # `create_oauth_metadata_request` returns *its* Request objects.
         from tools.mcp_tool import sdk_httpx
         httpx = sdk_httpx()
         if httpx is None:  # pragma: no cover — SDK import would have failed
             return
         from mcp.client.auth.utils import (
             build_oauth_authorization_server_metadata_discovery_urls,
-            build_protected_resource_metadata_discovery_urls,
-            create_oauth_metadata_request,
-            handle_auth_metadata_response,
-            handle_protected_resource_response,
+            build_protected_resource_metadata_discovery_urls, create_oauth_metadata_request,
+            handle_auth_metadata_response, handle_protected_resource_response,
         )
-
         server_url = self.context.server_url
 
         async def _send(client, url: str, label: str):
@@ -153,7 +125,7 @@ class _HermesRuntimeProviderMixin:
                 return None
 
         async with httpx.AsyncClient(timeout=10.0) as client:
-            # Step 1: PRM discovery to learn the authorization_server URL.
+            # PRM discovery to learn the authorization_server URL.
             for url in build_protected_resource_metadata_discovery_urls(None, server_url):
                 resp = await _send(client, url, "PRM")
                 prm = await handle_protected_resource_response(resp) if resp is not None else None
@@ -162,8 +134,7 @@ class _HermesRuntimeProviderMixin:
                     if prm.authorization_servers:
                         self.context.auth_server_url = str(prm.authorization_servers[0])
                     break
-
-            # Step 2: ASM discovery against auth_server_url (server_url fallback for legacy providers).
+            # ASM discovery against auth_server_url (server_url fallback for legacy providers).
             for url in build_oauth_authorization_server_metadata_discovery_urls(self.context.auth_server_url, server_url):
                 resp = await _send(client, url, "ASM")
                 if resp is None:
@@ -173,19 +144,15 @@ class _HermesRuntimeProviderMixin:
                     break
                 if asm:
                     self.context.oauth_metadata = asm
-                    # Persist now so a later cold-load skips discovery.
-                    storage = self._hermes_storage()
+                    storage = self._hermes_storage()  # persist now so a later cold-load skips discovery
                     if storage is not None:
                         storage.save_oauth_metadata(asm)
-                    logger.debug(
-                        "MCP OAuth '%s': pre-flight ASM discovered token_endpoint=%s",
-                        self._hermes_server_name, asm.token_endpoint,
-                    )
+                    logger.debug("MCP OAuth '%s': pre-flight ASM discovered token_endpoint=%s",
+                                 self._hermes_server_name, asm.token_endpoint)
                     break
 
     def _persist_oauth_metadata_if_changed(self) -> None:
-        """Save metadata the SDK discovered lazily (401 branch) for future restarts; no-op when
-        absent, not our storage, or unchanged."""
+        """Save metadata the SDK discovered lazily (401 branch); no-op when absent/unchanged."""
         meta = self.context.oauth_metadata
         storage = self._hermes_storage()
         if meta is None or storage is None:
@@ -195,14 +162,23 @@ class _HermesRuntimeProviderMixin:
             storage.save_oauth_metadata(meta)
 
     async def _is_invalid_client_at_token_endpoint(self, response: Any) -> bool:
-        """True when *response* is the token endpoint rejecting our client_id with
-        ``invalid_client`` (whole word, so RFC 7591's ``invalid_client_metadata`` does not trip
-        it). The body is read only after the endpoint matches."""
+        """True when *response* is the token endpoint (same scheme/host/path, query ignored)
+        rejecting our client_id with ``invalid_client`` — whole word, so RFC 7591's
+        ``invalid_client_metadata`` does not trip it. The body is read only after the endpoint
+        matches."""
+        from urllib.parse import urlsplit
         meta = getattr(self.context, "oauth_metadata", None)
         token_endpoint = str(meta.token_endpoint) if meta is not None and getattr(meta, "token_endpoint", None) else None
         req = getattr(response, "request", None)
         req_url = str(req.url) if req is not None else None
-        if not token_endpoint or not req_url or not _same_endpoint(req_url, token_endpoint):
+        if not token_endpoint or not req_url:
+            return False
+        try:
+            pa, pb = urlsplit(req_url), urlsplit(token_endpoint)
+        except ValueError:  # pragma: no cover — malformed URL
+            return False
+        if not (pa.scheme == pb.scheme and pa.netloc.lower() == pb.netloc.lower()
+                and pa.path.rstrip("/") == pb.path.rstrip("/")):
             return False
         body = await response.aread()
         return re.search(rb"\binvalid_client\b", body.lower()) is not None
@@ -210,46 +186,37 @@ class _HermesRuntimeProviderMixin:
     async def _maybe_flag_poisoned_client(self, response: Any) -> None:
         """Detect a dead client registration and force re-registration.
 
-        An ``invalid_client`` rejection of our ``client_id`` at the token endpoint (exchange or
-        refresh) proves the cached registration is dead server-side; delete ``client.json``
-        (+ stale metadata) so the SDK re-runs DCR next flow. The browser-side "Redirect URI
-        Mismatch" case has no HTTP signal and is left to ``hermes mcp reauth``.
-
-        Conservative by construction — acts ONLY when status is 400/401, the request hit the
-        discovered ``token_endpoint`` (the only request carrying our ``client_id``), and the body
-        carries ``invalid_client``. Pre-registered clients are never poisoned. Best-effort: any
-        failure is swallowed so a miss never breaks the live flow. If ``token_endpoint`` was
-        never discovered the guard returns early.
-        """
+        An ``invalid_client`` rejection of our ``client_id`` at the token endpoint proves the
+        cached registration is dead server-side; delete ``client.json`` (+ stale metadata) so the
+        SDK re-runs DCR next flow. Conservative: acts ONLY on status 400/401 at the discovered
+        ``token_endpoint`` (the only request carrying our ``client_id``) with ``invalid_client``
+        in the body; pre-registered clients are never poisoned; any failure is swallowed so a
+        miss never breaks the live flow. The browser-side "Redirect URI Mismatch" case has no
+        HTTP signal and is left to ``hermes mcp reauth``."""
         try:
             if self._hermes_preregistered or getattr(response, "status_code", None) not in (400, 401):
                 return
             if not await self._is_invalid_client_at_token_endpoint(response):
                 return
-
             storage = self._hermes_storage()
             # If the rejected client_id was our CIMD URL, re-presenting it would loop (the
             # server already fetched and refused it). Drop the URL so the retry takes DCR, and
             # mark it on disk so the next process doesn't walk back into the same refusal
             # (`hermes mcp login` clears the marker).
             cimd_url = getattr(self.context, "client_metadata_url", None)
-            rejected_id = getattr(self.context.client_info, "client_id", None)
-            if cimd_url and rejected_id == cimd_url:
-                logger.warning(
-                    "MCP OAuth '%s': authorization server rejected our Client ID Metadata Document (%s) "
-                    "with invalid_client — falling back to dynamic client registration.",
-                    self._hermes_server_name, cimd_url,
-                )
+            if cimd_url and getattr(self.context.client_info, "client_id", None) == cimd_url:
+                logger.warning("MCP OAuth '%s': authorization server rejected our Client ID Metadata Document (%s) "
+                               "with invalid_client — falling back to dynamic client registration.",
+                               self._hermes_server_name, cimd_url)
                 self.context.client_metadata_url = None
                 if storage is not None:
                     storage.mark_cimd_rejected()
-
             if storage is not None:
                 storage.poison_client_registration()
             # Drop the in-memory client so the SDK re-registers next flow.
             self.context.client_info = None
             self._initialized = False
-        except Exception as exc:  # pragma: no cover — defensive, must not throw
+        except Exception as exc:  # pragma: no cover — must not throw
             self._log_nonfatal("invalid_client detection", exc)
 
     async def async_auth_flow(self, request):  # type: ignore[override]
@@ -260,9 +227,8 @@ class _HermesRuntimeProviderMixin:
             self._log_nonfatal("pre-flow disk-watch", exc)
 
         # Bridge the bidirectional generator protocol by hand: httpx feeds responses back via
-        # ``auth_flow.asend(response)``. A naive ``async for item in inner: yield item``
-        # DISCARDS those values, so the SDK's ``response = yield request`` sees None and
-        # crashes on ``response.status_code``.
+        # ``auth_flow.asend(response)``. A naive ``async for item in inner: yield item`` DISCARDS
+        # those values, so the SDK's ``response = yield request`` sees None and crashes.
         inner = super().async_auth_flow(request)
         resource_lock_released = False
         sent_access_token = None
@@ -286,29 +252,22 @@ class _HermesRuntimeProviderMixin:
                 # retry with that token instead of a duplicate OAuth transition from the stale
                 # 401/403.
                 tokens = self.context.current_tokens
-                if (
-                    getattr(incoming, "status_code", None) in (401, 403)
-                    and self.context.is_token_valid()
-                    and tokens is not None
-                    and tokens.access_token != sent_access_token
-                ):
+                if (getattr(incoming, "status_code", None) in (401, 403) and self.context.is_token_valid()
+                        and tokens is not None and tokens.access_token != sent_access_token):
                     self._add_auth_header(request)
                     await inner.aclose()
                     retry_after_concurrent_auth = True
                     break
-                # Sniff for a dead-client-registration signal (best-effort).
                 await self._maybe_flag_poisoned_client(incoming)
                 outgoing = await inner.asend(incoming)
         except StopAsyncIteration:
-            # Persist metadata discovered lazily in the 401 branch.
-            self._persist_oauth_metadata_if_changed()
+            self._persist_oauth_metadata_if_changed()  # metadata discovered lazily in the 401 branch
             return
         finally:
             if resource_lock_released:
                 # Balance the SDK's surrounding ``async with`` even when HTTPX cancels/closes
                 # the flow mid-request. Shield only this local bookkeeping.
                 import anyio
-
                 with anyio.CancelScope(shield=True):
                     await self.context.lock.acquire()
 
@@ -318,32 +277,14 @@ class _HermesRuntimeProviderMixin:
             return
 
 
-def _make_hermes_provider_class() -> Optional[type]:
-    """Lazy-import the SDK base class and return our subclass (None if the SDK's OAuth module is
-    unavailable, so this module still imports)."""
-    try:
-        from mcp.client.auth.oauth2 import OAuthClientProvider
-    except ImportError:  # pragma: no cover — SDK required in CI
-        return None
-
-    class HermesMCPOAuthProvider(_HermesRuntimeProviderMixin, HermesProviderMixin, OAuthClientProvider):
-        """OAuthClientProvider with pre-flow disk-mtime reload: before every ``async_auth_flow``
-        the manager checks whether the tokens file changed on disk and, if so, resets
-        ``_initialized`` so the next flow re-reads storage — making external refreshes visible
-        to a running session. Token-endpoint fixes come from ``HermesProviderMixin``."""
-
-    return HermesMCPOAuthProvider
+# Cached at import time; None when the SDK's OAuth module is unavailable.
+_HERMES_PROVIDER_CLS: Optional[type] = HermesMCPOAuthProvider if _SDK_BASES else None
 
 
-# Cached at import time. Tested and used by :class:`MCPOAuthManager`.
-_HERMES_PROVIDER_CLS: Optional[type] = _make_hermes_provider_class()
-
-
-# -- Manager -----------------------------------------------------------------
 class MCPOAuthManager:
-    """Single source of truth for per-server MCP OAuth state. Thread-safe: the ``_entries`` dict
-    is guarded by ``_entries_lock`` for get-or-create semantics; per-entry state is guarded by
-    the entry's own ``asyncio.Lock`` (used from the MCP event loop thread)."""
+    """Single source of truth for per-server MCP OAuth state. Thread-safe: ``_entries`` is
+    guarded by ``_entries_lock`` for get-or-create; per-entry state by the entry's own
+    ``asyncio.Lock`` (used from the MCP event loop thread)."""
 
     def __init__(self) -> None:
         self._entries: dict[tuple[str, str], _ProviderEntry] = {}
@@ -352,12 +293,10 @@ class MCPOAuthManager:
         # mid-run and leave `await pending` hanging forever.
         self._inflight_tasks: set[asyncio.Task] = set()
 
-    # -- Provider construction / caching --
     def get_or_build_provider(self, server_name: str, server_url: str, oauth_config: Optional[dict]) -> Optional[Any]:
-        """Return a cached OAuth provider for ``server_name`` or build one. Idempotent: repeat
-        calls with the same name return the same instance; if ``server_url`` changes for a
-        given name the cached entry is discarded and a fresh provider is built. None if the MCP
-        SDK's OAuth support is unavailable."""
+        """Cached OAuth provider for ``server_name``, built on first use. If ``server_url``
+        changes for a name the cached entry is discarded and rebuilt. None if the MCP SDK's
+        OAuth support is unavailable."""
         key = self._key(server_name)
         with self._entries_lock:
             entry = self._entries.get(key)
@@ -365,8 +304,7 @@ class MCPOAuthManager:
                 logger.info("MCP OAuth '%s': URL changed from %s to %s, discarding cache", server_name, entry.server_url, server_url)
                 entry = None
             if entry is None:
-                entry = _ProviderEntry(server_url=server_url, oauth_config=oauth_config)
-                self._entries[key] = entry
+                entry = self._entries[key] = _ProviderEntry(server_url=server_url, oauth_config=oauth_config)
             if entry.provider is None:
                 entry.provider = self._build_provider(server_name, entry)
                 if entry.provider is not None:
@@ -376,13 +314,11 @@ class MCPOAuthManager:
     @staticmethod
     def _key(server_name: str, hermes_home: str | Path | None = None) -> tuple[str, str]:
         from hermes_constants import get_hermes_home
-
         home = Path(hermes_home) if hermes_home is not None else get_hermes_home()
         return (str(home.expanduser().resolve(strict=False)), server_name)
 
     def _build_provider(self, server_name: str, entry: _ProviderEntry) -> Optional[Any]:
-        """Build a :class:`HermesMCPOAuthProvider` from the shared ``tools.mcp_oauth`` helpers;
-        None if the SDK's OAuth support is unavailable."""
+        """Build a ``HermesMCPOAuthProvider``; None if the SDK's OAuth support is unavailable."""
         if _HERMES_PROVIDER_CLS is None:
             logger.warning("MCP OAuth '%s': SDK auth module unavailable", server_name)
             return None
@@ -390,34 +326,27 @@ class MCPOAuthManager:
         from tools.mcp_dashboard_oauth import get_dashboard_oauth_flow
         from tools.mcp_oauth import _OAUTH_AVAILABLE, OAuthNonInteractiveError, _is_interactive
         from tools.mcp_oauth_provider import build_provider_kwargs, prepare_oauth_config
-
         if not _OAUTH_AVAILABLE:
             return None
         cfg, storage = prepare_oauth_config(server_name, entry.server_url, entry.oauth_config)
         if get_dashboard_oauth_flow() is None and not _is_interactive() and not storage.has_cached_tokens():
             raise OAuthNonInteractiveError(
                 f"MCP OAuth for '{server_name}': non-interactive environment and no cached tokens found. "
-                f"Run `hermes mcp login {server_name}` interactively first to complete initial authorization."
-            )
+                f"Run `hermes mcp login {server_name}` interactively first to complete initial authorization.")
         return _HERMES_PROVIDER_CLS(
-            server_name=server_name,
-            preregistered=bool(cfg.get("client_id")),
-            server_url=entry.server_url,
-            **build_provider_kwargs(cfg, storage, ssh_proxy_hint=False),
-        )
+            server_name=server_name, preregistered=bool(cfg.get("client_id")), server_url=entry.server_url,
+            **build_provider_kwargs(cfg, storage, ssh_proxy_hint=False))
 
     def remove(self, server_name: str, *, hermes_home: str | Path | None = None) -> _ProviderEntry | None:
-        """Evict the provider from cache AND delete tokens from disk (``hermes mcp remove`` and,
-        indirectly, ``hermes mcp login`` during forced re-auth)."""
+        """Evict the provider from cache AND delete tokens from disk (``hermes mcp remove``,
+        and ``hermes mcp login`` during forced re-auth)."""
         entry = self.evict(server_name, hermes_home=hermes_home)
         from tools.mcp_oauth import remove_oauth_tokens
         remove_oauth_tokens(server_name, hermes_home=hermes_home)
         logger.info("MCP OAuth '%s': evicted from cache and removed from disk", server_name)
         return entry
 
-    def restore_entry(
-        self, server_name: str, entry: _ProviderEntry | None, *, hermes_home: str | Path | None = None
-    ) -> None:
+    def restore_entry(self, server_name: str, entry: _ProviderEntry | None, *, hermes_home: str | Path | None = None) -> None:
         """Restore a provider entry removed for a failed reauthorization."""
         if entry is None:
             return
@@ -429,13 +358,10 @@ class MCPOAuthManager:
         with self._entries_lock:
             return self._entries.pop(self._key(server_name, hermes_home), None)
 
-    # -- Disk watch --
     async def invalidate_if_disk_changed(self, server_name: str, *, hermes_home: str | Path | None = None) -> bool:
         """Force the SDK provider to reload when the tokens file mtime changed; True if
-        invalidated. This is the external-refresh fix: a cron job writes fresh tokens and the
-        next tool call picks them up."""
+        invalidated. A cron job writes fresh tokens and the next tool call picks them up."""
         from tools.mcp_oauth import _get_token_dir, _safe_filename
-
         entry = self._entries.get(self._key(server_name, hermes_home))
         if entry is None or entry.provider is None:
             return False
@@ -447,8 +373,7 @@ class MCPOAuthManager:
                 return False
             if mtime_ns == entry.last_mtime_ns:
                 return False
-            old = entry.last_mtime_ns
-            entry.last_mtime_ns = mtime_ns
+            old, entry.last_mtime_ns = entry.last_mtime_ns, mtime_ns
             # `_initialized` is private SDK API but stable across the versions we pin
             # (>=1.26.0); resetting it forces a reload.
             if hasattr(entry.provider, "_initialized"):
@@ -456,22 +381,18 @@ class MCPOAuthManager:
             logger.info("MCP OAuth '%s': tokens file changed (mtime %d -> %d), forcing reload", server_name, old, mtime_ns)
             return True
 
-    # -- 401 handler (dedup'd) --
     async def _recover_401(self, server_name: str, entry: _ProviderEntry, key: str, pending: asyncio.Future) -> None:
         """Single recovery attempt behind *pending*; always clears the dedup slot."""
         try:
-            # Step 1: Did disk change? Picks up external refresh.
-            if await self.invalidate_if_disk_changed(server_name):
-                if not pending.done():
-                    pending.set_result(True)
-                return
-            # Step 2: No disk change — if the SDK can refresh in place, let the caller retry
-            # (the httpx.Auth flow refreshes on the next request).
-            can_refresh_fn = getattr(getattr(entry.provider, "context", None), "can_refresh_token", None)
-            try:
-                can_refresh = bool(can_refresh_fn()) if callable(can_refresh_fn) else False
-            except Exception:
-                can_refresh = False
+            # Disk changed (external refresh)? Else: if the SDK can refresh in place, let the
+            # caller retry (the httpx.Auth flow refreshes on the next request).
+            can_refresh = True
+            if not await self.invalidate_if_disk_changed(server_name):
+                can_refresh_fn = getattr(getattr(entry.provider, "context", None), "can_refresh_token", None)
+                try:
+                    can_refresh = bool(can_refresh_fn()) if callable(can_refresh_fn) else False
+                except Exception:
+                    can_refresh = False
             if not pending.done():
                 pending.set_result(can_refresh)
         except Exception as exc:  # pragma: no cover — defensive
@@ -483,10 +404,10 @@ class MCPOAuthManager:
 
     async def handle_401(self, server_name: str, failed_access_token: Optional[str] = None) -> bool:
         """Handle a 401 from a tool call, deduplicated across concurrent callers. True: a
-        (possibly new) access token is available — caller should reconnect and retry. False: no
-        recovery path — caller should surface a ``needs_reauth`` error so the model stops
-        hallucinating manual refreshes. Thundering-herd protection: N concurrent 401s with the
-        same ``failed_access_token`` fire one recovery attempt; the rest await its future."""
+        (possibly new) access token is available — reconnect and retry. False: no recovery
+        path — surface a ``needs_reauth`` error so the model stops hallucinating manual
+        refreshes. N concurrent 401s with the same ``failed_access_token`` fire one recovery
+        attempt; the rest await its future."""
         entry = self._entries.get(self._key(server_name))
         if entry is None or entry.provider is None:
             return False
@@ -495,8 +416,7 @@ class MCPOAuthManager:
         async with entry.lock:
             pending = entry.pending_401.get(key)
             if pending is None:
-                pending = loop.create_future()
-                entry.pending_401[key] = pending
+                pending = entry.pending_401[key] = loop.create_future()
                 task = asyncio.create_task(self._recover_401(server_name, entry, key, pending))
                 self._inflight_tasks.add(task)
                 task.add_done_callback(self._inflight_tasks.discard)
@@ -507,7 +427,6 @@ class MCPOAuthManager:
             return False
 
 
-# -- Module-level singleton ---------------------------------------------------
 _MANAGER: Optional[MCPOAuthManager] = None
 _MANAGER_LOCK = threading.Lock()
 

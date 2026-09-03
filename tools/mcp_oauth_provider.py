@@ -1,10 +1,9 @@
 """Shared ``OAuthClientProvider`` customizations for Hermes MCP OAuth.
 
-Two code paths build an SDK provider — ``tools.mcp_oauth.build_oauth_auth``
-(legacy public API) and ``tools.mcp_oauth_manager.MCPOAuthManager`` — and both
-need the same real-world fixes and the same config → constructor-kwargs
-plumbing. This module holds that shared core once; the origin modules keep
-their own subclass (logger name, disk-watch hooks) on top of it.
+Two code paths build an SDK provider — ``tools.mcp_oauth.build_oauth_auth`` (legacy public
+API) and ``tools.mcp_oauth_manager.MCPOAuthManager`` — and both need the same real-world
+fixes and config → constructor-kwargs plumbing. This module holds that core once; the origin
+modules keep their own subclass (logger name, disk-watch hooks) on top of it.
 """
 
 from __future__ import annotations
@@ -22,17 +21,16 @@ class HermesProviderMixin:
     """Token-endpoint fixes layered over the SDK's ``OAuthClientProvider``.
 
     - Supabase-style dynamic registration returns a ``client_secret`` but omits
-      ``token_endpoint_auth_method``; the SDK then treats the client as public,
-      omits the secret, and the token endpoint rejects the exchange (looping the
-      browser authorization page). Coerce the in-memory client info to
-      ``client_secret_post`` right before token and refresh requests.
-    - ``token_user_agent`` (``oauth.user_agent``) is stamped onto token-endpoint
-      requests only — some authorization servers and WAFs reject httpx's default.
-    - Any 2xx token/refresh response is accepted, and token bodies never leak
-      into exception text or log output.
+      ``token_endpoint_auth_method``; the SDK then treats the client as public, omits the
+      secret, and the token endpoint rejects the exchange (looping the browser authorization
+      page). Coerce the in-memory client info to ``client_secret_post`` before token requests.
+    - ``token_user_agent`` (``oauth.user_agent``) is stamped onto token-endpoint requests
+      only — some authorization servers and WAFs reject httpx's default.
+    - Any 2xx token/refresh response is accepted, and token bodies never leak into
+      exception text or log output.
 
-    Must precede the SDK class in the MRO. Subclasses set ``_hermes_logger`` so
-    warnings keep their origin module's logger name.
+    Must precede the SDK class in the MRO. Subclasses set ``_hermes_logger`` so warnings
+    keep their origin module's logger name.
     """
 
     _hermes_logger: logging.Logger = logger
@@ -49,8 +47,8 @@ class HermesProviderMixin:
         return request
 
     def _coerce_client_secret_post(self) -> None:
-        """Same rule as ``HermesTokenStorage._coerce_secret_auth_method``, applied
-        to the in-memory client info right before a token-endpoint request."""
+        """Same rule as ``HermesTokenStorage._coerce_secret_auth_method``, applied to the
+        in-memory client info BEFORE the SDK builds a token-endpoint request from it."""
         info = self.context.client_info
         if not info:
             return
@@ -110,11 +108,9 @@ class HermesProviderMixin:
 
 
 def prepare_oauth_config(server_name: str, server_url: str, oauth_config: dict | None) -> tuple[dict, "HermesTokenStorage"]:
-    """Copy the ``oauth:`` block, apply provider defaults, open its token storage.
-
-    The copy matters: later steps record ``_resolved_port`` / ``_cimd_url`` in
-    the dict, which must never leak back into the caller's config.
-    """
+    """Copy the ``oauth:`` block, apply provider defaults, open its token storage. The copy
+    matters: later steps record ``_resolved_port`` / ``_cimd_url`` in the dict, which must
+    never leak back into the caller's config."""
     from tools import mcp_oauth as mo
 
     cfg = dict(oauth_config or {})
@@ -125,12 +121,10 @@ def prepare_oauth_config(server_name: str, server_url: str, oauth_config: dict |
 def build_provider_kwargs(cfg: dict, storage: "HermesTokenStorage", *, ssh_proxy_hint: bool) -> dict[str, Any]:
     """Resolve the callback port and return the shared provider constructor kwargs.
 
-    Runs the port → client-metadata → pre-registration sequence (order matters:
-    metadata needs the resolved port, pre-registration needs the metadata).
-    ``ssh_proxy_hint`` lets the redirect handler tailor its remote-session hint
-    to a configured proxy ``redirect_uri``. Helpers are looked up on
-    ``tools.mcp_oauth`` at call time so tests can patch them there.
-    """
+    Runs port → client-metadata → pre-registration (order matters: metadata needs the
+    resolved port, pre-registration needs the metadata). ``ssh_proxy_hint`` lets the redirect
+    handler tailor its remote-session hint to a configured proxy ``redirect_uri``. Helpers are
+    looked up on ``tools.mcp_oauth`` at call time so tests can patch them there."""
     from tools import mcp_oauth as mo
 
     port = mo._configure_callback_port(cfg, storage)
@@ -143,9 +137,6 @@ def build_provider_kwargs(cfg: dict, storage: "HermesTokenStorage", *, ssh_proxy
         "redirect_handler": mo._make_redirect_handler(port, redirect_uri=redirect_uri),
         # mcp 2.0 dropped OAuthClientProvider's own `timeout`; the configured
         # `oauth.timeout` bounds the callback waiter's poll loop instead.
-        "callback_handler": mo._make_callback_waiter(
-            port, cfg.get("_cimd_url"), timeout=float(cfg.get("timeout", 300))
-        ),
+        "callback_handler": mo._make_callback_waiter(port, cfg.get("_cimd_url"), timeout=float(cfg.get("timeout", 300))),
         "token_user_agent": mo.token_request_user_agent(cfg),
-        **mo.cimd_provider_kwargs(cfg),
-    }
+        **mo.cimd_provider_kwargs(cfg)}

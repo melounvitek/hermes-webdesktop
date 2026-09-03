@@ -1,21 +1,14 @@
 #!/usr/bin/env python3
 """Parent-death watchdog supervisor for stdio MCP subprocesses.
 
-If Hermes dies hard (kill -9, crash, force-quit) its graceful teardown never
-runs and the stdio child plus its descendants are orphaned (macOS has no
-``PR_SET_PDEATHSIG``); piled-up orphans then race the legitimate new connection
-for the same upstream session. So the MCP command is spawned via this
-supervisor, which (1) runs the real command as its own child in a new process
-group so the whole tree can be killpg'd, (2) passes stdin/stdout/stderr straight
-through — the MCP stdio protocol talks over those pipes, so this must be a
-no-op relay, not a proxy — and (3) polls ``getppid()`` against the recorded
-parent PID and, once the parent is gone, SIGTERMs the child's group, waits,
-then SIGKILLs. Standard-library only so it starts fast and cannot itself leak.
-
-Usage (see ``_wrap_command_with_watchdog``)::
-
-    python3 -m tools.mcp_stdio_watchdog \\
-        --ppid <original_parent_pid> -- <real_command> <arg1> <arg2> ...
+If Hermes dies hard (kill -9, crash) its graceful teardown never runs and the stdio child
+plus its descendants are orphaned (macOS has no ``PR_SET_PDEATHSIG``); piled-up orphans then
+race the new connection for the same upstream session. So the MCP command is spawned via this
+supervisor, which (1) runs the real command in a new process group so the whole tree can be
+killpg'd, (2) passes stdin/stdout/stderr straight through — the MCP stdio protocol talks over
+those pipes, so this is a no-op relay, not a proxy — and (3) polls ``getppid()`` and, once the
+parent is gone, SIGTERMs the child's group, waits, then SIGKILLs. Stdlib only so it starts
+fast and cannot itself leak. Usage: ``mcp_stdio_watchdog.py --ppid <pid> -- <cmd> <args...>``
 """
 
 from __future__ import annotations
@@ -38,9 +31,8 @@ def _is_orphaned(original_ppid: int, getppid=os.getppid) -> bool:
 
 
 def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """Best-effort SIGTERM-then-SIGKILL of the child's process group; guards the
-    POSIX-only primitives so an accidental Windows run degrades to a plain child
-    kill instead of AttributeError."""
+    """Best-effort SIGTERM-then-SIGKILL of the child's process group; guards the POSIX-only
+    primitives so an accidental Windows run degrades to a plain child kill."""
     killpg = getattr(os, "killpg", None)
     if killpg is None:  # windows-footgun: ok — non-POSIX fallback
         try:
@@ -87,13 +79,13 @@ def main(argv: list[str] | None = None) -> int:
         print("mcp_stdio_watchdog: no command given after '--'", file=sys.stderr)
         return 2
 
-    # New process group: killpg() reaches the whole tree the real command may
-    # spawn without touching our own group or the original parent's.
+    # New process group: killpg() reaches the whole tree the real command may spawn without
+    # touching our own group or the original parent's.
     proc = subprocess.Popen(real_argv, stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, start_new_session=True)
 
-    # The server lives in its OWN group, so the parent's shutdown killpg of *our*
-    # group no longer reaches it: forward SIGTERM/SIGINT to the child's group so
-    # graceful teardown still kills a wedged server that ignores stdin EOF.
+    # The server lives in its OWN group, so the parent's shutdown killpg of *our* group no
+    # longer reaches it: forward SIGTERM/SIGINT to the child's group so graceful teardown
+    # still kills a wedged server that ignores stdin EOF.
     def _forward_shutdown(signum, frame):  # noqa: ARG001
         _terminate_process_group(proc)
         sys.exit(128 + signum)
