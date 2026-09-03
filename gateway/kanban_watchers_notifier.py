@@ -89,14 +89,13 @@ class _Collector:
         self.profile_adapters = getattr(runner, "_profile_adapters", {})
         self.notifier_profiles = {notifier_profile}
         self.notifier_profiles.update(str(p).strip() for p in self.profile_adapters if str(p).strip())
-        self.active_platforms = _platform_names(runner.adapters)
         # Include every platform any secondary profile has live. This is only a
         # coarse pre-filter; the precise per-profile check (_authorization_adapter,
         # no default fallback) runs at delivery and rewinds the claim if it
         # resolves to None. An unclaimed event never retries, so dropping a
         # secondary-profile sub here would lose it.
-        for _profile_adapter_map in self.profile_adapters.values():
-            self.active_platforms.update(_platform_names(_profile_adapter_map))
+        self.active_platforms = _platform_names(runner.adapters).union(
+            *(_platform_names(m) for m in self.profile_adapters.values()))
 
     def collect(self) -> list[dict]:
         if not self.active_platforms:
@@ -124,31 +123,24 @@ class _Collector:
         """Cheap read-only probe before the writable connect() (schema init, WAL
         sidecars, checkpoints); a probe failure falls back to the writable open."""
         try:
-            if self.kb.count_notify_subs(
-                board=slug, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned,
-            ) == 0:
-                logger.debug(
-                    "kanban notifier: board %s has no subscriptions owned by %s; skipping open",
-                    slug, sorted(self.notifier_profiles),
-                )
-                return False
+            count = self.kb.count_notify_subs(
+                board=slug, notifier_profiles=self.notifier_profiles, include_unowned=self.include_unowned)
         except Exception as exc:
-            logger.debug(
-                "kanban notifier: read-only subscription probe failed "
-                "for board %s (%s); falling back to writable open",
-                slug, exc,
-            )
-        return True
+            logger.debug("kanban notifier: read-only subscription probe failed "
+                         "for board %s (%s); falling back to writable open", slug, exc)
+            return True
+        if count == 0:
+            logger.debug("kanban notifier: board %s has no subscriptions owned by %s; skipping open",
+                         slug, sorted(self.notifier_profiles))
+        return count != 0
 
     def _gc_stale_subs(self, conn: Any, slug: str) -> None:
         """Best-effort stale-sub sweep: a failed sweep never blocks delivery; the next hourly gate retries."""
         try:
             _purged = self.kb.purge_stale_done_notify_subs(conn, max_age_days=self.gc_retention_days)
             if _purged:
-                logger.info(
-                    "kanban notifier: purged %d stale done/blocked-task subscription(s) on board %s (retention %dd)",
-                    _purged, slug, self.gc_retention_days,
-                )
+                logger.info("kanban notifier: purged %d stale done/blocked-task subscription(s) on board %s (retention %dd)",
+                            _purged, slug, self.gc_retention_days)
         except Exception as _gc_exc:
             logger.debug("kanban notifier: stale-sub GC failed for board %s: %s", slug, _gc_exc)
 
@@ -156,17 +148,13 @@ class _Collector:
         """Claim one subscription's unseen events; None when skipped or nothing new."""
         owner_profile = sub.get("notifier_profile") or None
         if owner_profile and owner_profile != self.notifier_profile and not self.profile_adapters.get(owner_profile):
-            logger.debug(
-                "kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
-                sub.get("task_id"), owner_profile, self.notifier_profile,
-            )
+            logger.debug("kanban notifier: subscription for %s owned by profile %s; current profile %s has no adapter for it, skipping",
+                         sub.get("task_id"), owner_profile, self.notifier_profile)
             return None
         platform = (sub.get("platform") or "").lower()
         if platform not in self.active_platforms:
-            logger.debug(
-                "kanban notifier: subscription for %s on %s skipped; adapter not connected",
-                sub.get("task_id"), platform or "<missing>",
-            )
+            logger.debug("kanban notifier: subscription for %s on %s skipped; adapter not connected",
+                         sub.get("task_id"), platform or "<missing>")
             return None
         old_cursor, cursor, events = self.kb.claim_unseen_events_for_sub(
             conn, task_id=sub["task_id"], platform=sub["platform"], chat_id=sub["chat_id"],
@@ -175,10 +163,8 @@ class _Collector:
         if not events:
             return None
         task = self.kb.get_task(conn, sub["task_id"])
-        logger.debug(
-            "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
-            len(events), sub["task_id"], slug, old_cursor, cursor,
-        )
+        logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
+                     len(events), sub["task_id"], slug, old_cursor, cursor)
         return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
 
     def collect_board(self, slug: str) -> None:
@@ -207,10 +193,8 @@ class _Collector:
                         self.deliveries.append(claimed)
                 except Exception as sub_exc:
                     # One bad subscription must not block the rest of the tick.
-                    logger.warning(
-                        "kanban notifier: subscription for %s on board %s failed: %s",
-                        sub.get("task_id"), slug, sub_exc,
-                    )
+                    logger.warning("kanban notifier: subscription for %s on board %s failed: %s",
+                                   sub.get("task_id"), slug, sub_exc)
         finally:
             conn.close()
 
@@ -433,10 +417,8 @@ class _KanbanNotification:
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
 
     def _log_woke(self) -> None:
-        logger.info(
-            "kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
-            self.task_id, self.platform_str, self.sub["chat_id"], self.sub_profile or "default", self.wake_kinds,
-        )
+        logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
+                    self.task_id, self.platform_str, self.sub["chat_id"], self.sub_profile or "default", self.wake_kinds)
 
     async def wake(self) -> None:
         """Wake the creator session (raises on failure): push adapters get a full SessionSource, non-push a raw self-post."""
@@ -478,10 +460,8 @@ class _KanbanNotification:
         # "no exception == delivered" contract.
         if getattr(_send_res, "success", True) is False:
             raise RuntimeError(f"adapter send() reported failure: {getattr(_send_res, 'error', None) or 'unknown error'}")
-        logger.debug(
-            "kanban notifier: delivered %s event for %s to %s/%s on board %s",
-            ev.kind, self.task_id, self.platform_str, sub["chat_id"], self.board_slug,
-        )
+        logger.debug("kanban notifier: delivered %s event for %s to %s/%s on board %s",
+                     ev.kind, self.task_id, self.platform_str, sub["chat_id"], self.board_slug)
         # Upload artifact paths from the completion payload / legacy result as
         # native files. Only on ``completed`` so retries never spam attachments.
         if ev.kind == "completed":

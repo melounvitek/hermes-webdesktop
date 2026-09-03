@@ -38,10 +38,8 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     try:
         interval = float(kanban_cfg.get("dispatch_interval_seconds", 60) or 60)
     except (ValueError, TypeError):
-        logger.warning(
-            "kanban dispatcher: invalid dispatch_interval_seconds=%r, using default 60",
-            kanban_cfg.get("dispatch_interval_seconds"),
-        )
+        logger.warning("kanban dispatcher: invalid dispatch_interval_seconds=%r, using default 60",
+                       kanban_cfg.get("dispatch_interval_seconds"))
         interval = 60.0
     interval = max(interval, 1.0)  # sanity floor — tighter than this is a footgun
 
@@ -66,16 +64,12 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     try:
         failure_limit = int(raw_failure_limit)
     except (TypeError, ValueError):
-        logger.warning(
-            "kanban dispatcher: invalid kanban.failure_limit=%r; using default %d",
-            raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT,
-        )
+        logger.warning("kanban dispatcher: invalid kanban.failure_limit=%r; using default %d",
+                       raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT)
         failure_limit = kb.DEFAULT_FAILURE_LIMIT
     if failure_limit < 1:
-        logger.warning(
-            "kanban dispatcher: kanban.failure_limit=%r is below 1; using default %d",
-            raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT,
-        )
+        logger.warning("kanban dispatcher: kanban.failure_limit=%r is below 1; using default %d",
+                       raw_failure_limit, kb.DEFAULT_FAILURE_LIMIT)
         failure_limit = kb.DEFAULT_FAILURE_LIMIT
 
     # 0 disables stale detection.
@@ -83,22 +77,16 @@ def _resolve_dispatcher_settings(kanban_cfg: dict, kb: Any) -> _DispatcherSettin
     try:
         stale_timeout_seconds = int(raw_stale or 0)
     except (TypeError, ValueError):
-        logger.warning(
-            "kanban dispatcher: invalid kanban.dispatch_stale_timeout_seconds=%r; "
-            "disabling stale detection",
-            raw_stale,
-        )
+        logger.warning("kanban dispatcher: invalid kanban.dispatch_stale_timeout_seconds=%r; "
+                       "disabling stale detection", raw_stale)
         stale_timeout_seconds = 0
 
     # Fallback profile for tasks created without an assignee (e.g. via the
     # dashboard). Empty (the schema default) keeps skipping them.
     default_assignee = (kanban_cfg.get("default_assignee") or "").strip() or None
     if default_assignee:
-        logger.info(
-            "kanban dispatcher: default_assignee=%r (unassigned ready tasks "
-            "will route to this profile)",
-            default_assignee,
-        )
+        logger.info("kanban dispatcher: default_assignee=%r (unassigned ready tasks "
+                    "will route to this profile)", default_assignee)
 
     return _DispatcherSettings(
         interval=interval,
@@ -151,10 +139,7 @@ class _KanbanDispatcher:
         corrupt_guard_error = getattr(self.kb, "KanbanDbCorruptError", None)
         if corrupt_guard_error is not None and isinstance(exc, corrupt_guard_error):
             return True
-        if not isinstance(exc, sqlite3.DatabaseError):
-            return False
-        msg = str(exc).lower()
-        return any(marker in msg for marker in _CORRUPT_DB_MARKERS)
+        return isinstance(exc, sqlite3.DatabaseError) and any(m in str(exc).lower() for m in _CORRUPT_DB_MARKERS)
 
     def _quarantine_lifted(self, slug: str, fingerprint: tuple) -> bool:
         """Return False while *slug* stays quarantined; lift (and log) otherwise."""
@@ -166,11 +151,8 @@ class _KanbanDispatcher:
         if disabled_fingerprint == fingerprint and age < self.CORRUPT_BOARD_RETRY_AFTER_SECONDS:
             return False
         if disabled_fingerprint == fingerprint:
-            logger.info(
-                "kanban dispatcher: board %s database fingerprint unchanged "
-                "after %.0fs quarantine; retrying dispatch",
-                slug, age,
-            )
+            logger.info("kanban dispatcher: board %s database fingerprint unchanged "
+                        "after %.0fs quarantine; retrying dispatch", slug, age)
         else:
             logger.info("kanban dispatcher: board %s database changed; retrying dispatch", slug)
         self.disabled_corrupt_boards.pop(slug, None)
