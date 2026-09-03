@@ -56,7 +56,6 @@ def _run_helper(cmd: list, timeout: int) -> subprocess.CompletedProcess:
 
 
 # --- NeuTTS (subprocess via tools/neutts_synth.py so the ~500MB model exits after use) ---
-
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     neutts_config = tts_config.get("neutts") or {}
     wav_path = _wav_sidecar_path(output_path)
@@ -76,7 +75,6 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
 
 
 # --- Piper (local neural VITS, 44 languages) ---
-
 def _get_piper_voices_dir() -> Path:
     """``<HERMES_HOME>/cache/piper-voices/`` so voice downloads follow profile boundaries."""
     from hermes_constants import get_hermes_dir
@@ -140,7 +138,6 @@ _PIPER_ADVANCED_KNOBS = ("length_scale", "noise_scale", "noise_w_scale", "volume
 
 def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     import wave
-
     voice, piper_config = _load_piper_voice_for_config(tts_config)
     # Bad speaker_id drops to 0 (Piper's default); bools are rejected (they'd coerce to 1/0).
     _raw_speaker = piper_config.get("speaker_id", 0)
@@ -160,7 +157,6 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
                 speaker_id=speaker_id)
         except ImportError:
             logger.warning("[Piper] SynthesisConfig not available in this piper-tts version — advanced knobs ignored")
-
     wav_path = _wav_sidecar_path(output_path)
     with wave.open(wav_path, "wb") as wav_file:
         if syn_config is not None:
@@ -171,7 +167,6 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
 
 
 # --- KittenTTS (local ONNX, 25-80MB models, CPU only) ---
-
 def _load_kittentts_model_for_config(tts_config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     """Load (or fetch from cache) the KittenTTS model; returns ``(model, kittentts_config)``."""
     KittenTTS = _origin()._import_kittentts()
@@ -183,7 +178,6 @@ def _load_kittentts_model_for_config(tts_config: Dict[str, Any]) -> Tuple[Any, D
         m = KittenTTS(model_name)
         logger.info("[KittenTTS] Model loaded successfully")
         return m
-
     return _tts_cache_get_or_load(_kittentts_model_cache, model_name, _load_kittentts_model), kt_config
 
 
@@ -192,7 +186,6 @@ def _generate_kittentts(text: str, output_path: str, tts_config: Dict[str, Any])
     audio = model.generate(  # numpy array at 24kHz
         text, voice=kt_config.get("voice", DEFAULT_KITTENTTS_VOICE),
         speed=kt_config.get("speed", 1.0), clean_text=kt_config.get("clean_text", True))
-
     import soundfile as sf
     wav_path = _wav_sidecar_path(output_path)
     sf.write(wav_path, audio, 24000)

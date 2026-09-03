@@ -88,7 +88,6 @@ from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exp
 
 
 # --- Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.) ---
-
 def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str] = None) -> Callable[[], Any]:
     """Lazy SDK importer: returns ``module`` (or ``module.attr``), raising ImportError when absent.
 
@@ -274,7 +273,6 @@ def _finalize_voice_delivery(
         return file_str, want_opus and file_str.endswith(".ogg")
     else:
         return file_str, False
-
     if not opted_in:
         return file_str, False
     if not file_str.endswith(".ogg"):
@@ -283,7 +281,6 @@ def _finalize_voice_delivery(
 
 
 # --- Main tool function ---
-
 def _apply_call_overrides(tts_config: Dict[str, Any], speed: Optional[float], provider: Optional[str]):
     """Apply per-call ``speed`` (clamped, on a shallow copy) and resolve the provider name."""
     if speed is not None:
@@ -368,7 +365,6 @@ def _text_to_speech_single(
             if error:
                 return error
             _synthesize_builtin(provider, text, file_str, tts_config, instructions)
-
         if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
             return _error_json(f"TTS generation produced no output (provider: {provider})")
 
@@ -433,14 +429,12 @@ def text_to_speech_tool(
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
     try:  # shared cleaner: markdown, emoji, think blocks, verifier footer, units, newlines
-
         from tools.tts_text_normalize import prepare_spoken_text
         text = prepare_spoken_text(text, max_chars=None)
     except Exception:
         text = text.strip()
     if not text:
         return tool_error("Text is empty after TTS cleanup", success=False)
-
     tts_config, provider = _apply_call_overrides(_load_tts_config(), speed, provider)
     command_provider_config = _resolve_command_provider_config(provider, tts_config)
     max_len = _resolve_max_text_length(provider, tts_config)
@@ -450,13 +444,11 @@ def text_to_speech_tool(
     if len(chunks) > 1:
         logger.info("TTS text for provider %s split into %d chunks (input=%d chars, cap=%d)",
                     provider, len(chunks), len(text), max_len)
-
     platform, want_opus = _session_platform()
     delivery_profile = _resolve_audio_delivery_profile(platform, tts_config)
     base_path, error = _resolve_output_base(output_path, provider, command_provider_config, want_opus)
     if error:
         return error
-
     generated_artifacts: set[str] = set()
     final_paths: List[str] = []
     try:
@@ -494,7 +486,6 @@ def text_to_speech_tool(
 
 
 # --- check_fn ---
-
 def _minimax_requirements() -> bool:
     try:
         _resolve_minimax_tts_runtime(_load_tts_config())

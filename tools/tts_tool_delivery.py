@@ -32,7 +32,6 @@ logger = logging.getLogger("tools.tts_tool")
 def _origin():
     """``tools.tts_tool``, resolved per call so seams monkeypatched there still apply."""
     from tools import tts_tool
-
     return tts_tool
 
 
@@ -115,7 +114,6 @@ _OPUS_VOICE_ARGS = [
 
 
 # --- Text chunking and delivery profiles ---
-
 @dataclass(frozen=True)
 class AudioDeliveryProfile:
     """Destination-platform constraints for generated TTS audio."""
@@ -145,7 +143,6 @@ def _resolve_audio_delivery_profile(
     overrides = profiles.get(key, {}) if isinstance(profiles, dict) else {}
     if isinstance(overrides, dict):
         defaults.update({k: v for k, v in overrides.items() if v is not None})
-
     max_file_bytes = _positive_int(defaults.get("max_file_bytes")) or _PLATFORM_AUDIO_DEFAULTS["default"]["max_file_bytes"]
     safety_ratio = defaults.get("safety_ratio", 0.85)
     if isinstance(safety_ratio, bool) or not isinstance(safety_ratio, (int, float)) or not 0 < safety_ratio <= 1:
@@ -191,7 +188,6 @@ def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
         return []
     if len(normalized) <= max_chars:
         return [normalized]
-
     expanded: List[str] = []
     for sentence in re.split(r"(?<=[.!?;:,])\s+", normalized):
         sentence = sentence.strip()
@@ -225,7 +221,6 @@ def _pack_audio_files_for_delivery(audio_paths: List[str], profile: AudioDeliver
 
 
 # --- ffmpeg encoding helpers ---
-
 def _ffmpeg_run(
     ffmpeg: str, args: List[str], *, timeout: int = 30, check: bool = False, capture: bool = True,
 ) -> subprocess.CompletedProcess:
@@ -377,7 +372,6 @@ def _repair_ogg_container(file_str: str) -> str:
 
 
 # --- Long-form audio combination and delivery packing ---
-
 def _concat_audio_files(audio_paths: List[str], output_path: str, *, voice_compatible: bool = False) -> Optional[str]:
     """Combine independently encoded chunks with ffmpeg (never byte-joined). OGG/Opus is always
     re-encoded (even without voice opt-in); matching MP3 chunks keep their frames (``-c:a copy``).
@@ -455,7 +449,6 @@ def _build_audio_delivery_files(
         _remove_quietly(combined)
         midpoint = max(1, len(group) // 2)
         return emit(group[:midpoint]) + emit(group[midpoint:])
-
     groups = _pack_audio_files_for_delivery(audio_paths, profile)
     packed = [path for group in groups for path in emit(group)]
     final_paths: List[str] = []

@@ -65,7 +65,6 @@ def _signal_user_tts_provider(name: str, tts_config: Dict[str, Any], hook: str) 
                         env_passthrough=_command_provider_env_passthrough(cfg))
                 except Exception as exc:  # noqa: BLE001 — best-effort hook
                     logger.debug("[TTS] %s_command for %s failed: %s", hook, name, exc)
-
             threading.Thread(target=_run, name=f"tts-{hook}-{name}", daemon=True).start()
             return hook
         plugin_provider = _lookup_plugin_provider(name)
@@ -87,7 +86,6 @@ def warm_tts_provider(tts_config: Optional[Dict[str, Any]] = None, provider: Opt
         tts_config = _origin()._load_tts_config()
     name = (provider or _origin()._get_provider(tts_config) or "").lower().strip()
     result: Dict[str, Any] = {"provider": name, "warmed": False, "action": "noop"}
-
     warmer = _local_tts_warmers().get(name)
     if warmer is not None:
         cache = _LOCAL_TTS_MODEL_CACHES.get(name, {})
@@ -104,13 +102,11 @@ def warm_tts_provider(tts_config: Optional[Dict[str, Any]] = None, provider: Opt
             elapsed_ms=int((time.monotonic() - started) * 1000))
         logger.info("[TTS] warm-up %s: %s in %dms", name, result["action"], result["elapsed_ms"])
         return result
-
     signalled = _signal_user_tts_provider(name, tts_config, "warm")
     if signalled is not None:
         ok = signalled != "error"
         result.update(warmed=ok, action="warmed" if ok else "error")
         return result
-
     feature = _LAZY_SDK_FEATURES.get(name)
     if feature is not None:
         try:

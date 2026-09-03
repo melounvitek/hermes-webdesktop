@@ -328,7 +328,6 @@ def stream_tts_to_speaker(
             if stream_max_len and len(cleaned) > stream_max_len:
                 cleaned = cleaned[:stream_max_len]
             playback.speak(cleaned)
-
         while not stop_event.is_set():
             try:
                 delta = text_queue.get(timeout=0.5)
@@ -341,11 +340,9 @@ def stream_tts_to_speaker(
                 _speak_sentence(sentence)
             if delta is None:
                 break
-
         with contextlib.suppress(queue.Empty):
             while True:
                 text_queue.get_nowait()
-
     except Exception as exc:
         logger.warning("Streaming TTS pipeline error: %s", exc)
     finally:

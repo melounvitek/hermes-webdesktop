@@ -113,7 +113,6 @@ def _generate_openai_tts(
             "to use %r directly.",
             model, DEFAULT_OPENAI_MODEL, model)
         model = DEFAULT_OPENAI_MODEL
-
     create_kwargs: Dict[str, Any] = {
         "model": model, "voice": voice, "input": text,
         "response_format": _tts_response_format_from_path(output_path),

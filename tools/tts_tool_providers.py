@@ -84,7 +84,6 @@ def _require_key(env_var: str, provider_id: str, hint: str) -> str:
 
 
 # --- Bounded upstream response reading ---
-
 def _response_has_explicit_stream(response: Any) -> bool:
     """True for real ``requests`` responses (or doubles defining ``iter_content`` themselves)."""
     if not callable(getattr(response, "iter_content", None)):
@@ -153,12 +152,10 @@ def _write_bytes(output_path: str, audio_bytes: bytes) -> str:
 def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], **extra: Any):
     """Streaming ``requests.post`` with the shared 60s timeout (body read via the bounded readers)."""
     import requests
-
     return requests.post(url, headers=headers, json=payload, timeout=60, stream=True, **extra)
 
 
 # --- Auxiliary-model speech-tag rewrites ---
-
 def _auxiliary_reply_text(response: Any) -> str:
     """The first choice's message content with any ```fence``` unwrapped ("" when unreadable)."""
     try:
@@ -196,7 +193,6 @@ def _rewrite_with_auxiliary_model(
 
 
 # --- Edge TTS (free default) ---
-
 async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     _edge_tts = _origin()._import_edge_tts()
     edge_config = tts_config.get("edge") or {}
@@ -209,7 +205,6 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
 
 
 # --- ElevenLabs ---
-
 def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
     """SDK client kwargs for ``tts.elevenlabs.base_url``/``wss_url``; empty (SDK default) without a
     base_url. ``wss_url`` defaults to the base_url host with a ``ws(s)://`` scheme."""
@@ -337,7 +332,6 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
         payload["optimize_streaming_latency"] = optimize_streaming_latency
     if text_normalization:
         payload["text_normalization"] = True
-
     response = _post_json(f"{base_url}/tts", payload, {
         "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
         "User-Agent": hermes_xai_user_agent()})
@@ -346,7 +340,6 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
 
 
 # --- MiniMax TTS ---
-
 @dataclass(frozen=True)
 class _MiniMaxTTSRuntime:
     """A region-bound MiniMax endpoint and credential (key excluded from ``repr``)."""
@@ -434,7 +427,6 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
         if not hex_audio:
             raise RuntimeError("MiniMax TTS returned empty audio data")
         return _write_bytes(output_path, bytes.fromhex(hex_audio))
-
     content_type = response.headers.get("Content-Type", "")
     if "audio/" in content_type:
         return _write_bytes(output_path, _read_tts_response_bytes(response, label="MiniMax TTS"))
@@ -451,7 +443,6 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
 
 
 # --- Mistral (Voxtral TTS) — base64 audio, native Opus for voice bubbles ---
-
 def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     api_key = _require_key("MISTRAL_API_KEY", "mistral", "Get one at https://console.mistral.ai/")
     mi_config = tts_config.get("mistral") or {}
@@ -475,7 +466,6 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
 
 
 # --- Google Gemini TTS ---
-
 def _read_gemini_persona_prompt(gemini_config: Dict[str, Any]) -> str:
     """Read ``tts.gemini.persona_prompt_file`` (relative -> under HERMES_HOME), failing soft."""
     raw = gemini_config.get("persona_prompt_file")
@@ -600,12 +590,10 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     if urlparse(base_url).hostname == "generativelanguage.googleapis.com":
         try:
             import hermes_cli
-
             version = str(hermes_cli.__version__)
         except Exception:
             version = "0.0.0"
         headers["X-Goog-Api-Client"] = f"hermes-agent/{version}"  # partner-integration guidance
-
     response = _post_json(f"{base_url}/models/{model}:generateContent", payload, headers, params={"key": api_key})
     if response.status_code != 200:
         raise RuntimeError(f"Gemini TTS API error (HTTP {response.status_code}): {_gemini_error_detail(response)}")
