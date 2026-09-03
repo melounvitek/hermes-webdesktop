@@ -157,12 +157,10 @@ def _oneshot_run_claim_ttl_seconds() -> float:
     """One-shot running-claim TTL from ``HERMES_CRON_TIMEOUT``: unset/invalid → 600s → 1800s;
     ``0`` (unlimited) → the fixed floor; positive N → ``max(N * headroom, floor)``."""
     raw = os.getenv("HERMES_CRON_TIMEOUT", "").strip()
-    timeout = _DEFAULT_CRON_INACTIVITY_TIMEOUT
-    if raw:
-        try:
-            timeout = float(raw)
-        except (ValueError, TypeError):
-            timeout = _DEFAULT_CRON_INACTIVITY_TIMEOUT
+    try:
+        timeout = float(raw) if raw else _DEFAULT_CRON_INACTIVITY_TIMEOUT
+    except (ValueError, TypeError):
+        timeout = _DEFAULT_CRON_INACTIVITY_TIMEOUT
     if timeout <= 0:
         return float(ONESHOT_RUN_CLAIM_TTL_SECONDS)
     return max(timeout * _ONESHOT_RUN_CLAIM_TTL_HEADROOM, float(ONESHOT_RUN_CLAIM_TTL_SECONDS))
@@ -295,10 +293,7 @@ def _fire_job_lock(job_id: str):
         yield False
         return
 
-    held_locks = getattr(_fire_fence_lock_state, "held", None)
-    if held_locks is None:
-        held_locks = {}
-        _fire_fence_lock_state.held = held_locks
+    held_locks = _fire_fence_lock_state.__dict__.setdefault("held", {})
     if lock_key in held_locks:
         try:
             yield held_locks[lock_key]
@@ -368,9 +363,10 @@ def _job_output_dir(job_id: str) -> Path:
     """Resolve a job's output directory, rejecting any path-escape attempt (``..``, absolute
     paths, separators): only a single safe path component is accepted."""
     text = str(job_id or "").strip()
-    if not text or text in {".", ".."} or "/" in text or "\\" in text:
-        raise ValueError(f"Invalid cron job id for output path: {job_id!r}")
-    if Path(text).is_absolute() or Path(text).drive:
+    if (
+        not text or text in {".", ".."} or "/" in text or "\\" in text
+        or Path(text).is_absolute() or Path(text).drive
+    ):
         raise ValueError(f"Invalid cron job id for output path: {job_id!r}")
     return _current_cron_store().output_dir / text
 
@@ -655,10 +651,7 @@ def _parse_clock_time(text: str) -> Optional[tuple]:
     if meridiem:
         if not 1 <= hour <= 12:
             return None
-        if meridiem == "am":
-            hour = 0 if hour == 12 else hour
-        else:
-            hour = 12 if hour == 12 else hour + 12
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
     if hour > 23 or minute > 59:
         return None
     return (hour, minute)
@@ -675,21 +668,19 @@ def _natural_every_to_cron(rest: str) -> Optional[str]:
     idx = 1
     if dow is None:
         days = []
-        while idx <= len(tokens):
-            tok = tokens[idx - 1]
+        idx = len(tokens)
+        for i, tok in enumerate(tokens):
             if tok == "and":
-                idx += 1
                 continue
             mapped = _WEEKDAY_TO_CRON_DOW.get(tok)
             if mapped is None:
+                idx = i
                 break
             if mapped not in days:
                 days.append(mapped)
-            idx += 1
         if not days:
             return None
         dow = ",".join(days)
-        idx -= 1
     time_tokens = tokens[idx:]
     if time_tokens and time_tokens[0] == "at":  # optional separator: "every day at 9am"
         time_tokens = time_tokens[1:]
@@ -725,24 +716,18 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     original = schedule
     schedule_lower = schedule.lower()
 
-    # "every X" → recurring interval, or a natural day/time phrase → cron.
-    if schedule_lower.startswith("every "):
-        rest = schedule[6:].strip()
-        cron_expr = _natural_every_to_cron(rest)
-        if cron_expr is not None:
-            return _cron_schedule(
-                cron_expr, original,
-                "Weekday/time schedules like 'every monday 9am' require the 'croniter' package.",
-                "schedule")
-        return _interval_schedule(parse_duration(rest))
-
-    # No-"every" phrases ("weekdays at 9am", "daily at 7am"): same shape sans prefix.
-    cron_expr = _natural_every_to_cron(schedule_lower)
+    # Natural day/time phrase → cron ("every monday 9am", or sans prefix "weekdays at 9am");
+    # any other "every X" → recurring interval.
+    is_every = schedule_lower.startswith("every ")
+    rest = schedule[6:].strip() if is_every else schedule_lower
+    cron_expr = _natural_every_to_cron(rest)
     if cron_expr is not None:
+        example = "every monday 9am" if is_every else "weekdays at 9am"
         return _cron_schedule(
             cron_expr, original,
-            "Weekday/time schedules like 'weekdays at 9am' require the 'croniter' package.",
-            "schedule")
+            f"Weekday/time schedules like '{example}' require the 'croniter' package.", "schedule")
+    if is_every:
+        return _interval_schedule(parse_duration(rest))
 
     # Cron expression (5-6 fields). Letters are allowed so named months/weekdays (JAN-DEC, MON-FRI)
     # reach croniter, which supports them.
@@ -1313,9 +1298,7 @@ _SAVE_JOBS_MERGE_ATTEMPTS = 5
 
 
 def _save_jobs_unlocked(
-    jobs: List[Dict[str, Any]],
-    *,
-    removed_ids: Optional[Collection[str]] = None,
+    jobs: List[Dict[str, Any]], *, removed_ids: Optional[Collection[str]] = None,
     replace: bool = False,
 ):
     """Save all jobs; caller must hold _jobs_lock(). ``removed_ids`` = intentional deletes;
@@ -1323,13 +1306,11 @@ def _save_jobs_unlocked(
     jobs_file = _current_cron_store().jobs_file
     ensure_dirs()
     # Owner snapshot BEFORE replace so a root writer can hand the file back to the gateway user.
-    try:
-        _stat_before = os.stat(jobs_file)
-    except OSError:
-        try:
-            _stat_before = os.stat(jobs_file.parent)
-        except OSError:
-            _stat_before = None
+    _stat_before = None
+    for probe in (jobs_file, jobs_file.parent):
+        with contextlib.suppress(OSError):
+            _stat_before = os.stat(probe)
+            break
 
     # Shrink-merge loop: merge, stage, re-peek, repeat; the last attempt writes without a re-peek.
     tmp_path = None
@@ -1361,9 +1342,7 @@ def _save_jobs_unlocked(
 
 
 def save_jobs(
-    jobs: List[Dict[str, Any]],
-    *,
-    removed_ids: Optional[Collection[str]] = None,
+    jobs: List[Dict[str, Any]], *, removed_ids: Optional[Collection[str]] = None,
     replace: bool = False,
 ):
     """Save all jobs under the lock; see ``_save_jobs_unlocked`` for ``removed_ids``/``replace``."""
@@ -1565,8 +1544,7 @@ def _normalized_inference_axes(job: Dict[str, Any]) -> Tuple[Optional[str], Opti
     """Return the stored inference-routing fields in their semantic form."""
     return (
         _normalize_job_optional_text(job.get("provider")),
-        _normalize_job_optional_text(job.get("model")),
-        _normalize_base_url(job.get("base_url")),
+        _normalize_job_optional_text(job.get("model")), _normalize_base_url(job.get("base_url")),
         bool(job.get("no_agent")),
     )
 
@@ -1715,8 +1693,7 @@ def create_job(
     # Optional keys are persisted only when explicitly set: an absent key falls back to global config
     # (attach/reasoning) or to ``deliver`` (failure_deliver), byte-identical to pre-feature jobs.
     for key, value in (
-        ("attach_to_session", normalized_attach),
-        ("reasoning_effort", normalized_reasoning_effort),
+        ("attach_to_session", normalized_attach), ("reasoning_effort", normalized_reasoning_effort),
         ("failure_deliver", f["failure_deliver"]),
     ):
         if value is not None:
@@ -1943,9 +1920,7 @@ def trigger_job(job_id: str, extra_prompt: Optional[str] = None) -> Optional[Dic
 def _claim_is_live(claim: Any, now: datetime, ttl_seconds: float) -> bool:
     """True for a well-formed claim aged within ``[0, ttl)``: future-dated (clock/TZ skew) or
     malformed claims count as stale so they can never wedge a job."""
-    if not isinstance(claim, dict) or not claim.get("at"):
-        return False
-    claimed_at = _parse_aware(claim["at"])
+    claimed_at = _parse_aware(claim.get("at")) if isinstance(claim, dict) and claim.get("at") else None
     return claimed_at is not None and 0 <= (now - claimed_at).total_seconds() < ttl_seconds
 
 
@@ -2364,11 +2339,7 @@ def _machine_id() -> str:
 
 
 def claim_job_for_fire(
-    job_id: str,
-    *,
-    claim_ttl_seconds: int = 300,
-    force: bool = False,
-    return_job: bool = False,
+    job_id: str, *, claim_ttl_seconds: int = 300, force: bool = False, return_job: bool = False,
 ) -> Union[bool, Dict[str, Any]]:
     """Atomically claim a job for one external 'fire' (multi-machine at-most-once); True iff THIS
     caller won. Used by ``CronScheduler.fire_due`` so exactly one of N replicas runs a job.
@@ -2576,73 +2547,92 @@ def _recover_missing_next_run(job: Dict[str, Any], scan: _DueScan) -> Optional[s
     return recovered_next
 
 
-def _repair_timezone_shifted_cron(
-    job: Dict[str, Any], schedule: Dict[str, Any], raw_next_run_dt: datetime,
-    next_run_dt: datetime, scan: _DueScan,
-) -> bool:
+@dataclass
+class _DueJob:
+    """One candidate under evaluation: its record, schedule and the stored next_run in raw/aware form."""
+
+    job: Dict[str, Any]
+    scan: _DueScan
+    next_run: str  # stored ISO string, compared string-exact against manual_run_at
+    raw_next_run_dt: datetime  # as stored (may carry a pre-migration offset)
+    next_run_dt: datetime  # normalized to the configured tz
+
+    @property
+    def schedule(self) -> Dict[str, Any]:
+        return self.job.get("schedule", {})
+
+    @property
+    def kind(self) -> Optional[str]:
+        return self.schedule.get("kind")
+
+    @property
+    def label(self) -> Any:
+        return self.job.get("name", self.job.get("id", "?"))
+
+    def recompute_next(self) -> Optional[str]:
+        return compute_next_run(self.schedule, self.scan.now.isoformat())
+
+
+def _repair_timezone_shifted_cron(d: _DueJob) -> bool:
     """Repair a cron job whose stored offset no longer matches now's (TZ migration).
 
     next_run_at is an absolute instant but the expr means local wall clock, so a TZ change can make
     it look due hours early. If the stored wall clock is still in the future, recompute so we fire
     at the intended local time. True when re-anchored (caller skips this tick). TRADE-OFF: a DST
     offset change meeting the same conditions SKIPS the pending occurrence; accepted as rare."""
+    now = d.scan.now
     if not (
-        next_run_dt <= scan.now
-        and _timezone_offset_mismatch(raw_next_run_dt, scan.now)
-        and _stored_wall_clock_is_future(raw_next_run_dt, scan.now)
+        d.next_run_dt <= now
+        and _timezone_offset_mismatch(d.raw_next_run_dt, now)
+        and _stored_wall_clock_is_future(d.raw_next_run_dt, now)
     ):
         return False
-    new_next = compute_next_run(schedule, scan.now.isoformat())
+    new_next = d.recompute_next()
     if not new_next:
         return False
     logger.info(
         "Job '%s' next_run_at offset changed (%s -> %s). "
         "Recomputing cron run to preserve local wall-clock intent: %s",
-        job.get("name", job.get("id", "?")), raw_next_run_dt.utcoffset(), scan.now.utcoffset(), new_next)
-    scan.persist(job["id"], next_run_at=new_next)
+        d.label, d.raw_next_run_dt.utcoffset(), now.utcoffset(), new_next)
+    d.scan.persist(d.job["id"], next_run_at=new_next)
     return True
 
 
-def _rearm_stale_error_recurring(
-    job: Dict[str, Any], schedule: Dict[str, Any], kind: Optional[str], next_run: str,
-    next_run_dt: datetime, scan: _DueScan,
-) -> datetime:
+def _rearm_stale_error_recurring(d: _DueJob) -> datetime:
     """Re-arm a recurring job wedged in persisted last_status=error; returns the effective next_run_dt.
 
     Such a job errored, mark_job_run parked next_run_at in the future, and nothing re-dispatched it
     (the in-memory stale-claim sweep cannot see it). Interval jobs re-arm to now (always a legal
     fire); cron jobs re-arm to the next LEGAL occurrence, since re-arming to now would fire at times
     the expression excludes. A correctly-parked cron value is left as-is."""
+    now = d.scan.now
     if not (
-        kind in ("cron", "interval")
-        and next_run_dt > scan.now
-        and _job_is_stale_error_recurring(job, schedule, scan.now)
+        d.kind in ("cron", "interval")
+        and d.next_run_dt > now
+        and _job_is_stale_error_recurring(d.job, d.schedule, now)
     ):
-        return next_run_dt
-    jid = job.get("id")
-    if kind == "interval":
-        recovered_next = scan.now.isoformat()
-        recovered_next_dt: Optional[datetime] = scan.now
+        return d.next_run_dt
+    if d.kind == "interval":
+        recovered_next = now.isoformat()
+        recovered_next_dt: Optional[datetime] = now
     else:
-        recovered_next = compute_next_run(schedule, scan.now.isoformat())
+        recovered_next = d.recompute_next()
         recovered_next_dt = _parse_aware(recovered_next) if recovered_next else None
-    if not (recovered_next and recovered_next_dt is not None and recovered_next_dt < next_run_dt):
-        return next_run_dt
+    if not (recovered_next and recovered_next_dt is not None and recovered_next_dt < d.next_run_dt):
+        return d.next_run_dt
+    jid = d.job.get("id")
     logger.warning(
         "cron.persisted_error.recovered job='%s' id=%s — recurring "
         "job wedged in stale last_status=error without re-firing for "
         "a full cadence; re-arming next_run_at to %s so it re-dispatches without force-run/resume",
-        job.get("name", jid), jid, recovered_next)
-    _record_persisted_error_recovery(job, next_run)
-    job["next_run_at"] = recovered_next
-    scan.persist(jid, next_run_at=recovered_next)
+        d.job.get("name", jid), jid, recovered_next)
+    _record_persisted_error_recovery(d.job, d.next_run)
+    d.job["next_run_at"] = recovered_next
+    d.scan.persist(jid, next_run_at=recovered_next)
     return recovered_next_dt
 
 
-def _reanchor_stale_cron(
-    job: Dict[str, Any], schedule: Dict[str, Any], next_run: str, raw_next_run_dt: datetime,
-    next_run_dt: datetime, scan: _DueScan,
-) -> bool:
+def _reanchor_stale_cron(d: _DueJob) -> bool:
     """Stale-schedule guard for a due cron instant; True when re-anchored without firing.
 
     A direct edit of schedule.expr leaves next_run_at on the old lattice, so re-anchor first (from
@@ -2650,15 +2640,15 @@ def _reanchor_stale_cron(
     instant off the lattice, and re-anchoring THAT swallowed a due occurrence — so classify, and let
     the migration case fall through to fire ONCE (at-most-once holds: nothing re-reads the legacy
     instant after advance/mark_job_run rewrites it)."""
-    stale_class = _classify_stale_cron_next_run(schedule, raw_next_run_dt, next_run_dt)
+    stale_class = _classify_stale_cron_next_run(d.schedule, d.raw_next_run_dt, d.next_run_dt)
     if stale_class == STALE_CRON_EXPR_EDIT:
-        new_next = compute_next_run(schedule, scan.now.isoformat())
+        new_next = d.recompute_next()
         logger.info(
             "Job '%s' next_run_at %s does not match its current "
             "cron expression %r (direct jobs.json edit?); re-anchoring to %s without firing.",
-            job.get("name", job.get("id", "?")), next_run, schedule.get("expr"), new_next)
+            d.label, d.next_run, d.schedule.get("expr"), new_next)
         if new_next:
-            scan.persist(job["id"], next_run_at=new_next)
+            d.scan.persist(d.job["id"], next_run_at=new_next)
         return True
     if stale_class == STALE_CRON_TIMEZONE_MIGRATION:
         logger.warning(
@@ -2666,49 +2656,43 @@ def _reanchor_stale_cron(
             "stored=%s normalized=%s — stored next_run_at carries a "
             "pre-migration UTC offset (%s, now %s) and is a legal "
             "occurrence at its own wall clock; firing the due run instead of re-anchoring past it.",
-            job.get("name", job.get("id", "?")), job.get("id"), schedule.get("expr"), next_run,
-            next_run_dt.isoformat(), raw_next_run_dt.utcoffset(), scan.now.utcoffset())
-        _record_timezone_migration_catchup(job, raw_next_run_dt, next_run_dt)
+            d.label, d.job.get("id"), d.schedule.get("expr"), d.next_run,
+            d.next_run_dt.isoformat(), d.raw_next_run_dt.utcoffset(), d.scan.now.utcoffset())
+        _record_timezone_migration_catchup(d.job, d.raw_next_run_dt, d.next_run_dt)
     return False
 
 
-def _fast_forward_missed_recurring(
-    job: Dict[str, Any], schedule: Dict[str, Any], next_run: str, next_run_dt: datetime,
-    grace: int, scan: _DueScan,
-) -> None:
+def _fast_forward_missed_recurring(d: _DueJob, grace: int) -> None:
     """Recurring job past its grace window: skip the accumulated misses, fire once now.
 
     The fast-forward is persisted immediately — NOT redundant with advance_next_run/mark_job_run:
     it protects the crash window before mark_job_run and covers the external fire_due path, which
-    never calls advance_next_run. mark_job_run re-anchors on completion, so the value is provisional.
-    """
-    if (scan.now - next_run_dt).total_seconds() <= grace:
+    never calls advance_next_run. mark_job_run re-anchors on completion, so the value is provisional."""
+    if (d.scan.now - d.next_run_dt).total_seconds() <= grace:
         return
-    new_next = compute_next_run(schedule, scan.now.isoformat())
+    new_next = d.recompute_next()
     if not new_next:
         return
     logger.info(
         "Job '%s' missed its scheduled time (%s, grace=%ds). "
         "Running now; next run provisionally set to: %s (re-anchored on completion)",
-        job.get("name", job.get("id", "?")), next_run, grace, new_next)
-    scan.persist(job["id"], next_run_at=new_next)
+        d.label, d.next_run, grace, new_next)
+    d.scan.persist(d.job["id"], next_run_at=new_next)
     record_catch_up_occurrence()
 
 
-def _retire_expired_oneshot(
-    job: Dict[str, Any], next_run: str, next_run_dt: datetime, scan: _DueScan
-) -> bool:
+def _retire_expired_oneshot(d: _DueJob) -> bool:
     """One-shot grace gate; True when the job must not fire this tick.
 
     A one-shot beyond the grace window must never fire (create/update/resume reject such schedules
     and recovery never revives them; only the due scan used to dispatch them hours late). With no
     claim stamped, retire it with a diagnostic (never silently delete). A claim may mean a run is
     still in flight elsewhere — skip but keep the record so its mark_job_run can land."""
-    if (scan.now - next_run_dt).total_seconds() <= ONESHOT_GRACE_SECONDS:
+    if (d.scan.now - d.next_run_dt).total_seconds() <= ONESHOT_GRACE_SECONDS:
         return False
-    if not (job.get("run_claim") or job.get("fire_claim")):
-        _write_missed_oneshot_diagnostic(job, next_run)
-        scan.retire(job["id"])
+    if not (d.job.get("run_claim") or d.job.get("fire_claim")):
+        _write_missed_oneshot_diagnostic(d.job, d.next_run)
+        d.scan.retire(d.job["id"])
     return True
 
 
@@ -2765,37 +2749,26 @@ def _evaluate_due_job(job: Dict[str, Any], scan: _DueScan, run_claim_ttl: float)
         return False
 
     raw_next_run_dt = datetime.fromisoformat(next_run)
-    schedule = job.get("schedule", {})
-    kind = schedule.get("kind")
+    d = _DueJob(job, scan, next_run, raw_next_run_dt, _ensure_aware(raw_next_run_dt))
+    kind = d.kind
     recurring = kind in {"cron", "interval"}
-    next_run_dt = _ensure_aware(raw_next_run_dt)
     # Intentionally string-exact on raw stored values: trigger_job stamps the SAME isoformat string
     # into both fields, and any rewrite of next_run_at (edit, re-anchor, fire-claim advance) must
     # invalidate the marker. Do not "fix" this with _ensure_aware normalization.
     manual_run = job.get("manual_run_at") == next_run
-    if (
-        kind == "cron"
-        and not manual_run
-        and _repair_timezone_shifted_cron(job, schedule, raw_next_run_dt, next_run_dt, scan)
-    ):
+    if kind == "cron" and not manual_run and _repair_timezone_shifted_cron(d):
         return False
-    next_run_dt = _rearm_stale_error_recurring(job, schedule, kind, next_run, next_run_dt, scan)
-    if next_run_dt > now:
+    d.next_run_dt = _rearm_stale_error_recurring(d)
+    if d.next_run_dt > now:
         return False
 
-    if (
-        not manual_run
-        and kind == "cron"
-        and _reanchor_stale_cron(job, schedule, next_run, raw_next_run_dt, next_run_dt, scan)
-    ):
+    if not manual_run and kind == "cron" and _reanchor_stale_cron(d):
         return False
-    grace = _compute_grace_seconds(schedule)
+    grace = _compute_grace_seconds(d.schedule)
     if not manual_run and recurring:
-        _fast_forward_missed_recurring(job, schedule, next_run, next_run_dt, grace, scan)
+        _fast_forward_missed_recurring(d, grace)
     if kind == "once":
-        if _retire_expired_oneshot(job, next_run, next_run_dt, scan):
-            return False
-        if _oneshot_dispatch_limit_reached(job, scan):
+        if _retire_expired_oneshot(d) or _oneshot_dispatch_limit_reached(job, scan):
             return False
         # Durably claim the one-shot for the DURATION of its run: a second scheduler process on the
         # same HERMES_HOME must not re-dispatch it while in flight, and advancing next_run_at by a
@@ -2808,7 +2781,7 @@ def _evaluate_due_job(job: Dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     # Missed-run visibility: persist scheduled-vs-actual timing so separate CLI processes can show
     # a late catch-up. Recurring only — expired one-shots were retired above; manual triggers aren't late.
     if not manual_run and recurring:
-        lateness = max(0.0, (now - next_run_dt).total_seconds())
+        lateness = max(0.0, (now - d.next_run_dt).total_seconds())
         dispatch_stamp = {
             "scheduled_at": next_run,
             "dispatched_at": now.isoformat(),
