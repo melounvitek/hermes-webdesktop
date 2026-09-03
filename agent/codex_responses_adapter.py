@@ -273,10 +273,8 @@ def _derive_responses_function_call_id(call_id: str, response_item_id: Optional[
     source = (call_id or "").strip()
     sanitized = re.sub(r"[^A-Za-z0-9_-]", "", source)
     for candidate in (source, sanitized):
-        if candidate.startswith("fc_"):
-            return candidate
-        if candidate.startswith("call_") and len(candidate) > len("call_"):
-            return f"fc_{candidate[len('call_'):]}"
+        if candidate.startswith("fc_") or (candidate.startswith("call_") and len(candidate) > len("call_")):
+            return candidate if candidate.startswith("fc_") else f"fc_{candidate[len('call_'):]}"
     if sanitized:
         return f"fc_{sanitized[:48]}"
     seed = source or str(response_item_id or "") or uuid.uuid4().hex
@@ -301,13 +299,10 @@ def _responses_tools(tools: Optional[List[Dict[str, Any]]] = None) -> Optional[L
 # --- Message format conversion (chat history -> Responses input) --------------
 
 def _normalize_responses_message_status(value: Any, *, default: str = "completed") -> str:
-    """Normalize a replayed assistant message status, modulo case/hyphen spelling, so
-    incomplete Codex continuation turns are not falsely marked completed."""
-    if isinstance(value, str):
-        status = value.strip().lower().replace("-", "_").replace(" ", "_")
-        if status in _RESPONSE_MESSAGE_STATUSES:
-            return status
-    return default
+    """Normalize a replayed assistant message status, modulo case/hyphen spelling, so incomplete Codex
+    continuation turns are not falsely marked completed."""
+    status = value.strip().lower().replace("-", "_").replace(" ", "_") if isinstance(value, str) else None
+    return status if status in _RESPONSE_MESSAGE_STATUSES else default
 
 
 def _message_item(
@@ -678,10 +673,9 @@ def _preflight_tool(tool: Any, idx: int) -> Dict[str, Any]:
     if tool_type != "function":
         raise ValueError(f"Codex Responses tools[{idx}] has unsupported type {tool.get('type')!r}.")
     name, parameters = tool.get("name"), tool.get("parameters")
-    if not _nonblank(name):
-        raise ValueError(f"Codex Responses tools[{idx}] is missing a valid name.")
-    if not isinstance(parameters, dict):
-        raise ValueError(f"Codex Responses tools[{idx}] is missing valid parameters.")
+    for ok, what in ((_nonblank(name), "a valid name"), (isinstance(parameters, dict), "valid parameters")):
+        if not ok:
+            raise ValueError(f"Codex Responses tools[{idx}] is missing {what}.")
     return {
         "type": "function", "name": name.strip(), "description": _str_or_empty(tool.get("description", "")),
         "strict": bool(tool.get("strict", False)), "parameters": parameters,
@@ -725,9 +719,8 @@ def _preflight_codex_api_kwargs(
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
-    missing = [key for key in ("model", "instructions", "input") if key not in api_kwargs]
-    if missing:
-        raise ValueError(f"Codex Responses request missing required field(s): {', '.join(sorted(missing))}.")
+    if missing := sorted(key for key in ("model", "instructions", "input") if key not in api_kwargs):
+        raise ValueError(f"Codex Responses request missing required field(s): {', '.join(missing)}.")
     model = api_kwargs.get("model")
     if not _nonblank(model):
         raise ValueError("Codex Responses request 'model' must be a non-empty string.")
@@ -780,8 +773,7 @@ def _preflight_codex_api_kwargs(
         except Exception:
             pass  # Best-effort — the caller-level sanitization should have handled it
     allowed_keys = _PREFLIGHT_ALLOWED_KEYS | ({"stream"} if allow_stream else set())
-    unexpected = sorted(key for key in api_kwargs if key not in allowed_keys)
-    if unexpected:
+    if unexpected := sorted(key for key in api_kwargs if key not in allowed_keys):
         raise ValueError(f"Codex Responses request has unsupported field(s): {', '.join(unexpected)}.")
     return normalized
 
