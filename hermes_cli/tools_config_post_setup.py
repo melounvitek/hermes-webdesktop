@@ -11,14 +11,12 @@ from pathlib import Path
 from typing import Set
 
 from hermes_cli.cli_output import (
-    print_error as _print_error,
-    print_info as _print_info,
-    print_success as _print_success,
+    print_error as _print_error, print_info as _print_info, print_success as _print_success,
     print_warning as _print_warning,
 )
 from hermes_cli.config import get_env_value
 from hermes_cli.tools_config_cua import (
-    _cua_driver_install_ready, _pip_install, _post_setup_no_window_flags, install_cua_driver
+    _cua_driver_install_ready, _pip_install, _post_setup_no_window_flags, _run_text, install_cua_driver,
 )
 
 logger = logging.getLogger("hermes_cli.tools_config")
@@ -44,10 +42,8 @@ def _ensure_browser_use_cli(*, verbose_hints: bool = False) -> None:
     else:
         for line in str(message).splitlines():
             _print_warning(f"    {line[:200]}")
-        if shutil.which("uvx"):
-            _print_info("    Falling back to zero-install runs via `uvx browser-use`")
-        else:
-            _print_info("    Install manually: uv tool install browser-use  (https://docs.astral.sh/uv/)")
+        _print_info("    Falling back to zero-install runs via `uvx browser-use`" if shutil.which("uvx")
+                    else "    Install manually: uv tool install browser-use  (https://docs.astral.sh/uv/)")
     if verbose_hints:
         _print_info("    Local Chrome needs remote debugging: chrome://inspect/#remote-debugging")
         _print_info("    Cloud browsers: browser-use auth login  (or set BROWSER_USE_API_KEY)")
@@ -72,27 +68,21 @@ def _install_chromium(install_cmd: list[str]) -> None:
     """Run the agent-browser Chromium install command and report the outcome."""
     _print_info("    Installing Chromium (~170MB one-time download)...")
     try:
-        result = subprocess.run(
-            install_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(PROJECT_ROOT), timeout=600, creationflags=_post_setup_no_window_flags(),
-        )
+        result = _run_text(install_cmd, cwd=str(PROJECT_ROOT), timeout=600, creationflags=_post_setup_no_window_flags())
         if result.returncode == 0:
             _print_success("    Chromium installed")
             # Invalidate the cached "missing" flag so later check_browser_requirements() calls see the install.
             import tools.browser_tool as _bt
             _bt._cached_chromium_installed = None
-        else:
-            _print_warning("    Chromium install failed:")
-            tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
-            for line in tail:
-                _print_info(f"      {line[:200]}")
-            _print_info("    Run manually: npx agent-browser install --with-deps")
+            return
+        _print_warning("    Chromium install failed:")
+        for line in (result.stderr or result.stdout or "").strip().splitlines()[-3:]:
+            _print_info(f"      {line[:200]}")
     except subprocess.TimeoutExpired:
         _print_warning("    Chromium install timed out (>10min)")
-        _print_info("    Run manually: npx agent-browser install --with-deps")
     except Exception as exc:
         _print_warning(f"    Chromium install failed: {exc}")
-        _print_info("    Run manually: npx agent-browser install --with-deps")
+    _print_info("    Run manually: npx agent-browser install --with-deps")
 
 
 def _post_setup_agent_browser(post_setup_key: str) -> None:
@@ -106,12 +96,8 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
     try:
         # Lazy import so the tools_config UI doesn't pull in browser_tool at import time.
         from tools.browser_tool import (
-            _chromium_installed,
-            _running_in_docker,
-            _find_agent_browser,
-            _resolve_npx_bin,
-            _is_npx_agent_browser_sentinel,
-            AGENT_BROWSER_NPX_SPEC,
+            _chromium_installed, _running_in_docker, _find_agent_browser, _resolve_npx_bin,
+            _is_npx_agent_browser_sentinel, AGENT_BROWSER_NPX_SPEC,
         )
     except Exception as exc:  # pragma: no cover — defensive
         _print_warning(f"    Could not check Chromium status: {exc}")
@@ -164,11 +150,8 @@ def _post_setup_camofox() -> None:
     elif _npm_bin:
         _print_info("    Installing Camofox browser server...")
         # Absolute npm path so the .cmd shim executes on Windows; --workspaces=false avoids resolving apps/desktop.
-        result = subprocess.run(
-            [_npm_bin, "install", "--silent", "--workspaces=false"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(PROJECT_ROOT),
-            creationflags=_post_setup_no_window_flags(),
-        )
+        result = _run_text([_npm_bin, "install", "--silent", "--workspaces=false"], timeout=None,
+                           cwd=str(PROJECT_ROOT), creationflags=_post_setup_no_window_flags())
         if result.returncode == 0:
             _print_success("    Camofox installed")
         else:
@@ -230,30 +213,30 @@ _PIP_POST_SETUP_HOOKS: dict = {
 def _post_setup_pip(spec: dict) -> None:
     """Run one ``_PIP_POST_SETUP_HOOKS`` entry."""
     label = spec["label"]
-    freshly_installed = False
+    lines = list(spec["always"])
     try:
         __import__(spec["module"])
-        _print_success(f"    {label} is already installed")
+        installed = True
     except ImportError:
+        installed = False
+    if installed:
+        _print_success(f"    {label} is already installed")
+    else:
         _print_info(f"    {spec['installing']}")
         try:
             result = _pip_install(spec["args"], timeout=300)
-            if result.returncode == 0:
-                _print_success(f"    {label} installed")
-                freshly_installed = True
-            else:
-                _print_warning(f"    {label} install failed:")
-                _print_info(f"      {(result.stderr or '').strip()[:300]}")
-                _print_info(f"    Run manually: {spec['manual']}")
-                return
         except subprocess.TimeoutExpired:
             _print_warning(f"    {label} install timed out (>5min)")
             _print_info(f"    Run manually: {spec['manual']}")
             return
-    if freshly_installed:
-        for line in spec["on_install"]:
-            _print_info(f"    {line}")
-    for line in spec["always"]:
+        if result.returncode != 0:
+            _print_warning(f"    {label} install failed:")
+            _print_info(f"      {(result.stderr or '').strip()[:300]}")
+            _print_info(f"    Run manually: {spec['manual']}")
+            return
+        _print_success(f"    {label} installed")
+        lines = list(spec["on_install"]) + lines
+    for line in lines:
         _print_info(f"    {line}")
 
 
@@ -400,19 +383,12 @@ def valid_post_setup_keys() -> Set[str]:
 
     keys: Set[str] = set()
     for cat in TOOL_CATEGORIES.values():
-        for prov in cat.get("providers", []):
-            ps = prov.get("post_setup")
-            if ps:
-                keys.add(ps)
+        keys.update(ps for prov in cat.get("providers", []) if (ps := prov.get("post_setup")))
     for builder in (
         _plugin_web_search_providers, _plugin_image_gen_providers,
-        _plugin_video_gen_providers, _plugin_browser_providers,
-    ):
+        _plugin_video_gen_providers, _plugin_browser_providers):
         try:
-            for prov in builder():
-                ps = prov.get("post_setup")
-                if ps:
-                    keys.add(ps)
+            keys.update(ps for prov in builder() if (ps := prov.get("post_setup")))
         except Exception:  # pragma: no cover — defensive; plugins optional
             continue
     return keys

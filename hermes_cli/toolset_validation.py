@@ -14,17 +14,13 @@ def _platform_default_toolset(platform: object) -> str:
 
 
 def _platform_default_is_valid(
-    platform: object,
-    default_toolset: str,
-    is_valid_toolset: Callable[[str], bool],
+    platform: object, default_toolset: str, is_valid_toolset: Callable[[str], bool],
     is_allowed_for_platform: Callable[[str, str], bool],
 ) -> bool:
-    if is_valid_toolset(default_toolset) and is_allowed_for_platform(
-        default_toolset, str(platform)
-    ):
+    if is_valid_toolset(default_toolset) and is_allowed_for_platform(default_toolset, str(platform)):
         return True
-    # Dynamic plugin platforms are resolved by toolsets.resolve_toolset() even
-    # though their synthesized hermes-<platform> name is not in TOOLSETS.
+    # Dynamic plugin platforms are resolved by toolsets.resolve_toolset() even though their synthesized
+    # hermes-<platform> name is not in TOOLSETS.
     try:
         from gateway.platform_registry import platform_registry
 
@@ -34,8 +30,7 @@ def _platform_default_is_valid(
 
 
 def validate_platform_toolsets(
-    platform_toolsets: object,
-    is_valid_toolset: Callable[[str], bool],
+    platform_toolsets: object, is_valid_toolset: Callable[[str], bool],
     is_allowed_for_platform: Callable[[str, str], bool] = toolset_allowed_for_platform,
 ) -> List[str]:
     """Return human-readable warnings for a ``platform_toolsets`` mapping.
@@ -54,17 +49,13 @@ def validate_platform_toolsets(
     valid_count = 0
     for platform, raw in platform_toolsets.items():
         default = _platform_default_toolset(platform)
-        default_valid = _platform_default_is_valid(
-            platform, default, is_valid_toolset, is_allowed_for_platform
-        )
+        default_valid = _platform_default_is_valid(platform, default, is_valid_toolset, is_allowed_for_platform)
         platform_valid_count = 0
         if not isinstance(raw, list):
             if default_valid:
                 valid_count += 1
                 platform_valid_count += 1
-                fallback_detail = f"falling back to '{default}'"
-            else:
-                fallback_detail = f"falling back to unknown default '{default}'"
+            fallback_detail = f"falling back to '{default}'" if default_valid else f"falling back to unknown default '{default}'"
             if raw is None:
                 value_detail = "a null toolset value"
             elif isinstance(raw, str):
@@ -82,18 +73,16 @@ def validate_platform_toolsets(
         for name in raw:
             if not isinstance(name, str) or not name:
                 continue
-            if is_valid_toolset(name):
-                if is_allowed_for_platform(name, str(platform)):
-                    valid_count += 1
-                    platform_valid_count += 1
-                else:
-                    warnings.append(
-                        f"platform '{platform}' references toolset '{name}' "
-                        "which is not available on this platform"
-                    )
-                continue
-            hint = f" — did you mean '{default}'?" if default_valid else ""
-            warnings.append(f"platform '{platform}' references unknown toolset '{name}'{hint}")
+            if not is_valid_toolset(name):
+                hint = f" — did you mean '{default}'?" if default_valid else ""
+                warnings.append(f"platform '{platform}' references unknown toolset '{name}'{hint}")
+            elif is_allowed_for_platform(name, str(platform)):
+                valid_count += 1
+                platform_valid_count += 1
+            else:
+                warnings.append(
+                    f"platform '{platform}' references toolset '{name}' which is not available on this platform"
+                )
 
         if platform_valid_count == 0:
             reason = "is configured with an empty toolset list" if not raw else "has no valid toolsets configured"
