@@ -59,11 +59,9 @@ def load_on_disk_store() -> "MemoryStore":
         config = load_config() or {}
         mem_cfg = get_builtin_memory_config(config)
         memory_enabled, user_profile_enabled = get_builtin_memory_store_flags(config)
-        kwargs = {
-            "memory_char_limit": int(mem_cfg.get("memory_char_limit", 2200)),
-            "user_char_limit": int(mem_cfg.get("user_char_limit", 1375)),
-            "memory_enabled": memory_enabled,
-            "user_profile_enabled": user_profile_enabled}
+        kwargs = {"memory_char_limit": int(mem_cfg.get("memory_char_limit", 2200)),
+                  "user_char_limit": int(mem_cfg.get("user_char_limit", 1375)),
+                  "memory_enabled": memory_enabled, "user_profile_enabled": user_profile_enabled}
     except Exception:
         kwargs: Dict[str, Any] = {}  # config optional — fall back to defaults rather than break /memory
     store = MemoryStore(**kwargs)
@@ -174,8 +172,7 @@ def memory_tool(
     if content is None and new_text is not None:
         content = new_text
     # Strict providers send JSON null for optional fields; treat as omitted.
-    if target is None:
-        target = "memory"
+    target = "memory" if target is None else target
     target_error = _memory_target_error(store, target)
     if target_error is not None:
         return json.dumps(target_error)
@@ -221,9 +218,7 @@ def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[s
 def get_builtin_memory_store_flags(config: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
     """Return ``(memory_enabled, user_profile_enabled)`` from resolved config."""
     section = get_builtin_memory_config(config)
-    return (
-        is_truthy_value(section.get("memory_enabled"), default=True),
-        is_truthy_value(section.get("user_profile_enabled"), default=True))
+    return tuple(is_truthy_value(section.get(k), default=True) for k in ("memory_enabled", "user_profile_enabled"))
 
 
 @no_cache_check_fn
@@ -351,10 +346,8 @@ _SINGLE_TARGET_TEXT = {
 
 def _build_memory_schema_overrides() -> Dict[str, Any]:
     """Narrow the advertised target surface using the availability snapshot."""
-    flags = _memory_surface_flags.get()
+    flags = _memory_surface_flags.get() or get_builtin_memory_store_flags()
     _memory_surface_flags.set(None)
-    if flags is None:
-        flags = get_builtin_memory_store_flags()
     targets = [t for t, on in zip(("memory", "user"), flags) if on]
     parameters = copy.deepcopy(MEMORY_SCHEMA["parameters"])
     target_schema = parameters["properties"]["target"]

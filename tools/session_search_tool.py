@@ -67,10 +67,8 @@ def _format_timestamp(ts: Union[int, float, str, None]) -> str:
             value = float(ts)
         if isinstance(value, (int, float)):
             return datetime.fromtimestamp(value).strftime("%B %d, %Y at %I:%M %p")
-    except (ValueError, OSError, OverflowError) as e:
-        logging.debug("Failed to format timestamp %s: %s", ts, e, exc_info=True)
     except Exception as e:
-        logging.debug("Unexpected error formatting timestamp %s: %s", ts, e, exc_info=True)
+        logging.debug("Failed to format timestamp %s: %s", ts, e, exc_info=True)
     return str(ts)
 
 
@@ -172,10 +170,7 @@ def _annotate_rebuild_status(db, payload: Dict[str, Any]) -> None:
     """Add a rebuild-progress note while the deferred FTS backfill is running,
     so the agent can explain thin/slow results instead of treating them as
     ground truth. No-op (never raises) when no rebuild is pending."""
-    try:
-        status = db.fts_rebuild_status()
-    except Exception:
-        return
+    status = _quiet(db.fts_rebuild_status, None, "fts_rebuild_status failed")
     if status is None:
         return
     payload["index_rebuild"] = {"percent": status["percent"], "note": (
@@ -203,17 +198,12 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None,
         from tools.ansi_strip import strip_ansi
 
         content = strip_ansi(content)
-    original_chars = None
-    if max_content_len and content and len(content) > max_content_len:
-        original_chars = len(content)
-        content = content[:max_content_len] + "…"
     entry = {"id": m.get("id"), "role": m.get("role"), "content": content, "timestamp": m.get("timestamp")}
     entry.update({k: m.get(k) for k in ("tool_name", "tool_calls", "tool_call_id") if m.get(k)})
     if anchor_id is not None and m.get("id") == anchor_id:
         entry["anchor"] = True
-    if original_chars is not None:
-        entry["content_truncated"] = True
-        entry["original_content_chars"] = original_chars
+    if max_content_len and content and len(content) > max_content_len:
+        entry.update(content=content[:max_content_len] + "…", content_truncated=True, original_content_chars=len(content))
     return {k: v for k, v in entry.items() if v is not None or k == "content"}
 
 
@@ -267,19 +257,27 @@ def _title_match_result(db, query: str, current_lineage_root: Optional[str]) -> 
     if anchor_id is not None:
         view = _quiet(lambda: db.get_anchored_view(session_id, anchor_id, window=5, bookend=3), {},
                       "get_anchored_view failed for title match %s/%s", session_id, anchor_id)
-    entry = {
-        "session_id": session_id, "when": _format_timestamp(session_meta.get("started_at")),
-        "source": session_meta.get("source", "unknown"), "model": session_meta.get("model") or "unknown",
-        "title": session_meta.get("title") or title_query, "matched_role": "session_title",
-        "match_message_id": anchor_id,
-        "snippet": f"Session title matched: {session_meta.get('title') or title_query}",
-        "bookend_start": [_shape_message(m) for m in (view.get("bookend_start") or messages[:3])],
-        "messages": [_shape_message(m, anchor_id=anchor_id) for m in (view.get("window") or messages[:5])],
-        "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or messages[-3:])],
-        "messages_before": view.get("messages_before", 0),
-        "messages_after": view.get("messages_after", max(len(messages) - 5, 0)),
-        "detail": "full", "_lineage_root": lineage_root}
-    if lineage_root and lineage_root != session_id:
+    entry = _discovery_entry(
+        lineage_root, session_id=session_id, when=_format_timestamp(session_meta.get("started_at")),
+        source=session_meta.get("source", "unknown"), model=session_meta.get("model") or "unknown",
+        title=session_meta.get("title") or title_query, matched_role="session_title", match_message_id=anchor_id,
+        snippet=f"Session title matched: {session_meta.get('title') or title_query}",
+        bookend_start=[_shape_message(m) for m in (view.get("bookend_start") or messages[:3])],
+        messages=[_shape_message(m, anchor_id=anchor_id) for m in (view.get("window") or messages[:5])],
+        bookend_end=[_shape_message(m) for m in (view.get("bookend_end") or messages[-3:])],
+        messages_before=view.get("messages_before", 0),
+        messages_after=view.get("messages_after", max(len(messages) - 5, 0)), detail="full")
+    entry["_lineage_root"] = lineage_root
+    return entry
+
+
+def _discovery_entry(lineage_root: Optional[str], **fields) -> Dict[str, Any]:
+    """One discovery result in canonical key order; ``parent_session_id`` is set
+    when the hit lives in a child of its lineage root."""
+    entry = {k: fields[k] for k in (
+        "session_id", "when", "source", "model", "title", "matched_role", "match_message_id", "snippet",
+        "bookend_start", "messages", "bookend_end", "messages_before", "messages_after", "detail")}
+    if lineage_root and lineage_root != entry["session_id"]:
         entry["parent_session_id"] = lineage_root
     return entry
 
@@ -338,21 +336,18 @@ def _hydrate_hit(db, lineage_root: str, match_info: Dict[str, Any], result_detai
     window_messages = view.get("window") or []
     if not full:
         window_messages = [m for m in window_messages if m.get("id") == msg_id]
-    entry = {
-        "session_id": hit_sid,
-        "when": _format_timestamp(session_meta.get("started_at") or match_info.get("session_started")),
-        "source": session_meta.get("source") or match_info.get("source", "unknown"),
-        "model": session_meta.get("model") or match_info.get("model") or "unknown",
-        "title": session_meta.get("title") or None, "matched_role": match_info.get("role"),
-        "match_message_id": msg_id, "snippet": match_info.get("snippet") or "",
-        "bookend_start": _bookend(view, "bookend_start") if full else [],
-        "messages": [_shape_message(m, anchor_id=msg_id, max_content_len=4000) for m in window_messages],
-        "bookend_end": _bookend(view, "bookend_end") if full else [],
-        "messages_before": view.get("messages_before", 0), "messages_after": view.get("messages_after", 0),
-        "detail": result_detail}
-    if lineage_root and lineage_root != hit_sid:
-        entry["parent_session_id"] = lineage_root
-    return entry
+    return _discovery_entry(
+        lineage_root, session_id=hit_sid,
+        when=_format_timestamp(session_meta.get("started_at") or match_info.get("session_started")),
+        source=session_meta.get("source") or match_info.get("source", "unknown"),
+        model=session_meta.get("model") or match_info.get("model") or "unknown",
+        title=session_meta.get("title") or None, matched_role=match_info.get("role"),
+        match_message_id=msg_id, snippet=match_info.get("snippet") or "",
+        bookend_start=_bookend(view, "bookend_start") if full else [],
+        messages=[_shape_message(m, anchor_id=msg_id, max_content_len=4000) for m in window_messages],
+        bookend_end=_bookend(view, "bookend_end") if full else [],
+        messages_before=view.get("messages_before", 0), messages_after=view.get("messages_after", 0),
+        detail=result_detail)
 
 
 def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort: Optional[str],
@@ -440,9 +435,8 @@ def _locate_session_db(session_id: str):
         if str(db_path) in seen or not db_path.exists():
             continue
         seen.add(str(db_path))
-        try:
-            pdb = SessionDB(db_path=db_path, read_only=True)
-        except Exception:
+        pdb = _quiet(lambda: SessionDB(db_path=db_path, read_only=True), None, "open %s failed", db_path)
+        if pdb is None:
             continue
         if _quiet(lambda: pdb.get_session(session_id), None,
                   "get_session probe failed for %s in %s", session_id, name):
@@ -520,11 +514,10 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_p
 
 
 def _clamp_int(value, default: int, lo: int, hi: int) -> int:
-    if not isinstance(value, int):
-        try:
-            value = int(value)
-        except (TypeError, ValueError):
-            value = default
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = default
     return max(lo, min(value, hi))
 
 
@@ -533,11 +526,7 @@ def _anchor_in_live_context(db, anchor_state, anchor_session_id: str, current_se
     must be rejected. Same-lineage history that has LEFT live context (compacted
     rows, compression-ended parents, /new-reset predecessors) is allowed, so
     scroll never rejects a result discovery just returned."""
-    a_root = _resolve_lineage(db, anchor_session_id)
-    c_root = _resolve_lineage(db, current_session_id)
-    if not (a_root and c_root and a_root == c_root):
-        return False
-    if _is_compacted_state(anchor_state):
+    if not _same_lineage(db, anchor_session_id, current_session_id) or _is_compacted_state(anchor_state):
         return False
     # Rewind/undo rows (active=0, compacted!=1) never count as out-of-context history.
     is_inactive_non_compacted = (
@@ -545,13 +534,16 @@ def _anchor_in_live_context(db, anchor_state, anchor_session_id: str, current_se
     return is_inactive_non_compacted or not _session_left_live_context(db, anchor_session_id)
 
 
+def _same_lineage(db, a: str, b: str) -> bool:
+    a_root, b_root = _resolve_lineage(db, a), _resolve_lineage(db, b)
+    return bool(a_root and b_root and a_root == b_root)
+
+
 def _rebind_to_owner(db, session_id: str, owning: str, around_message_id: int, window: int):
     """Lineage rebind: the caller paired a parent session_id with a message id
     that lives in a descendant (compaction / delegation create child sessions).
     Returns ``(view, warning)`` from the owning session, or ``(None, None)``."""
-    a_root = _resolve_lineage(db, session_id)
-    o_root = _resolve_lineage(db, owning)
-    if not (a_root and o_root and a_root == o_root):
+    if not _same_lineage(db, session_id, owning):
         return None, None
     rebind_view = _quiet(lambda: db.get_messages_around(owning, around_message_id, window=window),
                          None, "rebind get_messages_around failed: %s", with_exc=True)
@@ -654,14 +646,13 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
     # Cross-profile read: swap in the named profile's DB (read-only) for every
     # shape. Current-lineage guards key off ids that won't collide, so they
     # stay inert.
-    if profile is not None and str(profile).strip():
-        try:
-            profile_db = _resolve_profile_db(profile)
-        except Exception as e:
-            return tool_error(f"profile '{profile}': {e}", success=False)
-        if profile_db is not None:
-            db, current_session_id = profile_db, None
-            owned_dbs.append(profile_db)
+    try:
+        profile_db = _resolve_profile_db(profile)
+    except Exception as e:
+        return tool_error(f"profile '{profile}': {e}", success=False)
+    if profile_db is not None:
+        db, current_session_id = profile_db, None
+        owned_dbs.append(profile_db)
 
     has_session = isinstance(session_id, str) and bool(session_id.strip())
     if has_session and around_message_id is not None:
@@ -675,8 +666,7 @@ def _dispatch(query, role_filter, limit, db, current_session_id, session_id,
 
     role_list = ([r.strip() for r in role_filter.split(",") if r.strip()] or None) if isinstance(role_filter, str) else None
     sort_norm = sort.strip().lower() if isinstance(sort, str) else None
-    if sort_norm not in ("newest", "oldest"):
-        sort_norm = None
+    sort_norm = sort_norm if sort_norm in ("newest", "oldest") else None
     detail_norm = "full" if isinstance(detail, str) and detail.strip().lower() == "full" else "adaptive"
     return _discover(
         db=db, query=query.strip(), role_filter=role_list, limit=limit, sort=sort_norm,
