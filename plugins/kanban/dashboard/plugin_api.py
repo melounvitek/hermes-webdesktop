@@ -10,6 +10,7 @@ dispatcher's write txns); it carries its credential in the query string (browser
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import re
@@ -106,6 +107,14 @@ def _require(getter: Callable, conn: sqlite3.Connection, ident, label: str):
     if obj is None:
         raise HTTPException(status_code=404, detail=f"{label} {ident} not found")
     return obj
+
+
+def _run_aux(board: Optional[str], module: str, fn: str, task_id: str, author: Optional[str]) -> Any:
+    """Run a slow auxiliary-LLM task helper (``hermes_cli.<module>.<fn>``) with the board pinned;
+    the module is imported lazily so a missing aux client can't break plugin load."""
+    def _run():
+        return getattr(importlib.import_module(f"hermes_cli.{module}"), fn)(task_id, author=(author or None))
+    return _with_board_pinned(board, _run)
 
 
 def _require_task(conn: sqlite3.Connection, task_id: str) -> kanban_db.Task:
@@ -959,11 +968,7 @@ class SpecifyBody(BaseModel):
 def specify_task_endpoint(task_id: str, payload: SpecifyBody, board: Optional[str] = Query(None)):
     """Flesh out a triage task via the auxiliary LLM (``hermes kanban specify``). Non-OK is NOT
     an HTTP error — the UI renders the reason inline. Sync ``def`` → runs in the threadpool."""
-    def _run():
-        from hermes_cli import kanban_specify  # lazy: missing aux client must not break plugin load
-        return kanban_specify.specify_task(task_id, author=(payload.author or None))
-
-    outcome = _with_board_pinned(board, _run)
+    outcome = _run_aux(board, "kanban_specify", "specify_task", task_id, payload.author)
     return {"ok": bool(outcome.ok), "task_id": outcome.task_id, "reason": outcome.reason, "new_title": outcome.new_title}
 
 
@@ -1532,11 +1537,7 @@ class DecomposeBody(BaseModel):
 def decompose_task_endpoint(task_id: str, payload: DecomposeBody, board: Optional[str] = Query(None)):
     """Fan a triage task out into child tasks via the auxiliary LLM (``hermes kanban decompose``).
     Non-OK is NOT an HTTP error. Sync ``def`` → runs in the threadpool."""
-    def _run():
-        from hermes_cli import kanban_decompose
-        return kanban_decompose.decompose_task(task_id, author=(payload.author or None))
-
-    outcome = _with_board_pinned(board, _run)
+    outcome = _run_aux(board, "kanban_decompose", "decompose_task", task_id, payload.author)
     return {
         "ok": bool(outcome.ok), "task_id": outcome.task_id, "reason": outcome.reason,
         "fanout": bool(outcome.fanout), "child_ids": outcome.child_ids or [], "new_title": outcome.new_title}
