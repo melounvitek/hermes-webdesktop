@@ -143,7 +143,6 @@ class _OvcliProfile:
     source: str
     name: str
     path: Path
-    data: dict
     values: dict
     is_active: bool = False
 
@@ -674,12 +673,11 @@ def _probe_openviking_identity(client: _VikingClient) -> tuple[str, Any]:
 
 def _load_profile(path: Path, *, source: str, name: str) -> Optional[_OvcliProfile]:
     try:
-        data = _load_ovcli_config(path)
-        values = _connection_values_from_ovcli(data)
+        values = _connection_values_from_ovcli(_load_ovcli_config(path))
     except Exception as e:
         logger.warning("Skipping invalid OpenViking CLI config %s: %s", path, _format_openviking_exception(e))
         return None
-    return _OvcliProfile(source=source, name=name, path=path, data=data, values=values)
+    return _OvcliProfile(source=source, name=name, path=path, values=values)
 
 
 def _profile_identity(path: Path) -> str:
@@ -849,15 +847,20 @@ def _identity_failure(identity: str, subject: str, *, unhealthy_status: str = "s
     }.get(identity, f"{subject} responded, but its /health response is not valid OpenViking.")
 
 
+def _client_health_failure(client, subject: str, **identity_kwargs) -> Optional[str]:
+    """"" when healthy, a message when the server answered but is not healthy OpenViking,
+    None when a payload-less (test double) client's health() is simply False."""
+    if hasattr(client, "health_payload"):
+        return _identity_failure(_probe_openviking_identity(client)[0], subject, **identity_kwargs)
+    return "" if client.health() else None
+
+
 def _validate_openviking_reachability(endpoint: str) -> tuple[bool, str]:
     endpoint = _normalize_openviking_url(endpoint)
     try:
-        client = _VikingClient(endpoint)
-        if hasattr(client, "health_payload"):
-            message = _identity_failure(_probe_openviking_identity(client)[0], "OpenViking server", legacy_subject="The server")
+        message = _client_health_failure(_VikingClient(endpoint), "OpenViking server", legacy_subject="The server")
+        if message is not None:
             return (not message), message
-        elif client.health():
-            return True, ""
     except Exception as e:
         if _status_code_from_error(e) is not None:
             return False, f"OpenViking server responded with {_format_openviking_exception(e)}."
@@ -1026,11 +1029,9 @@ def _classify_runtime_openviking_health(client: _VikingClient, endpoint: str) ->
     not treated as server absence unless nothing answered at all."""
     subject = f"Service at {endpoint}"
     try:
-        if hasattr(client, "health_payload"):
-            message = _identity_failure(_probe_openviking_identity(client)[0], subject, unhealthy_status="OpenViking status")
+        message = _client_health_failure(client, subject, unhealthy_status="OpenViking status")
+        if message is not None:
             return ("healthy", "") if not message else ("responded", message + _local_listener_suffix(endpoint))
-        if client.health():
-            return "healthy", ""
     except _OpenVikingHTTPError as e:
         return "responded", f"{subject} responded with {_format_openviking_exception(e)}.{_local_listener_suffix(endpoint)}"
     except Exception:
@@ -2076,7 +2077,14 @@ class OpenVikingMemoryProvider(MemoryProvider):
             self._turn_count += 1
         self._mark_session_pending(sid)
         upload = _TurnUpload(self, sid, batch_messages, user_content, assistant_content)
-        self._spawn_writer(sid, upload.run, name="openviking-sync")
+
+        def drop_empty() -> None:
+            if not self._inflight_writers.get(sid):
+                self._inflight_writers.pop(sid, None)
+
+        # Tracked in _inflight_writers[sid] so commits can drain every writer for that sid.
+        self._spawn_tracked("openviking-sync", upload.run, self._inflight_lock, lambda: self._inflight_writers.setdefault(sid, set()),
+                            after_discard=drop_empty)
 
     # -- tracked worker threads ---------------------------------------------
 
@@ -2104,15 +2112,6 @@ class OpenVikingMemoryProvider(MemoryProvider):
             except Exception as e:
                 workers().discard(thread)
                 logger.debug("OpenViking %s worker failed to start: %s", name, e)
-
-    def _spawn_writer(self, sid: str, target: Callable[[], None], name: str) -> None:
-        """Writer tracked in _inflight_writers[sid] so commits can drain every writer for that sid."""
-
-        def drop_empty() -> None:
-            if not self._inflight_writers.get(sid):
-                self._inflight_writers.pop(sid, None)
-
-        self._spawn_tracked(name, target, self._inflight_lock, lambda: self._inflight_writers.setdefault(sid, set()), after_discard=drop_empty)
 
     @staticmethod
     def _join_all(alive: Callable[[], List[threading.Thread]], timeout: float, *, slice_cap: Optional[float] = None) -> bool:
@@ -2454,8 +2453,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
             return
         subdir = _MEMORY_WRITE_TARGET_SUBDIR_MAP.get(target, "preferences")
         try:
-            # One connection snapshot for identity resolution, URI build, and write.
-            client = self._new_client()
+            client = self._new_client()  # one connection snapshot for identity, URI build, and write
         except Exception as e:
             logger.debug("OpenViking memory mirror client creation failed: %s", e)
             return
