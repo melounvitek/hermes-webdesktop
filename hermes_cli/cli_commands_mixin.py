@@ -211,6 +211,10 @@ _WORKTREE_SUBCOMMANDS = {
     **dict.fromkeys(("list", "ls"), "_worktree_list"),
     **dict.fromkeys(("new", "add", "create"), "_worktree_new")}
 
+# Message fields copied verbatim onto a /branch row (plus role / tool_name / api_content).
+_BRANCH_COPY_KEYS = ("content", "tool_calls", "tool_call_id", "reasoning", "reasoning_details",
+                     "codex_reasoning_items", "codex_message_items", "timestamp")
+
 # /diff argument -> mode (anything else is a path; --stat/stat is the stat flag).
 _DIFF_MODES = {
     "staged": "staged", "--staged": "staged", "cached": "staged", "--cached": "staged",
@@ -500,23 +504,18 @@ def _browser_connect(cli, cdp_url: str) -> None:
     is_default = cdp_url == DEFAULT_BROWSER_CDP_URL
     if is_default:
         found = discover_local_cdp_url(port, timeout=1.0)
-        already_open = found is not None
-        if found:
-            cdp_url = found
     else:
-        already_open = is_browser_debug_ready(cdp_url, timeout=1.0)
-    if already_open:
-        print(f"   ✓ Chromium-family browser is already listening at {cdp_url}")
+        found = cdp_url if is_browser_debug_ready(cdp_url, timeout=1.0) else None
+    if found:
+        print(f"   ✓ Chromium-family browser is already listening at {found}")
     elif is_default:
         found = _launch_default_cdp_browser(port)
-        already_open = found is not None
-        if found:
-            cdp_url = found
     else:
         print(f"   ⚠ Port {port} is not reachable at {cdp_url}")
-    if not already_open:
+    if not found:
         return _say_block("Browser not connected — start a Chromium-family browser with remote "
                           "debugging and retry /browser connect")
+    cdp_url = found
     os.environ["BROWSER_CDP_URL"] = cdp_url
     # Eagerly start the CDP supervisor so pending_dialogs + frame_tree show up in the next snapshot.
     with suppress(Exception):
@@ -795,12 +794,8 @@ class CLICommandsMixin:
             f"  {'─'*3}  {'─'*35} {'─'*5} {'─'*10} {'─'*20}")
         for i, s in enumerate(snaps, 1):
             size = s.get("total_size", 0)
-            if size < 1024:
-                size_str = f"{size} B"
-            elif size < 1024 * 1024:
-                size_str = f"{size / 1024:.0f} KB"
-            else:
-                size_str = f"{size / 1024 / 1024:.1f} MB"
+            size_str = (f"{size} B" if size < 1024 else f"{size / 1024:.0f} KB"
+                        if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB")
             label = s.get("label") or ""
             print(f"  {i:3}  {s['id']:<35} {s.get('file_count', 0):>5} {size_str:>10} {label}")
 
@@ -892,18 +887,14 @@ class CLICommandsMixin:
         from tools.process_registry import process_registry
         running = [p for p in process_registry.list_sessions() if p.get("status") == "running"]
         # Background subagents live in their own registry, not the process registry.
-        try:
-            from tools.async_delegation import active_count, interrupt_all
-            n_async = active_count()
-        except Exception:
-            n_async = 0
-            interrupt_all = None
+        n_async = _probe("tools.async_delegation", "active_count", 0)
         if not running and not n_async:
             return print("  No running background processes.")
         if running:
             print(f"  Stopping {len(running)} background process(es)...")
             print(f"  ✅ Stopped {process_registry.kill_all()} process(es).")
-        if n_async and interrupt_all is not None:
+        if n_async:
+            from tools.async_delegation import interrupt_all
             print(f"  ✅ Interrupted {interrupt_all(reason='/stop')} background delegation(s).")
 
     def _handle_agents_command(self):
@@ -1392,20 +1383,11 @@ class CLICommandsMixin:
         with suppress(Exception):
             self._session_db.append_messages_batch(
                 new_session_id,
-                [
-                    {
-                        "role": msg.get("role", "user"),
-                        "content": msg.get("content"),
-                        "tool_name": msg.get("tool_name") or msg.get("name"),
-                        "tool_calls": msg.get("tool_calls"),
-                        "tool_call_id": msg.get("tool_call_id"),
-                        "reasoning": msg.get("reasoning"),
-                        "reasoning_details": msg.get("reasoning_details"),
-                        "codex_reasoning_items": msg.get("codex_reasoning_items"),
-                        "codex_message_items": msg.get("codex_message_items"),
-                        "api_content": extract_api_content_sidecar(msg),
-                        "timestamp": msg.get("timestamp")}
-                    for msg in self.conversation_history],
+                [{"role": msg.get("role", "user"),
+                  "tool_name": msg.get("tool_name") or msg.get("name"),
+                  "api_content": extract_api_content_sidecar(msg),
+                  **{k: msg.get(k) for k in _BRANCH_COPY_KEYS}}
+                 for msg in self.conversation_history],
                 chunk_rows=500)
         with suppress(Exception):
             self._session_db.set_session_title(new_session_id, branch_title)
@@ -1535,12 +1517,9 @@ class CLICommandsMixin:
                     (read_raw_config().get("display") or {}).get("personality", ""))
             except Exception:
                 current = ""
-            print()
-            _pr("+" + "-" * 50 + "+", "|" + " " * 12 + "(^o^)/ Personalities" + " " * 15 + "|",
-                "+" + "-" * 50 + "+")
-            print()
-            marker = " *" if not current else "  "
-            print(f" {marker}{'none':<12} - (no personality overlay)")
+            _pr("", "+" + "-" * 50 + "+", "|" + " " * 12 + "(^o^)/ Personalities" + " " * 15 + "|",
+                "+" + "-" * 50 + "+", "",
+                f" {' *' if not current else '  '}{'none':<12} - (no personality overlay)")
             for name, prompt in self.personalities.items():
                 marker = " *" if name == current else "  "
                 print(f" {marker}{name:<12} - {describe_personality(prompt)}")
@@ -1959,11 +1938,10 @@ class CLICommandsMixin:
                 set_secret_capture_callback(self._secret_capture_callback)
             try:
                 bg_agent = AIAgent(
-                    model=turn_route["model"], api_key=runtime.get("api_key"),
-                    base_url=runtime.get("base_url"), provider=runtime.get("provider"),
-                    api_mode=runtime.get("api_mode"), acp_command=runtime.get("command"),
-                    acp_args=runtime.get("args"), max_tokens=runtime.get("max_tokens"),
-                    max_iterations=self.max_turns, enabled_toolsets=self.enabled_toolsets,
+                    model=turn_route["model"], acp_command=runtime.get("command"),
+                    acp_args=runtime.get("args"), max_iterations=self.max_turns,
+                    **{k: runtime.get(k) for k in ("api_key", "base_url", "provider", "api_mode",
+                                                   "max_tokens")}, enabled_toolsets=self.enabled_toolsets,
                     quiet_mode=True, verbose_logging=False, session_id=task_id, platform="cli",
                     session_db=self._session_db, reasoning_config=self.reasoning_config,
                     service_tier=self.service_tier,
@@ -2635,12 +2613,8 @@ class CLICommandsMixin:
         raw = _command_arg(cmd)
         if not raw:  # show current state
             rc = self.reasoning_config
-            if rc is None:
-                level = "medium (default)"
-            elif rc.get("enabled") is False:
-                level = "none (disabled)"
-            else:
-                level = rc.get("effort", "medium")
+            level = ("medium (default)" if rc is None else "none (disabled)"
+                     if rc.get("enabled") is False else rc.get("effort", "medium"))
             display_state = "on ✓" if self.show_reasoning else "off"
             full_state = "full" if getattr(self, "reasoning_full", False) else "clamped to 10 lines"
             return _cp(_accent_line(f"Reasoning effort:  {level}"),
