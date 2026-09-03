@@ -157,8 +157,7 @@ class SessionMessagesMixin:
                 logger.warning("Ignoring non-object display metadata on write")
                 return None
         elif not isinstance(display_metadata, dict):
-            logger.warning(
-                "Ignoring unexpected display metadata type on write: %s", type(display_metadata).__name__)
+            logger.warning("Ignoring unexpected display metadata type on write: %s", type(display_metadata).__name__)
             return None
         return json.dumps(display_metadata)
 
@@ -381,7 +380,7 @@ class SessionMessagesMixin:
             existing = self._reaction_list(meta)
             reactions = [r for r in existing if r.get("author") != author]
             previous = next((r for r in existing if r.get("author") == author), None)
-            if emoji and not (previous is not None and previous.get("emoji") == emoji):
+            if emoji and (previous is None or previous.get("emoji") != emoji):
                 reactions.append({"emoji": _scrub_surrogates(emoji), "author": author, "at": time.time()})
             if reactions:
                 meta[self.REACTIONS_METADATA_KEY] = reactions
@@ -454,8 +453,7 @@ class SessionMessagesMixin:
         """Role of the active message at *row_id* in *session_id*, or ``None``."""
         if not session_id:
             return None
-        row = self._read_one(
-            "SELECT role FROM messages WHERE id = ? AND session_id = ? AND active = 1", (int(row_id), session_id))
+        row = self._read_one("SELECT role FROM messages WHERE id = ? AND session_id = ? AND active = 1", (int(row_id), session_id))
         return row[0] if row else None
 
     def _insert_message_rows(self, conn, session_id: str, messages: List[Dict[str, Any]]) -> tuple[int, int]:
@@ -474,7 +472,7 @@ class SessionMessagesMixin:
                 msg["_row_id"] = cur.lastrowid
             inserted += 1
             tool_calls_total += _tool_calls_count(tool_calls)
-            now_ts = max(now_ts + 1e-6, message_timestamp + 1e-6)
+            now_ts = max(now_ts, message_timestamp) + 1e-6
         return inserted, tool_calls_total
 
     def replace_messages(
@@ -728,9 +726,8 @@ class SessionMessagesMixin:
         = session boundary). Empty when the anchor is not in *session_id*."""
         window = max(window, 0)
         with self._read_ctx() as conn:
-            if not conn.execute(
-                "SELECT 1 FROM messages WHERE id = ? AND session_id = ? LIMIT 1", (around_message_id, session_id),
-            ).fetchone():
+            anchor = (around_message_id, session_id)
+            if not conn.execute("SELECT 1 FROM messages WHERE id = ? AND session_id = ? LIMIT 1", anchor).fetchone():
                 return {"window": [], "messages_before": 0, "messages_after": 0}
             before_rows = conn.execute(
                 "SELECT * FROM messages WHERE session_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
@@ -1025,7 +1022,7 @@ class SessionMessagesMixin:
                 prev_content, prev_is_composite = SessionDB._canonical_replayed_user_content(prev)
                 if prev_content == content and (prefer_current or prev_is_composite or isinstance(content, str)):
                     return index, prefer_current
-            if prev.get("role") == "assistant" and (prev.get("content") or prev.get("tool_calls")):
+            elif prev.get("role") == "assistant" and (prev.get("content") or prev.get("tool_calls")):
                 return None
         return None
 
@@ -1105,8 +1102,7 @@ class SessionMessagesMixin:
                 "UPDATE sessions SET rewind_count = COALESCE(rewind_count, 0) + 1 WHERE id = ?", (session_id,))
             message_count, tool_call_count = self._active_transcript_counts(conn, session_id)
             conn.execute(f"{_SET_COUNTERS_SQL} WHERE id = ?", (message_count, tool_call_count, session_id))
-            head_row = conn.execute(
-                "SELECT MAX(id) FROM messages WHERE session_id = ? AND active = 1", (session_id,)).fetchone()
+            head_row = conn.execute("SELECT MAX(id) FROM messages WHERE session_id = ? AND active = 1", (session_id,)).fetchone()
             return target_row, ids, head_row[0] if head_row else None, replacement_message_id
         target_row, rewound, new_head_id, replacement_message_id = self._execute_write(_do)
         # Decode for the prompt-buffer prefill without a second fallible DB operation.
