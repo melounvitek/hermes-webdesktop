@@ -111,8 +111,7 @@ def aux_probe_mode():
 
 from agent.credential_pool import load_pool
 from agent.model_metadata import (
-    MINIMUM_CONTEXT_LENGTH,
-    get_model_context_length,
+    MINIMUM_CONTEXT_LENGTH, get_model_context_length,
     strip_codex_context_variant_suffix as _strip_codex_ctx_variant,
 )
 from hermes_cli.config import get_hermes_home
@@ -141,8 +140,7 @@ def _resolve_aux_verify(base_url: Optional[str]) -> Any:
 
         tls = get_custom_provider_tls_settings(str(base_url or ""), config=load_config_readonly())
         return resolve_httpx_verify(
-            ca_bundle=tls.get("ssl_ca_cert"),
-            ssl_verify=tls.get("ssl_verify"),
+            ca_bundle=tls.get("ssl_ca_cert"), ssl_verify=tls.get("ssl_verify"),
             base_url=str(base_url or ""),
         )
     except Exception:
@@ -153,17 +151,13 @@ _WARNED_KEEPALIVE_IMPORT_SKEW = False
 
 
 def _openai_http_client_kwargs(
-    base_url: Optional[str],
-    *,
-    async_mode: bool = False,
+    base_url: Optional[str], *, async_mode: bool = False
 ) -> Dict[str, Any]:
     """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
     try:
         from agent.process_bootstrap import build_keepalive_http_client
         client = build_keepalive_http_client(
-            str(base_url or ""),
-            async_mode=async_mode,
-            verify=_resolve_aux_verify(base_url),
+            str(base_url or ""), async_mode=async_mode, verify=_resolve_aux_verify(base_url)
         )
     except (ImportError, AttributeError):
         # Version-skewed install (Desktop runtime lagging a git tree): older
@@ -191,8 +185,7 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     # (relay 401s any unrecognized bearer) — blank the Authorization header.
     try:
         from hermes_cli.models import (
-            OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER,
-            opencode_zen_free_headers,
+            OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER, opencode_zen_free_headers
         )
         if api_key == OPENCODE_ZEN_FREE_KEYLESS_PLACEHOLDER:
             merged = dict(kwargs.get("default_headers") or {})
@@ -240,9 +233,7 @@ def _aux_interrupt_cancel_requested() -> bool:
 
 @contextlib.contextmanager
 def aux_interrupt_protection(
-    active: bool = True,
-    cancel_check=None,
-    cancel_event=None,
+    active: bool = True, cancel_check=None, cancel_event=None
 ):
     """Mark this thread's aux LLM call interrupt-protected (re-entrant-safe).
 
@@ -439,8 +430,7 @@ def _codex_event_has_content(event: Any) -> bool:
     if event_type == "response.output_item.added":
         item = _field(event, "item")
         return "function_call" in str(_field(item, "type") or "") and any(
-            bool(_field(item, field))
-            for field in ("id", "call_id", "name", "arguments")
+            bool(_field(item, field)) for field in ("id", "call_id", "name", "arguments")
         )
     return False
 
@@ -489,8 +479,7 @@ _aux_timing_hook = _aux_thread_local_hook
 
 
 def _run_protected_sync_provider_call(
-    callback: Callable[[dict[str, Any]], Any],
-    kwargs: dict[str, Any],
+    callback: Callable[[dict[str, Any]], Any], kwargs: dict[str, Any]
 ) -> Any:
     """Run one protected provider callback in an attempt-isolated daemon thread.
 
@@ -534,9 +523,7 @@ def _run_protected_sync_provider_call(
             done.set()
 
     threading.Thread(
-        target=provider_context.run,
-        args=(_provider_worker,),
-        name="hermes-protected-aux-provider",
+        target=provider_context.run, args=(_provider_worker,), name="hermes-protected-aux-provider",
         daemon=True,
     ).start()
 
@@ -712,8 +699,7 @@ def _is_codex_spark(model: Optional[str], provider: Optional[str] = None) -> boo
 
 
 def _fixed_temperature_for_model(
-    model: Optional[str],
-    base_url: Optional[str] = None,
+    model: Optional[str], base_url: Optional[str] = None
 ) -> "Optional[float] | object":
     """``OMIT_TEMPERATURE`` (drop the key; Kimi/Moonshot), a fixed ``float``, or ``None``."""
     if _is_kimi_model(model):
@@ -725,9 +711,7 @@ def _fixed_temperature_for_model(
 
 
 def _compression_threshold_for_model(
-    model: Optional[str],
-    provider: Optional[str] = None,
-    *,
+    model: Optional[str], provider: Optional[str] = None, *,
     allow_codex_gpt55_autoraise: bool = True,
 ) -> Optional[float]:
     """Per-model/route compression threshold override (fraction of context used), or None.
@@ -836,8 +820,7 @@ def _fast_model_from_catalog(provider_id: str) -> str:
             from hermes_cli.models import _NOUS_CATALOG_TTL_SECONDS
 
             _nous_kwargs = {
-                "include_sale_original": True,
-                "cache_ttl_seconds": _NOUS_CATALOG_TTL_SECONDS,
+                "include_sale_original": True, "cache_ttl_seconds": _NOUS_CATALOG_TTL_SECONDS
             }
         catalog = fetch_models_with_pricing(
             api_key=api_key or None, base_url=base_url, timeout=3.0, **_nous_kwargs
@@ -851,8 +834,7 @@ def _fast_model_from_catalog(provider_id: str) -> str:
         # Narrow catalog ids by org policy, as the pickers do.
         try:
             from hermes_cli.models import (
-                nous_policy_allowed_ids,
-                restrict_to_nous_policy,
+                nous_policy_allowed_ids, restrict_to_nous_policy
             )
 
             ids = restrict_to_nous_policy(ids, nous_policy_allowed_ids())
@@ -952,8 +934,7 @@ def _task_prefers_fast_model(task: Optional[str]) -> bool:
 
 # Dedicated vision models for direct providers whose main chat model differs.
 _PROVIDER_VISION_MODELS: Dict[str, str] = {
-    "xiaomi": "mimo-v2.5",
-    "zai": "glm-5v-turbo",
+    "xiaomi": "mimo-v2.5", "zai": "glm-5v-turbo"
 }
 
 
@@ -1133,8 +1114,7 @@ def _to_openai_base_url(base_url: str) -> str:
             return rewritten
         # Anthropic-only gateway: leave the /anthropic path alone.
         logger.debug(
-            "Auxiliary client: keeping Anthropic-only base URL %s (no dual-surface host match)",
-            url,
+            "Auxiliary client: keeping Anthropic-only base URL %s (no dual-surface host match)", url
         )
         return url
     if base_url_host_matches(url, "api.kimi.com") and url.endswith("/coding"):
@@ -1279,8 +1259,7 @@ def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
                 id=_field(item, "call_id", ""),
                 type="function",
                 function=SimpleNamespace(
-                    name=_field(item, "name", ""),
-                    arguments=_field(item, "arguments", "{}"),
+                    name=_field(item, "name", ""), arguments=_field(item, "arguments", "{}")
                 ),
             ))
     usage = None
@@ -1291,8 +1270,7 @@ def _parse_codex_final_response(final: Any) -> Tuple[List[str], List[Any], Any]:
                 resp_usage.get(key, 0) if isinstance(resp_usage, dict) else 0
             )
         usage = SimpleNamespace(
-            prompt_tokens=_u("input_tokens"),
-            completion_tokens=_u("output_tokens"),
+            prompt_tokens=_u("input_tokens"), completion_tokens=_u("output_tokens"),
             total_tokens=_u("total_tokens"),
         )
     return text_parts, tool_calls_raw, usage
@@ -1559,9 +1537,7 @@ class _CodexCompletionsAdapter:
         # doesn't survive credential rotation (401 on replay) — same guard as build_kwargs.
         # Aux calls never send ``context_management`` (main-turn feature): no compaction checkpoint.
         return instructions, _chat_messages_to_responses_input(
-            replay_messages,
-            is_github_responses=is_github,
-            native_compaction_eligible=False,
+            replay_messages, is_github_responses=is_github, native_compaction_eligible=False
         )
 
     @staticmethod
@@ -1626,15 +1602,13 @@ class _CodexCompletionsAdapter:
         """
         try:
             from agent.transports.codex import (
-                _cache_scope_from_session_id,
-                _content_cache_key,
+                _cache_scope_from_session_id, _content_cache_key,
                 _default_prompt_cache_retention_for_request,
             )
 
             if not skip_key and "prompt_cache_key" not in resp_kwargs:
                 scope = _cache_scope_from_session_id(
-                    _runtime_main_value("cache_scope")
-                    or _runtime_main_value("session_id")
+                    _runtime_main_value("cache_scope") or _runtime_main_value("session_id")
                 )
                 cache_key = _content_cache_key(resp_kwargs["instructions"], resp_kwargs.get("tools"), scope)
                 if cache_key:
@@ -1682,8 +1656,7 @@ class _CodexCompletionsAdapter:
         # rebuilds from ``response.completed.response.output``, which the Codex backend
         # returns as ``null`` (NoneType crash inside the SDK).
         from agent.codex_runtime import (
-            _bypass_sdk_request_transform,
-            _consume_codex_event_stream,
+            _bypass_sdk_request_transform, _consume_codex_event_stream
         )
 
         stream_kwargs = dict(resp_kwargs)
@@ -1703,9 +1676,7 @@ class _CodexCompletionsAdapter:
             if hasattr(event_stream, "output"):
                 return event_stream
             return _consume_codex_event_stream(
-                event_stream,
-                model=str(resp_kwargs.get("model") or model),
-                on_event=guard.on_event,
+                event_stream, model=str(resp_kwargs.get("model") or model), on_event=guard.on_event
             )
         finally:
             guard.release_stream(event_stream)
@@ -1730,14 +1701,11 @@ class _CodexCompletionsAdapter:
 
         # Shape the result like chat.completions.
         message = SimpleNamespace(
-            role="assistant",
-            content="".join(text_parts).strip() or None,
+            role="assistant", content="".join(text_parts).strip() or None,
             tool_calls=tool_calls_raw or None,
         )
         choice = SimpleNamespace(
-            index=0,
-            message=message,
-            finish_reason="stop" if not tool_calls_raw else "tool_calls",
+            index=0, message=message, finish_reason="stop" if not tool_calls_raw else "tool_calls"
         )
         return SimpleNamespace(choices=[choice], model=model, usage=usage)
 
@@ -1823,11 +1791,7 @@ class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
     def __init__(
-        self,
-        real_client: Any,
-        model: str,
-        is_oauth: bool = False,
-        base_url: str | None = None,
+        self, real_client: Any, model: str, is_oauth: bool = False, base_url: str | None = None
     ):
         self._client = real_client
         self._model = model
@@ -1936,9 +1900,7 @@ class _AnthropicCompletionsAdapter:
             # only for substantive payloads so keepalives can't hold a stalled summary
             # open. None keeps the fast get_final_message path.
             on_stream_event=(
-                _anthropic_aux_stream_event_hook()
-                if _aux_progress_active()
-                else None
+                _anthropic_aux_stream_event_hook() if _aux_progress_active() else None
             ),
         )
         _nr = get_transport("anthropic_messages").normalize_response(
@@ -1949,17 +1911,14 @@ class _AnthropicCompletionsAdapter:
             prompt_tokens = getattr(response.usage, "input_tokens", 0) or 0
             completion_tokens = getattr(response.usage, "output_tokens", 0) or 0
             usage = SimpleNamespace(
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+                prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                 total_tokens=getattr(response.usage, "total_tokens", 0) or (prompt_tokens + completion_tokens),
             )
         # ToolCall already duck-types as OpenAI shape via properties.
         choice = SimpleNamespace(
             index=0,
             message=SimpleNamespace(
-                content=_nr.content,
-                tool_calls=_nr.tool_calls,
-                reasoning=_nr.reasoning,
+                content=_nr.content, tool_calls=_nr.tool_calls, reasoning=_nr.reasoning
             ),
             finish_reason=_nr.finish_reason,
         )
@@ -2090,11 +2049,7 @@ def _is_specialized_aux_client(client_obj: Any) -> bool:
 
 
 def _maybe_wrap_anthropic(
-    client_obj: Any,
-    model: str,
-    api_key: str,
-    base_url: str,
-    api_mode: Optional[str] = None,
+    client_obj: Any, model: str, api_key: str, base_url: str, api_mode: Optional[str] = None
 ) -> Any:
     """Rewrap a plain OpenAI client in ``AnthropicAuxiliaryClient`` when the endpoint speaks Anthropic Messages.
 
@@ -2176,16 +2131,13 @@ def _nous_api_key(provider: dict) -> str:
     from hermes_cli.auth import _nous_invoke_jwt_is_usable
 
     for token_key, expiry_key in (
-        ("agent_key", "agent_key_expires_at"),
-        ("access_token", "expires_at"),
+        ("agent_key", "agent_key_expires_at"), ("access_token", "expires_at")
     ):
         token = provider.get(token_key)
         if not isinstance(token, str) or not token.strip():
             continue
         if _nous_invoke_jwt_is_usable(
-            token,
-            scope=provider.get("scope"),
-            expires_at=provider.get(expiry_key),
+            token, scope=provider.get("scope"), expires_at=provider.get(expiry_key)
         ):
             return token
     return ""
@@ -2280,8 +2232,7 @@ def _resolve_xai_oauth_for_aux() -> Optional[Tuple[str, str]]:
     """
     try:
         from hermes_cli.auth import (
-            DEFAULT_XAI_OAUTH_BASE_URL,
-            _xai_validate_inference_base_url,
+            DEFAULT_XAI_OAUTH_BASE_URL, _xai_validate_inference_base_url
         )
 
         pool = load_pool("xai-oauth")
@@ -2576,8 +2527,7 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
         _remaining = nous_rate_limit_remaining()
         if _remaining is not None and _remaining > 0:
             logger.debug(
-                "Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)",
-                _remaining,
+                "Auxiliary: skipping Nous Portal (rate-limited, resets in %.0fs)", _remaining
             )
             _mark_provider_unhealthy("nous", ttl=_remaining)
             return None, None
@@ -2588,15 +2538,13 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
     runtime = _resolve_nous_runtime_api(force_refresh=False)
     if runtime is None and not nous:
         logger.warning(
-            "Auxiliary Nous client unavailable: no Nous authentication found "
-            "(run: hermes auth)."
+            "Auxiliary Nous client unavailable: no Nous authentication found " "(run: hermes auth)."
         )
         _mark_provider_unhealthy("nous", ttl=60)
         return None, None
     if runtime is None and nous:
         logger.debug(
-            "Auxiliary Nous: runtime JWT refresh failed; checking stored "
-            "auth.json token."
+            "Auxiliary Nous: runtime JWT refresh failed; checking stored " "auth.json token."
         )
     global auxiliary_is_nous
     auxiliary_is_nous = True
@@ -2635,11 +2583,7 @@ def _try_nous(vision: bool = False) -> Tuple[Optional[OpenAI], Optional[str]]:
             return None, None
         base_url = str((nous or {}).get("inference_base_url") or _nous_base_url()).rstrip("/")
     return (
-        _create_openai_client(
-            api_key=api_key,
-            base_url=base_url,
-        ),
-        model,
+        _create_openai_client( api_key=api_key, base_url=base_url ), model
     )
 
 
@@ -2658,8 +2602,7 @@ def _refresh_nous_recommended_model(
         fresh = get_nous_recommended_aux_model(vision=vision, force_refresh=True)
     except Exception as exc:
         logger.debug(
-            "Nous recommended-model refresh failed (%s); using default %s",
-            exc, _NOUS_MODEL,
+            "Nous recommended-model refresh failed (%s); using default %s", exc, _NOUS_MODEL
         )
     if fresh and fresh.strip().lower() != stale:
         return fresh
@@ -2820,9 +2763,7 @@ def _relay_auxiliary_call_async(callback):
 
 
 def _set_relay_auxiliary_route(
-    provider: str | None,
-    model: str | None,
-    api_mode: str | None,
+    provider: str | None, model: str | None, api_mode: str | None
 ) -> None:
     context = _RELAY_AUX_CALL_CONTEXT.get()
     if context is None:
@@ -2834,9 +2775,7 @@ def _set_relay_auxiliary_route(
 
 
 def _record_route_info(
-    route_info: Optional[Dict[str, str]],
-    provider: Optional[str],
-    model: Optional[str],
+    route_info: Optional[Dict[str, str]], provider: Optional[str], model: Optional[str]
 ) -> None:
     """Expose the concrete route selected for one auxiliary call."""
     if route_info is not None:
@@ -2845,9 +2784,7 @@ def _record_route_info(
 
 
 def _relay_auxiliary_metadata(
-    *,
-    provider: str | None = None,
-    api_mode: str | None = None,
+    *, provider: str | None = None, api_mode: str | None = None
 ) -> tuple[str, str, dict[str, Any]] | None:
     context = _RELAY_AUX_CALL_CONTEXT.get()
     if context is None:
@@ -2866,12 +2803,8 @@ def _relay_auxiliary_metadata(
 
 
 def _relay_sync_completion(
-    client: Any,
-    kwargs: dict[str, Any],
-    *,
-    provider: str | None = None,
-    api_mode: str | None = None,
-    create: Callable[[dict[str, Any]], Any] | None = None,
+    client: Any, kwargs: dict[str, Any], *, provider: str | None = None,
+    api_mode: str | None = None, create: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any:
     callback = create or (lambda request: client.chat.completions.create(**request))
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
@@ -2883,22 +2816,15 @@ def _relay_sync_completion(
     from agent import relay_llm
 
     return relay_llm.execute_current(
-        kwargs,
-        lambda request: _run_protected_sync_provider_call(callback, request),
-        name=provider_name,
-        model_name=str(kwargs.get("model") or fallback_model),
-        metadata=metadata,
-        defer_logical_completion=True,
+        kwargs, lambda request: _run_protected_sync_provider_call(callback, request),
+        name=provider_name, model_name=str(kwargs.get("model") or fallback_model),
+        metadata=metadata, defer_logical_completion=True,
     )
 
 
 async def _relay_async_completion(
-    client: Any,
-    kwargs: dict[str, Any],
-    *,
-    provider: str | None = None,
-    api_mode: str | None = None,
-    create: Callable[[dict[str, Any]], Any] | None = None,
+    client: Any, kwargs: dict[str, Any], *, provider: str | None = None,
+    api_mode: str | None = None, create: Callable[[dict[str, Any]], Any] | None = None,
 ) -> Any:
     callback = create or (lambda request: client.chat.completions.create(**request))
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
@@ -2908,21 +2834,13 @@ async def _relay_async_completion(
     from agent import relay_llm
 
     return await relay_llm.execute_current_async(
-        kwargs,
-        callback,
-        name=provider_name,
-        model_name=str(kwargs.get("model") or fallback_model),
-        metadata=metadata,
-        defer_logical_completion=True,
+        kwargs, callback, name=provider_name, model_name=str(kwargs.get("model") or fallback_model),
+        metadata=metadata, defer_logical_completion=True,
     )
 
 
 def _relay_sync_stream(
-    client: Any,
-    kwargs: dict[str, Any],
-    *,
-    provider: str | None = None,
-    api_mode: str | None = None,
+    client: Any, kwargs: dict[str, Any], *, provider: str | None = None, api_mode: str | None = None
 ) -> Any:
     route = _relay_auxiliary_metadata(provider=provider, api_mode=api_mode)
     if route is None:
@@ -2931,12 +2849,8 @@ def _relay_sync_stream(
     from agent import relay_llm
 
     return relay_llm.stream_current(
-        kwargs,
-        lambda request: client.chat.completions.create(**request),
-        name=provider_name,
-        model_name=str(kwargs.get("model") or fallback_model),
-        finalizer=dict,
-        metadata=metadata,
+        kwargs, lambda request: client.chat.completions.create(**request), name=provider_name,
+        model_name=str(kwargs.get("model") or fallback_model), finalizer=dict, metadata=metadata,
         completed_response_predicate=lambda value: hasattr(value, "choices"),
     )
 _RUNTIME_MAIN_COMPAT_SNAPSHOT: Tuple[Any, ...] = ("", "", "", "", "", "")
@@ -2950,12 +2864,8 @@ def _publish_runtime_main_mirrors(values: Tuple[Any, ...]) -> None:
     global _RUNTIME_MAIN_AUTH_MODE, _RUNTIME_MAIN_COMPAT_SNAPSHOT
     with _RUNTIME_MAIN_COMPAT_LOCK:
         (
-            _RUNTIME_MAIN_PROVIDER,
-            _RUNTIME_MAIN_MODEL,
-            _RUNTIME_MAIN_BASE_URL,
-            _RUNTIME_MAIN_API_KEY,
-            _RUNTIME_MAIN_API_MODE,
-            _RUNTIME_MAIN_AUTH_MODE,
+            _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL, _RUNTIME_MAIN_BASE_URL,
+            _RUNTIME_MAIN_API_KEY, _RUNTIME_MAIN_API_MODE, _RUNTIME_MAIN_AUTH_MODE,
         ) = values
         _RUNTIME_MAIN_COMPAT_SNAPSHOT = tuple(values)
 
@@ -2969,12 +2879,8 @@ def _compat_runtime_main() -> Optional[Dict[str, Any]]:
     if threading.current_thread() is not threading.main_thread():
         return None
     values = (
-        _RUNTIME_MAIN_PROVIDER,
-        _RUNTIME_MAIN_MODEL,
-        _RUNTIME_MAIN_BASE_URL,
-        _RUNTIME_MAIN_API_KEY,
-        _RUNTIME_MAIN_API_MODE,
-        _RUNTIME_MAIN_AUTH_MODE,
+        _RUNTIME_MAIN_PROVIDER, _RUNTIME_MAIN_MODEL, _RUNTIME_MAIN_BASE_URL, _RUNTIME_MAIN_API_KEY,
+        _RUNTIME_MAIN_API_MODE, _RUNTIME_MAIN_AUTH_MODE,
     )
     if values == _RUNTIME_MAIN_COMPAT_SNAPSHOT:
         return None
@@ -2994,15 +2900,8 @@ def _runtime_main_value(field: str) -> Any:
 
 
 def set_runtime_main(
-    provider: str,
-    model: str,
-    *,
-    requested_provider: str = "",
-    base_url: str = "",
-    api_key: Any = "",
-    api_mode: str = "",
-    auth_mode: str = "",
-    session_id: str = "",
+    provider: str, model: str, *, requested_provider: str = "", base_url: str = "",
+    api_key: Any = "", api_mode: str = "", auth_mode: str = "", session_id: str = "",
     cache_scope: str = "",
 ) -> contextvars.Token:
     """Record the current context's live main runtime for auxiliary routing.
@@ -3017,9 +2916,7 @@ def set_runtime_main(
         "model": (model or "").strip(),
         "base_url": (base_url or "").strip(),
         "api_key": (
-            api_key.strip()
-            if isinstance(api_key, str)
-            else api_key if callable(api_key) else ""
+            api_key.strip() if isinstance(api_key, str) else api_key if callable(api_key) else ""
         ),
         "api_mode": (api_mode or "").strip(),
         "auth_mode": (auth_mode or "").strip().lower(),
@@ -3205,9 +3102,7 @@ def _build_xai_oauth_aux_client(model: str) -> Tuple[Optional[Any], Optional[str
     from tools.xai_http import hermes_xai_default_headers
 
     real_client = _create_openai_client(
-        api_key=api_key,
-        base_url=base_url,
-        default_headers=hermes_xai_default_headers(),
+        api_key=api_key, base_url=base_url, default_headers=hermes_xai_default_headers()
     )
     return CodexAuxiliaryClient(real_client, model), model
 
@@ -3240,19 +3135,15 @@ def _build_codex_client(model: str) -> Tuple[Optional[Any], Optional[str]]:
         base_url = _CODEX_AUX_BASE_URL
     logger.debug("Auxiliary client: Codex OAuth (%s via Responses API)", model)
     real_client = _create_openai_client(
-        api_key=codex_token,
-        base_url=base_url,
+        api_key=codex_token, base_url=base_url,
         default_headers=_codex_cloudflare_headers(codex_token, base_url=base_url),
     )
     return CodexAuxiliaryClient(real_client, model), model
 
 
 def _try_azure_foundry(
-    *,
-    model: Optional[str] = None,
-    explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None,
-    api_mode: Optional[str] = None,
+    *, model: Optional[str] = None, explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None, api_mode: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Azure Foundry aux client via the main agent's ``_resolve_azure_foundry_runtime`` (api_key vs Entra
     callable bearer, per-model api_mode, base_url overrides). Returns ``(client, model)`` or ``(None, None)``."""
@@ -3273,10 +3164,8 @@ def _try_azure_foundry(
 
     try:
         runtime = _resolve_azure_foundry_runtime(
-            requested_provider="azure-foundry",
-            model_cfg=model_cfg,
-            explicit_api_key=explicit_api_key,
-            explicit_base_url=explicit_base_url,
+            requested_provider="azure-foundry", model_cfg=model_cfg,
+            explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url,
             target_model=model,
         )
     except AuthError as exc:
@@ -3295,8 +3184,7 @@ def _try_azure_foundry(
         return None, None
 
     final_model = _normalize_resolved_model(
-        model or str(model_cfg.get("default") or ""),
-        "azure-foundry",
+        model or str(model_cfg.get("default") or ""), "azure-foundry"
     )
     if not final_model:
         # No fallback aux model for Azure (needs a deployment name): let the auto chain fall through instead of 404ing.
@@ -3407,10 +3295,8 @@ def _get_provider_chain() -> List[tuple]:
     ``openai-codex`` is deliberately absent (shifting allow-list breaks guessed-model fallback).
     """
     return [
-        ("openrouter", _try_openrouter),
-        ("nous", _try_nous),
-        ("local/custom", _try_custom_endpoint),
-        ("api-key", _resolve_api_key_provider),
+        ("openrouter", _try_openrouter), ("nous", _try_nous),
+        ("local/custom", _try_custom_endpoint), ("api-key", _resolve_api_key_provider),
     ]
 
 
@@ -3536,8 +3422,7 @@ def _nous_portal_account_has_fresh_paid_access() -> bool:
 
 
 _RATE_LIMIT_KEYWORDS = (
-    "rate limit", "rate_limit", "too many requests",
-    "try again", "retry after", "resets in",
+    "rate limit", "rate_limit", "too many requests", "try again", "retry after", "resets in"
 )
 _RATE_LIMIT_BILLING_KEYWORDS = (
     "credits", "insufficient funds", "billing",
@@ -3812,8 +3697,7 @@ def _evict_cached_clients(provider: str) -> None:
     normalized = _normalize_aux_provider(provider)
     with _client_cache_lock:
         stale_keys = [
-            key for key in _client_cache
-            if _normalize_aux_provider(str(key[0])) == normalized
+            key for key in _client_cache if _normalize_aux_provider(str(key[0])) == normalized
         ]
         for key in stale_keys:
             client = _client_cache.get(key, (None, None, None))[0]
@@ -3841,9 +3725,7 @@ def _evict_cached_client_instance(target: Any) -> bool:
 
 
 def _pool_cache_hint(
-    provider: str,
-    *,
-    main_runtime: Optional[Dict[str, Any]] = None,
+    provider: str, *, main_runtime: Optional[Dict[str, Any]] = None
 ) -> str:
     """Return a stable cache discriminator for pooled providers."""
     normalized = _normalize_aux_provider(provider)
@@ -3871,19 +3753,13 @@ def _pool_error_context(exc: Exception) -> Dict[str, Any]:
 
 # Ordered (host, provider) tables for inferring a backend from a client base URL.
 _POOL_PROVIDER_BY_HOST = (
-    ("chatgpt.com", "openai-codex"),
-    ("openrouter.ai", "openrouter"),
-    ("inference-api.nousresearch.com", "nous"),
-    ("api.anthropic.com", "anthropic"),
-    ("githubcopilot.com", "copilot"),
-    ("api.kimi.com", "kimi-coding"),
-    ("api.x.ai", "xai-oauth"),
+    ("chatgpt.com", "openai-codex"), ("openrouter.ai", "openrouter"),
+    ("inference-api.nousresearch.com", "nous"), ("api.anthropic.com", "anthropic"),
+    ("githubcopilot.com", "copilot"), ("api.kimi.com", "kimi-coding"), ("api.x.ai", "xai-oauth"),
 )
 _AUTH_REFRESH_PROVIDER_BY_HOST = (
-    ("api.githubcopilot.com", "copilot"),
-    ("chatgpt.com", "openai-codex"),
-    ("api.anthropic.com", "anthropic"),
-    ("inference-api.nousresearch.com", "nous"),
+    ("api.githubcopilot.com", "copilot"), ("chatgpt.com", "openai-codex"),
+    ("api.anthropic.com", "anthropic"), ("inference-api.nousresearch.com", "nous"),
 )
 
 
@@ -3896,9 +3772,7 @@ def _provider_for_host(base_url: str, table: Tuple[Tuple[str, str], ...]) -> Opt
 
 
 def _recoverable_pool_provider(
-    resolved_provider: str,
-    client: Any,
-    main_runtime: Optional[Dict[str, Any]] = None,
+    resolved_provider: str, client: Any, main_runtime: Optional[Dict[str, Any]] = None
 ) -> Optional[str]:
     """Infer which provider pool can recover the current auxiliary client."""
     normalized = _normalize_aux_provider(resolved_provider)
@@ -3946,8 +3820,7 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
     def _rotate(fallback_status: int) -> bool:
         next_entry = pool.mark_exhausted_and_rotate(
             status_code=status_code if status_code is not None else fallback_status,
-            error_context=_pool_error_context(exc),
-            api_key_hint=failed_api_key or None,
+            error_context=_pool_error_context(exc), api_key_hint=failed_api_key or None,
         )
         if next_entry is None:
             return False
@@ -3967,43 +3840,24 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
 
 
 def _prepare_same_provider_retry(
-    *,
-    task: Optional[str],
-    resolved_provider: str,
-    resolved_model: Optional[str],
-    resolved_base_url: Optional[str],
-    resolved_api_key: Optional[str],
-    resolved_api_mode: Optional[str],
-    main_runtime: Optional[Dict[str, Any]],
-    final_model: Optional[str],
-    messages: list,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    tools: Optional[list],
-    effective_timeout: float,
-    effective_extra_body: dict,
-    reasoning_config: Optional[dict],
-    async_mode: bool,
+    *, task: Optional[str], resolved_provider: str, resolved_model: Optional[str],
+    resolved_base_url: Optional[str], resolved_api_key: Optional[str],
+    resolved_api_mode: Optional[str], main_runtime: Optional[Dict[str, Any]],
+    final_model: Optional[str], messages: list, temperature: Optional[float],
+    max_tokens: Optional[int], tools: Optional[list], effective_timeout: float,
+    effective_extra_body: dict, reasoning_config: Optional[dict], async_mode: bool,
     extra_headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Rebuild (client, request kwargs) for a same-provider retry after credential recovery."""
     if task == "vision":
         effective_provider, retry_client, retry_model = resolve_vision_provider_client(
-            provider=resolved_provider,
-            model=final_model,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            async_mode=async_mode,
+            provider=resolved_provider, model=final_model, base_url=resolved_base_url,
+            api_key=resolved_api_key, async_mode=async_mode,
         )
     else:
         retry_client, retry_model = _get_cached_client(
-            resolved_provider,
-            resolved_model,
-            async_mode=async_mode,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            api_mode=resolved_api_mode,
-            main_runtime=main_runtime,
+            resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
+            api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
         )
         effective_provider = _effective_provider_for_client(
             retry_client, resolved_provider,
@@ -4015,17 +3869,10 @@ def _prepare_same_provider_retry(
 
     retry_base = str(getattr(retry_client, "base_url", "") or "")
     retry_kwargs = _build_call_kwargs(
-        effective_provider or resolved_provider,
-        retry_model or final_model,
-        messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        tools=tools,
-        timeout=effective_timeout,
-        extra_body=effective_extra_body,
-        reasoning_config=reasoning_config,
-        base_url=retry_base or resolved_base_url,
-        task=task,
+        effective_provider or resolved_provider, retry_model or final_model, messages,
+        temperature=temperature, max_tokens=max_tokens, tools=tools, timeout=effective_timeout,
+        extra_body=effective_extra_body, reasoning_config=reasoning_config,
+        base_url=retry_base or resolved_base_url, task=task,
     )
     # Preserve per-request attribution headers (e.g. Copilot ``x-initiator``) so the retry keeps capability gating.
     if extra_headers:
@@ -4069,10 +3916,7 @@ def _creds_have_api_key(creds: Dict[str, Any]) -> bool:
 
 def _refresh_copilot_credentials() -> bool:
     from hermes_cli.copilot_auth import (
-        _jwt_cache,
-        _token_fingerprint,
-        exchange_copilot_token,
-        resolve_copilot_token,
+        _jwt_cache, _token_fingerprint, exchange_copilot_token, resolve_copilot_token
     )
 
     raw_token, _source = resolve_copilot_token()
@@ -4093,8 +3937,7 @@ def _refresh_nous_credentials() -> bool:
     from hermes_cli.auth import resolve_nous_runtime_credentials
 
     return _creds_have_api_key(resolve_nous_runtime_credentials(
-        timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15),
-        force_refresh=True,
+        timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15), force_refresh=True
     ))
 
 
@@ -4128,8 +3971,7 @@ def _refresh_vertex_credentials() -> bool:
 
     token, base_url = get_vertex_config()
     return bool(
-        isinstance(token, str) and token.strip()
-        and isinstance(base_url, str) and base_url.strip()
+        isinstance(token, str) and token.strip() and isinstance(base_url, str) and base_url.strip()
     )
 
 
@@ -4161,8 +4003,7 @@ def _refresh_provider_credentials(provider: str) -> bool:
 
 
 def _auth_refresh_provider_for_route(
-    resolved_provider: Optional[str],
-    client_base_url: str,
+    resolved_provider: Optional[str], client_base_url: str
 ) -> str:
     """Provider whose short-lived credentials should be refreshed.
 
@@ -4213,8 +4054,7 @@ def _fallback_entry_timeout(task: Optional[str], fb_label: str) -> Optional[floa
 def _fallback_provider_from_label(label: str) -> str:
     """Recover the provider identifier from a fallback display label."""
     match = re.match(
-        r"(?:fallback_chain\[\d+\]|fallback_providers\[\d+\]|main-agent)\(([^)]+)\)$",
-        label or "",
+        r"(?:fallback_chain\[\d+\]|fallback_providers\[\d+\]|main-agent)\(([^)]+)\)$", label or ""
     )
     return match.group(1).strip() if match else str(label or "").strip()
 
@@ -4227,10 +4067,7 @@ class _FallbackDestination(NamedTuple):
 
 
 def _complete_fallback_destination(
-    provider: str,
-    base_url: str,
-    api_mode: Optional[str],
-    model: Optional[str],
+    provider: str, base_url: str, api_mode: Optional[str], model: Optional[str]
 ) -> _FallbackDestination:
     if not api_mode:
         if _endpoint_speaks_anthropic_messages(base_url):
@@ -4240,9 +4077,7 @@ def _complete_fallback_destination(
                 from hermes_cli.runtime_provider import resolve_runtime_provider
 
                 runtime = resolve_runtime_provider(
-                    requested=provider,
-                    explicit_base_url=base_url or None,
-                    target_model=model or "",
+                    requested=provider, explicit_base_url=base_url or None, target_model=model or ""
                 )
                 api_mode = str(runtime.get("api_mode") or "").strip() or None
             except Exception:
@@ -4251,9 +4086,7 @@ def _complete_fallback_destination(
 
 
 def _fallback_destination_from_entry(
-    entry: Dict[str, Any],
-    fb_client: Any,
-    fb_model: Optional[str],
+    entry: Dict[str, Any], fb_client: Any, fb_model: Optional[str]
 ) -> _FallbackDestination:
     provider = str(entry.get("provider") or "").strip()
     base_url = str(
@@ -4267,10 +4100,7 @@ def _fallback_destination_from_entry(
 
 
 def _fallback_destination(
-    task: Optional[str],
-    fb_client: Any,
-    fb_model: Optional[str],
-    fb_label: str,
+    task: Optional[str], fb_client: Any, fb_model: Optional[str], fb_label: str
 ) -> _FallbackDestination:
     """Return the resolved route identity used by a fallback request."""
     attached = getattr(fb_client, "_hermes_fallback_destination", None)
@@ -4280,23 +4110,17 @@ def _fallback_destination(
     if entry is not None:
         return _fallback_destination_from_entry(entry, fb_client, fb_model)
     return _complete_fallback_destination(
-        _fallback_provider_from_label(fb_label),
-        str(getattr(fb_client, "base_url", "") or ""),
-        None,
-        fb_model,
+        _fallback_provider_from_label(fb_label), str(getattr(fb_client, "base_url", "") or ""),
+        None, fb_model,
     )
 
 
 def _replan_synchronous_cache_sections(
-    messages: list,
-    tools: Optional[list],
-    *,
-    destination: _FallbackDestination,
+    messages: list, tools: Optional[list], *, destination: _FallbackDestination
 ) -> tuple[list, list]:
     """Strip source decoration and plan one synchronous destination locally."""
     from agent.agent_runtime_helpers import (
-        configured_cache_ttl,
-        plan_cache_sections_for_destination,
+        configured_cache_ttl, plan_cache_sections_for_destination
     )
 
     return plan_cache_sections_for_destination(
@@ -4312,38 +4136,22 @@ def _replan_synchronous_cache_sections(
 
 
 def _fallback_request_kwargs(
-    destination: _FallbackDestination,
-    *,
-    task: Optional[str],
-    messages: list,
-    tools: Optional[list],
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    effective_timeout: float,
-    effective_extra_body: dict,
-    reasoning_config: Optional[dict],
-    fallback_entry: dict,
-    task_config: dict,
-    apply_fast_lane: bool,
+    destination: _FallbackDestination, *, task: Optional[str], messages: list,
+    tools: Optional[list], temperature: Optional[float], max_tokens: Optional[int],
+    effective_timeout: float, effective_extra_body: dict, reasoning_config: Optional[dict],
+    fallback_entry: dict, task_config: dict, apply_fast_lane: bool,
 ) -> Dict[str, Any]:
     """Build request kwargs for one fallback destination (cache-section replan + fast-lane cap)."""
     fallback_max_tokens, fallback_extra_body = max_tokens, effective_extra_body
     if apply_fast_lane:
         fallback_max_tokens, fallback_extra_body = _compression_fast_lane_controls(
-            task,
-            actual_provider=destination.provider,
-            actual_model=destination.model,
+            task, actual_provider=destination.provider, actual_model=destination.model,
             requested_provider=fallback_entry.get("provider"),
-            requested_model=fallback_entry.get("model"),
-            route_config=fallback_entry,
-            leak_guard_config=task_config,
-            max_tokens=max_tokens,
-            extra_body=effective_extra_body,
+            requested_model=fallback_entry.get("model"), route_config=fallback_entry,
+            leak_guard_config=task_config, max_tokens=max_tokens, extra_body=effective_extra_body,
         )
     fallback_messages, fallback_tools = _replan_synchronous_cache_sections(
-        messages,
-        tools,
-        destination=destination,
+        messages, tools, destination=destination
     )
     fb_kwargs = _build_call_kwargs(
         destination.provider, destination.model, fallback_messages,
@@ -4359,14 +4167,8 @@ def _fallback_request_kwargs(
 
 
 def _plan_fallback_candidate(
-    fb_client: Any,
-    fb_model: Optional[str],
-    fb_label: str,
-    *,
-    task: Optional[str],
-    effective_timeout: float,
-    apply_fast_lane: bool,
-    **request,
+    fb_client: Any, fb_model: Optional[str], fb_label: str, *, task: Optional[str],
+    effective_timeout: float, apply_fast_lane: bool, **request,
 ) -> Tuple[_FallbackDestination, Dict[str, Any], Callable[[str, Any, Optional[str]], Dict[str, Any]]]:
     """Resolve the destination + first-attempt kwargs for a fallback candidate.
 
@@ -4393,10 +4195,8 @@ def _plan_fallback_candidate(
 
     def _rebuild(provider: str, client: Any, model: Optional[str]) -> Tuple[_FallbackDestination, Dict[str, Any]]:
         retry_destination = _FallbackDestination(
-            provider,
-            destination.base_url or str(getattr(client, "base_url", "") or ""),
-            destination.api_mode,
-            model or destination.model,
+            provider, destination.base_url or str(getattr(client, "base_url", "") or ""),
+            destination.api_mode, model or destination.model,
         )
         return retry_destination, _fallback_request_kwargs(retry_destination, **common)
 
@@ -4415,8 +4215,7 @@ def _quarantine_fallback_candidate(task: Optional[str], fb_label: str, fb_provid
 
 def _plan_fallback_auth_retry(
     destination: _FallbackDestination,
-    rebuild: Callable[[str, Any, Optional[str]], Tuple[_FallbackDestination, Dict[str, Any]]],
-    *,
+    rebuild: Callable[[str, Any, Optional[str]], Tuple[_FallbackDestination, Dict[str, Any]]], *,
     async_mode: bool,
 ) -> Tuple[str, Optional[Tuple[Any, Dict[str, Any], _FallbackDestination]]]:
     """After an auth error on a fallback candidate: refresh its credentials and rebuild the request.
@@ -4427,11 +4226,8 @@ def _plan_fallback_auth_retry(
     fb_provider = _auth_refresh_provider_for_route(destination.provider, destination.base_url)
     if fb_provider not in {"auto", "", None} and _refresh_provider_credentials(fb_provider):
         retry_client, retry_model = _get_cached_client(
-            fb_provider,
-            destination.model,
-            **({"async_mode": True} if async_mode else {}),
-            base_url=destination.base_url or None,
-            api_mode=destination.api_mode,
+            fb_provider, destination.model, **({"async_mode": True} if async_mode else {}),
+            base_url=destination.base_url or None, api_mode=destination.api_mode,
         )
         if retry_client is not None:
             retry_destination, retry_kwargs = rebuild(fb_provider, retry_client, retry_model)
@@ -4440,18 +4236,9 @@ def _plan_fallback_auth_retry(
 
 
 def _call_fallback_candidate_sync(
-    fb_client: Any,
-    fb_model: Optional[str],
-    fb_label: str,
-    *,
-    task: Optional[str],
-    messages: list,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    tools: Optional[list],
-    effective_timeout: float,
-    effective_extra_body: dict,
-    reasoning_config: Optional[dict],
+    fb_client: Any, fb_model: Optional[str], fb_label: str, *, task: Optional[str], messages: list,
+    temperature: Optional[float], max_tokens: Optional[int], tools: Optional[list],
+    effective_timeout: float, effective_extra_body: dict, reasoning_config: Optional[dict],
 ) -> Optional[Any]:
     """Call one fallback candidate with stale-credential recovery.
 
@@ -4474,9 +4261,7 @@ def _call_fallback_candidate_sync(
                 provider=dest.provider,
                 api_mode=dest.api_mode,
                 create=lambda request: _create_with_progress(
-                    client,
-                    request,
-                    task,
+                    client, request, task,
                     force_stream=_provider_requires_stream(dest.provider, dest.base_url),
                 ),
             ),
@@ -4500,18 +4285,9 @@ def _call_fallback_candidate_sync(
 
 
 async def _call_fallback_candidate_async(
-    fb_client: Any,
-    fb_model: Optional[str],
-    fb_label: str,
-    *,
-    task: Optional[str],
-    messages: list,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    tools: Optional[list],
-    effective_timeout: float,
-    effective_extra_body: dict,
-    reasoning_config: Optional[dict],
+    fb_client: Any, fb_model: Optional[str], fb_label: str, *, task: Optional[str], messages: list,
+    temperature: Optional[float], max_tokens: Optional[int], tools: Optional[list],
+    effective_timeout: float, effective_extra_body: dict, reasoning_config: Optional[dict],
 ) -> Optional[Any]:
     """Async mirror of :func:`_call_fallback_candidate_sync` (no fast-lane cap on this wire)."""
     destination, fb_kwargs, rebuild = _plan_fallback_candidate(
@@ -4524,10 +4300,7 @@ async def _call_fallback_candidate_async(
     async def _send(client: Any, request_kwargs: Dict[str, Any], dest: _FallbackDestination) -> Any:
         return _validate_llm_response(
             await _relay_async_completion(
-                client,
-                request_kwargs,
-                provider=dest.provider,
-                api_mode=dest.api_mode,
+                client, request_kwargs, provider=dest.provider, api_mode=dest.api_mode
             ),
             task,
         )
@@ -4551,9 +4324,7 @@ async def _call_fallback_candidate_async(
 
 
 def _try_payment_fallback(
-    failed_provider: str,
-    task: str = None,
-    reason: str = "payment error",
+    failed_provider: str, task: str = None, reason: str = "payment error"
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try the auto-detection chain after a payment/credit or connection error, skipping the failed provider.
 
@@ -4599,9 +4370,7 @@ def _failed_backend_skip(failed_provider: str, failed_model: Optional[str]) -> C
     auth/payment, where shared credentials are broken).
     """
     from agent.backend_identity import (
-        BackendIdentity,
-        FailureScope,
-        should_skip_candidate,
+        BackendIdentity, FailureScope, should_skip_candidate
     )
 
     skip_model = (failed_model or "").strip().lower() or None
@@ -4610,8 +4379,7 @@ def _failed_backend_skip(failed_provider: str, failed_model: Optional[str]) -> C
 
     def _skip(provider: str, model: Optional[str], base_url: str = "") -> bool:
         return should_skip_candidate(
-            BackendIdentity.build(provider=provider, model=model, base_url=base_url),
-            failed_ident,
+            BackendIdentity.build(provider=provider, model=model, base_url=base_url), failed_ident,
             failure_scope,
         )
 
@@ -4619,9 +4387,7 @@ def _failed_backend_skip(failed_provider: str, failed_model: Optional[str]) -> C
 
 
 def _try_main_agent_model_fallback(
-    failed_provider: str,
-    task: str = None,
-    reason: str = "error",
+    failed_provider: str, task: str = None, reason: str = "error",
     failed_model: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Last-resort fallback to the main agent provider + model after the configured chain is exhausted.
@@ -4674,20 +4440,14 @@ def _task_minimum_context_length(task: Optional[str]) -> Optional[int]:
 
 
 def _candidate_context_window(
-    provider: str,
-    model: str,
-    base_url: str = "",
-    api_key: str = "",
+    provider: str, model: str, base_url: str = "", api_key: str = ""
 ) -> Optional[int]:
     """Best-effort context window for a fallback candidate; ``None`` = unknown (never raises; callers pass it through)."""
     if not model:
         return None
     try:
         ctx = get_model_context_length(
-            model,
-            base_url=base_url,
-            api_key=api_key,
-            provider=provider,
+            model, base_url=base_url, api_key=api_key, provider=provider
         )
     except Exception as exc:
         logger.debug(
@@ -4699,22 +4459,14 @@ def _candidate_context_window(
 
 
 def _context_too_small(
-    entry: Dict[str, Any],
-    provider: str,
-    model: str,
-    min_ctx: Optional[int],
-    *,
-    task: Optional[str],
-    label: str,
-    name_model: bool = False,
+    entry: Dict[str, Any], provider: str, model: str, min_ctx: Optional[int], *,
+    task: Optional[str], label: str, name_model: bool = False,
 ) -> Optional[str]:
     """Screen one fallback candidate by context window; returns the ``tried`` note when it is too small."""
     if min_ctx is None:
         return None
     fb_ctx = _candidate_context_window(
-        provider,
-        model,
-        base_url=str(entry.get("base_url") or ""),
+        provider, model, base_url=str(entry.get("base_url") or ""),
         api_key=_fallback_entry_api_key(entry) or "",
     )
     if fb_ctx is None or fb_ctx >= min_ctx:
@@ -4733,10 +4485,7 @@ def _context_too_small(
 
 
 def _try_configured_fallback_chain(
-    task: str,
-    failed_provider: str,
-    reason: str = "error",
-    failed_model: Optional[str] = None,
+    task: str, failed_provider: str, reason: str = "error", failed_model: Optional[str] = None
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Try auxiliary.<task>.fallback_chain entries in order (each needs ``provider``; model/base_url/api_key optional).
 
@@ -4789,15 +4538,13 @@ def _try_configured_fallback_chain(
 
     if tried:
         logger.debug(
-            "Auxiliary %s: configured fallback_chain exhausted (tried: %s)",
-            task, ", ".join(tried),
+            "Auxiliary %s: configured fallback_chain exhausted (tried: %s)", task, ", ".join(tried)
         )
     return None, None, ""
 
 
 def _try_configured_fallback_for_unavailable_client(
-    task: Optional[str],
-    failed_provider: str,
+    task: Optional[str], failed_provider: str
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Task fallback_chain when an explicit aux provider cannot build a client (no key/OAuth/pool creds);
     stops at the per-task chain — the main-agent model stays the runtime last resort."""
@@ -4805,9 +4552,7 @@ def _try_configured_fallback_for_unavailable_client(
     if not task or not explicit or explicit in {"auto"}:
         return None, None, ""
     return _try_configured_fallback_chain(
-        task,
-        explicit,
-        reason="provider unavailable",
+        task, explicit, reason="provider unavailable"
     )
 
 
@@ -4828,10 +4573,7 @@ def _resolve_fallback_entry(entry: Dict[str, Any]) -> Tuple[Optional[Any], Optio
     api_key = _fallback_entry_api_key(entry)
     api_mode = str(entry.get("api_mode") or entry.get("transport") or "").strip() or None
     client, resolved_model = resolve_provider_client(
-        provider,
-        model=model,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
+        provider, model=model, explicit_base_url=base_url, explicit_api_key=api_key,
         api_mode=api_mode,
     )
     if client is not None:
@@ -4845,9 +4587,7 @@ def _resolve_fallback_entry(entry: Dict[str, Any]) -> Tuple[Optional[Any], Optio
 
 
 def _try_main_fallback_chain(
-    task: Optional[str],
-    failed_provider: str = "",
-    reason: str = "error",
+    task: Optional[str], failed_provider: str = "", reason: str = "error"
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Top-level main-agent fallback chain for a ``provider: auto`` auxiliary call.
 
@@ -5013,11 +4753,8 @@ def _try_main_provider_route(
         _log_skip_unhealthy(main_chain_label)
         return None
     client, resolved = resolve_provider_client(
-        resolved_provider,
-        main_model,
-        explicit_base_url=explicit_base_url,
-        explicit_api_key=explicit_api_key,
-        api_mode=runtime_api_mode or None,
+        resolved_provider, main_model, explicit_base_url=explicit_base_url,
+        explicit_api_key=explicit_api_key, api_mode=runtime_api_mode or None,
     )
     if client is None:
         return None
@@ -5050,8 +4787,7 @@ def _try_discovery_chain() -> Tuple[Optional[OpenAI], Optional[str], str]:
 
 
 def _resolve_auto_route(
-    main_runtime: Optional[Dict[str, Any]] = None,
-    task: Optional[str] = None,
+    main_runtime: Optional[Dict[str, Any]] = None, task: Optional[str] = None
 ) -> Tuple[Optional[OpenAI], Optional[str], str]:
     """Full auto-detection chain, including the selected provider identity.
 
@@ -5085,8 +4821,7 @@ def _resolve_auto_route(
 
 
 def _resolve_auto(
-    main_runtime: Optional[Dict[str, Any]] = None,
-    task: Optional[str] = None,
+    main_runtime: Optional[Dict[str, Any]] = None, task: Optional[str] = None
 ) -> Tuple[Optional[OpenAI], Optional[str]]:
     """Backward-compatible auto resolver for callers that only need client/model."""
     client, model, _provider = _resolve_auto_route(main_runtime=main_runtime, task=task)
@@ -5224,12 +4959,8 @@ def _build_bedrock_client(provider: str, model: Optional[str], *, raw_codex: boo
     (GPT-5.5/5.6) → Bedrock Mantle's OpenAI Responses endpoint; everything else → Converse API."""
     try:
         from agent.bedrock_adapter import (
-            has_aws_credentials,
-            is_anthropic_bedrock_model,
-            resolve_bedrock_runtime_region,
-            is_openai_bedrock_model,
-            bedrock_openai_base_url,
-            resolve_bedrock_bearer_token,
+            has_aws_credentials, is_anthropic_bedrock_model, resolve_bedrock_runtime_region,
+            is_openai_bedrock_model, bedrock_openai_base_url, resolve_bedrock_bearer_token,
             configure_bedrock_openai_client_kwargs,
         )
         from agent.anthropic_adapter import build_anthropic_bedrock_client
@@ -5379,8 +5110,7 @@ def _route_or_warn(req: _ResolveRequest, client: Any, default: Optional[str], un
 def _resolve_auto_branch(req: _ResolveRequest) -> _ResolveResult:
     """Auto: try all providers in priority order."""
     client, resolved, effective_provider = _resolve_auto_route(
-        main_runtime=req.main_runtime,
-        task=req.task,
+        main_runtime=req.main_runtime, task=req.task
     )
     if client is None:
         return None, None
@@ -5645,9 +5375,7 @@ def _api_key_provider_credentials(req: _ResolveRequest, pconfig: Any, resolve_cr
     if provider == "actual":
         try:
             from hermes_cli.auth import (
-                ACTUAL_LOCAL_NOAUTH_PLACEHOLDER,
-                is_actual_local_base_url,
-                normalize_actual_base_url,
+                ACTUAL_LOCAL_NOAUTH_PLACEHOLDER, is_actual_local_base_url, normalize_actual_base_url
             )
 
             raw_base_url = normalize_actual_base_url(raw_base_url)
@@ -5762,8 +5490,7 @@ def _resolve_registry_branch(req: _ResolveRequest) -> _ResolveResult:
     provider = req.provider
     try:
         from hermes_cli.auth import (
-            PROVIDER_REGISTRY,
-            resolve_api_key_provider_credentials,
+            PROVIDER_REGISTRY, resolve_api_key_provider_credentials,
             resolve_external_process_provider_credentials,
         )
     except ImportError:
@@ -5816,15 +5543,9 @@ _EXPLICIT_PROVIDER_BRANCHES: Dict[str, Callable[[_ResolveRequest], _ResolveResul
 
 
 def resolve_provider_client(
-    provider: str,
-    model: str = None,
-    async_mode: bool = False,
-    raw_codex: bool = False,
-    explicit_base_url: str = None,
-    explicit_api_key: str = None,
-    api_mode: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    is_vision: bool = False,
+    provider: str, model: str = None, async_mode: bool = False, raw_codex: bool = False,
+    explicit_base_url: str = None, explicit_api_key: str = None, api_mode: str = None,
+    main_runtime: Optional[Dict[str, Any]] = None, is_vision: bool = False,
     task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Central router: return a configured client (auth, base URL, API format) for a provider + optional model.
@@ -5888,9 +5609,7 @@ def resolve_provider_client(
 # ── Public API ──────────────────────────────────────────────────────────────
 
 def get_text_auxiliary_client(
-    task: str = "",
-    *,
-    main_runtime: Optional[Dict[str, Any]] = None,
+    task: str = "", *, main_runtime: Optional[Dict[str, Any]] = None
 ) -> Tuple[Optional[OpenAI], Optional[str]]:
     """Return (client, default_model_slug) for text-only auxiliary tasks.
 
@@ -5898,19 +5617,13 @@ def get_text_auxiliary_client(
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
     return resolve_provider_client(
-        provider,
-        model=model,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
-        api_mode=api_mode,
-        main_runtime=main_runtime,
+        provider, model=model, explicit_base_url=base_url, explicit_api_key=api_key,
+        api_mode=api_mode, main_runtime=main_runtime,
     )
 
 
 _VISION_AUTO_PROVIDER_ORDER = (
-    "openrouter",
-    "nous",
-    "deepinfra",
+    "openrouter", "nous", "deepinfra"
 )
 
 
@@ -5960,8 +5673,7 @@ _STRICT_VISION_BACKENDS: Dict[str, Callable[[Optional[str]], Tuple[Optional[Any]
 
 
 def _resolve_strict_vision_backend(
-    provider: str,
-    model: Optional[str] = None,
+    provider: str, model: Optional[str] = None
 ) -> Tuple[Optional[Any], Optional[str]]:
     backend = _STRICT_VISION_BACKENDS.get(_normalize_vision_provider(provider))
     return backend(model) if backend is not None else (None, None)
@@ -6007,10 +5719,7 @@ def _finalize_vision_client(
 
 
 def _vision_main_provider_client(
-    main_provider: str,
-    main_model: str,
-    runtime: Dict[str, Any],
-    resolved_model: Optional[str],
+    main_provider: str, main_model: str, runtime: Dict[str, Any], resolved_model: Optional[str],
     resolved_api_mode: Optional[str],
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Auto-detect step 1: try the main provider; (None, None) falls through to the aggregator chain."""
@@ -6073,9 +5782,7 @@ def _vision_main_provider_client(
 
 
 def _vision_auto_route(
-    runtime: Dict[str, Any],
-    resolved_model: Optional[str],
-    resolved_api_mode: Optional[str],
+    runtime: Dict[str, Any], resolved_model: Optional[str], resolved_api_mode: Optional[str],
     async_mode: bool,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Auto-detect order: 1. main provider + model, 2. OpenRouter, 3. Nous Portal, 4. DeepInfra, 5. stop."""
@@ -6107,18 +5814,13 @@ def _vision_auto_route(
 # ZAI vision must use the OpenAI-compatible endpoint: the Anthropic wire
 # rejects max_tokens on multimodal calls (error 1210).
 _ZAI_OPENAI_VISION_URLS = (
-    "https://open.bigmodel.cn/api/paas/v4",
-    "https://api.z.ai/api/paas/v4",
+    "https://open.bigmodel.cn/api/paas/v4", "https://api.z.ai/api/paas/v4"
 )
 
 
 def resolve_vision_provider_client(
-    provider: Optional[str] = None,
-    model: Optional[str] = None,
-    *,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    async_mode: bool = False,
+    provider: Optional[str] = None, model: Optional[str] = None, *, base_url: Optional[str] = None,
+    api_key: Optional[str] = None, async_mode: bool = False,
     main_runtime: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional[str], Optional[Any], Optional[str]]:
     """Resolve the client actually used for vision tasks.
@@ -6135,13 +5837,9 @@ def resolve_vision_provider_client(
     if resolved_base_url:
         provider_for_base_override = requested if requested and requested not in {"", "auto"} else "custom"
         client, final_model = resolve_provider_client(
-            provider_for_base_override,
-            model=resolved_model,
-            async_mode=async_mode,
-            explicit_base_url=resolved_base_url,
-            explicit_api_key=resolved_api_key,
-            api_mode=resolved_api_mode,
-            main_runtime=runtime,
+            provider_for_base_override, model=resolved_model, async_mode=async_mode,
+            explicit_base_url=resolved_base_url, explicit_api_key=resolved_api_key,
+            api_mode=resolved_api_mode, main_runtime=runtime,
         )
         return provider_for_base_override, client, (final_model if client is not None else None)
 
@@ -6155,11 +5853,8 @@ def resolve_vision_provider_client(
     if requested == "zai":
         for _zai_url in _ZAI_OPENAI_VISION_URLS:
             client, final_model = _get_cached_client(
-                requested, resolved_model, async_mode,
-                base_url=_zai_url,
-                api_key=resolved_api_key or None,
-                api_mode="chat_completions",
-                main_runtime=runtime,
+                requested, resolved_model, async_mode, base_url=_zai_url,
+                api_key=resolved_api_key or None, api_mode="chat_completions", main_runtime=runtime,
                 is_vision=True,
             )
             if client is not None:
@@ -6228,8 +5923,7 @@ class _CallableCacheDiscriminator:
 
     def __eq__(self, other: object) -> bool:
         return (
-            isinstance(other, _CallableCacheDiscriminator)
-            and self._callback is other._callback
+            isinstance(other, _CallableCacheDiscriminator) and self._callback is other._callback
         )
 
     def __repr__(self) -> str:
@@ -6247,16 +5941,10 @@ def _runtime_cache_discriminator(field: str, value: Any) -> Any:
 
 
 def _client_cache_key(
-    provider: str,
-    *,
-    async_mode: bool,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    api_mode: Optional[str] = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    is_vision: bool = False,
-    task: Optional[str] = None,
-    model: Optional[str] = None,
+    provider: str, *, async_mode: bool, base_url: Optional[str] = None,
+    api_key: Optional[str] = None, api_mode: Optional[str] = None,
+    main_runtime: Optional[Dict[str, Any]] = None, is_vision: bool = False,
+    task: Optional[str] = None, model: Optional[str] = None,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
     # `auto` resolves through the main runtime and task-specific policy, so both join the key.
@@ -6292,17 +5980,10 @@ def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[
 
 
 def _refresh_nous_auxiliary_client(
-    *,
-    cache_provider: str,
-    model: Optional[str],
-    async_mode: bool,
-    base_url: Optional[str] = None,
-    api_key: Optional[str] = None,
-    api_mode: Optional[str] = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    is_vision: bool = False,
-    lookup_model: Optional[str] = None,
-    lookup_task: Optional[str] = None,
+    *, cache_provider: str, model: Optional[str], async_mode: bool, base_url: Optional[str] = None,
+    api_key: Optional[str] = None, api_mode: Optional[str] = None,
+    main_runtime: Optional[Dict[str, Any]] = None, is_vision: bool = False,
+    lookup_model: Optional[str] = None, lookup_task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Refresh Nous runtime creds, rebuild the client, and replace the cache entry.
 
@@ -6330,14 +6011,8 @@ def _refresh_nous_auxiliary_client(
         client = sync_client
 
     cache_key = _client_cache_key(
-        cache_provider,
-        async_mode=async_mode,
-        base_url=base_url,
-        api_key=api_key,
-        api_mode=api_mode,
-        main_runtime=main_runtime,
-        is_vision=is_vision,
-        task=lookup_task,
+        cache_provider, async_mode=async_mode, base_url=base_url, api_key=api_key,
+        api_mode=api_mode, main_runtime=main_runtime, is_vision=is_vision, task=lookup_task,
         model=lookup_model,
     )
     _store_cached_client(cache_key, client, final_model, bound_loop=current_loop)
@@ -6503,15 +6178,9 @@ def _compat_model(client: Any, model: Optional[str], cached_default: Optional[st
 
 
 def _get_cached_client(
-    provider: str,
-    model: str = None,
-    async_mode: bool = False,
-    base_url: str = None,
-    api_key: str = None,
-    api_mode: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    is_vision: bool = False,
-    task: Optional[str] = None,
+    provider: str, model: str = None, async_mode: bool = False, base_url: str = None,
+    api_key: str = None, api_mode: str = None, main_runtime: Optional[Dict[str, Any]] = None,
+    is_vision: bool = False, task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
     """Get or create a cached client for the given provider.
 
@@ -6522,15 +6191,8 @@ def _get_cached_client(
     current_loop = _current_event_loop() if async_mode else None
     runtime = _normalize_main_runtime(main_runtime)
     cache_key = _client_cache_key(
-        provider,
-        async_mode=async_mode,
-        base_url=base_url,
-        api_key=api_key,
-        api_mode=api_mode,
-        main_runtime=main_runtime,
-        is_vision=is_vision,
-        task=task,
-        model=model,
+        provider, async_mode=async_mode, base_url=base_url, api_key=api_key, api_mode=api_mode,
+        main_runtime=main_runtime, is_vision=is_vision, task=task, model=model,
     )
     with _client_cache_lock:
         if cache_key in _client_cache:
@@ -6555,15 +6217,8 @@ def _get_cached_client(
         if _pe is not None:
             effective_api_key = _pool_runtime_api_key(_pe) or api_key
     client, default_model = resolve_provider_client(
-        provider,
-        model,
-        async_mode,
-        explicit_base_url=base_url,
-        explicit_api_key=effective_api_key,
-        api_mode=api_mode,
-        main_runtime=runtime,
-        is_vision=is_vision,
-        task=task,
+        provider, model, async_mode, explicit_base_url=base_url, explicit_api_key=effective_api_key,
+        api_mode=api_mode, main_runtime=runtime, is_vision=is_vision, task=task,
     )
     if client is not None:
         with _client_cache_lock:
@@ -6652,10 +6307,7 @@ def _preserve_provider_with_base_url(prov: Optional[str]) -> bool:
 
 
 def _resolve_task_provider_model(
-    task: str = None,
-    provider: str = None,
-    model: str = None,
-    base_url: Optional[str] = None,
+    task: str = None, provider: str = None, model: str = None, base_url: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> Tuple[str, Optional[str], Optional[str], Optional[str], Optional[str]]:
     """Determine (provider, model, base_url, api_key, api_mode) for a call.
@@ -6794,12 +6446,8 @@ def _fast_lane_config_fields(
 
 
 def resolve_compression_fast_lane(
-    actual_provider: str,
-    actual_model: Optional[str],
-    *,
-    requested_provider: Optional[str] = None,
-    requested_model: Optional[str] = None,
-    route_config: Optional[Dict[str, Any]] = None,
+    actual_provider: str, actual_model: Optional[str], *, requested_provider: Optional[str] = None,
+    requested_model: Optional[str] = None, route_config: Optional[Dict[str, Any]] = None,
 ) -> CompressionFastLane:
     """Certify the opt-in fast lane: capped only when an explicit, operator-certified
     non-reasoning provider/model exactly matches the route actually called."""
@@ -6830,27 +6478,17 @@ def _compression_config_claims_fast_lane(config: Dict[str, Any]) -> bool:
 
 
 def _compression_fast_lane_controls(
-    task: str | None,
-    *,
-    actual_provider: str,
-    actual_model: str | None,
-    requested_provider: str | None,
-    requested_model: str | None,
-    route_config: Dict[str, Any],
-    leak_guard_config: Dict[str, Any],
-    max_tokens: int | None,
-    extra_body: Dict[str, Any],
+    task: str | None, *, actual_provider: str, actual_model: str | None,
+    requested_provider: str | None, requested_model: str | None, route_config: Dict[str, Any],
+    leak_guard_config: Dict[str, Any], max_tokens: int | None, extra_body: Dict[str, Any],
 ) -> tuple[int | None, Dict[str, Any]]:
     """Apply the certified compression controls to one resolved route."""
     if task != "compression" or max_tokens is not None:
         return max_tokens, extra_body
     body = dict(extra_body)
     lane = resolve_compression_fast_lane(
-        actual_provider,
-        actual_model,
-        requested_provider=requested_provider,
-        requested_model=requested_model,
-        route_config=route_config,
+        actual_provider, actual_model, requested_provider=requested_provider,
+        requested_model=requested_model, route_config=route_config,
     )
     if lane.reasoning_config is not None:
         if "reasoning" not in body:
@@ -6987,8 +6625,7 @@ def _is_anthropic_compat_endpoint(provider: str, base_url: str) -> bool:
 # MiniMax's Anthropic-compatible endpoint wants type="video" (not "video_url"/
 # "input_video") with the same ``source`` shape as "image".
 _ANTHROPIC_MEDIA_BLOCKS = {
-    "image_url": ("image", "image/png"),
-    "video_url": ("video", "video/mp4"),
+    "image_url": ("image", "image/png"), "video_url": ("video", "video/mp4")
 }
 
 
@@ -7001,8 +6638,7 @@ def _anthropic_media_block(openai_type: str, url: str) -> dict:
     if ":" in header and ";" in header:
         media_type = header.split(":", 1)[1].split(";", 1)[0]
     return {
-        "type": block_type,
-        "source": {"type": "base64", "media_type": media_type, "data": b64data},
+        "type": block_type, "source": {"type": "base64", "media_type": media_type, "data": b64data}
     }
 
 
@@ -7153,10 +6789,7 @@ class _ProfileProjection(NamedTuple):
 
 
 def _project_provider_profile(
-    provider: str,
-    provider_norm: str,
-    model: str,
-    effective_base: str,
+    provider: str, provider_norm: str, model: str, effective_base: str,
     reasoning_config: Optional[dict],
 ) -> _ProfileProjection:
     """Provider profile's extra_body / kwargs projection; partial on failure."""
@@ -7171,15 +6804,11 @@ def _project_provider_profile(
         profile = get_provider_profile(provider_norm)
         if profile is not None:
             body = profile.build_extra_body(
-                model=model,
-                base_url=effective_base,
-                reasoning_config=reasoning_config,
+                model=model, base_url=effective_base, reasoning_config=reasoning_config
             ) or {}
             reasoning_extra, top_level = profile.build_api_kwargs_extras(
-                reasoning_config=reasoning_config,
-                supports_reasoning=reasoning_config is not None,
-                model=model,
-                base_url=effective_base,
+                reasoning_config=reasoning_config, supports_reasoning=reasoning_config is not None,
+                model=model, base_url=effective_base,
             )
             reasoning_extra = reasoning_extra or {}
             top_level = top_level or {}
@@ -7192,17 +6821,13 @@ def _project_provider_profile(
             )
     except Exception as exc:
         logger.debug(
-            "_build_call_kwargs: provider profile projection failed for %s: %s",
-            provider,
-            exc,
+            "_build_call_kwargs: provider profile projection failed for %s: %s", provider, exc
         )
     return _ProfileProjection(body, reasoning_extra, top_level, handles_reasoning)
 
 
 def _merge_aux_extra_body(
-    extra_body: Optional[dict],
-    projection: _ProfileProjection,
-    reasoning_config: Optional[dict],
+    extra_body: Optional[dict], projection: _ProfileProjection, reasoning_config: Optional[dict],
     provider_norm: str,
 ) -> Dict[str, Any]:
     """Caller extra_body + profile body/reasoning + generic reasoning fallback + Nous tags."""
@@ -7210,9 +6835,7 @@ def _merge_aux_extra_body(
     merged_extra.update(projection.body)
     merged_extra.update(projection.reasoning_extra)
     if (
-        reasoning_config
-        and isinstance(reasoning_config, dict)
-        and not projection.handles_reasoning
+        reasoning_config and isinstance(reasoning_config, dict) and not projection.handles_reasoning
     ):
         if reasoning_config.get("enabled") is False:
             merged_extra["reasoning"] = {"enabled": False}
@@ -7238,23 +6861,14 @@ def _merge_aux_extra_body(
 
 
 def _build_call_kwargs(
-    provider: str,
-    model: str,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: Optional[int] = None,
-    tools: Optional[list] = None,
-    timeout: float = 30.0,
-    extra_body: Optional[dict] = None,
-    reasoning_config: Optional[dict] = None,
-    base_url: Optional[str] = None,
-    task: Optional[str] = None,
+    provider: str, model: str, messages: list, temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None, tools: Optional[list] = None, timeout: float = 30.0,
+    extra_body: Optional[dict] = None, reasoning_config: Optional[dict] = None,
+    base_url: Optional[str] = None, task: Optional[str] = None,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
     kwargs: Dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "timeout": timeout,
+        "model": model, "messages": messages, "timeout": timeout
     }
     temperature = _effective_aux_temperature(model, base_url, temperature)
     if temperature is not None:
@@ -7304,9 +6918,7 @@ def _build_call_kwargs(
 
 
 def _validate_llm_response(
-    response: Any,
-    task: Optional[str] = None,
-    provider: Optional[str] = None,
+    response: Any, task: Optional[str] = None, provider: Optional[str] = None,
     base_url: Optional[str] = None,
 ) -> Any:
     """Validate the .choices[0].message shape (fail fast, not a downstream AttributeError).
@@ -7346,8 +6958,7 @@ def _complete_relay_auxiliary_call(*, outcome: str = "success") -> None:
     from agent import relay_llm
 
     relay_llm.complete_logical_call(
-        str(context.get("request_id") or ""),
-        outcome=outcome,
+        str(context.get("request_id") or ""), outcome=outcome,
         model_name=str(context.get("model") or "unknown"),
         provider_name=str(context.get("provider") or "auxiliary"),
         response_model_name=context.get("response_model"),
@@ -7388,10 +6999,8 @@ def _recover_aux_response_message(response: Any) -> Optional[Any]:
         return response
     except Exception:
         return SimpleNamespace(
-            id=getattr(response, "id", ""),
-            model=getattr(response, "model", ""),
-            object=getattr(response, "object", "chat.completion"),
-            choices=[choice],
+            id=getattr(response, "id", ""), model=getattr(response, "model", ""),
+            object=getattr(response, "object", "chat.completion"), choices=[choice],
             usage=getattr(response, "usage", None),
         )
 
@@ -7533,11 +7142,7 @@ def _affordable_max_tokens_from_error(exc: Exception) -> Optional[int]:
 
 
 def _create_with_progress(
-    client: Any,
-    kwargs: Dict[str, Any],
-    task: Optional[str] = None,
-    *,
-    force_stream: bool = False,
+    client: Any, kwargs: Dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
 ) -> Any:
     """Credit-aware :func:`_create_with_progress_once`: a 402 naming an affordable
     budget retries ONCE with that cap (only ever lowering); anything else re-raises."""
@@ -7557,9 +7162,7 @@ def _create_with_progress(
         retry_kwargs.pop("max_tokens", None)
         retry_kwargs.pop("max_completion_tokens", None)
         retry_kwargs.update(
-            auxiliary_max_tokens_param(
-                affordable, model=str(kwargs.get("model") or "") or None,
-            )
+            auxiliary_max_tokens_param( affordable, model=str(kwargs.get("model") or "") or None, )
         )
         logger.info(
             "Auxiliary %s: credit-limited 402 (affordable=%d tokens); "
@@ -7577,18 +7180,13 @@ def _stream_request_plan(kwargs: Dict[str, Any]) -> "Tuple[Dict[str, Any], str, 
     stream_kwargs["stream"] = True
     stream_kwargs["stream_options"] = {"include_usage": True}
     return (
-        stream_kwargs,
-        str(kwargs.get("model") or ""),
+        stream_kwargs, str(kwargs.get("model") or ""),
         _aux_stream_total_ceiling(kwargs.get("timeout")),
     )
 
 
 def _create_with_progress_once(
-    client: Any,
-    kwargs: Dict[str, Any],
-    task: Optional[str] = None,
-    *,
-    force_stream: bool = False,
+    client: Any, kwargs: Dict[str, Any], task: Optional[str] = None, *, force_stream: bool = False
 ) -> Any:
     """create() that streams (and re-aggregates, ticking the hook per substantive
     chunk) when a progress hook is active or the provider is stream-only; plain
@@ -7650,17 +7248,12 @@ def _close_chunk_stream(chunks: Any, *, allow_aclose: bool = False) -> Any:
 
 
 def _aggregate_chat_stream(
-    chunks: Any,
-    *,
-    model: str = "",
-    total_ceiling: Optional[float] = None,
+    chunks: Any, *, model: str = "", total_ceiling: Optional[float] = None
 ) -> Any:
     """Consume a chunk stream into a complete response; TimeoutError (phrased "timed
     out" so ``_is_timeout_error`` matches) when *total_ceiling* elapses."""
     acc = _ChatStreamAccumulator(
-        model=model,
-        total_ceiling=total_ceiling,
-        host_deadline=_current_aux_stream_deadline(),
+        model=model, total_ceiling=total_ceiling, host_deadline=_current_aux_stream_deadline()
     )
     try:
         for chunk in chunks:
@@ -7678,9 +7271,7 @@ class _ChatStreamAccumulator:
     """Shared per-chunk accumulation so sync and async aggregation cannot drift."""
 
     def __init__(
-        self,
-        model: str = "",
-        total_ceiling: Optional[float] = None,
+        self, model: str = "", total_ceiling: Optional[float] = None,
         host_deadline: Optional[float] = None,
     ):
         self._started = time.monotonic()
@@ -7776,8 +7367,7 @@ class _ChatStreamAccumulator:
             self.content_parts.append(piece)
             made_progress = True
         reasoning_piece = (
-            getattr(delta, "reasoning", None)
-            or getattr(delta, "reasoning_content", None)
+            getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
         )
         if reasoning_piece and isinstance(reasoning_piece, str):
             self.reasoning_parts.append(reasoning_piece)
@@ -7796,44 +7386,31 @@ class _ChatStreamAccumulator:
                     id=acc["id"],
                     type="function",
                     function=SimpleNamespace(
-                        name=acc["name"],
-                        arguments="".join(acc["arguments"]),
+                        name=acc["name"], arguments="".join(acc["arguments"])
                     ),
                 )
                 for _idx, acc in sorted(self.tool_calls_acc.items())
             ]
         message = SimpleNamespace(
-            role="assistant",
-            content="".join(self.content_parts),
-            tool_calls=tool_calls,
+            role="assistant", content="".join(self.content_parts), tool_calls=tool_calls,
             reasoning="".join(self.reasoning_parts) or None,
             reasoning_details=self.reasoning_details or None,
         )
         choice = SimpleNamespace(
-            index=0,
-            message=message,
-            finish_reason=self.finish_reason or "stop",
+            index=0, message=message, finish_reason=self.finish_reason or "stop"
         )
         return SimpleNamespace(
-            id=self.resp_id,
-            model=self.resp_model,
-            object="chat.completion",
-            choices=[choice],
+            id=self.resp_id, model=self.resp_model, object="chat.completion", choices=[choice],
             usage=self.usage,
         )
 
 
 async def _aggregate_chat_stream_async(
-    chunks: Any,
-    *,
-    model: str = "",
-    total_ceiling: Optional[float] = None,
+    chunks: Any, *, model: str = "", total_ceiling: Optional[float] = None
 ) -> Any:
     """Async mirror of :func:`_aggregate_chat_stream` (AsyncOpenAI streams need ``async for``)."""
     acc = _ChatStreamAccumulator(
-        model=model,
-        total_ceiling=total_ceiling,
-        host_deadline=_current_aux_stream_deadline(),
+        model=model, total_ceiling=total_ceiling, host_deadline=_current_aux_stream_deadline()
     )
     try:
         async for chunk in chunks:
@@ -7847,9 +7424,7 @@ async def _aggregate_chat_stream_async(
 
 
 async def _acreate_with_stream(
-    client: Any,
-    kwargs: Dict[str, Any],
-    task: Optional[str] = None,
+    client: Any, kwargs: Dict[str, Any], task: Optional[str] = None
 ) -> Any:
     """Async chat.completions.create() for stream-only providers: sends
     ``stream=True`` and aggregates the async chunk stream."""
@@ -7877,19 +7452,10 @@ class _ResolvedAuxRoute(NamedTuple):
 
 
 def _resolve_call_client(
-    task: Optional[str],
-    *,
-    provider: Optional[str],
-    model: Optional[str],
-    base_url: Optional[str],
-    api_key: Optional[str],
-    resolved_provider: str,
-    resolved_model: Optional[str],
-    resolved_base_url: Optional[str],
-    resolved_api_key: Optional[str],
-    resolved_api_mode: Optional[str],
-    main_runtime: Optional[Dict[str, Any]],
-    async_mode: bool,
+    task: Optional[str], *, provider: Optional[str], model: Optional[str], base_url: Optional[str],
+    api_key: Optional[str], resolved_provider: str, resolved_model: Optional[str],
+    resolved_base_url: Optional[str], resolved_api_key: Optional[str],
+    resolved_api_mode: Optional[str], main_runtime: Optional[Dict[str, Any]], async_mode: bool,
 ) -> _ResolvedAuxRoute:
     """Resolve the client for one aux call: vision chain, or cached text client with the
     explicit-provider fallback_chain / auto-chain rescue; RuntimeError when nothing is configured."""
@@ -7897,11 +7463,8 @@ def _resolve_call_client(
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
             provider=resolved_provider if resolved_provider != "auto" else provider,
-            model=resolved_model or model,
-            base_url=resolved_base_url or base_url,
-            api_key=resolved_api_key or api_key,
-            async_mode=async_mode,
-            main_runtime=main_runtime,
+            model=resolved_model or model, base_url=resolved_base_url or base_url,
+            api_key=resolved_api_key or api_key, async_mode=async_mode, main_runtime=main_runtime,
         )
         if client is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning(
@@ -7909,22 +7472,15 @@ def _resolve_call_client(
                 resolved_provider,
             )
             effective_provider, client, final_model = resolve_vision_provider_client(
-                provider="auto",
-                model=resolved_model,
-                async_mode=async_mode,
+                provider="auto", model=resolved_model, async_mode=async_mode,
                 main_runtime=main_runtime,
             )
         if client is not None:
             resolved_provider = effective_provider or resolved_provider
     else:
         client, final_model = _get_cached_client(
-            resolved_provider,
-            resolved_model,
-            async_mode=async_mode,
-            base_url=resolved_base_url,
-            api_key=resolved_api_key,
-            api_mode=resolved_api_mode,
-            main_runtime=main_runtime,
+            resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
+            api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
             task=task,
         )
         effective_provider = _effective_provider_for_client(
@@ -7986,24 +7542,12 @@ class _PreparedAuxRequest(NamedTuple):
 
 
 def _prepare_aux_request(
-    task: Optional[str],
-    *,
-    provider: Optional[str],
-    model: Optional[str],
-    base_url: Optional[str],
-    api_key: Optional[str],
-    main_runtime: Dict[str, Any],
-    messages: list,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    tools: Optional[list],
-    timeout: Optional[float],
-    extra_body: Optional[dict],
-    reasoning_config: Optional[dict],
-    extra_headers: Optional[Dict[str, str]],
-    api_mode: Optional[str],
-    route_info: Optional[Dict[str, str]],
-    async_mode: bool,
+    task: Optional[str], *, provider: Optional[str], model: Optional[str], base_url: Optional[str],
+    api_key: Optional[str], main_runtime: Dict[str, Any], messages: list,
+    temperature: Optional[float], max_tokens: Optional[int], tools: Optional[list],
+    timeout: Optional[float], extra_body: Optional[dict], reasoning_config: Optional[dict],
+    extra_headers: Optional[Dict[str, str]], api_mode: Optional[str],
+    route_info: Optional[Dict[str, str]], async_mode: bool,
 ) -> _PreparedAuxRequest:
     """Shared head of call_llm/async_call_llm: resolve route + client, publish it, build request kwargs.
     Sync-only: compression fast lane, per-request ``extra_headers``, and ``base_info`` falling
@@ -8015,12 +7559,10 @@ def _prepare_aux_request(
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
     client, final_model, resolved_provider, effective_provider = _resolve_call_client(
-        task,
-        provider=provider, model=model, base_url=base_url, api_key=api_key,
+        task, provider=provider, model=model, base_url=base_url, api_key=api_key,
         resolved_provider=resolved_provider, resolved_model=resolved_model,
         resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
-        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime,
-        async_mode=async_mode,
+        resolved_api_mode=resolved_api_mode, main_runtime=main_runtime, async_mode=async_mode,
     )
 
     effective_timeout = _effective_aux_timeout(task, timeout)
@@ -8031,14 +7573,9 @@ def _prepare_aux_request(
             _get_auxiliary_task_config("compression") if task == "compression" else {}
         )
         fast_compression_cap, effective_extra_body = _compression_fast_lane_controls(
-            task,
-            actual_provider=request_provider,
-            actual_model=final_model,
-            requested_provider=provider,
-            requested_model=model,
-            route_config=compression_config,
-            leak_guard_config=compression_config,
-            max_tokens=max_tokens,
+            task, actual_provider=request_provider, actual_model=final_model,
+            requested_provider=provider, requested_model=model, route_config=compression_config,
+            leak_guard_config=compression_config, max_tokens=max_tokens,
             extra_body=effective_extra_body,
         )
     _set_relay_auxiliary_route(request_provider, final_model, resolved_api_mode)
@@ -8095,8 +7632,7 @@ _RERAISE_ORIGINAL = object()
 # Ordered (predicate, reason) pairs for the provider-fallback rung: first match
 # wins, so a payment-flavoured 429 reads as "payment error", not "rate limit".
 _FALLBACK_REASONS: Tuple[Tuple[Callable[[Exception], bool], str], ...] = (
-    (_is_auth_error, "auth error"),
-    (_is_payment_error, "payment error"),
+    (_is_auth_error, "auth error"), (_is_payment_error, "payment error"),
     (_is_rate_limit_error, "rate limit"),
     (_is_model_incompatible_error, "model incompatible with route"),
     (_is_invalid_aux_response_error, "invalid provider response"),
@@ -8193,8 +7729,7 @@ def _ladder_parameter_rungs(
     # ZAI vision models reject max_tokens with code 1210 and a message that
     # never mentions "max_tokens", so detect it explicitly.
     _is_zai_param_error = (
-        "1210" in err_str
-        and "bigmodel" in str(getattr(client, "base_url", ""))
+        "1210" in err_str and "bigmodel" in str(getattr(client, "base_url", ""))
     )
     if max_tokens is not None and (
         "max_tokens" in err_str
@@ -8215,15 +7750,10 @@ def _refreshed_nous_step(
 ) -> Optional[_LadderStep]:
     """Rebuild the Nous client after a credential event; None when nothing refreshed."""
     refreshed_client, refreshed_model = _refresh_nous_auxiliary_client(
-        cache_provider=route.resolved_provider or "nous",
-        model=route.final_model,
-        lookup_model=route.resolved_model,
-        lookup_task=route.task,
-        async_mode=route.async_mode,
-        base_url=route.resolved_base_url,
-        api_key=route.resolved_api_key,
-        api_mode=route.resolved_api_mode,
-        main_runtime=route.main_runtime,
+        cache_provider=route.resolved_provider or "nous", model=route.final_model,
+        lookup_model=route.resolved_model, lookup_task=route.task, async_mode=route.async_mode,
+        base_url=route.resolved_base_url, api_key=route.resolved_api_key,
+        api_mode=route.resolved_api_mode, main_runtime=route.main_runtime,
         is_vision=(route.task == "vision"),
     )
     if refreshed_client is None:
@@ -8275,8 +7805,7 @@ def _ladder_nous_rungs(
 
     if _is_auth_error(first_err) and client_is_nous:
         step = _refreshed_nous_step(
-            route, kwargs,
-            "Auxiliary %s%s: refreshed Nous runtime credentials after 401, retrying",
+            route, kwargs, "Auxiliary %s%s: refreshed Nous runtime credentials after 401, retrying"
         )
         if step is not None:
             return (yield step), None
@@ -8411,22 +7940,11 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
 
 
 def _aux_recovery_ladder(
-    first_err: Exception,
-    *,
-    client: Any,
-    kwargs: Dict[str, Any],
-    task: Optional[str],
-    async_mode: bool,
-    base_info: str,
-    resolved_provider: str,
-    resolved_model: Optional[str],
-    resolved_base_url: Optional[str],
-    resolved_api_key: Optional[str],
-    resolved_api_mode: Optional[str],
-    final_model: Optional[str],
-    max_tokens: Optional[int],
-    main_runtime: Optional[Dict[str, Any]],
-    route_info: Optional[Dict[str, str]],
+    first_err: Exception, *, client: Any, kwargs: Dict[str, Any], task: Optional[str],
+    async_mode: bool, base_info: str, resolved_provider: str, resolved_model: Optional[str],
+    resolved_base_url: Optional[str], resolved_api_key: Optional[str],
+    resolved_api_mode: Optional[str], final_model: Optional[str], max_tokens: Optional[int],
+    main_runtime: Optional[Dict[str, Any]], route_info: Optional[Dict[str, str]],
 ):
     """Ordered recovery rungs after the primary request failed (generator): parameter
     strips → Nous heal/refresh → credential refresh/pool rotation → provider fallback.
@@ -8508,25 +8026,12 @@ def _stamp_latency_once(latency_info: Optional[Dict[str, int]], key: str, starte
 
 @_relay_auxiliary_call
 def call_llm(
-    task: str = None,
-    *,
-    provider: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: int = None,
-    tools: list = None,
-    timeout: float = None,
-    extra_body: dict = None,
-    reasoning_config: Optional[dict] = None,
-    extra_headers: Optional[Dict[str, str]] = None,
-    api_mode: str = None,
-    stream: bool = False,
-    stream_options: dict = None,
-    route_info: Optional[Dict[str, str]] = None,
+    task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
+    api_key: str = None, main_runtime: Optional[Dict[str, Any]] = None, messages: list,
+    temperature: Optional[float] = None, max_tokens: int = None, tools: list = None,
+    timeout: float = None, extra_body: dict = None, reasoning_config: Optional[dict] = None,
+    extra_headers: Optional[Dict[str, str]] = None, api_mode: str = None, stream: bool = False,
+    stream_options: dict = None, route_info: Optional[Dict[str, str]] = None,
     latency_info: Optional[Dict[str, int]] = None,
 ) -> Any:
     """Run an auxiliary LLM request, applying the configured task limit."""
@@ -8586,23 +8091,11 @@ def _release_sync_semaphore_after_stream(
 
 
 def _plan_aux_call(
-    task: Optional[str],
-    *,
-    async_mode: bool,
-    provider: Optional[str],
-    model: Optional[str],
-    base_url: Optional[str],
-    api_key: Optional[str],
-    main_runtime: Optional[Dict[str, Any]],
-    messages: list,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    tools: Optional[list],
-    timeout: Optional[float],
-    extra_body: Optional[dict],
-    reasoning_config: Optional[dict],
-    extra_headers: Optional[Dict[str, str]],
-    api_mode: Optional[str],
+    task: Optional[str], *, async_mode: bool, provider: Optional[str], model: Optional[str],
+    base_url: Optional[str], api_key: Optional[str], main_runtime: Optional[Dict[str, Any]],
+    messages: list, temperature: Optional[float], max_tokens: Optional[int], tools: Optional[list],
+    timeout: Optional[float], extra_body: Optional[dict], reasoning_config: Optional[dict],
+    extra_headers: Optional[Dict[str, str]], api_mode: Optional[str],
     route_info: Optional[Dict[str, str]],
 ) -> Tuple[_PreparedAuxRequest, Dict[str, Any], Dict[str, Any]]:
     """Shared head of both call impls: prepare the request and bundle the kwargs the
@@ -8666,8 +8159,7 @@ def _start_recovery_ladder(
 ):
     """Build the recovery-ladder generator for a failed primary request."""
     return _aux_recovery_ladder(
-        first_err,
-        client=req.client, kwargs=req.kwargs, task=task, async_mode=async_mode,
+        first_err, client=req.client, kwargs=req.kwargs, task=task, async_mode=async_mode,
         base_info=req.base_info,
         resolved_provider=req.resolved_provider, resolved_model=req.resolved_model,
         resolved_base_url=req.resolved_base_url, resolved_api_key=req.resolved_api_key,
@@ -8678,25 +8170,12 @@ def _start_recovery_ladder(
 
 
 def _call_llm_impl(
-    task: str = None,
-    *,
-    provider: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: int = None,
-    tools: list = None,
-    timeout: float = None,
-    extra_body: dict = None,
-    reasoning_config: Optional[dict] = None,
-    extra_headers: Optional[Dict[str, str]] = None,
-    api_mode: str = None,
-    stream: bool = False,
-    stream_options: dict = None,
-    route_info: Optional[Dict[str, str]] = None,
+    task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
+    api_key: str = None, main_runtime: Optional[Dict[str, Any]] = None, messages: list,
+    temperature: Optional[float] = None, max_tokens: int = None, tools: list = None,
+    timeout: float = None, extra_body: dict = None, reasoning_config: Optional[dict] = None,
+    extra_headers: Optional[Dict[str, str]] = None, api_mode: str = None, stream: bool = False,
+    stream_options: dict = None, route_info: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Centralized synchronous LLM call: resolve provider/model, auth, kwargs, fallbacks.
     task: aux task whose provider:model comes from config (ignored if provider set); api_mode
@@ -8853,9 +8332,7 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
         for detail in details:
             if isinstance(detail, dict):
                 summary = (
-                    detail.get("summary")
-                    or detail.get("content")
-                    or detail.get("text")
+                    detail.get("summary") or detail.get("content") or detail.get("text")
                 )
                 if summary and summary not in reasoning_parts:
                     reasoning_parts.append(summary.strip() if isinstance(summary, str) else str(summary))
@@ -8876,20 +8353,10 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
 
 @_relay_auxiliary_call_async
 async def async_call_llm(
-    task: str = None,
-    *,
-    provider: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: int = None,
-    tools: list = None,
-    timeout: float = None,
-    extra_body: dict = None,
-    reasoning_config: Optional[dict] = None,
+    task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
+    api_key: str = None, main_runtime: Optional[Dict[str, Any]] = None, messages: list,
+    temperature: Optional[float] = None, max_tokens: int = None, tools: list = None,
+    timeout: float = None, extra_body: dict = None, reasoning_config: Optional[dict] = None,
     route_info: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Run an asynchronous auxiliary LLM request under the configured limit."""
@@ -8909,20 +8376,10 @@ async def async_call_llm(
 
 
 async def _async_call_llm_impl(
-    task: str = None,
-    *,
-    provider: str = None,
-    model: str = None,
-    base_url: str = None,
-    api_key: str = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    messages: list,
-    temperature: Optional[float] = None,
-    max_tokens: int = None,
-    tools: list = None,
-    timeout: float = None,
-    extra_body: dict = None,
-    reasoning_config: Optional[dict] = None,
+    task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
+    api_key: str = None, main_runtime: Optional[Dict[str, Any]] = None, messages: list,
+    temperature: Optional[float] = None, max_tokens: int = None, tools: list = None,
+    timeout: float = None, extra_body: dict = None, reasoning_config: Optional[dict] = None,
     route_info: Optional[Dict[str, str]] = None,
 ) -> Any:
     """Centralized asynchronous LLM call; see call_llm() for full documentation."""
