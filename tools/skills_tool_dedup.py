@@ -1,14 +1,10 @@
 """skill_view repeat-view dedup registry.
 
-Per-task cache of (skill name, file_path) -> (skill file mtime+size). On a
-repeat view of an UNCHANGED skill file, ``tools.skills_tool`` returns a short
-stub instead of re-sending the full content — the earlier tool result in this
-conversation already carries it verbatim. Cleared on context compression via
-``reset_skill_view_dedup()`` (wired next to read_file's reset_file_dedup)
-because after compression the original content is summarized away.
-
-Every name is re-imported into ``tools.skills_tool``; the tracker state lives
-here and only here.
+Per-task cache of (skill name, file_path) -> (skill file mtime+size). A repeat
+view of an UNCHANGED file returns a short stub — the earlier tool result already
+carries the content verbatim. Cleared on context compression via
+``reset_skill_view_dedup()`` because the original content is summarized away.
+Every name is re-imported into ``tools.skills_tool``; state lives only here.
 """
 
 import json
@@ -24,8 +20,7 @@ _SKILL_VIEW_DEDUP_MESSAGE = (
     "Skill content unchanged since it was loaded earlier in this "
     "conversation — refer to the earlier skill_view result; it is still "
     "current and complete. (Re-issued after context compression, this "
-    "returns the full content again.)"
-)
+    "returns the full content again.)")
 
 
 def _skill_view_fingerprint(payload: dict) -> tuple | None:
@@ -44,9 +39,8 @@ def _record_skill_view(task_id, name, file_path, payload: dict) -> None:
     """Record a served skill_view so an identical repeat can be deduped."""
     if not task_id:
         return
-    # Never dedup setup-needed views: readiness depends on config/env state
-    # that can change without the skill file changing, and the model must
-    # see the refreshed setup status on a re-view.
+    # Never dedup setup-needed views: readiness depends on config/env state that
+    # changes without the file changing; the model must see the refreshed status.
     if payload.get("setup_needed") or payload.get("readiness_status") == "setup_needed":
         return
     fp = _skill_view_fingerprint(payload)
@@ -64,16 +58,16 @@ def _record_skill_view(task_id, name, file_path, payload: dict) -> None:
 
 
 def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
-    """Return a dedup stub when this exact skill file was already served
-    to this task and is unchanged on disk; None otherwise."""
+    """Dedup stub when this exact skill file was already served to this task and
+    is unchanged on disk; None otherwise."""
     if not task_id:
         return None
     with _skill_view_tracker_lock:
         cache = _skill_view_tracker.get(str(task_id))
         if not cache:
             return None
-        # The record key uses the RESOLVED name; check both the raw arg and
-        # resolved forms so 'category/skill' and bare-name views coalesce.
+        # Record key is the RESOLVED name; match raw and resolved forms so
+        # 'category/skill' and bare-name views coalesce.
         for key, (src, mtime_ns, size) in list(cache.items()):
             rec_name, rec_fp = key
             if rec_fp != (file_path or ""):
@@ -99,9 +93,7 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
 
 
 def reset_skill_view_dedup(task_id: str | None = None) -> None:
-    """Clear the skill_view dedup cache (all tasks when task_id is None). Called on
-    context compression: the original content is summarized away, so a re-view
-    must return full content again."""
+    """Clear the dedup cache (all tasks when task_id is None); called on context compression."""
     with _skill_view_tracker_lock:
         if task_id is None:
             _skill_view_tracker.clear()
