@@ -1,8 +1,7 @@
 """Shared device-code / browser / TLS helpers for interactive OAuth logins.
 
-Split out of ``hermes_cli/auth.py``; every name is re-exported there so ``hermes_cli.auth.<name>``
-keeps resolving (and monkeypatching). Origin-internal helpers are imported lazily inside each
-function (no import cycle; patches on ``hermes_cli.auth.<helper>`` still intercept).
+Split out of ``hermes_cli/auth.py`` and re-exported there; origin helpers are imported lazily
+inside each function so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 """
 
 from __future__ import annotations

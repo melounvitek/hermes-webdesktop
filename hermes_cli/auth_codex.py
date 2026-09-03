@@ -4,9 +4,8 @@ Tokens live in ~/.hermes/auth.json, NOT ~/.codex/: Hermes keeps its own Codex OA
 separate from the Codex CLI / VS Code extension so one app's refresh-token rotation cannot
 invalidate the other's session.
 
-Split out of ``hermes_cli/auth.py``; every name is re-exported there so ``hermes_cli.auth.<name>``
-keeps resolving (and monkeypatching). Origin-internal helpers are imported lazily inside each
-function (no import cycle; patches on ``hermes_cli.auth.<helper>`` still intercept).
+Split out of ``hermes_cli/auth.py`` and re-exported there; origin helpers are imported lazily
+inside each function so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 """
 
 from __future__ import annotations
@@ -218,6 +217,15 @@ def _refresh_payload_access_token(
             missing_access[0], provider=provider, code=missing_access[1],
             relogin_required=relogin_required)
     return payload, access
+
+
+def _codex_login_post(url: str, *, failure: Tuple[str, str], **kwargs: Any) -> "httpx.Response":
+    """One 15s POST for the device-login flow; transport errors become ``_codex_err(*failure)``."""
+    try:
+        with _codex_http_client(timeout=httpx.Timeout(15.0)) as client:
+            return client.post(url, **kwargs)
+    except Exception as exc:
+        raise _codex_err(f"{failure[0]}: {exc}", failure[1])
 
 
 def _codex_http_client(**kwargs: Any) -> "httpx.Client":
@@ -708,13 +716,10 @@ def _codex_request_device_code(issuer: str, client_id: str) -> Dict[str, Any]:
     resp = None
     max_attempts = 4
     for attempt in range(1, max_attempts + 1):
-        try:
-            with _codex_http_client(timeout=httpx.Timeout(15.0)) as client:
-                resp = client.post(
-                    f"{issuer}/api/accounts/deviceauth/usercode", json={"client_id": client_id},
-                    headers={"Content-Type": "application/json"})
-        except Exception as exc:
-            raise _codex_err(f"Failed to request device code: {exc}", "device_code_request_failed")
+        resp = _codex_login_post(
+            f"{issuer}/api/accounts/deviceauth/usercode", json={"client_id": client_id},
+            headers={"Content-Type": "application/json"},
+            failure=("Failed to request device code", "device_code_request_failed"))
         if resp.status_code != 429:
             break
         if attempt < max_attempts:
@@ -777,17 +782,14 @@ def _codex_exchange_authorization_code(
         raise _codex_err(
             "Device auth response missing authorization_code or code_verifier.",
             "device_code_incomplete_exchange")
-    try:
-        with _codex_http_client(timeout=httpx.Timeout(15.0)) as client:
-            token_resp = client.post(
-                CODEX_OAUTH_TOKEN_URL,
-                data={
-                    "grant_type": "authorization_code", "code": authorization_code,
-                    "redirect_uri": f"{issuer}/deviceauth/callback", "client_id": client_id,
-                    "code_verifier": code_verifier},
-                headers={"Content-Type": "application/x-www-form-urlencoded"})
-    except Exception as exc:
-        raise _codex_err(f"Token exchange failed: {exc}", "token_exchange_failed")
+    token_resp = _codex_login_post(
+        CODEX_OAUTH_TOKEN_URL,
+        data={
+            "grant_type": "authorization_code", "code": authorization_code,
+            "redirect_uri": f"{issuer}/deviceauth/callback", "client_id": client_id,
+            "code_verifier": code_verifier},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        failure=("Token exchange failed", "token_exchange_failed"))
     if token_resp.status_code == 429:
         raise _codex_login_rate_limited_error(token_resp, during=" during token exchange")
     if token_resp.status_code != 200:
