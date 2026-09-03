@@ -133,8 +133,7 @@ def remove_wrapper_script():
     candidates = (
         bin_dir / name
         for bin_dir in (Path.home() / ".local" / "bin", Path("/usr/local/bin"))
-        for name in ("hermes", "hermes-acp", "hermes-agent")
-    )
+        for name in ("hermes", "hermes-acp", "hermes-agent"))
     return _remove_each((w for w in candidates if w.exists()), _unlink_ours)
 
 
@@ -220,10 +219,7 @@ def uninstall_gateway_service():
 def _remove_systemd_gateway() -> bool:
     """Linux: uninstall systemd services (both user and system scopes)."""
     from hermes_cli.gateway import (
-        get_systemd_unit_path,
-        get_service_name,
-        _systemctl_cmd,
-    )
+        get_systemd_unit_path, get_service_name, _systemctl_cmd)
     svc_name = get_service_name()
     removed_any = False
 
@@ -254,8 +250,7 @@ def _remove_launchd_gateway() -> bool:
     plist_path = get_launchd_plist_path()
     if not plist_path.exists():
         return False
-    subprocess.run(["launchctl", "unload", str(plist_path)],
-                   capture_output=True, check=False)
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True, check=False)
     plist_path.unlink()
     log_success(f"Removed macOS gateway service ({plist_path})")
     return True
@@ -290,9 +285,7 @@ def _remove_windows_gateway() -> bool:
 _GATEWAY_SERVICE_REMOVERS = {
     "Linux": (_remove_systemd_gateway, "Could not check systemd gateway services"),
     "Darwin": (_remove_launchd_gateway, "Could not remove launchd gateway service"),
-    "Windows": (_remove_windows_gateway, "Could not check Windows gateway service"),
-}
-
+    "Windows": (_remove_windows_gateway, "Could not check Windows gateway service")}
 
 # ============================================================================
 # Windows-specific uninstall helpers
@@ -493,11 +486,8 @@ def _uninstall_profile(profile) -> None:
     for subcmd in ("stop", "uninstall"):
         try:
             subprocess.run(
-                hermes_invocation + ["gateway", subcmd],
-                capture_output=True,
-                text=True, encoding='utf-8', errors='replace',
-                timeout=60,
-                check=False,
+                hermes_invocation + ["gateway", subcmd], capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=60, check=False,
             )
         except subprocess.TimeoutExpired:
             log_warn(f"  Gateway {subcmd} timed out for '{name}'")
@@ -525,10 +515,7 @@ def run_gui_uninstall(args):
     config/sessions/.env, and never the Python agent or its venv.
     """
     from hermes_cli.gui_uninstall import (
-        agent_is_installed,
-        gui_install_summary,
-        uninstall_gui,
-    )
+        agent_is_installed, gui_install_summary, uninstall_gui)
 
     hermes_home = get_hermes_home()
     summary = gui_install_summary(hermes_home)
@@ -586,8 +573,7 @@ def run_uninstall(args):
         _print_uninstall_dry_run(
             project_root=project_root,
             hermes_home=hermes_home,
-            full_uninstall=bool(getattr(args, "full", False)),
-        )
+            full_uninstall=bool(getattr(args, "full", False)))
         return
 
     # Detect named profiles when uninstalling from the default root —
@@ -604,10 +590,8 @@ def run_uninstall(args):
     # lite/full modes.
     if bool(getattr(args, "yes", False)):
         _perform_uninstall(
-            project_root=project_root,
-            hermes_home=hermes_home,
-            full_uninstall=bool(getattr(args, "full", False)),
-            remove_profiles=False,
+            project_root=project_root, hermes_home=hermes_home,
+            full_uninstall=bool(getattr(args, "full", False)), remove_profiles=False,
             named_profiles=named_profiles,
         )
         return
@@ -684,11 +668,8 @@ def run_uninstall(args):
         return
 
     _perform_uninstall(
-        project_root=project_root,
-        hermes_home=hermes_home,
-        full_uninstall=full_uninstall,
-        remove_profiles=remove_profiles,
-        named_profiles=named_profiles,
+        project_root=project_root, hermes_home=hermes_home, full_uninstall=full_uninstall,
+        remove_profiles=remove_profiles, named_profiles=named_profiles,
     )
 
 
@@ -744,8 +725,7 @@ def _perform_uninstall(
     hermes_home: Path,
     full_uninstall: bool,
     remove_profiles: bool,
-    named_profiles: list,
-) -> None:
+    named_profiles: list) -> None:
     """Execute the uninstall steps; shared by the interactive and ``--yes`` paths.
 
     Order: stop gateway -> strip PATH (rc files + Windows registry) -> remove wrapper and node
@@ -813,8 +793,7 @@ def _perform_uninstall(
         _remove_step(
             "Removing Windows installer artifacts (PortableGit, Node, gateway-service)...",
             lambda: remove_portable_tooling_windows(hermes_home), "Removed {}",
-            "No Windows installer artifacts to remove",
-        )
+            "No Windows installer artifacts to remove")
     
     # 5. Optionally remove ~/.hermes/ data directory (and named profiles)
     if full_uninstall:
@@ -877,9 +856,7 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(prog="python -m hermes_cli.uninstall")
     parser.add_argument(
-        "--mode",
-        choices=["gui", "lite", "full"],
-        required=True,
+        "--mode", choices=["gui", "lite", "full"], required=True,
         help="gui = Chat GUI only; lite = GUI + agent, keep data; full = everything",
     )
     args = _UninstallArgs(mode=parser.parse_args(argv).mode)

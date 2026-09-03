@@ -63,8 +63,7 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
         live: dict[int, float | None] = {
             entry["pid"]: _numeric(entry.get("create_time"))
             for entry in ledger_entries()
-            if entry.get("purpose") in ("serve", "dashboard") and isinstance(entry.get("pid"), int)
-        }
+            if entry.get("purpose") in ("serve", "dashboard") and isinstance(entry.get("pid"), int)}
     except Exception as exc:
         logger.debug("Serve/dashboard survivor probe failed: %s", exc)
         live = None
@@ -77,8 +76,7 @@ def _surviving_pre_update_serve_runtimes(plan) -> list[dict]:
             if (
                 planned_created is not None
                 and live_created is not None
-                and abs(float(live_created) - float(planned_created)) >= 2.0
-            ):
+                and abs(float(live_created) - float(planned_created)) >= 2.0):
                 # Same number, different process: the pre-update runtime is gone
                 # and something new registered under its PID. Not a survivor.
                 continue
@@ -116,8 +114,7 @@ def _recover_gateway_restart_after_abort(
     *,
     gateway_mode: bool,
     skip_profiles: set[str] | None = None,
-    skip_units: set[str] | None = None,
-) -> dict[str, list]:
+    skip_units: set[str] | None = None) -> dict[str, list]:
     """Retry supervised gateway restarts from a clean Python process.
 
     ``hermes update`` normally performs the fleet restart in the interpreter that started before
@@ -139,8 +136,7 @@ def _recover_gateway_restart_after_abort(
             "relaunch_attempted": relaunch_attempted,
             "failed": failed,
             "skipped": skipped,
-            "serve_units": dict(_empty_serve) if serve_units is None else serve_units,
-        }
+            "serve_units": dict(_empty_serve) if serve_units is None else serve_units}
 
     if not profiles and not recover_serve:
         return _result([], [], [], [])
@@ -172,11 +168,7 @@ def _recover_gateway_restart_after_abort(
                 "profiles": profiles,
                 "supervisors": candidates,
                 "serve_units": {
-                    "recover": recover_serve,
-                    "skip": _qualified_serve_skips(skip_units),
-                },
-            }
-        ),
+                    "recover": recover_serve, "skip": _qualified_serve_skips(skip_units)}}),
         "capture_output": True,
         "text": True,
         "encoding": "utf-8",
@@ -186,13 +178,11 @@ def _recover_gateway_restart_after_abort(
         # Gateway profiles run sequentially at up to 90s each; the serve pass
         # adds its own restart + settle budget on top, so give the child room
         # for both rather than killing a recovery that was working.
-        "timeout": max(180, 30 + 90 * len(profiles) + (150 if recover_serve else 0)),
-    }
+        "timeout": max(180, 30 + 90 * len(profiles) + (150 if recover_serve else 0))}
     if sys.platform == "win32":
         kwargs["creationflags"] = (
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-        )
+            | getattr(subprocess, "DETACHED_PROCESS", 0))
     else:
         kwargs["start_new_session"] = True
 
@@ -222,14 +212,9 @@ def _recover_gateway_restart_after_abort(
         and isinstance(raw_serve.get("verified"), list)
         and isinstance(raw_serve.get("failed"), list)
         and all(
-            isinstance(unit, str)
-            for unit in (*raw_serve["verified"], *raw_serve["failed"])
-        )
-    ):
+            isinstance(unit, str) for unit in (*raw_serve["verified"], *raw_serve["failed"]))):
         serve_units = {
-            "verified": sorted(raw_serve["verified"]),
-            "failed": sorted(raw_serve["failed"]),
-        }
+            "verified": sorted(raw_serve["verified"]), "failed": sorted(raw_serve["failed"])}
     elif recover_serve:
         # An unreadable serve block cannot be read as "nothing to do": the
         # units it describes are exactly the ones that host tui_gateway and
@@ -245,8 +230,7 @@ def _recover_gateway_restart_after_abort(
         not all(isinstance(bucket, list) for bucket in buckets)
         or any(not isinstance(profile, str) for profile in reported)
         or set(reported) != set(profiles)
-        or len(reported) != len(set(reported))
-    ):
+        or len(reported) != len(set(reported))):
         logger.warning("Fresh gateway restart recovery returned incomplete profiles")
         return _all_failed()
 
@@ -256,8 +240,7 @@ def _recover_gateway_restart_after_abort(
         (relaunch_attempted, "  ⚠ Relaunch attempted in a fresh process but not"
                              " supervisor-verified (check these gateways manually): "),
         (serve_units["verified"], "  ✓ Restarted serve unit(s) in a fresh process (new main PID observed): "),
-        (serve_units["failed"], "  ⚠ Could not verify a replacement for serve unit(s): "),
-    ):
+        (serve_units["failed"], "  ⚠ Could not verify a replacement for serve unit(s): ")):
         if names:
             print(text + ", ".join(names))
     return _result(profiles, verified, relaunch_attempted, failed, serve_units)
@@ -275,27 +258,20 @@ def _warn_stale_serve_runtimes(rows) -> None:
         return
     print(
         "  ⚠ These serve/dashboard processes still run pre-update code"
-        " (they started before the checkout changed):"
-    )
+        " (they started before the checkout changed):")
     for row in rows:
         supervisor = row.get("supervisor") or "unknown"
         print(
             f"      pid {row.get('pid')} — {row.get('kind')}"
-            f" (profile {row.get('profile') or 'default'}, {supervisor})"
-        )
+            f" (profile {row.get('profile') or 'default'}, {supervisor})")
     print(
         "    Restart them before using Hermes again, e.g."
         " `systemctl --user restart hermes-serve.service`"
-        " or by relaunching `hermes serve` / the Desktop app."
-    )
+        " or by relaunching `hermes serve` / the Desktop app.")
 
 
 def _abort_recovery_is_complete(
-    *,
-    planned_gateway_profiles,
-    covered_gateway_profiles,
-    recovery_result,
-    stale_runtime_rows,
+    *, planned_gateway_profiles, covered_gateway_profiles, recovery_result, stale_runtime_rows
 ) -> bool:
     """May a fresh-process recovery clear the incomplete flag?
 

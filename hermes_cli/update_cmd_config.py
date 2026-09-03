@@ -31,8 +31,7 @@ def _reload_config_modules() -> None:
         "hermes_cli.config",
         "hermes_cli.config_migrations",
         "hermes_cli._subprocess_compat",
-        "hermes_cli.dashboard_procs",
-    ):
+        "hermes_cli.dashboard_procs"):
         mod = sys.modules.get(mod_name)
         if mod is not None:
             try:
@@ -74,10 +73,7 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     migrated: list[tuple[str, int, int]] = []
     with _best_effort('Sibling profile enumeration failed: %s'):
         from hermes_constants import (
-            get_process_hermes_home,
-            reset_hermes_home_override,
-            set_hermes_home_override,
-        )
+            get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override)
         from hermes_cli.profiles import _get_profiles_root, _PROFILE_ID_RE
 
         active_home = get_process_hermes_home()
@@ -124,8 +120,7 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
             print(
                 "  ⚠️  cron/jobs.json lost jobs during this update — "
                 f"restored {cron_restore['job_count']} job(s) from "
-                f"pre-update snapshot {cron_restore['snapshot_id']}."
-            )
+                f"pre-update snapshot {cron_restore['snapshot_id']}.")
     except Exception as exc:
         # Never let the cron safety net break an otherwise-good update.
         logger.debug("Cron jobs auto-restore check failed: %s", exc)
@@ -141,8 +136,7 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
             print(
                 "  ⚠️  config.yaml user model settings were rewritten during "
                 f"this update — restored {', '.join(cfg_restore['keys'])} "
-                f"from pre-update snapshot {cfg_restore['snapshot_id']}."
-            )
+                f"from pre-update snapshot {cfg_restore['snapshot_id']}.")
     except Exception as exc:
         # Never let the config safety net break an otherwise-good update.
         logger.debug("Config model-settings auto-restore check failed: %s", exc)
@@ -152,38 +146,33 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
         from hermes_cli.backup import restore_cron_jobs_all_profiles
 
         for _restored in restore_cron_jobs_all_profiles(
-            _LAST_SIBLING_SNAPSHOTS
-        ):
+            _LAST_SIBLING_SNAPSHOTS):
             print()
             print(
                 f"  ⚠️  Profile '{_restored['profile']}': cron/jobs.json "
                 f"lost jobs during this update — restored "
                 f"{_restored['job_count']} job(s) from pre-update "
-                f"snapshot {_restored['snapshot_id']}."
-            )
+                f"snapshot {_restored['snapshot_id']}.")
 
     # Same config model-settings safety net for sibling profiles.
     with _best_effort('Sibling config auto-restore check failed: %s'):
         from hermes_cli.backup import restore_config_model_settings_all_profiles
 
         for _cfg_restored in restore_config_model_settings_all_profiles(
-            _LAST_SIBLING_SNAPSHOTS
-        ):
+            _LAST_SIBLING_SNAPSHOTS):
             print()
             print(
                 f"  ⚠️  Profile '{_cfg_restored['profile']}': config.yaml "
                 f"user model settings were rewritten during this update — "
                 f"restored {', '.join(_cfg_restored['keys'])} from "
-                f"pre-update snapshot {_cfg_restored['snapshot_id']}."
-            )
+                f"pre-update snapshot {_cfg_restored['snapshot_id']}.")
 
 
 def _check_and_apply_config_migration(
     *,
     assume_yes: bool = False,
     gateway_mode: bool = False,
-    pre_update_snapshot_id: str | None = None,
-) -> None:
+    pre_update_snapshot_id: str | None = None) -> None:
     """Check/apply config migrations on an update completion path.
 
     Must use freshly-reloaded modules (see ``_reload_config_modules``) and run on EVERY
@@ -195,8 +184,7 @@ def _check_and_apply_config_migration(
         _migrate_sibling_profile_configs,
         _reload_config_modules,
         _run_config_check_fresh,
-        _run_migrate_config_fresh,
-    )
+        _run_migrate_config_fresh)
     print()
     print("→ Checking configuration for new options...")
 
@@ -204,9 +192,7 @@ def _check_and_apply_config_migration(
     _reload_config_modules()
 
     from hermes_cli.config import (
-        get_missing_env_vars,
-        get_missing_config_fields,
-    )
+        get_missing_env_vars, get_missing_config_fields)
 
     # A config-check failure must not break an otherwise-successful update.
     try:
@@ -257,29 +243,22 @@ def _check_and_apply_config_migration(
         elif gateway_mode:
             response = (
                 _gateway_prompt(
-                    "Would you like to configure new options now? [Y/n]", "n"
-                )
+                    "Would you like to configure new options now? [Y/n]", "n")
                 .strip()
-                .lower()
-            )
+                .lower())
         elif not (sys.stdin.isatty() and sys.stdout.isatty()):
             print("  ℹ Non-interactive session — applying safe config migrations.")
             response = "auto"
         else:
             try:
-                response = (
-                    input("Would you like to configure them now? [Y/n]: ")
-                    .strip()
-                    .lower()
-                )
+                response = (input("Would you like to configure them now? [Y/n]: ").strip().lower())
             except EOFError:
                 response = "n"
             except UnicodeDecodeError:
                 # Non-UTF-8 locales / embedded terminals can make input() raise this.
                 print(
                     "  ⚠ Could not read input (encoding issue). Skipping. "
-                    "Run 'hermes config migrate' manually to configure."
-                )
+                    "Run 'hermes config migrate' manually to configure.")
                 response = "n"
 
         if response in {"", "y", "yes", "auto"}:
