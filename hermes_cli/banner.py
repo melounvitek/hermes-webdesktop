@@ -53,9 +53,7 @@ def _skin_color(key: str, fallback: str) -> str:
     return _quiet(lambda: _active_skin().get_color(key, fallback), fallback)
 
 
-# =========================================================================
-# ASCII Art & Branding
-# =========================================================================
+# === ASCII Art & Branding ===
 
 from hermes_cli import __version__ as VERSION, __release_date__ as RELEASE_DATE
 
@@ -82,9 +80,7 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠳⠈⣡⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
 
-# =========================================================================
-# Skills scanning
-# =========================================================================
+# === Skills scanning ===
 
 # Per-process caches: ``None`` until computed, then a 1-tuple ``(value,)`` so a computed ``None``
 # is distinguishable from "not yet computed". Reset by assigning ``None`` (tests, ``hermes skills``).
@@ -129,9 +125,7 @@ def get_available_skills() -> Dict[str, List[str]]:
     return {} if result is _UNCACHED else result
 
 
-# =========================================================================
-# Update check
-# =========================================================================
+# === Update check ===
 
 _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600  # avoid repeated git fetches
 
@@ -180,7 +174,6 @@ def _git_run(
     kwargs: dict = {}
     if network:
         from hermes_cli._subprocess_compat import noninteractive_git_env
-
         kwargs = {"stdin": subprocess.DEVNULL, "env": noninteractive_git_env()}
     try:
         return subprocess.run(
@@ -227,7 +220,6 @@ def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
 
     def _fetch():
         import urllib.request
-
         # api.github.com 403s requests without a User-Agent.
         req = urllib.request.Request(
             url, headers={"Accept": "application/vnd.github+json", "User-Agent": "hermes-cli-update-check"})
@@ -300,7 +292,6 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # removes the lock. This passive check is also the main tmp_pack GENERATOR on flaky lines,
         # so it must be the janitor too (#93732).
         from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
-
         clear_stale_git_locks(repo_dir)
         clear_stale_tmp_packs(repo_dir)
 
@@ -463,9 +454,7 @@ def format_banner_version_label() -> str:
     return f"{base} · upstream {upstream} · local {local} (+{ahead} carried {_plural(ahead, 'commit')})"
 
 
-# =========================================================================
-# Non-blocking update check
-# =========================================================================
+# === Non-blocking update check ===
 
 _update_result: Optional[int] = None
 _update_check_done = threading.Event()
@@ -548,9 +537,7 @@ def _defer_update_notice(console: "Console", max_wait: float = 30.0) -> None:
     _daemon("update-notice", _wait_and_print)  # never break the session over an update notice
 
 
-# =========================================================================
-# Welcome banner
-# =========================================================================
+# === Welcome banner ===
 
 def _plural(n: int, word: str) -> str:
     return word if n == 1 else f"{word}s"
@@ -578,9 +565,7 @@ def _short_label(name: str) -> str:
     return name[:25] + "..." if len(name) > 28 else name
 
 
-# =========================================================================
-# Banner snapshot — warm-launch fast path
-# =========================================================================
+# === Banner snapshot — warm-launch fast path ===
 # The tool panel needs the full tool registry (~0.5-0.9s cold, the largest chunk of time-to-
 # banner). The list is a pure function of (config.yaml, .env, code checkout, enabled toolsets),
 # so the rendered inputs are snapshotted to disk and replayed when the fingerprint matches. The
@@ -597,7 +582,6 @@ def _banner_snapshot_path() -> Path:
 def banner_snapshot_fingerprint() -> Optional[str]:
     """Fingerprint the inputs the banner tool panel depends on."""
     import hashlib
-
     def _inputs():
         from hermes_cli.config import get_config_path
         return (get_config_path(), get_hermes_home() / ".env")
@@ -673,7 +657,6 @@ def compute_toolset_availability(enabled_toolsets: List[str] = None) -> Dict[str
     Split out so the result can be snapshotted and replayed without importing ``model_tools``.
     """
     from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
-
     enabled_toolsets = enabled_toolsets or []
     _, unavailable_toolsets = check_tool_availability(quiet=True)
     # The availability check walks the GLOBAL registry, so it includes toolsets outside this
@@ -749,7 +732,6 @@ def _moa_aggregator_label(preset_name: str) -> str:
     """Short aggregator-model label for a MoA preset ("" when the preset has none)."""
     from hermes_cli.config import load_config
     from hermes_cli.moa_config import normalize_moa_config
-
     preset = normalize_moa_config(load_config().get("moa") or {}).get("presets", {}).get(preset_name)
     model = str(((preset or {}).get("aggregator") or {}).get("model") or "")
     return model.split("/")[-1]
@@ -867,15 +849,11 @@ def _banner_skill_lines(skills_by_category: Dict[str, List[str]], skills_enabled
     return lines
 
 
-def build_welcome_banner(console: "Console", model: str, cwd: str,
-                         tools: List[dict] = None,
-                         enabled_toolsets: List[str] = None,
-                         session_id: str = None,
-                         get_toolset_for_tool=None,
-                         context_length: int = None,
-                         provider: str = None,
-                         availability: Dict[str, Any] = None,
-                         skills_by_category: Dict[str, List[str]] = None):
+def build_welcome_banner(
+    console: "Console", model: str, cwd: str, tools: List[dict] = None, enabled_toolsets: List[str] = None,
+    session_id: str = None, get_toolset_for_tool=None, context_length: int = None, provider: str = None,
+    availability: Dict[str, Any] = None, skills_by_category: Dict[str, List[str]] = None,
+):
     """Build and print a welcome banner with caduceus on left and info on right.
 
     When ``provider == "moa"``, ``model`` is a MoA preset name and the aggregator is rendered.
@@ -886,7 +864,6 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     from rich.table import Table
     if get_toolset_for_tool is None:
         from model_tools import get_toolset_for_tool
-
     tools = tools or []
     enabled_toolsets = enabled_toolsets or []
 
