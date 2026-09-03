@@ -55,6 +55,7 @@ _POLISHED_TOOLS = {
 
 _EMPTYISH = (None, "", [], {})
 Args = Dict[str, Any]
+_Formatter = Callable[[str, Optional[str], Optional[Args]], Optional[str]]
 
 
 def get_tool_kind(tool_name: str) -> ToolKind:
@@ -103,6 +104,22 @@ def _failure(data: Args, prefix: str) -> Optional[str]:
     if data.get("success") is False or data.get("error"):
         return f"{prefix}: {data.get('error', 'unknown error')}"
     return None
+
+
+def _structured(text_fallback: bool = False):
+    """Completion formatter taking ``(tool_name, data: dict, args: dict)``; the wrapper parses
+    ``result`` and returns ``None`` (or the raw text when ``text_fallback``) for non-dict payloads."""
+
+    def deco(fn: Callable[[str, Args, Args], Optional[str]]) -> _Formatter:
+        def wrapper(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
+            data = _json_loads_maybe(result)
+            if not isinstance(data, dict):
+                return _nonempty(result) if text_fallback else None
+            return fn(tool_name, data, args or {})
+
+        return wrapper
+
+    return deco
 
 
 def _args_json(arguments: Any) -> str:
@@ -239,9 +256,9 @@ def build_tool_title(tool_name: str, args: Args) -> str:
 # --- completion formatters; all share the signature (tool_name, result, args) --
 
 
-def _format_todo_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict) or not isinstance(data.get("todos"), list):
+@_structured()
+def _format_todo_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
+    if not isinstance(data.get("todos"), list):
         return None
     summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
     icon = {"completed": "✅", "in_progress": "🔄", "pending": "⏳", "cancelled": "✗"}
@@ -274,16 +291,13 @@ def _format_todo_result(tool_name: str, result: Optional[str], args: Optional[Ar
     return "\n".join(lines)
 
 
-def _format_read_file_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_read_file_result(tool_name: str, data: Args, a: Args) -> Optional[str]:
     if data.get("error") and not data.get("content"):
         return f"Read failed: {data.get('error')}"
     content = data.get("content")
     if not isinstance(content, str):
         return None
-    a = args or {}
     range_bits = [f"from line {a['offset']}"] if a.get("offset") else []
     if a.get("limit"):
         range_bits.append(f"limit {a['limit']}")
@@ -296,10 +310,8 @@ def _format_read_file_result(tool_name: str, result: Optional[str], args: Option
     return _truncate_text(f"{header}\n\n{_fenced_text(content)}")
 
 
-def _format_search_files_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_search_files_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     files, matches = data.get("files"), data.get("matches")
     if isinstance(files, list):
         shown = min(len(files), 20)
@@ -327,10 +339,8 @@ def _format_search_files_result(tool_name: str, result: Optional[str], args: Opt
     return _truncate_text("\n".join(lines), limit=7000)
 
 
-def _format_execute_code_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return _nonempty(result)
+@_structured(text_fallback=True)
+def _format_execute_code_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     exit_code = data.get("exit_code")
     parts = [f"Exit code: {exit_code}" if exit_code is not None else "Execution complete"]
     if data.get("stdout_truncated"):
@@ -360,10 +370,8 @@ def _extract_markdown_headings(content: str, limit: int = 8) -> list[str]:
     return headings
 
 
-def _format_skill_view_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_skill_view_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     if data.get("success") is False:
         return f"Skill view failed: {data.get('error', 'unknown error')}"
     content = str(data.get("content") or "")
@@ -384,11 +392,8 @@ def _format_skill_view_result(tool_name: str, result: Optional[str], args: Optio
     return "\n".join(lines)
 
 
-def _format_skill_manage_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
-    a = args or {}
+@_structured()
+def _format_skill_manage_result(tool_name: str, data: Args, a: Args) -> Optional[str]:
     action = _arg(a, "action", default="manage")
     name = str(a.get("name") or data.get("name") or "skill").strip() or "skill"
     file_path = str(a.get("file_path") or data.get("file_path") or "SKILL.md").strip() or "SKILL.md"
@@ -408,10 +413,8 @@ def _format_skill_manage_result(tool_name: str, result: Optional[str], args: Opt
     return "\n".join(lines)
 
 
-def _format_web_search_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_web_search_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     web = data.get("data", {}).get("web") if isinstance(data.get("data"), dict) else data.get("web")
     if not isinstance(web, list):
         return None
@@ -427,11 +430,9 @@ def _format_web_search_result(tool_name: str, result: Optional[str], args: Optio
     return _truncate_text("\n".join(lines))
 
 
-def _format_web_extract_result(result: Optional[str]) -> Optional[str]:
+@_structured()
+def _format_web_extract_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     """Return only web_extract errors for ACP; success stays compact via title."""
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
     if data.get("success") is False and data.get("error"):
         return f"Web extract failed: {data.get('error')}"
     results = data.get("results")
@@ -452,10 +453,8 @@ def _format_web_extract_result(result: Optional[str]) -> Optional[str]:
     return "\n".join([f"Web extract failed for {_plural(len(failures), 'URL')}", *failures])
 
 
-def _format_process_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return _nonempty(result)
+@_structured(text_fallback=True)
+def _format_process_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     if data.get("success") is False and data.get("error"):
         return f"Process error: {data.get('error')}"
     action = _arg(args, "action", default="process")
@@ -477,7 +476,7 @@ def _format_process_result(tool_name: str, result: Optional[str], args: Optional
         return "\n".join(lines)
 
     status = str(data.get("status") or data.get("state") or action).strip()
-    sid = str(data.get("session_id") or (args or {}).get("session_id") or "").strip()
+    sid = str(data.get("session_id") or args.get("session_id") or "").strip()
     lines = [f"Process {action}: {status}" + (f" (`{sid}`)" if sid else "")]
     for key, label in (("command", "Command"), ("pid", "PID"), ("exit_code", "Exit code"), ("returncode", "Exit code"), ("lines", "Lines")):
         if data.get(key) is not None:
@@ -493,10 +492,8 @@ def _format_process_result(tool_name: str, result: Optional[str], args: Optional
     return _truncate_text("\n".join(lines), limit=7000)
 
 
-def _format_delegate_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_delegate_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     results = data.get("results")
     if data.get("error") and not isinstance(results, list):
         return f"Delegation failed: {data.get('error')}"
@@ -527,10 +524,8 @@ def _format_delegate_result(tool_name: str, result: Optional[str], args: Optiona
     return _truncate_text("\n".join(lines), limit=8000)
 
 
-def _format_session_search_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_session_search_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     if data.get("success") is False:
         return f"Session search failed: {data.get('error', 'unknown error')}"
     results = data.get("results")
@@ -557,12 +552,10 @@ def _format_session_search_result(tool_name: str, result: Optional[str], args: O
     return _truncate_text("\n".join(lines), limit=7000)
 
 
-def _format_memory_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return None
+@_structured()
+def _format_memory_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     action = _arg(args, "action", default="memory")
-    target = str(data.get("target") or (args or {}).get("target") or "memory")
+    target = str(data.get("target") or args.get("target") or "memory")
     if data.get("success") is False:
         lines = [f"✗ Memory {action} failed ({target})", str(data.get("error") or "unknown error")]
         matches = data.get("matches")
@@ -606,10 +599,8 @@ def _format_edit_result(tool_name: str, result: Optional[str], args: Optional[Ar
     return "\n".join(lines)
 
 
-def _format_browser_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return _nonempty(result)
+@_structured(text_fallback=True)
+def _format_browser_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     failed = _failure(data, f"{tool_name} failed")
     if failed:
         return failed
@@ -631,10 +622,8 @@ def _format_browser_result(tool_name: str, result: Optional[str], args: Optional
     return _truncate_text("\n".join(lines), limit=7000)
 
 
-def _format_media_or_cron_result(tool_name: str, result: Optional[str], args: Optional[Args]) -> Optional[str]:
-    data = _json_loads_maybe(result)
-    if not isinstance(data, dict):
-        return _nonempty(result)
+@_structured(text_fallback=True)
+def _format_media_or_cron_result(tool_name: str, data: Args, args: Args) -> Optional[str]:
     failed = _failure(data, f"{tool_name} failed")
     if failed:
         return failed
@@ -745,8 +734,6 @@ def _format_generic_structured_result(tool_name: str, result: Optional[str], *, 
     return _truncate_text("\n".join(lines), limit=7000)
 
 
-_Formatter = Callable[[str, Optional[str], Optional[Args]], Optional[str]]
-
 _COMPLETION_FORMATTERS: Dict[str, _Formatter] = {
     "todo": _format_todo_result,
     "read_file": _format_read_file_result,
@@ -761,7 +748,6 @@ _COMPLETION_FORMATTERS: Dict[str, _Formatter] = {
     "skill_view": _format_skill_view_result,
     "skill_manage": _format_skill_manage_result,
     "web_search": _format_web_search_result,
-    "web_extract": lambda t, r, a: _format_web_extract_result(r),
     **{n: _format_browser_result for n in ("browser_navigate", "browser_snapshot", "browser_vision", "browser_get_images")},
     **{n: _format_media_or_cron_result for n in ("vision_analyze", "image_generate", "cronjob")},
 }
@@ -970,8 +956,8 @@ def build_tool_complete(
     snapshot: Any = None,
 ) -> ToolCallProgress:
     """Create a ToolCallUpdate (progress) event for a completed tool call."""
-    if tool_name == "web_extract":
-        error_text = _format_web_extract_result(result)
+    if tool_name == "web_extract":  # errors only; success stays compact via the title
+        error_text = _format_web_extract_result(tool_name, result, function_args)
         content = [_text(error_text)] if error_text else None
     else:
         content = _build_tool_complete_content(tool_name, result, function_args=function_args, snapshot=snapshot)

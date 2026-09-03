@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import base64
+import contextlib
 import contextvars
 import json
 import logging
 import os
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +85,7 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
             _fetch_picker_live_models,
             _models_config_is_allowlist,
         )
+        from hermes_cli.model_switch_providers import _discover_flag
         from hermes_cli.models import should_use_ollama_native_catalog
         from hermes_cli.providers import custom_provider_slug
     except ImportError:
@@ -131,12 +133,9 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
         if not api_key and not declared and not is_native_ollama:
             return None  # nothing to discover with and nothing declared: not addressable
 
-        discover = entry.get("discover_models", True)
-        if isinstance(discover, str):
-            discover = discover.lower() not in {"false", "no", "0"}
         model_ids = list(declared)
         live = None
-        if discover and (api_key or is_native_ollama):
+        if _discover_flag(entry) and (api_key or is_native_ollama):
             try:
                 live = _fetch_picker_live_models(
                     api_key,
@@ -175,7 +174,6 @@ _LIST_SESSIONS_PAGE_SIZE = 50
 # MoA picker cap). Not a total cap; the current model is always kept via the fallback insert.
 ACP_MAX_MODELS_PER_PROVIDER = 200
 _MAX_ACP_RESOURCE_BYTES = 512 * 1024
-_TEXT_RESOURCE_MIME_PREFIXES = ("text/",)
 _TEXT_RESOURCE_MIME_TYPES = {
     "application/json",
     "application/javascript",
@@ -194,10 +192,8 @@ def _resource_display_name(uri: str, name: str | None = None, title: str | None 
     raw_title = (title or "").strip()
     if raw_title and raw_name and raw_title != raw_name:
         return f"{raw_title} ({raw_name})"
-    if raw_title:
-        return raw_title
-    if raw_name:
-        return raw_name
+    if raw_title or raw_name:
+        return raw_title or raw_name
     parsed = urlparse(uri)
     candidate = parsed.path if parsed.scheme else uri
     return Path(unquote(candidate)).name or uri or "resource"
@@ -209,9 +205,7 @@ def _mime_main(mime_type: str | None) -> str:
 
 def _is_text_resource(mime_type: str | None) -> bool:
     mime = _mime_main(mime_type)
-    if not mime:
-        return False
-    return mime.startswith(_TEXT_RESOURCE_MIME_PREFIXES) or mime in _TEXT_RESOURCE_MIME_TYPES
+    return mime.startswith("text/") or mime in _TEXT_RESOURCE_MIME_TYPES
 
 
 def _is_image_resource(mime_type: str | None) -> bool:
@@ -227,10 +221,6 @@ _IMAGE_SUFFIX_MIME = {
     ".bmp": "image/bmp",
     ".svg": "image/svg+xml",
 }
-
-
-def _image_data_url(data: bytes, mime_type: str) -> str:
-    return f"data:{mime_type};base64,{base64.b64encode(data).decode('ascii')}"
 
 
 def _path_from_file_uri(uri: str) -> Path | None:
@@ -289,7 +279,7 @@ def _image_parts(uri: str, display: str, data: bytes, mime: str) -> list[dict[st
     """Text header + image_url data URL so vision models can see the attachment."""
     return [
         {"type": "text", "text": f"[Attached image: {display}]" + (f"\nURI: {uri}" if uri else "")},
-        {"type": "image_url", "image_url": {"url": _image_data_url(data, mime)}},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}},
     ]
 
 
@@ -383,13 +373,7 @@ def _embedded_resource_to_parts(block: EmbeddedResourceContentBlock) -> list[dic
 
 def _extract_text(prompt: list[PromptBlock]) -> str:
     """Extract plain text from ACP content blocks for display/commands."""
-    parts: list[str] = []
-    for block in prompt:
-        if isinstance(block, TextContentBlock):
-            parts.append(block.text)
-        elif hasattr(block, "text"):
-            parts.append(str(block.text))
-    return "\n".join(parts)
+    return "\n".join(str(block.text) for block in prompt if hasattr(block, "text"))
 
 
 def _image_block_to_openai_part(block: ImageContentBlock) -> dict[str, Any] | None:
@@ -408,6 +392,13 @@ def _image_block_to_openai_part(block: ImageContentBlock) -> dict[str, Any] | No
     return {"type": "image_url", "image_url": {"url": url}}
 
 
+def _append_parts(parts: list, text_parts: list[str], new_parts: list[dict[str, Any]]) -> None:
+    for part in new_parts:
+        parts.append(part)
+        if part.get("type") == "text":
+            text_parts.append(part["text"])
+
+
 def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | list[dict[str, Any]]:
     """Convert ACP prompt blocks into a Hermes/OpenAI-compatible user content payload."""
     parts: list[dict[str, Any]] = []
@@ -422,12 +413,10 @@ def _content_blocks_to_openai_user_content(prompt: list[PromptBlock]) -> str | l
             image_part = _image_block_to_openai_part(block)
             if image_part is not None:
                 parts.append(image_part)
-        elif isinstance(block, (ResourceContentBlock, EmbeddedResourceContentBlock)):
-            is_link = isinstance(block, ResourceContentBlock)
-            for part in (_resource_link_to_parts if is_link else _embedded_resource_to_parts)(block):
-                parts.append(part)
-                if part.get("type") == "text":
-                    text_parts.append(part["text"])
+        elif isinstance(block, ResourceContentBlock):
+            _append_parts(parts, text_parts, _resource_link_to_parts(block))
+        elif isinstance(block, EmbeddedResourceContentBlock):
+            _append_parts(parts, text_parts, _embedded_resource_to_parts(block))
 
     if not parts:
         return _extract_text(prompt)
@@ -580,18 +569,48 @@ def _history_tool_call_name_args(tool_call: dict[str, Any]) -> tuple[str, dict[s
     return name, raw_args
 
 
-def _history_tool_call_id(tool_call: dict[str, Any]) -> str:
-    return str(tool_call.get("id") or tool_call.get("call_id") or tool_call.get("tool_call_id") or "").strip()
-
-
 def _mcp_server_config(server: McpServerStdio | McpServerHttp | McpServerSse) -> dict:
     if isinstance(server, McpServerStdio):
         return {"command": server.command, "args": list(server.args), "env": {i.name: i.value for i in server.env}}
     return {"url": server.url, "headers": {i.name: i.value for i in server.headers}}
 
 
+def _restore_env(key: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+
+
+def _bind_guarded(stack: contextlib.ExitStack, label: str, setup: Callable[[], Callable[[], None]]) -> None:
+    """Run ``setup`` (returns its teardown) and register the teardown; failures in either half only
+    log — the turn must still run without the binding."""
+    try:
+        teardown = setup()
+    except Exception:
+        logger.debug("Could not set ACP %s", label, exc_info=True)
+        return
+
+    def _teardown() -> None:
+        try:
+            teardown()
+        except Exception:
+            logger.debug("Could not restore ACP %s", label, exc_info=True)
+
+    stack.callback(_teardown)
+
+
 def _attach_interrupted_prompt(interrupted_prompt: str, guidance: str) -> str:
     return f"{interrupted_prompt}\n\nUser correction/guidance after interrupt: {guidance}"
+
+
+def _take_interrupted_prompt(state: SessionState) -> tuple[bool, str]:
+    """``(idle, interrupted_prompt)``; consumes the cancelled prompt only when the session is idle."""
+    with state.runtime_lock:
+        if state.is_running:
+            return False, ""
+        text, state.interrupted_prompt_text = state.interrupted_prompt_text, ""
+        return True, text
 
 
 @dataclass
@@ -650,12 +669,11 @@ class _ModelCatalog:
             row_models = row.get("models")
             if not isinstance(row_models, (list, tuple)):
                 continue
-            if raw_row_provider == "ollama":
-                encoded_provider = "custom:ollama"
-            elif raw_row_provider.startswith("custom:"):
-                encoded_provider = raw_row_provider
-            else:
-                encoded_provider = row_provider
+            encoded_provider = (
+                "custom:ollama" if raw_row_provider == "ollama"
+                else raw_row_provider if raw_row_provider.startswith("custom:")
+                else row_provider
+            )
             for model_entry in row_models:
                 if isinstance(model_entry, dict):
                     model_entry = model_entry.get("id") or model_entry.get("model") or model_entry.get("name")
@@ -834,23 +852,18 @@ class HermesACPAgent(acp.Agent):
             cat.add_inventory_rows(payload.get("providers") or [], provider_label)
             cat.add_named_catalogs(_named_custom_provider_catalogs(), normalized_provider)
             available_models = cat.models
-            seen_ids = cat.seen_ids
-            current_choice_provider = cat.current_choice_provider
-            named_empty_authoritative = cat.empty_authoritative
 
             def empty_applies(provider_id: str) -> bool:
-                return _empty_catalog_applies(provider_id, named_empty_authoritative, normalize_provider)
+                return _empty_catalog_applies(provider_id, cat.empty_authoritative, normalize_provider)
 
-            if named_empty_authoritative:
+            if cat.empty_authoritative:
                 available_models = [m for m in available_models if not empty_applies(_choice_provider(m.model_id))]
-                seen_ids = {item.model_id for item in available_models}
 
-            current_is_empty = empty_applies(current_choice_provider)
+            current_is_empty = empty_applies(cat.current_choice_provider)
             if current_is_empty:
                 available_models = [m for m in available_models if " • current" not in str(m.description or "")]
-                seen_ids = {item.model_id for item in available_models}
-            current_model_id = "" if current_is_empty else self._encode_model_choice(current_choice_provider, model)
-            if current_model_id and current_model_id not in seen_ids:
+            current_model_id = "" if current_is_empty else self._encode_model_choice(cat.current_choice_provider, model)
+            if current_model_id and current_model_id not in {item.model_id for item in available_models}:
                 provider_name = provider_label(normalized_provider)
                 available_models.insert(0, ModelInfo(
                     model_id=current_model_id,
@@ -986,9 +999,6 @@ class HermesACPAgent(acp.Agent):
         await self._send(
             session_id, update, fail_msg="Could not send ACP session info update for %s", level=logging.DEBUG
         )
-
-    def _schedule_usage_update(self, state: SessionState) -> None:
-        self._schedule_soon(lambda: self._send_usage_update(state))
 
     async def _register_session_mcp_servers(
         self, state: SessionState, mcp_servers: list[McpServerStdio | McpServerHttp | McpServerSse] | None
@@ -1181,7 +1191,9 @@ class HermesACPAgent(acp.Agent):
                     for tool_call in tool_calls:
                         if not isinstance(tool_call, dict):
                             continue
-                        tool_call_id = _history_tool_call_id(tool_call)
+                        tool_call_id = str(
+                            tool_call.get("id") or tool_call.get("call_id") or tool_call.get("tool_call_id") or ""
+                        ).strip()
                         if not tool_call_id:
                             continue
                         tool_name, args = _history_tool_call_name_args(tool_call)
@@ -1225,7 +1237,7 @@ class HermesACPAgent(acp.Agent):
         """``models``/``modes``/``field_meta`` for session responses; schedules command
         advertisement + usage refresh."""
         self._schedule_available_commands_update(state.session_id)
-        self._schedule_usage_update(state)
+        self._schedule_soon(lambda: self._send_usage_update(state))
         return {
             "models": self._build_model_state(state),
             "modes": self._session_modes(state),
@@ -1317,14 +1329,13 @@ class HermesACPAgent(acp.Agent):
         has_more = len(infos) > _LIST_SESSIONS_PAGE_SIZE
         infos = infos[:_LIST_SESSIONS_PAGE_SIZE]
 
-        sessions = []
-        for s in infos:
-            updated_at = s.get("updated_at")
-            if updated_at is not None and not isinstance(updated_at, str):
-                updated_at = str(updated_at)
-            sessions.append(
-                SessionInfo(session_id=s["session_id"], cwd=s["cwd"], title=s.get("title"), updated_at=updated_at)
+        sessions = [
+            SessionInfo(
+                session_id=s["session_id"], cwd=s["cwd"], title=s.get("title"),
+                updated_at=None if s.get("updated_at") is None else str(s["updated_at"]),
             )
+            for s in infos
+        ]
 
         next_cursor = sessions[-1].session_id if has_more and sessions else None
         return ListSessionsResponse(sessions=sessions, next_cursor=next_cursor)
@@ -1345,27 +1356,15 @@ class HermesACPAgent(acp.Agent):
         if user_text.startswith("/steer"):
             split = user_text.split(maxsplit=1)
             steer_text = split[1].strip() if len(split) > 1 else ""
-            interrupted_prompt = ""
-            rewrite_idle = False
-            with state.runtime_lock:
-                if not state.is_running and steer_text:
-                    if state.interrupted_prompt_text:
-                        interrupted_prompt = state.interrupted_prompt_text
-                        state.interrupted_prompt_text = ""
-                    else:
-                        rewrite_idle = True
+            if not steer_text:
+                return user_text, user_content
+            idle, interrupted_prompt = _take_interrupted_prompt(state)
             if interrupted_prompt:
                 return (_attach_interrupted_prompt(interrupted_prompt, steer_text),) * 2
-            if rewrite_idle:
-                return steer_text, steer_text
-            return user_text, user_content
+            return (steer_text, steer_text) if idle else (user_text, user_content)
 
         if not user_text.startswith("/"):
-            interrupted_prompt = ""
-            with state.runtime_lock:
-                if not state.is_running and state.interrupted_prompt_text:
-                    interrupted_prompt = state.interrupted_prompt_text
-                    state.interrupted_prompt_text = ""
+            _idle, interrupted_prompt = _take_interrupted_prompt(state)
             if interrupted_prompt:
                 return (_attach_interrupted_prompt(interrupted_prompt, user_text),) * 2
 
@@ -1416,81 +1415,57 @@ class HermesACPAgent(acp.Agent):
         auto-approve path (GHSA-96vc-wcxf-jjff).
         """
         agent = state.agent
-        # HERMES_SESSION_KEY scopes per-session caches (interactive sudo password) to this
-        # session, not the reused thread. ``cwd`` pins what the system prompt reports as the
-        # working directory — otherwise it advertises the Hermes workspace while tools are
-        # rooted at the client's project and edits land outside it. ``cron_session=""`` masks
-        # any leaked process-global HERMES_CRON_SESSION.
-        try:
-            from gateway.session_context import clear_session_vars, set_session_vars
+        with contextlib.ExitStack() as stack:
+            # HERMES_SESSION_KEY scopes per-session caches (interactive sudo password) to this
+            # session, not the reused thread. ``cwd`` pins what the system prompt reports as the
+            # working directory — otherwise it advertises the Hermes workspace while tools are
+            # rooted at the client's project and edits land outside it. ``cron_session=""`` masks
+            # any leaked process-global HERMES_CRON_SESSION.
+            def _session_context() -> Callable[[], None]:
+                from gateway.session_context import clear_session_vars, set_session_vars
 
-            session_tokens = set_session_vars(
-                session_key=session_id, session_id=session_id, cwd=state.cwd, cron_session="",
-            )
-        except Exception:
-            session_tokens = None
-            clear_session_vars = None  # type: ignore[assignment]
-            logger.debug("Could not set ACP session context", exc_info=True)
-        previous_approval_cb = None
-        if approval_cb:
-            try:
-                from tools import terminal_tool as _terminal_tool
-                previous_approval_cb = _terminal_tool._get_approval_callback()
-                _terminal_tool.set_approval_callback(approval_cb)
-            except Exception:
-                logger.debug("Could not set ACP approval callback", exc_info=True)
-        edit_approval_token = None
-        if edit_approval_requester:
-            try:
-                from acp_adapter.edit_approval import set_edit_approval_requester
+                tokens = set_session_vars(
+                    session_key=session_id, session_id=session_id, cwd=state.cwd, cron_session="",
+                )
+                return lambda: clear_session_vars(tokens)
 
-                edit_approval_token = set_edit_approval_requester(edit_approval_requester)
-            except Exception:
-                logger.debug("Could not set ACP edit approval requester", exc_info=True)
-        interactive_token = set_hermes_interactive_context(True)
-        # Tools tag side-effects with the ACP session (``kanban_create``); save/restore it.
-        previous_session_id = os.environ.get("HERMES_SESSION_ID")
-        os.environ["HERMES_SESSION_ID"] = session_id
+            def _approval() -> Callable[[], None]:
+                from tools import terminal_tool
 
-        # Auto-titling fires in the turn prologue; push the title now as a session-info update.
-        def _notify_title_update(_title: str, _source: str) -> None:
-            if conn:
-                loop.call_soon_threadsafe(asyncio.create_task, self._send_session_info_update(session_id))
+                previous = terminal_tool._get_approval_callback()
+                terminal_tool.set_approval_callback(approval_cb)
+                return lambda: terminal_tool.set_approval_callback(previous)
 
-        agent._on_session_title = _notify_title_update
-        try:
-            return agent.run_conversation(
-                user_message=user_content, conversation_history=state.history, task_id=session_id,
-                persist_user_message=user_text or "[Image attachment]",
-            )
-        except Exception as e:
-            logger.exception("Agent error in session %s", session_id)
-            return {"final_response": f"Error: {e}", "messages": state.history}
-        finally:
-            if interactive_token is not None:
-                reset_hermes_interactive_context(interactive_token)
-            if previous_session_id is None:
-                os.environ.pop("HERMES_SESSION_ID", None)
-            else:
-                os.environ["HERMES_SESSION_ID"] = previous_session_id
+            def _edit_approval() -> Callable[[], None]:
+                from acp_adapter.edit_approval import reset_edit_approval_requester, set_edit_approval_requester
+
+                token = set_edit_approval_requester(edit_approval_requester)
+                return lambda: reset_edit_approval_requester(token)
+
+            _bind_guarded(stack, "session context", _session_context)
             if approval_cb:
-                try:
-                    from tools import terminal_tool as _terminal_tool
-                    _terminal_tool.set_approval_callback(previous_approval_cb)
-                except Exception:
-                    logger.debug("Could not restore approval callback", exc_info=True)
-            if edit_approval_token is not None:
-                try:
-                    from acp_adapter.edit_approval import reset_edit_approval_requester
+                _bind_guarded(stack, "approval callback", _approval)
+            if edit_approval_requester:
+                _bind_guarded(stack, "edit approval requester", _edit_approval)
+            stack.callback(reset_hermes_interactive_context, set_hermes_interactive_context(True))
+            # Tools tag side-effects with the ACP session (``kanban_create``); save/restore it.
+            stack.callback(_restore_env, "HERMES_SESSION_ID", os.environ.get("HERMES_SESSION_ID"))
+            os.environ["HERMES_SESSION_ID"] = session_id
 
-                    reset_edit_approval_requester(edit_approval_token)
-                except Exception:
-                    logger.debug("Could not restore ACP edit approval requester", exc_info=True)
-            if session_tokens is not None and clear_session_vars is not None:
-                try:
-                    clear_session_vars(session_tokens)
-                except Exception:
-                    logger.debug("Could not clear ACP session context", exc_info=True)
+            # Auto-titling fires in the turn prologue; push the title now as a session-info update.
+            def _notify_title_update(_title: str, _source: str) -> None:
+                if conn:
+                    loop.call_soon_threadsafe(asyncio.create_task, self._send_session_info_update(session_id))
+
+            agent._on_session_title = _notify_title_update
+            try:
+                return agent.run_conversation(
+                    user_message=user_content, conversation_history=state.history, task_id=session_id,
+                    persist_user_message=user_text or "[Image attachment]",
+                )
+            except Exception as e:
+                logger.exception("Agent error in session %s", session_id)
+                return {"final_response": f"Error: {e}", "messages": state.history}
 
     async def prompt(self, prompt: list[PromptBlock], session_id: str, **kwargs: Any) -> PromptResponse:
         """Run Hermes on the user's prompt and stream events back to the editor."""
@@ -1763,11 +1738,7 @@ class HermesACPAgent(acp.Agent):
     def _cmd_context(self, args: str, state: SessionState) -> str:
         """Show ACP session context pressure and compression guidance."""
         n_messages = len(state.history)
-
-        roles: dict[str, int] = {}
-        for msg in state.history:
-            role = msg.get("role", "unknown")
-            roles[role] = roles.get(role, 0) + 1
+        roles = Counter(msg.get("role", "unknown") for msg in state.history)
 
         agent = state.agent
         model = state.model or getattr(agent, "model", "")
@@ -1862,8 +1833,7 @@ class HermesACPAgent(acp.Agent):
                 # Stable ACP session id: suppress _compress_context's SQLite session split.
                 agent._session_db = None
                 compressed, _ = agent._compress_context(
-                    state.history, getattr(agent, "_cached_system_prompt", "") or "",
-                    approx_tokens=approx_tokens, task_id=state.session_id, force=True,
+                    state.history, _sys_prompt, approx_tokens=approx_tokens, task_id=state.session_id, force=True,
                 )
             finally:
                 agent._session_db = original_session_db
@@ -1871,14 +1841,13 @@ class HermesACPAgent(acp.Agent):
             state.history = compressed
             self.session_manager.save_session(state.session_id)
 
-            new_count = len(state.history)
             new_tokens = _estimate_tokens(
                 state.history, agent,
                 getattr(agent, "_cached_system_prompt", "") or _sys_prompt,
                 getattr(agent, "tools", None) or _tools,
             )
             return (
-                f"Context compressed: {original_count} -> {new_count} messages\n"
+                f"Context compressed: {original_count} -> {len(state.history)} messages\n"
                 f"~{approx_tokens:,} -> ~{new_tokens:,} tokens"
             )
         except Exception as e:
