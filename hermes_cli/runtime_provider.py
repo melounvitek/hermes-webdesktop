@@ -1,7 +1,7 @@
 """Shared runtime provider resolution for CLI, gateway, cron, and helpers.
 
-Layout: this module owns the resolution ORDER (:func:`resolve_runtime_provider`), the api_mode /
-base_url helpers and the pool / OAuth / explicit paths. Custom-provider lookup lives in
+This module owns the resolution ORDER (:func:`resolve_runtime_provider`), the api_mode / base_url
+helpers and the pool / OAuth / explicit paths. Custom-provider lookup lives in
 :mod:`hermes_cli.runtime_provider_custom`; Azure Foundry, OpenRouter/bare-custom, Bedrock and
 external-process builders in :mod:`hermes_cli.runtime_provider_backends`. Both are re-exported
 here so ``hermes_cli.runtime_provider.<name>`` imports and test patches keep working.
@@ -53,32 +53,24 @@ from hermes_cli.providers import is_official_openai_host
 from utils import base_url_host_matches, base_url_hostname, env_int
 
 
+# Late-bound delegates, deliberately NOT module-level from-imports: this module is often imported
+# lazily, so its first import can happen while a test has ``hermes_cli.config.load_config`` patched
+# — a from-import would bind the MagicMock permanently and poison every later caller.
 def load_config():
-    """Late-bound delegate to :func:`hermes_cli.config.load_config`.
-
-    Deliberately NOT a module-level from-import: this module is often imported lazily, so its
-    first import can happen while a test has ``hermes_cli.config.load_config`` patched — a
-    from-import would bind the MagicMock permanently and poison every later caller.
-    """
     return _config_mod.load_config()
 
 
 def get_compatible_custom_providers(config=None):
-    """Late-bound delegate — see :func:`load_config` for why."""
     return _config_mod.get_compatible_custom_providers(config)
 
 
 def normalize_extra_headers(value):
-    """Late-bound delegate — see :func:`load_config` for why."""
     return _config_mod.normalize_extra_headers(value)
 
 
 def _getenv(name: str, default: str = "") -> str:
-    """Profile-scoped ``os.getenv`` for credential/provider reads.
-
-    Identical to ``os.getenv`` when multiplexing is off; scope-aware (fail-closed on an unscoped
-    read) when on. Genuinely-global vars are handled inside ``get_secret``.
-    """
+    """Profile-scoped ``os.getenv`` for credential/provider reads: identical to ``os.getenv`` when
+    multiplexing is off; scope-aware (fail-closed on an unscoped read) when on."""
     val = _get_secret(name, default)
     return val if val is not None else default
 
@@ -98,10 +90,10 @@ def _resolves_to_custom(name: str) -> bool:
 def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider: str) -> bool:
     """Whether ``model.base_url`` may back bare ``custom`` runtime resolution.
 
-    The model picker can select Custom while ``model.provider`` still reflects a previous
-    provider. Non-loopback URLs are rejected unless the YAML provider is already ``custom`` or a
-    local-server alias (ollama/vllm/llamacpp — else a legit LAN ollama endpoint silently falls
-    through to OpenRouter), so a stale OpenRouter/Z.ai base_url cannot hijack local sessions.
+    The model picker can select Custom while ``model.provider`` still reflects a previous provider.
+    Non-loopback URLs are rejected unless the YAML provider is already ``custom`` or a local-server
+    alias (ollama/vllm/llamacpp — else a legit LAN ollama endpoint silently falls through to
+    OpenRouter), so a stale OpenRouter/Z.ai base_url cannot hijack local sessions.
     """
     cfg_provider_norm = (cfg_provider or "").strip().lower()
     bu = (cfg_base_url or "").strip()
@@ -127,15 +119,9 @@ _HOST_MANDATED_API_MODES = {
     "api.anthropic.com": "anthropic_messages",
 }
 
-_VALID_API_MODES = {
-    "chat_completions",
-    "codex_responses",
-    "anthropic_messages",
-    "bedrock_converse",
-    # Opt-in: hand the whole turn to a `codex app-server` subprocess (Codex's own tool runtime).
-    # Gated on `model.openai_runtime == "codex_app_server"` AND provider in {openai, openai-codex}.
-    "codex_app_server",
-}
+# codex_app_server is opt-in: hand the whole turn to a `codex app-server` subprocess (Codex's own
+# tool runtime), gated on `model.openai_runtime == "codex_app_server"` AND provider in {openai, openai-codex}.
+_VALID_API_MODES = {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse", "codex_app_server"}
 
 
 def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
@@ -176,8 +162,8 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
 def _fallback_api_mode(provider: str, base_url: str, model: str = "") -> str:
     """api_mode when no explicit/persisted mode applies: URL detection (host-mandated wire shapes)
     first, then the transport the provider overlay declares via ``providers.determine_api_mode``
-    (which was never consulted before — ``openai-api`` pointed at us.api.openai.com 400'd on every
-    tool call), then ``chat_completions``."""
+    (``openai-api`` pointed at us.api.openai.com 400'd on every tool call without it), then
+    ``chat_completions``."""
     detected = _detect_api_mode_for_url(base_url)
     if detected:
         return detected
@@ -212,13 +198,27 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
     return normalized_configured == normalized_provider
 
 
-def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str, *, target_model: Optional[str] = None) -> str:
+def _configured_api_mode(provider: str, model_cfg: Dict[str, Any]) -> Optional[str]:
+    """Persisted ``model.api_mode`` when valid and recorded for this provider, else None."""
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-    if configured_mode and _provider_supports_explicit_api_mode("copilot", _cfg_provider(model_cfg)):
+    if configured_mode and _provider_supports_explicit_api_mode(provider, _cfg_provider(model_cfg)):
+        return configured_mode
+    return None
+
+
+def _effective_model(model_cfg: Dict[str, Any], target_model: Optional[str]) -> str:
+    """The caller's target model (e.g. /model switch) beats the persisted default, else api_mode
+    is computed from a stale default."""
+    return target_model or model_cfg.get("default") or ""
+
+
+def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str, *, target_model: Optional[str] = None) -> str:
+    configured_mode = _configured_api_mode("copilot", model_cfg)
+    if configured_mode:
         return configured_mode
     # Use the model being resolved, not the persisted default: a Claude MoA slot inheriting
     # codex_responses from a GPT-5 default fails with "model ... does not support Responses API".
-    model_name = str(target_model or model_cfg.get("default") or "").strip()
+    model_name = str(_effective_model(model_cfg, target_model)).strip()
     if not model_name:
         return "chat_completions"
     try:
@@ -258,10 +258,7 @@ def _configured_or_fallback_api_mode(
             from hermes_cli.models import opencode_model_api_mode
 
             return opencode_model_api_mode(provider, effective_model)
-    configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-    if configured_mode and _provider_supports_explicit_api_mode(provider, _cfg_provider(model_cfg)):
-        return configured_mode
-    return _fallback_api_mode(provider, base_url, effective_model)
+    return _configured_api_mode(provider, model_cfg) or _fallback_api_mode(provider, base_url, effective_model)
 
 
 def _api_key_provider_api_mode(
@@ -331,6 +328,15 @@ def _anthropic_cfg_base_url(model_cfg: Dict[str, Any]) -> str:
     """Config base_url for native Anthropic, or "" when absent/untrustworthy."""
     cfg_base_url = _config_base_url_for_provider(model_cfg, "anthropic")
     return cfg_base_url if _anthropic_base_url_override_ok(cfg_base_url) else ""
+
+
+def _anthropic_token_or_raise() -> str:
+    from agent.anthropic_adapter import resolve_anthropic_token
+
+    token = resolve_anthropic_token()
+    if not token:
+        raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
+    return token
 
 
 def _host_derived_api_key(base_url: str) -> str:
@@ -408,21 +414,16 @@ def _nous_api_mode(model: str) -> str:
     return nous_api_mode(model)
 
 
-def _normalize_opencode_runtime_base_url(provider: str, api_mode: str, base_url: str) -> str:
-    """OpenCode base URLs end with /v1 for OpenAI-compatible models, but the Anthropic SDK prepends
-    its own /v1/messages: strip /v1 for anthropic_messages, re-append otherwise."""
+def _finalize_base_url(provider: str, api_mode: str, base_url: str) -> str:
+    """Shared tail for pool-entry and api-key paths: OpenCode /v1 rule (OpenCode URLs end with /v1
+    for OpenAI-compatible models but the Anthropic SDK prepends its own /v1/messages — strip for
+    anthropic_messages, re-append otherwise), then LM Studio normalization."""
     from hermes_cli.models import opencode_provider_family
 
-    if opencode_provider_family(provider) is None:
-        return base_url
-    from hermes_cli.models import normalize_opencode_base_url
+    if opencode_provider_family(provider) is not None:
+        from hermes_cli.models import normalize_opencode_base_url
 
-    return normalize_opencode_base_url(provider, api_mode, base_url)
-
-
-def _finalize_base_url(provider: str, api_mode: str, base_url: str) -> str:
-    """Shared tail for pool-entry and api-key paths: OpenCode /v1 rule, then LM Studio normalization."""
-    base_url = _normalize_opencode_runtime_base_url(provider, api_mode, base_url)
+        base_url = normalize_opencode_base_url(provider, api_mode, base_url)
     if provider == "lmstudio":
         base_url = auth_mod._normalize_lmstudio_runtime_base_url(base_url)
     return base_url
@@ -540,6 +541,35 @@ _POOL_ENTRY_SIMPLE_MODES: Dict[str, tuple] = {
 }
 
 
+def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_url) -> tuple:
+    """(api_mode, base_url) for a pool entry of ``provider``."""
+    if provider in _POOL_ENTRY_SIMPLE_MODES:
+        api_mode, default_url = _POOL_ENTRY_SIMPLE_MODES[provider]
+        return api_mode, base_url or (default_url() if callable(default_url) else default_url)
+    if provider == "anthropic":
+        return "anthropic_messages", _anthropic_cfg_base_url(model_cfg) or base_url or _ANTHROPIC_DEFAULT_BASE_URL
+    if provider == "nous":
+        return _nous_api_mode(effective_model), _nous_inference_base_url_override() or base_url
+    if provider == "copilot":
+        api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""), target_model=effective_model)
+        return api_mode, base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
+    if provider == "azure-foundry":
+        api_mode = "chat_completions"
+        if _cfg_provider(model_cfg) == "azure-foundry":
+            base_url = _config_base_url_for_provider(model_cfg, "azure-foundry") or base_url
+            api_mode = _parse_api_mode(model_cfg.get("api_mode")) or api_mode
+        api_mode = _azure_inferred_api_mode(effective_model, api_mode)
+        if api_mode == "anthropic_messages":
+            base_url = re.sub(r"/v1/?$", "", base_url)
+        return api_mode, base_url
+    # Honour model.base_url only when the pool entry carries no explicit base_url (i.e. it fell
+    # back to the registry default). Env var overrides win.
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if pconfig and base_url.rstrip("/") == pconfig.inference_base_url.rstrip("/"):
+        base_url = _config_base_url_for_provider(model_cfg, provider) or base_url
+    return _configured_or_fallback_api_mode(provider, model_cfg, base_url, effective_model, opencode_by_model=True), base_url
+
+
 def _resolve_runtime_from_pool_entry(
     *,
     provider: str,
@@ -550,43 +580,13 @@ def _resolve_runtime_from_pool_entry(
     target_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
-    # The caller's target model (e.g. /model switch) beats the persisted default, else api_mode is
-    # computed from a stale default.
-    effective_model = target_model or model_cfg.get("default") or ""
-    base_url = _pool_entry_base_url(entry).rstrip("/")
-    api_key = _pool_entry_api_key(entry)
-    if provider in _POOL_ENTRY_SIMPLE_MODES:
-        api_mode, default_url = _POOL_ENTRY_SIMPLE_MODES[provider]
-        base_url = base_url or (default_url() if callable(default_url) else default_url)
-    elif provider == "anthropic":
-        api_mode = "anthropic_messages"
-        base_url = _anthropic_cfg_base_url(model_cfg) or base_url or _ANTHROPIC_DEFAULT_BASE_URL
-    elif provider == "nous":
-        api_mode = _nous_api_mode(effective_model)
-        base_url = _nous_inference_base_url_override() or base_url
-    elif provider == "copilot":
-        api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""), target_model=effective_model)
-        base_url = base_url or PROVIDER_REGISTRY["copilot"].inference_base_url
-    elif provider == "azure-foundry":
-        api_mode = "chat_completions"
-        if _cfg_provider(model_cfg) == "azure-foundry":
-            base_url = _config_base_url_for_provider(model_cfg, "azure-foundry") or base_url
-            api_mode = _parse_api_mode(model_cfg.get("api_mode")) or api_mode
-        api_mode = _azure_inferred_api_mode(effective_model, api_mode)
-        if api_mode == "anthropic_messages":
-            base_url = re.sub(r"/v1/?$", "", base_url)
-    else:
-        # Honour model.base_url only when the pool entry carries no explicit base_url (i.e. it
-        # fell back to the registry default). Env var overrides win.
-        pconfig = PROVIDER_REGISTRY.get(provider)
-        if pconfig and base_url.rstrip("/") == pconfig.inference_base_url.rstrip("/"):
-            base_url = _config_base_url_for_provider(model_cfg, provider) or base_url
-        api_mode = _configured_or_fallback_api_mode(provider, model_cfg, base_url, effective_model, opencode_by_model=True)
-
+    api_mode, base_url = _pool_entry_mode_and_url(
+        provider, entry, model_cfg, _effective_model(model_cfg, target_model), _pool_entry_base_url(entry).rstrip("/")
+    )
     base_url = _finalize_base_url(provider, api_mode, base_url)
     api_mode = _maybe_apply_codex_app_server_runtime(provider=provider, api_mode=api_mode, model_cfg=model_cfg)
     return _runtime(
-        provider, api_mode, base_url, api_key,
+        provider, api_mode, base_url, _pool_entry_api_key(entry),
         source=getattr(entry, "source", "pool"), credential_pool=pool, requested_provider=requested_provider,
     )
 
@@ -658,12 +658,7 @@ def _resolve_from_pool(
 
 def _explicit_anthropic(requested_provider, model_cfg, api_key, base_url, target_model):
     base_url = base_url or _anthropic_cfg_base_url(model_cfg) or _ANTHROPIC_DEFAULT_BASE_URL
-    if not api_key:
-        from agent.anthropic_adapter import resolve_anthropic_token
-
-        api_key = resolve_anthropic_token()
-        if not api_key:
-            raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
+    api_key = api_key or _anthropic_token_or_raise()
     return _runtime("anthropic", "anthropic_messages", base_url, api_key, source="explicit", requested_provider=requested_provider)
 
 
@@ -700,7 +695,7 @@ def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, ta
         expires_at = creds.get("expires_at")
         base_url = explicit_base_url or creds.get("base_url", "").rstrip("/") or base_url
     return _runtime(
-        "nous", _nous_api_mode(target_model or model_cfg.get("default") or ""), base_url, api_key,
+        "nous", _nous_api_mode(_effective_model(model_cfg, target_model)), base_url, api_key,
         source="explicit", expires_at=expires_at, requested_provider=requested_provider,
     )
 
@@ -821,7 +816,7 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
         return None
     api_mode = spec.api_mode
     if callable(api_mode):
-        api_mode = api_mode(target_model or model_cfg.get("default") or "")
+        api_mode = api_mode(_effective_model(model_cfg, target_model))
     return _runtime(
         provider, api_mode,
         (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
@@ -832,7 +827,36 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
     )
 
 
+def _minimax_oauth_runtime(provider, requested_provider) -> Optional[Dict[str, Any]]:
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if not (pconfig and pconfig.auth_type == "oauth_minimax"):
+        return None
+    from hermes_cli.auth import resolve_minimax_oauth_runtime_credentials
+
+    creds = resolve_minimax_oauth_runtime_credentials()
+    return _runtime(
+        provider, "anthropic_messages", creds["base_url"], creds["api_key"],
+        source=creds.get("source", "oauth"), requested_provider=requested_provider,
+    )
+
+
 # ── env/config paths for anthropic and registry api_key providers ──────────────────────────
+
+
+def _azure_anthropic_env_key(model_cfg: Dict[str, Any]) -> str:
+    """Azure Anthropic key: `key_env` / `api_key_env` hints on the model config, then an inline
+    api_key (multi-profile setups), then the historical fixed names."""
+    for hint_key in ("key_env", "api_key_env"):
+        env_var = str(model_cfg.get(hint_key) or "").strip()
+        if env_var:
+            token = _getenv(env_var, "").strip()
+            if token:
+                return token
+    return (
+        str(model_cfg.get("api_key") or "").strip()
+        or _getenv("AZURE_ANTHROPIC_KEY", "").strip()
+        or _getenv("ANTHROPIC_API_KEY", "").strip()
+    )
 
 
 def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -841,22 +865,9 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -
     cfg_base_url = _anthropic_cfg_base_url(model_cfg)
     base_url = cfg_base_url or _ANTHROPIC_DEFAULT_BASE_URL
     # Microsoft Foundry endpoints reject Claude Code OAuth tokens, which resolve_anthropic_token()
-    # would return first — use the env key directly: `key_env` / `api_key_env` hints on the model
-    # config, then an inline api_key (multi-profile setups), then the historical fixed names.
+    # would return first — use the env key directly.
     if base_url_host_matches(base_url, "azure.com") or (cfg_base_url and base_url_host_matches(cfg_base_url, "azure.com")):
-        token = ""
-        for hint_key in ("key_env", "api_key_env"):
-            env_var = str(model_cfg.get(hint_key) or "").strip()
-            if env_var:
-                token = _getenv(env_var, "").strip()
-                if token:
-                    break
-        token = (
-            token
-            or str(model_cfg.get("api_key") or "").strip()
-            or _getenv("AZURE_ANTHROPIC_KEY", "").strip()
-            or _getenv("ANTHROPIC_API_KEY", "").strip()
-        )
+        token = _azure_anthropic_env_key(model_cfg)
         if not token:
             raise AuthError(
                 "No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or "
@@ -864,11 +875,7 @@ def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -
                 "config.yaml model section at a custom env var."
             )
     else:
-        from agent.anthropic_adapter import resolve_anthropic_token
-
-        token = resolve_anthropic_token()
-        if not token:
-            raise AuthError(_NO_ANTHROPIC_CREDENTIALS_MSG)
+        token = _anthropic_token_or_raise()
     return _runtime("anthropic", "anthropic_messages", base_url, token, source="env", requested_provider=requested_provider)
 
 
@@ -987,6 +994,10 @@ def _local_endpoint_bypass(requested_provider: str, explicit_api_key, explicit_b
         return None
     if any(base_url_host_matches(cfg_base_url, host) for host in _LOCAL_BYPASS_CLOUD_HOSTS):
         return None
+    return _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
+
+
+def _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url) -> Dict[str, Any]:
     runtime = _resolve_openrouter_runtime(
         requested_provider=requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url
     )
@@ -1076,15 +1087,9 @@ def resolve_runtime_provider(
             return runtime
 
     if provider == "minimax-oauth":
-        pconfig = PROVIDER_REGISTRY.get(provider)
-        if pconfig and pconfig.auth_type == "oauth_minimax":
-            from hermes_cli.auth import resolve_minimax_oauth_runtime_credentials
-
-            creds = resolve_minimax_oauth_runtime_credentials()
-            return _runtime(
-                provider, "anthropic_messages", creds["base_url"], creds["api_key"],
-                source=creds.get("source", "oauth"), requested_provider=requested_provider,
-            )
+        runtime = _minimax_oauth_runtime(provider, requested_provider)
+        if runtime:
+            return runtime
 
     if _is_external_process_provider(provider):
         return _resolve_external_process_runtime(provider, requested_provider)
@@ -1099,11 +1104,7 @@ def resolve_runtime_provider(
     if pconfig and pconfig.auth_type == "api_key":
         return _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model)
 
-    runtime = _resolve_openrouter_runtime(
-        requested_provider=requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url
-    )
-    runtime["requested_provider"] = requested_provider
-    return runtime
+    return _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
 
 
 def format_runtime_provider_error(error: Exception) -> str:
