@@ -19,6 +19,8 @@ from hermes_cli.models_reasoning_caps import _seed_reasoning_caps
 
 # Cache: maps model_id → {"prompt": str, "completion": str} per endpoint
 _pricing_cache: dict[str, dict[str, dict[str, str]]] = {}
+# (profile key, provider) → endpoint cache key last fetched, so cached_only reads find the right entry.
+_pricing_provider_cache_keys: dict[tuple[str, str], str] = {}
 
 # A failed fetch caches its empty result too, so an unreachable endpoint isn't re-dialed on every
 # call — but only until this deadline. Cached forever, one blip at startup would mean no live model
@@ -370,13 +372,36 @@ def restrict_to_nous_policy(
     return kept
 
 
+def _remember_provider_cache_key(provider: str, cache_key: str) -> None:
+    from hermes_cli.models import _pricing_profile_key, _pricing_provider_cache_keys
+    _pricing_provider_cache_keys[(_pricing_profile_key(), provider)] = cache_key
+
+
 def _fetch_openrouter_pricing(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
     from hermes_cli.models import fetch_models_with_pricing
+    _remember_provider_cache_key("openrouter", _OPENROUTER_PRICING_BASE)
     return fetch_models_with_pricing(
         api_key=_resolve_openrouter_api_key(),
-        base_url="https://openrouter.ai/api",
+        base_url=_OPENROUTER_PRICING_BASE,
         force_refresh=force_refresh,
     )
+
+
+def _fetch_ai_gateway_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+    from hermes_cli.models import fetch_ai_gateway_pricing
+    _remember_provider_cache_key("ai-gateway", _ai_gateway_pricing_scope())
+    return fetch_ai_gateway_pricing(force_refresh=force_refresh)
+
+
+def _fetch_novita_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+    from hermes_cli.models import _fetch_novita_pricing
+    _remember_provider_cache_key("novita", _novita_pricing_scope())
+    return _fetch_novita_pricing(force_refresh=force_refresh)
+
+
+def _fetch_fireworks_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
+    _remember_provider_cache_key("fireworks", _FIREWORKS_PRICING_KEY)
+    return _fireworks_pricing_from_models_dev(force_refresh=force_refresh)
 
 
 def _fetch_nous_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
@@ -384,14 +409,104 @@ def _fetch_nous_pricing_for_provider(*, force_refresh: bool = False) -> dict[str
     api_key, base_url = _resolve_nous_pricing_credentials()
     if not base_url:
         return {}
+    _remember_provider_cache_key("nous", base_url.rstrip("/"))
     return _fetch_nous_pricing(api_key, base_url, force_refresh=force_refresh)
 
 
-def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
+_OPENROUTER_PRICING_BASE = "https://openrouter.ai/api"
+_FIREWORKS_PRICING_KEY = "models.dev/fireworks"
+
+
+def _ai_gateway_pricing_scope() -> str:
+    from hermes_constants import AI_GATEWAY_BASE_URL
+    return AI_GATEWAY_BASE_URL.rstrip("/")
+
+
+def _novita_pricing_scope() -> str:
+    return (os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1").rstrip("/")
+
+
+def get_cached_nous_inference_base_url() -> str:
+    """The profile's persisted Nous endpoint (bare origin, no ``/v1``) without refreshing auth."""
+    try:
+        from hermes_cli.auth import (
+            _load_auth_store, _load_provider_state, _optional_base_url, _validate_nous_inference_url_from_network,
+        )
+
+        state = _load_provider_state(_load_auth_store(), "nous") or {}
+        url = _validate_nous_inference_url_from_network(_optional_base_url(state.get("inference_base_url"))) or ""
+        return url.rstrip("/").removesuffix("/v1")
+    except Exception:
+        return ""
+
+
+# Static endpoint identity per provider; dynamic ones (deepinfra, nous) are resolved in pricing_cache_scope.
+_STATIC_PRICING_SCOPES = {
+    "openrouter": lambda: _OPENROUTER_PRICING_BASE,
+    "ai-gateway": _ai_gateway_pricing_scope,
+    "novita": _novita_pricing_scope,
+    "fireworks": lambda: _FIREWORKS_PRICING_KEY,
+}
+
+
+def pricing_cache_scope(provider: str, *, current_provider: str = "", current_base_url: str = "") -> str:
+    """The current endpoint identity a provider's pricing cache is keyed on. Resolves local configuration
+    only, never fetches: picker prewarm single-flight uses it so an endpoint rotation can start a new
+    worker while the previous endpoint is still slow or unreachable."""
+    from hermes_cli.models import (
+        _deepinfra_catalog_url, _pricing_profile_key, _pricing_provider_cache_keys, normalize_provider,
+    )
+    normalized = normalize_provider(provider)
+    static = _STATIC_PRICING_SCOPES.get(normalized)
+    if static:
+        return static()
+    if normalized == "deepinfra":
+        return _deepinfra_catalog_url()[0]
+    if normalized == "nous":
+        try:
+            from hermes_cli.auth import _nous_inference_env_override
+
+            env_base = _nous_inference_env_override()
+        except Exception:
+            env_base = None
+        if env_base:
+            return env_base.rstrip("/").removesuffix("/v1")
+        if normalize_provider(current_provider) == "nous" and current_base_url:
+            return current_base_url.rstrip("/").removesuffix("/v1")
+        persisted_base = get_cached_nous_inference_base_url()
+        if persisted_base:
+            return persisted_base
+        return _pricing_provider_cache_keys.get((_pricing_profile_key(), normalized), _DEFAULT_NOUS_INFERENCE_BASE)
+    return ""
+
+
+def _cached_only_pricing(normalized: str) -> dict[str, dict[str, str]]:
+    """Process-resident pricing for *normalized* without any provider I/O."""
+    from hermes_cli.models import (
+        _deepinfra_catalog_cache, _deepinfra_catalog_url, _fetch_deepinfra_pricing, _pricing_profile_key,
+        _pricing_provider_cache_keys,
+    )
+    if normalized == "deepinfra":
+        cache_key, _url = _deepinfra_catalog_url()
+        return _fetch_deepinfra_pricing() if cache_key in _deepinfra_catalog_cache else {}
+    cache_key = _pricing_provider_cache_keys.get((_pricing_profile_key(), normalized))
+    if cache_key is None and normalized in ("openrouter", "ai-gateway", "fireworks"):
+        cache_key = _STATIC_PRICING_SCOPES[normalized]()
+    return (_cached_catalog(cache_key) or {}) if cache_key else {}
+
+
+def get_pricing_for_provider(
+    provider: str, *, force_refresh: bool = False, cached_only: bool = False
+) -> dict[str, dict[str, str]]:
     """Return live pricing for providers that support it (openrouter, nous, ai-gateway, novita,
-    deepinfra, fireworks); ``{}`` for everything else."""
+    deepinfra, fireworks); ``{}`` for everything else. ``cached_only`` never starts provider I/O:
+    normal picker opens use it so cold endpoints cannot hold the response path, while a background
+    prewarm fills the same caches for later opens."""
     from hermes_cli.models import normalize_provider
-    fetcher = _PRICING_FETCHERS.get(normalize_provider(provider))
+    normalized = normalize_provider(provider)
+    if cached_only:
+        return _cached_only_pricing(normalized)
+    fetcher = _PRICING_FETCHERS.get(normalized)
     return fetcher(force_refresh=force_refresh) if fetcher else {}
 
 
@@ -482,9 +597,9 @@ def _fetch_deepinfra_pricing(timeout: float = 5.0, *, force_refresh: bool = Fals
 
 _PRICING_FETCHERS = {
     "openrouter": _fetch_openrouter_pricing,
-    "ai-gateway": fetch_ai_gateway_pricing,
-    "novita": _fetch_novita_pricing,
+    "ai-gateway": _fetch_ai_gateway_pricing_for_provider,
+    "novita": _fetch_novita_pricing_for_provider,
     "deepinfra": _fetch_deepinfra_pricing,
-    "fireworks": _fireworks_pricing_from_models_dev,
+    "fireworks": _fetch_fireworks_pricing_for_provider,
     "nous": _fetch_nous_pricing_for_provider,
 }

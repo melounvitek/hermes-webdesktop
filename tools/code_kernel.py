@@ -78,12 +78,102 @@ import io
 import json
 import os
 import sys
+import threading
 import traceback
 
 _SENTINEL = os.environ["HERMES_KERNEL_SENTINEL"]
 _CAPTURE_LIMIT = {capture_limit}
 _SPILL_DIR = os.environ.get("HERMES_KERNEL_SPILL_DIR", "")
 _SPILL_CAP = {spill_cap}
+_PARENT_PROCESS_HANDLE = os.environ.pop("HERMES_KERNEL_PARENT_PROCESS_HANDLE", "")
+_PARENT_DEATH_FD = os.environ.pop("HERMES_KERNEL_PARENT_DEATH_FD", "")
+
+
+def _start_parent_death_pipe_watchdog():
+    """POSIX twin of the Windows handle watchdog: exit when the parent dies.
+
+    The host holds the only write end of an inherited pipe; a blocking read
+    returns EOF the instant the host exits by ANY means (SIGKILL, OOM, crash),
+    exactly like the MCP death supervisor. Stdin EOF alone is not enough: the
+    main loop only sees it between cells, so a kernel SIGKILLed mid-cell
+    outlived its host. Not PR_SET_PDEATHSIG — that is bound to the spawning
+    THREAD, and kernels are spawned from per-cell threads that exit.
+    """
+    global _PARENT_DEATH_FD
+    raw_fd = _PARENT_DEATH_FD
+    _PARENT_DEATH_FD = ""
+    if sys.platform == "win32" or not raw_fd:
+        return
+    try:
+        fd = int(raw_fd)
+        os.set_inheritable(fd, False)
+    except (OSError, ValueError):
+        return
+
+    def _wait():
+        try:
+            while os.read(fd, 1):
+                pass
+        except OSError:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_wait, name="hermes-parent-watchdog", daemon=True).start()
+
+
+def _start_parent_process_watchdog():
+    """Exit when the exact Windows parent process object is signaled.
+
+    The inherited SYNCHRONIZE handle names a process object, not a reusable
+    PID. Missing or invalid handles fail open so watchdog setup can never kill
+    an otherwise healthy kernel.
+    """
+    global _PARENT_PROCESS_HANDLE
+    raw_handle = _PARENT_PROCESS_HANDLE
+    _PARENT_PROCESS_HANDLE = ""
+    if sys.platform != "win32" or not raw_handle:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        handle = int(raw_handle)
+        if handle <= 0:
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.SetHandleInformation.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+        ]
+        kernel32.SetHandleInformation.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        # This process needs the handle, but user code spawned by a cell must
+        # not pass it any further. If Windows refuses to clear inheritance,
+        # disable the watchdog rather than leak the handle into cell children.
+        if not kernel32.SetHandleInformation(handle, 0x00000001, 0):
+            kernel32.CloseHandle(handle)
+            return
+    except (ImportError, OSError, TypeError, ValueError):
+        return
+
+    def _wait():
+        try:
+            result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+        finally:
+            kernel32.CloseHandle(handle)
+        if result == 0x00000000:  # WAIT_OBJECT_0: the parent exited
+            os._exit(0)
+
+    threading.Thread(target=_wait, name="hermes-parent-watchdog", daemon=True).start()
+
+
+_start_parent_process_watchdog()
+_start_parent_death_pipe_watchdog()
+
 _real_stdout = sys.stdout
 
 {cell_source}
@@ -222,8 +312,13 @@ class SessionKernel:
         self.sock_path: Optional[str] = None
         self.server_sock: Optional[socket.socket] = None
         self.stop_event = threading.Event()
+        self.death_pipe_w: Optional[int] = None
         self.tool_call_log: List = []
         self.tool_call_counter: List[int] = [0]
+        # Cells currently attached (bumped under the registry lock on selection, dropped when the
+        # cell settles). Reaping/cap-eviction skip attached kernels: tearing one down mid-spawn
+        # rmtree'd the staging dir under the spawner and killed live cells.
+        self.attached: int = 0
         self.response_q: "queue.Queue[dict]" = queue.Queue()
         self.raw, self.stderr = _BoundedBuffer(), _BoundedBuffer()
         self.execution_count, self.last_used = 0, time.monotonic()
@@ -232,8 +327,20 @@ class SessionKernel:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def dead(self) -> bool:
+        """True only once a spawned process has exited. ``proc is None`` is mid-spawn, not dead:
+        parallel cells for one owner race the first ``_spawn``, and treating the pending kernel as
+        dead made every racer replace it, orphaning the winner's process outside the registry."""
+        return self.proc is not None and self.proc.poll() is not None
+
     def teardown(self) -> None:
         self.stop_event.set()
+        if self.death_pipe_w is not None:
+            try:
+                os.close(self.death_pipe_w)
+            except OSError:
+                pass
+            self.death_pipe_w = None
         if self.alive():
             from tools.code_execution_tool import _kill_process_group
             _kill_process_group(self.proc, escalate=True)
@@ -267,9 +374,11 @@ class KernelRegistry:
             self._teardown(kernel)
 
     def discard(self, key: Tuple, kernel: Any) -> None:
-        """Drop one registry entry and tear the kernel down."""
+        """Drop *kernel*'s registry entry (only if it is still the one registered under *key* —
+        never a replacement) and tear the kernel down."""
         with self.lock:
-            self.kernels.pop(key, None)
+            if self.kernels.get(key) is kernel:
+                self.kernels.pop(key, None)
         self._teardown(kernel)
 
 
@@ -436,8 +545,37 @@ def _bind_rpc_socket(kernel: SessionKernel) -> str:
     return rpc_endpoint
 
 
+def _parent_process_handle(child_env: Dict[str, str]):
+    """Windows: open an inheritable SYNCHRONIZE handle to this process for the kernel's parent-death
+    watchdog. Returns (handle, CloseHandle, startupinfo) or (None, None, None); fails open."""
+    handle = close = startupinfo = None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcessId.argtypes = []
+        kernel32.GetCurrentProcessId.restype = wintypes.DWORD
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        close = kernel32.CloseHandle
+        # SYNCHRONIZE; inherited only by the explicitly allow-listed child.
+        handle = kernel32.OpenProcess(0x00100000, True, kernel32.GetCurrentProcessId())
+        if handle:
+            child_env["HERMES_KERNEL_PARENT_PROCESS_HANDLE"] = str(int(handle))
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.lpAttributeList = {"handle_list": [int(handle)]}
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        if handle and close is not None:
+            close(handle)
+        child_env.pop("HERMES_KERNEL_PARENT_PROCESS_HANDLE", None)
+        handle = close = startupinfo = None
+    return handle, close, startupinfo
+
+
 def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
-           sandbox_tools: frozenset, max_tool_calls: int) -> None:
+           sandbox_tools: frozenset, max_tool_calls: int, task_id: str = "") -> None:
     from tools.code_execution_tool import _build_child_env, generate_hermes_tools_module
     kernel.tmpdir = tempfile.mkdtemp(prefix="hermes_kernel_")
     kernel.rpc_token = secrets.token_urlsafe(32)
@@ -453,13 +591,29 @@ def _spawn(kernel: SessionKernel, *, child_python: str, child_cwd: str,
     child_env["HERMES_KERNEL_SPILL_DIR"] = kernel.tmpdir
     # Generated client reconnects after the RPC server's 300s idle timeout between cells.
     child_env["HERMES_RPC_PERSISTENT"] = "1"
-    kernel.proc = subprocess.Popen(
-        [child_python, os.path.join(kernel.tmpdir, "hermes_kernel_runner.py")],
-        # Strict mode passes an empty cwd: the kernel's staging dir plays the per-call tmpdir's role.
-        cwd=child_cwd or kernel.tmpdir, env=child_env, start_new_session=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
-        creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-    )
+    # Parent-death watchdog plumbing: Windows inherits a SYNCHRONIZE handle to this process; POSIX
+    # inherits the read end of a pipe whose only write end we hold (EOF == host gone, any cause).
+    parent_handle, close_handle, startupinfo = _parent_process_handle(child_env) if _IS_WINDOWS else (None, None, None)
+    death_r: Optional[int] = None
+    pass_fds: Tuple[int, ...] = ()
+    if not _IS_WINDOWS:
+        death_r, kernel.death_pipe_w = os.pipe()
+        child_env["HERMES_KERNEL_PARENT_DEATH_FD"] = str(death_r)
+        pass_fds = (death_r,)
+    try:
+        kernel.proc = subprocess.Popen(
+            [child_python, os.path.join(kernel.tmpdir, "hermes_kernel_runner.py")],
+            # Strict mode passes an empty cwd: the kernel's staging dir plays the per-call tmpdir's role.
+            cwd=child_cwd or kernel.tmpdir, env=child_env, start_new_session=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+            close_fds=True, pass_fds=pass_fds, startupinfo=startupinfo,
+        )
+    finally:
+        if parent_handle and close_handle is not None:
+            close_handle(parent_handle)
+        if death_r is not None:
+            os.close(death_r)
     # Deliberately NOT propagate_context_to_thread: that would freeze the spawning cell's
     # context/callbacks into the server thread for life. Authority is rebound per cell.
     for target, args in ((_rpc_forever, (kernel, max_tool_calls, sandbox_tools)),
@@ -474,16 +628,22 @@ def _acquire_kernel(key: Tuple, reset: bool) -> Tuple[SessionKernel, bool]:
     cap, idle_timeout = _lifecycle_limits()
     with _REGISTRY.lock:
         now = time.monotonic()
-        expired = [_KERNELS.pop(k) for k in list(_KERNELS) if now - _KERNELS[k].last_used > idle_timeout]
+        # Reaping and eviction skip kernels with attached cells (the last cell out tears them down).
+        expired = [_KERNELS.pop(k) for k in list(_KERNELS)
+                   if _KERNELS[k].attached == 0 and now - _KERNELS[k].last_used > idle_timeout]
         kernel = _KERNELS.get(key)
-        state_reset = kernel is not None and (reset or not kernel.alive())
+        state_reset = kernel is not None and (reset or kernel.dead())
         if state_reset:
-            expired.append(_KERNELS.pop(key))
+            dropped = _KERNELS.pop(key)
+            if dropped.attached == 0:
+                expired.append(dropped)
             kernel = None
         if kernel is None:
             kernel = _KERNELS[key] = SessionKernel(key)
         kernel.last_used = time.monotonic()
-        by_age = sorted((k for k in _KERNELS if k != key), key=lambda k: _KERNELS[k].last_used)
+        kernel.attached += 1
+        by_age = sorted((k for k in _KERNELS if k != key and _KERNELS[k].attached == 0),
+                        key=lambda k: _KERNELS[k].last_used)
         expired.extend(_KERNELS.pop(k) for k in by_age[: max(0, len(_KERNELS) - cap)])
     for doomed in expired:
         doomed.teardown()
@@ -585,6 +745,24 @@ def execute_in_session_kernel(
     key = (_resolve_owner(task_id) or "", mode, child_python, child_cwd, tuple(sorted(sandbox_tools)))
     exec_start = time.monotonic()
     kernel, state_reset = _acquire_kernel(key, reset)
+    try:
+        return _run_cell(kernel, key, code, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
+                         sandbox_tools=sandbox_tools, timeout=timeout, max_tool_calls=max_tool_calls,
+                         is_interrupted=is_interrupted, exec_start=exec_start, state_reset=state_reset)
+    finally:
+        with _REGISTRY.lock:
+            kernel.attached -= 1
+            kernel.last_used = time.monotonic()
+            # Dropped from the registry (reset/dead/reaped) while cells were still attached:
+            # the last one out owns the teardown.
+            orphaned = kernel.attached == 0 and _KERNELS.get(key) is not kernel
+        if orphaned:
+            kernel.teardown()
+
+
+def _run_cell(kernel: SessionKernel, key: Tuple, code: str, *, task_id: str, child_python: str,
+              child_cwd: str, sandbox_tools: frozenset, timeout: int, max_tool_calls: int,
+              is_interrupted, exec_start: float, state_reset: bool) -> str:
     reused = kernel.proc is not None
     # Captured on the calling thread BEFORE the cell runs (the snapshot a per-call RPC thread
     # would get) and installed on the kernel so RPC dispatches under THIS cell's identity.
@@ -592,7 +770,7 @@ def execute_in_session_kernel(
     with kernel.lock:
         try:
             if kernel.proc is None:
-                _spawn(kernel, child_python=child_python, child_cwd=child_cwd,
+                _spawn(kernel, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
                        sandbox_tools=sandbox_tools, max_tool_calls=max_tool_calls)
             assert kernel.proc is not None and kernel.proc.stdin is not None
             # Per-cell tool budget: the RPC loop enforces counter < max; reset without restarting.

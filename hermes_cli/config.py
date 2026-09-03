@@ -960,11 +960,14 @@ def _coerce_config_version(value: Any) -> int:
     return max(version, 0)
 
 
-def check_config_version() -> Tuple[int, int]:
+def check_config_version(*, raise_on_parse_error: bool = False) -> Tuple[int, int]:
     """Return ``(current_version, latest_version)`` from the raw on-disk config.
     Reads the raw file rather than ``load_config()``: the deep-merge would make a file lacking
     ``_config_version`` inherit the latest version, hiding that the schema was never migrated.
-    Invalid YAML gets a parse warning, not an automatic schema rewrite."""
+    Invalid YAML gets a parse warning, not an automatic schema rewrite. Tolerant runtime status
+    callers keep the historical latest/latest fallback for malformed YAML; mutation and explicit
+    validation paths set ``raise_on_parse_error`` so a parse failure or a non-mapping root cannot
+    be mistaken for an up-to-date config."""
     latest = _coerce_config_version(DEFAULT_CONFIG.get("_config_version", 1)) or 1
     config_path = get_config_path()
     if not config_path.exists():
@@ -972,12 +975,25 @@ def check_config_version() -> Tuple[int, int]:
 
     try:
         with open(config_path, encoding="utf-8") as f:
-            config = fast_safe_load(f) or {}
+            config = fast_safe_load(f)
     except Exception as e:
         _warn_config_parse_failure(config_path, e)
+        if raise_on_parse_error:
+            raise InvalidUserConfigError(
+                f"Cannot inspect {config_path}: config.yaml is not valid YAML ({e})"
+            ) from e
         return latest, latest
 
+    if config is None:
+        config = {}  # empty file / bare document: valid first-run state
     if not isinstance(config, dict):
+        # A list/scalar root parses fine but is just as unusable as broken YAML: save_config()
+        # would refuse it later, after .env was already rewritten. Strict callers see it up front.
+        if raise_on_parse_error:
+            raise InvalidUserConfigError(
+                f"Cannot inspect {config_path}: config.yaml top-level value must be "
+                f"a mapping, got {type(config).__name__}"
+            )
         config = {}
     return _coerce_config_version(config.get("_config_version")), latest
 
@@ -1245,14 +1261,16 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> Dict[str, A
     """Migrate config to latest version, prompting for new required fields."""
     results = {"env_added": [], "config_added": [], "warnings": []}
 
+    # Validate config.yaml before any migration side effect: sanitize_env_file() rewrites .env,
+    # which must not happen when the migration will be refused for malformed YAML.
+    current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
+
     try:
         fixes = sanitize_env_file()
         if fixes and not quiet:
             print(f"  ✓ Normalized .env line formatting ({fixes} line(s) changed)")
     except Exception:
         pass  # best-effort; never block migration on sanitize failure
-
-    current_ver, latest_ver = check_config_version()
 
     # Auto-migration support floor (v12): an EXPLICIT on-disk ``_config_version`` below the
     # floor is NOT migrated and NOT rewritten — surface a message and leave the file untouched
@@ -3497,7 +3515,7 @@ def _cmd_config_migrate(args):
 
     missing_env = get_missing_env_vars(required_only=False)
     missing_config = get_missing_config_fields()
-    current_ver, latest_ver = check_config_version()
+    current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
 
     if not missing_env and not missing_config and current_ver >= latest_ver:
         print(color("✓ Configuration is up to date!", Colors.GREEN))
@@ -3536,7 +3554,7 @@ def _cmd_config_check(args):
     """Non-interactive report of what's missing."""
     _print_banner("📋 Configuration Status")
 
-    current_ver, latest_ver = check_config_version()
+    current_ver, latest_ver = check_config_version(raise_on_parse_error=True)
     if current_ver >= latest_ver:
         print(f"  Config version: {current_ver} ✓")
     else:

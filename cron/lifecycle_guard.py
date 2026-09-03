@@ -249,6 +249,95 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     return _contains_launchctl_gateway_lifecycle(normalized)
 
 
+# Whole-walk work limits. The per-file cap and depth bound above limit one read, not the walk: a
+# command can reference arbitrarily many scripts, and the pure-Python shlex pass (quadratic on a
+# giant token) once held the GIL for minutes. These caps bound one whole walk and are charged
+# BEFORE any text reaches shlex. Exhaustion fails closed (an unscanned script could hide a
+# lifecycle command) and is logged at WARNING so an operator can tell it from a real block. Sizes
+# sit well above any legitimate wrapper graph; remote reads are a backend roundtrip each, so they
+# get a far tighter cap.
+_MAX_LIFECYCLE_SCAN_BYTES = _MAX_REFERENCED_SCRIPT_BYTES  # 1 MiB across the walk
+_MAX_LIFECYCLE_SCAN_LINES = 16384
+_MAX_LIFECYCLE_SCAN_LINE_BYTES = 64 * 1024
+_MAX_LIFECYCLE_SCAN_PATHS = 1024
+_MAX_LIFECYCLE_SCAN_REMOTE_READS = 64
+
+
+class _LifecycleScanBudget:
+    """Shared work budget for one complete referenced-script walk."""
+
+    __slots__ = ("bytes_remaining", "lines_remaining", "paths_remaining", "remote_reads_remaining")
+
+    def __init__(self) -> None:
+        # Read the module constants at construction so tests/operators can lower them at runtime.
+        self.bytes_remaining = _MAX_LIFECYCLE_SCAN_BYTES
+        self.lines_remaining = _MAX_LIFECYCLE_SCAN_LINES
+        self.paths_remaining = _MAX_LIFECYCLE_SCAN_PATHS
+        self.remote_reads_remaining = _MAX_LIFECYCLE_SCAN_REMOTE_READS
+
+    def charge_text(self, text: str) -> bool:
+        """Charge *text* before tokenization; False when it does not fit."""
+        # UTF-8 is >= one byte per code point, so the char count is a free lower bound.
+        if len(text) > self.bytes_remaining:
+            return False
+        encoded = len(text.encode("utf-8", errors="replace"))
+        if encoded > self.bytes_remaining:
+            return False
+        lines = text.count("\n") + 1
+        if lines > self.lines_remaining:
+            return False
+        # One huge token is the quadratic shlex case; bound the longest physical line (chars, a
+        # lower bound on bytes — tight enough for a DoS bound without a per-line encode).
+        longest = max((len(line) for line in text.split("\n")), default=0)
+        if longest > _MAX_LIFECYCLE_SCAN_LINE_BYTES:
+            return False
+        self.bytes_remaining -= encoded
+        self.lines_remaining -= lines
+        return True
+
+    def charge_path(self) -> bool:
+        """Charge one unique referenced path before any local/remote read."""
+        if self.paths_remaining <= 0:
+            return False
+        self.paths_remaining -= 1
+        return True
+
+    def charge_remote_read(self) -> bool:
+        """Charge one remote-backend read (a network roundtrip each)."""
+        if self.remote_reads_remaining <= 0:
+            return False
+        self.remote_reads_remaining -= 1
+        return True
+
+
+def _capped_read_limit(max_bytes: Optional[int]) -> int:
+    """Per-read byte cap: never above the per-file cap, never negative. One definition so local and
+    remote reads cannot diverge."""
+    if max_bytes is None:
+        return _MAX_REFERENCED_SCRIPT_BYTES
+    return min(_MAX_REFERENCED_SCRIPT_BYTES, max(0, int(max_bytes)))
+
+
+def lifecycle_scan_root_within_budget(text: str) -> bool:
+    """Whether *text* may safely enter an optional tokenizer pass (``tools/terminal_tool.py`` gates
+    its launchctl pre-scan on this). A FRESH budget, independent of the full guard's walk: the
+    pre-scan may pass while the walk later exhausts, still fail-closed — only the friendlier
+    launchctl diagnostic is lost. ``False`` is not a verdict: callers must still run the full guard."""
+    try:
+        return _LifecycleScanBudget().charge_text(text)
+    except Exception:
+        return False
+
+
+def _budget_exhausted(what: str, depth: int) -> bool:
+    logger.warning(
+        "lifecycle guard scan budget exhausted (%s at depth %d); "
+        "failing closed — see _MAX_LIFECYCLE_SCAN_* in cron/lifecycle_guard.py",
+        what, depth,
+    )
+    return True
+
+
 # --- shell tokenization -----------------------------------------------------------------------
 
 def _split_logical_lines(text: str) -> list[str]:
@@ -622,13 +711,17 @@ def _has_binary_magic(data: bytes) -> bool:
     return data.startswith(_BINARY_MAGICS)
 
 
-def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
+def _read_referenced_script(
+    path: Path, *, max_bytes: Optional[int] = None
+) -> tuple[Optional[str], bool]:
     """Return ``(text, unsafe)`` using bounded, regular-file-only reads.
 
     Shared choke point for every local script read, so the cloud-placeholder refusal lives here: a
     FileProvider path is never opened — not even to check hydration — because an evicted
     placeholder's ``open()`` can hang preflight. Lexical check: direct paths; resolved: symlinks.
+    ``max_bytes`` lowers the per-file cap to what the calling walk can still afford.
     """
+    byte_limit = _capped_read_limit(max_bytes)
     if _on_cloud_path(path):
         return None, True
     flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
@@ -649,9 +742,13 @@ def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
         data = os.read(descriptor, _BINARY_SNIFF_BYTES)
         if _has_binary_magic(data):
             return None, False
+        # A regular file whose size already exceeds the cap fails closed without reading it (the
+        # walk budget can be far below 1 MiB).
+        if metadata.st_size > byte_limit:
+            return None, True
         # Read the remainder (bounded); loop because os.read may return short.
-        while len(data) <= _MAX_REFERENCED_SCRIPT_BYTES:
-            chunk = os.read(descriptor, _MAX_REFERENCED_SCRIPT_BYTES + 1 - len(data))
+        while len(data) <= byte_limit:
+            chunk = os.read(descriptor, byte_limit + 1 - len(data))
             if not chunk:
                 break
             data += chunk
@@ -663,21 +760,26 @@ def _read_referenced_script(path: Path) -> tuple[Optional[str], bool]:
         return None, False
     # Size check BEFORE NUL stripping: stripping shrinks the buffer and would let an oversized file
     # slip under the threshold past this fail-closed branch.
-    if len(data) > _MAX_REFERENCED_SCRIPT_BYTES:
+    if len(data) > byte_limit:
         return None, True
     if b"\x00" in data:
         data = data.replace(b"\x00", b"")
     return data.decode("utf-8", errors="replace"), False
 
 
-def _sanitize_remote_script_text(text: Optional[str]) -> tuple[Optional[str], bool]:
+def _sanitize_remote_script_text(
+    text: Optional[str], *, max_bytes: Optional[int] = None
+) -> tuple[Optional[str], bool]:
     """Apply the local-read contract to text from an untrusted ``read_remote_script`` callback: NUL
     means binary (nothing to scan, checked first); oversized fails closed. Size compares re-encoded
     *bytes* (matching the ``head -c`` wire bound): a >1 MiB multibyte file truncated at the byte cap
     decodes to fewer chars, and a char count would scan instead of failing."""
     if not text or "\x00" in text:
         return None, False
-    if len(text.encode("utf-8", errors="replace")) > _MAX_REFERENCED_SCRIPT_BYTES:
+    byte_limit = _capped_read_limit(max_bytes)
+    if len(text) > byte_limit:
+        return None, True  # chars <= bytes: over the cap without encoding
+    if len(text.encode("utf-8", errors="replace")) > byte_limit:
         return None, True
     return text, False
 
@@ -698,9 +800,12 @@ def _read_script_for_scanning(script_path: str) -> str:
 # --- recursive walk ---------------------------------------------------------------------------
 
 def _contains_unsafe_gateway_action(
-    command: str, *, cwd: Optional[str], depth: int, visited: set[Path],
+    command: str, *, cwd: Optional[str], depth: int, visited: set[Path], budget: _LifecycleScanBudget,
     read_remote_script: Optional[_ReadRemoteScriptFn] = None,
 ) -> bool:
+    # Charge BEFORE _direct_lifecycle_scan: every scan in it tokenizes with shlex.
+    if not budget.charge_text(command):
+        return _budget_exhausted("text", depth)
     if _direct_lifecycle_scan(command):
         return True
     if depth >= _MAX_REFERENCED_SCRIPT_DEPTH:
@@ -708,7 +813,8 @@ def _contains_unsafe_gateway_action(
 
     def recurse(text: str, cwd: Optional[str]) -> bool:
         return _contains_unsafe_gateway_action(
-            text, cwd=cwd, depth=depth + 1, visited=visited, read_remote_script=read_remote_script
+            text, cwd=cwd, depth=depth + 1, visited=visited, budget=budget,
+            read_remote_script=read_remote_script,
         )
 
     for payload in _iter_shell_command_payloads(command):
@@ -722,14 +828,22 @@ def _contains_unsafe_gateway_action(
         resolved = _resolve_lenient(script_path)
         if resolved in visited:
             continue
+        if not budget.charge_path():
+            return _budget_exhausted("paths", depth)
         visited.add(resolved)
-        script_text, unsafe = _read_referenced_script(script_path)
+        # Never read more than the walk can still afford to tokenize; a file larger than the
+        # remainder fails closed exactly like an oversized one.
+        script_text, unsafe = _read_referenced_script(script_path, max_bytes=budget.bytes_remaining)
         if unsafe:
             return True
         if script_text is None and read_remote_script is not None:
             # Local path missing; the remote backend's output crosses the same trust boundary as a
             # local read — sanitize identically (binary skip + size fail-closed).
-            script_text, unsafe = _sanitize_remote_script_text(read_remote_script(str(script_path)))
+            if not budget.charge_remote_read():
+                return _budget_exhausted("remote reads", depth)
+            script_text, unsafe = _sanitize_remote_script_text(
+                read_remote_script(str(script_path)), max_bytes=budget.bytes_remaining
+            )
             if unsafe:
                 return True
         if not script_text:
@@ -752,7 +866,8 @@ def contains_gateway_lifecycle_command_or_referenced_script(
     """
     try:
         return _contains_unsafe_gateway_action(
-            command, cwd=cwd, depth=0, visited=set(), read_remote_script=read_remote_script
+            command, cwd=cwd, depth=0, visited=set(), budget=_LifecycleScanBudget(),
+            read_remote_script=read_remote_script,
         )
     except Exception:
         logger.warning(
@@ -795,7 +910,11 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         # Python runs via the interpreter, never a POSIX shell, and the shell reference walk is a
         # false-positive generator on Python sources (pathlib "/" resolves to the filesystem root).
         # The regex still scans the full text; non-regular/oversized files fail closed (sentinel).
-        unsafe = _lifecycle_command_scan_with_data_exemption(combined)
+        # The data-exemption masker tokenizes with shlex, so it is charged against the walk budget.
+        if not _LifecycleScanBudget().charge_text(combined):
+            unsafe = _budget_exhausted("text", 0)
+        else:
+            unsafe = _lifecycle_command_scan_with_data_exemption(combined)
     else:
         unsafe = contains_gateway_lifecycle_command_or_referenced_script(
             combined, cwd=_resolve_script_directory(script) if script else None

@@ -421,9 +421,18 @@ def exchange_copilot_token(
     so it is None. Cached in-process until close to expiry. Raises ``ValueError`` on failure.
     """
     fp = _token_fingerprint(raw_token)
-    cached = _jwt_cache.get(fp)  # fast path outside the lock
+    # Fast paths outside the lock: a valid in-process JWT needs no exchange, and a recent failure
+    # means queueing behind the in-flight holder (up to ~50 s) would only park an executor thread
+    # to learn the same answer.
+    cached = _jwt_cache.get(fp)
     if _cache_entry_fresh(cached):
         return cached
+    _fail_until = _exchange_failure_cache.get(fp, 0.0)
+    if time.time() < _fail_until:
+        raise ValueError("Copilot token exchange recently failed; skipping re-attempt "
+                         f"for another {int(_fail_until - time.time())}s")
+    # Note: a waiter's own ``timeout`` is not honoured across the lock wait — by design of
+    # single-flight, it observes the holder's outcome instead.
     with _exchange_lock_for(fp):
         return _exchange_copilot_token_locked(raw_token, fp, timeout=timeout)
 

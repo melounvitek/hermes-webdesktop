@@ -156,6 +156,28 @@ def _mcp_resource_filename(uri: str, mime_type: str) -> str:
     return name
 
 
+def _render_mcp_dropped_block_notice(block, block_type: str) -> str:
+    """Inline notice for an unsupported MCP content block (kimi-code#3227): silently dropping it
+    leaves the model unaware content went missing. Carries whatever handles the block exposes —
+    mime type, uri, size, name — so the agent can fetch or reason about the missing content."""
+    details = [f"type={block_type}"]
+    mime = mcp_field(block, "mime_type", "mimeType", None)
+    if mime:
+        details.append(f"mimeType={mime}")
+    uri = getattr(block, "uri", None) or getattr(getattr(block, "resource", None), "uri", None)
+    if uri:
+        details.append(f"uri={uri}")
+    for size_attr in ("size", "sizeInBytes"):
+        size = getattr(block, size_attr, None)
+        if isinstance(size, int):
+            details.append(f"size={size}")
+            break
+    name = getattr(block, "name", None)
+    if name and isinstance(name, str):
+        details.append(f"name={name}")
+    return f"[MCP content dropped: unsupported block ({', '.join(details)})]"
+
+
 def _render_mcp_resource_block(block, server_name: str = "") -> str:
     """Render a ``ResourceLink`` or ``EmbeddedResource`` block as text: embedded text → the
     text; embedded blob → decoded (size-capped) into the document cache with a path marker;

@@ -80,23 +80,30 @@ def _create_configured_env(
     )
 
 
-def _teardown_env(env: Any, task_id: str, *, force_remove: Optional[bool] = None, done_msg: str = "Cleaned up inactive environment for task: %s") -> None:
-    """Stop *env* via cleanup()/stop()/terminate(), whichever it has; log the outcome.
+def _cleanup_env(env: Any, *, force_remove: Optional[bool] = None) -> None:
+    """Tear down one environment via cleanup()/stop()/terminate(), whichever it has.
 
-    ``force_remove`` is forwarded to ``cleanup()`` only when given and the
-    backend's signature accepts it (DockerEnvironment; others don't). A
-    404/"not found" error means the sandbox is already gone — logged at info.
+    ``force_remove`` is forwarded to ``cleanup()`` only when given and the backend's
+    signature accepts it (``DockerEnvironment``, issue #20561; other backends don't).
+    Shared by ``cleanup_vm``, the idle reaper and the prompt-time backend probe so
+    the signature check lives in one place.
     """
+    if hasattr(env, 'cleanup'):
+        if force_remove is not None and "force_remove" in inspect.signature(env.cleanup).parameters:
+            env.cleanup(force_remove=force_remove)
+        else:
+            env.cleanup()
+    elif hasattr(env, 'stop'):
+        env.stop()
+    elif hasattr(env, 'terminate'):
+        env.terminate()
+
+
+def _teardown_env(env: Any, task_id: str, *, force_remove: Optional[bool] = None, done_msg: str = "Cleaned up inactive environment for task: %s") -> None:
+    """``_cleanup_env`` plus outcome logging. A 404/"not found" error means the
+    sandbox is already gone — logged at info."""
     try:
-        if hasattr(env, 'cleanup'):
-            if force_remove is not None and "force_remove" in inspect.signature(env.cleanup).parameters:
-                env.cleanup(force_remove=force_remove)
-            else:
-                env.cleanup()
-        elif hasattr(env, 'stop'):
-            env.stop()
-        elif hasattr(env, 'terminate'):
-            env.terminate()
+        _cleanup_env(env, force_remove=force_remove)
         logger.info(done_msg, task_id)
     except Exception as e:
         error_str = str(e)

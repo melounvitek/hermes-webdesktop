@@ -206,8 +206,12 @@ def gateway_lifecycle_block(
         _MAX_REFERENCED_SCRIPT_BYTES,
         contains_gateway_lifecycle_command_or_referenced_script,
         contains_launchctl_submit_command,
+        lifecycle_scan_root_within_budget,
     )
-    if contains_launchctl_submit_command(command):
+    # Keep the specific launchctl diagnostic when this optional pre-scan fits the
+    # budget. The full fail-closed guard below still runs when it does not, so
+    # oversized roots never reach shlex here.
+    if lifecycle_scan_root_within_budget(command) and contains_launchctl_submit_command(command):
         return _blocked_json(
             "Blocked: launchctl submit/bootstrap registers a persistent "
             "KeepAlive job and is unsafe from inside the gateway process. "

@@ -185,15 +185,42 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
         f"(SELECT started_at FROM sessions _act_s WHERE _act_s.id = {session_id_expr})")
 
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 30
 
 # Auto-maintenance VACUUMs only above this freelist fraction; below it a rewrite costs more I/O than it returns.
 AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 
-# FTS layout, tracked INDEPENDENTLY of SCHEMA_VERSION (state_meta ``fts_storage_version``): it changes only
-# when a DB is born fresh or via ``hermes sessions optimize-storage``.  0 (marker absent) = legacy inline
-# index, still working; 1 = v23 external-content layout.
-FTS_STORAGE_VERSION = 1
+# FTS storage-layout version, tracked INDEPENDENTLY of SCHEMA_VERSION in the
+# state_meta key ``fts_storage_version``. The main schema version advances
+# freely on open (so future migrations always land); the FTS *layout* only
+# reaches the current version when a DB is either born fresh or explicitly
+# optimized via ``hermes sessions optimize-storage``. A legacy DB sits at
+# layout 0 (marker absent) with a working inline index until the user opts in.
+#   1 = v23 external-content layout with a tool-row-excluded trigram
+#   2 = trigram also excludes structured tool_calls JSON
+FTS_STORAGE_VERSION = 2
+
+# Tool results are often multi-megabyte machine payloads. Index a useful
+# prefix for new tool rows instead of tokenizing the entire body while the
+# canonical message write holds SQLite's single writer lock. The high-water
+# marker lets upgraded databases retain the exact token stream already stored
+# for historical rows, so external-content delete/update commands stay valid
+# without an eager full-index rebuild.
+FTS_TOOL_CONTENT_PREFIX_CHARS = 8_192
+FTS_TOOL_FULL_CONTENT_HIGH_WATER_KEY = "fts_tool_full_content_high_water"
+
+
+def _fts_indexed_content_sql(alias: str) -> str:
+    return f"""CASE WHEN {alias}.role = 'tool'
+              AND {alias}.id > COALESCE((SELECT CAST(value AS INTEGER)
+                                         FROM state_meta
+                                         WHERE key = '{FTS_TOOL_FULL_CONTENT_HIGH_WATER_KEY}'), -1)
+         THEN substr(COALESCE({alias}.content, ''), 1, {FTS_TOOL_CONTENT_PREFIX_CHARS})
+         ELSE {alias}.content END"""
+
+
+_FTS_NEW_INDEXED_CONTENT_SQL = _fts_indexed_content_sql("new")
+_FTS_OLD_INDEXED_CONTENT_SQL = _fts_indexed_content_sql("old")
 
 # Cap on user-controlled FTS5 query input before sanitizer processing.
 MAX_FTS5_QUERY_CHARS = 2_048
@@ -483,14 +510,34 @@ CREATE INDEX IF NOT EXISTS idx_sessions_handoff_state
     ON sessions(handoff_state, started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
     ON sessions(system_prompt_hash);
+-- Recent-session browsing must never derive recency by scanning messages.
+-- This expression is the durable, indexable approximation used to preselect
+-- a small candidate set before compression-chain and preview hydration.
+CREATE INDEX IF NOT EXISTS idx_sessions_effective_activity
+    ON sessions(COALESCE(last_activity_at, started_at) DESC, started_at DESC);
 """
 
-# Deferred FTS rebuild bookkeeping: while a background rebuild is pending, state_meta H = fts_rebuild_high_water
-# (MAX(messages.id) when the old indexes were dropped) and P = fts_rebuild_progress (highest backfilled id)
-# define the indexed rows, id <= P OR id > H (post-drop rows are indexed live by the insert triggers).  Every
-# trigger gates on that predicate: an external-content 'delete' for an unindexed row corrupts the index and
-# skipping one for an indexed row leaves a stale entry.  No rebuild pending => both absent, COALESCE tautology.
-FTS_SQL = """
+
+# ── Deferred FTS rebuild bookkeeping (schema v23) ──
+# While a background index rebuild is pending, two state_meta keys define
+# which message rows are currently IN the FTS indexes:
+#
+#   fts_rebuild_high_water  H — MAX(messages.id) at the moment the old
+#                                indexes were dropped
+#   fts_rebuild_progress    P — highest id the chunked backfill has indexed
+#
+# A row is indexed iff  id <= P  (backfilled)  OR  id > H  (inserted after
+# the drop; ids are AUTOINCREMENT so new rows are always > H and the insert
+# triggers index them live).  Rows in (P, H] are not yet indexed.
+#
+# Every trigger below gates on that same predicate: firing an FTS5
+# external-content 'delete' for a row that is NOT in the index corrupts the
+# index, and skipping it for a row that IS indexed leaves a stale entry.
+# When no rebuild is pending both keys are absent and COALESCE turns the
+# predicate into a tautology (id > -1 OR id <= -1), i.e. normal operation.
+# The two state_meta PK probes per write are negligible next to the FTS
+# insert itself.
+FTS_SQL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
     tool_name,
@@ -506,7 +553,12 @@ WHEN (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
                           WHERE key = 'fts_rebuild_progress'), -1))
 BEGIN
     INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
-    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
+    VALUES (
+        new.id,
+        {_FTS_NEW_INDEXED_CONTENT_SQL},
+        new.tool_name,
+        new.tool_calls
+    );
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages
@@ -516,71 +568,19 @@ WHEN (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
                           WHERE key = 'fts_rebuild_progress'), -1))
 BEGIN
     INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
-    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
+    VALUES (
+        'delete',
+        old.id,
+        {_FTS_OLD_INDEXED_CONTENT_SQL},
+        old.tool_name,
+        old.tool_calls
+    );
 END;
 
 -- UPDATE OF skips the trigger entirely for non-content column writes
 -- (status/compacted/observed/etc.), which is stronger than the WHEN gate
 -- alone and avoids FTS I/O saturation on large state.db (#68858 / #73639).
 CREATE TRIGGER IF NOT EXISTS messages_fts_update
-AFTER UPDATE OF content, tool_name, tool_calls ON messages
-WHEN (old.content IS NOT new.content
-    OR old.tool_name IS NOT new.tool_name
-    OR old.tool_calls IS NOT new.tool_calls)
-   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
-                           WHERE key = 'fts_rebuild_high_water'), -1)
-     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
-                            WHERE key = 'fts_rebuild_progress'), -1))
-BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
-    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
-    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
-    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
-END;
-"""
-
-# Trigram FTS5 table for CJK substring search (unicode61 splits CJK into single tokens).  The trigram index is
-# ~2.6x the text it covers and ``role='tool'`` rows are ~90% of message bytes, so it reads through the
-# ``messages_fts_trigram_src`` view excluding tool rows; those stay searchable via ``messages_fts`` and
-# ``search_messages`` routes CJK queries filtered on role='tool' to LIKE.
-FTS_TRIGRAM_SQL = """
-CREATE VIEW IF NOT EXISTS messages_fts_trigram_src AS
-    SELECT id, role, content, tool_name, tool_calls
-    FROM messages
-    WHERE role <> 'tool';
-
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
-    content,
-    tool_name,
-    tool_calls,
-    content='messages_fts_trigram_src',
-    content_rowid='id',
-    tokenize='trigram'
-);
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages
-WHEN new.role <> 'tool'
-   AND (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
-                           WHERE key = 'fts_rebuild_high_water'), -1)
-     OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
-                            WHERE key = 'fts_rebuild_progress'), -1))
-BEGIN
-    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
-    VALUES (new.id, new.content, new.tool_name, new.tool_calls);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages
-WHEN old.role <> 'tool'
-   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
-                           WHERE key = 'fts_rebuild_high_water'), -1)
-     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
-                            WHERE key = 'fts_rebuild_progress'), -1))
-BEGIN
-    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls)
-    VALUES ('delete', old.id, old.content, old.tool_name, old.tool_calls);
-END;
-
-CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update
 AFTER UPDATE OF content, tool_name, tool_calls, role ON messages
 WHEN (old.content IS NOT new.content
     OR old.tool_name IS NOT new.tool_name
@@ -591,12 +591,129 @@ WHEN (old.content IS NOT new.content
      OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
                             WHERE key = 'fts_rebuild_progress'), -1))
 BEGIN
-    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name, tool_calls)
-    SELECT 'delete', old.id, old.content, old.tool_name, old.tool_calls
-    WHERE old.role <> 'tool';
-    INSERT INTO messages_fts_trigram(rowid, content, tool_name, tool_calls)
-    SELECT new.id, new.content, new.tool_name, new.tool_calls
-    WHERE new.role <> 'tool';
+    INSERT INTO messages_fts(messages_fts, rowid, content, tool_name, tool_calls)
+    VALUES (
+        'delete',
+        old.id,
+        {_FTS_OLD_INDEXED_CONTENT_SQL},
+        old.tool_name,
+        old.tool_calls
+    );
+    INSERT INTO messages_fts(rowid, content, tool_name, tool_calls)
+    VALUES (
+        new.id,
+        {_FTS_NEW_INDEXED_CONTENT_SQL},
+        new.tool_name,
+        new.tool_calls
+    );
+END;
+"""
+
+
+# Trigram FTS5 table for CJK substring search.  The default unicode61
+# tokenizer splits CJK characters into individual tokens, breaking phrase
+# matching.  The trigram tokenizer creates overlapping 3-byte sequences so
+# substring queries work natively for any script (CJK, Thai, etc.).
+#
+# The trigram index is the most expensive index in state.db (~2.6x the size
+# of the text it covers). Tool output (~90% of message bytes, machine noise)
+# and cron transcripts are excluded: the index reads through
+# ``messages_fts_trigram_src``, a view that skips both classes. They stay
+# fully stored in ``messages`` and searchable via the standard
+# ``messages_fts`` index; they just don't get trigram (CJK substring)
+# treatment. ``search_messages`` routes explicit tool/cron CJK searches to
+# LIKE for the same reason. Structured ``tool_calls`` JSON likewise stays
+# searchable through ``messages_fts``; excluding it here avoids indexing
+# repetitive JSON syntax as trigrams (FTS_STORAGE_VERSION 2).
+#
+# Delegate-child (subagent) transcripts are excluded the same way (v30):
+# on a fan-out-heavy install they were ~70% of all message bytes and
+# ``session_search`` hides ``source='subagent'`` sessions anyway. A child
+# is recognised by its source OR by the ``_delegate_from`` creation marker
+# (children spawned under a gateway turn inherit the gateway's source).
+# Compression/branch continuations of interactive sessions also carry
+# ``parent_session_id`` but NOT the marker, so they stay trigram-indexed.
+FTS_TRIGRAM_EXCLUDED_SOURCES = ("cron", "subagent")
+
+# Predicate over a ``sessions`` row (unqualified column names) selecting
+# sessions whose rows belong in the trigram index. Shared by the view, the
+# sync triggers, and the deferred-backfill INSERT ... SELECTs so they can
+# never disagree about the index boundary.
+FTS_TRIGRAM_SESSION_SQL = (
+    "source NOT IN ("
+    + ", ".join(f"'{src}'" for src in FTS_TRIGRAM_EXCLUDED_SOURCES)
+    + ") AND json_extract(COALESCE(model_config, '{}'), '$._delegate_from') IS NULL"
+)
+
+
+def fts_trigram_session_sql(alias: str) -> str:
+    """``FTS_TRIGRAM_SESSION_SQL`` with every column qualified by ``alias``."""
+    return FTS_TRIGRAM_SESSION_SQL.replace("source ", f"{alias}.source ").replace(
+        "COALESCE(model_config", f"COALESCE({alias}.model_config"
+    )
+
+
+FTS_TRIGRAM_SQL = f"""
+CREATE VIEW IF NOT EXISTS messages_fts_trigram_src AS
+    SELECT m.id, m.role, m.content, m.tool_name
+    FROM messages AS m
+    JOIN sessions AS s ON s.id = m.session_id
+    WHERE m.role <> 'tool' AND {fts_trigram_session_sql('s')};
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
+    content,
+    tool_name,
+    content='messages_fts_trigram_src',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages
+WHEN new.role <> 'tool'
+   AND EXISTS (SELECT 1 FROM sessions
+               WHERE id = new.session_id AND {FTS_TRIGRAM_SESSION_SQL})
+   AND (new.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR new.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name)
+    VALUES (new.id, new.content, new.tool_name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON messages
+WHEN old.role <> 'tool'
+   AND EXISTS (SELECT 1 FROM sessions
+               WHERE id = old.session_id AND {FTS_TRIGRAM_SESSION_SQL})
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name)
+    VALUES ('delete', old.id, old.content, old.tool_name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update
+AFTER UPDATE OF content, tool_name, role ON messages
+WHEN (old.content IS NOT new.content
+    OR old.tool_name IS NOT new.tool_name
+    OR old.role IS NOT new.role)
+   AND (old.id > COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                           WHERE key = 'fts_rebuild_high_water'), -1)
+     OR old.id <= COALESCE((SELECT CAST(value AS INTEGER) FROM state_meta
+                            WHERE key = 'fts_rebuild_progress'), -1))
+BEGIN
+    INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content, tool_name)
+    SELECT 'delete', old.id, old.content, old.tool_name
+    WHERE old.role <> 'tool'
+      AND EXISTS (SELECT 1 FROM sessions
+                  WHERE id = old.session_id AND {FTS_TRIGRAM_SESSION_SQL});
+    INSERT INTO messages_fts_trigram(rowid, content, tool_name)
+    SELECT new.id, new.content, new.tool_name
+    WHERE new.role <> 'tool'
+      AND EXISTS (SELECT 1 FROM sessions
+                  WHERE id = new.session_id AND {FTS_TRIGRAM_SESSION_SQL});
 END;
 """
 
@@ -613,10 +730,19 @@ FTS_STALE_KEY = "fts_stale"
 # Durable diagnostic for stale FTS recovery blocked across process restarts.
 FTS_REBUILD_DEFERRAL_KEY = "fts_rebuild_deferral"
 
-# Legacy (v22 / inline-content) FTS DDL: ONLY keeps a pre-v23 install's search working and its triggers
-# repairable until `optimize_fts_storage()` migrates it (inline content || tool_name || tool_calls, trigram over
-# every row).  Never created fresh; the v23 DDL on a legacy DB would leave a mixed, broken state.
-LEGACY_FTS_SQL = """
+
+# ── Legacy (v22 / inline-content) FTS DDL ──────────────────────────────
+# Used ONLY to keep an existing pre-v23 install's search working and its
+# triggers repairable UNTIL the user opts into `hermes db optimize`. This is
+# the exact inline shape v11..v22 shipped: each virtual table stores its own
+# copy of ``content || tool_name || tool_calls`` and the trigram table indexes
+# every row (including role='tool'). We never CREATE these on a fresh install —
+# fresh installs are born on the v23 external-content schema above. These
+# constants exist so a legacy DB is never accidentally handed the v23 DDL
+# (which would create the external-content trigram source VIEW and leave the
+# DB in a mixed, broken state). `optimize_fts_storage()` is what migrates a
+# legacy DB to the v23 shape.
+LEGACY_FTS_SQL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content
 );
@@ -624,7 +750,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
 CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts(rowid, content) VALUES (
         new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+        COALESCE({_FTS_NEW_INDEXED_CONTENT_SQL}, '')
+        || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
     );
 END;
 
@@ -633,16 +760,18 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_update
-AFTER UPDATE OF content, tool_name, tool_calls ON messages BEGIN
+AFTER UPDATE OF content, tool_name, tool_calls, role ON messages BEGIN
     DELETE FROM messages_fts WHERE rowid = old.id;
     INSERT INTO messages_fts(rowid, content) VALUES (
         new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+        COALESCE({_FTS_NEW_INDEXED_CONTENT_SQL}, '')
+        || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
     );
 END;
 """
 
-LEGACY_FTS_TRIGRAM_SQL = """
+
+LEGACY_FTS_TRIGRAM_SQL = f"""
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
     content,
     tokenize='trigram'
@@ -651,7 +780,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts_trigram USING fts5(
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
     INSERT INTO messages_fts_trigram(rowid, content) VALUES (
         new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+        COALESCE({_FTS_NEW_INDEXED_CONTENT_SQL}, '')
+        || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
     );
 END;
 
@@ -660,11 +790,12 @@ CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_delete AFTER DELETE ON message
 END;
 
 CREATE TRIGGER IF NOT EXISTS messages_fts_trigram_update
-AFTER UPDATE OF content, tool_name, tool_calls ON messages BEGIN
+AFTER UPDATE OF content, tool_name, tool_calls, role ON messages BEGIN
     DELETE FROM messages_fts_trigram WHERE rowid = old.id;
     INSERT INTO messages_fts_trigram(rowid, content) VALUES (
         new.id,
-        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+        COALESCE({_FTS_NEW_INDEXED_CONTENT_SQL}, '')
+        || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
     );
 END;
 """

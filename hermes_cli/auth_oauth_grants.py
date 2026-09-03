@@ -376,6 +376,9 @@ class _HealPass:
     def heal_profile_singleton(self, profile_singleton: Optional[Path]) -> None:
         if profile_singleton is None or not profile_singleton.exists():
             return
+        from hermes_cli.auth import _is_same_auth_store
+        if self.root_singleton is not None and _is_same_auth_store(profile_singleton, self.root_singleton):
+            return  # an aliased singleton pair is one shared grant, not a fork: never self-compare/unlink
         p_single = _singleton_as_row(profile_singleton)
         root_has_grant = bool(self.r_oauth) or self.root_singleton_row is not None
         # Otherwise root has NO grant for this provider (or the file is not a grant): the
@@ -444,7 +447,8 @@ class _HealPass:
 def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, Any]]:
     from hermes_cli.auth import (
         _auth_file_path, _auth_store_lock, _global_auth_file_path, _load_auth_store,
-        _oauth_heal_clean_marks, _oauth_heal_notices, _same_path, _save_auth_store)
+        _is_same_auth_store, _oauth_heal_clean_marks, _oauth_heal_notices, _same_path,
+        _save_auth_store)
     root_path = _global_auth_file_path()
     if root_path is None:
         return None  # classic mode: nothing to consolidate into
@@ -468,6 +472,14 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
         return None
     if fingerprint[1] is None and fingerprint[2] is None:
         _oauth_heal_clean_marks[provider_id] = fingerprint
+        return None
+    if _is_same_auth_store(profile_path, root_path):
+        # The profile's auth.json IS the root store (symlink/hardlink alias — a deliberate way to
+        # share one grant). Both "sides" would read the same file, every OAuth row would match
+        # itself, and the strip would write through the alias and delete the shared credential.
+        # Nothing to consolidate; the mtime mark keeps this off the per-call hot path.
+        _oauth_heal_clean_marks[provider_id] = fingerprint
+        logger.debug("%s: forked-OAuth heal skipped, %s is the root store", provider_id, profile_path)
         return None
 
     # Lock order: active (profile) store first, then the root source store — the same order

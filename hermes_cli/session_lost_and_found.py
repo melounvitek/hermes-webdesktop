@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import sqlite3
@@ -16,6 +17,8 @@ from hermes_cli.session_recovery import (
     _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _count_rows, _immediate_transaction,
     _placeholder_titles, _quoted_columns, _table_columns,
 )
+
+logger = logging.getLogger(__name__)
 
 # Hermes session ids are timestamps (20260812_135332_ab12cd): the strongest sentinel for schema-less rows.
 SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_")
@@ -36,6 +39,12 @@ SESSION_MODEL_USAGE_NFIELD = 18
 # Plausible unix-epoch window for started_at heuristics on legacy layouts.
 _EPOCH_LOW = 1_000_000_000.0   # 2001
 _EPOCH_HIGH = 4_000_000_000.0  # 2096
+
+# Title label/prefix of every session row this lane synthesises (legacy-layout rows and stubbed parents).
+# The recovery verifier keys on the prefix to tell synthesised rows from positionally mapped ones.
+_STUB_TITLE_LABEL = "best-effort recovered"
+STUB_TITLE_PREFIX = f"[{_STUB_TITLE_LABEL}"
+
 SQLITE3_CLI_GUIDANCE = (
     "A last-resort page-level salvage is available when a `.recover`-capable `sqlite3` command-line shell is "
     "installed: its `.recover` command can rebuild rows into lost_and_found tables even when the table schemas are "
@@ -45,16 +54,94 @@ SQLITE3_CLI_GUIDANCE = (
     "re-run with --allow-partial."
 )
 
+# SQLite's WAL-reset bug (https://sqlite.org/wal.html#walresetbug) lets a
+# fresh opener unlink a live WAL/SHM sidecar pair and split the database into
+# two concurrent generations whose acknowledged writes can silently vanish.
+# It is real in CLI builds up to 3.51.2; fixed in 3.51.3+ with backports
+# 3.50.7 and 3.44.6 — the same version gate hermes_state applies to the
+# embedded library (#69784). The system `sqlite3` CLI on Debian/Ubuntu is
+# routinely in the vulnerable band (e.g. 3.45.1), and #100368's forensics
+# caught exactly this shell converting a live Hermes state.db into two
+# generations. A salvage shell must therefore be version-gated, not just
+# capability-gated, before it is pointed at (a copy of) a Hermes database.
+#
+# The predicate lives in hermes_cli.sqlite_runtime (stdlib-only, shared with
+# the installer/update gates) so the embedded runtime and the salvage shell
+# can never disagree about which versions are safe.
+from hermes_cli.sqlite_runtime import is_sqlite_wal_reset_vulnerable as _wal_reset_vulnerable  # noqa: E502
+
+_WAL_RESET_VULNERABLE_GUIDANCE = (
+    "salvage against a Hermes database with the WAL-reset bug "
+    "(https://sqlite.org/wal.html#walresetbug, fixed in 3.51.3+ / backports "
+    "3.50.7 / 3.44.6; the vulnerable fresh-opener can unlink a live WAL/SHM "
+    "pair and split the database into two generations, losing acknowledged "
+    "writes — #100368). Install a fixed sqlite3 CLI (3.51.3+, e.g. `brew "
+    "install sqlite` or the precompiled sqlite-tools from sqlite.org)"
+)
+
 
 class LostAndFoundError(RuntimeError):
     """Raised when the CLI .recover pass cannot produce a usable database."""
 
 
+def _parse_sqlite3_cli_version(binary: str) -> Optional[tuple[int, int, int]]:
+    """Version of the sqlite3 CLI at *binary* via ``--version``, or None when it cannot run or be parsed."""
+    try:
+        probe = subprocess.run([binary, "--version"], capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if probe.returncode != 0:
+        return None
+    match = re.search(rb"(\d+)\.(\d+)\.(\d+)", probe.stdout)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+_last_cli_refusal: dict[str, Any] = {}
+
+
+def find_sqlite3_cli_refusal() -> dict[str, Any]:
+    """Why the last :func:`find_sqlite3_cli` call in this process refused: ``{"reason": ...}`` with reason in
+    ``missing``, ``no_dbpage`` (shell cannot run ``.recover``), ``wal_reset_vulnerable``; empty if it succeeded."""
+    return dict(_last_cli_refusal)
+
+
 def find_sqlite3_cli() -> Optional[str]:
-    """A ``.recover``-capable sqlite3 CLI path, or None. PATH presence is not enough: distro builds can
-    lack the ``sqlite_dbpage`` virtual table ``.recover`` needs, so probe on a scratch DB once."""
+    """A salvage-safe ``.recover``-capable sqlite3 CLI path, or None.
+
+    PATH presence is not enough, and neither is ``.recover`` support alone: (1) distro builds can lack the
+    ``sqlite_dbpage`` virtual table ``.recover`` needs — probed once on a scratch DB; (2) a capable CLI can still
+    carry the WAL-reset opener bug (fixed 3.51.3+ / backports 3.50.7 / 3.44.6). The salvage lane only runs it on a
+    snapshot copy, but refusing it keeps vulnerable shells out of the documented workflow. Refusals are recorded
+    for :func:`find_sqlite3_cli_refusal` so callers can say exactly what to install.
+    """
+    global _last_cli_refusal
+    _last_cli_refusal = {}
     binary = shutil.which("sqlite3")
-    return binary if binary is not None and _cli_supports_recover(binary) else None
+    if binary is None:
+        _last_cli_refusal = {"reason": "missing"}
+        return None
+    if not _cli_supports_recover(binary):
+        _last_cli_refusal = {"reason": "no_dbpage", "binary": binary}
+        return None
+    version = _parse_sqlite3_cli_version(binary)
+    if version is not None and _wal_reset_vulnerable(version):
+        version_str = ".".join(str(part) for part in version)
+        logger.warning(
+            "sqlite3 CLI %s reports version %s, which still carries the "
+            "WAL-reset opener bug; refusing to use it for salvage",
+            binary,
+            version_str,
+        )
+        _last_cli_refusal = {
+            "reason": "wal_reset_vulnerable",
+            "binary": binary,
+            "version": version_str,
+            "detail": f"reports version {version_str}, which has " + _WAL_RESET_VULNERABLE_GUIDANCE,
+        }
+        return None
+    return binary
 
 
 def _cli_supports_recover(binary: str) -> bool:
@@ -280,7 +367,7 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                         row_values = (
                             cells[0], cells[1] if _looks_like_source(cells[1]) else "recovered",
                             _heuristic_started_at(cells),
-                            "[best-effort recovered] legacy session row (layout unknown)",
+                            f"{STUB_TITLE_PREFIX}] legacy session row (layout unknown)",
                         )
                         inserted = dest.execute(
                             "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
@@ -322,7 +409,7 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
             "EXISTS (SELECT 1 FROM sessions WHERE sessions.id = u.session_id)"
         ):
             orphan_ids.setdefault(str(session_id), {"started_at": 0.0, "message_count": 0})
-        titles = _placeholder_titles(dest, "best-effort recovered")
+        titles = _placeholder_titles(dest, _STUB_TITLE_LABEL)
         for session_id, info in sorted(orphan_ids.items()):
             title = next(titles)
             dest.execute(

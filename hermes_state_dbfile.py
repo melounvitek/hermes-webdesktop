@@ -378,23 +378,3 @@ def _concrete_state_db_holder_pids(db_path: Path, holders: List[Tuple[int, str]]
     watched = {canonical_db, canonical_db + "-wal", canonical_db + "-shm"}
     return list(dict.fromkeys(
         pid for pid, path in holders if pid > 0 and _canonical_sqlite_path(path) in watched))
-
-
-def _read_proc_cmdline(pid: int) -> Optional[str]:
-    """Space-joined /proc/<pid>/cmdline (readable even when the fd table is not); None if unreadable."""
-    try:
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            raw = f.read()
-        return raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip() if raw else None
-    except OSError:
-        return None
-
-
-_HERMES_CMDLINE_MARKERS = ("hermes_cli.main", "hermes_cli/main", "hermes serve",
-                           "hermes-agent", "hermes gateway", "hermes chat")
-
-
-def _looks_like_hermes(cmdline: str) -> bool:
-    """Heuristic: is this a Hermes process?  Decides whether an uninspectable process (fd
-    table unreadable, other user) counts as a potential state.db holder; daemons are not."""
-    return any(marker in cmdline.lower() for marker in _HERMES_CMDLINE_MARKERS)

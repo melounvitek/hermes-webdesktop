@@ -114,7 +114,11 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "minimax-oauth": "minimax", "minimax-cn": "minimax-cn", "deepseek": "deepseek",
     "alibaba": "alibaba", "qwen-oauth": "alibaba", "copilot": "github-copilot",
     "ai-gateway": "vercel", "opencode-zen": "opencode",
-    "opencode-go": "opencode-go", "kilocode": "kilo", "fireworks": "fireworks-ai",
+    "opencode-go": "opencode-go",
+    # opencode-free is Zen-hosted (hermes_cli/models.py) and models.dev's "opencode" catalog lists
+    # its *-contributor-free SKUs; without this alias every opencode-free lookup missed models.dev.
+    "opencode-free": "opencode",
+    "kilocode": "kilo", "fireworks": "fireworks-ai",
     "huggingface": "huggingface", "gemini": "google", "google": "google",
     "xai": "xai",
     "xai-oauth": "xai",  # OAuth is a transport path for the same xAI catalog

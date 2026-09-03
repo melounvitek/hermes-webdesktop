@@ -197,6 +197,9 @@ def _kill_orphaned_mcp_children(include_active: bool = False, server_name: Optio
         if _pid_exists(pid):  # survived SIGTERM
             _signal_mcp_process(pid, sigkill, owner, pgids.get(pid), my_pgid)
             logger.warning("Force-killed MCP process %d (%s) after SIGTERM timeout", pid, owner)
+    # These groups are reaped. Release them last, so a crash partway through the SIGTERM/SIGKILL
+    # dance still leaves the supervisor holding them.
+    _core._update_death_supervisor("unregister", pgids.values())
 
 
 def _stop_mcp_loop_if_idle() -> bool:

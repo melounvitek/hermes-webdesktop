@@ -33,7 +33,8 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
         "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash-0731",
         "qwen/qwen3.8-max", "qwen/qwen3.8-flash", "moonshotai/kimi-k3", "minimax/minimax-m3", "z-ai/glm-5.3",
         "z-ai/glm-5.3-flash", "z-ai/glm-5.2", "xiaomi/mimo-v2.5-pro", "tencent/hy4-preview", "tencent/hy3",
-        "stepfun/step-3.7-flash", "nvidia/nemotron-3-super-120b-a12b", "meta/muse-spark-1.2", "sakana/fugu-ultra",
+        "stepfun/step-3.7-flash", "nvidia/nemotron-3-super-120b-a12b", "meta/muse-spark-1.2",
+        "meta/muse-spark-1.2-contributor", "meta/muse-spark-1.3", "meta/muse-spark-1.3-contributor", "sakana/fugu-ultra",
         "openrouter/pareto-code", "thinkingmachines/inkling:free", "thinkingmachines/inkling-small:free",
         "minimax/minimax-m3:free", "z-ai/glm-5.2:free", "poolside/laguna-s-2.1:free", "poolside/laguna-xs-2.1:free",
         "nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -43,7 +44,8 @@ OPENROUTER_MODELS: list[tuple[str, str]] = [
 
 # OpenRouter entries the Nous Portal does not carry (routing/fast variants, free tier).
 _OPENROUTER_ONLY = {
-    "anthropic/claude-opus-5-fast", "anthropic/claude-opus-4.8-fast", "meta/muse-spark-1.2", "openrouter/pareto-code",
+    "anthropic/claude-opus-5-fast", "anthropic/claude-opus-4.8-fast", "meta/muse-spark-1.2",
+    "meta/muse-spark-1.2-contributor", "meta/muse-spark-1.3", "meta/muse-spark-1.3-contributor", "openrouter/pareto-code",
 }
 
 
@@ -221,7 +223,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "kimi-k2.7-code", "deepseek-v4-pro",
         "deepseek-v4-flash", "deepseek-v4-flash-free", "qwen3.6-plus", "qwen3.5-plus", "big-pickle", "mimo-v2.5-free",
         "hy3-free", "laguna-s-2.1-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free",
-        "muse-spark-1.2-contributor-free",
+        "muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free",
     ],
     # OpenCode keyless free tier — OFFLINE FLOOR only. provider_model_ids("opencode-free")
     # revalidates live against GET /zen/v1/models and filters to the anonymous tier, so this list
@@ -230,6 +232,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "opencode-free": [
         "deepseek-v4-flash-free", "hy3-free", "mimo-v2.5-free", "laguna-s-2.1-free",
         "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "muse-spark-1.2-contributor-free",
+        "muse-spark-1.3-contributor-free",
     ],
     # Synced against opencode.ai/docs/go + live GET /zen/go/v1/models. "ox-alpha-free" is the
     # Go-subscription twin of Zen's keyless Ox Alpha (NOT keyless — the Go relay requires a Go key).
@@ -238,7 +241,8 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
         "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro",
         "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro",
         "deepseek-v4-flash", "qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
-        "qwen3.5-plus", "hy3", "hy3-preview", "muse-spark-1.2-contributor", "ox-alpha-free",
+        "qwen3.5-plus", "hy3", "hy3-preview", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor",
+        "ox-alpha-free",
     ],
     "kilocode": [
         "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4",
@@ -512,7 +516,7 @@ _BORROWED_MODEL_PROVIDERS: frozenset[str] = frozenset()
 # entries lead, curated-only append). Every OTHER provider keeps curated-first so a deliberately
 # surfaced newest model stays on top when the live API lags. Zen/Go re-expose dozens of vendors
 # and rotate them often, so their stale curated entries must not pollute the top.
-_LIVE_FIRST_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencode-go"})
+_LIVE_FIRST_PICKER_PROVIDERS: frozenset[str] = frozenset({"opencode-zen", "opencode-go", "meta-ai"})
 
 
 # Models supporting OpenAI Priority Processing (service_tier="priority"; see

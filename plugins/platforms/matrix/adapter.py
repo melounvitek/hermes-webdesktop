@@ -2056,17 +2056,21 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.warning("[Matrix] Encrypted media event missing decryption metadata for %s", event_id)
                 return None
             file_bytes = decrypt_attachment(file_bytes, key_value, hash_value, iv_value)
-        from gateway.platforms.base import cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes
+        from gateway.platforms.base import (
+            cache_audio_from_bytes_async,
+            cache_document_from_bytes_async,
+            cache_image_from_bytes_async,
+        )
         if msg_type == MessageType.PHOTO:
             ext_map = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}
-            cached_path = cache_image_from_bytes(file_bytes, ext=ext_map.get(media_type, ".jpg"))
+            cached_path = await cache_image_from_bytes_async(file_bytes, ext=ext_map.get(media_type, ".jpg"))
             logger.info("[Matrix] Cached user image at %s", cached_path)
             return cached_path
         if msg_type in {MessageType.AUDIO, MessageType.VOICE}:
             ext = Path(body or ("voice.ogg" if is_voice_message else "audio.ogg")).suffix or ".ogg"
-            return cache_audio_from_bytes(file_bytes, ext=ext)
+            return await cache_audio_from_bytes_async(file_bytes, ext=ext)
         filename = body or ("video.mp4" if msg_type == MessageType.VIDEO else "document")
-        return cache_document_from_bytes(file_bytes, filename)
+        return await cache_document_from_bytes_async(file_bytes, filename)
 
     async def _on_invite(self, event: Any) -> None:
         """Auto-join rooms when invited, recording DM rooms in m.direct."""

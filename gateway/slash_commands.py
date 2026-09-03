@@ -22,13 +22,13 @@ from typing import Optional, Union
 from agent.i18n import t
 from gateway.config import HomeChannel, Platform, PlatformConfig, persist_home_channel
 from gateway.platforms.base import EphemeralReply, MessageEvent
-from gateway.session import AsyncSessionStore
+from gateway.session import AsyncSessionStore, TranscriptReadError
 from gateway.slash_commands_goals import GatewayGoalCommandsMixin
 from gateway.slash_commands_model import (  # noqa: F401 — _model_switch_skew_guard re-exported for tests
     GatewayModelCommandsMixin,
     _model_switch_skew_guard)
 from gateway.slash_commands_session import GatewaySessionCommandsMixin
-from gateway.slash_commands_status import GatewayStatusCommandsMixin
+from gateway.slash_commands_status import HISTORY_UNREADABLE, GatewayStatusCommandsMixin  # noqa: F401 — re-exported
 from hermes_cli.config import atomic_config_write, cfg_get
 from utils import atomic_json_write, is_truthy_value
 
@@ -768,7 +768,10 @@ class GatewaySlashCommandsMixin(
             return t("gateway.btw.usage")
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
-        history = await self.async_session_store.load_transcript(session_entry.session_id)
+        try:
+            history = await self.async_session_store.load_transcript(session_entry.session_id)
+        except TranscriptReadError:
+            return HISTORY_UNREADABLE
         if not history:
             return t("gateway.btw.no_history")
         try:

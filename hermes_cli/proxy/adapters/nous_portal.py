@@ -59,19 +59,22 @@ class NousPortalAdapter(UpstreamAdapter):
     def get_retry_credential(
         self, *, failed_credential: UpstreamCredential, status_code: int
     ) -> Optional[UpstreamCredential]:
-        _ = failed_credential
         if status_code != 401:
             return None
         logger.info("proxy: Nous upstream rejected bearer; force-refreshing invoke JWT")
-        return self._get_credential(force_refresh=True)
+        return self._get_credential(force_refresh=True, stale_access_token=failed_credential.bearer)
 
-    def _get_credential(self, *, force_refresh: bool = False) -> UpstreamCredential:
+    def _get_credential(
+        self, *, force_refresh: bool = False, stale_access_token: Optional[str] = None
+    ) -> UpstreamCredential:
         with self._lock:
             state = self._read_state()
             if state is None:
                 raise RuntimeError("Not logged into Nous Portal. Run `hermes auth add nous` first.")
             try:
-                refreshed = resolve_nous_runtime_credentials(force_refresh=force_refresh)
+                refreshed = resolve_nous_runtime_credentials(
+                    force_refresh=force_refresh, stale_access_token=stale_access_token or None
+                )
             except Exception as exc:
                 if isinstance(exc, AuthError) and _is_terminal_nous_refresh_error(exc):
                     _quarantine_nous_oauth_state(state, exc, reason="proxy_refresh_failure")

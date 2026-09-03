@@ -8,6 +8,7 @@ import contextvars
 import json
 import logging
 import os
+import queue
 import sys
 import threading
 from collections import OrderedDict
@@ -29,6 +30,51 @@ from tools.threat_patterns import scan_for_threats as _scan_for_threats
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
+
+
+# Default read deadline for context files (SOUL.md, AGENTS.md, .cursorrules,
+# ...); overridable via ``context_file_read_timeout`` in config.yaml.
+# Intentionally short: network-backed filesystems (iCloud Drive, OneDrive,
+# NFS) can fault-in an evicted file and block a cold read indefinitely, which
+# stalls system-prompt assembly before the first turn.
+_CONTEXT_FILE_READ_TIMEOUT_SECS = 5.0
+
+
+def _get_context_file_read_timeout() -> float:
+    """``context_file_read_timeout`` from config.yaml, else the 5s default."""
+    val = _config_readonly("context_file_read_timeout").get("context_file_read_timeout")
+    if isinstance(val, (int, float)) and val > 0:
+        return float(val)
+    return _CONTEXT_FILE_READ_TIMEOUT_SECS
+
+
+def _read_text_with_timeout(path: Path, timeout: Optional[float] = None) -> Optional[str]:
+    """``path.read_text()`` on a daemon thread so a slow file can't stall startup.
+
+    Returns the text, or ``None`` after *timeout* seconds (logged at WARNING;
+    the orphaned reader thread finishes on its own). Read errors propagate to
+    the caller exactly as a direct ``read_text`` would, so existing
+    ``try/except`` handling at each site is unchanged.
+    """
+    if timeout is None:
+        timeout = _get_context_file_read_timeout()
+    result: "queue.Queue[tuple[bool, object]]" = queue.Queue(maxsize=1)
+
+    def _reader() -> None:
+        try:
+            result.put((True, path.read_text(encoding="utf-8")))
+        except Exception as exc:  # re-raised on the caller thread
+            result.put((False, exc))
+
+    threading.Thread(target=_reader, daemon=True, name=f"context-read:{path.name}").start()
+    try:
+        ok, value = result.get(timeout=timeout)
+    except queue.Empty:
+        logger.warning("Context file %s read timed out after %.1fs; skipping", path, timeout)
+        return None
+    if ok:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]
 
 
 def _scan_context_content(content: str, filename: str) -> str:
@@ -245,14 +291,17 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "user. Responses that only describe intentions without acting are not acceptable."
 )
 
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek")
+# "muse" = Meta Muse Spark: on defaults it answers in prose with 0 tool calls and the turn closes on
+# finish_reason=stop (#96550).
+TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm", "qwen", "deepseek", "muse")
 
 # Models that receive OPENAI_MODEL_EXECUTION_GUIDANCE when agent.execution_guidance is "auto" (agentic-eval
-# traces showed the same failure modes). Gemini/Gemma get GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead; Claude
-# does not exhibit these modes. Any model can opt in via config.yaml (`true` or a substring list).
+# traces showed the same failure modes; Muse Spark stops after a chat-only turn on defaults). Gemini/Gemma get
+# GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead; Claude does not exhibit these modes. Any model can opt in via
+# config.yaml (`true` or a substring list).
 EXECUTION_GUIDANCE_MODELS = (
     "gpt", "codex", "grok",
-    "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral",
+    "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral", "muse",
 )
 
 # Universal "finish the job" guidance (ALL models): don't stop after a stub, never
@@ -734,17 +783,30 @@ _BACKEND_PROBE_CMD = (
 
 def _run_backend_probe(env_type: str, terminal_tool) -> str:
     """Execute the probe command inside a freshly built backend; "" when it yields nothing."""
+    from tools.terminal_tool_backends import _ssh_config_from_config
+
     config = terminal_tool._get_env_config()
     # Mirrors tools/terminal_tool.py's live-command assembly (`_create_environment` is the factory).
     env = terminal_tool._create_environment(
         env_type=env_type, image=config.get(_BACKEND_IMAGE_KEYS[env_type], "") if env_type in _BACKEND_IMAGE_KEYS else "", cwd=config.get("cwd", ""),
         timeout=config.get("timeout", 180),
-        ssh_config=terminal_tool._ssh_config_from_config(config) if env_type == "ssh" else None,
+        ssh_config=_ssh_config_from_config(config) if env_type == "ssh" else None,
         container_config=({k: config.get(k, d) for k, d in _CONTAINER_CONFIG_DEFAULTS}
                           if terminal_tool._is_container_backend(env_type) else None),
         task_id="prompt-backend-probe", host_cwd=config.get("host_cwd"),
     )
-    result = env.execute(_BACKEND_PROBE_CMD, timeout=4)
+    try:
+        result = env.execute(_BACKEND_PROBE_CMD, timeout=4)
+    finally:
+        # One-shot `uname`; without teardown the backend leaves a second idle sandbox
+        # (task_id="prompt-backend-probe") running for the whole process next to the agent's own.
+        # ssh is left alone: no task-scoped sandbox, and its cleanup() closes a ControlMaster socket
+        # (keyed by user@host:port) shared with the agent's real environment; ControlPersist expires it.
+        if env_type != "ssh":
+            try:
+                terminal_tool._cleanup_env(env, force_remove=True)
+            except Exception:
+                logger.debug("Backend probe cleanup failed", exc_info=True)
     if result.get("returncode") != 0:
         logger.debug("Backend probe returned non-zero: %r", result)
         return ""
@@ -779,6 +841,11 @@ def _probe_remote_backend(env_type: str) -> str | None:
                 logger.debug("Backend probe failed: %s", e)
         _BACKEND_PROBE_CACHE[cache_key] = formatted
     return formatted or None
+
+
+def _clear_backend_probe_cache() -> None:
+    """Test helper — drop the backend probe cache so monkeypatched backends take effect."""
+    _BACKEND_PROBE_CACHE.clear()
 
 
 def _local_host_hints() -> list[str]:
@@ -1295,7 +1362,7 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
     if not soul_path.exists():
         return None
     try:
-        content = soul_path.read_text(encoding="utf-8").strip()
+        content = (_read_text_with_timeout(soul_path) or "").strip()
         if not content:
             return None
         return _truncate_content(_scan_context_content(content, "SOUL.md"), "SOUL.md", context_length=context_length,
@@ -1310,7 +1377,7 @@ def _read_context_file(path: Path) -> str:
     if not path.exists():
         return ""
     try:
-        return path.read_text(encoding="utf-8").strip()
+        return (_read_text_with_timeout(path) or "").strip()
     except Exception as e:
         logger.debug("Could not read %s: %s", path, e)
         return ""

@@ -182,10 +182,7 @@ def _reclaim_orphaned_leases() -> None:
     """Hand the registry the lease ids we still own so it can drop the rest."""
     try:
         from hermes_cli.active_sessions import release_orphaned_leases
-        with _sessions_lock:
-            live = {lease.lease_id for session in _sessions.values()
-                    if (lease := session.get("active_session_lease")) is not None}
-        if dropped := release_orphaned_leases(live):
+        if dropped := release_orphaned_leases(_own_live_lease_ids()):
             logger.info("Reclaimed %d orphaned active-session lease(s)", dropped)
     except Exception:
         logger.debug("orphaned lease reclaim failed", exc_info=True)

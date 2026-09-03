@@ -283,18 +283,26 @@ def _should_run_preflight_estimate(
 
 def _should_idle_compact(
     *, enabled: bool, idle_after_seconds: int, idle_gap_seconds: float, tokens: int,
-    floor_tokens: int, cooldown_active: bool,
+    floor_tokens: int, cooldown_active: bool, last_compaction_tokens: int = 0,
 ) -> bool:
     """Pure predicate: idle compaction fires after a wall-clock gap of
     ``idle_after_seconds`` (opt-in, <= 0 disables), independent of ``threshold_tokens``;
-    never at/below ``floor_tokens`` or during a compression-failure cooldown."""
-    return bool(
-        enabled
-        and idle_after_seconds > 0
-        and idle_gap_seconds >= idle_after_seconds
-        and not cooldown_active
-        and tokens > floor_tokens
-    )
+    never at/below ``floor_tokens`` or during a compression-failure cooldown.
+
+    ``floor_tokens`` (``threshold_tokens × summary_target_ratio``) is a theoretical target a
+    real pass routinely misses (system prompt, tool schemas and protected head/tail are
+    incompressible), so a session compacted to above it would re-summarise on every idle
+    resume without growing. ``last_compaction_tokens`` — what the previous pass actually
+    produced (``ContextCompressor.last_compression_rough_tokens``, same rough shape as
+    ``tokens``) — raises the floor to ``last + floor_tokens`` so the transcript must gain a
+    floor's worth of NEW content first. ``0`` (nothing compacted yet / counter reset) keeps
+    the original semantics exactly."""
+    if not enabled or idle_after_seconds <= 0 or idle_gap_seconds < idle_after_seconds or cooldown_active:
+        return False
+    effective_floor = floor_tokens
+    if last_compaction_tokens > 0:
+        effective_floor = max(effective_floor, last_compaction_tokens + floor_tokens)
+    return tokens > effective_floor
 
 
 @dataclass

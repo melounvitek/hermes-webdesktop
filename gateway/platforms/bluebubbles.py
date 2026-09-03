@@ -20,7 +20,7 @@ from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import (
     BasePlatformAdapter, MessageEvent, MessageType, SendResult,
-    cache_image_from_bytes, cache_audio_from_bytes, cache_document_from_bytes)
+    cache_image_from_bytes_async, cache_audio_from_bytes_async, cache_document_from_bytes_async)
 from .media_cache import ext_for_mime
 from gateway.platforms.helpers import compile_mention_patterns, strip_markdown
 from utils import TRUTHY_STRINGS
@@ -471,11 +471,11 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             data = resp.content
             mime = (att_meta.get("mimeType") or "").lower()
             if mime.startswith("image/"):
-                return cache_image_from_bytes(data, _closed_ext(mime, _BLUEBUBBLES_IMAGE_EXT_OVERRIDES, ".jpg"))
+                return await cache_image_from_bytes_async(data, _closed_ext(mime, _BLUEBUBBLES_IMAGE_EXT_OVERRIDES, ".jpg"))
             if mime.startswith("audio/"):
-                return cache_audio_from_bytes(data, _closed_ext(mime, _BLUEBUBBLES_AUDIO_EXT_OVERRIDES, ".mp3"))
+                return await cache_audio_from_bytes_async(data, _closed_ext(mime, _BLUEBUBBLES_AUDIO_EXT_OVERRIDES, ".mp3"))
             # Videos, documents, and everything else
-            return cache_document_from_bytes(data, att_meta.get("transferName", "") or f"file_{uuid.uuid4().hex[:8]}")
+            return await cache_document_from_bytes_async(data, att_meta.get("transferName", "") or f"file_{uuid.uuid4().hex[:8]}")
         except Exception as exc:
             logger.warning("[bluebubbles] failed to download attachment %s: %s", _redact(att_guid), exc)
             return None

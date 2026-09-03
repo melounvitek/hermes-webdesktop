@@ -452,6 +452,9 @@ DEFAULT_CONFIG = {
     # .cursorrules) before head/tail truncation. null = scale with the model's context window (floor
     # 20K, ceiling 500K); a positive int pins a fixed cap. Separate from read_file limits.
     "context_file_max_chars": None,
+    # Seconds to wait for a single context file read before skipping it with a warning. Guards startup
+    # against network-backed filesystems (iCloud Drive, OneDrive, NFS) that can block a cold read.
+    "context_file_read_timeout": 5.0,
     # Max chars per read_file call; larger reads are rejected with offset+limit guidance. 100K chars
     # ≈ 25–35K tokens.
     "file_read_max_chars": 100_000,
@@ -2105,6 +2108,7 @@ DEFAULT_CONFIG = {
         # cua-driver's upstream PostHog telemetry defaults ON; Hermes sets
         # CUA_DRIVER_RS_TELEMETRY_ENABLED=0 in every child env unless this is true.
         "cua_telemetry": False,
+        "native_wayland": False,
         # Cap driver screenshot longest edge (pixels) via set_config at session start; shrinks SOM
         # multimodal payloads. 0 disables.
         "max_image_dimension": 1456,

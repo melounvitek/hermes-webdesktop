@@ -72,6 +72,9 @@ class ServerDef:
     build_spawn: _SpawnFn
     seed_first_push: bool = False
     description: str = ""
+    # Server handles ``workspace/didChangeWorkspaceFolders``: one process serves every project root
+    # (git worktrees included) as extra workspaceFolders instead of one process per root.
+    multi_root: bool = False
 
     def matches(self, file_path: str) -> bool:
         return _file_ext_or_basename(file_path) in self.extensions
@@ -263,20 +266,21 @@ def _server(server_id: str, extensions: Tuple[str, ...], description: str, *,
             markers: Optional[Sequence[str]] = None, excludes: Sequence[str] = (),
             resolve_root: Optional[_RootFn] = None, build_spawn: Optional[_SpawnFn] = None,
             which: Sequence[str] = (), args: Sequence[str] = (), install_pkg: Optional[str] = None,
-            base_init: Optional[Dict[str, Any]] = None, seed: bool = False) -> ServerDef:
+            base_init: Optional[Dict[str, Any]] = None, seed: bool = False,
+            multi_root: bool = False) -> ServerDef:
     """Registry entry factory: defaults to marker-based root + single-binary spawn."""
     return ServerDef(
         server_id, extensions,
         resolve_root or _markers_root(markers, excludes),
         build_spawn or _simple_spawn(server_id, which or (server_id,), args, install_pkg, base_init, seed),
-        seed_first_push=seed, description=description,
+        seed_first_push=seed, description=description, multi_root=multi_root,
     )
 
 
 SERVERS: List[ServerDef] = [
     _server("pyright", (".py", ".pyi"), "Python — Microsoft pyright",
             markers=["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "Pipfile", "pyrightconfig.json"],
-            build_spawn=_spawn_pyright),
+            build_spawn=_spawn_pyright, multi_root=True),
     _server("typescript", (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"),
             "JavaScript/TypeScript — typescript-language-server", resolve_root=_root_typescript,
             which=("typescript-language-server",), args=("--stdio",), install_pkg="typescript-language-server", seed=True),

@@ -2,8 +2,9 @@
 
 One process at a time may load -> run -> flush a session shared through state.db (Desktop, CLI
 resume, gateway, background delivery). ``admit_durable_turn_lease`` acquires the row lease (or
-returns the early result the façade must hand back); ``DurableTurnLease`` owns the refresher
-daemon thread, the turn-liveness watchdog wiring, and the lease-loss / stall interrupt plumbing.
+returns the early result the façade must hand back); ``DurableTurnLease`` owns the periodic
+refresher, the turn-liveness watchdog wiring, and the lease-loss / stall interrupt plumbing. Both
+timers run on the shared scheduler thread (``agent/periodic_scheduler.py``), not per-turn threads.
 """
 import logging
 import os
@@ -20,7 +21,7 @@ LEASE_WAIT_SECONDS = 1800.0
 
 
 class DurableTurnLease:
-    """An admitted session turn lease plus the threads that keep it alive and watch the turn.
+    """An admitted session turn lease plus the periodic timers that keep it alive and watch the turn.
 
     ``stop`` is shared by the refresher and the liveness watchdog; ``turn_active`` gates every
     interrupt so a late refresher miss can never hard-interrupt the NEXT turn. Both are read and
@@ -37,18 +38,15 @@ class DurableTurnLease:
         self._lock = threading.Lock()
         self.turn_active = False
         self.interrupt_message: Optional[str] = None
-        self.refresh_thread: Optional[threading.Thread] = None
-        self.liveness_thread: Optional[threading.Thread] = None
+        self.watchdog = None  # TurnLivenessWatchdog when configured
+        self.timer_handles: list = []  # periodic_scheduler handles, cancelled in join_threads
 
     def _current_session_id(self) -> str:
         return getattr(self.agent, "session_id", None) or self.session_id
 
     def build_threads(self) -> None:
-        """Create (not start) the refresher thread and, when configured, the liveness watchdog:
-        lease renewal is NOT evidence of progress; a silently stalled turn would renew forever."""
-        self.refresh_thread = threading.Thread(
-            target=self.refresh_loop, name="session-turn-lease-refresh", daemon=True
-        )
+        """Create (not schedule) the liveness watchdog when configured: lease renewal is NOT
+        evidence of progress; a silently stalled turn would renew forever."""
         try:
             from hermes_cli.config import load_config_readonly
 
@@ -59,13 +57,13 @@ class DurableTurnLease:
 
         timeout_s, poll_s = turn_liveness.resolve_turn_liveness_settings(liveness_config)
         if timeout_s is not None:
-            self.liveness_thread = turn_liveness.TurnLivenessWatchdog(
+            self.watchdog = turn_liveness.TurnLivenessWatchdog(
                 self.agent, session_id=self._current_session_id(), timeout_s=timeout_s,
                 poll_s=poll_s, stop_event=self.stop,
                 activity_lock=self.agent._liveness_activity_lock(),
                 is_turn_active=self.is_turn_active, commit_abort=self.commit_liveness_abort,
                 deactivate_turn=self.stop_refresher,
-            ).make_thread()
+            )
 
     def start(self) -> None:
         with self._lock:
@@ -73,9 +71,11 @@ class DurableTurnLease:
         # Stamp the activity clock at turn entry: `_last_activity_ts` persists across turns, so
         # without this the watchdog would measure idle from the PREVIOUS turn and abort a fresh one.
         self.agent._touch_activity("starting new turn")
-        self.refresh_thread.start()
-        if self.liveness_thread is not None:
-            self.liveness_thread.start()
+        from agent.periodic_scheduler import schedule
+
+        self.timer_handles.append(schedule(self.refresh_tick, self.refresh_interval))
+        if self.watchdog is not None:
+            self.timer_handles.append(self.watchdog.schedule())
 
     def stop_refresher(self) -> None:
         """Stop renewal and deactivate the turn. Also the watchdog's deactivate callback: a wedge the
@@ -88,9 +88,10 @@ class DurableTurnLease:
     deactivate_after_liveness_abort = stop_refresher
 
     def join_threads(self, timeout: float = 1.0) -> None:
-        for thread in (self.refresh_thread, self.liveness_thread):
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=timeout)
+        """Cancel both timers; ``wait=timeout`` mirrors the old ``thread.join(timeout)`` so an
+        in-flight tick finishes before ``clear_interrupt`` runs."""
+        for handle in self.timer_handles:
+            handle.cancel(wait=timeout)
 
     def release(self) -> None:
         """Release the row and drop the agent's holder attrs (only if they still name this lease)."""
@@ -171,34 +172,36 @@ class DurableTurnLease:
             if agent._execution_thread_id is not None:
                 _set_interrupt(False, agent._execution_thread_id)
 
-    def refresh_loop(self) -> None:
-        """Renew the lease every ``refresh_interval``; a miss or error interrupts the turn.
+    def refresh_tick(self):
+        """One periodic renewal (every ``refresh_interval`` on the shared scheduler); a miss or
+        error interrupts the turn. Returning False stops the timer.
 
         The holder-qualified UPDATE fences a late refresher from a successor lease. The façade's
         finally sets ``stop`` before releasing, so a holder-fenced miss observed after stop is not
         a loss."""
-        while not self.stop.wait(self.refresh_interval):
-            try:
-                if self.db.refresh_session_turn_lease(
-                    self._current_session_id(), self.holder, ttl_seconds=LEASE_TTL_SECONDS
-                ):
-                    continue
-                if self.stop.is_set():
-                    return
-                logger.error(
-                    "Lost session turn lease while turn is active: %s", self._current_session_id()
-                )
-                self._interrupt_turn("Session turn lease lost; stopping to protect the transcript.")
-            except Exception:
-                if self.stop.is_set():
-                    return
-                logger.warning(
-                    "Failed to refresh session turn lease: %s", self._current_session_id(), exc_info=True,
-                )
-                self._interrupt_turn(
-                    "Session turn lease could not be refreshed; stopping to protect the transcript."
-                )
-            return
+        if self.stop.is_set():
+            return False
+        try:
+            if self.db.refresh_session_turn_lease(
+                self._current_session_id(), self.holder, ttl_seconds=LEASE_TTL_SECONDS
+            ):
+                return None
+            if self.stop.is_set():
+                return False
+            logger.error(
+                "Lost session turn lease while turn is active: %s", self._current_session_id()
+            )
+            self._interrupt_turn("Session turn lease lost; stopping to protect the transcript.")
+        except Exception:
+            if self.stop.is_set():
+                return False
+            logger.warning(
+                "Failed to refresh session turn lease: %s", self._current_session_id(), exc_info=True,
+            )
+            self._interrupt_turn(
+                "Session turn lease could not be refreshed; stopping to protect the transcript."
+            )
+        return False
 
 
 @dataclass

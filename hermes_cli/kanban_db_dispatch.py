@@ -2105,6 +2105,30 @@ def _open_worker_log(task: Task, board: Optional[str]):
     return open(log_path, "ab")
 
 
+def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
+    """Wrap a managed-gateway worker in the shared restart-safe scope."""
+    from tools.process_registry import restart_safe_gateway_child_argv
+
+    if task.current_run_id is None:
+        # Outside managed systemd this is harmless, but a managed dispatch must
+        # never mint an untraceable scope.  Check topology through the shared
+        # helper first, using a placeholder suffix that cannot be launched.
+        scoped = restart_safe_gateway_child_argv(
+            command, unit_suffix=f"kanban-{task.id}-run-missing"
+        )
+        if scoped is not command:
+            raise RuntimeError(
+                "cannot create restart-safe systemd scope for Kanban worker: "
+                "the claimed task has no current run id"
+            )
+        return command
+
+    return restart_safe_gateway_child_argv(
+        command,
+        unit_suffix=f"kanban-{task.id}-run-{task.current_run_id}",
+    )
+
+
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -2121,7 +2145,13 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
 
     profile_arg = normalize_profile_name(task.assignee)
 
-    env = dict(os.environ)
+    from agent.secret_scope import is_multiplex_active
+    from tools.environments.local import build_subprocess_env
+
+    env = build_subprocess_env(
+        scrub_secrets=is_multiplex_active(),
+        inherit_profile_home=True,
+    )
     # The dispatcher is detached from every conversation; its worker must never
     # inherit routing mirrored by a previous gateway turn.
     from gateway.session_context import _VAR_MAP
@@ -2183,6 +2213,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     env.pop("HERMES_TUI", None)
 
     cmd = _worker_argv(task, profile_arg, env.get("HERMES_HOME"))
+    # A worker spawned by a managed systemd gateway must leave the gateway's
+    # cgroup before startup; otherwise restarting the service kills the worker
+    # that is performing the handoff.
+    cmd = _restart_safe_worker_argv(task, cmd)
     log_f = _open_worker_log(task, board)
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above

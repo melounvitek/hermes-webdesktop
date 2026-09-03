@@ -25,8 +25,8 @@ import httpx
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult, cache_image_from_bytes,
-    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_url, utf16_len)
+    BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult, cache_image_from_bytes_async,
+    cache_audio_from_bytes_async, cache_document_from_bytes_async, cache_image_from_url, utf16_len)
 from gateway.platforms.helpers import redact_phone
 from gateway.platforms.media_cache import mime_for_ext
 from tools.audio_container import CONTAINER_TO_EXT, sniff_container
@@ -592,9 +592,9 @@ class SignalAdapter(BasePlatformAdapter):
         # to .m4a. Without ffmpeg the raw file is cached as-is (no downstream remux fallback).
         if ext == ".aac":
             raw_data, ext = (await asyncio.to_thread(_remux_aac_to_m4a, raw_data)) or (raw_data, ext)
-        cache = (cache_image_from_bytes if _is_image_ext(ext)
-                 else cache_audio_from_bytes if _is_audio_ext(ext) else cache_document_from_bytes)
-        return cache(raw_data, ext), ext
+        cache = (cache_image_from_bytes_async if _is_image_ext(ext)
+                 else cache_audio_from_bytes_async if _is_audio_ext(ext) else cache_document_from_bytes_async)
+        return await cache(raw_data, ext), ext
 
     async def _rpc(self, method: str, params: dict, rpc_id: str = None, *, log_failures: bool = True,
                    raise_on_rate_limit: bool = False, timeout: float = 30.0) -> Any:

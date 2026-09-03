@@ -39,7 +39,7 @@ from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome,
     SendResult, SUPPORTED_DOCUMENT_TYPES, SUPPORTED_VIDEO_TYPES, _TEXT_INJECT_EXTENSIONS,
     is_host_excluded_by_no_proxy, resolve_proxy_url, safe_url_for_log, _ssrf_redirect_guard,
-    cache_document_from_bytes, cache_video_from_bytes)
+    cache_document_from_bytes_async, cache_video_from_bytes_async)
 
 try:  # sibling module; support both package and flat plugin-dir import
     from .block_kit import render_blocks, sanitize_blocks
@@ -4222,7 +4222,7 @@ class SlackAdapter(BasePlatformAdapter):
                 mime_to_ext = {v: k for k, v in SUPPORTED_VIDEO_TYPES.items()}
                 ext = mime_to_ext.get(mimetype.split(";", 1)[0].lower(), ".mp4")
             raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
-            cached_path = cache_video_from_bytes(raw_bytes, ext=ext)
+            cached_path = await cache_video_from_bytes_async(raw_bytes, ext=ext)
             logger.debug("[Slack] Cached user video: %s", cached_path)
             return cached_path, SUPPORTED_VIDEO_TYPES.get(ext, mimetype or "video/mp4"), ""
         return await self._cache_slack_document(f, url, mimetype, team_id)
@@ -4243,7 +4243,7 @@ class SlackAdapter(BasePlatformAdapter):
             logger.warning("[Slack] Document too large or unknown size: %s", file_size)
             return None
         raw_bytes = await self._download_slack_file_bytes(url, team_id=team_id)
-        cached_path = cache_document_from_bytes(
+        cached_path = await cache_document_from_bytes_async(
             raw_bytes, original_filename or f"document{ext or '.bin'}")
         doc_mime = SUPPORTED_DOCUMENT_TYPES.get(ext, mimetype or "application/octet-stream")
         logger.debug("[Slack] Cached user document: %s (%s)", cached_path, doc_mime)
@@ -5276,9 +5276,9 @@ class SlackAdapter(BasePlatformAdapter):
     async def _download_slack_file(
         self, url: str, ext: str, audio: bool = False, team_id: str = "") -> str:
         """Download a Slack image/audio file and cache it; returns the cached path."""
-        from gateway.platforms.base import cache_audio_from_bytes, cache_image_from_bytes
+        from gateway.platforms.base import cache_audio_from_bytes_async, cache_image_from_bytes_async
         data = await self._download_slack_file_bytes(url, team_id=team_id, html_label="media")
-        return (cache_audio_from_bytes if audio else cache_image_from_bytes)(data, ext)
+        return await (cache_audio_from_bytes_async if audio else cache_image_from_bytes_async)(data, ext)
 
     # ── Channel mention gating ─────────────────────────────────────────────
 

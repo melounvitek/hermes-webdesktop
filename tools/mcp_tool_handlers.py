@@ -10,13 +10,14 @@ import json
 import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from tools.registry import tool_error
 from tools.ansi_strip import strip_unicode_tags
 from tools.mcp_tool_common import _exc_str, _sanitize_error, mcp_field, _core
 from tools.mcp_tool_content import (
     _MCP_HARD_RESULT_CAP_CHARS, _cache_mcp_audio_block, _cache_mcp_image_block,
-    _render_mcp_resource_block, _strip_reserved_meta_keys, _truncate_mcp_text_result)
+    _render_mcp_dropped_block_notice, _render_mcp_resource_block, _strip_reserved_meta_keys,
+    _truncate_mcp_text_result)
 from tools.mcp_tool_errors import _is_session_expired_error
 
 logger = logging.getLogger("tools.mcp_tool")
@@ -321,17 +322,23 @@ def _error_result_text(result) -> str:
     return "".join(str(t) for t in texts if t)
 
 
-def _render_content_blocks(result, server_name: str) -> str:
+def _render_content_blocks(result, server_name: str) -> Tuple[str, int]:
     """Text passes through; image/audio blocks are cached (MEDIA: tags); resource blocks are
-    materialized rather than silently dropped."""
+    materialized rather than silently dropped; unsupported blocks become an inline drop notice
+    (kimi-code#3227). Returns ``(text, usable_parts)`` — the count of REAL rendered blocks
+    (whitespace-only text and drop notices excluded) that the structuredContent arbitration uses."""
     parts: List[str] = []
+    usable_parts = 0
     for block in (result.content or []):
         if getattr(block, "text", None):
             parts.append(strip_unicode_tags(block.text))
+            if block.text.strip():
+                usable_parts += 1
             continue
         rendered = _cache_mcp_image_block(block) or _cache_mcp_audio_block(block) or _render_mcp_resource_block(block, server_name)
         if rendered:
             parts.append(rendered)
+            usable_parts += 1
             continue
         # Benign empty renders log at debug; warn only for unknown shapes.
         block_type = getattr(block, "type", None) or type(block).__name__
@@ -339,8 +346,11 @@ def _render_content_blocks(result, server_name: str) -> str:
             logger.debug("MCP %s: content block type %r rendered empty", server_name, block_type)
         else:
             logger.warning("MCP %s: dropping unsupported content block type %r", server_name, block_type)
+            # Surface the drop to the MODEL, not just the log: a silent drop leaves the agent
+            # believing the tool returned less than it did, with no way to recover.
+            parts.append(_render_mcp_dropped_block_notice(block, block_type))
     # Hard-cap pathological payloads; ordinary large results pass to spillover.
-    return _truncate_mcp_text_result("\n".join(parts))
+    return _truncate_mcp_text_result("\n".join(parts)), usable_parts
 
 
 def _capped_structured_content(result):
@@ -355,13 +365,19 @@ def _capped_structured_content(result):
 
 
 def _render_call_tool_result(result, server_name: str) -> str:
-    """Pure: ``CallToolResult`` -> handler JSON. ``content`` is primary; ``structuredContent``
-    supplements it (or becomes ``result`` without text); ``_meta`` minus reserved keys."""
+    """Pure: ``CallToolResult`` -> handler JSON. ``content`` and ``structuredContent`` are
+    ALTERNATIVES, never both forwarded (kimi-code#3234): spec-following servers already render
+    their data into content, so forwarding both sent it twice. content wins whenever it rendered
+    anything usable (no richness heuristic is attempted — none is reliable); structuredContent
+    fills in only when the blocks rendered effectively empty, keeping structuredContent-only
+    servers working. ``_meta`` minus reserved keys is always surfaced."""
     if mcp_field(result, "is_error", "isError", False):
         return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
-    text_result = _render_content_blocks(result, server_name)
+    text_result, usable_parts = _render_content_blocks(result, server_name)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
+    if structured is not None and usable_parts > 0:
+        structured = None  # drop notices do not count as usable content
     if structured is None and meta is None:
         return json.dumps({"result": text_result}, ensure_ascii=False)
     # Key order is part of the output: "result" leads when there is text, otherwise "_meta"

@@ -83,7 +83,7 @@ def test_admission_sets_holder_attrs_and_release_clears_them(monkeypatch):
     assert agent._active_session_turn_lease_holder == lease.holder
     assert agent._active_session_turn_lease_ttl_seconds == LEASE_TTL_SECONDS
     assert lease.holder.startswith("pid=") and ":platform=cli" in lease.holder
-    assert lease.refresh_thread is not None and lease.liveness_thread is None
+    assert lease.watchdog is None and lease.timer_handles == []
     assert lease.is_turn_active() is False
 
     lease.stop_refresher()

@@ -315,8 +315,12 @@ def compress_after_tool_results(
                 return _verdict(True)
     elif agent.compression_enabled:
         # Over threshold but compression blocked (cooldown/anti-thrash): deduped
-        # warning so context can't silently overflow.
-        _block_reason = _blocked_compress_reason(_compressor, _real_tokens)
+        # warning so context can't silently overflow. ``attempts_spent`` names the
+        # attempts_exhausted lockout when the engine says RUN but the per-turn
+        # budget is spent (#101889).
+        _block_reason = _blocked_compress_reason(
+            _compressor, _real_tokens, attempts_spent=compression_attempts
+        )
         if _block_reason:
             agent._warn_context_overflow_blocked(
                 _block_reason, _real_tokens, int(getattr(_compressor, "threshold_tokens", 0) or 0)

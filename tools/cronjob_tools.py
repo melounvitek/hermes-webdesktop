@@ -277,13 +277,23 @@ def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) ->
             _registered = False
             release_running_job(job_id)
         refreshed = get_job(job_id) or {}
+        execution = None
+        execution_id = job.get("execution_id")
+        if execution_id:
+            from cron.executions import get_execution
+
+            execution = get_execution(str(execution_id))
         last_status = refreshed.get("last_status")
         # "delivery_failed": the run succeeded but output never reached the user — not a
         # success for the caller; surface last_delivery_error.
         run_error = refreshed.get("last_error")
         if last_status == "delivery_failed" and not run_error:
             run_error = refreshed.get("last_delivery_error")
-        return {"claimed": True, "success": bool(processed and last_status == "ok"), "error": run_error}
+        ok = last_status == "ok"
+        if execution is not None and execution.get("status") != "completed":
+            ok = False
+            run_error = execution.get("error") or f"execution ended in {execution.get('status') or 'unknown'} state"
+        return {"claimed": True, "success": bool(processed and ok), "error": run_error}
     except Exception as e:
         logger.error("Failed to execute cron job %s immediately: %s", job_id, e)
         if _registered:

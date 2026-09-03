@@ -1539,6 +1539,19 @@ def _deliver_result(
     targets = _sched._resolve_delivery_targets(job, for_failure=for_failure)
     if not targets:
         return _unresolved_delivery_outcome(job, for_failure)
+
+    # Restart-safe workers have no live gateway adapters: hand the send back through a durable
+    # queue so the current or replacement gateway performs it with relay/E2EE parity. The execution
+    # id is the idempotency key (the queue never retries an uncertain claimed send). Match on THIS
+    # job's own attempt: a worker's script may dispatch another job in-process (`hermes cron run`),
+    # and that nested delivery must not be keyed under the outer execution id.
+    external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER", "")
+    if (external_execution and adapters is None
+            and external_execution == str(job.get("execution_id") or "")):
+        from cron.delivery_queue import enqueue_and_wait
+
+        return enqueue_and_wait(external_execution, job, content, for_failure=for_failure)
+
     from gateway.config import load_gateway_config
 
     # Wrap with header/footer unless cron.wrap_response: false.

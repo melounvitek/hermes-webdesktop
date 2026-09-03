@@ -378,7 +378,17 @@ def _rewrite_compound_background(command: str) -> str:
         insert_pos = chain_end
         while insert_pos < amp_pos and result[insert_pos].isspace():
             insert_pos += 1
-        result = result[:insert_pos] + "{ " + result[insert_pos:amp_pos] + "& }" + result[amp_pos + 1 :]
+        # The consumed `&` also separated the compound from any statement that followed
+        # on the same line (`A && B & C`); `{ B & } C` is a syntax error, so restore a `;`
+        # when the suffix resumes with command text. No separator when the suffix already
+        # starts with a terminator (`;` `&` `|` newline `)` `}`) — except `&>`, which is a
+        # redirect prefix for the NEXT command, not a terminator. Strip only spaces/tabs:
+        # a newline already terminates the group.
+        suffix = result[amp_pos + 1 :]
+        tail = suffix.lstrip(" \t")
+        needs_separator = bool(tail) and (tail[0] not in ";\n&|)}" or tail.startswith("&>"))
+        separator = " ;" if needs_separator else ""
+        result = result[:insert_pos] + "{ " + result[insert_pos:amp_pos] + "& }" + separator + suffix
     return result
 
 

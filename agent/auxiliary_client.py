@@ -1322,6 +1322,10 @@ class _CodexCompletionsAdapter:
         timeout = kwargs.get("timeout")
         if timeout is not None:
             resp_kwargs["timeout"] = timeout
+        # Per-request HTTP headers (OpenCode session affinity, Copilot x-initiator) map to real
+        # headers via the SDK kwarg — forward them.
+        if isinstance(kwargs.get("extra_headers"), dict) and kwargs["extra_headers"]:
+            resp_kwargs["extra_headers"] = dict(kwargs["extra_headers"])
         # The Codex endpoint rejects max_output_tokens/temperature (400) — omit.
         extra_body = kwargs.get("extra_body") or {}
         if isinstance(extra_body, dict):
@@ -1573,6 +1577,13 @@ class _AnthropicCompletionsAdapter:
             from agent.anthropic_adapter import _forbids_sampling_params
             if not _forbids_sampling_params(model):
                 anthropic_kwargs["temperature"] = temperature
+        # Per-request HTTP headers (OpenCode session affinity) — the Anthropic SDK accepts
+        # ``extra_headers`` on messages.create/stream too.
+        if isinstance(kwargs.get("extra_headers"), dict) and kwargs["extra_headers"]:
+            anthropic_kwargs["extra_headers"] = {
+                **(anthropic_kwargs.get("extra_headers") or {}),
+                **kwargs["extra_headers"],
+            }
         # response_format: top-level gets the same translation as the extra_body form; when both
         # are present the extra_body form wins. Passthrough excludes ``reasoning``/``response_format``
         # (already TRANSLATED to native fields — raw would 400 on strict gateways) and ``_`` Hermes plumbing.
@@ -1839,15 +1850,21 @@ def _resolve_nous_pool_runtime_api(*, force_refresh: bool = False) -> Optional[t
     return api_key, base_url
 
 
-def _resolve_nous_runtime_api(*, force_refresh: bool = False) -> Optional[tuple[str, str]]:
-    """Fresh Nous runtime credentials (pool first, then auth store + JWT refresh) — mirrors the main agent's 401 recovery."""
+def _resolve_nous_runtime_api(
+    *, force_refresh: bool = False, stale_access_token: Optional[str] = None
+) -> Optional[tuple[str, str]]:
+    """Fresh Nous runtime credentials (pool first, then auth store + JWT refresh) — mirrors the main
+    agent's 401 recovery. ``stale_access_token`` is the bearer that just 401'd; with ``force_refresh``
+    it lets the auth store adopt a sibling process's rotation instead of re-POSTing the shared grant."""
     pooled = _resolve_nous_pool_runtime_api(force_refresh=force_refresh)
     if pooled is not None:
         return pooled
     try:
         from hermes_cli.auth import resolve_nous_runtime_credentials
         creds = resolve_nous_runtime_credentials(
-            timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15), force_refresh=force_refresh,
+            timeout_seconds=env_float("HERMES_NOUS_TIMEOUT_SECONDS", 15),
+            force_refresh=force_refresh,
+            stale_access_token=stale_access_token or None,
         )
     except Exception as exc:
         logger.debug("Auxiliary Nous runtime credential resolution failed: %s", exc)
@@ -5040,7 +5057,7 @@ def _refresh_nous_auxiliary_client(
     the exact entry the stale one is served from. Keying on the resolved model or an empty task
     would leave the expired client immortal and every auxiliary call 401ing forever.
     """
-    runtime = _resolve_nous_runtime_api(force_refresh=True)
+    runtime = _resolve_nous_runtime_api(force_refresh=True, stale_access_token=api_key)
     if runtime is None:
         return None, model
     fresh_key, fresh_base_url = runtime
@@ -5803,7 +5820,10 @@ def _build_call_kwargs(
             or _endpoint_speaks_anthropic_messages(raw_base) or _is_anthropic_compat_endpoint(provider_norm, raw_base)
         ):
             kwargs["_reasoning_config"] = dict(reasoning_config)
-    return kwargs
+    # OpenCode relay session affinity — same key as the main turn so compression/title/vision
+    # calls stay on the conversation's warm backend.
+    from agent.opencode_affinity import merge_opencode_session_headers
+    return merge_opencode_session_headers(kwargs, provider, base_url, _runtime_main_value("session_id") or None)
 
 
 def _validate_llm_response(

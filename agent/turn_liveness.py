@@ -86,7 +86,8 @@ def resolve_turn_liveness_settings(
 
 
 class TurnLivenessWatchdog:
-    """Sampled-idle watchdog thread bound to one conversation turn.
+    """Sampled-idle watchdog bound to one conversation turn (polls on the
+    shared periodic scheduler thread).
 
     ``activity_lock`` must be the SAME lock ``AIAgent._touch_activity`` stamps
     the activity clock with; run_agent owns the lease state and callbacks.
@@ -108,28 +109,32 @@ class TurnLivenessWatchdog:
         self._commit_abort = commit_abort
         self._deactivate_turn = deactivate_turn
 
-    def make_thread(self) -> threading.Thread:
-        """Build the (not yet started) watcher thread; started at turn entry, after the
-        turn-active flag and activity clock are stamped."""
-        return threading.Thread(target=self._watch, name="turn-liveness-watchdog", daemon=True)
+    def schedule(self):
+        """Start polling on the shared periodic scheduler thread; returns the cancel handle.
+        Scheduled at turn entry, after the turn-active flag and activity clock are stamped."""
+        from agent.periodic_scheduler import schedule
 
-    def _watch(self) -> None:
-        while not self._stop_event.wait(self._poll_s):
-            snapshot = self._sample()
-            if snapshot is None:
-                return  # turn no longer active
-            if snapshot.idle_seconds < self._timeout_s:
-                continue
-            # Observational only: the commit below can still veto the abort if progress
-            # resumed; the definitive settlement is _surface_committed_abort.
-            self._surface_stall(snapshot)
-            message = f"Turn made no progress for {int(snapshot.idle_seconds)}s; aborting to release the session."
-            if not self._commit_abort(snapshot, message):
-                continue
-            # Stop renewing the lease so a wedge the interrupt cannot unwind expires via TTL.
-            self._deactivate_turn()
-            self._surface_committed_abort(snapshot)
-            return
+        return schedule(self._tick, self._poll_s)
+
+    def _tick(self):
+        """One poll. Returns False when the watchdog is finished."""
+        if self._stop_event.is_set():
+            return False
+        snapshot = self._sample()
+        if snapshot is None:
+            return False  # turn no longer active
+        if snapshot.idle_seconds < self._timeout_s:
+            return None
+        # Observational only: the commit below can still veto the abort if progress
+        # resumed; the definitive settlement is _surface_committed_abort.
+        self._surface_stall(snapshot)
+        message = f"Turn made no progress for {int(snapshot.idle_seconds)}s; aborting to release the session."
+        if not self._commit_abort(snapshot, message):
+            return None
+        # Stop renewing the lease so a wedge the interrupt cannot unwind expires via TTL.
+        self._deactivate_turn()
+        self._surface_committed_abort(snapshot)
+        return False
 
     def _sample(self) -> Optional[ActivitySnapshot]:
         with self._activity_lock:

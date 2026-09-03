@@ -376,14 +376,30 @@ def _acquire_discovery_lock_with_retry():
     return cookie
 
 
-def discover_mcp_tools() -> List[str]:
+def discover_mcp_tools(allowed_mcp_names: Optional[List[str]] = None) -> List[str]:
     """Entry point: load config, connect servers, register tools. [] without the ``mcp``
-    package; idempotent (only servers missing from a previous call are retried)."""
+    package; idempotent (only servers missing from a previous call are retried).
+
+    ``allowed_mcp_names``: spawn only the MCP servers named in it (built-in toolset names in the
+    list simply don't match); ``None`` spawns every configured server. Used by
+    ``hermes -z -t <toolsets>`` to skip cold-starting servers the caller doesn't need (10-60s
+    each); it only affects which servers start, not which names ``-t`` validation can see."""
     servers = _core._load_mcp_config()
     if not servers:
         logger.debug("No MCP servers configured")
         return []
-    # SDK import deferred to here so a config without servers never pays it.
+    if allowed_mcp_names is not None:
+        allowed_set = {str(n) for n in allowed_mcp_names}
+        filtered = {name: cfg for name, cfg in servers.items() if name in allowed_set}
+        if len(filtered) != len(servers):
+            logger.debug("MCP discovery filter: spawning %d/%d configured server(s) per --toolsets filter "
+                         "(skipped: %s)", len(filtered), len(servers), ",".join(sorted(set(servers) - set(filtered))))
+        servers = filtered
+        if not servers:
+            logger.debug("No MCP servers in --toolsets filter; skipping MCP load entirely")
+            return []
+    # SDK import deferred to here so a config without servers — or a -t filter that keeps
+    # none — never pays it.
     if not _core._ensure_mcp_sdk():
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
         return []

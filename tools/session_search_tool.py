@@ -418,12 +418,18 @@ def _read_session(db, session_id: str, head: int = 20, tail: int = 10, link_prof
 def _list_recent_sessions(db, limit: int, current_session_id: str = None, link_profile: str = None) -> str:
     """Browse shape: metadata for the most recent sessions (no LLM, no FTS5)."""
     def _browse():
-        # list_sessions_rich already applies the canonical child classifier (roots,
-        # /branch and /new-reset children admitted; delegation/compression children
-        # hidden). Re-classifying here re-hid legacy reset children — trust the query.
-        sessions = db.list_sessions_rich(
+        # Never use list_sessions_rich(order_by_last_active=True) here: it walks every
+        # compression chain and derives activity/previews before LIMIT, which can
+        # monopolise a gateway callback for minutes on a multi-GB state.db. The
+        # bounded browse query preselects an indexed candidate set and carries a
+        # cooperative SQLite VM cancellation deadline. Fail closed rather than
+        # silently falling back to the whole-database query shape.
+        bounded_list = getattr(db, "list_recent_sessions_bounded", None)
+        if bounded_list is None:
+            raise RuntimeError("session database does not support bounded recent-session browse")
+        sessions = bounded_list(
             limit=limit + 15,  # extra so we can skip current / compression roots
-            exclude_sources=list(_HIDDEN_SESSION_SOURCES), order_by_last_active=True)
+            exclude_sources=list(_HIDDEN_SESSION_SOURCES), timeout_seconds=3.0)
         current_root, has_compression_hop = (
             _resolve_to_parent(db, current_session_id) if current_session_id else (None, False))
         results = []

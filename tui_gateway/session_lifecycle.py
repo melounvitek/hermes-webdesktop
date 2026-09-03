@@ -73,7 +73,7 @@ def _release_active_session_slot(session: dict | None) -> bool:
     lease = session.get("active_session_lease") if session else None
     if lease is None:
         return True
-    if (err := _lease_retry(3 if getattr(lease, "track_liveness", False) else 1, lease.release)) is not None:
+    if (err := _lease_retry(3 if getattr(lease, "track_liveness", False) else 1, lambda: lease.release())) is not None:
         logger.warning("Failed to release active session slot", exc_info=err)
         return False
     if not (getattr(lease, "released", True) or not getattr(lease, "enabled", True)):
@@ -81,6 +81,13 @@ def _release_active_session_slot(session: dict | None) -> bool:
     if session.get("active_session_lease") is lease:
         session.pop("active_session_lease", None)
     return True
+
+
+def _own_live_lease_ids(*, exclude=None) -> set[str]:
+    """Snapshot leases still backed by this process's live session records."""
+    with _sessions_lock:
+        return {str(lease.lease_id) for session in _sessions.values()
+                if (lease := session.get("active_session_lease")) is not None and lease is not exclude}
 
 
 @contextlib.contextmanager
@@ -97,13 +104,15 @@ def _other_runtime_lease_guard(session_id: str, session: dict):
         return
     stack = contextlib.ExitStack()
     active: list = []
+    own_live_lease_ids = _own_live_lease_ids(exclude=lease)
 
     def _enter() -> None:
         stack.close()  # drop anything a half-failed previous attempt left behind
         if lease is not None and getattr(lease, "enabled", False):
-            guard = release_active_session_liveness_guard(lease, session_id)
+            guard = release_active_session_liveness_guard(lease, session_id, own_live_lease_ids=own_live_lease_ids)
         else:
-            guard = active_session_liveness_guard(session_id, registry_home=session.get("profile_home"))
+            guard = active_session_liveness_guard(
+                session_id, registry_home=session.get("profile_home"), own_live_lease_ids=own_live_lease_ids)
         active[:] = [stack.enter_context(guard)]
 
     if (last_error := _lease_retry(3, _enter)) is not None:

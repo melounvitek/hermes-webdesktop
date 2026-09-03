@@ -98,9 +98,10 @@ class SessionPortabilityMixin:
         s["preview"] = _shape_preview(s.pop("_preview_raw", ""))
         return s
 
-    def _locked_rows(self, sql: str, params=()) -> list:
-        with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+    def _read_rows(self, sql: str, params=()) -> list:
+        """Pure-read query via ``_read_ctx()`` (never the writer lock: turn persistence must not convoy)."""
+        with self._read_ctx() as conn:
+            return conn.execute(sql, params).fetchall()
 
     def distinct_session_cwds(self, include_archived: bool = False) -> List[Dict[str, Any]]:
         """Distinct non-empty session cwds with usage stats, for repo discovery. Aggregates
@@ -109,7 +110,7 @@ class SessionPortabilityMixin:
         where = "cwd IS NOT NULL AND TRIM(cwd) != ''"
         if not include_archived:
             where += " AND archived = 0"
-        rows = self._locked_rows(
+        rows = self._read_rows(
             "SELECT cwd AS cwd, COUNT(*) AS sessions, MAX(COALESCE(ended_at, started_at, 0)) AS last_active "
             f"FROM sessions WHERE {where} GROUP BY cwd"
         )
@@ -130,7 +131,7 @@ class SessionPortabilityMixin:
             "\n            ORDER BY s.started_at DESC, s.id DESC\n            LIMIT ? OFFSET ?",
             prompt_select=f",\n                {_PROMPT_RESOLVED_SQL}",
         )
-        return [self._rich_row(row) for row in self._locked_rows(query, (prefix, prefix_hi, limit, offset))]
+        return [self._rich_row(row) for row in self._read_rows(query, (prefix, prefix_hi, limit, offset))]
 
     def _get_session_rich_row(self, session_id: str, compact_rows: bool = False) -> Optional[Dict[str, Any]]:
         """One session with the ``list_sessions_rich`` enriched columns, or None.
@@ -160,13 +161,13 @@ class SessionPortabilityMixin:
             self._compact_session_cols() if compact_rows else "s.*", f"s.id IN ({','.join('?' for _ in ids)})",
             prompt_select=None if compact_rows else f", {_PROMPT_RESOLVED_SQL}",
         )
-        return {s["id"]: s for s in map(self._rich_row, self._locked_rows(query, ids))}
+        return {s["id"]: s for s in map(self._rich_row, self._read_rows(query, ids))}
 
     def list_skill_scaffolded_sessions(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Titled sessions whose first user turn was a ``/skill`` invocation (their titles
         describe the expanded skill body, not the request). Returns ``id``, ``title`` and
         the first-turn ``content`` so callers can re-derive what was typed. Newest first."""
-        rows = self._locked_rows("""
+        rows = self._read_rows("""
                 SELECT s.id, s.title, m.content
                 FROM sessions s
                 JOIN messages m ON m.id = (

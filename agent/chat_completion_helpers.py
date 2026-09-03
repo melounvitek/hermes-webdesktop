@@ -1499,7 +1499,25 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
 
 
 def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
-    """Build the keyword arguments dict for the active API mode."""
+    """Build the keyword arguments dict for the active API mode.
+
+    Wraps the per-api_mode builder so the OpenCode ``x-opencode-session``
+    affinity header rides on every OpenCode request regardless of transport
+    (chat_completions / codex_responses / anthropic_messages all route
+    OpenCode models). No-op for every other provider.
+    """
+    from agent.opencode_affinity import merge_opencode_session_headers
+
+    kwargs = _build_api_kwargs_for_mode(agent, api_messages, tools_for_api)
+    return merge_opencode_session_headers(
+        kwargs,
+        getattr(agent, "provider", None),
+        getattr(agent, "base_url", None),
+        getattr(agent, "session_id", None),
+    )
+
+
+def _build_api_kwargs_for_mode(agent, api_messages: list, tools_for_api: list | None = None) -> dict:
     # One-shot continuation override — consumed exactly once, on the FIRST
     # request this call builds (only one api_mode branch runs per invocation).
     reasoning_config = _reasoning_config_for_wire(agent)
@@ -2079,6 +2097,9 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
 
     # Compression/resume can orphan a tool result whose parent tool_call was summarized away.
     api_messages = agent._sanitize_api_messages(api_messages)
+    # Same send-path vision eviction as the main loop (#89296).
+    from agent.context_compressor import evict_stale_outbound_tool_images
+    evict_stale_outbound_tool_images(api_messages)
     # Thinking-only assistant turns 400 on Anthropic-family providers; _thinking_prefill must
     # survive until here so the drop pass recognizes stubs after reasoning is stripped.
     api_messages = agent._drop_thinking_only_and_merge_users(api_messages)
@@ -2541,6 +2562,15 @@ class _ToolCallAccumulator:
         self._notified: set = set()
         self._last_id_at_idx: dict = {}      # raw_index -> last seen non-empty id
         self._active_slot_by_idx: dict = {}  # raw_index -> current slot in acc
+        # Argument deltas are collected per slot and joined once in ``materialize`` —
+        # ``+=`` per chunk rebuilds the whole string every delta (quadratic on big args).
+        self._argument_parts: dict[int, list[str]] = {}
+
+    def materialize(self) -> dict:
+        """Join buffered argument deltas into each entry's ``arguments``; idempotent. Returns ``acc``."""
+        for idx, parts in self._argument_parts.items():
+            self.acc[idx]["function"]["arguments"] = "".join(parts)
+        return self.acc
 
     def feed(self, tc_delta) -> Optional[str]:
         """Merge one delta; return the tool name the first time it is complete."""
@@ -2562,6 +2592,7 @@ class _ToolCallAccumulator:
         entry = self.acc.setdefault(
             idx, {"id": tc_id or "", "type": "function", "function": {"name": "", "arguments": ""}, "extra_content": None},
         )
+        parts = self._argument_parts.setdefault(idx, [])
         if tc_id:
             entry["id"] = tc_id
         tc_function = getattr(tc_delta, "function", None)
@@ -2571,7 +2602,7 @@ class _ToolCallAccumulator:
                 # NVIDIA NIM) resend the full name every chunk — += gives "read_fileread_file".
                 entry["function"]["name"] = tc_function.name
             if getattr(tc_function, "arguments", None):
-                entry["function"]["arguments"] += tc_function.arguments
+                parts.append(tc_function.arguments)
         extra = getattr(tc_delta, "extra_content", None)
         if extra is None and hasattr(tc_delta, "model_extra"):
             extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")
@@ -2832,6 +2863,7 @@ class _StreamingCall:
             return self._open_chat_stream({**next_api_kwargs, "stream": True, "timeout": timeout})
 
         def _relay_final_response() -> dict[str, Any]:
+            tool_calls.materialize()
             message = {"role": role, "content": "".join(content_parts) or None,
                 "reasoning_content": "".join(reasoning_parts) or None,
                 "tool_calls": [tool_calls_acc[i] for i in sorted(tool_calls_acc)] or None}
@@ -2920,6 +2952,7 @@ class _StreamingCall:
                         # complete instead of silently discarding the action.
                         self.result["partial_tool_names"].append(name)
 
+        tool_calls.materialize()
         self._close_managed_stream()
         if self._stream_attempt_was_cancelled(stream_attempt_id):
             raise _httpx.RemoteProtocolError(f"stream attempt {stream_attempt_id} was superseded")

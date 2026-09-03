@@ -365,7 +365,12 @@ class GatewayGoalsMixin:
             return
 
         mgr = LoopManager(session_id=sid)
-        wakeup = mgr.fire_tick() if mgr.is_due(now) else None
+        if not mgr.is_due(now):
+            return
+        # fire_tick()/complete_tick() are writes (BEGIN IMMEDIATE) taking the SessionDB writer lock; a slow
+        # writer elsewhere holding it while the loop thread blocked froze the gateway until the watchdog
+        # fired. The context-preserving executor keeps the profile HERMES_HOME override under multiplex.
+        wakeup = await self._run_in_executor_with_context(mgr.fire_tick)
         if not wakeup:
             return
         try:
@@ -378,7 +383,7 @@ class GatewayGoalsMixin:
             # Slash-command loops dispatch through the command path and never hit the post-turn
             # completion hook — complete the tick immediately (caps + scheduling).
             if wakeup.lstrip().startswith("/"):
-                mgr.complete_tick("")
+                await self._run_in_executor_with_context(mgr.complete_tick, "")
         except Exception as exc:
             logger.warning("loop wakeup injection failed for %s: %s", sid, exc)
             with suppress(Exception):
@@ -398,8 +403,10 @@ class GatewayGoalsMixin:
                 # Warm once per scan: the scan reads every persisted loop and a cold cache would
                 # run the state.db init on the loop thread before the first read.
                 await self._warm_goals_session_db("loop wakeup")
+                # Off-loop too: the read is lock-free under WAL but convoys on the writer lock without it.
+                active_loops = await self._run_in_executor_with_context(list_active_loops)
                 now = time.time()
-                for sid, state in list_active_loops():
+                for sid, state in active_loops:
                     await self._loop_wakeup_fire_one(sid, state, now, warned_no_route)
             except Exception as exc:
                 logger.debug("loop wakeup watcher error: %s", exc)

@@ -4183,6 +4183,7 @@ from hermes_cli.kanban_db_dispatch import (  # noqa: E402,F401
     _record_worker_exit,
     _resolve_hermes_argv,
     _resolve_worker_cli_toolsets,
+    _restart_safe_worker_argv,
     _retag_legacy_worker_sessions,
     _set_worker_pid,
     _system_memory_sample,

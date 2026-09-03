@@ -233,6 +233,21 @@ def _template_visible_role(message: Any) -> Optional[str]:
     return None if role == "tool" or (role == "assistant" and message.get("tool_calls")) else role
 
 
+def _last_template_visible_role(messages: List[Dict[str, Any]]) -> Optional[str]:
+    """Last role a strict alternation template would count in *messages*.
+
+    ``None`` when every row is template-exempt (tool flow only).
+    """
+    return next(
+        (
+            role
+            for role in (_template_visible_role(m) for m in reversed(messages))
+            if role is not None
+        ),
+        None,
+    )
+
+
 def _strip_persistence_markers(messages: List[Dict[str, Any]]) -> None:
     """Enforce the invariant: no assembled message carries a persistence marker.
     A leaked ``_db_persisted`` makes the child-session rotation flush skip the row, losing it from state.db.
@@ -295,6 +310,22 @@ _SUMMARY_END_MARKER = "--- END OF CONTEXT SUMMARY — respond to the message bel
 # these delimiters, so the summary prefix is not at content start.
 _MERGED_PRIOR_CONTEXT_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
 _MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+
+# Prefixes the copy of a still-running user task that compaction re-states after
+# the handoff boundary (#100818). A cron run's only user turn is the job prompt
+# in the protected head, so compaction leaves it BEFORE the summary — and
+# SUMMARY_PREFIX tells the model to do nothing when no user message follows.
+# Set on a compaction carrier when the in-flight task was merged onto it (the
+# carrier ends the list, so a standalone user row would break alternation).
+# conversation_compression._ensure_compressed_has_user_turn treats it as
+# "intent present" so it does not insert a second copy of the same request.
+_INFLIGHT_REPLAY_MERGED_KEY = "_inflight_replay_merged"
+
+_INFLIGHT_TASK_REPLAY_HEADER = (
+    "[STILL IN PROGRESS — this is the active request, restated after the "
+    "compaction boundary because it was not finished yet. Continue it; do not "
+    "start over.]"
+)
 
 _SALVAGE_SUMMARY_MAX_CHARS = 8_000
 _SALVAGE_KEEP_RECENT_TOOLS = 2
@@ -1140,6 +1171,23 @@ def _retire_stale_tool_result_images(result: List[Dict[str, Any]], keep_newest: 
     return pruned
 
 
+def evict_stale_outbound_tool_images(
+    api_messages: List[Dict[str, Any]],
+    keep_newest: int = _MAX_KEEP_TOOL_IMAGES,
+) -> int:
+    """Drop stale screenshot/vision payloads from the per-call API copy.
+
+    Compression's keep-newest pass only runs when prune/compress fires, and
+    the Anthropic adapter's screenshot eviction only sees nested
+    ``tool_result`` blocks. OpenAI-style ``image_url`` tool results
+    otherwise ride every subsequent request until a 413 forces the reactive
+    strip (#89286). Call this on the cloned ``api_messages`` list after
+    sanitization so older frames never leave the box (#89296). Do not pass
+    persisted history — the rewrite is send-path only.
+    """
+    return _retire_stale_tool_result_images(api_messages, keep_newest=keep_newest)
+
+
 def _truncate_tool_call_args_json(args: str, head_chars: int = 200) -> str:
     """Shrink long string leaves in a tool-call arguments JSON blob, keeping it valid (providers 400 on malformed args)."""
     try:
@@ -1716,7 +1764,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._reset_real_usage_pairing()
         self._last_compression_telemetry = self._active_compression_telemetry = None
         self._compression_telemetry_seed = None
-        self._proactive_prune_rearm_tokens = 0
+        self._reset_proactive_prune_rearm()
 
     def bind_session_state(self, session_db: Any = None, session_id: str = "") -> None:
         """Bind the current session row so durable cooldowns can round-trip."""
@@ -1726,8 +1774,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._cooldown_persist_failed = False
         self._last_summary_error = None
         self._consecutive_timeout_failures = self._fallback_compression_streak = 0
-        self._ineffective_compression_count = self._prellm_skip_count = self._proactive_prune_rearm_tokens = 0
+        self._ineffective_compression_count = self._prellm_skip_count = 0
         self._anti_thrash_recovery_deadline = self._structural_no_op_backoff_until = 0.0
+        self._reset_proactive_prune_rearm()
         self.get_active_compression_failure_cooldown()
         self._load_fallback_compression_streak()
         self._load_ineffective_compression_count()
@@ -2016,7 +2065,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._clear_compression_failure_cooldown()
         self._verify_compaction_cleared_threshold = self._last_compression_made_progress = False
         # Runway was computed against the previous model's trigger; clear the durable copy too.
-        self._proactive_prune_rearm_tokens = 0
+        self._reset_proactive_prune_rearm()
         self._clear_durable_proactive_prune_rearm()
 
     # When the MINIMUM_CONTEXT_LENGTH floor binds on a small window, trigger near the top instead.
@@ -2107,6 +2156,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self.proactive_prune_min_reclaim_tokens = max(0, int(proactive_prune_min_reclaim_tokens or 0))
         # A committed prune is a cache boundary: rearm only after the prompt regrows the reclaimed tokens.
         self._proactive_prune_rearm_tokens: int = 0
+        # Dedup key for the over-threshold "reclamation no-oped" warning
+        # (#101889) so a tool loop riding above the threshold warns once per
+        # distinct reason + rearm snapshot instead of every iteration.
+        self._last_reclaim_block_warn: "tuple[str, int] | None" = None
         self.min_tail_user_messages = min_tail_user_messages
         self.summary_target_ratio = max(0.10, min(summary_target_ratio, 0.80))
         self.quiet_mode = quiet_mode
@@ -2513,35 +2566,115 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             )
         return result, pruned
 
+    def _reset_proactive_prune_rearm(self) -> None:
+        """Fully rearm the proactive prune and let a future lockout warn again.
+
+        Every path that zeroes the rearm mark (compaction, session
+        reset/end/rebind, model recalibration) is a reclamation or a fresh
+        start, so the over-threshold no-op dedup key must not survive it —
+        otherwise an identical lockout after a full compaction (rearm back
+        at 0) would be silent (#101889).
+        """
+        self._proactive_prune_rearm_tokens = 0
+        self._last_reclaim_block_warn = None
+
+    def _billed_basis_over_threshold(self, current_tokens: "int | None") -> bool:
+        """Whether a provider-billed reading says the session is over threshold.
+
+        ``current_tokens`` is the provider's ``prompt_tokens`` (or the
+        overhead-aware fallback estimate): it counts the system prompt and tool
+        schemas, which the message-only estimate behind
+        ``_proactive_prune_rearm_tokens`` does not. Used to stop schema
+        overhead from parking the prune rearm gate above a real request that is
+        already over ``threshold_tokens`` (#101889).
+        """
+        return (
+            current_tokens is not None
+            and self.threshold_tokens > 0
+            and current_tokens >= self.threshold_tokens
+        )
+
+    def _warn_reclamation_no_op(
+        self,
+        reason: str,
+        current_tokens: "int | None",
+        before: "int | None" = None,
+    ) -> None:
+        """Warn when an over-threshold session's reclamation path no-ops.
+
+        A session sitting above ``threshold_tokens`` with every reclamation
+        path declining is the failure mode from #101889: context keeps growing
+        until the provider's hard limit rejects the request, with nothing in
+        the log to explain it. Silent below the threshold (a declined prune
+        there is ordinary hysteresis, not a lockout). Deduped on
+        ``reason`` + the rearm snapshot so a busy tool loop logs once per
+        distinct state, not once per iteration; the key is cleared whenever
+        the session drops back under threshold or any reclamation resets the
+        rearm mark (prune commit, compaction, session reset/rebind, model
+        recalibration) so a later lockout warns again.
+        """
+        # The explicit None check is redundant with the predicate; it narrows
+        # ``current_tokens`` for the type checker on the format below.
+        if current_tokens is None or not self._billed_basis_over_threshold(
+            current_tokens
+        ):
+            self._last_reclaim_block_warn = None
+            return
+        key = (reason, int(self._proactive_prune_rearm_tokens))
+        if self._last_reclaim_block_warn == key:
+            return
+        self._last_reclaim_block_warn = key
+        logger.warning(
+            "Context is over the compression threshold (~%s of %s tokens) but "
+            "reclamation did not run: %s (message-token estimate %s, prune "
+            "rearm mark %s). The session may keep growing until the provider "
+            "rejects the request — /compact to compress history now.",
+            f"{int(current_tokens):,}",
+            f"{int(self.threshold_tokens):,}",
+            reason,
+            "n/a" if before is None else f"{int(before):,}",
+            f"{int(self._proactive_prune_rearm_tokens):,}",
+        )
+
     def prune_tool_results_only(
         self, messages: List[Dict[str, Any]], current_tokens: int | None = None,
     ) -> tuple[List[Dict[str, Any]], int]:
         """Deterministic, no-LLM tool-result prune gated on ``proactive_prune_tokens``.
         Protects the tail by message COUNT only. A commit breaks the prompt cache, so it requires
         ``proactive_prune_min_reclaim_tokens`` and a full regrowth runway; otherwise returns the INPUT
-        object as ``(messages, 0)``."""
-        if (
-            self.proactive_prune_tokens <= 0
-            or (current_tokens is not None and current_tokens < self.proactive_prune_tokens)
-            or len(messages) <= self.protect_last_n + self._protect_head_size(messages) + 1
+        object as ``(messages, 0)``. The rearm gate is measured on message bodies only, so it is
+        bypassed (never the reclaim gate) when a provider-billed ``current_tokens`` reading already
+        puts the request over ``threshold_tokens`` (#101889); every no-op taken while over threshold
+        is logged once per distinct reason."""
+        if self.proactive_prune_tokens <= 0 or (
+            current_tokens is not None and current_tokens < self.proactive_prune_tokens
         ):
             return messages, 0
+        if len(messages) <= self.protect_last_n + self._protect_head_size(messages) + 1:
+            self._warn_reclamation_no_op("prune:tail_only", current_tokens)
+            return messages, 0
         before = sum(_estimate_msg_budget_tokens(m) for m in messages)
-        if before < self._proactive_prune_rearm_tokens:
+        # Under-threshold runway skip is ordinary hysteresis (silent); above it the lockout is the bug.
+        if before < self._proactive_prune_rearm_tokens and not self._billed_basis_over_threshold(current_tokens):
             return messages, 0
         # Capability gate first: a store without archive_and_compact makes every prune a no-op.
         session_db = getattr(self, "_session_db", None)
         session_id = getattr(self, "_session_id", "")
         if session_db and session_id and not callable(getattr(session_db, "archive_and_compact", None)):
+            self._warn_reclamation_no_op("prune:store_cannot_persist", current_tokens)
             return messages, 0
         pruned_msgs, pruned_count = self._prune_old_tool_results(
             messages, protect_tail_count=self.protect_last_n, protect_tail_tokens=None, min_prune_chars=self.proactive_prune_min_result_chars,
         )
-        # No-op contract: return the INPUT object so callers can gate on `result is not input`.
+        if not pruned_count:
+            # No-op contract: return the INPUT object so callers can gate on `result is not input`.
+            self._warn_reclamation_no_op("prune:nothing_eligible", current_tokens)
+            return messages, 0
         # Prompt-cache hysteresis: commit only when the reclaim is meaningful.
         after = sum(_estimate_msg_budget_tokens(m) for m in pruned_msgs)
         reclaimed = max(0, before - after)
-        if not pruned_count or reclaimed < self.proactive_prune_min_reclaim_tokens:
+        if reclaimed < self.proactive_prune_min_reclaim_tokens:
+            self._warn_reclamation_no_op("prune:reclaim_below_minimum", current_tokens, before=before)
             return messages, 0
         # Require a full trigger-sized regrowth before the next cache-breaking rewrite.
         runway = max(reclaimed, self.proactive_prune_tokens, self.proactive_prune_min_reclaim_tokens)
@@ -2558,6 +2691,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             # Shared post-commit stamp site with the in-place commit and micro-compaction sync.
             stamp_db_persisted_markers(pruned_msgs)
         self._proactive_prune_rearm_tokens = next_rearm_tokens
+        # Reclamation just ran: let a future lockout warn again.
+        self._last_reclaim_block_warn = None
         return pruned_msgs, pruned_count
 
     def _compute_summary_budget(self, turns_to_summarize: List[Dict[str, Any]]) -> int:
@@ -3602,6 +3737,164 @@ Write only the summary body. Do not include any preamble or prefix."""
             return max(pair_end, head_end + 1)
         return adjusted
 
+    @classmethod
+    def _find_inflight_user_task(
+        cls, messages: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Return the user turn that is still awaiting completion, or ``None``.
+
+        Scans the WHOLE transcript, not just the compressible region: a cron
+        run's only user turn is the job prompt sitting in the protected head
+        (``protect_first_n`` keeps system + first user), which is exactly the
+        turn ``_find_last_user_message_idx`` cannot see (#100818).
+
+        A turn is in-flight when the transcript does not already end with a
+        completed assistant reply — i.e. a text-bearing assistant message with
+        no pending ``tool_calls``.  A trailing ``tool`` result or an assistant
+        message that still has ``tool_calls`` outstanding means the run was
+        interrupted mid-task and the instruction is still owed an answer.
+
+        Handoff carriers and synthetic scaffolding rows are excluded via the
+        same filter pair as ``_find_last_user_message_idx``, so an idle session
+        whose only user-role row is an inherited summary yields ``None`` and is
+        never re-animated (#80622).
+        """
+        from agent.conversation_compression import _is_real_user_message
+
+        last_user_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            msg = messages[i]
+            # _is_real_user_message also rejects metadata-flagged scaffolding
+            # (_todo_snapshot_synthetic, recovery nudges, ...) that
+            # _is_actionable_user_turn cannot see.
+            if cls._is_actionable_user_turn(msg) and _is_real_user_message(msg):
+                last_user_idx = i
+                break
+            if isinstance(msg, dict) and msg.get(_INFLIGHT_REPLAY_MERGED_KEY):
+                # A previous cycle merged the live request onto this summary
+                # carrier; it is the only copy left, so it is still the task.
+                last_user_idx = i
+                break
+        if last_user_idx < 0:
+            return None
+
+        for msg in reversed(messages[last_user_idx + 1:]):
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                # Trailing tool result (or anything else): still mid-task.
+                break
+            if msg.get("tool_calls"):
+                break
+            if _content_text_for_contains(msg.get("content")).strip():
+                # Final answer already delivered — replaying the ask would
+                # hand the model finished work as a fresh instruction.
+                return None
+            # Empty assistant row (a bare reasoning/stub turn): keep looking.
+        return messages[last_user_idx]
+
+    def _reappend_inflight_user_task(
+        self,
+        compressed: List[Dict[str, Any]],
+        inflight: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Restate an unfinished user task after the compaction handoff.
+
+        ``SUMMARY_PREFIX`` instructs the model to act only on a user message
+        that appears AFTER the summary, and to do nothing when none does.  When
+        the single in-flight instruction lived in the protected head, the
+        assembled transcript orders it before the handoff and the run ends in a
+        ``[SILENT]`` no-op that the scheduler records as success (#100818).
+
+        Re-append a copy of that turn after the surviving tail so the prefix's
+        "latest user message" pointer resolves to it again.  If the transcript
+        already ends on a template-visible user row, appending a second one
+        would break user/assistant alternation, so the restatement is merged
+        onto the handoff carrier instead — after ``_SUMMARY_END_MARKER``, which
+        is the boundary the prefix's rule is written against.
+        """
+        if inflight is None or not compressed:
+            return compressed
+
+        carrier_idx = -1
+        for idx in range(len(compressed) - 1, -1, -1):
+            if self._is_context_summary_message(compressed[idx]):
+                carrier_idx = idx
+                break
+        if carrier_idx < 0:
+            # No handoff was emitted — nothing reordered the instruction.
+            return compressed
+
+        for msg in compressed[carrier_idx + 1:]:
+            if self._is_actionable_user_turn(
+                msg
+            ) and not self._is_synthetic_compression_user_turn(msg):
+                # A real request already follows the summary.
+                return compressed
+
+        carrier = compressed[carrier_idx]
+        carrier_text = _content_text_for_contains(carrier.get("content"))
+        if _SUMMARY_END_MARKER not in carrier_text:
+            return compressed
+        if carrier_text.split(_SUMMARY_END_MARKER, 1)[1].strip():
+            # The _force_user_leading layout keeps the live request on the
+            # carrier itself, after the marker. Already actionable.
+            return compressed
+
+        task_text = _content_text_for_contains(inflight.get("content")).strip()
+        if _INFLIGHT_TASK_REPLAY_HEADER in task_text:
+            # Already a restatement from an earlier compaction (standalone row
+            # or merged onto a carrier): take the text after the header so a
+            # task that survives >1 cycle never stacks headers or drags the
+            # old summary along.
+            task_text = task_text.rsplit(_INFLIGHT_TASK_REPLAY_HEADER, 1)[1].strip()
+        if not task_text:
+            return compressed
+
+        if not self.quiet_mode:
+            logger.info(
+                "Re-appending the in-flight user task after the compaction "
+                "handoff so it stays actionable (#100818)"
+            )
+
+        last_visible_role = _last_template_visible_role(compressed)
+        if inflight.get(_INFLIGHT_REPLAY_MERGED_KEY):
+            # Never copy a summary carrier (metadata would mark the replay
+            # synthetic): restate as a plain user row.
+            replay = {"role": "user", "content": task_text}
+        else:
+            replay = _fresh_compaction_message_copy(inflight)
+        replay.pop(_COMPACTION_TAIL_MARKER, None)
+        if isinstance(replay.get("content"), str):
+            # Plain text: rebuild from the header-stripped task text so a
+            # task surviving several compactions never stacks headers.
+            replay["content"] = _INFLIGHT_TASK_REPLAY_HEADER + "\n" + task_text
+        else:
+            # Multimodal parts: keep them, prepend the header text part.
+            replay["content"] = _append_text_to_content(
+                replay.get("content"),
+                _INFLIGHT_TASK_REPLAY_HEADER + "\n",
+                prepend=True,
+            )
+        drop_stale_api_content(replay)
+
+        if last_visible_role == "user":
+            # Alternation is judged on template-visible rows only (tool_calls /
+            # tool rows are exempt), so a user-pinned summary followed by a
+            # tool tail still "ends on user": a standalone user row would break
+            # the Mistral-style pre-flight check (#58753). Merge onto the
+            # carrier instead and flag it — the carrier's own metadata marks it
+            # synthetic, and without the flag _ensure_compressed_has_user_turn
+            # would insert a second copy of the same request.
+            carrier["content"] = _append_text_to_content(
+                carrier.get("content"),
+                "\n\n" + _INFLIGHT_TASK_REPLAY_HEADER + "\n" + task_text,
+            )
+            carrier[_INFLIGHT_REPLAY_MERGED_KEY] = True
+            drop_stale_api_content(carrier)
+            return compressed
+
+        compressed.append(replay)
+        return compressed
+
     def _ensure_last_n_user_messages_in_tail(
         self, messages: List[Dict[str, Any]], cut_idx: int, head_end: int, n: int,
     ) -> int:
@@ -3923,7 +4216,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         last_head_role: Optional[str] = "user"
         if compressed:
             # None = all-exempt head: the summary opens the visible sequence and must be "user".
-            last_head_role = next((r for r in map(_template_visible_role, reversed(compressed)) if r is not None), None)
+            last_head_role = _last_template_visible_role(compressed)
         first_tail_visible_idx, first_tail_role = next(
             ((idx, role) for idx, role in enumerate(map(_template_visible_role, tail_messages)) if role is not None),
             (None, None),
@@ -3973,8 +4266,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         self, compressed: List[Dict[str, Any]], messages: List[Dict[str, Any]], n_messages: int,
     ) -> List[Dict[str, Any]]:
         """Post-assembly cleanup: orphan pairs, media, savings, markers, replay prune, mem trim."""
-        self.compression_count += 1
+        # Single-prompt cron shape: the only live instruction sits in the protected head, BEFORE the
+        # handoff, and SUMMARY_PREFIX reads that as "nothing to do" — restate it past the boundary
+        # (#100818). Sanitize FIRST: the trailing-in-flight exemption (#79278) walks back from the list
+        # end, and a replay user row there would strip a genuinely pending assistant(tool_calls).
         compressed = self._sanitize_tool_pairs(compressed)
+        compressed = self._reappend_inflight_user_task(compressed, self._find_inflight_user_task(messages))
+        self.compression_count += 1
         # Replace historical image payloads with placeholders; multi-MB base64 blobs otherwise
         # exceed body limits.
         compressed = _strip_historical_media(compressed)
@@ -4010,7 +4308,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Batch marker holds MORE history than the rolling summary: reset micro state so it can't
         # supersede/defrag content it lacks; the next micro pass rehydrates from the batch marker.
         self._reset_micro_compact_cursor_state()
-        self._proactive_prune_rearm_tokens = 0
+        self._reset_proactive_prune_rearm()
         return compressed
 
     def compress(

@@ -22,7 +22,8 @@ from hermes_startup_watchdog import report_startup_progress
 from utils import safe_json_loads
 from hermes_state_common import (
     DEFERRED_INDEX_SQL, FTS_CJK_STALE_KEY, FTS_REBUILD_DEFERRAL_KEY, FTS_STALE_KEY, FTS_SQL,
-    FTS_STORAGE_VERSION, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL, LEGACY_FTS_TRIGRAM_SQL, SCHEMA_SQL,
+    FTS_STORAGE_VERSION, FTS_TOOL_FULL_CONTENT_HIGH_WATER_KEY, FTS_TRIGRAM_SQL, LEGACY_FTS_SQL,
+    LEGACY_FTS_TRIGRAM_SQL, SCHEMA_SQL,
     SCHEMA_VERSION, _FTS_CJK_TRIGGERS, _FTS_TRIGGERS, _ephemeral_child_sql, fts_rebuild_admission,
 )
 
@@ -116,6 +117,9 @@ _TITLE_UNIQUE_INDEX_SQL = (
 )
 _STALE_KEY_UPSERT_SQL = (
     "INSERT INTO state_meta (key, value) VALUES (?, '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+)
+_STATE_META_UPSERT_SQL = (
+    "INSERT INTO state_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
 )
 _CLEAR_REBUILD_MARKERS_SQL = "DELETE FROM state_meta WHERE key IN ('fts_rebuild_high_water', 'fts_rebuild_progress')"
 
@@ -261,6 +265,93 @@ class SessionSchemaMixin:
         logger.info("Migrated %d broad FTS UPDATE trigger(s) to AFTER UPDATE OF (no rebuild required)", len(to_drop))
         return len(to_drop)
 
+    @staticmethod
+    def _stamp_fts_tool_high_water(cursor: sqlite3.Cursor) -> None:
+        """Record MAX(messages.id) as the bounded-tool-content high-water mark: rows at or below it keep
+        their exact stored token stream; newer tool rows index only the prefix (see ``_fts_indexed_content_sql``)."""
+        high_water = cursor.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0]
+        cursor.execute(_STATE_META_UPSERT_SQL, (FTS_TOOL_FULL_CONTENT_HIGH_WATER_KEY, str(high_water)))
+
+    @staticmethod
+    def _execute_ddl_script_transactional(cursor: sqlite3.Cursor, ddl: str) -> None:
+        """Execute a DDL script without ``executescript``'s implicit commit."""
+        statement = ""
+        for line in ddl.splitlines():
+            statement += line + "\n"
+            if sqlite3.complete_statement(statement):
+                cursor.execute(statement)
+                statement = ""
+        if statement.strip():
+            raise sqlite3.OperationalError("incomplete FTS DDL statement")
+
+    def _migrate_bounded_tool_fts_triggers(self, cursor: sqlite3.Cursor, *, legacy: bool) -> None:
+        """Replace FTS triggers without rebuilding historical indexes. Existing rows keep their
+        full-content token stream; the durable high-water id makes new tool rows use the bounded
+        prefix in INSERT and the matching external-content delete/update. One savepoint, so no
+        concurrent writer lands in a trigger gap."""
+        marker = cursor.execute(
+            "SELECT 1 FROM state_meta WHERE key = ? LIMIT 1", (FTS_TOOL_FULL_CONTENT_HIGH_WATER_KEY,),
+        ).fetchone()
+        if marker is not None:
+            return
+        trigram_present = self._sqlite_table_exists(cursor, "messages_fts_trigram")
+        names = _FTS_BASE_TRIGGERS + (_FTS_TRIGRAM_TRIGGERS if legacy and trigram_present else ())
+        has_messages = cursor.execute("SELECT 1 FROM messages LIMIT 1").fetchone() is not None
+        self._fts_tool_prefix_migration_requires_rebuild = bool(
+            self._sqlite_table_exists(cursor, "messages_fts") and has_messages
+            and self._fts_triggers_missing(cursor, names)
+        )
+        cursor.execute("SAVEPOINT bounded_tool_fts")
+        try:
+            self._stamp_fts_tool_high_water(cursor)
+            for name in names:
+                cursor.execute(f"DROP TRIGGER IF EXISTS {name}")
+            if legacy:
+                self._execute_ddl_script_transactional(cursor, LEGACY_FTS_SQL)
+                if trigram_present:
+                    self._execute_ddl_script_transactional(cursor, LEGACY_FTS_TRIGRAM_SQL)
+            else:
+                self._execute_ddl_script_transactional(cursor, FTS_SQL)
+            cursor.execute("RELEASE SAVEPOINT bounded_tool_fts")
+        except BaseException:
+            cursor.execute("ROLLBACK TO SAVEPOINT bounded_tool_fts")
+            cursor.execute("RELEASE SAVEPOINT bounded_tool_fts")
+            raise
+
+    @staticmethod
+    def _sqlite_table_exists(cursor: sqlite3.Cursor, name: str) -> bool:
+        return cursor.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,),
+        ).fetchone() is not None
+
+    def _migrate_trigram_cron_exclusion(self, cursor: sqlite3.Cursor) -> bool:
+        """Install the source-filtered trigram view and purge historical rows (v29 cron exclusion,
+        v30 subagent exclusion: both only change the view/trigger predicate and rebuild from it).
+        Legacy inline indexes stay opt-in (their content is private to the vtable). A v1 external
+        layout whose vtable still declares ``tool_calls`` is left to ``optimize-storage``: swapping
+        the view underneath would make 'rebuild' read a column the view no longer has. Otherwise
+        the inverted index still holds excluded rows until FTS5 rebuilds from the new view, which
+        runs under the shared cross-process admission gate. Returns False to hold schema_version back."""
+        if self._db_has_legacy_inline_fts(cursor) or self._db_has_trigram_tool_calls_projection(cursor):
+            return True
+        trigram_exists = self._fts_table_probe(cursor, "messages_fts_trigram")
+        if trigram_exists is not True:
+            # Absent: the normal ensure path creates/backfills it. None: this runtime cannot
+            # safely inspect an existing one, so leave the version behind for retry.
+            return trigram_exists is False
+        for name in _FTS_TRIGRAM_TRIGGERS:
+            cursor.execute(f"DROP TRIGGER IF EXISTS {name}")
+        cursor.execute("DROP VIEW IF EXISTS messages_fts_trigram_src")
+        if not self._ensure_fts_schema(cursor, "messages_fts_trigram", FTS_TRIGRAM_SQL):
+            return False
+        # Always rebuild while schema_version is behind, even if the view already has the new
+        # predicate: a process can die between replacing the view and rebuilding/stamping.
+        self._run_admitted_startup_rebuild(
+            cursor,
+            lambda: cursor.execute("INSERT INTO messages_fts_trigram(messages_fts_trigram) VALUES('rebuild')"),
+        )
+        return True
+
     def _quarantine_cjk_after_update_of_migration(self, cursor: sqlite3.Cursor) -> None:
         """Fail closed after dropping the CJK UPDATE trigger mid-migration: clear availability,
         persist ``fts_cjk_stale``, drop any residual trigger so a later open cannot
@@ -281,6 +372,7 @@ class SessionSchemaMixin:
         markers are cleared or the worker would re-insert covered rows (duplicates).
         ``legacy`` (pre-v23 inline layout) has no external-content 'rebuild' source, so it
         DELETEs + reinserts the concatenated content the legacy triggers produced."""
+        SessionSchemaMixin._stamp_fts_tool_high_water(cursor)
         tables = ("messages_fts", "messages_fts_trigram") if include_trigram else ("messages_fts",)
         for tbl in tables:
             if legacy:
@@ -401,7 +493,15 @@ class SessionSchemaMixin:
         start a full rebuild, and a gateway opens state.db once for days, so "next open"
         never comes. Bounded doubling backoff, non-blocking admission, no new thread. True
         only when the index was rebuilt and sync triggers restored. Never raises."""
-        if not self._fts_stale or self.read_only or self._conn is None:
+        if not self._fts_stale:
+            return False
+        if getattr(self, "_db_corrupt", False):
+            # Quarantined: never run FTS DDL/DML against a damaged image (mirrors _try_wal_checkpoint /
+            # close). Reset the backoff so a future un-quarantine starts from the default interval.
+            self._fts_stale_retry_after = 0.0
+            self._fts_stale_retry_interval = 0.0
+            return False
+        if self.read_only or self._conn is None:
             return False
         now = time.monotonic()
         if now < getattr(self, "_fts_stale_retry_after", 0.0):
@@ -761,11 +861,17 @@ class SessionSchemaMixin:
         # install only gets a flag; `hermes sessions optimize-storage` performs it. The FTS
         # layout is tracked by the independent `fts_storage_version` marker, so
         # schema_version still advances for legacy-FTS users.
-        if current_version < 23 and fts5_available and self._db_has_legacy_inline_fts(cursor):
+        if current_version < 23 and fts5_available and self._db_needs_fts_storage_upgrade(cursor):
             self.set_meta("fts_optimize_available", "1", cursor=cursor)
         if current_version < 25:
             # v25: de-duplicate system prompt snapshots (old column stays a read fallback).
             self._dedupe_legacy_system_prompts(cursor)
+        fts_migrations_complete = True
+        if current_version < 30 and fts5_available:
+            # v29: cron sessions leave the trigram substring index (they stay in the word index);
+            # v30: delegate-child transcripts too (FTS_TRIGRAM_EXCLUDED_SOURCES + _delegate_from).
+            # Rebuild once so rows indexed by older view/trigger definitions do not linger.
+            fts_migrations_complete = self._migrate_trigram_cron_exclusion(cursor)
 
         # Stamp the FTS layout version (fresh/optimized DBs); a legacy DB keeps its absent/0
         # marker until optimize-storage runs. An INTERRUPTED optimize (markers, trash, or an
@@ -773,7 +879,7 @@ class SessionSchemaMixin:
         # source of truth for "fully optimized" and keeps the resume offer alive.
         if (
             fts5_available
-            and not self._db_has_legacy_inline_fts(cursor)
+            and not self._db_needs_fts_storage_upgrade(cursor)
             and cursor.execute(
                 "SELECT 1 FROM state_meta WHERE key = 'fts_rebuild_high_water' LIMIT 1"
             ).fetchone() is None
@@ -785,7 +891,7 @@ class SessionSchemaMixin:
         # Advance schema_version — deliberately NOT gated on the FTS opt-in (that would block
         # every future migration for a user who never optimizes). FTS5 unavailable is the
         # one skip: claiming current would lie.
-        if current_version < SCHEMA_VERSION and fts5_available:
+        if current_version < SCHEMA_VERSION and fts_migrations_complete and fts5_available:
             cursor.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
 
     def _migrate_v22_session_model_usage(self, cursor: sqlite3.Cursor) -> None:
@@ -847,6 +953,8 @@ class SessionSchemaMixin:
         OPT-IN v23 boundary: a legacy v22 inline install keeps its inline schema + triggers
         (the v23 DDL would create the trigram source VIEW and leave a mixed state)."""
         legacy_fts = self._db_has_legacy_inline_fts(cursor)
+        if not self._fts_stale:
+            self._migrate_bounded_tool_fts_triggers(cursor, legacy=legacy_fts)
         if self._fts_stale:
             if self._recover_stale_fts(cursor, legacy=legacy_fts):
                 # CJK was detached alongside the base indexes; its ensure path decides when it returns.
@@ -857,7 +965,8 @@ class SessionSchemaMixin:
             base_sql, trigram_sql = _FTS_DDL[legacy_fts]
             # Measure BEFORE the DDL below runs (pre-repair state). Whether the trigram half is
             # creatable is only known AFTER _ensure_fts_schema, hence the halves combine at the `if`.
-            base_triggers_missing = self._fts_triggers_missing(cursor, _FTS_BASE_TRIGGERS)
+            base_triggers_missing = self._fts_triggers_missing(cursor, _FTS_BASE_TRIGGERS) or getattr(
+                self, "_fts_tool_prefix_migration_requires_rebuild", False)
             trigram_triggers_missing = self._fts_triggers_missing(cursor, _FTS_TRIGRAM_TRIGGERS)
             self._fts_enabled = self._ensure_fts_schema(cursor, "messages_fts", base_sql)
             if self._fts_enabled:

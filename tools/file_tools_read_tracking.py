@@ -3,8 +3,10 @@
 Process-lifetime state behind read_file/search_files/write_file/patch;
 ``tools.file_tools`` re-imports every name here. Per task_id ``_read_tracker``
 stores: ``last_key``/``consecutive`` (loop detection; reset by any OTHER tool
-call), ``read_history`` (diagnostics), ``dedup`` (key -> mtime; cleared on
-context compression), ``dedup_hits`` (stub-loop breaker), ``read_timestamps``
+call), ``read_history`` (diagnostics), ``dedup`` (key -> mtime; survives context
+compression), ``dedup_generation_reads`` (keys whose full content was served since
+the last compaction boundary; cleared on compression so one recovery read returns
+full content), ``dedup_hits`` (stub-loop breaker), ``read_timestamps``
 (staleness warnings) and ``not_found`` (short-TTL negative cache). Every
 container is hard-capped (``_cap_read_tracker_data``) so long sessions stay small.
 """
@@ -44,6 +46,7 @@ def _task_data(task_id: str) -> dict:
         "last_key": None, "consecutive": 0, "read_history": set()})
     for key in ("dedup", "dedup_hits", "read_timestamps"):
         task_data.setdefault(key, {})
+    task_data.setdefault("dedup_generation_reads", set())
     return task_data
 
 
@@ -75,6 +78,7 @@ def _cap_read_tracker_data(task_data: dict) -> None:
         ("read_history", _READ_HISTORY_CAP),
         ("dedup", _DEDUP_CAP),
         ("dedup_hits", _DEDUP_CAP),
+        ("dedup_generation_reads", _DEDUP_CAP),
         ("read_timestamps", _READ_TIMESTAMPS_CAP),
         ("not_found", _NOT_FOUND_CAP)):
         container = task_data.get(key)
@@ -141,17 +145,21 @@ def _bump_consecutive(task_data: dict, key: tuple) -> int:
 
 
 def reset_file_dedup(task_id: str = None):
-    """Clear the read-dedup cache (one task, or all when ``task_id`` is None). Called
-    after context compression: a "file unchanged" stub would point at summarised-away content."""
+    """Advance the read-dedup generation after context compression (one task, or all
+    when ``task_id`` is None). The per-key ``dedup`` mtime map is PRESERVED so unchanged
+    files keep returning stubs instead of re-bloating the reclaimed context; the
+    generation-read set is cleared so the FIRST unchanged read of each key after
+    compaction returns full content the summary may have dropped. Stub-hit counters
+    are cleared so the hard block restarts fresh."""
     with _read_tracker_lock:
         if task_id:
             targets = [_read_tracker[task_id]] if _read_tracker.get(task_id) else []
         else:
             targets = list(_read_tracker.values())
         for task_data in targets:
-            for key in ("dedup", "dedup_hits"):
-                if key in task_data:
-                    task_data[key].clear()
+            if "dedup_hits" in task_data:
+                task_data["dedup_hits"].clear()
+            task_data.setdefault("dedup_generation_reads", set()).clear()
 
 
 def notify_other_tool_call(task_id: str = "default"):

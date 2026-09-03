@@ -36,7 +36,8 @@ from urllib.parse import quote as _urlquote
 from gateway.platforms._shared import get_scoped_secret as _get_scoped_secret
 from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult,
-    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes, cache_video_from_bytes)
+    cache_audio_from_bytes_async, cache_document_from_bytes_async, cache_image_from_bytes_async,
+    cache_video_from_bytes_async)
 from gateway.config import Platform
 
 logger = logging.getLogger(__name__)
@@ -340,7 +341,7 @@ _OUTBOUND_MEDIA = {
 
 # Inbound media kinds → cached file extension.
 _INBOUND_MEDIA_EXT = {"image": ".jpg", "audio": ".m4a", "video": ".mp4", "file": ".bin"}
-_INBOUND_AV_CACHERS = {"audio": cache_audio_from_bytes, "video": cache_video_from_bytes}
+_INBOUND_AV_CACHERS = {"audio": cache_audio_from_bytes_async, "video": cache_video_from_bytes_async}
 _LIFECYCLE_EVENTS = frozenset({"follow", "unfollow", "join", "leave"})
 _ENV_SEED_KEYS = (("LINE_HOST", "host"), ("LINE_PUBLIC_URL", "public_url"), ("LINE_HOME_CHANNEL", "home_channel"))
 
@@ -596,12 +597,12 @@ class LineAdapter(BasePlatformAdapter):
         ext = _INBOUND_MEDIA_EXT.get(msg_type, ".bin")
         try:
             if msg_type == "image":
-                return cache_image_from_bytes(data, ext=ext), "image/jpeg"
+                return await cache_image_from_bytes_async(data, ext=ext), "image/jpeg"
             if msg_type in _INBOUND_AV_CACHERS:
-                return _INBOUND_AV_CACHERS[msg_type](data, ext=ext), mimetypes.guess_type(f"{msg_type}{ext}")[0] or f"{msg_type}/mp4"
+                return await _INBOUND_AV_CACHERS[msg_type](data, ext=ext), mimetypes.guess_type(f"{msg_type}{ext}")[0] or f"{msg_type}/mp4"
             document_name = filename or f"line_file{ext}"
             mime = mimetypes.guess_type(document_name)[0] or "application/octet-stream"
-            return cache_document_from_bytes(data, document_name), mime
+            return await cache_document_from_bytes_async(data, document_name), mime
         except Exception as exc:
             logger.warning("LINE: failed to cache %s payload: %s", msg_type, exc)
             return None, ""

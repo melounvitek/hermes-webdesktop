@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import ssl
+import threading
 from pathlib import Path
 from typing import Any, Optional
 
@@ -12,6 +13,24 @@ logger = logging.getLogger(__name__)
 
 _CA_BUNDLE_ENV_VARS = ("HERMES_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE")
 _INSECURE_STRINGS = {"false", "0", "no", "off"}
+_CA_CONTEXTS: dict[str, ssl.SSLContext] = {}
+_CA_CONTEXTS_LOCK = threading.Lock()
+
+
+def _context_for_ca_bundle(ca_path: str) -> ssl.SSLContext:
+    """One ``SSLContext`` per CA bundle path, process-wide.
+
+    ``ssl.create_default_context(cafile=...)`` parses the whole bundle each call, and httpx
+    transport sharing keys on context identity — so a per-agent context cost one parsed bundle
+    AND one private connection pool per agent (and per delegated child). An ``SSLContext`` is
+    safe to share across connections.
+    """
+    with _CA_CONTEXTS_LOCK:
+        ctx = _CA_CONTEXTS.get(ca_path)
+        if ctx is None:
+            ctx = ssl.create_default_context(cafile=ca_path)
+            _CA_CONTEXTS[ca_path] = ctx
+        return ctx
 
 
 def resolve_httpx_verify(*, ca_bundle: Optional[str] = None, ssl_verify: Any = None, base_url: str = "") -> bool | ssl.SSLContext:
@@ -32,6 +51,6 @@ def resolve_httpx_verify(*, ca_bundle: Optional[str] = None, ssl_verify: Any = N
     if effective_ca:
         ca_path = str(Path(effective_ca).expanduser())
         if os.path.isfile(ca_path):
-            return ssl.create_default_context(cafile=ca_path)
+            return _context_for_ca_bundle(ca_path)
         logger.warning("CA bundle path does not exist: %s — falling back to default certificates", effective_ca)
     return True

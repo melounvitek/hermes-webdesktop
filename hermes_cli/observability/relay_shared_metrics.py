@@ -678,8 +678,11 @@ class _Runtime:
         )
         self._guarded(
             "Hermes shared-metrics tool call close failed",
-            self._run_in_task, task, self.relay.tools.call_end, tool_call.handle, fields,
-            metadata=self._event_metadata(),
+            lambda: self._run_in_task(
+                task, self.relay.tools.call_end, tool_call.handle,
+                self.relay.ToolExecutionResult(fields),
+                metadata=self._event_metadata(),
+            ),
         )
 
     def _end_pending_tool_calls(

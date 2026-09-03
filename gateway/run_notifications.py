@@ -708,13 +708,24 @@ class GatewayNotificationsMixin:
         error = getattr(self, "_session_db_init_error", None)
         if not error:
             return
-        from hermes_state import classify_persistence_error, format_session_db_unavailable
+        from hermes_state import _default_db_path, classify_persistence_error, format_session_db_unavailable
         if classify_persistence_error(error) == "corrupt":
+            # Copy-pasteable, so name the real store (profiles / HERMES_HOME do not live under ~/.hermes).
+            db_path = _default_db_path()
             message = (
-                "⚠️ Session database corruption detected. Messages may not be persisted. Recovery "
-                "options:\n1. Run `hermes doctor --fix`\n2. Salvage with: sqlite3 ~/.hermes/state.db "
-                "\".recover\" (then replace state.db)\n3. Restore from a backup in ~/.hermes/backups/\nRun "
-                "`hermes doctor` for sanitized diagnostics."
+                "⚠️ Session database corruption detected. Messages may not be "
+                "persisted. Recovery options:\n"
+                "1. Run `hermes doctor --fix`\n"
+                "2. Stop the gateway, then recover with:\n"
+                f"   hermes sessions recover --source {db_path} "
+                "--inspect-only\n"
+                "   (if it reports recoverable) hermes sessions recover "
+                f"--source {db_path} --output recovered-state.db\n"
+                "   — recovery snapshots the damaged file first; do NOT run "
+                "`sqlite3 ... \".recover\"` against the live state.db, a "
+                "vulnerable sqlite3 CLI can corrupt it further\n"
+                "3. Restore from a backup in ~/.hermes/backups/\n"
+                "Run `hermes doctor` for sanitized diagnostics."
             )
         else:
             message = (

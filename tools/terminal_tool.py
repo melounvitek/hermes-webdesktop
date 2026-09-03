@@ -44,7 +44,7 @@ def _redact_terminal_error_text(value: Any) -> str:
 from tools.interrupt import _interrupt_event  # noqa: F401 — re-exported (tests patch it here)
 from tools.registry import tool_error
 from tools.terminal_tool_lifecycle import (  # noqa: F401  (re-exported; tests patch tools.terminal_tool.<name>)
-    _check_disk_usage_warning, _cleanup_inactive_envs, _create_configured_env,
+    _check_disk_usage_warning, _cleanup_env, _cleanup_inactive_envs, _create_configured_env,
     _evict_environment_for_task, cleanup_all_environments, cleanup_vm, ensure_task_env,
     get_active_env, is_persistent_env,
 )

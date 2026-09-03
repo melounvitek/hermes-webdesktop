@@ -7,6 +7,7 @@ list_apps, CLI --version). Exit codes: 0 overall=="ok"; 1 degraded/failed; 2 bin
 from __future__ import annotations
 
 import json
+import os
 import platform as _platform_mod
 import re
 import subprocess
@@ -277,9 +278,17 @@ def _apply_display_count_guard(report: Report) -> Report:
                 report["overall"] = "degraded"
     return report
 
-def _print_text_report(report: Report, color: bool, *, identity: Optional[Report] = None) -> None:
+def _wayland_environment_context(report: Report) -> Optional[Report]:
+    """Linux+Wayland only: doctor probes the CLI process's environment, not the gateway's."""
+    if report.get("platform") != "linux" or not os.environ.get("WAYLAND_DISPLAY"):
+        return None
+    return {"scope": "cli_process", "gateway_environment_checked": False}
+
+def _print_text_report(report: Report, color: bool, *, identity: Optional[Report] = None,
+                       environment: Optional[Report] = None) -> None:
     """Render like `cua-driver call health_report`: header (CLI --version preferred over health_report's stale
-    ``driver_version``), identity block, one line per check + indented hint/``data`` rows (support staff need them)."""
+    ``driver_version``), identity block, environment note, one line per check + indented hint/``data`` rows
+    (support staff need them)."""
     platform, report_v, overall = (report.get(k, "?") for k in ("platform", "driver_version", "overall"))
     identity = identity or {}
     cli_v = identity.get("cli_version") or ""
@@ -293,6 +302,9 @@ def _print_text_report(report: Report, color: bool, *, identity: Optional[Report
         lines.append(f"  {dim}binary: {identity['resolved_binary']}{reset}")
     if cli_v and report_v and str(report_v) not in str(cli_v) and str(cli_v) not in str(report_v):  # clearly differ
         lines += [f"  {dim}--version: {cli_v}{reset}", f"  {dim}health_report.driver_version: {report_v}{reset}"]
+    if environment:
+        lines += [f"  {dim}environment: current CLI process{reset}",
+                  f"  {dim}gateway environment was not checked; active gateway computer_use sessions use that process environment{reset}"]
     if identity.get("version_mismatch"):
         lines += [f"  {yellow}⚠️ version mismatch: health_report says {report_v!r} but binary --version is {cli_v!r}{reset}",
                   f"  {dim}→ trust --version / packages/current for debugging; health_report's binary_version check can lag on Windows{reset}"]
@@ -329,10 +341,16 @@ def run_doctor(driver_cmd: Optional[str] = None, *, include: Sequence[str] = (),
         return 2
     report = _apply_display_count_guard(report)
     identity = _build_identity(binary, report)
+    environment = _wayland_environment_context(report)
     if json_output:
-        # Additive envelope: upstream keys preserved, identity under hermes_identity so overall/checks parsers keep working.
-        json.dump({**report, "hermes_identity": identity}, sys.stdout, indent=2, sort_keys=True)
+        # Additive envelope: upstream keys preserved, identity under hermes_identity (and environment under
+        # hermes_environment when present) so overall/checks parsers keep working.
+        payload = {**report, "hermes_identity": identity}
+        if environment:
+            payload["hermes_environment"] = environment
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
     else:
-        _print_text_report(report, color=sys.stdout.isatty() if color is None else bool(color), identity=identity)
+        _print_text_report(report, color=sys.stdout.isatty() if color is None else bool(color), identity=identity,
+                           environment=environment)
     return 0 if report.get("overall") == "ok" else 1  # unknown/missing overall must not look like success

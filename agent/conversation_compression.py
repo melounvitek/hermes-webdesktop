@@ -59,6 +59,9 @@ _SPLIT_FAILURE_COOLDOWN_SECONDS = 60
 # the phrase intact when rewording. Idle/preflight/retry lines lack it; is_compaction_progress_status covers those.
 COMPACTION_STATUS_MARKER = "Compacting context"
 COMPACTION_STATUS = f"🗜️ {COMPACTION_STATUS_MARKER} — summarizing earlier conversation so I can continue..."
+# Periodic heartbeat re-emitted while a long compression is still running so remote transports with
+# idle-turn watchdogs (#98371) see progress. Same marker as COMPACTION_STATUS so consumers classify it alike.
+COMPACTION_HEARTBEAT_STATUS = f"🗜️ {COMPACTION_STATUS_MARKER} — still summarizing earlier conversation so I can continue..."
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
 
@@ -113,7 +116,8 @@ CONTEXT_OVERFLOW_BLOCKED_WARNING_TEMPLATE = (
 
 # Formatted from the same constants the emission sites use, so noise-filter tests exercise the ACTUAL wording.
 ROUTINE_COMPRESSION_STATUS_SAMPLES = (
-    COMPACTION_STATUS, COMPACTION_DONE_STATUS, PRE_API_COMPRESSION_STATUS_TEMPLATE.format(tokens=123456),
+    COMPACTION_STATUS, COMPACTION_HEARTBEAT_STATUS, COMPACTION_DONE_STATUS,
+    PRE_API_COMPRESSION_STATUS_TEMPLATE.format(tokens=123456),
     PREFLIGHT_COMPRESSION_STATUS_TEMPLATE.format(tokens=120000, threshold=100000),
     IDLE_COMPACTION_STATUS_TEMPLATE.format(idle_seconds=3600, tokens=120000),
     COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE.format(tokens=250000, attempt=1, cap=3),
@@ -1388,7 +1392,8 @@ class _CompressionActivityHeartbeat:
     """Refresh the agent inactivity tracker while compression blocks in an aux call."""
 
     def __init__(
-        self, agent: Any, interval_seconds: float | None = None, commit_fence: Optional[CompressionCommitFence] = None
+        self, agent: Any, interval_seconds: float | None = None, *, emit_client_status: bool = False,
+        commit_fence: Optional[CompressionCommitFence] = None,
     ) -> None:
         self._agent = agent
         self._commit_fence = commit_fence
@@ -1404,6 +1409,10 @@ class _CompressionActivityHeartbeat:
         except (TypeError, ValueError):
             interval_seconds = 60.0
         self._interval_seconds = max(0.1, interval_seconds)
+        # Only a compression that opened a VISIBLE compaction phase (the
+        # routine start status was emitted) keeps it alive with heartbeats;
+        # quiet context engines emit neither (#98371 follow-up).
+        self._emit_client_status = emit_client_status
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="compression-activity-heartbeat", daemon=True)
 
@@ -1449,11 +1458,40 @@ class _CompressionActivityHeartbeat:
                     return
                 touch(desc, provenance=ActivityProvenance.AGENT_COMPRESSION, force_persist=force_persist)
 
+    def _emit_progress_status(self) -> None:
+        """Re-publish the compacting status so remote transports see progress.
+
+        Compression can stream for minutes with no deltas, tool events, or
+        status lines reaching remote transports. Idle-progress watchdogs on
+        those clients (e.g. the Android relay app's 180s turn watchdog)
+        treat the silence as a dead turn and fire ``session.interrupt`` —
+        killing a healthy compression mid-flight and rolling back its work,
+        which retriggers on the next prompt and loops forever on sessions
+        near the context ceiling (#98371).
+
+        Routed through ``agent._emit_status`` like every other compaction
+        status: same "lifecycle" key (the TUI gateway re-tags it to
+        ``compacting``; Telegram edits one bubble per key), same chat-platform
+        filter, same CLI print path.
+        """
+        if not self._emit_client_status:
+            return
+        emit = getattr(self._agent, "_emit_status", None)
+        if not callable(emit):
+            return
+        try:
+            emit(COMPACTION_HEARTBEAT_STATUS)
+        except Exception:
+            logger.debug(
+                "status emit error in compression heartbeat", exc_info=True
+            )
+
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
             if self._should_suppress():
                 return
             self._touch("context compression in progress")
+            self._emit_progress_status()
 
 
 def _direct_messages_for_pre_compress_memory(messages: Any) -> list[dict[str, Any]]:
@@ -1941,7 +1979,12 @@ def _ensure_compressed_has_user_turn(original_messages: list, compressed: list) 
     """Preserve human intent, not merely a synthetic user-role placeholder."""
     if any(_is_real_user_message(message) for message in compressed) or _compressed_has_busy_steer(compressed):
         return "already_present"
-    from agent.context_compressor import COMPRESSION_CONTINUATION_USER_CONTENT, _fresh_compaction_message_copy
+    from agent.context_compressor import (
+        _INFLIGHT_REPLAY_MERGED_KEY, COMPRESSION_CONTINUATION_USER_CONTENT, _fresh_compaction_message_copy,
+    )
+    if any(isinstance(message, dict) and message.get(_INFLIGHT_REPLAY_MERGED_KEY) for message in compressed):
+        # The in-flight request was restated onto the summary carrier (#100818); an anchor would duplicate it.
+        return "already_present"
     # One reversed scan over BOTH kinds: scanning steer then user would let an older
     # consumed steer outrank a newer real user request and replay it.
     for message in reversed(original_messages):
@@ -2063,7 +2106,7 @@ class _CompactionLifecycle:
 
     def __init__(self, agent: Any, status_emitted: bool) -> None:
         self._agent = agent
-        self._status_emitted = status_emitted
+        self.status_emitted = status_emitted
         self._done_emitted = False
         self.commit_status = "aborted"
 
@@ -2074,7 +2117,7 @@ class _CompactionLifecycle:
         # Suppressed start → no terminal edge. Non-compacting aborts (lock contender,
         # cancelled fence) opt in via force_terminal so clients can retire their phase.
         # Failure warnings go through _emit_warning and are never suppressed here.
-        if self._status_emitted and (self.commit_status == "committed" or force_terminal):
+        if self.status_emitted and (self.commit_status == "committed" or force_terminal):
             _emit_compaction_done(self._agent)
 
 
@@ -2102,6 +2145,11 @@ class _CompressionLease:
         # Fence lock acquisition + release-hook publication together so a host timeout
         # cannot win between acquiring the lock and having a way to release it.
         self._lock_setup_entered = False
+
+    @property
+    def status_emitted(self) -> bool:
+        """True when the routine compaction start status was shown (heartbeats may follow it)."""
+        return self._lifecycle.status_emitted
 
     def begin_lock_setup(self) -> bool:
         if self._commit_fence is None:
@@ -2796,8 +2844,9 @@ def _warn_summary_or_aux_fallback(agent: Any) -> None:
 
 
 def _reset_read_dedup_caches(task_id: str, *, skills: bool = True) -> None:
-    """Clear the file-read (and skill_view) repeat-read dedup caches after a boundary.
-    Original read content was summarized away, so a re-read must return full content, not a "file unchanged" stub.
+    """Advance the file-read (and skill_view) repeat-read dedup to a fresh generation after a boundary.
+    The mtime map is kept: the first read of each unchanged key returns full content compaction may have
+    omitted; later reads return stubs, and stub-hit counters restart at the same boundary (#84857).
     """
     with contextlib.suppress(Exception):
         from tools.file_tools import reset_file_dedup
@@ -3144,7 +3193,9 @@ def _run_summary_phase(
             bypass_cooldown=bypass_cooldown,
         )
         messages_before_compression = copy.deepcopy(messages)
-        _activity_heartbeat = _CompressionActivityHeartbeat(agent, commit_fence=commit_fence).start()
+        _activity_heartbeat = _CompressionActivityHeartbeat(
+            agent, commit_fence=commit_fence, emit_client_status=lease.status_emitted,
+        ).start()
         compressed = _run_summary_dispatch(
             agent, messages, compress_fn, compress_kwargs, commit_fence=commit_fence,
             attempt_generation=attempt.generation, hard_cancel_event=hard_cancel_event,
@@ -3495,7 +3546,7 @@ def _compress_context_via_codex_app_server(
     logger.info("codex app-server compaction started: session=%s messages=%d tokens=~%s", _sid, len(messages), _tokens)
     with contextlib.suppress(Exception):
         agent._emit_status(COMPACTION_STATUS)
-    _activity_heartbeat = _CompressionActivityHeartbeat(agent).start()
+    _activity_heartbeat = _CompressionActivityHeartbeat(agent, emit_client_status=True).start()
     try:
         result = codex_session.compact_thread()
     except BaseException:
@@ -3717,7 +3768,7 @@ def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int
 
 
 __all__ = [
-    "COMPACTION_STATUS", "COMPACTION_DONE_STATUS", "COMPACTION_STATUS_MARKER", "is_compaction_progress_status",
+    "COMPACTION_STATUS", "COMPACTION_DONE_STATUS", "COMPACTION_HEARTBEAT_STATUS", "COMPACTION_STATUS_MARKER", "is_compaction_progress_status",
     "check_compression_model_feasibility", "replay_compression_warning", "compress_context",
     "try_shrink_image_parts_in_messages",
 ]

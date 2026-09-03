@@ -252,7 +252,7 @@ def _run_single_child(
     # thread before the worker settles races the conversation's finally path.
     _child_close_deferred = False
     try:
-        heartbeat[1].start()
+        heartbeat.start()
         _safe_progress(child_progress_cb, "subagent.start", preview=goal)
         run.seed_workspace()
         result, failure_entry, _child_close_deferred = run.await_child()

@@ -269,7 +269,8 @@ class _ProcessRelayPluginConfiguration:
             except Exception as exc:
                 raise RuntimeError("Hermes Relay dynamic plugin activation failed") from exc
         if self._activation is None:
-            # Reached only after explicit opt-in; Relay owns any ambient layering.
+            # Reached only after explicit opt-in. Relay 0.8 no longer layers repository-local
+            # configuration onto this explicitly selected payload.
             _resolve_plugin_awaitable(relay.plugin.initialize(plugin_config))
         return True
 

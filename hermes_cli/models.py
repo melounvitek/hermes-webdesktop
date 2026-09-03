@@ -104,9 +104,12 @@ from hermes_cli.models_pricing import (  # noqa: F401  (re-exported; tests patch
     compute_sale_discount,
     fetch_ai_gateway_pricing,
     fetch_models_with_pricing,
+    _pricing_provider_cache_keys,
+    get_cached_nous_inference_base_url,
     get_pricing_for_provider,
     nous_policy_allowed_ids,
     peek_cached_pricing,
+    pricing_cache_scope,
     restrict_to_nous_policy)
 from hermes_cli.models_validate import validate_requested_model  # noqa: F401  (re-exported)
 
@@ -276,25 +279,45 @@ def union_with_portal_paid_recommendations(
         force_refresh=force_refresh, synthesize_free_pricing=False)
 
 
-# Free-tier detection cache — short so an account upgrade shows within minutes.
+# Free-tier detection cache, per profile — short so an account upgrade shows within minutes.
 _FREE_TIER_CACHE_TTL: int = 180  # seconds
-_free_tier_cache: tuple[bool, float] | None = None  # (result, timestamp)
+_free_tier_cache: dict[str, tuple[bool, float]] = {}  # profile key -> (result, timestamp)
 
 
-def check_nous_free_tier(*, force_fresh: bool = False) -> bool:
+def _pricing_profile_key() -> str:
+    """Stable profile identity for process-local pricing caches."""
+    from hermes_constants import hermes_home_key
+
+    return hermes_home_key()
+
+
+def get_cached_nous_free_tier() -> Optional[bool]:
+    """This profile's live cached entitlement, or ``None`` if unknown/expired."""
+    cached = _free_tier_cache.get(_pricing_profile_key())
+    if cached is None or time.monotonic() - cached[1] >= _FREE_TIER_CACHE_TTL:
+        return None
+    return cached[0]
+
+
+def check_nous_free_tier(*, force_fresh: bool = False, cached_only: bool = False) -> bool:
     """True only when the Nous Portal user is KNOWN to be free-tier (unknown/error → False so this
-    never blocks users). Cached ``_FREE_TIER_CACHE_TTL`` seconds so an upgrade shows within minutes."""
-    global _free_tier_cache
+    never blocks users). Cached ``_FREE_TIER_CACHE_TTL`` seconds so an upgrade shows within minutes.
+    ``cached_only`` returns the live cached answer or the fail-open ``False`` without contacting Portal."""
     now = time.monotonic()
-    if not force_fresh and _free_tier_cache is not None and now - _free_tier_cache[1] < _FREE_TIER_CACHE_TTL:
-        return _free_tier_cache[0]
+    profile_key = _pricing_profile_key()
+    if not force_fresh:
+        cached_result = get_cached_nous_free_tier()
+        if cached_result is not None:
+            return cached_result
+    if cached_only:
+        return False
     try:
         from hermes_cli.nous_account import get_nous_portal_account_info
 
         result = get_nous_portal_account_info(force_fresh=force_fresh).is_free_tier
     except Exception:
         result = False  # default to paid on error — don't block users
-    _free_tier_cache = (result, now)
+    _free_tier_cache[profile_key] = (result, now)
     return result
 
 

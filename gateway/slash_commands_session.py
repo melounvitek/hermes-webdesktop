@@ -18,7 +18,8 @@ from agent.i18n import t
 from agent.turn_context import extract_api_content_sidecar
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
-from gateway.session import SessionSource, build_session_key, is_shared_multi_user_session
+from gateway.session import SessionSource, TranscriptReadError, build_session_key, is_shared_multi_user_session
+from gateway.slash_commands_status import HISTORY_UNREADABLE
 
 logger = logging.getLogger("gateway.run")  # log-record parity with gateway/run.py
 
@@ -378,7 +379,10 @@ class GatewaySessionCommandsMixin:
 
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
-        history = await self.async_session_store.load_transcript(session_entry.session_id)
+        try:
+            history = await self.async_session_store.load_transcript(session_entry.session_id)
+        except TranscriptReadError:
+            return HISTORY_UNREADABLE
         last_user_idx = next((i for i in range(len(history) - 1, -1, -1)
                               if user_originated_turn_view(history[i]) is not None), None)
         if last_user_idx is None:
@@ -484,7 +488,10 @@ class GatewaySessionCommandsMixin:
 
         source = event.source
         session_entry = await self.async_session_store.get_or_create_session(source)
-        history = await self.async_session_store.load_transcript(session_entry.session_id)
+        try:
+            history = await self.async_session_store.load_transcript(session_entry.session_id)
+        except TranscriptReadError:
+            return HISTORY_UNREADABLE
         if not history or len(history) < 4:
             return t("gateway.compress.not_enough")
         # Flags are stripped before positional parsing so they coexist with the boundary-aware
@@ -899,7 +906,11 @@ class GatewaySessionCommandsMixin:
         # provider cached _session_id at initialize() and would keep writing to the wrong session.
         self._evict_cached_agent(session_key)
         title = await self._session_db.get_session_title(target_id) or name
-        history = await self.async_session_store.load_transcript(target_id)
+        try:
+            history = await self.async_session_store.load_transcript(target_id)
+        except TranscriptReadError:
+            # The resume itself succeeded; only the count is missing — say so rather than "empty".
+            return t("gateway.resume.resumed_no_count", title=title) + "\n" + HISTORY_UNREADABLE
         msg_count = len([m for m in history if m.get("role") == "user"]) if history else 0
         if source.platform == Platform.MATRIX and allow_cross_room:
             msg_part = f" ({msg_count} message{'s' if msg_count != 1 else ''})" if msg_count else ""
@@ -993,7 +1004,10 @@ class GatewaySessionCommandsMixin:
         source = event.source
         session_key = self._session_key_for_source(source)
         current_entry = await self.async_session_store.get_or_create_session(source)
-        history = await self.async_session_store.load_transcript(current_entry.session_id)
+        try:
+            history = await self.async_session_store.load_transcript(current_entry.session_id)
+        except TranscriptReadError:
+            return HISTORY_UNREADABLE
         if not history:
             return t("gateway.branch.no_conversation")
         new_session_id = f"{_dt.now().strftime('%Y%m%d_%H%M%S')}_{_uuid.uuid4().hex[:6]}"

@@ -31,7 +31,7 @@ from typing import Callable, Dict, Optional, Any, List, Tuple, cast
 
 from agent.async_utils import safe_schedule_threadsafe
 from agent.conversation_compression import (
-    COMPACTION_DONE_STATUS, COMPACTION_STATUS, COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE,
+    COMPACTION_DONE_STATUS, COMPACTION_HEARTBEAT_STATUS, COMPACTION_STATUS, COMPRESSION_RETRY_CONTEXT_REDUCED_STATUS_TEMPLATE,
     COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE, COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE,
     COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE, IDLE_COMPACTION_STATUS_TEMPLATE,
     PRE_API_COMPRESSION_STATUS_TEMPLATE, PREFLIGHT_COMPRESSION_STATUS_TEMPLATE)
@@ -71,7 +71,8 @@ _TELEGRAM_NOISY_STATUS_RE = re.compile(
     r"|auto-lowered\s+(?:this\s+)?session'?s?\s+threshold"
     r"|configured\s+auxiliary\s+compression\s+provider\s+.+\s+unavailable"
     r"|skipping\s+concurrent\s+compression"
-    r"|compacting\s+context\s+[—-]\s+summarizing\s+earlier\s+conversation"
+    rf"|{re.escape(COMPACTION_STATUS)}"
+    rf"|{re.escape(COMPACTION_HEARTBEAT_STATUS)}"
     r"|resumed\s+after\s+\d+s\s+idle\s+[—-]\s+compacting"
     r"|preflight\s+compression"
     r"|pre[- ]api\s+compression"
@@ -286,7 +287,7 @@ _COMPRESSION_PROGRESS_STATUS_RE = re.compile(
     "|".join(
         _status_template_to_regex(_template)
         for _template in (
-            COMPACTION_STATUS, COMPACTION_DONE_STATUS, PRE_API_COMPRESSION_STATUS_TEMPLATE,
+            COMPACTION_STATUS, COMPACTION_HEARTBEAT_STATUS, COMPACTION_DONE_STATUS, PRE_API_COMPRESSION_STATUS_TEMPLATE,
             PREFLIGHT_COMPRESSION_STATUS_TEMPLATE, IDLE_COMPACTION_STATUS_TEMPLATE,
             COMPRESSION_RETRY_TOO_LARGE_STATUS_TEMPLATE, COMPRESSION_RETRY_MESSAGES_STATUS_TEMPLATE,
             COMPRESSION_RETRY_TOKENS_STATUS_TEMPLATE,
@@ -4162,11 +4163,43 @@ def _housekeeping_memory_trim() -> None:
     trim_memory(reason="messaging gateway housekeeping")
 
 
-def _start_gateway_housekeeping(stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, cron_provider=None):
+def _drain_restart_safe_cron_deliveries(adapters, loop, runner=None) -> None:
+    """Drain each profile's worker queue through its matching live adapters. A credential-less satellite
+    profile (empty adapter map) drains through the primary's adapters routed by its own profile routes."""
+    from cron import scheduler as cron_scheduler
+
+    if runner is None:
+        if adapters is not None:
+            cron_scheduler.drain_delivery_queue(adapters, loop)
+        return
+    for profile_name, profile_home in _handoff_watch_scopes(runner):
+        if profile_name is None:
+            profile_adapters = adapters
+        else:
+            profile_adapters = getattr(runner, "_profile_adapters", {}).get(profile_name)
+        if profile_adapters is None:
+            continue
+        with _profile_runtime_scope(profile_home or get_hermes_home()):
+            if profile_name is not None and not profile_adapters and adapters:
+                routes = cron_scheduler._primary_profile_routes_for_current_home()
+                if routes:
+                    profile_adapters = cron_scheduler.SharedRouteAdapters(adapters, routes)
+            cron_scheduler.drain_delivery_queue(profile_adapters, loop)
+
+
+def _start_gateway_housekeeping(
+    stop_event: threading.Event, adapters=None, loop=None, interval: int = 60, cron_provider=None, runner=None,
+):
     """Background thread for gateway-only periodic chores (NOT cron). Separate from the cron trigger
     so chores run under any ``CronScheduler`` provider (external scale-to-zero has no 60s loop).
     Cadences are ticks of ``interval``; inner gates own the real cadence."""
-    chores: list[tuple[int, str, Any]] = [
+    chores: list[tuple[int, str, Any]] = []
+    if adapters is not None or runner is not None:
+        # Restart-safe cron workers run outside the gateway cgroup and queue their final send for
+        # whichever gateway is live; drained here (not the scheduler tick) so external providers get it too.
+        chores.append((1, "Cron durable delivery queue drain",
+                       lambda: _drain_restart_safe_cron_deliveries(adapters, loop, runner)))
+    chores += [
         (5, "Channel directory refresh", lambda: adapters and _housekeeping_channel_directory(adapters, loop)),
         (60, "Media cache cleanup", _housekeeping_media_caches),
         (60, "Paste sweep", _housekeeping_paste_sweep)]
@@ -4694,7 +4727,7 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping, args=(cron_stop,),
         kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(),
-                "cron_provider": cron_provider},
+                "cron_provider": cron_provider, "runner": runner},
         daemon=True, name="gateway-housekeeping")
     housekeeping_thread.start()
     return cron_stop, cron_provider, cron_thread, housekeeping_thread

@@ -403,12 +403,28 @@ _TOOL_RESULT_MEDIA_PROVIDERS = frozenset({
 _GEMINI_PROVIDERS = frozenset({"google", "gemini", "google-gemini", "google-vertex-gemini"})
 
 
+def _profile_rejects_tool_media(provider: str) -> bool:
+    """Hard veto: the provider's ``ProviderProfile`` declares
+    ``supports_vision_tool_messages=False`` — images are accepted in user
+    messages but list-type tool-result content is rejected with 400
+    (xiaomi/MiMo "text is not set"). ``supports_vision`` alone must not
+    override this, or the multimodal tool-result envelope 400s every turn
+    and the image never enters context (#89981).
+    """
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(str(provider or "").strip().lower())
+        return profile is not None and profile.supports_vision_tool_messages is False
+    except Exception:
+        return False
+
+
 def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     """Whether provider+model accepts image content inside a tool-result message. Unknown
     providers are False (caller falls back to aux-LLM text) unless their ``ProviderProfile``
-    declares ``supports_vision``."""
+    declares ``supports_vision``; ``supports_vision_tool_messages=False`` is a hard veto."""
     p = provider.strip().lower() if isinstance(provider, str) else ""
-    if not p:
+    if not p or _profile_rejects_tool_media(p):
         return False
     if p in _TOOL_RESULT_MEDIA_PROVIDERS:
         return True
@@ -435,6 +451,11 @@ def _should_use_native_vision_fast_path() -> bool:
         model = _read_main_model()
         cfg = load_config()
         if decide_image_input_mode(provider, model, cfg) != "native":
+            return False
+        # The profile veto applies ahead of the capability lookup too: a
+        # model marked vision-capable by models.dev / custom_providers must
+        # not re-open the multimodal-envelope route the profile rejects.
+        if _profile_rejects_tool_media(provider):
             return False
         return (
             _supports_media_in_tool_results(provider, model)

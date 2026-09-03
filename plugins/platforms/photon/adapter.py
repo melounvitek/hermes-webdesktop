@@ -419,6 +419,7 @@ _CONTENT_NORMALIZERS: Dict[Any, Callable[[Dict[str, Any]], _Normalized]] = {
     "richlink": lambda c: (_format_richlink_content(c), MessageType.TEXT, [], []),
     "group": _normalize_group_content,
 }
+_BINARY_CONTENT_TYPES = {"attachment", "voice", "group"}  # may decode/cache media bytes → run off the event loop
 
 
 def _normalize_content(content: Dict[str, Any]) -> _Normalized:
@@ -805,7 +806,11 @@ class PhotonAdapter(BasePlatformAdapter):
                 return
             await self.handle_message(_event(choice))
             return
-        text, mtype, media_urls, media_types = _normalize_content(content)
+        if ctype in _BINARY_CONTENT_TYPES:
+            # Base64 decode + media-cache write of possibly multi-MB payloads — keep it off the event loop.
+            text, mtype, media_urls, media_types = await asyncio.to_thread(_normalize_content, content)
+        else:
+            text, mtype, media_urls, media_types = _normalize_content(content)
         if chat_type == "group" and self.require_mention:
             if not self._message_matches_mention_patterns(text):
                 logger.debug("[photon] ignoring group message (require_mention=true, no mention pattern matched)")

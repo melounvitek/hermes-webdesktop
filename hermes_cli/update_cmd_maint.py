@@ -140,7 +140,7 @@ def _print_curator_first_run_notice() -> None:
 
 
 def _print_fts_optimize_available_notice() -> None:
-    """Advertise the opt-in v23 FTS optimization when state.db is still on the legacy layout.
+    """Advertise the opt-in FTS storage rebuild when state.db still needs one.
 
     ``sessions.fts_optimize_notice``: ``advise`` (default), ``require`` (firmer), ``off``.
     """
@@ -168,13 +168,15 @@ def _print_fts_optimize_available_notice() -> None:
     if size_gb < 0.5:
         return
     db = None
+    needs_upgrade = False
     try:
         db = SessionDB(db_path=db_path, read_only=True)
-        # read_only opens skip schema init; probe the layout directly.
+        # read_only opens skip schema init; probe the stored layout directly.
         row = db._conn.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()
+        needs_upgrade = bool(row) and getattr(db, "_db_needs_fts_storage_upgrade")(db._conn)
         # Interrupted optimize-storage: v23 table shape but backfill markers / trash
         # tables remain. Re-running resumes it, so offer the command again.
         interrupted = bool(
@@ -197,9 +199,8 @@ def _print_fts_optimize_available_notice() -> None:
         if db is not None:
             with suppress(Exception):
                 db.close()
-    sql = (row[0] if row else "") or ""
-    if not sql or ("tool_name" in sql and not interrupted):
-        return
+    if not needs_upgrade and not interrupted:
+        return  # current layout already present (fresh/optimized)
 
     if interrupted:
         print()

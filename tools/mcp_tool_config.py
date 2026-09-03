@@ -1,7 +1,8 @@
 """MCP server config loading and stdio launch environment: ${VAR}/Cursor-style
 interpolation, hidden-whitespace and suspicious-entry filtering, the filtered
-subprocess env, command resolution, watchdog wrapping and the shared stderr log."""
+subprocess env, command resolution, the cached-npx binary shortcut and the shared stderr log."""
 
+import json
 import logging
 import os
 import re
@@ -174,18 +175,81 @@ def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
     return resolved_command, resolved_env
 
 
-def _wrap_command_with_watchdog(command: str, args: list) -> tuple[str, list]:
-    """Wrap a stdio command in the parent-death watchdog (POSIX only — it relies on process
-    groups, same scope as the killpg-based orphan cleanup). Unchanged on non-POSIX or if the
-    PID cannot be read — watchdog bookkeeping must never block a connection."""
-    if os.name != "posix":
-        return command, args
+def _npx_bin_candidates(bin_dir: str, name: str, *, windows: Optional[bool] = None) -> list:
+    """Launcher paths to try for *name* inside an npx cache's ``.bin``, in order. On Windows that
+    directory holds the extensionless sh script plus ``<name>.cmd``/``<name>.ps1``; the sh one
+    cannot be spawned there and ``os.access(X_OK)`` is only an existence check, so select by
+    extension (same precedence as ``hermes_constants._candidate_node_command_names``). ``windows``
+    is injectable so the branch is testable without patching ``os.name`` process-wide."""
+    is_windows = os.name == "nt" if windows is None else windows
+    if is_windows:
+        return [os.path.join(bin_dir, name + ext) for ext in (".cmd", ".exe")]
+    return [os.path.join(bin_dir, name)]
+
+
+def _npx_cached_bin(args: list) -> Optional[tuple]:
+    """Resolve ``npx -y <pkg>`` to the already-installed binary, or None.
+
+    ``npx`` resolves the package and then FORKS, staying resident as the real server's parent
+    for nothing (~48 MB private memory per MCP server, measured); Hermes already supervises the
+    child (shared death supervisor). When the package is in npx's cache we spawn its binary
+    directly. Deliberately conservative — None (caller keeps plain ``npx``, so a cold machine
+    still installs) for a cache miss, a version pin (``pkg@1.2.3``), extra npx flags, a manifest
+    without one obvious bin, or any unreadable cache entry. Returns ``(binary_path, remaining_args)``."""
+    if not isinstance(args, list) or not args:
+        return None
+
+    rest = list(args)
+    while rest and rest[0] in ("-y", "--yes"):
+        rest.pop(0)
+    if not rest:
+        return None
+    # `npx pkg -y` (flag AFTER the spec) would hand the server a flag npx would have eaten.
+    if any(str(a) in ("-y", "--yes") for a in rest[1:]):
+        return None
+
+    spec = str(rest[0])
+    # Scoped names keep their leading '@', so only an '@' AFTER the scope is a version separator.
+    if "@" in (spec[1:] if spec.startswith("@") else spec):
+        return None
+    if not spec or spec.startswith("-"):
+        return None
+
+    cache_root = os.environ.get("npm_config_cache") or os.path.join(os.path.expanduser("~"), ".npm")
+    npx_root = os.path.join(cache_root, "_npx")
+    if not os.path.isdir(npx_root):
+        return None
     try:
-        my_pid = os.getpid()
-    except Exception:
-        return command, args
-    watchdog = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_stdio_watchdog.py")
-    return sys.executable, [watchdog, "--ppid", str(my_pid), "--", command, *args]
+        entries = os.listdir(npx_root)
+    except OSError:
+        return None
+
+    for entry in entries:
+        manifest = os.path.join(npx_root, entry, "package.json")
+        try:
+            with open(manifest, "r", encoding="utf-8") as fh:
+                deps = (json.load(fh) or {}).get("dependencies") or {}
+        except (OSError, ValueError, TypeError):
+            continue
+        if spec not in deps:
+            continue
+        pkg_json = os.path.join(npx_root, entry, "node_modules", spec, "package.json")
+        try:
+            with open(pkg_json, "r", encoding="utf-8") as fh:
+                bin_field = (json.load(fh) or {}).get("bin")
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(bin_field, str):
+            names = [os.path.basename(spec)]
+        elif isinstance(bin_field, dict) and len(bin_field) == 1:
+            names = list(bin_field.keys())
+        else:
+            continue  # zero or several bins: which one npx would pick is not ours to guess
+        bin_dir = os.path.join(npx_root, entry, "node_modules", ".bin")
+        for candidate in _npx_bin_candidates(bin_dir, names[0]):
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                return candidate, rest[1:]
+    return None
 
 
 def _interpolate_env_vars(value):

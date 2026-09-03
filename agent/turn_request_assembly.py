@@ -113,7 +113,7 @@ def assemble_api_request(
     user merge and surrogate stripping, so the same row's bytes never vary across turns."""
     from agent.conversation_loop import (
         _apply_context_engine_selection, _canonicalize_api_tool_calls, _clone_message_for_send,
-        _midturn_request_pressure_tokens, estimate_messages_tokens_rough,
+        _midturn_request_pressure_tokens, _pressure_with_real_floor, estimate_messages_tokens_rough,
     )
 
     api_messages, effective_system = build_api_messages(
@@ -145,6 +145,13 @@ def assemble_api_request(
     # Runs unconditionally (not gated on context_compressor) so orphaned tool
     # results from session loading or manual message edits are always caught.
     api_messages = agent._sanitize_api_messages(api_messages)
+    # Send-path vision eviction (#89296): compression only strips stale screenshots
+    # when prune fires, and the Anthropic adapter's keep-window never sees
+    # OpenAI-style tool-result image_url parts. The per-call clone is rewritten in
+    # place; persisted history is untouched.
+    from agent.context_compressor import evict_stale_outbound_tool_images
+
+    evict_stale_outbound_tool_images(api_messages)
 
     # One-time repeated-heal notice goes out via the status/warning callback, NEVER
     # appended to messages: the cached prompt prefix stays byte-identical.
@@ -235,6 +242,13 @@ def assemble_api_request(
     _anchored_pressure = anchored_context_tokens(messages, getattr(agent, "_usage_anchor", None))
     if _anchored_pressure is not None:
         request_pressure_tokens = _anchored_pressure
+    else:
+        # Rough fallback only: floor at the provider's last REAL prompt size (an anchored
+        # figure is provider-exact and is never floored — on MoA turns that would re-add
+        # the fan-out tokens the anchor excludes).
+        request_pressure_tokens = _pressure_with_real_floor(
+            agent.context_compressor, request_pressure_tokens
+        )
     # Stash the rough estimate so update_from_response() can pair it with the real
     # count (should_defer_preflight_to_real_usage). getattr: test doubles lack it.
     _note_rough = getattr(agent.context_compressor, "note_request_rough_estimate", None)

@@ -337,8 +337,10 @@ DEFAULT_CONTEXT_LENGTHS = {
     # https://api-docs.deepseek.com/zh-cn/quick_start/pricing
     "deepseek-v4-pro": 1_000_000, "deepseek-v4-flash": 1_000_000, "deepseek-chat": 1_000_000,
     "deepseek-reasoner": 1_000_000, "deepseek": 128000,
-    # Meta; Thinking Machines inkling (covers inkling-small and :free/:batch variants)
-    "llama": 131072, "inkling": 1_048_576,
+    # Meta; Muse Spark family (1.1/1.2/1.3, -contributor(-free), meta/ prefixed) is 1M per OpenRouter,
+    # models.dev and api.commandcode.ai /models — keep the "muse-spark" prefix (bare "muse" would match
+    # muse-image/muse-voice). Thinking Machines inkling (covers inkling-small and :free/:batch variants)
+    "llama": 131072, "muse-spark-1.3": 1_048_576, "muse-spark": 1_048_576, "inkling": 1_048_576,
     # Qwen — https://help.aliyun.com/zh/model-studio/developer-reference/ (3.8-max/flash
     # 1M verified on OpenRouter & Nous portal 2026-08; qwen3-max = 256K Coding Plan snapshot)
     "qwen3.8-max": 1_000_000, "qwen3.8-flash": 1_000_000, "qwen3.6-plus": 1048576, "qwen3.7-plus": 1048576,
@@ -1269,6 +1271,7 @@ def _model_name_suggests_minimax_m3(model: str) -> bool:
 # shorter matching key and the 256K fallback — the threshold is inferred from them.
 _PRE_CATALOG_STALE_KEYS = frozenset({
     "minimax-m3",  # 1M; "minimax" catch-all persisted 204,800
+    "muse-spark-1.3", "muse-spark",  # 1M; pre-entry builds fell through to the 256K fallback
     "grok-4.3", "grok-4.6",  # 1M / 500K; "grok-4" catch-all persisted 256,000
     "grok-4-fast", "grok-4.20",  # 2M; fell through to the 256K fallback
     "qwen3.6-plus",  # 1M; "qwen" catch-all persisted 131,072
@@ -1775,8 +1778,9 @@ def _resolve_provider_aware_context_length(model: str, base_url: str, api_key: s
             if base_url and source == persist_on:
                 save_context_length(model, base_url, ctx)
             return ctx
-    if effective_provider == "gmi" and base_url:
-        # GMI exposes authoritative context_length via /models, but it is not in models.dev yet.
+    if effective_provider in {"gmi", "commandcode", "commandcode-anthropic"} and base_url:
+        # GMI and CommandCode expose authoritative context_length via /models (e.g. muse-spark 1M) but are
+        # not in models.dev, and as known providers they skip step 2's probe — else they fell to 256K.
         ctx = _resolve_endpoint_context_length(model, base_url, api_key=api_key)
         if ctx is not None:
             return ctx
@@ -1924,14 +1928,23 @@ def _is_cjk_token_dense_char(ch: str) -> bool:
 
 
 def estimate_tokens_rough(text: str) -> int:
-    """Rough token estimate: ceil(chars/4), CJK/Hangul/Kana codepoints ~1 token each. Ceiling keeps
-    short texts from estimating 0. Runs on every preflight walk, so the all-ASCII case stays O(1)."""
+    """Rough token estimate: CJK/Hangul/Kana codepoints ~1 token each; everything else ceil(UTF-8 bytes/4).
+    Ceiling keeps short texts from estimating 0. Runs on every preflight walk, so all-ASCII stays O(1).
+
+    Byte-counting (not chars) is the corrective for non-CJK, non-ASCII text: Cyrillic/Greek/Arabic are 2
+    bytes/char so count ~chars/2, matching real BPE cost (~2-3 chars/token) where chars/4 under-counted
+    ~2x and let sessions ride the provider ceiling below the compaction threshold. Calibrated vs
+    cl100k/o200k/Qwen2.5 (estimate/real): Russian 0.67->1.24, Arabic 0.53->0.96, Hindi 0.34->0.90,
+    Greek 0.37->0.68; accented Latin barely moves (French 1.02->1.03). errors="replace": lone surrogates
+    (routine in tool output; see message_sanitization) must not turn an estimate into a raise."""
     if not text:
         return 0
     text = str(text)
-    # ``str.isascii()`` is a flag check on CPython; non-ASCII without CJK (accents, Cyrillic, emoji) also gets chars/4.
-    dense = 0 if text.isascii() else len(text) - len(_CJK_DENSE_RE.sub("", text))
-    return dense + ((len(text) - dense + 3) // 4)
+    if text.isascii():  # flag check on CPython; ASCII cannot contain token-dense CJK
+        return (len(text) + 3) // 4
+    stripped = _CJK_DENSE_RE.sub("", text)
+    dense = len(text) - len(stripped)
+    return dense + ((len(stripped.encode("utf-8", "replace")) + 3) // 4)
 
 
 def estimate_messages_tokens_rough(messages: List[Dict[str, Any]], *, charge_stale_thinking: bool = True) -> int:

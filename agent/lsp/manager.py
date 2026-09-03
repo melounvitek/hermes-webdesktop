@@ -2,7 +2,9 @@
 
 :class:`LSPService` bridges the synchronous file_operations layer and the async
 :class:`agent.lsp.client.LSPClient`: one asyncio loop in a background thread, one lazily
-spawned client per ``(server_id, workspace_root)``, a **broken-set** of pairs that failed
+spawned client per ``(server_id, workspace_root)`` — servers flagged ``multi_root`` (pyright) get ONE
+client per ``server_id`` and further roots (typically sibling git worktrees) are attached to the running
+process via ``workspace/didChangeWorkspaceFolders`` — a **broken-set** of pairs that failed
 to spawn/initialize (never retried for the life of the service), and a **delta baseline**
 per file (``snapshot_baseline()`` runs BEFORE a write; the next ``get_diagnostics_sync()``
 returns only diagnostics not in it).  Off unless config enables it.
@@ -28,6 +30,12 @@ MIN_IDLE_TIMEOUT = 30  # floor for config values; must exceed any per-op wait bu
 
 _Key = Tuple[str, str]
 _Diags = List[Dict[str, Any]]
+
+
+def _client_key(srv: ServerDef, root: str) -> _Key:
+    """Cache key for the client serving ``root``: multi-root servers share one process per
+    ``server_id``; everything else is keyed per resolved project root."""
+    return (srv.server_id, "" if srv.multi_root else root)
 
 
 class _BackgroundLoop:
@@ -274,9 +282,10 @@ class LSPService:
             return
         already_broken = key in self._broken
         self._broken.add(key)
+        ckey = _client_key(srv, key[1])
         with self._state_lock:
-            client = self._clients.pop(key, None)
-            self._last_used.pop(key, None)
+            client = self._clients.pop(ckey, None)
+            self._last_used.pop(ckey, None)
         if client is not None:
             try:
                 # Fire-and-forget shutdown — we're already on a slow path.
@@ -301,8 +310,9 @@ class LSPService:
         """Return a snapshot of the service for ``hermes lsp status``."""
         with self._state_lock:
             clients = [
-                {"server_id": k[0], "workspace_root": k[1], "state": c.state, "running": c.is_running}
-                for k, c in self._clients.items()
+                {"server_id": c.server_id, "workspace_root": c.workspace_root,
+                 "workspace_folders": list(c.workspace_folders), "state": c.state, "running": c.is_running}
+                for c in self._clients.values()
             ]
             broken = list(self._broken)
         return {
@@ -349,7 +359,7 @@ class LSPService:
         if not (ws and gated and srv):
             return []
         with self._state_lock:
-            client = self._clients.get((srv.server_id, ws))
+            client = self._clients.get(_client_key(srv, ws))
         return list(client.diagnostics_for(file_path, fresh_only=True)) if client else []
 
     async def _get_or_spawn(self, file_path: str) -> Optional[LSPClient]:
@@ -367,38 +377,46 @@ class LSPService:
         if root is None:
             eventlog.log_disabled(srv.server_id, file_path, "exclude marker hit (server gated off)")
             return None
-        key = (srv.server_id, root)
-        if key in self._broken:
+        if (srv.server_id, root) in self._broken:
             return None
+        key = _client_key(srv, root)
         with self._state_lock:
             client = self._clients.get(key)
             if client is not None and client.is_running:
                 self._last_used[key] = time.time()
-                eventlog.log_active(*key)
-                return client
+                eventlog.log_active(srv.server_id, root)
+                return await self._attach_root(srv, client, root)
             spawning = self._spawning.get(key)
             owner = spawning is None
             if owner:
                 spawning = self._spawning[key] = asyncio.get_running_loop().create_future()
         if not owner:
             try:
-                return await spawning
+                client = await spawning
             except Exception:  # noqa: BLE001
                 return None
+            return await self._attach_root(srv, client, root) if client is not None else None
         try:
             client = await self._spawn_client(srv, root)
             if client is None:
-                self._broken.add(key)
+                self._broken.add((srv.server_id, root))
             else:
                 with self._state_lock:
                     self._clients[key] = client
                     self._last_used[key] = time.time()
-                eventlog.log_active(*key)
+                eventlog.log_active(srv.server_id, root)
             spawning.set_result(client)
             return client
         finally:
             with self._state_lock:
                 self._spawning.pop(key, None)
+
+    @staticmethod
+    async def _attach_root(srv: ServerDef, client: LSPClient, root: str) -> LSPClient:
+        """Multi-root servers: announce ``root`` to the shared process instead of spawning another."""
+        if srv.multi_root:
+            await client.add_workspace_folder(root)
+        return client
 
     async def _spawn_client(self, srv: ServerDef, root: str) -> Optional[LSPClient]:
         """Resolve the binary and start a client; ``None`` (after logging) when either fails."""
@@ -425,10 +443,10 @@ class LSPService:
 
     def _touch(self, client: LSPClient) -> None:
         """Refresh last-used; guarded on membership so a client reaped mid-operation can't resurrect its entry."""
-        key = (client.server_id, client.workspace_root)
         with self._state_lock:
-            if key in self._clients:
-                self._last_used[key] = time.time()
+            for key, c in self._clients.items():
+                if c is client:
+                    self._last_used[key] = time.time()
 
     async def _start_idle_reaper(self) -> None:
         self._idle_reaper_task = asyncio.create_task(self._idle_reaper_loop())

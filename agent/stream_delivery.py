@@ -65,10 +65,25 @@ class StreamDeliveryMixin:
             deliver(ctx_scrubber.flush())
         self._current_streamed_assistant_text = ""
 
+    @property
+    def _current_streamed_assistant_text(self) -> str:
+        """Visible assistant text streamed so far this turn. Backed by a list of pieces: ``+=`` on a string
+        attribute copies the whole reply on every delta (quadratic). Hot-path emptiness checks look at
+        ``_streamed_assistant_text_parts`` so they do not join per token."""
+        parts = getattr(self, "_streamed_assistant_text_parts", None)
+        return "".join(parts) if parts else ""
+
+    @_current_streamed_assistant_text.setter
+    def _current_streamed_assistant_text(self, value: str) -> None:
+        self._streamed_assistant_text_parts = [value] if value else []
+
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks (superseded writers excluded)."""
         if isinstance(text, str) and text and not self._stream_writer_superseded():
-            self._current_streamed_assistant_text = getattr(self, "_current_streamed_assistant_text", "") + text
+            parts = getattr(self, "_streamed_assistant_text_parts", None)
+            if parts is None:
+                parts = self._streamed_assistant_text_parts = []
+            parts.append(text)
 
     @staticmethod
     def _normalize_interim_visible_text(text: str) -> str:
@@ -263,7 +278,8 @@ class StreamDeliveryMixin:
             text = think_scrubber.feed(text) if think_scrubber is not None else self._strip_think_blocks(text)
             text = scrubber.feed(text) if scrubber is not None else sanitize_context(text)
             # Only strip leading newlines on the first delta — mid-stream "\n" is legitimate markdown.
-            if not prepended_break and not getattr(self, "_current_streamed_assistant_text", ""):
+            # Check the parts list, not the joined property (joining per token copies the whole reply).
+            if not prepended_break and not getattr(self, "_streamed_assistant_text_parts", None):
                 text = text.lstrip("\n")
         if not text:
             return

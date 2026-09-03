@@ -501,6 +501,19 @@ def _same_path(left: Path, right: Path) -> bool:
         return left == right
 
 
+def _is_same_auth_store(left: Path, right: Path) -> bool:
+    """True when two auth paths name ONE store rather than two copies.
+    ``_same_path`` resolves symlinks and ``..``; ``samefile`` adds hardlinks and bind-mounts
+    (same inode under two resolved names). Used by the forked-grant heal: a shared store has
+    no "other side" to consolidate."""
+    if _same_path(left, right):
+        return True
+    try:
+        return left.samefile(right)
+    except OSError:
+        return False
+
+
 def _resolved_key(path: Path) -> str:
     """Canonical string for *path* (resolved when possible) used as a cache / lock-holder key."""
     try:

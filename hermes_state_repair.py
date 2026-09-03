@@ -51,7 +51,8 @@ _FINGERPRINT_VOLATILE_HEADER_RANGES = ((24, 28), (92, 96))
 _REPAIR_BACKUP_MIN_FREE_BYTES = 256 * 1024 * 1024  # 256 MiB absolute floor
 _REPAIR_BACKUP_FREE_FRACTION = 0.02  # plus 2% of the volume
 _FTS_TABLES = ("messages_fts", "messages_fts_trigram", "messages_fts_cjk")
-_MANUAL_RECOVER_HINT = 'Free disk space, then retry (or recover manually with `sqlite3 {db_path} ".recover"`).'
+_MANUAL_RECOVER_HINT = ("Free disk space, then retry (or recover manually with "
+                        "`hermes sessions recover --source {db_path} --inspect-only` first).")
 
 
 def _sidecars(db_path: Path):
@@ -372,7 +373,10 @@ def _persistent_repair_exhausted_error(db_path: Path) -> str:
     """The stable operator-facing diagnostic for an exhausted repair budget."""
     return (f"automatic repair has already failed {_MAX_PERSISTENT_REPAIR_ATTEMPTS} times on this exact file — the "
             f"corruption is beyond the schema/FTS repair strategies (likely b-tree page damage). Manual recovery "
-            f"required: restore a backup, or salvage with `sqlite3 {db_path} \".recover\"`. "
+            f"required: restore a backup, or salvage with `hermes sessions recover --source {db_path} "
+            f"--inspect-only`, then (if it reports recoverable) `hermes sessions recover --source {db_path} "
+            f"--output recovered-state.db` (recovery snapshots the damaged file first, then runs the page-level "
+            f"`.recover` lane on the copy; do NOT point a raw `sqlite3` shell at the live database). "
             f"Delete {_repair_ledger_path(db_path).name} to force another automatic attempt.")
 
 
@@ -458,7 +462,10 @@ def _backup_db_file(db_path: Path) -> "Tuple[Optional[Path], Optional[str]]":
     Dedupe: reuse the newest backup when byte-identical to the current recovery image (``_backup_content_identity``
     — NOT mtime, NOT ``_db_fingerprint``); a repair loop once re-copied the same bytes on every restart. Staging
     names live OUTSIDE the ``.malformed-backup-`` prefix: inside it they count as a backup, sort NEWEST (prune kept
-    partials, deleted intact copies) and dedupe could return one with no real forensic copy on disk."""
+    partials, deleted intact copies) and dedupe could return one with no real forensic copy on disk.
+
+    Refusal reasons (``_backup_free_space_error`` / ``_MANUAL_RECOVER_HINT``) point operators at the safe lane,
+    `hermes sessions recover --source <db> --inspect-only`, never at a raw sqlite3 shell on the live file."""
     with contextlib.suppress(ImportError):  # scaffold/embed installs without hermes_cli track no connections
         from hermes_cli.sqlite_safe_read import has_live_connection
         if has_live_connection(db_path):
@@ -715,16 +722,11 @@ def _live_writer_holds_db(db_path: Path) -> bool:
     it with SQLITE_BUSY; neither statement parses the schema, so it works on malformed DBs. Fails **open**
     (False) on anything but a positive busy/locked signal: refusing to repair a DB nobody holds would strand
     the self-heal path. In ``journal_mode=DELETE`` a held reader takes only SHARED and this returns False;
-    repair is then serialised only by the cross-process repairer lock."""
-    try:
-        probe = _open_exclusive(db_path, "BEGIN IMMEDIATE")
-        with contextlib.suppress(Exception):  # a close() error is not evidence of a holder
-            _close_unpinned(probe)
-        return False
-    except sqlite3.OperationalError as exc:
-        return "locked" in str(exc).lower() or "busy" in str(exc).lower()
-    except Exception:  # malformed/unreadable: no evidence of a live holder either way
-        return False
+    repair is then serialised only by the cross-process repairer lock. Before probing, the foreign-holder scan
+    (``hermes_state_holders``) fails closed on deleted-WAL-generation, uninspectable, or unknown holders."""
+    import hermes_state_holders as _state_holders
+    from hermes_state import _connect_repair_durable as _connect  # call-time lookup: tests patch hermes_state.<name>
+    return _state_holders.live_writer_holds_db(db_path, connect_repair_durable=_connect)
 
 
 def _repair_skip(report: Dict[str, Any], verb: str, error: str, exc: Optional[BaseException] = None) -> Dict[str, Any]:
@@ -789,10 +791,10 @@ def repair_state_db_schema(db_path: Path, *, backup: bool = True) -> Dict[str, A
             # Probe journal mode BEFORE surgery: a rebuilt file comes back in the default (delete) mode and nothing
             # else records the flip. Unprobeable (damaged file) -> database.journal_mode is the restore target.
             before_mode = _probe_journal_mode_for_repair(db_path)
-            result = _repair_state_db_schema_locked(db_path, backup=backup, report=report)
+            result = _repair_state_db_schema_locked(db_path, backup=backup, report=report,
+                                                    journal_mode_before=before_mode)
             if result.get("repaired"):
                 result["journal_mode_before"] = before_mode
-                _restore_journal_mode_after_repair(db_path, before_mode)
         # Environmental aborts (before a strategy mutates the snapshot) are retriable, not proof of exhaustion;
         # the private marker stays out of the public report. The ledger update stays under the cross-process
         # lock so two repairers cannot lose each other's updates; a queued loser must not record at all.
@@ -813,8 +815,12 @@ def _probe_journal_mode_for_repair(db_path: Path) -> Optional[str]:
         return None
 
 
-def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]) -> None:
+def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str], *, conn=None) -> None:
     """Re-apply the journal mode after schema surgery.
+
+    ``conn`` must be the exclusive repair guard connection when called from the repair path: opening a fresh
+    connection AFTER the guard released let a writer still holding the unlinked old ``-wal`` inode coexist with
+    a brand-new ``state.db-wal`` — two generations of one store. The reopen is the hazard, not the mode.
 
     A rebuilt file comes back in the default (delete) mode; without this a corruption event silently moves a
     WAL store out of WAL (the open-time WAL-reset gate never sees a flip made inside repair). Routed through
@@ -824,7 +830,10 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
     is ``database.journal_mode``. Best-effort: the repair already succeeded, so failures log at WARNING."""
     from hermes_state import apply_wal_with_fallback
     try:
-        with _repair_conn(db_path) as conn:
+        if conn is None:
+            with _repair_conn(db_path) as owned:
+                after = apply_wal_with_fallback(owned, db_label=db_path.name)
+        else:
             after = apply_wal_with_fallback(conn, db_label=db_path.name)
         if before_mode and after != before_mode:
             logger.warning("state.db repair changed journal_mode %r -> %r (pre-surgery probe %r; restore resolved "
@@ -835,7 +844,9 @@ def _restore_journal_mode_after_repair(db_path: Path, before_mode: Optional[str]
                        "journal_mode on the next open", db_path, exc)
 
 
-def _repair_state_db_schema_locked(db_path: Path, *, backup: bool, report: Dict[str, Any]) -> Dict[str, Any]:
+def _repair_state_db_schema_locked(
+    db_path: Path, *, backup: bool, report: Dict[str, Any], journal_mode_before: Optional[str] = None,
+) -> Dict[str, Any]:
     """Repair strategies for :func:`repair_state_db_schema`; caller holds the cross-process repair lock.
 
     Strategies run on a SCRATCH COPY, copied back through SQLite's transactional backup API only once proven to open
@@ -844,8 +855,9 @@ def _repair_state_db_schema_locked(db_path: Path, *, backup: bool, report: Dict[
     file from the schema SQLite can still parse — when the damage IS in the schema b-tree (the ``malformed database
     schema ()`` class) every table hanging off the unreadable part is silently dropped, the probe still reports
     malformed, and repair returned ``repaired=False`` having destroyed what it was asked to save."""
-    from hermes_state import (_backup_db_file, _copy_database_snapshot, _db_opens_cleanly,
-                              _repair_scratch_space_error, _run_repair_strategies, _unlink_db_triple)
+    from hermes_state import (_backup_db_file, _copy_database_snapshot, _db_opens_cleanly, _exclusive_repair_db_guard,
+                              _repair_scratch_space_error, _restore_journal_mode_after_repair, _run_repair_strategies,
+                              _unlink_db_triple)
     scratch = db_path.with_name(f"{db_path.name}.repair-scratch")
     if (cleanup_error := _unlink_db_triple(scratch)) is not None:
         return _repair_skip(report, "aborted", f"could not remove a stale repair snapshot before probing state.db: {cleanup_error}")
@@ -894,6 +906,7 @@ def _repair_state_db_schema_locked(db_path: Path, *, backup: bool, report: Dict[
                 else:
                     logger.warning("state.db repaired via '%s' and promoted transactionally: %s",
                                    report.get("strategy"), db_path)
+                    _restore_journal_mode_after_repair(db_path, journal_mode_before, conn=live_guard)
             if not report.get("repaired"):
                 # Logged HERE, not in the strategies: they see the scratch copy, and the message a human acts on
                 # must name a path that still exists.

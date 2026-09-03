@@ -58,10 +58,10 @@ from hermes_state_fts import SessionFtsSetupMixin, load_fts5_cjk_extension  # no
 from hermes_state_portability import SessionPortabilityMixin
 from hermes_state_telegram import SessionTelegramTopicsMixin
 from hermes_state_schema import SessionSchemaMixin
+import hermes_state_holders as _state_holders
 from hermes_state_dbfile import (  # noqa: F401  (re-exported; tests patch hermes_state.<name>)
     _canonical_sqlite_path, _concrete_state_db_holder_pids, _connect_tracked_db,
-    _is_inactive_orphan_desktop_holder, _looks_like_hermes, _read_proc_cmdline,
-    _read_sqlite_application_id, _stat_sqlite_sidecar_identity, _watched_sqlite_sidecar_paths,
+    _is_inactive_orphan_desktop_holder, _read_sqlite_application_id, _stat_sqlite_sidecar_identity, _watched_sqlite_sidecar_paths,
     collect_state_db_stats, count_db_holders, is_zeroed_state_db, iter_deleted_sqlite_sidecar_holders,
     quarantine_cross_process_lock, quarantine_zeroed_state_db, refuse_deleted_wal_generation,
 )
@@ -81,7 +81,8 @@ from hermes_state_repair import (  # noqa: F401  (re-exported; tests patch herme
     _persistent_repair_attempts_exhausted, _probe_journal_mode_for_repair, _prune_malformed_backups,
     _read_repair_ledger, _record_repair_outcome, _release_auto_maintenance_lock,
     _repair_backup_headroom_bytes, _repair_ledger_path, _repair_scratch_space_error,
-    _repair_snapshot_timeout_seconds, _repair_state_db_schema_locked, _run_repair_strategies,
+    _repair_snapshot_timeout_seconds, _repair_state_db_schema_locked, _restore_journal_mode_after_repair,
+    _exclusive_repair_db_guard, _run_repair_strategies,
     _try_acquire_auto_maintenance_lock, _unlink_db_triple, apply_durability_barriers,
     preflight_db_writability, repair_state_db_schema,
 )
@@ -337,6 +338,11 @@ def divert_session_transcript_jsonl(session_id: str, messages) -> "Optional[Path
 
 # Process-wide shared SessionDB registry: long-lived in-process callers share ONE writer
 # connection per resolved path via get_shared_session_db(); one-shots use SessionDB() + close().
+def _foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
+    """Compatibility delegate to the state-holder authority."""
+    return _state_holders.foreign_state_db_holders(db_path)
+
+
 from hermes_state_registry import (  # noqa: F401  (re-export)
     close_shared_session_dbs, get_shared_session_db, release_or_close,
 )
@@ -1059,53 +1065,8 @@ class SessionDB(
         return True
 
     def _foreign_state_db_holders(self) -> List[Tuple[int, str]]:
-        """Foreign processes holding this DB or its WAL sidecars: automatic FTS
-        repair must not run while another process is attached (a sidecar reset
-        under it splits the WAL inodes). A scan failure is reported as an unknown
-        holder — skipping optional maintenance beats assuming quiescence."""
-        # Split-brain needs POSIX unlink semantics (Windows refuses to replace open sidecars);
-        # psutil.open_files() there can block for minutes.
-        if _IS_WINDOWS:
-            return []
-        if psutil is None:
-            return [(-1, "open-file scan unavailable")]
-        db_path = os.path.abspath(os.fspath(self.db_path))
-        watched = {_canonical_sqlite_path(db_path + suffix) for suffix in ("", "-wal", "-shm")}
-        holders: List[Tuple[int, str]] = []
-        own_pid = os.getpid()
-        try:
-            if sys.platform.startswith("linux"):
-                # readlink /proc/<pid>/fd directly; psutil.open_files() stats the literal path
-                # and silently drops "state.db-wal (deleted)" entries.
-                for pid in (int(p) for p in os.listdir("/proc") if p.isdigit()):
-                    if pid == own_pid:
-                        continue
-                    try:
-                        targets = list(_proc_fd_targets(pid))
-                    except OSError:
-                        # Unreadable fd table (other user); flag only Hermes-looking holders via cmdline.
-                        cmdline = _read_proc_cmdline(pid)
-                        if cmdline is not None and _looks_like_hermes(cmdline):
-                            holders.append((pid, f"uninspectable holder: {cmdline[:80]}"))
-                        continue
-                    holders.extend((pid, t) for t in targets if _canonical_sqlite_path(t) in watched)
-            else:
-                # macOS / BSD: psutil.open_files() (no "(deleted)" convention; AccessDenied -> empty).
-                for process in psutil.process_iter(["pid", "open_files"]):
-                    pid = int(process.info["pid"])
-                    if pid == own_pid:
-                        continue
-                    for opened in process.info.get("open_files") or ():
-                        path = getattr(opened, "path", "")
-                        if path and _canonical_sqlite_path(path) in watched:
-                            holders.append((pid, path))
-        except Exception as exc:
-            logger.warning(
-                "Could not prove state.db has no foreign holders; "
-                "deferring automatic FTS maintenance: %s", exc,
-            )
-            return holders or [(-1, f"open-file scan failed: {exc}")]
-        return holders
+        """Foreign processes holding this DB or its WAL sidecars (see hermes_state_holders)."""
+        return _foreign_state_db_holders(self.db_path)
 
     def _try_wal_checkpoint(self) -> None:
         """Best-effort PASSIVE WAL checkpoint; never raises. PASSIVE never blocks writers;

@@ -972,10 +972,13 @@ class GatewayStartupMixin:
             if outcome == "ok":
                 self._publish_primary_adapter(platform, adapter)
                 connected_count += 1
+                # connect() may return True on a degraded (unconfirmed) receive path; don't stamp "connected".
+                _degraded = adapter.send_path_degraded
                 self._update_platform_runtime_status(
-                    platform.value, platform_state="connected", error_code=None, error_message=None,
+                    platform.value, platform_state="retrying" if _degraded else "connected", error_code=None,
+                    error_message=adapter.DEGRADED_STATUS_MESSAGE if _degraded else None,
                 )
-                logger.info("\u2713 %s connected", platform.value)
+                logger.info("\u2713 %s connected%s", platform.value, " (degraded)" if _degraded else "")
                 continue
             # outcome == "failed"
             logger.warning("\u2717 %s failed to connect", platform.value)

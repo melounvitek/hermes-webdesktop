@@ -15,6 +15,7 @@ from agent.account_usage import fetch_account_usage, render_account_usage_lines
 from agent.i18n import t
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent
+from gateway.session import TranscriptReadError
 
 # Log-record parity with gateway/run.py and the origin module.
 logger = logging.getLogger("gateway.run")
@@ -64,6 +65,10 @@ async def _quiet(call, default=None):
         return await call()
     except Exception:
         return default
+
+
+HISTORY_UNREADABLE = ("⚠️ Conversation history is unreadable (state.db). "
+                      "This is not a new conversation — earlier messages exist but cannot be loaded.")
 
 
 def _quiet_sync(call, default=None):
@@ -328,7 +333,10 @@ class GatewayStatusCommandsMixin:
             breakdown = await asyncio.to_thread(self._context_breakdown_block, agent, source, expanded) if agent else []
             return "\n".join(lines + ([""] + breakdown if breakdown else []))
         # Last resort: rough estimate from transcript
-        history = await self.async_session_store.load_transcript(session_entry.session_id)
+        try:
+            history = await self.async_session_store.load_transcript(session_entry.session_id)
+        except TranscriptReadError:
+            return HISTORY_UNREADABLE
         if not history:
             return t("gateway.context.no_data")
         approx, count = _transcript_estimate(history)
@@ -440,7 +448,10 @@ class GatewayStatusCommandsMixin:
         Runs in a thread; returns [] and never raises."""
         try:
             from agent.context_breakdown import compute_context_details, render_context_breakdown_lines
-            payload = self._session_context_breakdown(agent, source)
+            try:
+                payload = self._session_context_breakdown(agent, source)
+            except TranscriptReadError:
+                return [HISTORY_UNREADABLE]  # a read failure is not an empty transcript
             if not (payload.get("categories") or []):
                 return []
             details = _quiet_sync(lambda: compute_context_details(agent), {"skills": [], "toolsets": []}) if expanded else None
@@ -449,16 +460,25 @@ class GatewayStatusCommandsMixin:
             return []
 
     def _session_context_breakdown(self, agent, source) -> dict:
-        """Per-category context estimate (chars/4) for *agent* over the session transcript (sync)."""
+        """Per-category context estimate (chars/4) for *agent* over the session transcript (sync).
+        Raises ``TranscriptReadError`` (unreadable rows must not pass as an empty transcript)."""
         from agent.context_breakdown import compute_session_context_breakdown
         store = self.session_store
-        history = _quiet_sync(lambda: store.load_transcript(store.get_or_create_session(source).session_id) or [], [])
+        try:
+            history = store.load_transcript(store.get_or_create_session(source).session_id) or []
+        except TranscriptReadError:
+            raise
+        except Exception:
+            history = []
         return compute_session_context_breakdown(agent, history)
 
     def _context_breakdown_lines(self, agent, source) -> list[str]:
         """/usage per-category context breakdown (chars/4 estimate). Returns [] and never raises."""
         try:
-            payload = self._session_context_breakdown(agent, source)
+            try:
+                payload = self._session_context_breakdown(agent, source)
+            except TranscriptReadError:
+                return [HISTORY_UNREADABLE]
             categories = payload.get("categories") or []
             if not categories:
                 return []
@@ -542,7 +562,10 @@ class GatewayStatusCommandsMixin:
 
         # No agent at all -- rough count from session history
         session_entry = await self.async_session_store.get_or_create_session(source)
-        history = await self.async_session_store.load_transcript(session_entry.session_id)
+        try:
+            history = await self.async_session_store.load_transcript(session_entry.session_id)
+        except TranscriptReadError:
+            return HISTORY_UNREADABLE
         if history:
             approx, count = _transcript_estimate(history)
             return _with_account_blocks([

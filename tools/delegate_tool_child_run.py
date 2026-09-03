@@ -202,55 +202,74 @@ def _dump_subagent_timeout_diagnostic(
 
 # ── Per-run helpers ──────────────────────────────────────────────────────────
 
-def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> tuple:
-    """``(stop_event, thread)`` for one child's parent-activity heartbeat, NOT
-    started: the caller starts it inside its ``try`` so a failed ``start()`` (OS
-    thread exhaustion) leaves ``ident`` None and the finally-path join is skipped."""
-    from tools.delegate_tool import (_HEARTBEAT_INTERVAL, _HEARTBEAT_STALE_CYCLES_IDLE, _HEARTBEAT_STALE_CYCLES_IN_TOOL)
-    _heartbeat_stop = threading.Event()
-    # Stale detection: a cycle counts as stale when (tool, iteration,
-    # activity_ts) all froze; thresholds differ idle vs in-tool.
-    last_seen = {"iter": 0, "tool": None, "ts": None, "stale": 0}
+class _Heartbeat:
+    """One child's parent-activity heartbeat on the shared periodic scheduler thread
+    (``agent.periodic_scheduler``) — not one daemon thread per child. NOT started at construction:
+    the caller calls ``start()`` inside its ``try`` so a failed schedule (OS thread exhaustion on
+    first use) leaves ``handle`` None and ``stop()`` is a no-op."""
 
-    def _heartbeat_loop():
-        while not _heartbeat_stop.wait(_HEARTBEAT_INTERVAL):
-            touch = getattr(parent_agent, "_touch_activity", None) if parent_agent is not None else None
-            if not touch:
-                continue
-            desc = f"delegate_task: subagent {task_index} working"
-            try:
-                child_summary = child.get_activity_summary()
-                child_tool = child_summary.get("current_tool")
-                child_iter = child_summary.get("api_call_count", 0)
-                child_max = child_summary.get("max_iterations", 0)
-                child_activity_ts = child_summary.get("last_activity_ts")
-                # A slow model wait refreshes last_activity_ts (direct_api_call
-                # heartbeat), so it never looks stale at the idle threshold.
-                activity_advanced = child_activity_ts is not None and (
-                    last_seen["ts"] is None or child_activity_ts > last_seen["ts"]
+    def __init__(self, child: Any, parent_agent: Any, task_index: int):
+        self.child, self.parent_agent, self.task_index = child, parent_agent, task_index
+        # Stale detection: a cycle counts as stale when (tool, iteration,
+        # activity_ts) all froze; thresholds differ idle vs in-tool.
+        self.last_seen = {"iter": 0, "tool": None, "ts": None, "stale": 0}
+        self.handle = None
+
+    def start(self) -> None:
+        from agent.periodic_scheduler import schedule
+        from tools.delegate_tool import _HEARTBEAT_INTERVAL
+        self.handle = schedule(self.tick, _HEARTBEAT_INTERVAL)
+
+    def stop(self) -> None:
+        """wait=5 mirrors the old thread join: an in-flight tick finishes."""
+        if self.handle is not None:
+            self.handle.cancel(wait=5)
+
+    def tick(self):
+        """Returning False stops the periodic callback."""
+        from tools.delegate_tool import _HEARTBEAT_STALE_CYCLES_IDLE, _HEARTBEAT_STALE_CYCLES_IN_TOOL
+        child, parent_agent, task_index, last_seen = self.child, self.parent_agent, self.task_index, self.last_seen
+        touch = getattr(parent_agent, "_touch_activity", None) if parent_agent is not None else None
+        if not touch:
+            return None
+        desc = f"delegate_task: subagent {task_index} working"
+        try:
+            child_summary = child.get_activity_summary()
+            child_tool = child_summary.get("current_tool")
+            child_iter = child_summary.get("api_call_count", 0)
+            child_max = child_summary.get("max_iterations", 0)
+            child_activity_ts = child_summary.get("last_activity_ts")
+            # A slow model wait refreshes last_activity_ts (direct_api_call
+            # heartbeat), so it never looks stale at the idle threshold.
+            activity_advanced = child_activity_ts is not None and (
+                last_seen["ts"] is None or child_activity_ts > last_seen["ts"]
+            )
+            if child_iter > last_seen["iter"] or child_tool != last_seen["tool"] or activity_advanced:
+                last_seen.update(iter=child_iter, tool=child_tool, stale=0)
+                if child_activity_ts is not None:
+                    last_seen["ts"] = child_activity_ts
+            else:
+                last_seen["stale"] += 1
+            if last_seen["stale"] >= (_HEARTBEAT_STALE_CYCLES_IN_TOOL if child_tool else _HEARTBEAT_STALE_CYCLES_IDLE):
+                logger.warning(
+                    "Subagent %d appears stale (no progress for %d heartbeat cycles, tool=%s) — stopping heartbeat",
+                    task_index, last_seen["stale"], child_tool or "<none>",
                 )
-                if child_iter > last_seen["iter"] or child_tool != last_seen["tool"] or activity_advanced:
-                    last_seen.update(iter=child_iter, tool=child_tool, stale=0)
-                    if child_activity_ts is not None:
-                        last_seen["ts"] = child_activity_ts
-                else:
-                    last_seen["stale"] += 1
-                if last_seen["stale"] >= (_HEARTBEAT_STALE_CYCLES_IN_TOOL if child_tool else _HEARTBEAT_STALE_CYCLES_IDLE):
-                    logger.warning(
-                        "Subagent %d appears stale (no progress for %d heartbeat cycles, tool=%s) — stopping heartbeat",
-                        task_index, last_seen["stale"], child_tool or "<none>",
-                    )
-                    break  # stop touching parent, let gateway timeout fire
-                if child_tool:
-                    desc = f"delegate_task: subagent running {child_tool} (iteration {child_iter}/{child_max})"
-                elif child_summary.get("last_activity_desc", ""):
-                    desc = f"delegate_task: subagent {child_summary.get('last_activity_desc', '')} (iteration {child_iter}/{child_max})"
-            except Exception:
-                pass
-            with _quiet(None):
-                touch(desc)
+                return False  # stop touching parent, let gateway timeout fire
+            if child_tool:
+                desc = f"delegate_task: subagent running {child_tool} (iteration {child_iter}/{child_max})"
+            elif child_summary.get("last_activity_desc", ""):
+                desc = f"delegate_task: subagent {child_summary.get('last_activity_desc', '')} (iteration {child_iter}/{child_max})"
+        except Exception:
+            pass
+        with _quiet(None):
+            touch(desc)
+        return None
 
-    return _heartbeat_stop, threading.Thread(target=_heartbeat_loop, daemon=True)
+
+def _start_heartbeat(child: Any, parent_agent: Any, task_index: int) -> _Heartbeat:
+    """Build (not start) one child's heartbeat; see ``_Heartbeat``."""
+    return _Heartbeat(child, parent_agent, task_index)
 
 def _register_child(
     child: Any, parent_agent: Any, goal: str, *, owner_session_id: Optional[str], owner_transport: Any,
@@ -748,16 +767,13 @@ class _ChildRun:
                 complete_kwargs["cost_usd"] = float(_cost_usd)
         _safe_progress(self.child_progress_cb, "subagent.complete", **complete_kwargs)
 
-    def cleanup(self, *, heartbeat: tuple, child_pool: Any, leased_cred_id: Any, close_deferred: bool) -> None:
+    def cleanup(self, *, heartbeat: _Heartbeat, child_pool: Any, leased_cred_id: Any, close_deferred: bool) -> None:
         """Finally-path teardown (idempotent, never raises). Order matters: stop heartbeat → drop registry entry →
         release credential lease → restore the parent's process-global tool names → detach from the parent's
         interrupt list → close the child (unless a timed-out worker still owns it) → pop the child's Relay scope if
         no turn is active."""
         child = self.child
-        _heartbeat_stop, _heartbeat_thread = heartbeat
-        _heartbeat_stop.set()
-        if _heartbeat_thread.ident is not None:
-            _heartbeat_thread.join(timeout=5)
+        heartbeat.stop()
 
         # Safe even if the child was never registered (ID missing on test doubles).
         if self.subagent_id:

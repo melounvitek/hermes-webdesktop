@@ -512,9 +512,13 @@ class MattermostAdapter(BasePlatformAdapter):
     async def _download_attachments(self, file_ids: List[str]) -> Tuple[List[str], List[str]]:
         """Download attachments now (URLs need auth headers downstream tools lack) → (paths, mime types)."""
         import aiohttp
-        from gateway.platforms.base import cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes
+        from gateway.platforms.base import (
+            cache_audio_from_bytes_async,
+            cache_document_from_bytes_async,
+            cache_image_from_bytes_async,
+        )
         media_urls, media_types = [], []
-        cache_fns = {"image/": cache_image_from_bytes, "audio/": cache_audio_from_bytes}
+        cache_fns = {"image/": cache_image_from_bytes_async, "audio/": cache_audio_from_bytes_async}
         for fid in file_ids:
             try:
                 file_info = await self._api_get(f"files/{fid}/info")
@@ -529,9 +533,10 @@ class MattermostAdapter(BasePlatformAdapter):
                     file_data = await resp.read()
                     prefix = next((p for p in cache_fns if mime.startswith(p)), None)
                     if prefix:
-                        media_urls.append(cache_fns[prefix](file_data, Path(fname).suffix or _INBOUND_CACHE_EXT[prefix]))
+                        media_urls.append(
+                            await cache_fns[prefix](file_data, Path(fname).suffix or _INBOUND_CACHE_EXT[prefix]))
                     else:
-                        media_urls.append(cache_document_from_bytes(file_data, fname))
+                        media_urls.append(await cache_document_from_bytes_async(file_data, fname))
                     media_types.append(mime)
             except Exception as exc:
                 logger.warning("Mattermost: error downloading file %s: %s", fid, exc)

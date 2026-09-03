@@ -140,6 +140,19 @@ class SessionFtsSetupMixin:
         ).fetchone()
         return row is not None and "tool_name" not in (row[0] or "")
 
+    @staticmethod
+    def _db_has_trigram_tool_calls_projection(cursor: sqlite3.Cursor) -> bool:
+        """True when the trigram vtable still includes the tool_calls payload (FTS_STORAGE_VERSION 1)."""
+        row = cursor.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts_trigram'"
+        ).fetchone()
+        return row is not None and "tool_calls" in (row[0] or "").lower()
+
+    @classmethod
+    def _db_needs_fts_storage_upgrade(cls, cursor: sqlite3.Cursor) -> bool:
+        """True when the current FTS storage layout should be treated as stale (optimize-storage has work)."""
+        return cls._db_has_legacy_inline_fts(cursor) or cls._db_has_trigram_tool_calls_projection(cursor)
+
     def _warn_trigram_unavailable(self, exc: sqlite3.OperationalError) -> None:
         """Log once that the trigram tokenizer is missing; base FTS5 stays enabled."""
         if getattr(self, "_trigram_unavailable_warned", False):  # attr is lazily created here

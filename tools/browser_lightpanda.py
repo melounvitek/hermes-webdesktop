@@ -6,6 +6,7 @@ built-in ``browser_*`` tools keep going through ``agent-browser --engine lightpa
 ``tools.browser_tool`` owns the session cache, inactivity reaper and atexit sweep.
 """
 
+import functools
 import json
 import logging
 import os
@@ -88,6 +89,47 @@ def _state_dir() -> Path:
     return path
 
 
+def _http_cache_dir() -> Path:
+    """Filesystem HTTP cache shared by every Lightpanda this Hermes spawns.
+
+    Shared rather than per-session so a cached asset survives session churn.
+    Lightpanda holds it in sqlite (WAL) with a best-effort write path, and
+    ``--http-cache-entry-limit`` (upstream default 1000, not passed here)
+    bounds it without Hermes managing eviction.
+    """
+    path = _state_dir() / "http-cache"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+_HTTP_CACHE_FLAG = "--http-cache-dir"
+
+
+@functools.lru_cache(maxsize=1)
+def _binary_supports_http_cache(binary: str) -> bool:
+    """True if ``lightpanda serve`` accepts ``--http-cache-dir``.
+
+    The flag landed upstream in 0.3.x; older binaries fatally reject it
+    ("unknown argument"), which would break every launch. Probing ``help``
+    output keeps working across future flag additions without parsing
+    versions, and the lru_cache keeps it once per binary per process.
+    """
+    try:
+        proc = subprocess.run(
+            [binary, "help"],
+            capture_output=True, text=True, timeout=3.0,
+            stdin=subprocess.DEVNULL,
+        )
+        return _HTTP_CACHE_FLAG in ((proc.stdout or "") + (proc.stderr or ""))
+    except Exception as e:
+        logger.debug("lightpanda http-cache probe failed (%s); assuming no", e)
+        return False
+
+
+def _record_path(session_name: str) -> Path:
+    return _state_dir() / f"{session_name}.json"
+
+
 def _browser_env() -> dict:
     try:
         from tools.browser_tool import _build_browser_env
@@ -163,7 +205,11 @@ def launch_lightpanda(session_name: str, *, block_private_networks: bool = False
                       f"or ~/.local/bin. {LIGHTPANDA_INSTALL_HINT}, or set browser.engine to auto.")
 
     port = _pick_free_loopback_port()
-    argv = [binary, "serve", "--host", "127.0.0.1", "--port", str(port)] + (["--block-private-networks"] if block_private_networks else [])
+    argv = [binary, "serve", "--host", "127.0.0.1", "--port", str(port)]
+    if _binary_supports_http_cache(binary):
+        argv += [_HTTP_CACHE_FLAG, str(_http_cache_dir())]
+    if block_private_networks:
+        argv.append("--block-private-networks")
     log_path = str(_state_dir() / f"{session_name}.log")
     try:
         with open(log_path, "wb") as log_file:

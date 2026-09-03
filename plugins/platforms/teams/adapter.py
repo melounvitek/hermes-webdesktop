@@ -51,7 +51,7 @@ HttpMethod = str  # type: ignore[assignment,misc]
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import (
-    gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult, cache_image_from_url, cache_media_bytes,
+    gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, SendResult, cache_image_from_url, cache_media_bytes_async,
 )
 from gateway.platforms._shared import coerce_port, get_scoped_secret as _get_scoped_secret
 from plugins.platforms.teams.summary_writer import TeamsSummaryWriter  # noqa: F401 — re-exported for teams_pipeline
@@ -496,7 +496,7 @@ class TeamsAdapter(BasePlatformAdapter):
             filename = att_name or (f"document.{file_type}" if file_type else "document")
             try:
                 data = await self._fetch_attachment_bytes(download_url)
-                cached = cache_media_bytes(data, filename=filename, mime_type="")
+                cached = await cache_media_bytes_async(data, filename=filename, mime_type="")
                 if not cached:
                     logger.warning("[teams] Unsupported document type for attachment '%s', skipping", filename)
                     return None
@@ -510,7 +510,7 @@ class TeamsAdapter(BasePlatformAdapter):
                     # Connector URL needs the bot's bearer token; the generic cache helper sends none.
                     data = await self._fetch_attachment_bytes(content_url)
                     ext = content_type.split("/")[-1].split(";")[0] or "png"
-                    cached = cache_media_bytes(data, filename=att_name or f"image.{ext}", mime_type=content_type)
+                    cached = await cache_media_bytes_async(data, filename=att_name or f"image.{ext}", mime_type=content_type)
                     if not cached:
                         logger.warning(
                             "[teams] Bot Framework attachment '%s' returned data that failed image validation, skipping",
@@ -525,7 +525,7 @@ class TeamsAdapter(BasePlatformAdapter):
         if content_url:  # direct-URL non-image attachment (video/audio/document)
             try:
                 data = await self._fetch_attachment_bytes(content_url)
-                cached = cache_media_bytes(data, filename=att_name, mime_type=content_type)
+                cached = await cache_media_bytes_async(data, filename=att_name, mime_type=content_type)
                 return (cached.path, cached.media_type, cached.kind) if cached else None
             except Exception as e:
                 logger.warning("[teams] Failed to cache attachment '%s' (%s): %s", att_name or content_url, content_type, e)

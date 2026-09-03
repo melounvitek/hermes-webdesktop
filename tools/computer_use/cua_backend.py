@@ -38,6 +38,7 @@ from tools.computer_use.cua_backend_session import _AsyncBridge, _CuaDriverSessi
 logger = logging.getLogger(__name__)
 # cua-driver's anonymous PostHog telemetry gate ("0" disables; absent => ON upstream).
 _CUA_TELEMETRY_ENV_VAR = "CUA_DRIVER_RS_TELEMETRY_ENABLED"
+_CUA_NATIVE_WAYLAND_ENV_VAR = "CUA_DRIVER_RS_ENABLE_WAYLAND"
 
 
 def _computer_use_cfg() -> Dict[str, Any]:
@@ -97,8 +98,15 @@ def _computer_use_max_image_dimension() -> Optional[int]:
 
 def cua_driver_child_env(base_env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Env for spawning cua-driver: ``base_env`` (default ``os.environ``) plus ``CUA_DRIVER_RS_TELEMETRY_ENABLED=0``
-    unless the user opted in. Used by every spawn site (MCP, status, doctor, install) so the policy is uniform."""
-    return {**(os.environ if base_env is None else base_env), **({_CUA_TELEMETRY_ENV_VAR: "0"} if _cua_telemetry_disabled() else {})}
+    unless the user opted in, plus the native-Wayland bridge (``computer_use.native_wayland`` config opt-in, only when
+    the child has a Wayland display). Used by every spawn site (MCP, status, doctor, install) so CLI and gateway
+    runtimes share one policy."""
+    env = dict(os.environ if base_env is None else base_env)
+    if _cua_telemetry_disabled():
+        env[_CUA_TELEMETRY_ENV_VAR] = "0"
+    if sys.platform == "linux" and env.get("WAYLAND_DISPLAY") and bool(_computer_use_cfg().get("native_wayland", False)):
+        env[_CUA_NATIVE_WAYLAND_ENV_VAR] = "1"
+    return env
 
 def sanitized_cua_driver_env() -> Dict[str, str]:
     """``cua_driver_child_env()`` with Hermes provider secrets stripped — cua-driver is a third-party binary and must

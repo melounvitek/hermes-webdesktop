@@ -26,7 +26,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tools.code_kernel import RUNNER_CELL_SOURCE, KernelRegistry
 
@@ -114,6 +114,10 @@ class RemoteKernel:
     last_used: float = field(default_factory=time.monotonic)
     execution_count: int = 0
     cell_seq: int = 0
+    # Cells currently running on this kernel. Reap/evict skip attached
+    # kernels: killing one mid-cell tears the runner out from under a live
+    # poll loop (same guard as tools.code_kernel, hermes-agent#101861).
+    attached: int = 0
 
     def sh(self, cmd: str, timeout: int = 15) -> str:
         return _sh(self.env, cmd, timeout)
@@ -160,6 +164,28 @@ def shutdown_remote_kernels_for_owner(owner: str) -> None:
     local kernels, so /new and session close reap both kinds."""
     if owner:
         _REGISTRY.shutdown(owner)
+
+
+def _reap_unlocked(idle_timeout: int) -> List["RemoteKernel"]:
+    """Pop idle-expired, unattached remote kernels; caller tears them down outside the lock. The
+    runner self-exits after the same idle window, so this clears the HOST-side entry — without it
+    the map grew one entry per never-revisited (owner, env_type, task_env_id) for the gateway's life."""
+    now = time.monotonic()
+    doomed = [key for key, kernel in _REMOTE_KERNELS.items()
+              if kernel.attached == 0 and now - kernel.last_used > idle_timeout]
+    return [_REMOTE_KERNELS.pop(key) for key in doomed]
+
+
+def _evict_over_cap_unlocked(keep: Tuple) -> List["RemoteKernel"]:
+    """Pop least-recently-used unattached remote kernels beyond the process-wide cap (the same
+    ``max_session_kernels`` bound as local kernels, applied independently to this map)."""
+    from tools.code_kernel import _lifecycle_limits
+    cap, _ = _lifecycle_limits()
+    if len(_REMOTE_KERNELS) <= cap:
+        return []
+    by_age = sorted((key for key in _REMOTE_KERNELS if key != keep and _REMOTE_KERNELS[key].attached == 0),
+                    key=lambda key: _REMOTE_KERNELS[key].last_used)
+    return [_REMOTE_KERNELS.pop(key) for key in by_age[: len(_REMOTE_KERNELS) - cap]]
 
 
 atexit.register(shutdown_all_remote_kernels)
@@ -215,11 +241,15 @@ def _spawn_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
 def _acquire_remote_kernel(env, env_type: str, owner: str, task_env_id: str,
                            sandbox_tools: frozenset, *, reset: bool,
                            idle_exit: int) -> Tuple[Optional[RemoteKernel], bool, bool, bool]:
-    """Find/respawn the owner's kernel: (kernel|None, reused, state_reset, state_lost)."""
+    """Find/respawn the owner's kernel: (kernel|None, reused, state_reset, state_lost); reaps
+    idle-expired entries on the way in."""
     key = _kernel_key(owner, env_type, task_env_id)
     state_lost = state_reset = False
     with _REGISTRY.lock:
+        expired = _reap_unlocked(idle_exit)
         kernel = _REMOTE_KERNELS.get(key)
+    for doomed in expired:
+        doomed.kill()
     if kernel is not None and reset:
         _REGISTRY.discard(key, kernel)
         kernel, state_reset = None, True
@@ -274,8 +304,6 @@ def execute_in_remote_kernel(
     post-processes output), or ``None`` when no kernel could be spawned (caller falls open to
     per-call). ``state_lost``/``state_reset``/``reused`` ride in the ``kernel`` sub-dict."""
     from tools.code_kernel import _resolve_owner
-    from tools.code_execution_tool import _rpc_poll_loop
-    from tools.thread_context import propagate_context_to_thread
     owner = _resolve_owner(task_env_id)
     kernel, reused, state_reset, state_lost = _acquire_remote_kernel(
         env, env_type, owner, task_env_id, sandbox_tools, reset=reset, idle_exit=idle_exit)
@@ -283,6 +311,26 @@ def execute_in_remote_kernel(
         return None  # fail open to per-call
     key = _kernel_key(owner, env_type, task_env_id)
     kernel.last_used = time.monotonic()
+    with _REGISTRY.lock:
+        kernel.attached += 1
+        evicted = _evict_over_cap_unlocked(keep=key)
+    for doomed in evicted:
+        doomed.kill()
+    try:
+        return _run_attached_cell(kernel, key, code, env=env, task_env_id=task_env_id,
+                                  sandbox_tools=sandbox_tools, timeout=timeout, max_tool_calls=max_tool_calls,
+                                  reused=reused, state_reset=state_reset, state_lost=state_lost)
+    finally:
+        with _REGISTRY.lock:
+            kernel.attached -= 1
+            kernel.last_used = time.monotonic()
+
+
+def _run_attached_cell(kernel: RemoteKernel, key: Tuple, code: str, *, env, task_env_id: str,
+                       sandbox_tools: frozenset, timeout: int, max_tool_calls: int,
+                       reused: bool, state_reset: bool, state_lost: bool) -> Dict[str, Any]:
+    from tools.code_execution_tool import _rpc_poll_loop
+    from tools.thread_context import propagate_context_to_thread
     # Clean stale tool-RPC requests from a previous cell before arming this cell's poll loop, so
     # a background thread the last cell leaked cannot smuggle a call into this authority window.
     q_rpc = shlex.quote(kernel.kernel_dir + '/rpc')

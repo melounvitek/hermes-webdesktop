@@ -178,7 +178,7 @@ from gateway.authz_mixin import _coerce_allow_set
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult,
-    classify_send_error, cache_image_from_bytes, cache_audio_from_bytes, cache_video_from_bytes,
+    classify_send_error, cache_image_from_bytes_async, cache_audio_from_bytes_async, cache_video_from_bytes_async,
     resolve_proxy_url, SUPPORTED_VIDEO_TYPES, SUPPORTED_DOCUMENT_TYPES,
     SUPPORTED_IMAGE_DOCUMENT_TYPES, _TEXT_INJECT_EXTENSIONS, utf16_len,
 )
@@ -631,6 +631,13 @@ class TelegramAdapter(BasePlatformAdapter):
         # Post-connect housekeeping (command menu + DM topics) runs off the connect path so a
         # slow Bot API call (set_my_commands stall) can't blow the gateway connect timeout.
         self._post_connect_task: Optional[asyncio.Task] = None
+
+    @property
+    def send_path_degraded(self) -> bool:
+        # True from polling-generation start until the first getUpdates
+        # round-trip is proven (_record_polling_progress), and again at every
+        # polling-death site. getattr: tests build adapters via object.__new__().
+        return bool(getattr(self, "_send_path_degraded", False))
 
     def _mark_connected(self) -> None:
         self._drop_delayed_deliveries = False
@@ -2001,6 +2008,13 @@ class TelegramAdapter(BasePlatformAdapter):
             self._polling_conflict_recovery_generation = None
         else:
             self._polling_conflict_count = 0
+        # First proof getUpdates is flowing for this generation: flip a
+        # published "retrying" (degraded connect, reconnect stamp, or the
+        # mid-session recovery below) back to "connected" (#101391).
+        if self._send_path_degraded and getattr(self, "_running", False) and not self.has_fatal_error:
+            self._write_runtime_status_safe(
+                "connected", platform_state="connected", error_code=None, error_message=None,
+            )
         self._send_path_degraded = False
 
     def _observe_polling_request_result(self, request, generation, result):
@@ -2181,6 +2195,11 @@ class TelegramAdapter(BasePlatformAdapter):
             )
             return
         self._send_path_degraded = True
+        # Polling died mid-session on an adapter that published "connected"
+        # at connect time. Without this, gateway_state.json keeps saying
+        # connected for as long as the recovery ladder runs (#101391: 11 h).
+        if getattr(self, "_running", False):
+            self._mark_degraded()
         logger.warning(
             "[%s] Telegram polling degraded (%s); gateway stays alive and will retry. Error: %s",
             self.name, reason, _redact_telegram_error_text(error),
@@ -7061,7 +7080,7 @@ class TelegramAdapter(BasePlatformAdapter):
         ``"oversized"`` (skipped, ``cached`` is the raw file_size), ``"failed"``
         (download error, logged), ``"unreadable"`` (cache rejected it) or ``"ok"``.
         """
-        from gateway.platforms.base import cache_media_bytes
+        from gateway.platforms.base import cache_media_bytes_async
         source, filename, mime, kind = self._observed_media_source(msg)
         if source is None:
             return "none", None
@@ -7078,7 +7097,7 @@ class TelegramAdapter(BasePlatformAdapter):
             data = bytes(await file_obj.download_as_bytearray())
             if not filename:
                 filename = os.path.basename(getattr(file_obj, "file_path", "") or "")
-            cached = cache_media_bytes(data, filename=filename, mime_type=mime, default_kind=kind)
+            cached = await cache_media_bytes_async(data, filename=filename, mime_type=mime, default_kind=kind)
         except Exception as exc:
             logger.warning("[Telegram] Failed to cache %s: %s", what, _redact_telegram_error_text(exc), exc_info=True)
             return "failed", None
@@ -7550,10 +7569,10 @@ class TelegramAdapter(BasePlatformAdapter):
                         if file_obj.file_path.lower().endswith(candidate):
                             ext = candidate
                             break
-                cached_path = cache_video_from_bytes(bytes(data), ext=ext)
+                cached_path = await cache_video_from_bytes_async(bytes(data), ext=ext)
                 mime = SUPPORTED_VIDEO_TYPES.get(ext, "video/mp4")
             else:
-                cached_path = cache_audio_from_bytes(bytes(data), ext=ext)
+                cached_path = await cache_audio_from_bytes_async(bytes(data), ext=ext)
             event.media_urls = [cached_path]
             event.media_types = [mime]
             logger.info("[Telegram] Cached user %s at %s", kind, cached_path)
@@ -7610,7 +7629,7 @@ class TelegramAdapter(BasePlatformAdapter):
                         if file_obj.file_path.lower().endswith(candidate):
                             ext = candidate
                             break
-                cached_path = cache_image_from_bytes(bytes(image_bytes), ext=ext)
+                cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=ext)
                 event.media_urls = [cached_path]
                 event.media_types = [f"image/{ext.lstrip('.')}"]
                 logger.info("[Telegram] Cached user photo at %s", cached_path)
@@ -7659,7 +7678,7 @@ class TelegramAdapter(BasePlatformAdapter):
                     image_bytes = await file_obj.download_as_bytearray()
                     image_ext = ext if ext in _TELEGRAM_IMAGE_EXTENSIONS else _TELEGRAM_IMAGE_MIME_TO_EXT.get(doc_mime, ".jpg")
                     try:
-                        cached_path = cache_image_from_bytes(bytes(image_bytes), ext=image_ext)
+                        cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=image_ext)
                     except ValueError as e:
                         logger.warning("[Telegram] Failed to cache image document: %s", _redact_telegram_error_text(e), exc_info=True)
                         event.text = f"Image document '{original_filename or doc_mime or ext or 'unknown'}' could not be read as an image."
@@ -7683,7 +7702,7 @@ class TelegramAdapter(BasePlatformAdapter):
                 if ext in SUPPORTED_VIDEO_TYPES:
                     file_obj = await doc.get_file()
                     video_bytes = await file_obj.download_as_bytearray()
-                    cached_path = cache_video_from_bytes(bytes(video_bytes), ext=ext)
+                    cached_path = await cache_video_from_bytes_async(bytes(video_bytes), ext=ext)
                     event.media_urls = [cached_path]
                     event.media_types = [SUPPORTED_VIDEO_TYPES[ext]]
                     event.message_type = MessageType.VIDEO
@@ -7697,8 +7716,8 @@ class TelegramAdapter(BasePlatformAdapter):
                 file_obj = await doc.get_file()
                 doc_bytes = await file_obj.download_as_bytearray()
                 raw_bytes = bytes(doc_bytes)
-                from gateway.platforms.base import cache_media_bytes
-                cached = cache_media_bytes(
+                from gateway.platforms.base import cache_media_bytes_async
+                cached = await cache_media_bytes_async(
                     raw_bytes, filename=original_filename or f"document{ext or '.bin'}", mime_type=doc_mime
                 )
                 if cached is None:
@@ -7807,7 +7826,7 @@ class TelegramAdapter(BasePlatformAdapter):
         try:
             file_obj = await sticker.get_file()
             image_bytes = await file_obj.download_as_bytearray()
-            cached_path = cache_image_from_bytes(bytes(image_bytes), ext=".webp")
+            cached_path = await cache_image_from_bytes_async(bytes(image_bytes), ext=".webp")
             logger.info("[Telegram] Analyzing sticker at %s", cached_path)
             from tools.vision_tools import vision_analyze_tool
             result_json = await vision_analyze_tool(image_url=cached_path, user_prompt=STICKER_VISION_PROMPT)

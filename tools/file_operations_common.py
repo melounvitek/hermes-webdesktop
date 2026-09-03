@@ -145,6 +145,7 @@ class SearchResult:
             result["counts"] = self.counts
         if self.truncated:
             result["truncated"] = True
+            result["total_count_is_lower_bound"] = True
         for key in ("limit_reason", "warning", "error"):
             value = getattr(self, key)
             if value:

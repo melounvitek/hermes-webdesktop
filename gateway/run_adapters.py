@@ -679,11 +679,19 @@ class GatewayAdapterLifecycleMixin:
         self._publish_primary_adapter(platform, adapter)
         self.delivery_router.adapters = self.adapters
         del self._failed_platforms[platform]
+        # connect() returning True does not mean the receive path is confirmed -- Telegram's degraded
+        # reconnect returns True so the gateway stays up while its own ladder retries. Stamping "connected"
+        # here would undo the adapter's accurate status.
+        _degraded = adapter.send_path_degraded
         self._update_platform_runtime_status(
-            platform.value, platform_state="connected", error_code=None, error_message=None,
+            platform.value, platform_state="retrying" if _degraded else "connected", error_code=None,
+            error_message=adapter.DEGRADED_STATUS_MESSAGE if _degraded else None,
             needs_attention=False, retrying_since=None,
         )
-        logger.info("✓ %s reconnected successfully", platform.value)
+        if _degraded:
+            logger.info("⚠ %s reconnected in degraded mode (receive path not yet confirmed)", platform.value)
+        else:
+            logger.info("✓ %s reconnected successfully", platform.value)
         # Responses rejected while down are owned by this live process (startup recovery cannot claim them).
         with _log_suppressed(
             logging.DEBUG, "failed-obligation redelivery after %s reconnect failed",

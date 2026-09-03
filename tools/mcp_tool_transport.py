@@ -1,5 +1,5 @@
-"""Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, watchdog wrap, child PID
-ledger), Streamable HTTP / SSE connect (preflight, identity header, client certs, OAuth),
+"""Transport bring-up for MCPServerTask: stdio spawn (OSV preflight, cached-npx swap, child PID
+ledger + death-supervisor registration), Streamable HTTP / SSE connect (preflight, identity header, client certs, OAuth),
 protocol negotiation and initial tool discovery. Split from tools/mcp_tool.py."""
 
 import logging
@@ -7,7 +7,6 @@ import asyncio
 import os
 from contextlib import asynccontextmanager
 from typing import Dict, Optional, Set
-from tools.mcp_tool_config import _wrap_command_with_watchdog
 from tools.mcp_tool_errors import NonMcpEndpointError, _apply_identity_header, _handshake_rejected_as_modern, _make_redirect_header_stripper, _resolve_client_cert
 from tools.mcp_tool_lifecycle import _filter_mcp_children, _orphan_stdio_pid_servers, _orphan_stdio_pids, _stdio_pgids, _stdio_pids
 from tools.mcp_tool_common import _core
@@ -39,22 +38,6 @@ def _pgroup_alive(pgid: Optional[int]) -> bool:
         return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
-
-
-async def _osv_malware_preflight(server_name: str, command: str, args: list) -> None:
-    """OSV malware preflight, off-loop with a wall-clock bound (fail-open on timeout). Must run on
-    the REAL command/args — the watchdog wrap rewrites argv to the supervisor (check becomes a no-op)."""
-    from tools.osv_check import check_package_for_malware
-    try:
-        malware_error = await asyncio.wait_for(
-            asyncio.to_thread(check_package_for_malware, command, args), timeout=_core._OSV_MALWARE_CHECK_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        logger.warning("MCP server '%s': OSV malware preflight timed out after %.0fs "
-                       "(network slow/unreachable) — proceeding without the check.",
-                       server_name, _core._OSV_MALWARE_CHECK_TIMEOUT_S)
-        return
-    if malware_error:
-        raise ValueError(f"MCP server '{server_name}': {malware_error}")
 
 
 class MCPServerTransportMixin:
@@ -153,7 +136,13 @@ class MCPServerTransportMixin:
         for pid in new_pids:
             try:
                 new_pgids[pid] = os.getpgid(pid)
-            except (AttributeError, ProcessLookupError, OSError):  # Windows / already exited
+            except ProcessLookupError:
+                # Raced and already exited. The SDK spawns with start_new_session=True, so the
+                # child was its own group leader (pgid == pid): keep that group covered — any
+                # descendant it left behind still has to be reaped; the prune forgets the group
+                # once nothing in it is alive.
+                new_pgids[pid] = pid
+            except (AttributeError, OSError):  # Windows (os.getpgid is POSIX-only)
                 pass
         with _core._lock:
             _stdio_pids.update(dict.fromkeys(new_pids, self.name))
@@ -165,11 +154,20 @@ class MCPServerTransportMixin:
                 register_child(_pid, "mcp-helper")
             except Exception:
                 logger.debug("spawn-ledger register_child failed for MCP helper pid %s", _pid, exc_info=True)
+        # Hand the pgroups to the shared parent-death supervisor so an ungraceful exit of this
+        # process (kill -9, crash, force-quit) can't leave this server — or its descendants, e.g.
+        # mcp-remote's spawned `node` — running forever. The graceful paths (shutdown,
+        # _kill_orphaned_mcp_children) still reap as before; this only covers when they never run.
+        _core._update_death_supervisor("register", new_pgids.values())
 
     def _release_spawned_children(self, new_pids: Set[int]) -> None:
         """Drop the ledger entries; a child (or its pgroup) still alive means SDK teardown failed
         (common on mid-way cancel on Linux: setsid() children escape) — mark it orphaned for the sweep."""
         from gateway.status import _pid_exists
+        # Groups with nothing left alive; the supervisor forgets them after the lock is released.
+        # Groups still alive stay registered on purpose, so the supervisor still reaps them if this
+        # process dies before the orphan sweep runs.
+        released_pgids: list = []
         with _core._lock:
             for pid in new_pids:
                 _stdio_pids.pop(pid, None)
@@ -179,7 +177,10 @@ class MCPServerTransportMixin:
                     _orphan_stdio_pids.add(pid)
                     _orphan_stdio_pid_servers[pid] = self.name
                 else:  # nothing to reap — drop the pgid so PID reuse can't surface stale pgroup state
-                    _stdio_pgids.pop(pid, None)
+                    dropped = _stdio_pgids.pop(pid, None)
+                    if dropped is not None:
+                        released_pgids.append(dropped)
+        _core._update_death_supervisor("unregister", released_pgids)
 
     async def _run_stdio(self, config: dict):
         """Run the server using stdio transport."""
@@ -194,10 +195,8 @@ class MCPServerTransportMixin:
         if not command:
             raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
         command, safe_env = _core._resolve_stdio_command(command, _core._build_safe_env(config.get("env")))
-        await _osv_malware_preflight(self.name, command, config.get("args", []))
-        # Parent-death watchdog so kill -9 / crash can't leave the child tree running (POSIX-only).
-        # AFTER the OSV preflight so the check inspects the real package.
-        command, args = _wrap_command_with_watchdog(command, config.get("args", []))
+        # OSV malware preflight, then the cached-npx swap (ordering enforced there).
+        command, args = await _core._preflight_stdio_command(self.name, command, config.get("args", []))
         server_params = _core.StdioServerParameters(
             command=command, args=args, env=safe_env or None, cwd=config.get("cwd"),
             # Windows pipes can split non-UTF-8 bytes at chunk boundaries; substitute, don't raise.

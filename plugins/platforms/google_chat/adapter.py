@@ -125,7 +125,8 @@ Platform("google_chat")
 from gateway.platforms.helpers import MessageDeduplicator
 from gateway.platforms.base import (
     gateway_trust_env, BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult,
-    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_bytes, cache_video_from_bytes,
+    cache_audio_from_bytes_async, cache_document_from_bytes_async, cache_image_from_bytes_async,
+    cache_video_from_bytes_async,
 )
 
 # Pinned to the legacy module path so operator log filters keep matching.
@@ -158,8 +159,8 @@ _REDACTIONS = (
 )
 _MIME_MESSAGE_TYPES = (("image/", MessageType.PHOTO), ("audio/", MessageType.AUDIO), ("video/", MessageType.VIDEO))
 _MEDIA_CACHERS = (
-    ("image/", cache_image_from_bytes, ".jpg"), ("audio/", cache_audio_from_bytes, ".ogg"),
-    ("video/", cache_video_from_bytes, ".mp4"),
+    ("image/", cache_image_from_bytes_async, ".jpg"), ("audio/", cache_audio_from_bytes_async, ".ogg"),
+    ("video/", cache_video_from_bytes_async, ".mp4"),
 )
 
 
@@ -975,8 +976,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         for prefix, cache_fn, default_ext in _MEDIA_CACHERS:
             if mime.startswith(prefix):
-                return cache_fn(data, ext=ext or default_ext), mime
-        return cache_document_from_bytes(data, filename), mime
+                return await cache_fn(data, ext=ext or default_ext), mime
+        return await cache_document_from_bytes_async(data, filename), mime
 
     # -- outbound ------------------------------------------------------------
     def _note_rate_limit(self, chat_id: str) -> int:

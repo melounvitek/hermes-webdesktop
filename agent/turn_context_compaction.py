@@ -56,16 +56,26 @@ def _reset_retry_state_after_compaction(agent: Any) -> None:
     agent._mute_post_response = False
 
 
-def _blocked_compress_reason(compressor: Any, tokens: int) -> Optional[str]:
+def _blocked_compress_reason(
+    compressor: Any, tokens: int, attempts_spent: Optional[int] = None
+) -> Optional[str]:
     """Why an over-threshold request is blocked (``None`` below threshold or when the
-    engine lacks ``should_compress_info`` / raises)."""
+    engine lacks ``should_compress_info`` / raises).
+
+    ``attempts_spent``: when given and the engine says compression SHOULD run
+    (``(True, None)``) yet the caller skipped it, the per-turn attempt budget is
+    spent — name it ``attempts_exhausted:<n>`` instead of dropping the
+    ``(True, None)`` on the floor (silent-lockout case, #101889)."""
     _info = getattr(compressor, "should_compress_info", None)
     if not callable(_info):
         return None
     try:
-        return _info(tokens)[1]
+        _should_now, _reason = _info(tokens)
     except Exception:
         return None
+    if attempts_spent is not None and _should_now and not _reason:
+        return f"attempts_exhausted:{attempts_spent}"
+    return _reason
 
 
 def _apply_grown_window(agent: Any, compressor: Any, grown: int) -> None:
@@ -144,15 +154,22 @@ def _idle_compaction(
     _idle_cooldown = getattr(
         _compressor, "get_active_compression_failure_cooldown", lambda: None
     )()
+    # What the previous pass actually produced — the honest floor versus the theoretical
+    # ``_idle_floor``. Type pin: compressor doubles expose truthy non-ints here; only a real
+    # int may raise the floor, anything else falls back to 0 (original semantics).
+    _idle_last_compaction = getattr(_compressor, "last_compression_rough_tokens", 0)
+    if not isinstance(_idle_last_compaction, int) or isinstance(_idle_last_compaction, bool):
+        _idle_last_compaction = 0
     if not _tc._should_idle_compact(
         enabled=agent.compression_enabled, idle_after_seconds=_idle_after,
         idle_gap_seconds=_idle_gap, tokens=_idle_tokens, floor_tokens=_idle_floor,
-        cooldown_active=bool(_idle_cooldown),
+        cooldown_active=bool(_idle_cooldown), last_compaction_tokens=_idle_last_compaction,
     ):
         return
     logger.info(
-        "Idle compaction: %ss idle >= %ss, ~%s tokens > %s floor (session %s)",
+        "Idle compaction: %ss idle >= %ss, ~%s tokens > %s floor (last compaction produced ~%s) (session %s)",
         int(_idle_gap), _idle_after, f"{_idle_tokens:,}", f"{_idle_floor:,}",
+        f"{_idle_last_compaction:,}" if _idle_last_compaction > 0 else "n/a",
         agent.session_id or "none",
     )
     _idle_status = automatic_compaction_status_message(

@@ -77,7 +77,8 @@ def _in_excluded_root_dir(rel_path: Path) -> bool:
 # SQLite sidecars are excluded because ``*.db`` is snapshotted via ``sqlite3.backup()``:
 # shipping the live WAL/SHM/journal alongside would pair a fresh snapshot with stale sidecar
 # state and produce a torn restore on next open. They are regenerated on first connection.
-_EXCLUDED_SUFFIXES = (".pyc", ".pyo", ".db-wal", ".db-shm", ".db-journal")
+_SQLITE_SIDECAR_SUFFIXES = (".db-wal", ".db-shm", ".db-journal")
+_EXCLUDED_SUFFIXES = (".pyc", ".pyo", *_SQLITE_SIDECAR_SUFFIXES)
 
 # File names to skip (runtime state that's meaningless on another machine)
 _EXCLUDED_NAMES = {".backup.lock", "gateway.pid", "cron.pid"}
@@ -430,6 +431,9 @@ def _safe_restore_db(src: Path, dst: Path) -> bool:
 
     Writing pages into the live file preserves its inode and WAL state, so other holders (gateway,
     dashboard, another CLI) see the restored data instead of stale pages from a replaced inode.
+    The fallback runs ONLY when no other process or in-process connection holds the file
+    (replacing the inode under a live holder is the #90950 split-brain); otherwise it fails closed
+    (``False``) and the caller reports the file as skipped.
     """
     try:
         dst_conn = sqlite3.connect(str(dst))
@@ -740,6 +744,68 @@ def _extract_member_atomically(
         raise
 
 
+def _count_session_rows(path: Path) -> Optional[Tuple[int, int]]:
+    """``(sessions, messages)`` in session database *path*; read-only, best effort.
+
+    ``None`` means "unknown" (missing, not a Hermes session store, unreadable) — never "zero":
+    acting on an unreadable database would mask the very loss this count exists to surface.
+    Same contract as :func:`_count_cron_jobs`.
+    """
+    if not path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        return int(sessions), int(messages)
+    except (sqlite3.Error, TypeError, ValueError):
+        return None
+    finally:
+        conn.close()
+
+
+def _import_db_member(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
+
+    A rename-publish over a live database is the #65942 / #90950 corruption class: a gateway,
+    dashboard, or WebUI holding it open keeps serving the unlinked inode and writing sessions no
+    other process will see, and a sidecar WAL beside the new file describes the old database —
+    nothing fails, the sessions are simply gone (#100960). Route the member through the same
+    ``_safe_restore_db`` page copy ``/snapshot restore`` uses, so the live inode is preserved and
+    every open connection converges. A target that does not exist yet has no holders, so it takes
+    the ordinary atomic publish. Raises ``OSError`` when the database could not be replaced
+    safely, so the caller reports a skipped file instead of a silent success.
+    """
+    if not target.exists():
+        _extract_member_atomically(zf, member, target, new_file_mode)
+        return
+    # The database keeps its own mode/ownership: the bytes come from the archive, the file does not.
+    mode = _preserve_file_mode(target)
+    owner = _preserve_file_owner(target)
+    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name[:80]}.", suffix=".dbimport")
+    try:
+        with os.fdopen(fd, "wb") as dst:
+            with zf.open(member) as src:  # stream: never hold a multi-GB state.db in memory
+                shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        if not _safe_restore_db(Path(tmp_name), target):
+            raise OSError(
+                "live-safe restore refused or failed; the existing database was "
+                "left untouched. Stop the gateway/dashboard processes holding it "
+                "open and re-run the import."
+            )
+        _restore_file_owner(target, owner)
+        _restore_file_mode(target, mode)
+    finally:
+        with suppress(OSError):
+            os.unlink(tmp_name)
+
+
 def _confirm_import_overwrite(hermes_root: Path) -> bool:
     """Prompt before importing over an existing installation; True when import may proceed."""
     if not any((hermes_root / m).exists() for m in ("config.yaml", ".env")):
@@ -759,10 +825,15 @@ def _confirm_import_overwrite(hermes_root: Path) -> bool:
 
 def _import_members(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str]]:
-    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime)``."""
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
+
+    ``db_shrunk`` holds ``(rel, live_counts, imported_counts)`` for every session database the
+    import replaced with one holding fewer rows — allowed, but never silent (#100960).
+    """
     errors: list[str] = []
     skipped_runtime: list[str] = []
+    db_shrunk: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
     restored = restored_external = 0
     home_dir = Path.home().resolve()
     new_file_mode = _default_new_file_mode()  # once: every member is published via mkstemp (0600)
@@ -780,6 +851,13 @@ def _import_members(
             if rel and Path(rel).name in _IMPORT_SKIP_NAMES:  # see ``_IMPORT_SKIP_NAMES``
                 skipped_runtime.append(rel)
                 continue
+            # A ``.db`` member is page-restored into the live file; an archived WAL/SHM/journal
+            # describes a different database image and installed beside it (over a live sidecar)
+            # would replay a foreign WAL on next open. Current backups never ship these
+            # (_EXCLUDED_SUFFIXES); older or hand-built archives might.
+            if rel.endswith(_SQLITE_SIDECAR_SUFFIXES):
+                skipped_runtime.append(rel)
+                continue
             target = hermes_root / rel
             root = hermes_root.resolve()
             tighten = target.name in _SECRET_FILE_NAMES
@@ -792,7 +870,15 @@ def _import_members(
         else:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _extract_member_atomically(zf, member, target, new_file_mode)
+                if target.suffix == ".db":
+                    # Count before the write: afterwards the dropped rows are gone.
+                    before = _count_session_rows(target)
+                    _import_db_member(zf, member, target, new_file_mode)
+                    after = _count_session_rows(target)
+                    if before and after and after[1] < before[1]:
+                        db_shrunk.append((rel, before, after))
+                else:
+                    _extract_member_atomically(zf, member, target, new_file_mode)
                 if tighten:
                     try:
                         os.chmod(target, 0o600)
@@ -807,7 +893,7 @@ def _import_members(
         if restored % 500 == 0:
             print(f"  {restored}/{file_count} files ...")
 
-    return restored, restored_external, errors, skipped_runtime
+    return restored, restored_external, errors, skipped_runtime, db_shrunk
 
 
 def run_import(args) -> None:
@@ -838,7 +924,7 @@ def run_import(args) -> None:
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
         t0 = time.monotonic()
-        restored, restored_external, errors, skipped_runtime = _import_members(
+        restored, restored_external, errors, skipped_runtime, db_shrunk = _import_members(
             zf, members, prefix, hermes_root, file_count)
         elapsed = time.monotonic() - t0
         print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
@@ -847,6 +933,15 @@ def run_import(args) -> None:
                   f"their original location(s) outside {display_hermes_home()}.")
         if errors:
             _print_capped(f"\n  Warnings ({len(errors)} files skipped):", errors, "  ")
+        if db_shrunk:
+            # The backup predates work that is now overwritten — say so (#100960: twelve sessions
+            # disappeared with nothing logged anywhere).
+            print("\n  ⚠ Session data replaced by older backup contents:")
+            for rel, before, after in db_shrunk:
+                print(f"    {rel}: {before[0]} session(s) / {before[1]} message(s)"
+                      f" -> {after[0]} / {after[1]}")
+            print("    Anything recorded after the backup was taken is not in it. "
+                  "Recover from a newer backup or snapshot: hermes snapshot list")
         if skipped_runtime:
             _print_capped(f"\n  Preserved {len(skipped_runtime)} runtime state "
                           f"file(s) (kept this machine's, not the backup's):",
@@ -1144,7 +1239,10 @@ def restore_quick_snapshot(snapshot_id: str, hermes_home: Optional[Path] = None)
             if dst.suffix == ".db":
                 # Through the backup API so live connections see the restored data instead of
                 # stale pages from a replaced inode (#65942).
-                _safe_restore_db(src, dst)
+                if not _safe_restore_db(src, dst):
+                    # Refused (live holder) or failed: destination untouched — a failure, not a restore.
+                    logger.error("Failed to restore %s: live-safe restore refused", rel)
+                    continue
             else:
                 shutil.copy2(src, dst)
             restored += 1
