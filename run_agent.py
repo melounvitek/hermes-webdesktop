@@ -104,7 +104,7 @@ if not _loaded_env_paths:
 
 
 from model_tools import get_tool_definitions, get_toolset_for_tool, handle_function_call, check_toolset_requirements  # noqa: F401
-from tools.terminal_tool import cleanup_vm, get_active_env
+from tools.terminal_tool_lifecycle import cleanup_vm, get_active_env
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
 

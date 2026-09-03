@@ -1,8 +1,7 @@
 """Wake-word hotword engines (openWakeWord / sherpa-onnx KWS / Porcupine).
 
 All three run fully on-device. Config, platform probes and sensitivity accessors
-live in :mod:`tools.wake_word`; engines read them lazily through that module so
-test seams (``patch("tools.wake_word.<name>")``) keep working.
+live in :mod:`tools.wake_word`; engines read them lazily through that module (import cycle).
 """
 
 from __future__ import annotations

@@ -21,10 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from tools.wake_word_engines import (  # noqa: F401  (re-exported for callers/tests)
-    _SHERPA_KWS_MODEL_DIR, _SHERPA_KWS_MODEL_URL, _Engine, _OpenWakeWordEngine, _PorcupineEngine,
-    _SherpaKwsEngine, _ensure_sherpa_model, _looks_like_path, _sherpa_model_root, _sub,
-)
+from tools.wake_word_engines import _Engine, _OpenWakeWordEngine, _PorcupineEngine, _SherpaKwsEngine, _sub
 
 logger = logging.getLogger(__name__)
 
