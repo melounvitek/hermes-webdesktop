@@ -15,73 +15,44 @@ from utils import atomic_replace, fast_safe_load
 
 logger = logging.getLogger(__name__)
 
-# Env var name suffixes that indicate credential values.  These are the
-# only env vars whose values we sanitize on load — we must not silently
-# alter arbitrary user env vars, but credentials are known to require
-# pure ASCII (they become HTTP header values).
+# The ONLY env vars sanitized on load: we must not silently alter arbitrary user env vars, but
+# credentials are known to require pure ASCII (they become HTTP header values).
 _CREDENTIAL_SUFFIXES = ("_API_KEY", "_TOKEN", "_SECRET", "_KEY")
 
-# Names we've already warned about during this process, so repeated
-# load_hermes_dotenv() calls (user env + project env, gateway hot-reload,
-# tests) don't spam the same warning multiple times.
-_WARNED_KEYS: set[str] = set()
+# Once-per-process guards: load_hermes_dotenv() is called repeatedly (user env + project env,
+# gateway hot-reload, lazy imports mid-turn, tests) so warnings/logs fire once per key/path/home.
+_WARNED_KEYS: set[str] = set()          # credential names already given the non-ASCII warning
+_WARNED_UTF32_PATHS: set[str] = set()   # .env paths already given the UTF-32 refuse-to-mangle warning
+_SCOPED_SKIP_LOGGED: set[str] = set()   # routed profile homes whose multiplex dotenv skip was logged
 
-# Paths we've already emitted a UTF-32 refuse-to-mangle warning for.
-# load_hermes_dotenv can call _sanitize_env_file_if_needed multiple times
-# for the same file (user env + project env + hot-reload); once per path
-# is enough.
-_WARNED_UTF32_PATHS: set[str] = set()
-
-# Map of env-var name → source label ("bitwarden", etc.) for credentials
-# that were injected by an external secret source during load_hermes_dotenv().
-# Used by setup / `hermes model` flows to label detected credentials so
-# users understand WHERE a key came from when their .env doesn't contain it
-# directly (otherwise the "credentials detected ✓" line looks identical to
-# the .env case and they don't know Bitwarden is wired up).
+# env-var name → source label ("bitwarden", …) for credentials injected by an external secret
+# source. Setup / `hermes model` use it so users know WHERE a key came from when .env lacks it.
 _SECRET_SOURCES: dict[str, str] = {}
-# Applied values are immutable per-home snapshots.  ``os.environ`` is shared
-# across profiles and may be overwritten by a later home's source apply.
+# Applied values are immutable per-home snapshots: ``os.environ`` is shared across profiles and
+# may be overwritten by a later home's source apply.
 _SECRET_SOURCE_VALUES_BY_HOME: dict[str, dict[str, str]] = {}
-
-# HERMES_HOME paths we've already pulled external secrets for during this
-# process.  ``load_hermes_dotenv()`` is called at module-import time from
-# several hot modules (cli.py, hermes_cli/main.py, run_agent.py,
-# trajectory_compressor.py, gateway/run.py, ...), so without this guard the
-# Bitwarden status line gets printed 3-5x per startup.  Bitwarden's own
-# in-process cache prevents redundant network calls, but the print, the
-# config re-parse, and the ASCII sanitization sweep still ran every time.
+# HERMES_HOME paths already pulled external secrets for. load_hermes_dotenv() runs at import time
+# from several hot modules (cli.py, hermes_cli/main.py, run_agent.py, gateway/run.py, …); without
+# this the Bitwarden status line prints 3-5x per startup and the config re-parse + ASCII sweep
+# re-run each time (Bitwarden's own cache only saves the network call).
 _APPLIED_HOMES: set[str] = set()
 _SECRET_SOURCE_CACHE_LOCK = threading.RLock()
 
-# Routed profile homes whose dotenv load was skipped under multiplex, so the
-# skip is logged once per home rather than on every lazy import mid-turn.
-_SCOPED_SKIP_LOGGED: set[str] = set()
-
-
-# Behavioral routing keys a parent Hermes process injects into child env and
-# that silently redirect a profile onto the wrong provider path (ACP auth
-# method, copilot-ACP endpoints). These — and ONLY these — are scrubbed from
-# os.environ at startup when absent from the profile's .env. Credential keys
-# (API keys/tokens) are excluded: shell exports are a legitimate,
-# documented way to supply them, and read-time secret-scope checks
+# Behavioral routing keys a parent Hermes process injects into child env that silently redirect a
+# profile onto the wrong provider path. These — and ONLY these — are scrubbed from os.environ at
+# startup when absent from the profile's .env. Credential keys are excluded: shell exports are a
+# legitimate, documented way to supply them, and read-time secret-scope checks
 # (agent/secret_scope.py) own cross-profile credential isolation.
 _PROFILE_MANAGED_ENV_KEYS: frozenset[str] = frozenset({
-    "HERMES_ACP_AUTH_METHOD",
-    "HERMES_ACP_AUTO_APPROVE",
-    "HERMES_COPILOT_ACP_COMMAND",
-    "HERMES_COPILOT_ACP_ARGS",
-    "COPILOT_CLI_PATH",
-    "COPILOT_ACP_BASE_URL",
+    "HERMES_ACP_AUTH_METHOD", "HERMES_ACP_AUTO_APPROVE", "HERMES_COPILOT_ACP_COMMAND",
+    "HERMES_COPILOT_ACP_ARGS", "COPILOT_CLI_PATH", "COPILOT_ACP_BASE_URL",
 })
 
 
 def _env_keys_defined_in_dotenv(path: Path) -> set[str]:
-    """Return KEY names assigned in a dotenv file (including empty ``KEY=``).
-
-    A fast line scanner rather than full dotenv parsing, so it works during early bootstrap
-    without importing python-dotenv. Non-ASCII decode errors fall back to ``latin-1``, matching
-    ``_load_dotenv_with_fallback``.
-    """
+    """KEY names assigned in a dotenv file (including empty ``KEY=``). A fast line scanner, not full
+    dotenv parsing, so it works during early bootstrap without importing python-dotenv; decode
+    errors fall back to ``latin-1`` like ``_load_dotenv_with_fallback``."""
     keys: set[str] = set()
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -101,16 +72,8 @@ def _env_keys_defined_in_dotenv(path: Path) -> set[str]:
 
 
 def _clear_known_keys_missing_from_dotenv(path: Path) -> None:
-    """Remove inherited profile-managed Hermes keys absent from ``.env``.
-
-    After the profile's ``.env`` has been loaded with ``override=True``, scan the file for which
-    profile-managed keys it explicitly defines and delete any such key that exists in ``os.environ``
-    but is *not* present in the file.
-
-    Scope is deliberately NARROW: only ``_PROFILE_MANAGED_ENV_KEYS`` — behavioral routing keys (ACP
-    auth method, copilot-ACP endpoints) that a parent Hermes process injects and that silently
-    change *which provider path* a profile uses.
-    """
+    """After ``.env`` loaded with ``override=True``, delete inherited ``_PROFILE_MANAGED_ENV_KEYS``
+    it does not define. Deliberately NARROW: only keys that change *which provider path* is used."""
     if not path.exists():
         return
     defined = _env_keys_defined_in_dotenv(path)
@@ -120,36 +83,25 @@ def _clear_known_keys_missing_from_dotenv(path: Path) -> None:
 
 
 def get_secret_source(env_var: str) -> str | None:
-    """Return the label of the secret source that supplied ``env_var``, if any.
-
-    ``"bitwarden"`` for keys pulled during this process's ``load_hermes_dotenv()``; ``None`` for
-    ``.env``/shell keys. The label is metadata only -- credential-pool persistence may store it to
-    explain a borrowed secret's origin but must never treat it as authorization to persist the
-    raw value.
-    """
+    """Source label that supplied ``env_var`` (``"bitwarden"`` …), None for .env/shell keys. Metadata
+    only -- credential-pool persistence may store it to explain a borrowed secret's origin but must
+    never treat it as authorization to persist the raw value."""
     return _SECRET_SOURCES.get(env_var)
 
 
-def get_secret_source_values(
-    hermes_home: str | os.PathLike,
-) -> dict[str, str]:
+def get_secret_source_values(hermes_home: str | os.PathLike) -> dict[str, str]:
     """Return the external-secret value snapshot for ``hermes_home``."""
-    home_key = str(Path(hermes_home).resolve())
-    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(home_key, {}))
+    return dict(_SECRET_SOURCE_VALUES_BY_HOME.get(str(Path(hermes_home).resolve()), {}))
 
 
-def hydrate_profile_secret_sources(
-    hermes_home: str | os.PathLike,
-) -> dict[str, str]:
+def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, str]:
     """Resolve one profile's configured sources without mutating ``os.environ``.
 
-    Multiplex gateways can route a first turn to a secondary profile that has never run the process-
-    global dotenv startup path. Resolve that profile's sources against a private mapping seeded from
-    its own ``.env`` and record the usual per-home snapshot for ``build_profile_secret_scope()``.
-
-    Fail-open and once-per-home semantics intentionally mirror ``_apply_external_secret_sources``.
-    The returned mapping contains only values actually contributed by external sources, never the
-    profile's plaintext ``.env`` entries.
+    Multiplex gateways can route a first turn to a secondary profile that never ran the process-
+    global dotenv startup path: resolve against a private mapping seeded from its own ``.env`` and
+    record the per-home snapshot for ``build_profile_secret_scope()``. Fail-open and once-per-home
+    semantics mirror ``_apply_external_secret_sources``; the result holds only values contributed
+    by external sources, never plaintext ``.env`` entries.
     """
     with _SECRET_SOURCE_CACHE_LOCK:
         return _hydrate_profile_secret_sources(Path(hermes_home))
@@ -172,17 +124,10 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
         from agent.secret_scope import _is_global_env, load_env_file
         from agent.secret_sources.registry import apply_all
 
-        local_env = {
-            name: value
-            for name, value in os.environ.items()
-            if _is_global_env(name)
-        }
+        local_env = {name: value for name, value in os.environ.items() if _is_global_env(name)}
         local_env.update(load_env_file(home / ".env"))
-        # Mirror load_hermes_dotenv()'s .op.env bootstrap: the 1Password
-        # service-account token lives in <home>/.op.env (gitignored), not
-        # .env. Without seeding it here a cold profile configured for the
-        # supported .op.env flow fails 1Password hydration (sweeper review
-        # on #74549). .env values win — never override an existing key.
+        # Mirror load_hermes_dotenv()'s .op.env bootstrap (1Password service-account token lives in
+        # gitignored <home>/.op.env, not .env) or cold profiles fail 1Password hydration. .env wins.
         op_env = home / ".op.env"
         if op_env.exists():
             for _name, _value in load_env_file(op_env).items():
@@ -209,30 +154,21 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
 
 
 def reset_secret_source_cache() -> None:
-    """Forget which HERMES_HOME paths have already had external secrets applied.
-
-    ``_apply_external_secret_sources(home_path)`` pulls once per process and then no-ops for that
-    home; call this to force a re-pull (tests, long-running processes after a config change).
-    """
+    """Forget applied homes so the next load re-pulls (tests, long-running processes after config edits)."""
     _APPLIED_HOMES.clear()
     _SECRET_SOURCES.clear()
     _SECRET_SOURCE_VALUES_BY_HOME.clear()
 
 
 def format_secret_source_suffix(env_var: str) -> str:
-    """Return a human-readable suffix like ``" (from Bitwarden)"`` or ``""``.
-
-    Empty for ``.env``/shell credentials -- those are the implicit default cases users already
-    understand, so only external sources get called out.
-    """
+    """``" (from Bitwarden)"``-style suffix; ``""`` for .env/shell credentials (the implicit default
+    users already understand — only external sources get called out)."""
     source = get_secret_source(env_var)
     if not source:
         return ""
     if source == "bitwarden":
         return " (from Bitwarden)"
-    # Ask the registry for the source's human label (e.g. "1Password").
-    # Fall back to the raw source name for labels the registry doesn't
-    # know (stale provenance from an uninstalled plugin, tests).
+    # Registry label (e.g. "1Password"); raw name for unknown sources (uninstalled plugin, tests).
     try:
         from agent.secret_sources.registry import get_source
 
@@ -245,7 +181,7 @@ def format_secret_source_suffix(env_var: str) -> str:
 
 
 def _format_offending_chars(value: str, limit: int = 3) -> str:
-    """Return a compact 'U+XXXX ('c'), ...' summary of non-ASCII codepoints."""
+    """Compact ``U+XXXX ('c'), ...`` summary of non-ASCII codepoints."""
     seen: list[str] = []
     for ch in value:
         if ord(ch) > 127:
@@ -260,12 +196,8 @@ def _format_offending_chars(value: str, limit: int = 3) -> str:
 
 
 def _sanitize_loaded_credentials() -> None:
-    """Strip non-ASCII characters from credential env vars in os.environ.
-
-    Called after dotenv loads so the rest of the codebase never sees non-ASCII API keys. Only
-    touches env vars whose names end with known credential suffixes (``_API_KEY``, ``_TOKEN``,
-    etc.).
-    """
+    """Strip non-ASCII from credential env vars (``_CREDENTIAL_SUFFIXES``) after dotenv loads, so the
+    rest of the codebase never sees non-ASCII API keys."""
     for key, value in list(os.environ.items()):
         if not any(key.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES):
             continue
@@ -297,10 +229,8 @@ def _sanitize_loaded_credentials() -> None:
 
 def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
     try:
-        # utf-8-sig strips a leading UTF-8 BOM if present (PowerShell 5.1
-        # Set-Content -Encoding UTF8 / Notepad) and is a no-op for BOM-less
-        # UTF-8. Plain "utf-8" would keep U+FEFF on the first key name and
-        # silently drop it from os.environ under its canonical name.
+        # utf-8-sig strips a leading UTF-8 BOM (PowerShell 5.1 / Notepad); plain "utf-8" would keep
+        # U+FEFF on the first key name and silently drop it from os.environ under its canonical name.
         load_dotenv(dotenv_path=path, override=override, encoding="utf-8-sig")
     except UnicodeDecodeError:
         # utf-8-sig can't strip a BOM once we fall back to latin-1 decode.
@@ -308,24 +238,18 @@ def _load_dotenv_with_fallback(path: Path, *, override: bool) -> None:
         if raw.startswith(codecs.BOM_UTF8):
             raw = raw[len(codecs.BOM_UTF8) :]
         load_dotenv(stream=io.StringIO(raw.decode("latin-1")), override=override)
-    # Strip non-ASCII characters from credential env vars that were just
-    # loaded.  API keys must be pure ASCII since they're sent as HTTP
-    # header values (httpx encodes headers as ASCII).  Non-ASCII chars
-    # typically come from copy-pasting keys from PDFs or rich-text editors
-    # that substitute Unicode lookalike glyphs (e.g. ʋ U+028B for v).
+    # API keys must be pure ASCII (httpx encodes headers as ASCII); non-ASCII typically comes from
+    # keys copy-pasted out of PDFs / rich-text editors that substitute lookalike glyphs.
     _sanitize_loaded_credentials()
 
 
 def _sanitize_env_file_if_needed(path: Path) -> None:
     """Pre-sanitize a .env file before python-dotenv reads it.
 
-    Encoding: sniffs a leading BOM *before* any text decode. UTF-16 (Notepad "Unicode") is decoded
-    correctly and rewritten as clean UTF-8. UTF-32 is refused (left untouched) so we never fall
-    through to the errors=replace corruption path. Order of BOM checks matters: UTF-32-LE's BOM
-    starts with UTF-16-LE's FF FE.
-
-    ``hermes_cli.config._sanitize_env_lines`` normalizes line endings while treating content after
-    the first ``=`` as opaque for boundary discovery.
+    Sniffs a leading BOM *before* any text decode: UTF-16 (Notepad "Unicode") is decoded and
+    rewritten as clean UTF-8; UTF-32 is refused (left untouched) so we never fall through to the
+    errors=replace corruption path. ``hermes_cli.config._sanitize_env_lines`` normalizes line
+    endings while treating content after the first ``=`` as opaque for boundary discovery.
     """
     if not path.exists():
         return
@@ -339,14 +263,10 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     except Exception:
         return
 
-    # Sniff leading BOM bytes BEFORE decoding. ORDER MATTERS:
-    # codecs.BOM_UTF32_LE is FF FE 00 00, which startswith
-    # codecs.BOM_UTF16_LE (FF FE). Checking UTF-16 first would
-    # misdetect UTF-32-LE as UTF-16-LE and mangle the file.
+    # ORDER MATTERS: BOM_UTF32_LE (FF FE 00 00) startswith BOM_UTF16_LE (FF FE); checking UTF-16
+    # first would misdetect UTF-32-LE and mangle the file.
     force_utf8_rewrite = False
     if raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(codecs.BOM_UTF32_BE):
-        # Lazy import keeps the module import block identical to #65124's
-        # codecs/io additions so the two PRs auto-merge either order.
         path_key = str(path.resolve())
         if path_key not in _WARNED_UTF32_PATHS:
             _WARNED_UTF32_PATHS.add(path_key)
@@ -357,49 +277,35 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
             )
         return
     if raw.startswith(codecs.BOM_UTF16_LE) or raw.startswith(codecs.BOM_UTF16_BE):
-        # "utf-16" uses the BOM to select endianness and strips it.
-        # TextIOWrapper + newline=None matches open()'s universal-newlines
-        # line splitting (\\n/\\r\\n/\\r only — not splitlines()'s extra
-        # Unicode boundaries like U+2028), so sanitize sees the same lines
-        # as the UTF-8 path.
+        # "utf-16" uses the BOM for endianness and strips it. newline=None matches open()'s
+        # universal-newlines splitting (\n/\r\n/\r only — not splitlines()'s extra Unicode
+        # boundaries like U+2028), so sanitize sees the same lines as the UTF-8 path.
         try:
-            with io.TextIOWrapper(
-                io.BytesIO(raw), encoding="utf-16", newline=None
-            ) as f:
+            with io.TextIOWrapper(io.BytesIO(raw), encoding="utf-16", newline=None) as f:
                 original = f.readlines()
         except UnicodeDecodeError:
             return
-        # Source is UTF-16 on disk; always rewrite as clean UTF-8 so
-        # the subsequent utf-8 dotenv load sees a canonical file.
-        force_utf8_rewrite = True
+        force_utf8_rewrite = True  # always rewrite UTF-16 as UTF-8 so the dotenv load sees a canonical file
     else:
-        # Default path: utf-8-sig (strips UTF-8 BOM if present) with
-        # errors=replace so embedded NULs can be stripped below.
+        # utf-8-sig strips a UTF-8 BOM; errors=replace so embedded NULs can be stripped below.
         try:
             with open(path, encoding="utf-8-sig", errors="replace") as f:
                 original = f.readlines()
         except Exception:
             return
-        # Defense-in-depth: errors=replace turns undecodable leading
-        # bytes into U+FFFD. Persisting that glues replacement chars
-        # onto the first key name and rewrites the file permanently
-        # (the UTF-16-with-BOM corruption path before BOM sniffing).
-        # Leave the file untouched rather than write the mangling.
+        # errors=replace turns undecodable leading bytes into U+FFFD; persisting that would glue
+        # replacement chars onto the first key name permanently. Leave the file untouched instead.
         if original and original[0].startswith("\ufffd"):
             return
 
     try:
-        # Strip null bytes before _sanitize_env_lines so they never
-        # reach python-dotenv (which passes them to os.environ and
-        # crashes with ValueError). Also intentionally repairs
-        # BOM-less UTF-16 (NUL-padded ASCII) into clean UTF-8.
+        # Strip NULs so they never reach python-dotenv (os.environ raises ValueError on them); this
+        # also intentionally repairs BOM-less UTF-16 (NUL-padded ASCII) into clean UTF-8.
         stripped = [line.replace("\x00", "") for line in original]
         sanitized = _sanitize_env_lines(stripped)
         if sanitized != original or force_utf8_rewrite:
             import tempfile
-            fd, tmp = tempfile.mkstemp(
-                dir=str(path.parent), suffix=".tmp", prefix=".env_"
-            )
+            fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp", prefix=".env_")
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as f:
                     f.writelines(sanitized)
@@ -422,22 +328,15 @@ def load_hermes_dotenv(
     project_env: str | os.PathLike | None = None,
     load_external_secrets: bool = True,
 ) -> list[Path]:
-    """Load Hermes environment files with user config taking precedence.
-
-    Behavior: - `~/.hermes/.env` overrides stale shell-exported values when present. - project
-    `.env` acts as a dev fallback and only fills missing values when the user env exists. - if no
-    user env exists, the project `.env` also overrides stale shell vars.
-    """
+    """Load Hermes env files, user config first: ``~/.hermes/.env`` overrides stale shell exports;
+    project ``.env`` is a dev fallback that only fills gaps when the user env exists (and overrides
+    stale shell vars when it does not)."""
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 
-    # A multiplex gateway hosts every profile in one process.  While a routed
-    # profile-home override is active, copying that profile's .env into
-    # os.environ would expose its credentials to sibling turns and every
-    # subsequently spawned child.  An unscoped startup load remains process
-    # configuration and must retain the normal loading path.
-    # External secret sources still need their normal refresh path, so resolve
-    # them against the existing profile-local mapping instead of simply
-    # returning before all hydration work.
+    # A multiplex gateway hosts every profile in one process: while a routed profile-home override
+    # is active, copying that profile's .env into os.environ would expose its credentials to sibling
+    # turns and every spawned child. An unscoped startup load is process configuration and keeps the
+    # normal path. External sources still refresh, against the profile-local mapping.
     from agent.secret_scope import is_multiplex_active
     from hermes_constants import get_hermes_home_override
 
@@ -470,20 +369,14 @@ def load_hermes_dotenv(
     if user_env.exists():
         _load_dotenv_with_fallback(user_env, override=True)
         loaded.append(user_env)
-        # Mirror reload_env() known-key cleanup so inherited Hermes keys
-        # absent from this profile's .env do not leak into the runtime.
+        # Mirror reload_env() known-key cleanup so inherited Hermes keys absent from this
+        # profile's .env do not leak into the runtime.
         _clear_known_keys_missing_from_dotenv(user_env)
 
-    # Load .op.env AFTER .env so that .env values win, but the bootstrap
-    # token (OP_SERVICE_ACCOUNT_TOKEN) becomes available for
-    # apply_onepassword_secrets() even in cron / subprocess environments
-    # that inherit no shell state (no systemd EnvironmentFile, no op run).
-    # .op.env is gitignored — the service-account token never enters the
-    # committed .env file.
-    # Users on systemd can alternatively use:
-    #   EnvironmentFile=-/path/to/.hermes/.op.env
-    # in their gateway unit, which takes precedence (override=False below
-    # ensures .op.env never clobbers a token already in the environment).
+    # .op.env AFTER .env so .env wins, but the bootstrap OP_SERVICE_ACCOUNT_TOKEN is available to
+    # apply_onepassword_secrets() even in cron / subprocesses with no shell state. It is gitignored
+    # so the token never enters the committed .env; override=False lets a systemd
+    # `EnvironmentFile=-…/.op.env` token take precedence.
     op_env = home_path / ".op.env"
     if op_env.exists() and not os.environ.get("OP_SERVICE_ACCOUNT_TOKEN"):
         _load_dotenv_with_fallback(op_env, override=False)
@@ -492,48 +385,32 @@ def load_hermes_dotenv(
         _load_dotenv_with_fallback(project_env_path, override=not loaded)
         loaded.append(project_env_path)
 
-    # External secret sources are skipped in two updater situations:
-    # 1. ``load_external_secrets=False`` — the caller is an ``update``
-    #    invocation that must not import optional secret-manager libraries
-    #    (Bitwarden → cryptography → ``_rust.pyd``) into the process that
-    #    replaces that same environment on Windows (#73381, #86735).
-    # 2. A fresh ``hermes update`` retry just completed a deferred dependency
-    #    install before importing this module.  Do not remap native
-    #    secret-source dependencies in that same updater process or the
-    #    self-lock preflight will recreate the marker and exit 2 again.
-    # Dotenv and managed env still load in both cases; only external source
-    # resolution is unnecessary for the updater.
+    # External sources are skipped for the updater (dotenv + managed env still load):
+    # 1. ``load_external_secrets=False`` — ``update`` must not import optional secret-manager libs
+    #    (Bitwarden → cryptography → ``_rust.pyd``) into the process replacing that env on Windows.
+    # 2. A fresh ``hermes update`` retry just completed a deferred dependency install; mapping native
+    #    secret-source deps in that process would make the self-lock preflight exit 2 again.
     from hermes_cli import _early_recovery
 
     if load_external_secrets and not _early_recovery._should_skip_external_secret_sources():
         _apply_external_secret_sources(home_path)
     _apply_managed_env()
 
-    # config.yaml is the documented source of truth for terminal.* settings,
-    # but the dotenv loads above run with override=True — so a stale
-    # TERMINAL_ENV=docker left in ~/.hermes/.env (e.g. written by an older
-    # `hermes setup` before the user switched terminal.backend in config.yaml)
-    # silently wins again on every reload. Startup launchers bridge
-    # config→env once, but long-lived processes (gateway per-turn reload,
-    # cron standalone runs) call load_hermes_dotenv() repeatedly and used to
-    # flip the effective backend back to the stale .env value mid-session
-    # (#29186, #67323). Re-apply config.yaml's explicit terminal keys last so
-    # the documented config path always wins. Runs after _apply_managed_env()
-    # so the merged config (which already carries the managed overlay) is
-    # what lands in the env.
+    # config.yaml owns terminal.* settings, but the override=True loads above let a stale
+    # TERMINAL_ENV=docker in ~/.hermes/.env (older `hermes setup`) win on every reload; long-lived
+    # processes (gateway per-turn reload, cron) call this repeatedly and used to flip the backend
+    # back mid-session. Re-apply config.yaml's explicit terminal keys LAST, after
+    # _apply_managed_env(), so the merged config (with the managed overlay) lands in the env.
     _reapply_terminal_config_bridge(home_path)
 
     return loaded
 
 
 def _reapply_terminal_config_bridge(home_path: Path) -> None:
-    """Re-assert config.yaml's explicit ``terminal.*`` keys over reloaded .env.
-
-    Delegates to ``hermes_cli.config.apply_terminal_config_to_env`` — the single shared bridge (same
-    one terminal_tool's fallback and the TUI/ dashboard launchers use) — so key coverage, explicit-
-    keys-only override semantics, cwd placeholder handling, and the managed-scope overlay can't
-    drift from the other bridge sites.
-    """
+    """Re-assert config.yaml's explicit ``terminal.*`` keys over reloaded .env via the single shared
+    bridge ``hermes_cli.config.apply_terminal_config_to_env`` (also used by terminal_tool's fallback
+    and the TUI/dashboard launchers) so coverage, explicit-keys-only semantics, cwd placeholders and
+    the managed-scope overlay can't drift between sites."""
     try:
         if Path(home_path).resolve() != _process_hermes_home().resolve():
             return
@@ -547,12 +424,9 @@ def _reapply_terminal_config_bridge(home_path: Path) -> None:
 def _apply_managed_env() -> None:
     """Apply the managed-scope .env last, with override, so it beats user/shell.
 
-    This does NOT prevent the agent from later mutating ``os.environ`` in-process or ``export``-ing
-    in a subprocess shell; that hard boundary is a documented v2 item (design §8.1). v1 relies on
-    filesystem permissions only.
-
-    Fail-open: a missing managed dir or .env is the common case and a no-op; any error here is
-    swallowed so managed scope can never block startup.
+    Does NOT stop the agent from later mutating ``os.environ`` or ``export``-ing in a subprocess
+    shell — that hard boundary is a documented v2 item (design §8.1); v1 relies on filesystem
+    permissions. Fail-open: missing dir/.env is the common no-op; errors never block startup.
     """
     try:
         from hermes_cli import managed_scope
@@ -572,14 +446,11 @@ def _apply_managed_env() -> None:
 def _apply_external_secret_sources(home_path: Path) -> None:
     """Pull secrets from every enabled external source into env.
 
-    Runs AFTER dotenv loads so .env values are visible (sources use them to locate bootstrap tokens)
-    but BEFORE the rest of Hermes reads ``os.environ`` for credentials. Any failure here is logged
-    and swallowed — external secret sources must never block startup.
-
-    The heavy lifting (source ordering, mapped-beats-bulk precedence, first-claim-wins conflict
-    handling, override semantics, provenance) lives in ``agent.secret_sources.registry.apply_all``;
-    this wrapper owns the once-per-HERMES_HOME guard, the post-apply ASCII sanitization sweep, the
-    ``_SECRET_SOURCES`` provenance map that UI surfaces read, and the startup status lines.
+    Runs AFTER dotenv loads (sources use .env values to locate bootstrap tokens) but BEFORE Hermes
+    reads ``os.environ`` for credentials; failures are swallowed — sources must never block startup.
+    Ordering, mapped-beats-bulk precedence, first-claim-wins conflicts and provenance live in
+    ``agent.secret_sources.registry.apply_all``; this wrapper owns the once-per-HERMES_HOME guard,
+    the post-apply ASCII sweep, the ``_SECRET_SOURCES`` map UI surfaces read, and status lines.
     """
     home_key = str(Path(home_path).resolve())
     if home_key in _APPLIED_HOMES:
@@ -588,31 +459,19 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     try:
         cfg = _load_secrets_config(home_path)
     except Exception:  # noqa: BLE001 — config errors must not block startup
-        # Deliberately NOT marked applied: a malformed config.yaml would
-        # otherwise permanently disable secret loading for this process
-        # even after the user fixes the file (#40597).
+        # Deliberately NOT marked applied: a malformed config.yaml would otherwise permanently
+        # disable secret loading for this process even after the user fixes the file.
         return
     if not cfg:
-        # No secrets section (or everything disabled at parse level).  Not
-        # marked applied either — the re-parse is a cheap fast_safe_load and
-        # leaving the home unmarked lets a process pick up a config change
-        # on its next load_hermes_dotenv() call instead of never.
+        # No secrets section. Not marked applied either — the re-parse is a cheap fast_safe_load and
+        # an unmarked home picks up a config change on the next load_hermes_dotenv() instead of never.
         return
 
-    # Defer the registry import until we know a secrets source is enabled —
-    # agent.secret_sources.bitwarden eagerly loads cryptography._rust.pyd,
-    # which causes the Windows updater to self-lock before its preflight
-    # (the updater itself maps the .pyd before the dependency sync runs).
-    # A config with no enabled sources costs one dict scan; a config with
-    # enabled sources pays the crypto load exactly once, on demand.
-    # NOTE: only keys that smell like a real secret source trigger the import —
-    # a generic dict entry must not force crypto load on every hermes launch.
-    # We whitelist by *shape* (source dict with enabled flag) rather than
-    # hardcoding names, so plugin/test sources pass through unknown keys.
-    any_enabled = any(
-        isinstance(v, dict) and v.get("enabled") is True
-        for v in cfg.values()
-    )
+    # Defer the registry import until a source is enabled — agent.secret_sources.bitwarden eagerly
+    # loads cryptography._rust.pyd, which makes the Windows updater self-lock before its preflight.
+    # Detect by *shape* (dict with enabled flag), not hardcoded names, so plugin/test sources pass
+    # and a generic dict entry never forces the crypto load on every launch.
+    any_enabled = any(isinstance(v, dict) and v.get("enabled") is True for v in cfg.values())
     if not any_enabled:
         return
 
@@ -627,27 +486,18 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         return
 
     if not report.sources:
-        # Config parsed but no source is enabled: keep retrying cheaply
-        # (no fetch happens for disabled sources) so flipping a source on
-        # mid-process takes effect on the next call.
+        # No source enabled: keep retrying cheaply so flipping one on mid-process takes effect.
         return
 
-    # A real fetch attempt happened (success OR error).  Mark the home now
-    # so the 3-5 import-time load_hermes_dotenv() calls per startup don't
-    # re-fetch / re-print — error retries within one process are opt-in via
-    # reset_secret_source_cache().  Marking AFTER the attempt (not before,
-    # see #40597) is what lets the earlier failure paths stay retryable.
+    # A real fetch attempt happened (success OR error). Mark the home now so the 3-5 import-time
+    # calls per startup don't re-fetch / re-print — error retries are opt-in via
+    # reset_secret_source_cache(). Marking AFTER the attempt keeps the earlier failure paths retryable.
     _APPLIED_HOMES.add(home_key)
 
     if report.applied_any:
-        # Re-run the ASCII sanitization pass: vault values are
-        # user-supplied and might have the same copy-paste corruption as
-        # a manually edited .env (see #6843).
+        # Vault values are user-supplied and may carry the same copy-paste corruption as .env.
         _sanitize_loaded_credentials()
-        # Remember where each var came from so setup / `hermes model`
-        # flows can label detected credentials with "(from Bitwarden)" /
-        # "(from 1Password)" — otherwise users see "credentials ✓" with
-        # no hint the value came from a vault rather than .env.
+        # Provenance lets setup / `hermes model` label credentials "(from Bitwarden)" etc.
         values: dict[str, str] = {}
         for name, applied in report.provenance.items():
             _SECRET_SOURCES[name] = applied.source
@@ -664,9 +514,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
             )
         if src.result.error:
             print(f"  {src.label}: {src.result.error}", file=sys.stderr)
-            hint = _remediation_hint(
-                src.name, src.result.error_kind, cfg, scope=home_key
-            )
+            hint = _remediation_hint(src.name, src.result.error_kind, cfg, scope=home_key)
             if hint:
                 print(f"  {src.label}: → {hint}", file=sys.stderr)
         for warn in src.result.warnings:
@@ -675,18 +523,9 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         print(f"  Secret sources: {conflict}", file=sys.stderr)
 
 
-def _remediation_hint(
-    source_name: str,
-    error_kind,
-    secrets_cfg: dict,
-    *,
-    scope: str | None = None,
-) -> str:
-    """Ask the failed source for its one-line fix-it hint.
-
-    Defensive wrapper: remediation() is a pure mapping and shouldn't raise, but a plugin source
-    could — and startup must never break on a status line.
-    """
+def _remediation_hint(source_name: str, error_kind, secrets_cfg: dict, *, scope: str | None = None) -> str:
+    """The failed source's one-line fix-it hint. remediation() is a pure mapping and shouldn't raise,
+    but a plugin source could — and startup must never break on a status line."""
     try:
         from agent.secret_sources.registry import get_source
 
@@ -701,21 +540,15 @@ def _remediation_hint(
 
 
 def _load_secrets_config(home_path: Path) -> dict:
-    """Read just the ``secrets:`` section out of config.yaml.
-
-    Imported lazily and isolated from the main config loader so a malformed config can't take down
-    dotenv loading entirely.
-    """
+    """Read just the ``secrets:`` section of config.yaml, isolated from the main config loader so a
+    malformed config can't take down dotenv loading entirely."""
     config_path = home_path / "config.yaml"
     if not config_path.exists():
         return {}
-    # Prefer the shared (mtime, size)-keyed raw-config cache — this is the
-    # first config.yaml read in a normal `hermes` startup, so populating the
-    # shared cache here lets main.py's early bridge and hermes_logging reuse
-    # the same parse (one parse per process instead of 3-4). Falls back to a
-    # direct isolated parse if the shared reader is unavailable, preserving
-    # the "malformed config can't take down dotenv loading" property (the
-    # shared reader also swallows parse errors and returns {}).
+    # Prefer the shared (mtime, size)-keyed raw-config cache: this is the first config.yaml read in
+    # a normal startup, so populating it lets main.py's early bridge and hermes_logging reuse one
+    # parse instead of 3-4. Falls back to a direct isolated parse (the shared reader also swallows
+    # parse errors -> {}).
     if home_path == _process_hermes_home():
         try:
             from hermes_cli.config import read_raw_config

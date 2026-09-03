@@ -55,40 +55,28 @@ def _resolve(style: str, alpha: float) -> Optional[str]:
 
 def _relative_luminance(rgb: tuple[int, int, int]) -> float:
     def channel(value: int) -> float:
-        normalized = value / 255
-        return (
-            normalized / 12.92
-            if normalized <= 0.03928
-            else ((normalized + 0.055) / 1.055) ** 2.4
-        )
+        n = value / 255
+        return n / 12.92 if n <= 0.03928 else ((n + 0.055) / 1.055) ** 2.4
 
     red, green, blue = (channel(value) for value in rgb)
     return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
 
-def _contrast_ratio(
-    foreground: tuple[int, int, int], background: tuple[int, int, int]
-) -> float:
-    foreground_luminance = _relative_luminance(foreground)
-    background_luminance = _relative_luminance(background)
-    high, low = sorted((foreground_luminance, background_luminance), reverse=True)
+def _contrast_ratio(foreground: tuple[int, int, int], background: tuple[int, int, int]) -> float:
+    high, low = sorted((_relative_luminance(foreground), _relative_luminance(background)), reverse=True)
     return (high + 0.05) / (low + 0.05)
 
 
-def _ensure_contrast(
-    color: Optional[str], background: str, minimum: float
-) -> Optional[str]:
+def _ensure_contrast(color: Optional[str], background: str, minimum: float) -> Optional[str]:
     """Lift a foreground toward the readable pole until it clears ``minimum``."""
     if not color:
         return None
-
     from agent.learning_graph_render import hex_to_rgb, mix_rgb, rgb_to_hex
 
     foreground_rgb = hex_to_rgb(color)
     background_rgb = hex_to_rgb(background)
     if _contrast_ratio(foreground_rgb, background_rgb) >= minimum:
         return color
-
     pole = (0, 0, 0) if _relative_luminance(background_rgb) > 0.5 else (255, 255, 255)
     for step in range(1, 21):
         candidate = mix_rgb(foreground_rgb, pole, step * 0.05)
@@ -99,9 +87,7 @@ def _ensure_contrast(
 
 def _resolve_charted_signal(style: str, alpha: float) -> Optional[str]:
     """Keep age tinting without allowing explanatory labels to disappear."""
-    return _ensure_contrast(
-        _resolve(style, alpha), _palette()["bg"], _CHARTED_SIGNAL_MIN_CONTRAST
-    )
+    return _ensure_contrast(_resolve(style, alpha), _palette()["bg"], _CHARTED_SIGNAL_MIN_CONTRAST)
 
 
 def _row_to_text(row: list, color: bool):
@@ -109,8 +95,7 @@ def _row_to_text(row: list, color: bool):
 
     text = Text()
     for run in row:
-        chunk = run[0]
-        style = run[1]
+        chunk, style = run[0], run[1]
         alpha = run[2] if len(run) > 2 else 1.0
         override = run[3] if len(run) > 3 else None
         if not color:
@@ -144,15 +129,13 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
     frame = render.render_graph(payload, cols=inner, rows=field_rows, reveal=reveal)
     count = len(payload.get("nodes", []))
 
-    parts: list[Any] = []
-
     def st(style: Optional[str]) -> Optional[str]:
         return style if color else None
 
     title = Text()
     title.append("✦ Journey ", style=st(f"bold {_TITLE_COLOR}"))
     title.append("· learned skills & memories over time", style=st("grey62"))
-    parts.append(title)
+    parts: list[Any] = [title]
 
     legend_line = Text("  ")
     for i, item in enumerate(legend):
@@ -172,7 +155,6 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
         parts.append(cat_line)
 
     parts.append(Text(""))
-
     for grow in frame["grid"]:
         line = _row_to_text(grow, color)
         line.pad_left(2)
@@ -181,8 +163,7 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
     # Date axis under the field (oldest → now), with the playhead date centered.
     axis_line = Text("  ")
     axis_line.append(axis["start"], style=st("grey54"))
-    gap = max(1, inner - len(axis["start"]) - len(axis["end"]))
-    axis_line.append(" " * gap)
+    axis_line.append(" " * max(1, inner - len(axis["start"]) - len(axis["end"])))
     axis_line.append(axis["end"], style=st("grey54"))
     parts.append(axis_line)
 
@@ -197,14 +178,11 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
     if labels:
         parts.append(Text(""))
         parts.append(Text("  charted signals", style=st("grey62")))
-
         for item in labels[:6]:
             row = Text("  ")
             row.append(f"{item['key']} ", style=st("grey70"))
             signal_style = (
-                _resolve_charted_signal(item["style"], float(item.get("alpha", 1.0)))
-                if color
-                else None
+                _resolve_charted_signal(item["style"], float(item.get("alpha", 1.0))) if color else None
             )
             row.append(f"{item['glyph']} ", style=signal_style)
             row.append(str(item["label"]), style=signal_style)
@@ -214,7 +192,6 @@ def _frame_renderable(payload, *, cols, rows, reveal, color):
 
     for line_text in summary:
         parts.append(Text("  " + line_text, style=st("grey62")))
-
     return Group(*parts)
 
 
@@ -249,10 +226,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "memories will start mapping out here.[/grey62]"
         )
         return 0
-
     if getattr(args, "play", False):
         return _play(console, payload, cols=cols, rows=rows, color=color, fps=getattr(args, "fps", 12))
-
     reveal = _clamp(float(getattr(args, "reveal", 1.0) or 1.0), 0.0, 1.0)
     console.print(_frame_renderable(payload, cols=cols, rows=rows, reveal=reveal, color=color))
     return 0
@@ -334,8 +309,7 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     detail = _lookup_node(args.node)
     if detail is None:
         return 1
-    suffix = ".md" if detail["kind"] == "skill" else ".txt"
-    edited = _open_in_editor(detail["content"], suffix=suffix)
+    edited = _open_in_editor(detail["content"], suffix=".md" if detail["kind"] == "skill" else ".txt")
     if edited is None or edited.strip() == detail["content"].strip():
         print("  no changes")
         return 0
@@ -369,10 +343,7 @@ def _open_in_editor(initial: str, *, suffix: str) -> Optional[str]:
 
 def register_cli(parent: argparse.ArgumentParser) -> None:
     parent.add_argument(
-        "--reveal",
-        type=float,
-        default=1.0,
-        metavar="0..1",
+        "--reveal", type=float, default=1.0, metavar="0..1",
         help="Render the timeline built up to this point (0=oldest, 1=now).",
     )
     parent.add_argument("--play", action="store_true", help="Animate the build-up over time (Ctrl-C to stop).")
