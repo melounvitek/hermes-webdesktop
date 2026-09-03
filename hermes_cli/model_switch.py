@@ -1001,59 +1001,53 @@ def _config_declares_model(
     return False
 
 
-def _apply_direct_alias_endpoint(
-    da: DirectAlias, target_provider: str, new_model: str, api_key: str, base_url: str,
-) -> tuple[str, str, dict | None, bool]:
-    """Route a direct alias to its own base_url and decide its credential.
+def _apply_direct_alias_endpoint(st: "_Switch", da: DirectAlias) -> None:
+    """Route a direct alias to its own base_url and decide its credential (mutates ``st``).
 
-    Returns ``(api_key, base_url, validation_headers_override, suppress_ollama_headers)``; a
-    ``None`` headers override means "leave as is". Credentials were resolved against the DEFAULT
-    provider; carrying that key onto the alias endpoint both 401s and ships the default provider's
-    secret to an unrelated host. The alias's own endpoint decides: its declared key; else the
-    session key only for the SAME ORIGIN; else a fresh resolution against the alias base_url
-    (env-key fallbacks are host-gated: OLLAMA_API_KEY resolves for ollama.com, OPENROUTER_API_KEY
-    never reaches an unrelated host).
+    Credentials were resolved against the DEFAULT provider; carrying that key onto the alias
+    endpoint both 401s and ships the default provider's secret to an unrelated host. The alias's
+    own endpoint decides: its declared key; else the session key only for the SAME ORIGIN; else a
+    fresh resolution against the alias base_url (env-key fallbacks are host-gated: OLLAMA_API_KEY
+    resolves for ollama.com, OPENROUTER_API_KEY never reaches an unrelated host).
     """
     from hermes_cli.models import _same_ollama_native_root
     from hermes_cli.runtime_provider import resolve_runtime_provider
     alias_key = direct_alias_api_key(da)
+    same_host = _may_reuse_session_credential(st.base_url, da.base_url)
     if alias_key:
-        base_url, api_key = da.base_url, alias_key
-    elif api_key and api_key != "no-key-required" and _may_reuse_session_credential(base_url, da.base_url):
+        st.base_url, st.api_key = da.base_url, alias_key
+    elif st.api_key and st.api_key != "no-key-required" and same_host:
         # Same origin: the key is host-appropriate and re-resolving would only repeat the work.
-        base_url = da.base_url
+        st.base_url = da.base_url
     else:
         try:
             req, explicit = direct_alias_runtime_request(da)
             alias_runtime = resolve_runtime_provider(
-                requested=req, explicit_api_key=explicit, explicit_base_url=da.base_url, target_model=new_model,
-            )
+                requested=req, explicit_api_key=explicit, explicit_base_url=da.base_url, target_model=st.new_model)
         except Exception:
             alias_runtime = {}
-        same_host = _may_reuse_session_credential(base_url, da.base_url)
-        base_url = alias_runtime.get("base_url", "") or da.base_url
+        st.base_url = alias_runtime.get("base_url", "") or da.base_url
         # The resolver reports "no key found" as the `no-key-required` placeholder; normalise so
         # a same-host credential still outranks it.
         resolved_key = alias_runtime.get("api_key", "")
         if resolved_key == "no-key-required":
             resolved_key = ""
-        api_key = resolved_key or (api_key if same_host else "") or "no-key-required"
+        st.api_key = resolved_key or (st.api_key if same_host else "") or "no-key-required"
 
-    headers_override = None
-    suppress = False
     # providers.ollama refinement: pick up the configured key only for the configured native
     # root; drop key and provider-level headers for any other origin. Skipped when the alias
     # declared its own credential (explicit api_key/key_env outranks a provider-level config key).
-    if not alias_key and target_provider.strip().lower() == "ollama":
+    if not alias_key and st.target_provider.strip().lower() == "ollama":
         ollama_cfg, ollama_cfg_base = _ollama_configured_base()
-        if ollama_cfg_base and _same_ollama_native_root(base_url, ollama_cfg_base):
+        if ollama_cfg_base and _same_ollama_native_root(st.base_url, ollama_cfg_base):
             configured_key = _entry_configured_key(ollama_cfg, lambda n: os.environ.get(n, "").strip())
             if configured_key:
-                api_key = configured_key
+                st.api_key = configured_key
         else:
             # Different origin, or no configured root to safely associate the headers with.
-            headers_override, suppress, api_key = {}, True, "no-key-required"
-    return api_key or "no-key-required", base_url, headers_override, suppress
+            st.validation_headers, st.suppress_ollama_headers, st.api_key = {}, True, "no-key-required"
+    st.api_key = st.api_key or "no-key-required"
+    st.api_mode = ""  # clear so determine_api_mode re-detects from URL
 
 
 def _moa_default_preset() -> str:
@@ -1369,13 +1363,7 @@ def _resolve_switch_credentials(st: _Switch) -> Optional[ModelSwitchResult]:
         _ensure_direct_aliases()
         da = DIRECT_ALIASES.get(st.resolved_alias)
         if da is not None and da.base_url:
-            st.api_key, st.base_url, headers_override, suppress = _apply_direct_alias_endpoint(
-                da, st.target_provider, st.new_model, st.api_key, st.base_url)
-            st.api_mode = ""  # clear so determine_api_mode re-detects from URL
-            if headers_override is not None:
-                st.validation_headers = headers_override
-            if suppress:
-                st.suppress_ollama_headers = True
+            _apply_direct_alias_endpoint(st, da)
 
     # Fills an empty mode (alias cleared it) and overrides a STALE mode carried from previous
     # session state when the host mandates one wire protocol (e.g. gpt-5.x on api.openai.com
