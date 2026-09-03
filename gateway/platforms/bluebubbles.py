@@ -118,9 +118,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         self.password = extra.get("password") or _get_scoped_secret("BLUEBUBBLES_PASSWORD", "")
         self.webhook_host = _setting(extra, "webhook_host", "BLUEBUBBLES_WEBHOOK_HOST", DEFAULT_WEBHOOK_HOST)
         self.webhook_port = int(_setting(extra, "webhook_port", "BLUEBUBBLES_WEBHOOK_PORT", str(DEFAULT_WEBHOOK_PORT)))
-        self.webhook_path = _setting(extra, "webhook_path", "BLUEBUBBLES_WEBHOOK_PATH", DEFAULT_WEBHOOK_PATH)
-        if not str(self.webhook_path).startswith("/"):
-            self.webhook_path = f"/{self.webhook_path}"
+        path = str(_setting(extra, "webhook_path", "BLUEBUBBLES_WEBHOOK_PATH", DEFAULT_WEBHOOK_PATH))
+        self.webhook_path = path if path.startswith("/") else f"/{path}"
         self.send_read_receipts = bool(extra.get("send_read_receipts", True))
         _require_mention = extra.get("require_mention")
         if _require_mention is None:
@@ -137,8 +136,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     # --- API helpers ---
 
     def _api_url(self, path: str) -> str:
-        sep = "&" if "?" in path else "?"
-        return f"{self.server_url}{path}{sep}password={quote(self.password, safe='')}"
+        return f"{self.server_url}{path}{'&' if '?' in path else '?'}password={quote(self.password, safe='')}"
 
     @staticmethod
     def _compile_mention_patterns(raw: Any) -> List[re.Pattern]:
@@ -321,10 +319,8 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         the same contact appears in a 1:1 DM and any number of groups, so a participant match could
         leak a DM reply into a group thread. ``None`` lets the caller create a fresh DM."""
         target = (target or "").strip()
-        if not target:
-            return None
-        if ";" in target:
-            return target
+        if not target or ";" in target:
+            return target or None
         if target in self._guid_cache:
             self._guid_cache.move_to_end(target)
             return self._guid_cache[target]
@@ -333,8 +329,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             for chat in payload.get("data", []) or []:
                 if (chat.get("chatIdentifier") or chat.get("identifier")) != target:
                     continue
-                guid = chat.get("guid") or chat.get("chatGuid")
-                if guid:
+                if guid := chat.get("guid") or chat.get("chatGuid"):
                     self._guid_cache[target] = guid
                     while len(self._guid_cache) > _GUID_CACHE_SIZE:
                         self._guid_cache.popitem(last=False)
@@ -351,8 +346,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
     @staticmethod
     def truncate_message(content: str, max_length: int = MAX_TEXT_LENGTH) -> List[str]:
         # Base splitter minus "(1/3)" pagination suffixes — iMessage bubbles flow naturally.
-        chunks = BasePlatformAdapter.truncate_message(content, max_length)
-        return [_PAGINATION_SUFFIX_RE.sub("", c) for c in chunks]
+        return [_PAGINATION_SUFFIX_RE.sub("", c) for c in BasePlatformAdapter.truncate_message(content, max_length)]
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[Dict[str, Any]] = None) -> SendResult:
@@ -360,11 +354,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         if not text:
             return SendResult(success=False, error="BlueBubbles send requires text")
         # Each paragraph becomes its own iMessage bubble; truncate any still too long.
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
-        chunks: List[str] = []
-        for para in (paragraphs or [text]):
-            chunks.extend([para] if len(para) <= self.MAX_MESSAGE_LENGTH
-                          else self.truncate_message(para, max_length=self.MAX_MESSAGE_LENGTH))
+        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()] or [text]
+        chunks = [c for para in paragraphs for c in (
+            [para] if len(para) <= self.MAX_MESSAGE_LENGTH else self.truncate_message(para, self.MAX_MESSAGE_LENGTH))]
         last = SendResult(success=True)
         for chunk in chunks:
             guid = await self._resolve_chat_guid(chat_id)
@@ -375,8 +367,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             payload: Dict[str, Any] = {"chatGuid": guid, "tempGuid": _temp_guid(), "message": chunk}
             if reply_to and self._private_api_enabled and self._helper_connected:
                 payload.update(method="private-api", selectedMessageGuid=reply_to, partIndex=0)
-            last = await self._post_message("/api/v1/message/text", payload)
-            if not last.success:
+            if not (last := await self._post_message("/api/v1/message/text", payload)).success:
                 return last
         return last
 
@@ -418,8 +409,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                          reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         try:
             from gateway.platforms.base import cache_image_from_url
-            local_path = await cache_image_from_url(image_url)
-            return await self._send_attachment(chat_id, local_path, caption=caption)
+            return await self._send_attachment(chat_id, await cache_image_from_url(image_url), caption=caption)
         except Exception:
             return await super().send_image(chat_id, image_url, caption, reply_to)
 
@@ -533,8 +523,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             is_voice = mime.startswith("audio/") or (att.get("uti") or "").endswith("caf")
             msg_type = (MessageType.PHOTO if mime.startswith("image/") else MessageType.VOICE if is_voice
                         else MessageType.VIDEO if mime.startswith("video/") else MessageType.DOCUMENT)
-        # With multiple attachments, prefer PHOTO if any images present
-        if len(media_urls) > 1 and any(m.split("/")[0] == "image" for m in media_types):
+        if len(media_urls) > 1 and any(m.split("/")[0] == "image" for m in media_types):  # any image → PHOTO
             msg_type = MessageType.PHOTO
         return media_urls, media_types, msg_type
 
@@ -544,16 +533,14 @@ class BlueBubblesAdapter(BasePlatformAdapter):
 
     def _resolve_chat_and_sender(self, payload: Dict[str, Any], record: Dict[str, Any]):
         """Returns ``(chat_guid, chat_identifier, sender)`` from the many BlueBubbles payload shapes."""
-        chat_guid = self._value(
-            record.get("chatGuid"), payload.get("chatGuid"),
-            record.get("chat_guid"), payload.get("chat_guid"), payload.get("guid"))
+        chat_guid = self._value(record.get("chatGuid"), payload.get("chatGuid"), record.get("chat_guid"),
+                                payload.get("chat_guid"), payload.get("guid"))
         # BlueBubbles v1.9+ payloads omit top-level chatGuid; it's nested under data.chats[0].guid.
         _chats = record.get("chats") or []
         if not chat_guid and _chats and isinstance(_chats[0], dict):
             chat_guid = _chats[0].get("guid") or _chats[0].get("chatGuid")
-        chat_identifier = self._value(
-            record.get("chatIdentifier"), record.get("identifier"),
-            payload.get("chatIdentifier"), payload.get("identifier"))
+        chat_identifier = self._value(record.get("chatIdentifier"), record.get("identifier"),
+                                      payload.get("chatIdentifier"), payload.get("identifier"))
         handle = record.get("handle")
         sender = (self._value(handle.get("address") if isinstance(handle, dict) else None, record.get("sender"),
                               record.get("from"), record.get("address")) or chat_identifier or chat_guid)
@@ -594,10 +581,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
                 logger.debug("[bluebubbles] ignoring group message (require_mention=true, no mention pattern matched)")
                 return _ok()
             text = self._clean_mention_text(text)
-        source = self.build_source(
-            chat_id=session_chat_id, chat_name=chat_identifier or sender,
-            chat_type="group" if is_group else "dm", user_id=sender, user_name=sender,
-            chat_id_alt=chat_identifier)
+        source = self.build_source(chat_id=session_chat_id, chat_name=chat_identifier or sender,
+                                   chat_type="group" if is_group else "dm", user_id=sender, user_name=sender,
+                                   chat_id_alt=chat_identifier)
         event = MessageEvent(
             text=text, message_type=msg_type, source=source, raw_message=payload,
             message_id=self._value(record.get("guid"), record.get("messageGuid"), record.get("id")),
