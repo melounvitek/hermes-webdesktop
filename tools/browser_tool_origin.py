@@ -1,8 +1,8 @@
 """Origin-module lookup shared by the ``tools.browser_tool_*`` extraction modules.
 
-Extracted code must read its origin's symbols *through* ``tools.browser_tool`` so
-``patch("tools.browser_tool.X")`` is honoured, and must not import it at import time
-(cycle) — hence the lazy :func:`origin_module` and the :data:`origin` proxy.
+Extracted code reads facade-owned state (caches, locks, session tables, facade-defined
+helpers) *through* ``tools.browser_tool`` and must not import it at import time (cycle) —
+hence the lazy :func:`origin_module` and the :data:`origin` proxy.
 """
 
 import sys

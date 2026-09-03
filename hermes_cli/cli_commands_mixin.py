@@ -501,7 +501,7 @@ def _browser_connect(cli, cdp_url: str) -> None:
         return
     cdp_url, port = normalized
     # Clear any existing browser sessions so the next tool call uses the new backend
-    _probe("tools.browser_tool", "cleanup_all_browsers", None)
+    _probe("tools.browser_tool_lifecycle", "cleanup_all_browsers", None)
     print()
     # Already serving CDP? For the default-local URL probe both loopbacks: a squatter
     # on 127.0.0.1:<port> (e.g. an IDE debugger) can push the browser to bind [::1] only.
@@ -543,7 +543,7 @@ def _browser_disconnect(cli) -> None:
                           "(already using default mode)")
     os.environ.pop("BROWSER_CDP_URL", None)
     with suppress(Exception):
-        from tools.browser_tool import cleanup_all_browsers
+        from tools.browser_tool_lifecycle import cleanup_all_browsers
         from tools.browser_tool_cdp import _stop_cdp_supervisor
         _stop_cdp_supervisor("default")
         cleanup_all_browsers()
@@ -586,7 +586,7 @@ def _browser_status() -> None:
         except Exception:
             print("   Status: ⚠ not reachable (browser may not be running)")
     else:
-        provider = _probe("tools.browser_tool", "_get_cloud_provider", None)
+        provider = _probe("tools.browser_tool_cloud", "_get_cloud_provider", None)
         if provider is not None:
             print(f"🌐 Browser: {provider.display_name} (cloud)")
             _print_lightpanda_engine_status()

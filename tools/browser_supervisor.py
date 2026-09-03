@@ -5,7 +5,7 @@ persistent WebSocket, ``Page`` / ``Runtime`` / ``Target`` events on every attach
 session (top page + auto-attached OOPIF / worker targets), pending dialogs + frame
 tree exposed via a thread-safe snapshot. Not in the tool schema — output reaches the
 agent via ``browser_snapshot`` / ``browser_dialog``. Dialog capture and frame tracking
-are mixins (``browser_supervisor_dialogs`` / ``browser_supervisor_frames``) re-exported here.
+are mixins (``browser_supervisor_dialogs`` / ``browser_supervisor_frames``).
 Design spec: ``website/docs/developer-guide/browser-supervisor.md``.
 """
 
@@ -20,15 +20,11 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
-from tools.browser_supervisor_dialogs import (  # noqa: F401 — re-exported
-    DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, DIALOG_BRIDGE_HOST, DIALOG_BRIDGE_URL_PATTERN,
-    DIALOG_POLICY_AUTO_ACCEPT, DIALOG_POLICY_AUTO_DISMISS, DIALOG_POLICY_MUST_RESPOND, RECENT_DIALOGS_MAX,
-    _DIALOG_BRIDGE_SCRIPT, _VALID_POLICIES, DialogRecord, DialogSupervisionMixin, PendingDialog,
-    _redact_supervisor_text, _trim_ring,
+from tools.browser_supervisor_dialogs import (
+    DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, RECENT_DIALOGS_MAX, _VALID_POLICIES, DialogRecord,
+    DialogSupervisionMixin, PendingDialog,
 )
-from tools.browser_supervisor_frames import (  # noqa: F401 — re-exported
-    FRAME_TREE_MAX_ENTRIES, FRAME_TREE_MAX_OOPIF_DEPTH, FrameInfo, FrameTrackingMixin,
-)
+from tools.browser_supervisor_frames import FrameInfo, FrameTrackingMixin
 
 # ``websockets`` costs ~22 ms at import and is only needed once a supervisor connects.
 if TYPE_CHECKING:
@@ -475,8 +471,4 @@ class _SupervisorRegistry:
 SUPERVISOR_REGISTRY = _SupervisorRegistry()
 
 
-__all__ = [
-    "CDPSupervisor", "DEFAULT_DIALOG_POLICY", "DEFAULT_DIALOG_TIMEOUT_S", "DIALOG_POLICY_AUTO_ACCEPT",
-    "DIALOG_POLICY_AUTO_DISMISS", "DIALOG_POLICY_MUST_RESPOND", "DialogRecord", "FrameInfo", "PendingDialog",
-    "SUPERVISOR_REGISTRY", "SupervisorSnapshot", "_SupervisorRegistry",
-]
+__all__ = ["CDPSupervisor", "SUPERVISOR_REGISTRY", "SupervisorSnapshot", "_SupervisorRegistry"]

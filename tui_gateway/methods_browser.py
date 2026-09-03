@@ -12,7 +12,7 @@ _CDP_SCHEMES = {"http", "https", "ws", "wss"}
 
 def _resolve_browser_cdp_url() -> str:
     """Configured browser CDP override without network I/O (``/browser status`` must be fast;
-    ``tools.browser_tool._get_cdp_override`` HTTP-probes discovery URLs). Same precedence (env,
+    ``tools.browser_tool_cdp._get_cdp_override`` HTTP-probes discovery URLs). Same precedence (env,
     then ``browser.cdp_url``) minus WS resolution; ``browser_navigate`` normalizes on the next call."""
     if env_url := os.environ.get("BROWSER_CDP_URL", "").strip():
         return env_url
@@ -96,7 +96,7 @@ def _connect_local_default(port: int, system: str, announce) -> str | None:
 def _browser_connect(rid, params: dict) -> dict:
     import platform
     from hermes_cli.browser_connect import DEFAULT_BROWSER_CDP_URL
-    from tools.browser_tool import cleanup_all_browsers
+    from tools.browser_tool_lifecycle import cleanup_all_browsers
     from urllib.parse import urlparse
     raw_url = params.get("url")
     if raw_url is not None and not isinstance(raw_url, str):
@@ -161,7 +161,7 @@ def _browser_disconnect(rid) -> dict:
     # Reap, drop the override, reap again — same swap window as ``_browser_connect``.
     def reap() -> None:
         with contextlib.suppress(Exception):
-            from tools.browser_tool import cleanup_all_browsers
+            from tools.browser_tool_lifecycle import cleanup_all_browsers
             cleanup_all_browsers()
 
     reap()

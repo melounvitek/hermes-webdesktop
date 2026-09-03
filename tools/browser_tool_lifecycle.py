@@ -1,7 +1,6 @@
 """Browser session lifecycle: inactivity janitor, orphan reaper, per-session teardown, atexit cleanup.
 
-Split out of ``tools/browser_tool.py`` (every name re-imported there); origin symbols
-are read through the ``_bt`` proxy so ``patch("tools.browser_tool.X")`` is honoured.
+Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle.
 """
 
 import contextlib
@@ -17,6 +16,11 @@ from typing import Any, Dict, Optional, Tuple
 
 from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
 from tools.browser_tool_origin import origin as _bt
+from tools import browser_tool_cdp as _cdp
+from tools import browser_tool_cloud as _cloud
+from tools import browser_tool_session as _session
+from tools import browser_tool_install as _install
+from tools import browser_tool_real_profile as _real_profile
 
 
 def _session_expiry_timestamp(session_info: Dict[str, Any]) -> Optional[float]:
@@ -45,7 +49,7 @@ def _session_has_expired(
     session_info: Dict[str, Any], *, now: Optional[float] = None
 ) -> bool:
     """Whether a cached browser session crossed its provider deadline."""
-    expires_at = _bt._session_expiry_timestamp(session_info)
+    expires_at = _session_expiry_timestamp(session_info)
     if expires_at is None:
         return False
     return (time.time() if now is None else now) >= expires_at
@@ -75,11 +79,11 @@ def _emergency_cleanup_all_sessions():
     # Own sessions first so their owner_pid files are gone before the reaper scans.
     # Real-profile Chrome is launched directly (not by agent-browser), so the
     # session cleanup never reaps it.
-    _best_effort("Real-profile chrome cleanup on exit", _bt._terminate_real_profile_chrome)
+    _best_effort("Real-profile chrome cleanup on exit", _real_profile._terminate_real_profile_chrome)
     if _bt._active_sessions:
         _bt.logger.info("Emergency cleanup: closing %s active session(s)...", len(_bt._active_sessions))
         try:
-            _bt.cleanup_all_browsers()
+            cleanup_all_browsers()
         except Exception as e:
             _bt.logger.error("Emergency cleanup error: %s", e)
         finally:
@@ -93,7 +97,7 @@ def _emergency_cleanup_all_sessions():
     _best_effort("Lightpanda cleanup on exit", _stop_all_lightpanda)
     # Safe even if we never used the browser — owner_pid liveness protects daemons
     # owned by other live hermes processes.
-    _best_effort("Orphan reap on exit", _bt._reap_orphaned_browser_sessions)
+    _best_effort("Orphan reap on exit", _reap_orphaned_browser_sessions)
 
 
 @contextlib.contextmanager
@@ -154,8 +158,8 @@ def _cleanup_inactive_browser_sessions():
         elapsed = int(current_time - _bt._session_last_activity.get(task_id, current_time))
         _bt.logger.info("Cleaning up inactive session for task: %s (inactive for %ss)", task_id, elapsed)
         try:
-            with _bt._session_owner_scope(task_id):
-                _bt.cleanup_browser(task_id)
+            with _session_owner_scope(task_id):
+                cleanup_browser(task_id)
             _forget_session_tracking(task_id)
         except Exception as e:
             with _bt._cleanup_lock:
@@ -167,8 +171,8 @@ def _cleanup_inactive_browser_sessions():
             _bt.logger.error("Browser cleanup failed %d times for inactive session %s; "
                          "force-reaping: %s", failures, task_id, e)
             try:
-                with _bt._session_owner_scope(task_id):
-                    _bt._force_reap_browser_session(task_id)
+                with _session_owner_scope(task_id):
+                    _force_reap_browser_session(task_id)
             except Exception as reap_exc:
                 _bt.logger.error("Force-reap of browser session %s failed: %s", task_id, reap_exc)
             finally:
@@ -296,11 +300,11 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
     pidless dir is only stale after the grace period (deleting it immediately races the
     creator's first stdout open). The PID is identity-verified before any tree-kill.
     """
-    owner_pid, owner_alive = _bt._owner_pid_alive(socket_dir, session_name)
+    owner_pid, owner_alive = _owner_pid_alive(socket_dir, session_name)
     if owner_alive is True:
         if session_name in tracked_names:
             return False
-        idle_s = _bt._socket_dir_idle_seconds(socket_dir)
+        idle_s = _socket_dir_idle_seconds(socket_dir)
         if idle_s is None or idle_s < _bt.BROWSER_ORPHAN_GRACE_SECONDS:
             return False  # unknown age or within grace — fail safe
         _bt.logger.warning(
@@ -313,7 +317,7 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
 
     pid_file = os.path.join(socket_dir, f"{session_name}.pid")
     if not os.path.isfile(pid_file):
-        idle_s = _bt._socket_dir_idle_seconds(socket_dir)
+        idle_s = _socket_dir_idle_seconds(socket_dir)
         if idle_s is None or idle_s < _bt.BROWSER_ORPHAN_GRACE_SECONDS:
             return False
         shutil.rmtree(socket_dir, ignore_errors=True)
@@ -325,7 +329,7 @@ def _reap_socket_dir(socket_dir: str, session_name: str, tracked_names: set) -> 
         shutil.rmtree(socket_dir, ignore_errors=True)
         return False
 
-    if not _bt._verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
+    if not _verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
         return False  # leave process and dir for a later sweep once the imposter PID is gone
 
     # Tree-kill so Chromium children (renderer, GPU, ...) go too.
@@ -367,7 +371,7 @@ def _reap_orphaned_browser_sessions():
     reaped = 0
     for socket_dir in socket_dirs:
         session_name = os.path.basename(socket_dir).removeprefix("agent-browser-")
-        if session_name and _bt._reap_socket_dir(socket_dir, session_name, tracked_names):
+        if session_name and _reap_socket_dir(socket_dir, session_name, tracked_names):
             reaped += 1
 
     if reaped:
@@ -383,13 +387,13 @@ def _browser_cleanup_thread_worker():
     while _bt._cleanup_running:
         if cycle % reap_every_cycles == 0:  # cycle 0 is the startup reap
             try:
-                _bt._reap_orphaned_browser_sessions()
+                _reap_orphaned_browser_sessions()
             except Exception as e:
                 _bt.logger.warning("Orphan reap error: %s", e)
         cycle += 1
 
         try:
-            _bt._cleanup_inactive_browser_sessions()
+            _cleanup_inactive_browser_sessions()
         except Exception as e:
             _bt.logger.warning("Cleanup thread error: %s", e)
 
@@ -404,7 +408,7 @@ def _start_browser_cleanup_thread():
     with _bt._cleanup_lock:
         if _bt._cleanup_thread is None or not _bt._cleanup_thread.is_alive():
             _bt._cleanup_running = True
-            _bt._cleanup_thread = threading.Thread(target=_bt._browser_cleanup_thread_worker, daemon=True,
+            _bt._cleanup_thread = threading.Thread(target=_browser_cleanup_thread_worker, daemon=True,
                                                    name="browser-cleanup")
             _bt._cleanup_thread.start()
             _bt.logger.info("Started inactivity cleanup thread (timeout: %ss)", _bt.BROWSER_SESSION_INACTIVITY_TIMEOUT)
@@ -452,7 +456,7 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
 
         _deadline_kill_tree(proc.pid)
     except Exception:
-        _bt._legacy_kill_process_tree(proc)
+        _legacy_kill_process_tree(proc)
 
 
 def _legacy_kill_process_tree(proc: "subprocess.Popen") -> None:
@@ -549,8 +553,8 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
         if not _bt._is_local_sidecar_key(task_id) and sidecar_key in _bt._active_sessions:
             session_keys.append(sidecar_key)
     for session_key in session_keys:
-        _bt._cleanup_single_browser_session(session_key)
-    _bt._drop_last_active_binding(task_id)
+        _cleanup_single_browser_session(session_key)
+    _drop_last_active_binding(task_id)
 
 
 def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
@@ -561,7 +565,7 @@ def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
         return False
     try:
         daemon_pid = int(Path(pid_file).read_text(encoding="utf-8").strip())
-        if not _bt._verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
+        if not _verify_reapable_browser_daemon(daemon_pid, socket_dir, session_name):
             _bt.logger.debug("Skipped daemon kill for %s: pid %s failed identity verification", session_name, daemon_pid)
             return False
         if not _terminate_verified_daemon(daemon_pid, session_name, lambda *_a: _bt.logger.debug(
@@ -586,7 +590,7 @@ def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> No
     _forget_session_tracking(task_id, session=True)
 
     if bb_session_id:  # cloud only — local sidecars have bb_session_id=None
-        provider = _bt._get_cloud_provider()
+        provider = _cloud._get_cloud_provider()
         if provider is not None:
             try:
                 provider.close_session(bb_session_id)
@@ -597,7 +601,7 @@ def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> No
     if session_name:
         socket_dir = os.path.join(_bt._socket_safe_tmpdir(), f"agent-browser-{session_name}")
         if os.path.exists(socket_dir):
-            _bt._kill_verified_daemon(socket_dir, session_name)
+            _kill_verified_daemon(socket_dir, session_name)
             shutil.rmtree(socket_dir, ignore_errors=True)
 
 
@@ -606,19 +610,19 @@ def _force_reap_browser_session(task_id: str) -> None:
 
     Janitor last resort after repeated cleanup failures (#100738).
     """
-    _bt._stop_cdp_supervisor(task_id)
+    _cdp._stop_cdp_supervisor(task_id)
     with _bt._cleanup_lock:
         session_info = _bt._active_sessions.get(task_id)
         _bt._session_last_activity.pop(task_id, None)
         _bt._recording_sessions.discard(task_id)
     if session_info:
-        _bt._release_session_resources(task_id, session_info)
-    _bt._drop_last_active_binding(task_id)
+        _release_session_resources(task_id, session_info)
+    _drop_last_active_binding(task_id)
 
 
 def _cleanup_single_browser_session(task_id: str) -> None:
     """Reap a single browser session by its exact session key."""
-    _bt._stop_cdp_supervisor(task_id)  # close our WebSocket BEFORE the backend tears down the endpoint
+    _cdp._stop_cdp_supervisor(task_id)  # close our WebSocket BEFORE the backend tears down the endpoint
 
     # Camofox: managed persistence keeps the profile (cookies) across tasks; skip the full
     # close then — the inactivity reaper still frees idle resources.
@@ -651,16 +655,16 @@ def _cleanup_single_browser_session(task_id: str) -> None:
             stop_lightpanda(session_info.get("session_name", ""))
         except Exception as e:
             _bt.logger.warning("lightpanda stop failed for task %s: %s", task_id, e)
-    elif _bt._session_has_expired(session_info):
+    elif _session_has_expired(session_info):
         _bt.logger.debug("Skipping agent-browser close for expired session %s", task_id)
     else:
         try:
-            _bt._run_browser_command(task_id, "close", [], timeout=10)
+            _session._run_browser_command(task_id, "close", [], timeout=10)
             _bt.logger.debug("agent-browser close command completed for task %s", task_id)
         except Exception as e:
             _bt.logger.warning("agent-browser close failed for task %s: %s", task_id, e)
 
-    _bt._release_session_resources(task_id, session_info)
+    _release_session_resources(task_id, session_info)
     _bt.logger.debug("Removed task %s from active sessions", task_id)
 
 
@@ -669,7 +673,7 @@ def cleanup_all_browsers() -> None:
     with _bt._cleanup_lock:
         task_ids = list(_bt._active_sessions.keys())
     for task_id in task_ids:
-        _bt.cleanup_browser(task_id)
+        cleanup_browser(task_id)
 
     try:  # tear down CDP supervisors so background threads exit
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
@@ -677,7 +681,7 @@ def cleanup_all_browsers() -> None:
     except Exception:
         pass
 
-    _bt._discover_homebrew_node_dirs.cache_clear()
+    _install._discover_homebrew_node_dirs.cache_clear()
     # Each resolved flag flips BEFORE its cache is nulled so a concurrent reader never
     # sees ``resolved=True`` with ``cache=None``.
     for flag, cache in (

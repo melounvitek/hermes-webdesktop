@@ -104,7 +104,7 @@ def _camofox_active(context: str = "") -> bool:
 
 
 def _real_profile_consented() -> bool:
-    return _lazy_call("tools.browser_tool", "_use_real_profile", False, "real-profile consent lookup failed")
+    return _lazy_call("tools.browser_tool_cloud", "_use_real_profile", False, "real-profile consent lookup failed")
 
 
 def _set_cdp_env(env: dict, cdp: str) -> None:
@@ -160,7 +160,7 @@ def _floor_subprocess_path(path: str) -> str:
     if os.name == "nt":
         return path
     with contextlib.suppress(Exception):
-        from tools.browser_tool import _merge_browser_path
+        from tools.browser_tool_install import _merge_browser_path
         return _merge_browser_path(path or "")
     parts = [p for p in (path or "").split(os.pathsep) if p]
     return os.pathsep.join(parts + [d for d in _FHS_BIN_DIRS if d not in set(parts) and os.path.isdir(d)])
@@ -353,7 +353,8 @@ def _resolve_lightpanda_cdp(env: dict, task_id: Optional[str], session_name: str
     nothing of higher precedence claimed the session). Each cache key gets its own process via the
     legacy ``_get_session_info()`` (cache, reaper, atexit): private browser, own-tab preamble skipped."""
     try:
-        from tools.browser_tool import _get_session_info, _using_lightpanda_engine
+        from tools.browser_tool_session import _get_session_info
+        from tools.browser_tool_lightpanda_fallback import _using_lightpanda_engine
         if not _using_lightpanda_engine():
             return None
     except Exception as e:  # stubbed browser_tool in tests / engine lookup failure
@@ -383,7 +384,9 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     if _has_cdp_env(env):
         return None
     try:
-        from tools.browser_tool import _get_cdp_override, _get_cloud_provider, _get_session_info
+        from tools.browser_tool_cloud import _get_cloud_provider
+        from tools.browser_tool_session import _get_session_info
+        from tools.browser_tool_cdp import _get_cdp_override
     except Exception as e:  # pragma: no cover — stubbed browser_tool in tests
         logger.debug("browser_tool backend resolution unavailable: %s", e)
         return None
@@ -428,7 +431,9 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
     if not _real_profile_consented() or _has_cdp_env(env):
         return None
     try:
-        from tools.browser_tool import _get_cdp_override_raw, _get_cloud_provider, _real_profile_cdp
+        from tools.browser_tool_cdp import _get_cdp_override_raw
+        from tools.browser_tool_cloud import _get_cloud_provider
+        from tools.browser_tool_real_profile import _real_profile_cdp
     except Exception as e:  # pragma: no cover — stubbed browser_tool in tests
         logger.debug("real-profile backend resolution unavailable: %s", e)
         return None
@@ -608,7 +613,7 @@ _HELPERS_DIGEST = (
 
 def _description_header() -> str:
     """Header tailored to whether the active model can see images natively"""
-    if _lazy_call("tools.browser_tool", "lightpanda_engine_status", (False, ""),
+    if _lazy_call("tools.browser_tool_lightpanda_fallback", "lightpanda_engine_status", (False, ""),
                   "lightpanda engine status unavailable")[0]:  # no screenshots, whatever the model sees
         return _HEADER_BASE + _HEADER_TEXT_ONLY + _HEADER_LIGHTPANDA
     vision = _lazy_call("tools.vision_tools", "_should_use_native_vision_fast_path", False, "")

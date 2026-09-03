@@ -1,8 +1,7 @@
 """Lightpanda engine status and the automatic Chrome fallback for browser commands
 that Lightpanda cannot serve (screenshots, empty snapshots, failed commands).
 
-Origin-module symbols are resolved lazily through ``tools.browser_tool`` (``_bt``)
-so ``patch("tools.browser_tool.X")`` keeps working; never import it at import time (cycle).
+Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle.
 """
 
 import json
@@ -11,6 +10,10 @@ import shutil
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 from tools.browser_tool_origin import origin_module as _origin
+from tools import browser_tool_cdp as _cdp
+from tools import browser_tool_cloud as _cloud
+from tools import browser_tool_install as _install
+from tools import browser_tool_session as _session
 
 # Commands where Chrome can meaningfully produce a different result. Session-management
 # commands (close, record) are tied to the engine's daemon and can't be retried elsewhere.
@@ -20,7 +23,7 @@ _FALLBACK_ELIGIBLE = frozenset({"open", "snapshot", "screenshot", "eval", "click
 
 def _using_lightpanda_engine() -> bool:
     """Return True when local browser commands are configured for Lightpanda."""
-    return _origin()._get_browser_engine() == "lightpanda"
+    return _cloud._get_browser_engine() == "lightpanda"
 
 
 def lightpanda_engine_status() -> Tuple[bool, str]:
@@ -31,18 +34,18 @@ def lightpanda_engine_status() -> Tuple[bool, str]:
     precedence with config-only gates (no network I/O) for ``/browser status`` / ``hermes doctor``.
     """
     _bt = _origin()
-    if not _bt._using_lightpanda_engine():
+    if not _using_lightpanda_engine():
         return False, ""
-    if _bt._get_cdp_override_raw():
+    if _cdp._get_cdp_override_raw():
         return False, "a CDP override is active (/browser connect or browser.cdp_url)"
     if _bt._is_camofox_mode():
         return False, "Camofox is the selected browser (CAMOFOX_URL)"
     # Real-profile before cloud provider: browser_exec resolves real-profile before
     # the backend, so with both set the real-profile toggle claims the session.
-    if _bt._use_real_profile():
+    if _cloud._use_real_profile():
         return False, "browser.use_real_profile is on (Lightpanda cannot load a Chromium profile)"
     try:
-        provider = _bt._get_cloud_provider()
+        provider = _cloud._get_cloud_provider()
     except Exception:
         provider = None
     if provider is not None:
@@ -122,7 +125,7 @@ def _run_chrome_fallback_command(task_id: str, command: str, args: List[str], ti
     import uuid
     # 1. Current URL from the Lightpanda session. ``get url`` is not fallback-eligible,
     # so this can't recurse; the explicit override strips Chromium-only env flags.
-    url_result = _bt._run_browser_command(task_id, "get", ["url"], timeout=10, _engine_override="lightpanda")
+    url_result = _session._run_browser_command(task_id, "get", ["url"], timeout=10, _engine_override="lightpanda")
     current_url = str(url_result.get("data", {}).get("url", "")).strip() if url_result.get("success") else None
     if not current_url:
         _bt.logger.warning("Chrome fallback: could not determine current URL from LP session")
@@ -131,12 +134,12 @@ def _run_chrome_fallback_command(task_id: str, command: str, args: List[str], ti
     # 2. Temporary Chrome session (bypasses _get_session_info's cache).
     tmp_session = f"h_cfb_{uuid.uuid4().hex[:8]}"
     try:
-        browser_cmd = _bt._find_agent_browser()
+        browser_cmd = _install._find_agent_browser()
     except FileNotFoundError as e:
         return {"success": False, "error": str(e)}
 
-    if not _bt._chromium_installed():
-        if _bt._running_in_docker():
+    if not _install._chromium_installed():
+        if _install._running_in_docker():
             hint = ("Chrome fallback requires Chromium, but it is missing. You're running in Docker — "
                     "pull the latest image: docker pull ghcr.io/nousresearch/hermes-agent:latest")
         else:
@@ -144,14 +147,14 @@ def _run_chrome_fallback_command(task_id: str, command: str, args: List[str], ti
                     "npx agent-browser install --with-deps (or: npx playwright install --with-deps chromium)")
         return {"success": False, "error": hint}
 
-    base_args = _bt._agent_browser_argv(browser_cmd) + ["--engine", "chrome", "--session", tmp_session, "--json"]
-    task_socket_dir = _bt._prepare_session_socket_dir(tmp_session)
+    base_args = _session._agent_browser_argv(browser_cmd) + ["--engine", "chrome", "--session", tmp_session, "--json"]
+    task_socket_dir = _session._prepare_session_socket_dir(tmp_session)
     # Bypasses _run_browser_command, so apply the same Chromium sandbox policy explicitly.
-    browser_env = _bt._agent_browser_command_env(task_socket_dir)
-    _bt._apply_chromium_sandbox_args(browser_env)
+    browser_env = _session._agent_browser_command_env(task_socket_dir)
+    _session._apply_chromium_sandbox_args(browser_env)
 
     def _run_tmp(cmd: str, cmd_args: List[str]) -> Dict[str, Any]:
-        proc = _bt._popen_agent_browser(base_args + [cmd] + cmd_args, browser_env, task_socket_dir, cmd)
+        proc = _session._popen_agent_browser(base_args + [cmd] + cmd_args, browser_env, task_socket_dir, cmd)
         stdout_path = os.path.join(task_socket_dir, f"_stdout_{cmd}")
         stderr_path = os.path.join(task_socket_dir, f"_stderr_{cmd}")
         try:
@@ -168,7 +171,7 @@ def _run_chrome_fallback_command(task_id: str, command: str, args: List[str], ti
         except Exception as exc:
             _bt.logger.debug("Chrome fallback tmp cmd '%s' error: %s", cmd, exc)
         finally:
-            _bt._unlink_command_output_files(stdout_path, stderr_path)
+            _session._unlink_command_output_files(stdout_path, stderr_path)
         return {"success": False, "error": f"Chrome fallback '{cmd}' failed"}
 
     try:
@@ -189,4 +192,4 @@ def _run_chrome_fallback_command(task_id: str, command: str, args: List[str], ti
 
 def _chrome_fallback_screenshot(task_id: str, args: List[str], timeout: int) -> Dict[str, Any]:
     """Take a screenshot using a temporary Chrome session."""
-    return _origin()._run_chrome_fallback_command(task_id, "screenshot", args, timeout)
+    return _run_chrome_fallback_command(task_id, "screenshot", args, timeout)

@@ -1,9 +1,7 @@
 """Snapshot post-processing for the browser tools: truncate-and-store of oversized
 accessibility trees, model-boundary secret redaction, screenshot-path recovery.
 
-Origin-module symbols are resolved lazily through ``tools.browser_tool`` (``_bt``)
-so ``patch("tools.browser_tool.X")`` keeps working; never import ``tools.browser_tool``
-at import time (cycle).
+Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle.
 """
 
 import re

@@ -2,8 +2,8 @@
 hermes-owned copy, launch the real browser binary on it, and attach agent-browser.
 
 State (``_REAL_PROFILE_SESSION``, ``_real_profile_cdp_lock``, ``_real_profile_cdp_cache``,
-``_real_profile_chrome_procs``) lives in ``tools.browser_tool``; origin symbols are read
-through ``_bt`` so ``patch("tools.browser_tool.X")`` keeps working (never import it at import time).
+``_real_profile_chrome_procs``) lives in ``tools.browser_tool``; it is read
+through ``_bt`` (resolved per call — never import ``tools.browser_tool`` at import time).
 """
 
 import os
@@ -13,6 +13,10 @@ import sys
 import time
 from typing import Optional, Tuple
 from tools.browser_tool_origin import origin_module as _origin
+from tools import browser_tool_cloud as _cloud
+from tools import browser_tool_install as _install
+from tools import browser_tool_lightpanda_fallback as _lp
+from tools import browser_tool_session as _session
 
 _RP = "browser.use_real_profile is on, but "
 
@@ -36,11 +40,11 @@ def _agent_browser_session_cmd(session_name: str, *cmd: str, log_label: str) -> 
     """Run ``agent-browser --session <name> <cmd...>``; None when agent-browser is missing or the run fails."""
     _bt = _origin()
     try:
-        browser_cmd = _bt._find_agent_browser()
+        browser_cmd = _install._find_agent_browser()
     except FileNotFoundError:
         return None
     try:
-        return subprocess.run([*_bt._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
+        return subprocess.run([*_session._agent_browser_argv(browser_cmd), "--session", session_name, *cmd],
                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=15,
                               env=_bt._build_browser_env(), stdin=subprocess.DEVNULL)
     except (subprocess.SubprocessError, OSError) as e:
@@ -128,7 +132,7 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
         pass
     chrome_argv = [real_binary, f"--user-data-dir={copy_dir}", *_REAL_PROFILE_CHROME_FLAGS]
     _has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    if not (_bt._is_headed_mode() and (_has_display or not sys.platform.startswith("linux"))):
+    if not (_cloud._is_headed_mode() and (_has_display or not sys.platform.startswith("linux"))):
         chrome_argv.append("--headless=new")
     try:
         chrome_proc = subprocess.Popen(chrome_argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -143,10 +147,10 @@ def _launch_real_profile_chrome(real_binary: str, copy_dir: str) -> Tuple[Option
         if line.isdigit():
             return int(line), None
         if chrome_proc.poll() is not None:
-            _bt._terminate_real_profile_chrome()
+            _terminate_real_profile_chrome()
             return None, _RP + "Chrome exited during startup (another instance may hold the profile copy)."
         time.sleep(0.25)
-    _bt._terminate_real_profile_chrome()
+    _terminate_real_profile_chrome()
     return None, _RP + "the real-profile browser did not expose a debug port in time. Retry, or turn the toggle off."
 
 
@@ -158,10 +162,10 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
     """
     _bt = _origin()
     try:
-        browser_cmd = _bt._find_agent_browser()
+        browser_cmd = _install._find_agent_browser()
     except FileNotFoundError as e:
         return None, f"{_RP}the local browser engine (agent-browser) is not installed: {e}"
-    argv = [*_bt._agent_browser_argv(browser_cmd), "--session", _bt._REAL_PROFILE_SESSION,
+    argv = [*_session._agent_browser_argv(browser_cmd), "--session", _bt._REAL_PROFILE_SESSION,
             "--cdp", str(port), "open", "about:blank"]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -174,7 +178,7 @@ def _attach_agent_browser_to_real_profile(port: int, copy_dir: str) -> Tuple[Opt
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
         return None, f"{_RP}the real-profile browser failed to start: {tail[-1] if tail else f'exit {proc.returncode}'}"
-    cdp = _bt._agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+    cdp = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
     our_port = _read_devtools_port(copy_dir)
     if our_port is not None and (m := re.search(r":(\d+)", cdp or "")) and m.group(1) != our_port:
         cdp = f"http://127.0.0.1:{our_port}"
@@ -192,7 +196,7 @@ def _real_profile_cdp() -> tuple:
     across calls (cached, re-validated). ``(None, message)`` fail-closed; ``(None, None)`` when consent is off.
     """
     _bt = _origin()
-    if not _bt._use_real_profile():
+    if not _cloud._use_real_profile():
         # Consent is off: delete any snapshot store (copies of cookies/logins) so
         # revoking consent actually removes the credential copies.
         try:
@@ -205,7 +209,7 @@ def _real_profile_cdp() -> tuple:
 
     # Lightpanda rejects ``--profile``; check BEFORE default-browser detection so a
     # host with no Chromium default still reports the actionable engine conflict.
-    if _bt._using_lightpanda_engine():
+    if _lp._using_lightpanda_engine():
         return None, (_RP + "browser.engine is set to 'lightpanda', which cannot load a real Chromium profile. "
                       "Set browser.engine to 'auto' or 'chrome' to use real-profile browsing, or turn the toggle off.")
 
@@ -214,7 +218,7 @@ def _real_profile_cdp() -> tuple:
 
     with _bt._real_profile_cdp_lock:
         cached = _bt._real_profile_cdp_cache.get("cdp")
-        if cached and _bt._cdp_http_ready(cached):
+        if cached and _cdp_http_ready(cached):
             return cached, None
         _bt._real_profile_cdp_cache.pop("cdp", None)
 
@@ -227,12 +231,12 @@ def _real_profile_cdp() -> tuple:
         # Cookies / Login Data) must NOT run while a live copy-browser (maybe from a previous
         # hermes process) holds the user-data-dir open — that corrupts the databases.
         copy_dir = real_profile_copy_dir(browser)
-        existing = _bt._agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
-        if existing and _bt._cdp_http_ready(existing) and _bt._cdp_on_data_dir(existing, copy_dir):
+        existing = _agent_browser_get_cdp(_bt._REAL_PROFILE_SESSION)
+        if existing and _cdp_http_ready(existing) and _cdp_on_data_dir(existing, copy_dir):
             _bt._real_profile_cdp_cache["cdp"] = existing
             return existing, None
         if existing:  # stale/wrong-dir session: close it so nothing holds the dir open
-            _bt._agent_browser_close_session(_bt._REAL_PROFILE_SESSION)
+            _agent_browser_close_session(_bt._REAL_PROFILE_SESSION)
 
         copy_dir, err = snapshot_real_profile(browser)
         if err or not copy_dir:

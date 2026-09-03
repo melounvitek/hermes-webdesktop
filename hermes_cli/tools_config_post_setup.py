@@ -102,15 +102,16 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
         # check_browser_requirements).
         # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
         # for most installs, which a bare PATH + node_modules probe can't see. Mirror the local-CLI tail of
-        # :func:`tools.browser_tool.check_browser_requirements` (same cascade, same Termux carve-out) so the
+        # :func:`tools.browser_tool_install.check_browser_requirements` (same cascade, same Termux carve-out) so the
         # setup/status surfaces can't diverge from what browser tools actually find at runtime;
         # validate=False keeps this a cheap existence check with no subprocess spawn.
         # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
         # (or a global/Hermes-managed install) instead of a local `npm install`, so there's no node_modules/
         # population step here anymore.
-        from tools.browser_tool import (
+        from tools.browser_tool import AGENT_BROWSER_NPX_SPEC
+        from tools.browser_tool_install import (
             _chromium_installed, _running_in_docker, _find_agent_browser, _resolve_npx_bin,
-            _is_npx_agent_browser_sentinel, AGENT_BROWSER_NPX_SPEC)
+            _is_npx_agent_browser_sentinel)
     except Exception as exc:  # pragma: no cover — defensive
         _print_warning(f"    Could not check Chromium status: {exc}")
         return

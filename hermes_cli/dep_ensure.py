@@ -36,13 +36,13 @@ def _has_system_browser() -> bool:
 
 def _has_npx_agent_browser() -> bool:
     """agent-browser resolves lazily via npx on the default install, invisible to the PATH/managed-dir
-    probes above. Mirror tools.browser_tool.check_browser_requirements's Termux carve-out so this
+    probes above. Mirror tools.browser_tool_install.check_browser_requirements's Termux carve-out so this
     check can't diverge from what browser tools actually find.
 
     See #43564.
     """
     try:
-        from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
+        from tools.browser_tool_install import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
         browser_cmd = _find_agent_browser(validate=False)
     except Exception:
         return False

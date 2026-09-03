@@ -69,7 +69,7 @@ def get_camofox_url() -> str:
 
 def _config_cdp_url() -> str:
     """Persistent ``browser.cdp_url`` from config.yaml, or "" (read here, not via
-    ``browser_tool._get_cdp_override`` — circular import)."""
+    ``browser_tool_cdp._get_cdp_override`` — circular import)."""
     try:
         from hermes_cli.config import read_raw_config  # late-bound: tests patch the source module
         browser_cfg = read_raw_config().get("browser", {})
@@ -86,7 +86,7 @@ def is_camofox_mode() -> bool:
     Selection is ``browser.cloud_provider: camofox``; ``CAMOFOX_URL`` is only the address
     and never overrides a different stored selection (legacy: with no selection ever
     written, a set ``CAMOFOX_URL`` still activates Camofox). A CDP override (``BROWSER_CDP_URL``
-    env or ``browser.cdp_url``, same precedence as ``browser_tool._get_cdp_override()``) wins.
+    env or ``browser.cdp_url``, same precedence as ``browser_tool_cdp._get_cdp_override()``) wins.
     """
     if os.getenv("BROWSER_CDP_URL", "").strip() or _config_cdp_url():
         return False
@@ -344,7 +344,8 @@ def _fetch_snapshot(session: Dict[str, Any]) -> tuple[str, int]:
     """``(snapshot_text, refs_count)`` truncated like the main browser tool (line boundaries,
     full tree stored to cache/web, read_file pointer appended). Lazy import: ``browser_tool``
     imports this module."""
-    from tools.browser_tool import _truncate_snapshot, get_browser_snapshot_threshold
+    from tools.browser_tool_snapshot import _truncate_snapshot
+    from tools.browser_tool import get_browser_snapshot_threshold
     data = _snapshot_data(session)
     snapshot, threshold = data.get("snapshot", ""), get_browser_snapshot_threshold()
     if len(snapshot) > threshold:
@@ -409,7 +410,7 @@ def _camofox_private_page_block(session: Dict[str, Any], task_id: Optional[str],
     the SSRF guard applies (non-local backend, not a local sidecar, ``allow_private_urls``
     unset); fail-open on probe failure like sibling guards. Lazy import (cycle).
     """
-    from tools.browser_tool import _camofox_current_page_private_url, _eval_ssrf_guard_active
+    from tools.browser_tool_eval_policy import _camofox_current_page_private_url, _eval_ssrf_guard_active
     if not _eval_ssrf_guard_active(task_id or "default"):
         return None
     blocked_url = _camofox_current_page_private_url(session["tab_id"], session["user_id"])

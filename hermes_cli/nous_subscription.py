@@ -187,11 +187,11 @@ def _has_agent_browser() -> bool:
     from hermes_constants import agent_browser_runnable
 
     # agent-browser resolves lazily via npx for most installs, which a bare PATH + node_modules
-    # probe can't see. Mirror the local-CLI tail of tools.browser_tool.check_browser_requirements
+    # probe can't see. Mirror the local-CLI tail of tools.browser_tool_install.check_browser_requirements
     # (same cascade, same Termux carve-out) so setup/status can't diverge from runtime;
     # validate=False keeps this a cheap existence check with no subprocess spawn.
     try:
-        from tools.browser_tool import _find_agent_browser, _requires_real_termux_browser_install
+        from tools.browser_tool_install import _find_agent_browser, _requires_real_termux_browser_install
     except Exception:
         # Runtime probe unavailable: fall back to binary presence rather than crashing. Rungs: PATH;
         # Hermes-managed Node dirs ($HERMES_HOME/node, prepended to PATH at runtime but usually absent
@@ -219,11 +219,12 @@ def _has_agent_browser() -> bool:
 def _local_browser_runnable() -> bool:
     """True when the *local* browser backend would actually start: the CLI must be present AND a
     Chromium build on disk (else agent-browser hangs until the command timeout) unless the Lightpanda
-    engine is selected. Mirrors the local-mode tail of tools.browser_tool.check_browser_requirements."""
+    engine is selected. Mirrors the local-mode tail of tools.browser_tool_install.check_browser_requirements."""
     if not _has_agent_browser():
         return False
     try:
-        from tools.browser_tool import _chromium_installed, _using_lightpanda_engine
+        from tools.browser_tool_install import _chromium_installed
+        from tools.browser_tool_lightpanda_fallback import _using_lightpanda_engine
     except Exception:
         return True  # runtime probe unavailable: fall back to binary presence rather than crashing
     return _using_lightpanda_engine() or _chromium_installed()

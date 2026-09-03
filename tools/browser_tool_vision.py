@@ -1,9 +1,6 @@
 """browser_vision helpers: Lightpanda pre-route, native provider vision, auxiliary-LLM screenshot analysis.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there. Origin
-symbols are read through ``_bt`` (the
-:data:`tools.browser_tool_origin.origin` proxy) so ``patch("tools.browser_tool.X")``
-is honoured and no import cycle exists.
+Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle.
 """
 
 import os
@@ -11,11 +8,14 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from hermes_cli.config import cfg_get
 from tools.browser_tool_origin import origin as _bt
+from tools import browser_tool_cloud as _cloud
+from tools import browser_tool_lightpanda_fallback as _lp
 
 
 def _vision_mode_label() -> str:
-    _cp = _bt._get_cloud_provider()
+    _cp = _cloud._get_cloud_provider()
     return "local" if _cp is None else f"cloud ({_cp.display_name})"
 
 
@@ -26,13 +26,13 @@ def _lightpanda_vision_preroute(
     (it has no graphical renderer). Returns ``(prerouted, fallback_warning, path)``;
     on fallback failure ``prerouted`` is False and the caller takes the normal
     screenshot path (forcing Chrome) so the standard fallback metadata still applies."""
-    engine = _bt._get_browser_engine()
-    if engine != "lightpanda" or not _bt._should_inject_engine(engine):
+    engine = _cloud._get_browser_engine()
+    if engine != "lightpanda" or not _cloud._should_inject_engine(engine):
         return False, None, screenshot_path
     _bt.logger.debug("browser_vision: pre-routing screenshot to Chrome (engine=lightpanda)")
     screenshot_args = ["--annotate"] if annotate else []
-    fb_result = _bt._chrome_fallback_screenshot(effective_task_id, screenshot_args, _bt._get_command_timeout())
-    fb_result = _bt._annotate_lightpanda_fallback(fb_result, _bt._LP_VISION_FALLBACK_REASON)
+    fb_result = _lp._chrome_fallback_screenshot(effective_task_id, screenshot_args, _bt._get_command_timeout())
+    fb_result = _lp._annotate_lightpanda_fallback(fb_result, _bt._LP_VISION_FALLBACK_REASON)
     if not fb_result.get("success"):
         _bt.logger.warning("Lightpanda Chrome fallback vision screenshot failed: %s", fb_result.get("error"))
         return False, None, screenshot_path
@@ -108,13 +108,15 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
     vision_temperature = 0.1
     try:
         from hermes_cli.config import load_config
-        _vision_cfg = _bt.cfg_get(load_config(), "auxiliary", "vision", default={})
+        _vision_cfg = cfg_get(load_config(), "auxiliary", "vision", default={})
         if _vision_cfg.get("timeout") is not None:
             vision_timeout = float(_vision_cfg["timeout"])
         if _vision_cfg.get("temperature") is not None:
             vision_temperature = float(_vision_cfg["temperature"])
     except Exception:
         pass
+
+    from agent.auxiliary_client import call_llm  # lazy: heavy client, only needed on the vision path
 
     call_kwargs = {
         "task": "vision", "temperature": vision_temperature, "timeout": vision_timeout,
@@ -126,7 +128,7 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
     if vision_model:
         call_kwargs["model"] = vision_model
     try:
-        response = _bt.call_llm(**call_kwargs)
+        response = call_llm(**call_kwargs)
     except Exception as _api_err:
         from tools.vision_tools import _is_image_size_error, _resize_image_for_vision, _RESIZE_TARGET_BYTES
         if not (_is_image_size_error(_api_err) and len(data_url) > _RESIZE_TARGET_BYTES):
@@ -135,7 +137,7 @@ def _analyze_screenshot_with_aux_llm(screenshot_path: Path, question: str) -> st
                         len(data_url) / (1024 * 1024), _RESIZE_TARGET_BYTES / (1024 * 1024))
         data_url = _resize_image_for_vision(screenshot_path, mime_type="image/png")
         call_kwargs["messages"][0]["content"][1]["image_url"]["url"] = data_url
-        response = _bt.call_llm(**call_kwargs)
+        response = call_llm(**call_kwargs)
 
     from agent.redact import redact_sensitive_text  # the LLM may have read secrets off the screenshot
     return redact_sensitive_text((response.choices[0].message.content or "").strip())

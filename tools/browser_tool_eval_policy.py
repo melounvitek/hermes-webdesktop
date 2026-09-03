@@ -1,13 +1,15 @@
 """browser_console(expression=...) policy: SSRF guard gating, private-URL probes,
 and the opt-in sensitive-primitive denylist.
 
-Origin-module symbols are resolved lazily through ``tools.browser_tool`` (``_bt``)
-so ``patch("tools.browser_tool.X")`` keeps working; never import it at import time (cycle).
+Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle.
 """
 
 import re
 from typing import Optional
+from utils import is_truthy_value
 from tools.browser_tool_origin import origin_module as _origin
+from tools import browser_tool_cloud as _cloud
+from tools import browser_tool_session as _session
 
 
 def _eval_ssrf_guard_active(effective_task_id: str) -> bool:
@@ -18,7 +20,7 @@ def _eval_ssrf_guard_active(effective_task_id: str) -> bool:
     browser-on-host reaches networks the terminal can't); skipped for local sidecars / ``allow_private_urls``.
     """
     _bt = _origin()
-    return not _bt._is_local_backend() and not _bt._is_local_sidecar_key(effective_task_id) and not _bt._allow_private_urls()
+    return not _cloud._is_local_backend() and not _bt._is_local_sidecar_key(effective_task_id) and not _cloud._allow_private_urls()
 
 
 def _url_blocked(_bt, url: str) -> bool:
@@ -44,7 +46,7 @@ def _current_page_private_url(effective_task_id: str) -> Optional[str]:
     ``location.href = '...'`` eval). Fail-open on probe failure, matching the snapshot/vision guards."""
     _bt = _origin()
     try:
-        url_result = _bt._run_browser_command(effective_task_id, "eval", ["window.location.href"], timeout=5, _engine_override="auto")
+        url_result = _session._run_browser_command(effective_task_id, "eval", ["window.location.href"], timeout=5, _engine_override="auto")
         if url_result.get("success"):
             current_url = url_result.get("data", {}).get("result", "").strip().strip('"').strip("'")
             if current_url and _url_blocked(_bt, current_url):
@@ -84,7 +86,7 @@ _SENSITIVE_BROWSER_EVAL_TOKENS: tuple[tuple[str, str], ...] = (
 def _browser_eval_flag(key: str) -> bool:
     """Read boolean ``browser.<key>`` (default False) through the origin's config reader."""
     _bt = _origin()
-    return _bt._browser_cfg(key, False, lambda v: _bt.is_truthy_value(v, default=False), f"browser.{key} from config")
+    return _bt._browser_cfg(key, False, lambda v: is_truthy_value(v, default=False), f"browser.{key} from config")
 
 
 def _allow_unsafe_browser_evaluate() -> bool:
@@ -137,8 +139,7 @@ def _risky_browser_eval_reason(expression: str) -> Optional[str]:
 def _enforce_browser_eval_policy(expression: str) -> Optional[str]:
     """Block sensitive browser JS evaluation when the opt-in denylist is on (opt-in because it gates on
     primitive *names*; private-address egress is enforced separately in ``_browser_eval``)."""
-    _bt = _origin()
-    if not _bt._restrict_browser_evaluate() or _bt._allow_unsafe_browser_evaluate():
+    if not _restrict_browser_evaluate() or _allow_unsafe_browser_evaluate():
         return None
     reason = _risky_browser_eval_reason(expression)
     if not reason:

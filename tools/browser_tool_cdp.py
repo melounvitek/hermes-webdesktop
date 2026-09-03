@@ -1,7 +1,6 @@
 """User-supplied CDP endpoint resolution (browser.cdp_url / real-profile), dialog-policy config and the per-task CDP supervisor lifecycle.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there (tests monkeypatch ``tools.browser_tool.<name>``).
-Origin symbols/state go through ``_bt`` (origin module, resolved per call) — no import cycle."""
+Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle."""
 
 import contextlib
 import os
@@ -67,14 +66,14 @@ def _get_cdp_override() -> str:
     :func:`_get_cdp_override_raw`.
     """
     _bt = _origin()
-    return _bt._resolve_cdp_override(raw) if (raw := _bt._get_cdp_override_raw()) else ""
+    return _resolve_cdp_override(raw) if (raw := _get_cdp_override_raw()) else ""
 
 
 def _get_dialog_policy_config() -> Tuple[str, float]:
     """Read ``browser.dialog_policy`` + ``browser.dialog_timeout_s``; supervisor defaults when absent/invalid."""
     _bt = _origin()
     # Deferred so browser_tool imports in minimal environments.
-    from tools.browser_supervisor import DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, _VALID_POLICIES
+    from tools.browser_supervisor_dialogs import DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, _VALID_POLICIES
     policy, timeout_s = DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S
     try:
         from hermes_cli.config import read_raw_config
@@ -108,18 +107,18 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
     snapshots just lack ``pending_dialogs`` / ``frame_tree``.
     """
     _bt = _origin()
-    cdp_url = _bt._get_cdp_override()
+    cdp_url = _get_cdp_override()
     if not cdp_url:
         with _bt._cleanup_lock:
             session_info = _bt._active_sessions.get(task_id, {})
         maybe = str(session_info.get("cdp_url") or "")
         if maybe:
-            cdp_url = _bt._resolve_cdp_override(maybe)
+            cdp_url = _resolve_cdp_override(maybe)
     if not cdp_url:
         return
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-        policy, timeout_s = _bt._get_dialog_policy_config()
+        policy, timeout_s = _get_dialog_policy_config()
         SUPERVISOR_REGISTRY.get_or_start(task_id=task_id, cdp_url=cdp_url, dialog_policy=policy, dialog_timeout_s=timeout_s)
     except Exception as exc:
         _bt.logger.debug("CDP supervisor attach for task=%s failed (non-fatal): %s", task_id, exc)

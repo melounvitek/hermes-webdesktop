@@ -1,7 +1,6 @@
 """Cloud browser provider resolution (explicit browser.cloud_provider, auto-detect, per-profile cache), backend/engine selection and headed-mode flags.
 
-Split out of ``tools/browser_tool.py``; every name is re-imported there (tests monkeypatch ``tools.browser_tool.<name>``).
-Origin symbols/state go through ``_bt`` (origin module, resolved per call) — no import cycle."""
+Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt`` (``tools.browser_tool``, resolved per call) — no import cycle."""
 
 from __future__ import annotations
 
@@ -9,7 +8,14 @@ import os
 from typing import Callable, Optional
 
 from agent.browser_provider import BrowserProvider as CloudBrowserProvider
+from agent.browser_registry import get_provider as _registry_get_browser_provider
+from hermes_constants import get_hermes_home_override, hermes_home_key
+from plugins.browser.browser_use.provider import BrowserUseBrowserProvider
+from plugins.browser.browserbase.provider import BrowserbaseBrowserProvider
+from tools.tool_backend_helpers import normalize_browser_cloud_provider
+from utils import is_truthy_value
 from tools.browser_tool_origin import origin_module as _origin
+from tools import browser_tool_cdp as _cdp
 
 
 def _memo(_bt, resolved_attr: str, cache_attr: str, compute: Callable[[], object]):
@@ -43,7 +49,7 @@ def _ensure_browser_plugins_loaded() -> None:
 def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
     """Return the provider cached for the active Hermes profile."""
     _bt = _origin()
-    scope = _bt.hermes_home_key()
+    scope = hermes_home_key()
     with _bt._cloud_provider_cache_lock:
         # A cleared boolean (tests / legacy reset) is a full reset even if a scoped resolution is still mirrored here.
         if not _bt._cloud_provider_resolved:
@@ -59,7 +65,7 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
                 return _bt._cached_cloud_provider
             _bt._cached_cloud_provider = None
             _bt._cloud_provider_resolved = False
-            resolved = _bt._resolve_cloud_provider_uncached()
+            resolved = _resolve_cloud_provider_uncached()
             after_generation = _bt._browser_registry_generation(scope=scope)
             if before_generation != after_generation:  # force reload mid-resolution: discard, resolve again
                 continue
@@ -80,12 +86,12 @@ def _instantiate_explicit_cloud_provider(provider_key: str) -> Optional[CloudBro
     """
     _bt = _origin()
     try:
-        if _bt._is_legacy_provider_registry_overridden():
+        if _is_legacy_provider_registry_overridden():
             factory = _bt._PROVIDER_REGISTRY.get(provider_key)
             resolved = factory() if factory is not None else None
         else:
-            _bt._ensure_browser_plugins_loaded()
-            resolved = _bt._registry_get_browser_provider(provider_key)
+            _ensure_browser_plugins_loaded()
+            resolved = _registry_get_browser_provider(provider_key)
         if resolved is None:
             from tools.tool_backend_helpers import selection_error
             raise ValueError(selection_error(
@@ -103,12 +109,11 @@ def _instantiate_explicit_cloud_provider(provider_key: str) -> Optional[CloudBro
 def _autodetect_cloud_provider() -> Optional[CloudBrowserProvider]:
     """Auto-detect: Browser Use, then Browserbase; never raises.
 
-    Uses the class names bound on the origin module so tests that monkeypatch ``BrowserUseProvider`` keep driving
-    this branch. Third-party plugins are only reachable via explicit ``browser.cloud_provider: <name>``.
+    Third-party plugins are only reachable via explicit ``browser.cloud_provider: <name>``.
     """
     _bt = _origin()
     try:
-        for cls in (_bt.BrowserUseProvider, _bt.BrowserbaseProvider):
+        for cls in (BrowserUseBrowserProvider, BrowserbaseBrowserProvider):
             fallback_provider = cls()
             if fallback_provider.is_available():
                 return fallback_provider
@@ -131,7 +136,7 @@ def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
         from hermes_cli.config import read_raw_config
         browser_cfg = read_raw_config().get("browser", {})
         if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
-            provider_key = _bt.normalize_browser_cloud_provider(browser_cfg.get("cloud_provider"))
+            provider_key = normalize_browser_cloud_provider(browser_cfg.get("cloud_provider"))
             if provider_key in ("local", "camofox"):
                 # Camofox runs through the built-in browser tools, not a cloud provider.
                 _bt._cached_cloud_provider = None
@@ -141,7 +146,7 @@ def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
                 # Managed "Nous Subscription" is serviced by the Browser Use provider.
                 provider_key = "browser-use"
         if provider_key:
-            resolved = _bt._instantiate_explicit_cloud_provider(provider_key)
+            resolved = _instantiate_explicit_cloud_provider(provider_key)
             if resolved is None:
                 return None
     except ValueError:
@@ -151,7 +156,7 @@ def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
         _bt.logger.debug("Could not read cloud_provider from config: %s", e)
 
     if resolved is None and provider_key is None:
-        resolved = _bt._autodetect_cloud_provider()
+        resolved = _autodetect_cloud_provider()
     if resolved is None:
         return None
     _bt._cached_cloud_provider = resolved
@@ -162,7 +167,7 @@ def _resolve_cloud_provider_uncached() -> Optional[CloudBrowserProvider]:
 def _is_local_mode() -> bool:
     """Return True when the browser tool will use a local browser backend."""
     _bt = _origin()
-    return not _bt._get_cdp_override_raw() and _bt._get_cloud_provider() is None
+    return not _cdp._get_cdp_override_raw() and _get_cloud_provider() is None
 
 
 def _is_local_backend() -> bool:
@@ -174,11 +179,11 @@ def _is_local_backend() -> bool:
     in agreement.
     """
     _bt = _origin()
-    if _bt._get_cdp_override_raw():
+    if _cdp._get_cdp_override_raw():
         return False
     if _bt._is_camofox_mode():
         return True
-    if _bt._get_cloud_provider() is not None:
+    if _get_cloud_provider() is not None:
         return False
     # Scope-aware: under gateway multiplexing the routed profile's terminal backend lives in the per-turn scope.
     # When terminal runs in a container, browser on host can access internal networks the terminal can't →
@@ -219,7 +224,7 @@ def _is_headed_mode() -> bool:
 def _should_inject_engine(engine: str) -> bool:
     """True when ``--engine`` should be added: explicit (non-``auto``) engine on a non-cloud, non-camofox local session."""
     _bt = _origin()
-    return engine != "auto" and not _bt._is_camofox_mode() and _bt._is_local_mode()
+    return engine != "auto" and not _bt._is_camofox_mode() and _is_local_mode()
 
 
 def _auto_local_for_private_urls() -> bool:
@@ -247,12 +252,12 @@ def _allow_private_urls() -> bool:
     resolve on every call so one profile's opt-out is never reused by another.
     """
     _bt = _origin()
-    if _bt.get_hermes_home_override() is not None:
-        return _bt._resolve_allow_private_urls()
-    return _memo(_bt, "_allow_private_urls_resolved", "_cached_allow_private_urls", _bt._resolve_allow_private_urls)
+    if get_hermes_home_override() is not None:
+        return _resolve_allow_private_urls()
+    return _memo(_bt, "_allow_private_urls_resolved", "_cached_allow_private_urls", _resolve_allow_private_urls)
 
 
 def _resolve_allow_private_urls() -> bool:
     """Read the browser private-URL toggle from the active config scope."""
     _bt = _origin()
-    return _bt._browser_cfg("allow_private_urls", False, lambda v: _bt.is_truthy_value(v, default=False), "allow_private_urls from config")
+    return _bt._browser_cfg("allow_private_urls", False, lambda v: is_truthy_value(v, default=False), "allow_private_urls from config")

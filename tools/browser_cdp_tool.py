@@ -101,9 +101,9 @@ def _run_async(coro):
 
 
 def _resolve_cdp_endpoint() -> str:
-    """Normalized CDP WebSocket URL via ``browser_tool._get_cdp_override``, or ""."""
+    """Normalized CDP WebSocket URL via ``browser_tool_cdp._get_cdp_override``, or ""."""
     try:
-        from tools.browser_tool import _get_cdp_override  # type: ignore[import-not-found]
+        from tools.browser_tool_cdp import _get_cdp_override  # type: ignore[import-not-found]
         return (_get_cdp_override() or "").strip()
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp: failed to resolve CDP endpoint: %s", exc)
@@ -112,6 +112,11 @@ def _resolve_cdp_endpoint() -> str:
 
 def _blocked(message: str, method: str) -> str:
     return tool_error(message, method=method, cdp_docs=CDP_DOCS_URL)
+
+
+def _expression_private_target(expression: str) -> Optional[str]:
+    from tools.browser_tool_eval_policy import _expression_targets_private_url
+    return _expression_targets_private_url(expression)
 
 
 def _navigate_private_target(bt: Any, params: Dict[str, Any]) -> Optional[str]:
@@ -125,7 +130,7 @@ def _navigate_private_target(bt: Any, params: Dict[str, Any]) -> Optional[str]:
 _METHOD_PARAM_GUARDS = {
     "Page.navigate": (_navigate_private_target,
                       "Blocked: CDP Page.navigate target is a private or internal address ({})."),
-    "Runtime.evaluate": (lambda bt, params: bt._expression_targets_private_url(str(params.get("expression") or "")),
+    "Runtime.evaluate": (lambda bt, params: _expression_private_target(str(params.get("expression") or "")),
                          "Blocked: CDP Runtime.evaluate expression targets a private or internal address ({})."),
 }
 
@@ -139,7 +144,8 @@ def _browser_cdp_private_guard(*, task_id: str, method: str, params: Dict[str, A
     """
     try:
         from tools import browser_tool as bt  # type: ignore[import-not-found]
-        if not bt._eval_ssrf_guard_active(task_id):  # type: ignore[attr-defined]
+        from tools import browser_tool_eval_policy as policy
+        if not policy._eval_ssrf_guard_active(task_id):
             return None
         guard = _METHOD_PARAM_GUARDS.get(method)
         if guard is not None:
@@ -148,7 +154,7 @@ def _browser_cdp_private_guard(*, task_id: str, method: str, params: Dict[str, A
             if literal:
                 return _blocked(template.format(literal), method)
         if method not in _CDP_PRIVATE_PAGE_ALLOWED_METHODS:
-            blocked_url = bt._current_page_private_url(task_id)  # type: ignore[attr-defined]
+            blocked_url = policy._current_page_private_url(task_id)
             if blocked_url:
                 return _blocked(f"Blocked: page URL targets a private or internal address ({blocked_url}). "
                                 f"Raw CDP method {method!r} could expose private page content or state.", method)
@@ -375,7 +381,8 @@ def _browser_cdp_check() -> bool:
     surfaced). Raw (no-I/O) gate: check_fns run at every startup, and resolving the endpoint
     over HTTP here would block launch on a stale endpoint."""
     try:
-        from tools.browser_tool import _get_cdp_override_raw, check_browser_requirements  # type: ignore[import-not-found]
+        from tools.browser_tool_cdp import _get_cdp_override_raw
+        from tools.browser_tool_install import check_browser_requirements  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp check: browser_tool import failed: %s", exc)
         return False

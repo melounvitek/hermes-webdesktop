@@ -247,7 +247,7 @@ def _check_terminal_backend(should_fix: bool, f: Finding) -> None:
 def _check_agent_browser(should_fix: bool) -> bool:
     """agent-browser resolution; returns True when browser tools will find a usable install.
 
-    Mirrors ``tools.browser_tool._find_agent_browser``'s own cascade (lazy npx or a global/Hermes-managed
+    Mirrors ``tools.browser_tool_install._find_agent_browser``'s own cascade (lazy npx or a global/Hermes-managed
     install) so doctor can't diverge from the tools; validate=False keeps it a cheap, side-effect-free check.
     """
     try:
@@ -295,7 +295,9 @@ def _check_chromium() -> None:
     """
     from hermes_cli.doctor import PROJECT_ROOT
     try:
-        from tools.browser_tool import _is_camofox_mode, _get_cloud_provider, _get_cdp_override_raw
+        from tools.browser_tool import _is_camofox_mode
+        from tools.browser_tool_cloud import _get_cloud_provider
+        from tools.browser_tool_cdp import _get_cdp_override_raw
         from tools.browser_tool_install import _chromium_installed
         from tools.browser_tool_lightpanda_fallback import _using_lightpanda_engine
     except Exception:

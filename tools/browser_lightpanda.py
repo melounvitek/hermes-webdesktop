@@ -67,7 +67,7 @@ def find_lightpanda_binary() -> Optional[str]:
         return None
     path_env = os.environ.get("PATH", "")
     try:
-        from tools.browser_tool import _merge_browser_path
+        from tools.browser_tool_install import _merge_browser_path
         path_env = _merge_browser_path(path_env)
     except Exception as e:
         logger.debug("browser PATH merge unavailable: %s", e)
