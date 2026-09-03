@@ -26,12 +26,16 @@ _TERMINAL_EXEC_STATUSES = frozenset({"completed", "failed", "cancelled", "timeou
 _CLIENT_TIMEOUT_GRACE_SECONDS = 10.0
 
 
-def _request_timeout_env(name: str, default: float) -> float:
+def _coerce_number(value: Any, default: float) -> float:
     try:
-        value = float(os.getenv(name, str(default)))
-        return value if value > 0 else default
+        return default if value is None else float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _request_timeout_env(name: str, default: float) -> float:
+    value = _coerce_number(os.getenv(name), default)
+    return value if value > 0 else default
 
 
 def _result(output: str, returncode: int = 1) -> dict:
@@ -66,14 +70,10 @@ class ManagedModalEnvironment(BaseEnvironment):
             raise ValueError("Managed Modal requires a configured tool gateway and Nous user token")
         self._gateway_origin = gateway.gateway_origin.rstrip("/")
         self._nous_user_token = gateway.nous_user_token
-        self._task_id = task_id
-        self._persistent = persistent_filesystem
-        self._image = image
+        self._task_id, self._persistent, self._image = task_id, persistent_filesystem, image
         self._sandbox_kwargs = dict(modal_sandbox_kwargs or {})
         self._create_idempotency_key = str(uuid.uuid4())
         self._sandbox_id = self._create_sandbox()
-
-    # -- Execution ------------------------------------------------------
 
     def execute(self, command: str, cwd: str = "", *, timeout: int | None = None, stdin_data: str | None = None,
                 rewrite_compound_background: bool = True, bounded_capture: bool = False) -> dict:
@@ -87,12 +87,22 @@ class ManagedModalEnvironment(BaseEnvironment):
             # Feed sudo via a shell pipe: the transport has no direct stdin piping.
             exec_command = f"printf '%s\\n' {shlex.quote(sudo_stdin.rstrip())} | {exec_command}"
         timeout = timeout or self.timeout
+        exec_id = str(uuid.uuid4())
+        payload: Dict[str, Any] = {"execId": exec_id, "command": exec_command, "cwd": cwd or self.cwd,
+                                   "timeoutMs": int(timeout * 1000)}
+        if stdin_data is not None:
+            payload["stdinData"] = stdin_data
         try:
-            exec_id, immediate = self._start_exec(exec_command, cwd or self.cwd, timeout, stdin_data)
+            response = self._request("POST", f"/v1/sandboxes/{self._sandbox_id}/execs", json=payload, timeout=10)
+            body = response.json() if response.status_code < 400 else None
         except Exception as exc:
             return _result(f"Managed Modal exec failed: {exc}")
-        if immediate is not None:
-            return immediate
+        if body is None:
+            return _result(self._format_error("Managed Modal exec failed", response))
+        if (final := self._result_from_body(body)) is not None:
+            return final
+        if body.get("execId") != exec_id:
+            return _result("Managed Modal exec start did not return the expected exec id")
         deadline = time.monotonic() + timeout + _CLIENT_TIMEOUT_GRACE_SECONDS
         _now = time.monotonic()
         _activity_state = {"last_touch": _now, "start": _now}
@@ -101,11 +111,10 @@ class ManagedModalEnvironment(BaseEnvironment):
                 self._cancel_exec(exec_id)
                 return _result("[Command interrupted - Modal sandbox exec cancelled]", 130)
             try:
-                result = self._poll_exec(exec_id)
+                if (result := self._poll_exec(exec_id)) is not None:
+                    return result
             except Exception as exc:
                 return _result(f"Managed Modal exec failed: {exc}")
-            if result is not None:
-                return result
             if time.monotonic() >= deadline:
                 self._cancel_exec(exec_id)
                 return _result(f"Managed Modal exec timed out after {timeout}s", 124)
@@ -118,46 +127,23 @@ class ManagedModalEnvironment(BaseEnvironment):
                 pass
             time.sleep(0.25)
 
-    def _result_from_body(self, body: dict) -> dict | None:
+    @staticmethod
+    def _result_from_body(body: dict) -> dict | None:
         """Final result dict if the exec body reports a terminal status, else ``None``."""
         if body.get("status") in _TERMINAL_EXEC_STATUSES:
             return _result(body.get("output", ""), body.get("returncode", 1))
-        return None
-
-    def _start_exec(self, command: str, cwd: str, timeout: int,
-                    stdin_data: str | None) -> tuple[str, dict | None]:
-        """POST the exec; return (exec_id, immediate_result). A non-None result ends execute()."""
-        exec_id = str(uuid.uuid4())
-        payload: Dict[str, Any] = {"execId": exec_id, "command": command, "cwd": cwd,
-                                   "timeoutMs": int(timeout * 1000)}
-        if stdin_data is not None:
-            payload["stdinData"] = stdin_data
-        try:
-            response = self._request("POST", f"/v1/sandboxes/{self._sandbox_id}/execs", json=payload, timeout=10)
-        except Exception as exc:
-            return exec_id, _result(f"Managed Modal exec failed: {exc}")
-        if response.status_code >= 400:
-            return exec_id, _result(self._format_error("Managed Modal exec failed", response))
-        body = response.json()
-        final = self._result_from_body(body)
-        if final is not None:
-            return exec_id, final
-        if body.get("execId") != exec_id:
-            return exec_id, _result("Managed Modal exec start did not return the expected exec id")
-        return exec_id, None
 
     def _poll_exec(self, exec_id: str) -> dict | None:
         try:
-            status_response = self._request(
-                "GET", f"/v1/sandboxes/{self._sandbox_id}/execs/{exec_id}",
-                timeout=(self._CONNECT_TIMEOUT_SECONDS, self._POLL_READ_TIMEOUT_SECONDS))
+            response = self._request("GET", f"/v1/sandboxes/{self._sandbox_id}/execs/{exec_id}",
+                                     timeout=(self._CONNECT_TIMEOUT_SECONDS, self._POLL_READ_TIMEOUT_SECONDS))
         except Exception as exc:
             return _result(f"Managed Modal exec poll failed: {exc}")
-        if status_response.status_code == 404:
+        if response.status_code == 404:
             return _result("Managed Modal exec not found")
-        if status_response.status_code >= 400:
-            return _result(self._format_error("Managed Modal exec poll failed", status_response))
-        return self._result_from_body(status_response.json())
+        if response.status_code >= 400:
+            return _result(self._format_error("Managed Modal exec poll failed", response))
+        return self._result_from_body(response.json())
 
     def _cancel_exec(self, exec_id: str) -> None:
         try:
@@ -177,13 +163,11 @@ class ManagedModalEnvironment(BaseEnvironment):
         finally:
             self._sandbox_id = None
 
-    # -- Gateway HTTP ---------------------------------------------------
-
     def _create_sandbox(self) -> str:
         kw = self._sandbox_kwargs
-        cpu = self._coerce_number(kw.get("cpu"), 1)
-        memory = self._coerce_number(kw.get("memoryMiB", kw.get("memory")), 5120)
-        disk = self._coerce_number(kw.get("ephemeral_disk", kw.get("diskMiB")), None)
+        cpu = _coerce_number(kw.get("cpu"), 1)
+        memory = _coerce_number(kw.get("memoryMiB", kw.get("memory")), 5120)
+        disk = _coerce_number(kw.get("ephemeral_disk", kw.get("diskMiB")), None)
         create_payload = {
             "image": self._image, "cwd": self.cwd, "cpu": cpu, "memoryMiB": memory, "timeoutMs": 3_600_000,
             "idleTimeoutMs": max(300_000, int(self.timeout * 1000)),
@@ -205,13 +189,6 @@ class ManagedModalEnvironment(BaseEnvironment):
         headers = {"Authorization": f"Bearer {self._nous_user_token}", "Content-Type": "application/json",
                    **(extra_headers or {})}
         return requests.request(method, f"{self._gateway_origin}{path}", headers=headers, json=json, timeout=timeout)
-
-    @staticmethod
-    def _coerce_number(value: Any, default: float) -> float:
-        try:
-            return default if value is None else float(value)
-        except (TypeError, ValueError):
-            return default
 
     @staticmethod
     def _format_error(prefix: str, response: requests.Response) -> str:

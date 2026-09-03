@@ -36,7 +36,6 @@ _DEFAULT_CONTAINER_DISK_MB = 51200
 _CREATE_RETRY_ATTEMPTS = 3
 _TRANSIENT_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 _RUNNING_WAIT_TIMEOUT = timedelta(seconds=30)
-_SNAPSHOT_STORE_NAME = "vercel_sandbox_snapshots.json"
 
 
 def _ensure_vercel_sdk() -> None:
@@ -87,13 +86,17 @@ def _result_parts(result: Any) -> tuple[str, int]:
     return ("" if value is None else str(value)), (exit_code if isinstance(exit_code, int) else 1)
 
 
+def _snapshot_store() -> Path:
+    return get_hermes_home() / "vercel_sandbox_snapshots.json"
+
+
 def _load_snapshots() -> dict:
-    return _load_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME)
+    return _load_json_store(_snapshot_store())
 
 
 def _store_snapshot(task_id: str, snapshot_id: str) -> None:
     if task_id and snapshot_id:
-        _save_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME, {**_load_snapshots(), task_id: snapshot_id})
+        _save_json_store(_snapshot_store(), {**_load_snapshots(), task_id: snapshot_id})
 
 
 def _delete_snapshot(task_id: str, snapshot_id: str) -> None:
@@ -101,7 +104,7 @@ def _delete_snapshot(task_id: str, snapshot_id: str) -> None:
     snapshots = _load_snapshots()
     if task_id and snapshots.get(task_id) == snapshot_id:
         snapshots.pop(task_id)
-        _save_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME, snapshots)
+        _save_json_store(_snapshot_store(), snapshots)
 
 
 def _extract_snapshot_id(snapshot: Any) -> str | None:
@@ -136,22 +139,18 @@ class VercelSandboxEnvironment(BaseEnvironment):
             raise ValueError(
                 "Vercel Sandbox does not support configurable container_disk. "
                 "Use the default shared setting.")
-        self._persistent = persistent_filesystem
-        self._task_id = task_id
-        self._requested_cwd = cwd
+        self._persistent, self._task_id, self._requested_cwd = persistent_filesystem, task_id, cwd
         self._lock = threading.Lock()
         self._sandbox: Sandbox | None = None
-        self._workspace_root = DEFAULT_VERCEL_CWD
-        self._remote_home = DEFAULT_VERCEL_CWD
+        self._workspace_root = self._remote_home = DEFAULT_VERCEL_CWD
         self._sync_manager: FileSyncManager | None = None
         _ensure_vercel_sdk()
         from vercel.sandbox import Resources
-        vcpus = math.floor(cpu) if cpu > 0 else None
-        memory_mb = memory if memory > 0 else None
-        resources = Resources(vcpus=vcpus, memory=memory_mb) if vcpus is not None or memory_mb is not None else None
+        vcpus, memory_mb = (math.floor(cpu) if cpu > 0 else None), (memory if memory > 0 else None)
         self._create_kwargs = {
             "timeout": max(timedelta(seconds=max(self.timeout, 0)), timedelta(minutes=5)),
-            "runtime": runtime or None, "resources": resources}
+            "runtime": runtime or None,
+            "resources": Resources(vcpus=vcpus, memory=memory_mb) if (vcpus, memory_mb) != (None, None) else None}
         self._attach_fresh_sandbox(cwd)
         self._sync_manager.sync(force=True)
         self.init_session()
@@ -162,8 +161,7 @@ class VercelSandboxEnvironment(BaseEnvironment):
         return self._sandbox
 
     def _remote_hermes_dir(self) -> str:
-        home = self._remote_home
-        return "/.hermes" if home == "/" else f"{home.rstrip('/')}/.hermes"
+        return f"{self._remote_home.rstrip('/')}/.hermes"
 
     def _create_sandbox(self) -> Sandbox:
         _ensure_vercel_sdk()
@@ -172,8 +170,9 @@ class VercelSandboxEnvironment(BaseEnvironment):
         if isinstance(snapshot_id, str) and snapshot_id:
             try:
                 source = {"type": "snapshot", "snapshot_id": snapshot_id}
-                return _retry_vercel_call("sandbox restore", lambda: Sandbox.create(**self._create_kwargs, source=source),
-                                          attempts=_CREATE_RETRY_ATTEMPTS)
+                return _retry_vercel_call(
+                    "sandbox restore", lambda: Sandbox.create(**self._create_kwargs, source=source),
+                    attempts=_CREATE_RETRY_ATTEMPTS)
             except Exception as exc:
                 logger.warning("Vercel: failed to restore snapshot %s for task %s; falling back to a fresh sandbox: %s",
                                snapshot_id, self._task_id, exc)
@@ -191,14 +190,11 @@ class VercelSandboxEnvironment(BaseEnvironment):
         container_base = self._remote_hermes_dir()
         self._sync_manager = FileSyncManager(
             get_files_fn=lambda: iter_sync_files(container_base),
-            upload_fn=self._vercel_upload, delete_fn=self._vercel_delete,
+            upload_fn=lambda host_path, remote_path: self._vercel_bulk_upload([(host_path, remote_path)]),
+            delete_fn=self._vercel_delete,
             bulk_upload_fn=self._vercel_bulk_upload, bulk_download_fn=self._vercel_bulk_download)
-        if requested_cwd == "~":
-            self.cwd = self._remote_home
-        elif requested_cwd in {"", DEFAULT_VERCEL_CWD}:
-            self.cwd = self._workspace_root
-        else:
-            self.cwd = requested_cwd
+        self.cwd = {"~": self._remote_home, "": self._workspace_root,
+                    DEFAULT_VERCEL_CWD: self._workspace_root}.get(requested_cwd, requested_cwd)
 
     def _detect_remote_home(self) -> str:
         try:
@@ -238,20 +234,19 @@ class VercelSandboxEnvironment(BaseEnvironment):
             except TypeError:  # older SDKs: stop() takes no arguments
                 sandbox.stop()
 
-    def _snapshot_sandbox(self, sandbox: Sandbox) -> str | None:
+    def _snapshot_sandbox(self, sandbox: Sandbox) -> None:
         if not self._persistent or not self._task_id:
-            return None
+            return
         try:
             snapshot_id = _extract_snapshot_id(sandbox.snapshot())
         except Exception as exc:
             logger.warning("Vercel: filesystem snapshot failed for task %s: %s", self._task_id, exc)
-            return None
+            return
         if not snapshot_id:
             logger.warning("Vercel: filesystem snapshot for task %s did not return a snapshot id", self._task_id)
-            return None
+            return
         _store_snapshot(self._task_id, snapshot_id)
         logger.info("Vercel: saved filesystem snapshot %s for task %s", snapshot_id, self._task_id)
-        return snapshot_id
 
     def _ensure_sandbox_ready(self) -> None:
         """Reuse a healthy sandbox; recreate when refresh fails or it hit a terminal state."""
@@ -276,9 +271,6 @@ class VercelSandboxEnvironment(BaseEnvironment):
             self._require_sandbox().run_command("bash", ["-lc", script], cwd=self._workspace_root))
         if returncode != 0:
             raise RuntimeError(f"Vercel {label} failed: {output.strip()}")
-
-    def _vercel_upload(self, host_path: str, remote_path: str) -> None:
-        self._vercel_bulk_upload([(host_path, remote_path)])
 
     def _vercel_bulk_upload(self, files: list[tuple[str, str]]) -> None:
         if not files:
@@ -313,16 +305,15 @@ class VercelSandboxEnvironment(BaseEnvironment):
         """``timeout`` is enforced by the base ``_wait_for_process`` via ``cancel_fn`` (the SDK has no
         per-exec timeout); ``stdin_data`` is already embedded as a heredoc by the base ``execute()``."""
         del timeout, stdin_data
-        sandbox = self._require_sandbox()
-        workspace_root = self._workspace_root
-        lock = self._lock
+        sandbox, workspace_root, lock = self._require_sandbox(), self._workspace_root, self._lock
 
         def cancel() -> None:
             with lock:
                 self._stop_sandbox(sandbox)
 
         def exec_fn() -> tuple[str, int]:
-            return _result_parts(sandbox.run_command("bash", ["-lc" if login else "-c", cmd_string], cwd=workspace_root))
+            return _result_parts(
+                sandbox.run_command("bash", ["-lc" if login else "-c", cmd_string], cwd=workspace_root))
         return _ThreadedProcessHandle(exec_fn, cancel_fn=cancel)
 
     def cleanup(self):

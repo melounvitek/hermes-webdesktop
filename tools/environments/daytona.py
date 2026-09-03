@@ -36,39 +36,33 @@ class DaytonaEnvironment(BaseEnvironment):
         ensure_lazy_dep("terminal.daytona")
         from daytona import Daytona, CreateSandboxFromImageParams, DaytonaError, Resources, SandboxState
 
-        self._persistent = persistent_filesystem
-        self._task_id = task_id
-        self._SandboxState = SandboxState
+        self._persistent, self._task_id, self._SandboxState = persistent_filesystem, task_id, SandboxState
         self._daytona = Daytona()
         self._sandbox = None
         self._lock = threading.Lock()
 
-        memory_gib = max(1, math.ceil(memory / 1024))
-        disk_gib = max(1, math.ceil(disk / 1024))
+        memory_gib, disk_gib = max(1, math.ceil(memory / 1024)), max(1, math.ceil(disk / 1024))
         if disk_gib > 10:
             logger.warning("Daytona: requested disk (%dGB) exceeds platform limit (10GB). "
                            "Capping to 10GB.", disk_gib)
             disk_gib = 10
         resources = Resources(cpu=cpu, memory=memory_gib, disk=disk_gib)
-        labels = {"hermes_task_id": task_id}
-        sandbox_name = f"hermes-{task_id}"
+        labels, sandbox_name = {"hermes_task_id": task_id}, f"hermes-{task_id}"
 
         if self._persistent:
             try:
                 self._sandbox = self._daytona.get(sandbox_name)
                 self._sandbox.start()
                 logger.info("Daytona: resumed sandbox %s for task %s", self._sandbox.id, task_id)
-            except DaytonaError:
-                self._sandbox = None
             except Exception as e:
-                logger.warning("Daytona: failed to resume sandbox for task %s: %s", task_id, e)
+                if not isinstance(e, DaytonaError):  # DaytonaError == not found: silently fall through
+                    logger.warning("Daytona: failed to resume sandbox for task %s: %s", task_id, e)
                 self._sandbox = None
             if self._sandbox is None:
                 try:
                     # SDK list() is a cursor-paginated iterator (offset pagination is gone).
-                    legacy = next(iter(self._daytona.list(labels=labels, limit=1)), None)
-                    if legacy is not None:
-                        self._sandbox = legacy
+                    self._sandbox = next(iter(self._daytona.list(labels=labels, limit=1)), None)
+                    if self._sandbox is not None:
                         self._sandbox.start()
                         logger.info("Daytona: resumed legacy sandbox %s for task %s", self._sandbox.id, task_id)
                 except Exception as e:
@@ -96,7 +90,6 @@ class DaytonaEnvironment(BaseEnvironment):
         self.init_session()
 
     def _daytona_upload(self, host_path: str, remote_path: str) -> None:
-        """Upload a single file via Daytona SDK."""
         self._sandbox.process.exec(quoted_mkdir_command([str(Path(remote_path).parent)]))
         self._sandbox.fs.upload_file(host_path, remote_path)
 
@@ -123,7 +116,6 @@ class DaytonaEnvironment(BaseEnvironment):
             self._sandbox.process.exec(f"rm -f {shlex.quote(remote_tar)}")
 
     def _daytona_delete(self, remote_paths: list[str]) -> None:
-        """Batch-delete remote files via SDK exec."""
         self._sandbox.process.exec(quoted_rm_command(remote_paths))
 
     def _ensure_sandbox_ready(self) -> None:
@@ -134,16 +126,13 @@ class DaytonaEnvironment(BaseEnvironment):
             logger.info("Daytona: restarted sandbox %s", self._sandbox.id)
 
     def _before_execute(self) -> None:
-        """Ensure sandbox is ready, then sync files via FileSyncManager."""
         with self._lock:
             self._ensure_sandbox_ready()
         self._sync_manager.sync()
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None):
-        """Return a _ThreadedProcessHandle wrapping a blocking Daytona SDK call."""
-        sandbox = self._sandbox
-        lock = self._lock
+        sandbox, lock = self._sandbox, self._lock
 
         def cancel():
             with lock, contextlib.suppress(Exception):

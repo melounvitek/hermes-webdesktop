@@ -51,10 +51,10 @@ def _store_direct_snapshot(task_id: str, snapshot_id: str) -> None:
 def _delete_direct_snapshot(task_id: str, snapshot_id: str | None = None) -> None:
     snapshots = _load_snapshots()
     stale = [k for k in (f"direct:{task_id}", task_id)
-             if snapshots.get(k) is not None and (snapshot_id is None or snapshots[k] == snapshot_id)]
+             if snapshots.get(k) is not None and snapshot_id in (None, snapshots[k])]
+    for key in stale:
+        snapshots.pop(key)
     if stale:
-        for key in stale:
-            snapshots.pop(key, None)
         _save_snapshots(snapshots)
 
 
@@ -137,13 +137,10 @@ class ModalEnvironment(BaseEnvironment):
                  modal_sandbox_kwargs: Optional[dict[str, Any]] = None,
                  persistent_filesystem: bool = True, task_id: str = "default"):
         super().__init__(cwd=cwd, timeout=timeout)
-        self._persistent = persistent_filesystem
-        self._task_id = task_id
-        self._sandbox = None
-        self._app = None
+        self._persistent, self._task_id = persistent_filesystem, task_id
+        self._sandbox = self._app = None
         self._worker = _AsyncWorker()
         self._sync_manager: FileSyncManager | None = None  # initialized after sandbox creation
-        sandbox_kwargs = dict(modal_sandbox_kwargs or {})
         restored_snapshot_id, restored_from_legacy_key = (
             _get_snapshot_restore_candidate(self._task_id) if self._persistent else (None, False))
         if restored_snapshot_id:
@@ -156,32 +153,33 @@ class ModalEnvironment(BaseEnvironment):
             # from_iterable keeps each source lazy so a failure mid-way leaves the earlier mounts in place
             for entry in itertools.chain.from_iterable(
                     fn() for fn in (get_credential_file_mounts, iter_skills_files, iter_cache_files)):
-                cred_mounts.append(_modal.Mount.from_local_file(entry["host_path"], remote_path=entry["container_path"]))
+                cred_mounts.append(
+                    _modal.Mount.from_local_file(entry["host_path"], remote_path=entry["container_path"]))
         except Exception as e:
             logger.debug("Modal: could not load credential file mounts: %s", e)
         self._worker.start()
 
-        async def _create_sandbox(image_spec: Any):
-            app = await _modal.App.lookup.aio("hermes-agent", create_if_missing=True)
-            create_kwargs = dict(sandbox_kwargs)
-            if cred_mounts:
-                create_kwargs["mounts"] = list(create_kwargs.pop("mounts", [])) + cred_mounts
-            sandbox = await _modal.Sandbox.create.aio(
-                "sleep", "infinity", image=image_spec, app=app,
-                timeout=int(create_kwargs.pop("timeout", 3600)), **create_kwargs)
-            return app, sandbox
+        def _create(image_spec: Any) -> None:
+            async def _create_sandbox():
+                app = await _modal.App.lookup.aio("hermes-agent", create_if_missing=True)
+                create_kwargs = dict(modal_sandbox_kwargs or {})
+                if cred_mounts:
+                    create_kwargs["mounts"] = list(create_kwargs.pop("mounts", [])) + cred_mounts
+                sandbox = await _modal.Sandbox.create.aio(
+                    "sleep", "infinity", image=image_spec, app=app,
+                    timeout=int(create_kwargs.pop("timeout", 3600)), **create_kwargs)
+                return app, sandbox
+            self._app, self._sandbox = self._worker.run_coroutine(_create_sandbox(), timeout=300)
         try:
             try:
-                effective_image = _resolve_modal_image(restored_snapshot_id or image)
-                self._app, self._sandbox = self._worker.run_coroutine(_create_sandbox(effective_image), timeout=300)
+                _create(_resolve_modal_image(restored_snapshot_id or image))
             except Exception as exc:
                 if not restored_snapshot_id:
                     raise
                 logger.warning("Modal: failed to restore snapshot %s, retrying with base image: %s",
                                restored_snapshot_id[:20], exc)
                 _delete_direct_snapshot(self._task_id, restored_snapshot_id)
-                self._app, self._sandbox = self._worker.run_coroutine(
-                    _create_sandbox(_resolve_modal_image(image)), timeout=300)
+                _create(_resolve_modal_image(image))
             else:
                 if restored_snapshot_id and restored_from_legacy_key:
                     _store_direct_snapshot(self._task_id, restored_snapshot_id)
@@ -196,22 +194,26 @@ class ModalEnvironment(BaseEnvironment):
         self._sync_manager.sync(force=True)
         self.init_session()
 
-    def _exec_with_stdin(self, cmd: str, payload: str, *, timeout: int, fail_label: str | None = None) -> None:
-        """Run ``bash -c cmd`` in the sandbox feeding ``payload`` on stdin; when ``fail_label`` is
-        given a non-zero exit raises with the remote stderr."""
+    def _exec(self, cmd: str, *, timeout: int, stdin: str | None = None, fail_label: str | None = None,
+              capture: bool = False):
+        """Run ``bash -c cmd`` in the sandbox. ``stdin`` is streamed in chunks; ``capture`` returns
+        stdout; ``fail_label`` turns a non-zero exit into RuntimeError (with stderr unless capturing)."""
         async def _run():
             proc = await self._sandbox.exec.aio("bash", "-c", cmd)
-            await _stream_stdin(proc, payload, self._STDIN_CHUNK_SIZE)
+            if stdin is not None:
+                await _stream_stdin(proc, stdin, self._STDIN_CHUNK_SIZE)
+            data = await proc.stdout.read.aio() if capture else None
             exit_code = await proc.wait.aio()
             if fail_label and exit_code != 0:
-                stderr_text = await proc.stderr.read.aio()
-                raise RuntimeError(f"Modal {fail_label} failed (exit {exit_code}): {stderr_text}")
-        self._worker.run_coroutine(_run(), timeout=timeout)
+                detail = "" if capture else f": {await proc.stderr.read.aio()}"
+                raise RuntimeError(f"Modal {fail_label} failed (exit {exit_code}){detail}")
+            return data
+        return self._worker.run_coroutine(_run(), timeout=timeout)
 
     def _modal_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via base64 piped through stdin."""
         cmd = f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && base64 -d > {shlex.quote(remote_path)}"
-        self._exec_with_stdin(cmd, base64.b64encode(Path(host_path).read_bytes()).decode("ascii"), timeout=30)
+        self._exec(cmd, stdin=base64.b64encode(Path(host_path).read_bytes()).decode("ascii"), timeout=30)
 
     def _modal_bulk_upload(self, files: list[tuple[str, str]]) -> None:
         """Upload many files as one in-memory gzipped tar streamed through stdin
@@ -224,34 +226,21 @@ class ModalEnvironment(BaseEnvironment):
                 tar.add(host_path, arcname=remote_path.lstrip("/"))
         payload = base64.b64encode(buf.getvalue()).decode("ascii")
         cmd = f"{quoted_mkdir_command(unique_parent_dirs(files))} && base64 -d | tar xzf - -C /"
-        self._exec_with_stdin(cmd, payload, timeout=120, fail_label="bulk upload")
+        self._exec(cmd, stdin=payload, timeout=120, fail_label="bulk upload")
 
     def _modal_bulk_download(self, dest: Path) -> None:
         """Download remote .hermes/ as a tar archive (sandboxes run as root, so /root/.hermes)."""
-        async def _download():
-            proc = await self._sandbox.exec.aio("bash", "-c", "tar cf - -C / root/.hermes")
-            data = await proc.stdout.read.aio()
-            exit_code = await proc.wait.aio()
-            if exit_code != 0:
-                raise RuntimeError(f"Modal bulk download failed (exit {exit_code})")
-            return data.encode() if isinstance(data, str) else data
-        dest.write_bytes(self._worker.run_coroutine(_download(), timeout=120))
+        data = self._exec("tar cf - -C / root/.hermes", timeout=120, fail_label="bulk download", capture=True)
+        dest.write_bytes(data.encode() if isinstance(data, str) else data)
 
     def _modal_delete(self, remote_paths: list[str]) -> None:
-        """Batch-delete remote files via exec."""
-        async def _rm():
-            proc = await self._sandbox.exec.aio("bash", "-c", quoted_rm_command(remote_paths))
-            await proc.wait.aio()
-        self._worker.run_coroutine(_rm(), timeout=15)
+        self._exec(quoted_rm_command(remote_paths), timeout=15)
 
     def _before_execute(self) -> None:
-        """Sync files to sandbox via FileSyncManager (rate-limited internally)."""
-        self._sync_manager.sync()
+        self._sync_manager.sync()  # rate-limited internally
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120, stdin_data: str | None = None):
-        """Return a _ThreadedProcessHandle wrapping an async Modal sandbox exec."""
-        sandbox = self._sandbox
-        worker = self._worker
+        sandbox, worker = self._sandbox, self._worker
 
         def cancel():
             worker.run_coroutine(sandbox.terminate.aio(), timeout=15)
@@ -292,5 +281,4 @@ class ModalEnvironment(BaseEnvironment):
             pass
         finally:
             self._worker.stop()
-            self._sandbox = None
-            self._app = None
+            self._sandbox = self._app = None

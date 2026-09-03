@@ -46,11 +46,7 @@ class SSHEnvironment(BaseEnvironment):
     def __init__(self, host: str, user: str, cwd: str = "~",
                  timeout: int = 60, port: int = 22, key_path: str = ""):
         super().__init__(cwd=cwd, timeout=timeout)
-        self.host = host
-        self.user = user
-        self.port = port
-        self.key_path = key_path
-
+        self.host, self.user, self.port, self.key_path = host, user, port, key_path
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
         self.control_dir.mkdir(parents=True, exist_ok=True)
         # Short, deterministic socket name: the path must stay under macOS's 104-byte sun_path
@@ -114,10 +110,9 @@ class SSHEnvironment(BaseEnvironment):
         """Detect the remote user's home directory."""
         with contextlib.suppress(Exception):
             result = self._run_ssh("echo $HOME", timeout=10)
-            home = result.stdout.strip()
-            if home and result.returncode == 0:
-                logger.debug("SSH: remote home = %s", home)
-                return home
+            if result.returncode == 0 and result.stdout.strip():
+                logger.debug("SSH: remote home = %s", result.stdout.strip())
+                return result.stdout.strip()
         return "/root" if self.user == "root" else f"/home/{self.user}"
 
     def _ensure_remote_dirs(self) -> None:
@@ -190,7 +185,7 @@ class SSHEnvironment(BaseEnvironment):
                 for proc in (tar_proc, ssh_proc):
                     proc.kill()
                 for proc in (tar_proc, ssh_proc):
-                    proc.wait()
+                    proc.wait()  # kill both first, then reap: never wait on one while the other blocks
                 raise EnvironmentConnectionError(
                     "SSH bulk upload timed out",
                     retry_hint=f"Bulk file sync to {self.host} timed out — check the connection and retry.")
@@ -216,17 +211,14 @@ class SSHEnvironment(BaseEnvironment):
                               f"File sync from {self.host}")
 
     def _ssh_delete(self, remote_paths: list[str]) -> None:
-        """Batch-delete remote files in one SSH call."""
         self._run_ssh_checked(quoted_rm_command(remote_paths), 10, "remote rm failed",
                               f"Remote file cleanup on {self.host}")
 
     def _before_execute(self) -> None:
-        """Sync files to remote via FileSyncManager (rate-limited internally)."""
-        self._sync_manager.sync()
+        self._sync_manager.sync()  # rate-limited internally
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
-        """Spawn an SSH process that runs bash on the remote host."""
         return _popen_bash(self._build_ssh_command() + bash_argv(shlex.quote(cmd_string), login), stdin_data)
 
     def cleanup(self):
