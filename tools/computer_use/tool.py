@@ -415,12 +415,15 @@ def _action_payload(res: ActionResult) -> Dict[str, Any]:
 def _text_response(res: ActionResult) -> str:
     return json.dumps(_action_payload(res))
 
-_DEFAULT_MAX_ELEMENTS = 100  # AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file
-_MIN_PROVIDER_IMAGE_DIMENSION = 8  # some providers reject images below 8x8 before the model sees the result; such captures fall back to text
+# AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file.
+_DEFAULT_MAX_ELEMENTS = 100
+# Some providers reject images below 8x8 before the model sees the result; such captures fall back to text.
+_MIN_PROVIDER_IMAGE_DIMENSION = 8
 # Some AX trees (Discord/Slack via UIA, Electron chat clients) expose ENTIRE message bodies as labels; uncapped
 # they blew the tool-result budget and leaked private chat text. Labels identify a control, not text extraction.
 _MAX_ELEMENT_LABEL_CHARS = 120
-_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20  # bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup
+# Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup.
+_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
 
 def _capture_image_format(cap: CaptureResult) -> Tuple[str, str]:
     # (MIME, file extension): cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/,
@@ -584,7 +587,8 @@ def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int
             stale.unlink(missing_ok=True)
     return cache_dir / name
 
-def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int, write: Callable[[Any], None]) -> Optional[str]:
+def _write_cache_file(what: str, subdir: str, legacy: str, name: str, pattern: str, cap: int,
+                      write: Callable[[Any], None]) -> Optional[str]:
     """Bounded cache write via ``write(path)``; the path, or None on any failure — an unwritable cache must never
     break control (a capture keeps working without its spill/screenshot copy)."""
     try:
