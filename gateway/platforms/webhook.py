@@ -105,8 +105,7 @@ def _json_error(message: str, status: int) -> "web.Response":
 
 def _peek_session_id(store, session_key: str):
     """Prefer the store's lock-held accessor; the private-path fallback is for older stores / test doubles."""
-    peek = getattr(store, "peek_session_id", None)
-    if callable(peek):
+    if callable(peek := getattr(store, "peek_session_id", None)):
         return peek(session_key)
     if hasattr(store, "_ensure_loaded"):
         with suppress(Exception):
@@ -285,8 +284,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
     def _record_rate_limit_hit(self, route_name: str, now: float) -> bool:
         """Return True if route is still within limit after recording this hit."""
-        window = self._rate_counts.get(route_name)
-        if not isinstance(window, deque):
+        if not isinstance(window := self._rate_counts.get(route_name), deque):
             window = self._rate_counts[route_name] = deque(window or ())
         cutoff = now - _RATE_WINDOW_SECONDS
         while window and window[0] < cutoff:
@@ -298,8 +296,7 @@ class WebhookAdapter(BasePlatformAdapter):
 
     def _record_delivery_id(self, delivery_id: str, now: float) -> bool:
         """Return True when this delivery should be processed."""
-        seen_at = self._seen_deliveries.get(delivery_id)
-        if seen_at is not None and now - seen_at < self._idempotency_ttl:
+        if (seen_at := self._seen_deliveries.get(delivery_id)) is not None and now - seen_at < self._idempotency_ttl:
             return False
         if seen_at is not None:
             self._seen_deliveries.pop(delivery_id, None)
@@ -462,9 +459,8 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.exception("[webhook] direct-deliver failed route=%s delivery=%s", route_name, delivery_id)
             return web.json_response(failed, status=502)
         if result.success:
-            return web.json_response(
-                {"status": "delivered", "route": route_name, "target": delivery["deliver"], "delivery_id": delivery_id},
-                status=200)
+            return web.json_response({"status": "delivered", "route": route_name, "target": delivery["deliver"],
+                                      "delivery_id": delivery_id}, status=200)
         # Target rejected it — 502 with a generic error (don't leak adapter detail).
         logger.warning("[webhook] direct-deliver target rejected route=%s target=%s error=%s", route_name,
                        delivery["deliver"], result.error)
@@ -756,8 +752,7 @@ class WebhookAdapter(BasePlatformAdapter):
             target_platform = Platform(platform_name)
         except ValueError:
             return SendResult(success=False, error=f"Unknown platform: {platform_name}")
-        adapter = self._find_adapter(target_platform)
-        if not adapter:
+        if not (adapter := self._find_adapter(target_platform)):
             return SendResult(success=False, error=f"Platform {platform_name} not connected")
         extra = delivery.get("deliver_extra", {})
         chat_id = extra.get("chat_id", "")

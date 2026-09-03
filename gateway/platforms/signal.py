@@ -74,8 +74,7 @@ def _guess_extension(data: bytes) -> str:
             return ext
     if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
-    container = sniff_container(data)
-    if container is not None:
+    if (container := sniff_container(data)) is not None:
         return CONTAINER_TO_EXT[container]
     return ".zip" if data[:2] == b"PK" else ".bin"
 
@@ -225,8 +224,7 @@ class SignalAdapter(BasePlatformAdapter):
         if not self.http_url or not self.account:
             logger.error("Signal: SIGNAL_HTTP_URL and SIGNAL_ACCOUNT are required")
             return False
-        # Scoped lock prevents duplicate Signal listeners for the same phone.
-        lock_acquired = False
+        lock_acquired = False  # scoped lock prevents duplicate Signal listeners for the same phone
         try:
             if not self._acquire_platform_lock('signal-phone', self.account, 'Signal account'):
                 return False
@@ -337,8 +335,7 @@ class SignalAdapter(BasePlatformAdapter):
             await asyncio.sleep(HEALTH_CHECK_INTERVAL)
             if not self._running:
                 break
-            elapsed = time.time() - self._last_sse_activity
-            if elapsed <= HEALTH_CHECK_STALE_THRESHOLD:
+            if (elapsed := time.time() - self._last_sse_activity) <= HEALTH_CHECK_STALE_THRESHOLD:
                 continue
             logger.warning("Signal: SSE idle for %.0fs, checking daemon health", elapsed)
             try:
@@ -510,17 +507,15 @@ class SignalAdapter(BasePlatformAdapter):
 
     def _remember_recipient_identifiers(self, number: Optional[str], service_id: Optional[str]) -> None:
         """Cache any number↔UUID mapping observed from Signal envelopes."""
-        if not number or not service_id or not _is_signal_service_id(service_id):
-            return
-        self._recipient_uuid_by_number[number] = service_id
-        self._recipient_number_by_uuid[service_id] = number
+        if number and service_id and _is_signal_service_id(service_id):
+            self._recipient_uuid_by_number[number] = service_id
+            self._recipient_number_by_uuid[service_id] = number
 
     @staticmethod
     def _extract_quote_author(quote_data: Any) -> Optional[str]:
         """Return the best available Signal sender identifier from quote metadata."""
-        if not isinstance(quote_data, dict):
-            return None
-        return next((str(quote_data[k]) for k in _QUOTE_AUTHOR_KEYS if quote_data.get(k)), None)
+        keys = _QUOTE_AUTHOR_KEYS if isinstance(quote_data, dict) else ()
+        return next((str(quote_data[k]) for k in keys if quote_data.get(k)), None)
 
     def _quote_references_own_message(self, reply_to_id: Optional[str], reply_to_author: Optional[str]) -> bool:
         """True when a Signal quote points at this adapter's outbound message."""
@@ -538,8 +533,7 @@ class SignalAdapter(BasePlatformAdapter):
         if timestamp is None:
             return
         key = str(timestamp)
-        # Re-insert to mark most-recently-used so eviction drops genuinely old entries.
-        self._sent_message_timestamps.pop(key, None)
+        self._sent_message_timestamps.pop(key, None)  # re-insert as most-recently-used so eviction drops old ones
         self._sent_message_timestamps[key] = None
         while len(self._sent_message_timestamps) > self._max_sent_message_timestamps:
             self._sent_message_timestamps.popitem(last=False)

@@ -116,8 +116,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         self._notification_scheduler: Optional[NotificationScheduler] = None
         self._seen_receipts: set[str] = set()
         self._seen_receipt_order: deque[str] = deque()
-        self._accepted_count = 0
-        self._duplicate_count = 0
+        self._accepted_count = self._duplicate_count = 0
 
     def set_notification_scheduler(self, scheduler: Optional[NotificationScheduler]) -> None:
         self._notification_scheduler = scheduler
@@ -176,8 +175,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         are rejected so the endpoint can't be enumerated."""
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
-        validation_token = request.query.get("validationToken", "")
-        if not validation_token:
+        if not (validation_token := request.query.get("validationToken", "")):
             return web.Response(status=400)
         return web.Response(text=validation_token, content_type="text/plain")
 
@@ -192,8 +190,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             # Bad clientState is an auth failure: a fully forged batch gets 403 so the sender stops
             # retrying; legitimate Graph retries carry a valid clientState → accepted/duplicate paths.
             return "auth"
-        explicit_id = str(notification.get("id") or "").strip()
-        receipt_key = f"id:{explicit_id}" if explicit_id else None
+        receipt_key = f"id:{explicit_id}" if (explicit_id := str(notification.get("id") or "").strip()) else None
         if receipt_key is not None:
             if receipt_key in self._seen_receipts:
                 return "duplicate"
@@ -206,8 +203,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
         # Graph never sends validationToken on POST, but tolerate clients replaying it in-band.
-        validation_token = request.query.get("validationToken", "")
-        if validation_token:
+        if validation_token := request.query.get("validationToken", ""):
             return web.Response(text=validation_token, content_type="text/plain")
         status, notifications = await self._read_notifications(request)
         if status:
