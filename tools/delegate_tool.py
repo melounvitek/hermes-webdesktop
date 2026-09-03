@@ -500,6 +500,9 @@ def _build_dynamic_schema_overrides() -> dict:
 
     return {"description": _build_top_level_description(), "parameters": overrides_params}
 
+def _p(type_: str, description: str, **extra) -> dict:
+    return {"type": type_, **extra, "description": description}
+
 DELEGATE_TASK_SCHEMA = {
     "name": "delegate_task",
     # description / tasks.description are placeholders: the real text is built per
@@ -516,70 +519,57 @@ DELEGATE_TASK_SCHEMA = {
         "properties": {
             # The handler also accepts the legacy single-goal shape (top-level
             # `goal`/`context`/`output_schema`), wrapped into a one-entry batch at
-            # dispatch. Unadvertised on purpose (old transcripts only); do not re-add.
+            # dispatch, and a per-task `role` (legacy, ignored: capability is
+            # depth-derived). Both unadvertised on purpose (old transcripts only);
+            # do not re-add. No maxItems — the runtime limit
+            # (delegation.max_concurrent_children) is enforced with a clear error in
+            # delegate_task().
             "tasks": {
                 "type": "array",
                 "minItems": 1,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "goal": {
-                            "type": "string",
-                            "description": (
-                                "What this subagent should accomplish. Be specific and self-contained — it knows "
-                                "nothing about your conversation history."
-                            ),
-                        },
-                        "context": {
-                            "type": "string",
-                            "description": (
-                                "Background THIS child needs: file paths, error messages, constraints. Each child "
-                                "sees only its own context — repeat shared background in every task that needs it."
-                            ),
-                        },
-                        "output_schema": {
-                            "type": "object",
-                            "description": (
-                                "Optional JSON Schema this child's final answer must validate against (told to the "
-                                "child up front; parent validates with one bounded correction retry; result gains "
-                                "schema_valid, plus schema_errors on failure). Keep it forgiving — require only "
-                                "fields you will read."
-                            ),
-                        },
+                        "goal": _p(
+                            "string",
+                            "What this subagent should accomplish. Be specific and self-contained — it knows "
+                            "nothing about your conversation history.",
+                        ),
+                        "context": _p(
+                            "string",
+                            "Background THIS child needs: file paths, error messages, constraints. Each child "
+                            "sees only its own context — repeat shared background in every task that needs it.",
+                        ),
+                        "output_schema": _p(
+                            "object",
+                            "Optional JSON Schema this child's final answer must validate against (told to the "
+                            "child up front; parent validates with one bounded correction retry; result gains "
+                            "schema_valid, plus schema_errors on failure). Keep it forgiving — require only "
+                            "fields you will read.",
+                        ),
                     },
                     "required": ["goal"],
                 },
-                # No maxItems — the runtime limit (delegation.max_concurrent_children)
-                # is enforced with a clear error in delegate_task(). A per-task `role`
-                # is also accepted — legacy, ignored (capability is depth-derived);
-                # unadvertised on purpose, do not re-add.
                 "description": "(rebuilt at get_definitions() time)",
             },
             # `background` (bool) is also accepted — DEPRECATED, ignored: top-level
             # delegations always run in the background. Unadvertised; do not re-add.
-            "action": {
-                "type": "string",
-                "enum": ["spawn", "list", "steer", "stop"],
-                "description": (
-                    "Default 'spawn'. Live control of running children: "
-                    "'list' = ids/goals/status/transcripts; 'steer' = queue "
-                    "course-correction text into one child (subagent_id + "
-                    "message) without stopping it; 'stop' = end one child "
-                    "early (subagent_id; partial result still returns). "
-                    "Control actions return immediately; goal/tasks are ignored unless spawning."
-                ),
-            },
-            "subagent_id": {
-                "type": "string",
-                "description": ("Target for action='steer'/'stop' (ids from the spawn response or action='list')."),
-            },
-            "message": {
-                "type": "string",
-                "description": (
-                    "For action='steer': the course correction, appended to "
-                    "the child's next tool result mid-run. Be directive and specific."
-                ),
-            },
+            "action": _p(
+                "string",
+                "Default 'spawn'. Live control of running children: "
+                "'list' = ids/goals/status/transcripts; 'steer' = queue "
+                "course-correction text into one child (subagent_id + "
+                "message) without stopping it; 'stop' = end one child "
+                "early (subagent_id; partial result still returns). "
+                "Control actions return immediately; goal/tasks are ignored unless spawning.",
+                enum=["spawn", "list", "steer", "stop"],
+            ),
+            "subagent_id": _p("string", "Target for action='steer'/'stop' (ids from the spawn response or action='list')."),
+            "message": _p(
+                "string",
+                "For action='steer': the course correction, appended to "
+                "the child's next tool result mid-run. Be directive and specific.",
+            ),
         },
         "required": [],
     },
