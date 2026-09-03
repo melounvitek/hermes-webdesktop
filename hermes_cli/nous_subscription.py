@@ -8,9 +8,7 @@ from typing import Dict, Iterable, Optional, Set
 
 from hermes_cli.config import get_env_value, load_config
 from hermes_cli.nous_account import (
-    NousPortalAccountInfo,
-    format_nous_portal_entitlement_message,
-    get_nous_portal_account_info,
+    NousPortalAccountInfo, format_nous_portal_entitlement_message, get_nous_portal_account_info,
 )
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 from utils import is_truthy_value
@@ -54,12 +52,10 @@ _FEATURES: Dict[str, _FeatureSpec] = {
         ("PARALLEL_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"),
     ),
     "image_gen": _FeatureSpec(
-        "Image generation", True, "fal", "fal-queue", ("image_gen", "provider"),
-        "Image generation (FAL)", "FAL key",
+        "Image generation", True, "fal", "fal-queue", ("image_gen", "provider"), "Image generation (FAL)", "FAL key",
     ),
     "video_gen": _FeatureSpec(
-        "Video generation", False, "fal-video", "fal-queue", ("video_gen", "provider"),
-        "Video generation (FAL)", "FAL key",
+        "Video generation", False, "fal-video", "fal-queue", ("video_gen", "provider"), "Video generation (FAL)", "FAL key",
     ),
     "tts": _FeatureSpec(
         "OpenAI TTS", True, "openai-audio", "openai-audio", ("tts", "provider"),
@@ -139,7 +135,7 @@ class NousSubscriptionFeatures:
 
 
 def _section(config: Dict[str, object], key: str) -> Dict[str, object]:
-    """Return ``config[key]`` when it is a dict, else ``{}`` (read-only view)."""
+    """``config[key]`` when it is a dict, else ``{}`` (read-only view)."""
     value = config.get(key)
     return value if isinstance(value, dict) else {}
 
@@ -306,10 +302,10 @@ def _state(key: str, **fields) -> NousFeatureState:
 def _web_feature(
     web_cfg: Dict[str, object], tool_enabled: bool, managed: bool, web_gw: bool, direct_firecrawl: bool
 ) -> NousFeatureState:
-    backend = _norm(web_cfg.get("backend"))
     # Per-capability overrides decide the active search/extract backend independently of web.backend.
-    search_backend = _norm(web_cfg.get("search_backend"))
-    extract_backend = _norm(web_cfg.get("extract_backend"))
+    backend, search_backend, extract_backend = (
+        _norm(web_cfg.get(k)) for k in ("backend", "search_backend", "extract_backend")
+    )
     # The "nous" selection is serviced by Firecrawl — normalize so downstream vendor checks hold.
     if backend == "nous" or web_gw:
         backend = "firecrawl"
@@ -319,8 +315,7 @@ def _web_feature(
         "exa": _any_env("EXA_API_KEY") and not web_gw,
         "firecrawl": direct_firecrawl,
         "parallel": _any_env("PARALLEL_API_KEY") and not web_gw,
-        "tavily": (_any_env("TAVILY_API_KEY") and not web_gw)
-        or ("tavily" in {backend, search_backend, extract_backend} and not web_gw),
+        "tavily": (_any_env("TAVILY_API_KEY") or "tavily" in {backend, search_backend, extract_backend}) and not web_gw,
         "searxng": _any_env("SEARXNG_URL"),
     }
     web_managed = backend == "firecrawl" and managed and not direct_firecrawl
@@ -347,26 +342,25 @@ def _fal_feature(key: str, tool_enabled: bool, direct: bool, managed: bool, sele
     )
 
 
+def _audio_provider(cfg: Dict[str, object], default: str, gw: bool) -> str:
+    provider = _norm(cfg.get("provider"), default)
+    return "openai" if (provider == "nous" or gw) else (provider or default)
+
+
 def _audio_features(
     tts_cfg: Dict[str, object], stt_cfg: Dict[str, object], tts_tool_enabled: bool,
     managed: Dict[str, bool], selected: Dict[str, Optional[str]], use_gateway: Dict[str, bool],
 ) -> tuple[NousFeatureState, NousFeatureState]:
     tts_gw, stt_gw = use_gateway["tts"], use_gateway["stt"]
-    tts_provider = _norm(tts_cfg.get("provider"), "edge")
     # STT default is "local" (faster-whisper, needs a pip install); Nous subscribers are routed
-    # to the managed audio gateway by apply_nous_managed_defaults.
-    stt_provider = _norm(stt_cfg.get("provider"), "local")
-    # The "nous" selection is serviced by OpenAI — normalize so downstream vendor checks hold.
-    if tts_provider == "nous" or tts_gw:
-        tts_provider = "openai"
-    if stt_provider == "nous" or stt_gw:
-        stt_provider = "openai"
+    # to the managed audio gateway by apply_nous_managed_defaults. The "nous" selection is
+    # serviced by OpenAI — normalize so downstream vendor checks hold.
+    tts_current = _audio_provider(tts_cfg, "edge", tts_gw)
+    stt_current = _audio_provider(stt_cfg, "local", stt_gw)
     # Whisper reuses the TTS audio key (VOICE_TOOLS_OPENAI_KEY, falling back to OPENAI_API_KEY).
     audio_key = bool(resolve_openai_audio_api_key())
     direct_openai_tts = audio_key and not tts_gw
     direct_openai_stt = audio_key and not stt_gw
-
-    tts_current = tts_provider or "edge"
     tts_managed = tts_tool_enabled and tts_current == "openai" and managed["tts"] and not direct_openai_tts
     tts_available = bool({
         "edge": True, "neutts": True, "openai": managed["tts"] or direct_openai_tts,
@@ -382,7 +376,6 @@ def _audio_features(
     # STT isn't a model-callable tool — the gateway voice middleware calls it on every inbound
     # voice message — so it is "enabled" whenever a usable provider is configured, and
     # toolset_enabled is reported True so status never flags it "tool disabled".
-    stt_current = stt_provider or "local"
     stt_available = bool({
         "local": _local_stt_backend_available() and not stt_gw, "openai": managed["stt"] or direct_openai_stt,
         "groq": _any_env("GROQ_API_KEY") and not stt_gw, "mistral": _any_env("MISTRAL_API_KEY") and not stt_gw,
