@@ -60,6 +60,22 @@ def _write_env(env_path: Path, env_writes: dict) -> None:
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
+def _prompt_embedded_llm(llm_provider: str, provider_config: dict, env_writes: dict, hermes_env: Path) -> None:
+    """local_embedded wizard step: endpoint (openai_compatible only), model, LLM key."""
+    if llm_provider == "openai_compatible":
+        existing_base_url = provider_config.get("llm_base_url", "")
+        prompt = "  LLM endpoint URL (e.g. http://192.168.1.10:8080/v1)" + (f" [{existing_base_url}]" if existing_base_url else "")
+        if val := input(prompt + ": ").strip():
+            provider_config["llm_base_url"] = val
+    elif llm_provider == "openrouter":
+        provider_config["llm_base_url"] = "https://openrouter.ai/api/v1"
+    current_model = provider_config.get("llm_model") or _PROVIDER_DEFAULT_MODELS.get(llm_provider, "gpt-4o-mini")
+    val = input(f"  LLM model [{current_model}]: ").strip()
+    provider_config["llm_model"] = val or current_model
+    llm_key = _secret_prompt("  LLM API key: ")
+    env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key or _load_simple_env(hermes_env).get("HINDSIGHT_LLM_API_KEY", "")
+
+
 def run_setup(provider, hermes_home: str, config: dict) -> None:
     """Interactive wizard — installs only the deps the selected mode needs."""
     from hermes_cli.config import save_config
@@ -81,9 +97,9 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
 
     llm_provider = ""
     if mode == "local_embedded":
-        providers = list(_PROVIDER_DEFAULT_MODELS)
-        llm_items = [(p, f"default model: {_PROVIDER_DEFAULT_MODELS[p]}") for p in providers]
-        llm_provider = _select("  Select LLM provider", llm_items, providers, provider_config.get("llm_provider"))
+        llm_items = [(p, f"default model: {m}") for p, m in _PROVIDER_DEFAULT_MODELS.items()]
+        llm_provider = _select("  Select LLM provider", llm_items, list(_PROVIDER_DEFAULT_MODELS),
+                               provider_config.get("llm_provider"))
         if llm_provider is None:
             return
         provider_config["llm_provider"] = llm_provider
@@ -109,33 +125,15 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
         api_key = _secret_prompt(f"  API key (current: {masked}, blank to keep): " if existing_key else "  API key: ")
         if api_key:
             env_writes["HINDSIGHT_API_KEY"] = api_key
-        val = input(f"  API URL [{_DEFAULT_API_URL}]: ").strip()
-        if val:
+        if val := input(f"  API URL [{_DEFAULT_API_URL}]: ").strip():
             provider_config["api_url"] = val
-
     elif mode == "local_external":
         val = input(f"  Hindsight API URL [{_DEFAULT_LOCAL_URL}]: ").strip()
         provider_config["api_url"] = val or _DEFAULT_LOCAL_URL
-        api_key = _secret_prompt("  API key (optional, blank to skip): ")
-        if api_key:
+        if api_key := _secret_prompt("  API key (optional, blank to skip): "):
             env_writes["HINDSIGHT_API_KEY"] = api_key
-
-    else:  # local_embedded
-        if llm_provider == "openai_compatible":
-            existing_base_url = provider_config.get("llm_base_url", "")
-            prompt = "  LLM endpoint URL (e.g. http://192.168.1.10:8080/v1)" + (f" [{existing_base_url}]" if existing_base_url else "")
-            val = input(prompt + ": ").strip()
-            if val:
-                provider_config["llm_base_url"] = val
-        elif llm_provider == "openrouter":
-            provider_config["llm_base_url"] = "https://openrouter.ai/api/v1"
-
-        current_model = provider_config.get("llm_model") or _PROVIDER_DEFAULT_MODELS.get(llm_provider, "gpt-4o-mini")
-        val = input(f"  LLM model [{current_model}]: ").strip()
-        provider_config["llm_model"] = val or current_model
-
-        llm_key = _secret_prompt("  LLM API key: ")
-        env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key or _load_simple_env(hermes_env).get("HINDSIGHT_LLM_API_KEY", "")
+    else:
+        _prompt_embedded_llm(llm_provider, provider_config, env_writes, hermes_env)
 
     provider_config.setdefault("bank_id", "hermes")
     provider_config.setdefault("recall_budget", "mid")
