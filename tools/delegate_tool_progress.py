@@ -159,8 +159,7 @@ def _build_child_system_prompt(
                 "your work in this workspace.\n\n" + _ctx_files.strip()
             )
     parts.append(
-        "\nComplete this task using the tools available to you. "
-        "When finished, provide a clear, concise summary of:\n"
+        "\nComplete this task using the tools available to you. When finished, provide a clear, concise summary of:\n"
         "- What you did\n"
         "- What you found or accomplished\n"
         "- Any files you created or modified\n"
@@ -189,16 +188,14 @@ def _build_child_system_prompt(
             "WHEN to delegate:\n"
             "- The goal decomposes into 2+ independent subtasks that can "
             "run in parallel (e.g. research A and B simultaneously).\n"
-            "- A subtask is reasoning-heavy and would flood your context "
-            "with intermediate data.\n\n"
+            "- A subtask is reasoning-heavy and would flood your context with intermediate data.\n\n"
             "WHEN NOT to delegate:\n"
             "- Single-step mechanical work — do it directly.\n"
             "- Trivial tasks you can execute in one or two tool calls.\n"
             "- Re-delegating your entire assigned goal to one worker "
             "(that's just pass-through with no value added).\n\n"
             "Coordinate your workers' results and synthesize them before "
-            "reporting back to your parent. You are responsible for the "
-            "final summary, not your workers.\n\n"
+            "reporting back to your parent. You are responsible for the final summary, not your workers.\n\n"
             f"NOTE: You are at depth {child_depth}. The delegation tree "
             f"is capped at max_spawn_depth={max_spawn_depth}. {child_note}"
         )

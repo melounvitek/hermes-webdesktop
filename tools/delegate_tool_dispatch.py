@@ -49,8 +49,7 @@ class _Batch:
     def owner_kwargs(self) -> Dict[str, Any]:
         """Steer/stop authority of the originating session, passed to every child run."""
         return {
-            "owner_session_id": self.origin_ui_session_id or None,
-            "owner_transport": self.origin_owner_transport,
+            "owner_session_id": self.origin_ui_session_id or None, "owner_transport": self.origin_owner_transport,
             "owner_session_record": self.origin_owner_session_record,
         }
 
@@ -174,15 +173,12 @@ _SYNC_FALLBACK_NOTES = {
         "background=true is not available in this session — it cannot "
         "receive a detached subagent result after the turn ends (a "
         "one-shot runner such as `hermes -z`, a cron job, a Kanban "
-        "worker, or a stateless HTTP endpoint). The subagent(s) ran "
-        "SYNCHRONOUSLY and the result is included above."
+        "worker, or a stateless HTTP endpoint). The subagent(s) ran SYNCHRONOUSLY and the result is included above."
     ),
     "at_capacity": (
-        "The background delegation pool was at capacity "
-        "(delegation.max_concurrent_children), so the subagent(s) ran "
+        "The background delegation pool was at capacity (delegation.max_concurrent_children), so the subagent(s) ran "
         "SYNCHRONOUSLY and the result is included above. Raise "
-        "delegation.max_concurrent_children in config.yaml to allow "
-        "more concurrent background delegations."
+        "delegation.max_concurrent_children in config.yaml to allow more concurrent background delegations."
     ),
 }
 
@@ -212,12 +208,9 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
         return ""
     if origin_wake_sid:
         logger.info(
-            "delegate_task: async delivery unsupported on this "
-            "session, but a session id is bound (%s) — dispatching "
-            "in the background and waking the session via self-post "
-            "when it completes instead of forcing synchronous "
-            "execution.",
-            origin_wake_sid,
+            "delegate_task: async delivery unsupported on this session, but a session id is bound (%s) — dispatching "
+            "in the background and waking the session via self-post when it completes instead of forcing synchronous "
+            "execution.", origin_wake_sid,
         )
         return origin_wake_sid
     return None
@@ -277,14 +270,12 @@ def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any
         "note": (
             "Subagent is running in the background. You and the user can "
             "keep working; its full result re-enters the conversation as a "
-            "new message when it finishes. Do not wait or poll — just "
-            "continue."
+            "new message when it finishes. Do not wait or poll — just continue."
             if n == 1 else
             f"{n} subagents are running in parallel in the background. You "
             f"and the user can keep working; they wait on each other and "
             f"their consolidated results re-enter the conversation as a "
-            f"single message once ALL of them finish. Do not wait or poll "
-            f"— just continue."
+            f"single message once ALL of them finish. Do not wait or poll — just continue."
         ),
     }
     sids = [getattr(c, "_subagent_id", None) for c in child_agents]
@@ -294,16 +285,14 @@ def _dispatched_payload(dispatch: dict, goals: List[str], child_agents: List[Any
             "While a child runs you can orchestrate it live with this "
             "same tool: delegate_task(action='list') to see live "
             "children, action='steer' with subagent_id + message to "
-            "redirect one, action='stop' with subagent_id to end one "
-            "early."
+            "redirect one, action='stop' with subagent_id to end one early."
         )
     if live_paths:
         payload["live_transcripts"] = list(live_paths)
         payload["live_transcripts_hint"] = (
             "Each subagent streams a human-readable transcript of its "
             "operations to the file listed above (append-only, one per "
-            "task). Read or `tail -f` these paths at any time to watch "
-            "a child work while it runs."
+            "task). Read or `tail -f` these paths at any time to watch a child work while it runs."
         )
     return payload
 
@@ -318,7 +307,6 @@ def _dispatch_background(batch: _Batch) -> str:
     """
     from tools.delegate_tool import _get_max_async_children
     from tools.async_delegation import dispatch_async_delegation_batch
-
     wake_sid = _resolve_async_wake_sid(batch.origin_wake_sid)
     if wake_sid is None:
         logger.info("delegate_task: async delivery unsupported on this session runtime; running the batch synchronously instead.")

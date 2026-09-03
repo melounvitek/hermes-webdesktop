@@ -176,19 +176,10 @@ def _dump_subagent_timeout_diagnostic(
         if len(_goal_preview) > 1000:
             _goal_preview = _goal_preview[:1000] + " ...[truncated]"
         lines: List[str] = [
-            "# Subagent timeout diagnostic — issue #14726",
-            f"# Generated: {_dt.datetime.now().isoformat()}",
-            "",
-            "## Timeout",
-            f"  task_index:        {task_index}",
-            f"  subagent_id:       {subagent_id}",
-            f"  configured_timeout: {timeout_seconds}s",
-            f"  actual_duration:   {duration_seconds:.2f}s",
-            "",
-            "## Goal",
-            _goal_preview or "(empty)",
-            "",
-            "## Child config",
+            "# Subagent timeout diagnostic — issue #14726", f"# Generated: {_dt.datetime.now().isoformat()}", "",
+            "## Timeout", f"  task_index:        {task_index}", f"  subagent_id:       {subagent_id}",
+            f"  configured_timeout: {timeout_seconds}s", f"  actual_duration:   {duration_seconds:.2f}s", "", "## Goal",
+            _goal_preview or "(empty)", "", "## Child config",
         ]
         for attr in _DIAG_CHILD_ATTRS:
             try:
@@ -458,8 +449,7 @@ def _build_tool_trace(messages: Any) -> list[Dict[str, Any]]:
                 fn = tc.get("function", {})
                 arguments = fn.get("arguments", "")
                 entry_t = {
-                    "tool": fn.get("name", "unknown"),
-                    "args_bytes": len(arguments),
+                    "tool": fn.get("name", "unknown"), "args_bytes": len(arguments),
                     "input_summary": _summarize_tool_arguments(arguments),
                 }
                 tool_trace.append(entry_t)
@@ -773,8 +763,7 @@ class _ChildRun:
             if not mod_paths:
                 return
             reminder = (
-                "\n\n[NOTE: subagent modified files the parent "
-                "previously read — re-read before editing: "
+                "\n\n[NOTE: subagent modified files the parent previously read — re-read before editing: "
                 + ", ".join(mod_paths[:8])
                 + (f" (+{len(mod_paths) - 8} more)" if len(mod_paths) > 8 else "")
                 + "]"

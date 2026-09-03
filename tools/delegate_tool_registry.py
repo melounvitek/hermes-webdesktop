@@ -72,9 +72,7 @@ def _unregister_subagent(subagent_id: str, *, agent: Any = None) -> None:
         sid = record.get("subagent_id")
         if not sid:
             return
-        _recent_subagents[sid] = {
-            k: record.get(k) for k in ("goal", "delegation_id", "owner_agent_session_id")
-        }
+        _recent_subagents[sid] = {k: record.get(k) for k in ("goal", "delegation_id", "owner_agent_session_id")}
         while len(_recent_subagents) > _RECENT_SUBAGENTS_CAP:
             _recent_subagents.pop(next(iter(_recent_subagents)), None)
 
@@ -299,21 +297,16 @@ def _handle_control_action(action: str, subagent_id: Optional[str], message: Opt
 _CONTROL_OUTCOMES = {
     "stop": (
         "interrupt_requested",
-        "The subagent stops at its next iteration boundary "
-        "(in-flight tool calls are asked to cancel). Its "
-        "partial result still re-enters the conversation as a "
-        "completion message — do not wait or poll.",
+        "The subagent stops at its next iteration boundary (in-flight tool calls are asked to cancel). Its "
+        "partial result still re-enters the conversation as a completion message — do not wait or poll.",
         "Could not interrupt '{sid}' — it likely finished in the last "
         "moment. Its result arrives as a normal completion message.",
     ),
     "steer": (
         "queued",
-        "Steering text queued. The subagent sees it appended "
-        "to its next tool result — the current tool call is "
-        "never cut. If the child finishes before a delivery "
-        "boundary remains, the text is reported back as "
-        "missed_steer in its completion entry.",
-        "Subagent '{sid}' is no longer accepting steering (finishing or "
+        "Steering text queued. The subagent sees it appended to its next tool result — the current tool call is "
+        "never cut. If the child finishes before a delivery boundary remains, the text is reported back as "
+        "missed_steer in its completion entry.", "Subagent '{sid}' is no longer accepting steering (finishing or "
         "already finished). Its result arrives as a normal completion "
         "message; re-delegate a follow-up task if more work is needed.",
     ),

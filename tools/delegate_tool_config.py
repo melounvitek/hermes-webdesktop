@@ -99,8 +99,7 @@ def _get_max_concurrent_children() -> int:
     )
     if result > 10 and _cfg().get("max_concurrent_children") is not None:
         _warn_once(
-            "_HIGH_CONCURRENCY_WARNED",
-            "delegation.max_concurrent_children=%d: each child consumes API tokens "
+            "_HIGH_CONCURRENCY_WARNED", "delegation.max_concurrent_children=%d: each child consumes API tokens "
             "independently. High values multiply cost linearly.", result,
         )
     return result
@@ -125,8 +124,7 @@ def _get_max_async_children() -> int:
     from tools.delegate_tool import _get_max_concurrent_children
     if _cfg().get("max_async_children") is not None:
         _warn_once(
-            "_LEGACY_MAX_ASYNC_WARNED",
-            "delegation.max_async_children is deprecated and ignored; "
+            "_LEGACY_MAX_ASYNC_WARNED", "delegation.max_async_children is deprecated and ignored; "
             "delegation.max_concurrent_children now caps background "
             "delegations too. Remove the stale key from config.yaml.",
         )

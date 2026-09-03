@@ -217,8 +217,7 @@ def _trim_summary_with_footer(summary: str, cap: int, task_index: int) -> tuple[
 
     spill_path = _spill_summary_to_file(task_index, summary)
     footer_lines = [
-        "",
-        "─" * 8 + " [SUMMARY TRUNCATED] " + "─" * 8,
+        "", "─" * 8 + " [SUMMARY TRUNCATED] " + "─" * 8,
         f"Showing {len(head):,} chars (head) + {len(tail):,} chars (tail) "
         f"of {original_len:,} total — trimmed to protect the parent's context window.",
     ]
