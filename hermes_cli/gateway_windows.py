@@ -1,17 +1,14 @@
 """Windows gateway service backend (Scheduled Task + Startup-folder fallback).
 
-This mirrors the contract exposed by ``launchd_install`` / ``launchd_start`` / ``launchd_status``
-etc. on macOS and ``systemd_install`` / ``systemd_start`` on Linux.
-
-Design notes ------------ * ``schtasks /Create /SC ONLOGON /RL LIMITED`` means the task runs at the
-CURRENT USER's next logon without any elevation prompt. Manual starts and install ``--start-now``
-use the direct hidden-console launcher instead of ``schtasks /Run`` so start/restart behavior is
-consistent.
+Mirrors the ``launchd_*`` / ``systemd_*`` contract. ``schtasks /Create ... /RL LIMITED`` runs at the
+CURRENT USER's next logon without elevation. Manual starts and ``install --start-now`` use the direct
+hidden-console launcher instead of ``schtasks /Run`` so start/restart behavior is consistent.
 """
 
 from __future__ import annotations
 
 import ctypes
+import json
 import locale
 import logging
 import os
@@ -21,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -42,10 +40,9 @@ _FALLBACK_PATTERNS = re.compile(
 )
 _ACCESS_DENIED_PATTERN = re.compile(r"(access is denied|acceso denegado)", re.IGNORECASE)
 
-# Set by _spawn_detached() when the breakaway spawn failed and it had to
-# retry WITHOUT CREATE_BREAKAWAY_FROM_JOB — meaning the child stays inside
-# the parent's Job Object and may be killed when this shell exits (#91675).
-# Dict (not bare bool) so the flag is mutable without ``global``.
+# Set by _spawn_detached() when the breakaway spawn failed and it retried WITHOUT
+# CREATE_BREAKAWAY_FROM_JOB — the child stays in the parent's Job Object and may be killed when this
+# shell exits. Dict (not bare bool) so the flag is mutable without ``global``.
 _LAST_SPAWN_BREAKAWAY_FALLBACK: dict = {"fallback": False}
 
 _TASK_NAME_DEFAULT = "Hermes_Gateway"
@@ -54,65 +51,58 @@ _TASK_LOGON_DELAY = "PT30S"
 _TASK_RESTART_INTERVAL = "PT1M"
 _TASK_RESTART_COUNT = 999
 
+_GATEWAY_ENV = (("PYTHONIOENCODING", "utf-8"), ("HERMES_GATEWAY_DETACHED", "1"), ("HERMES_SUPERVISED_CHILD", "1"))
+
 
 def _schtasks_encoding() -> str:
-    """Best-effort console encoding for decoding ``schtasks.exe`` output.
-
-    On localized Windows (e.g. Chinese), ``schtasks`` emits text in the OEM/ANSI code page rather
-    than UTF-8. Decoding with the wrong codec raised ``UnicodeDecodeError`` inside ``subprocess``'
-    reader threads. Prefer the locale's preferred encoding and fall back to UTF-8.
-    """
+    """Console encoding for ``schtasks.exe`` output: localized Windows emits the OEM/ANSI code page,
+    not UTF-8, and decoding with the wrong codec raised UnicodeDecodeError in subprocess' reader
+    threads. Prefer the locale's preferred encoding, fall back to UTF-8."""
     try:
         return locale.getpreferredencoding(False) or "utf-8"
     except Exception:
         return "utf-8"
 
 
-# ---------------------------------------------------------------------------
-# Platform guard
-# ---------------------------------------------------------------------------
-
 def _assert_windows() -> None:
     if sys.platform != "win32":
         raise RuntimeError("gateway_windows is Windows-only")
 
 
+def _hermes_home() -> Path:
+    from hermes_cli.config import get_hermes_home
+
+    return Path(get_hermes_home())
+
+
 def _preserve_hermes_home_path(path: str | Path) -> str:
     r"""Render Hermes-owned paths under the configured HERMES_HOME spelling.
 
-    Windows installs may keep ``%LOCALAPPDATA%\hermes`` as a symlink/junction to another drive.
-    Runtime state should still identify itself by the configured AppData path, so launcher files
-    must not bake in the resolved target when a path lives under HERMES_HOME.
+    ``%LOCALAPPDATA%\hermes`` may be a symlink/junction to another drive; launcher files must not
+    bake in the resolved target for paths under HERMES_HOME.
     """
     candidate = Path(path)
     try:
-        from hermes_cli.config import get_hermes_home
-
-        home = Path(get_hermes_home())
+        home = _hermes_home()
         resolved_home = home.resolve()
         resolved_candidate = candidate.resolve()
         home_key = os.path.normcase(str(resolved_home))
         candidate_key = os.path.normcase(str(resolved_candidate))
         if os.path.commonpath([home_key, candidate_key]) == home_key:
-            rel = os.path.relpath(str(resolved_candidate), str(resolved_home))
-            return str(home / rel)
+            return str(home / os.path.relpath(str(resolved_candidate), str(resolved_home)))
     except Exception:
         pass
     return str(candidate)
 
 
 # ---------------------------------------------------------------------------
-# Quoting helpers. cmd.exe (.cmd body), VBScript literals and schtasks /TR are
-# three DIFFERENT parsers — never reuse one helper for another. The task XML
-# path avoids /TR quoting entirely (see _build_scheduled_task_xml).
+# Quoting helpers. cmd.exe (.cmd body), VBScript literals and schtasks /TR are three DIFFERENT
+# parsers — never reuse one helper for another. The task XML path avoids /TR quoting entirely.
 # ---------------------------------------------------------------------------
 
 def _quote_cmd_script_arg(value: str) -> str:
-    """Quote a single argument for use INSIDE a .cmd file, for cmd.exe parsing.
-
-    cmd.exe splits on spaces/tabs outside of double quotes. Embedded quotes are doubled. We also
-    refuse line breaks because they'd terminate the logical command line mid-script.
-    """
+    """Quote one argument INSIDE a .cmd file for cmd.exe: split on spaces/tabs outside double quotes,
+    embedded quotes doubled. Line breaks are refused — they'd end the logical command line."""
     if "\r" in value or "\n" in value:
         raise ValueError(f"refusing to quote value containing newline: {value!r}")
     if not value:
@@ -122,16 +112,20 @@ def _quote_cmd_script_arg(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
+def _quote_vbs_string(value: str) -> str:
+    """VBScript double-quoted literal (embedded quote doubled; newline refused)."""
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"refusing to quote VBScript value containing newline: {value!r}")
+    return '"' + value.replace('"', '""') + '"'
+
+
 # ---------------------------------------------------------------------------
 # schtasks.exe wrapper
 # ---------------------------------------------------------------------------
 
 def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
-    """Run ``schtasks.exe`` with a hard timeout. Return (code, stdout, stderr).
-
-    If schtasks wedges, returns code=124 with a synthetic stderr string — same convention OpenClaw
-    uses, so the fallback detection regex matches.
-    """
+    """Run ``schtasks.exe`` with a hard timeout. Return (code, stdout, stderr); a wedge returns
+    code=124 with a synthetic stderr so the fallback regex matches."""
     _assert_windows()
     schtasks = shutil.which("schtasks")
     if schtasks is None:
@@ -141,16 +135,12 @@ def _exec_schtasks(args: list[str]) -> tuple[int, str, str]:
             [schtasks, *args],
             capture_output=True,
             text=True,
-            # Localized Windows emits schtasks output in the console code page,
-            # not UTF-8. Decode with the locale encoding and replace undecodable
-            # bytes so a non-UTF-8 status line never surfaces a UnicodeDecodeError
-            # traceback from subprocess' reader threads (issue #38172).
+            # Locale encoding + replace: a non-UTF-8 status line must never surface a
+            # UnicodeDecodeError traceback from subprocess' reader threads.
             encoding=_schtasks_encoding(),
             errors="replace",
             timeout=_SCHTASKS_TIMEOUT_S,
-            # CREATE_NO_WINDOW avoids a flashing console window when the CLI
-            # is itself hosted in a TUI. See tools/browser_tool.py for the
-            # same pattern and the windows-subprocess-sigint-storm.md ref.
+            # CREATE_NO_WINDOW avoids a flashing console when the CLI is hosted in a TUI.
             creationflags=windows_hide_flags(),
         )
         return (proc.returncode, proc.stdout or "", proc.stderr or "")
@@ -188,28 +178,17 @@ def _current_profile_cli_args() -> list[str]:
 def _launch_elevated_gateway_command(command: str, extra_args: list[str] | None = None) -> bool:
     """Launch an elevated gateway subcommand via UAC and return True on handoff.
 
-    The elevated child is the console ``python.exe`` launched with ``SW_HIDE``: ShellExecuteW
-    applies the show-command to a console app's console window, so the child owns a single *hidden*
-    console that its own subprocess spawns (schtasks, taskkill, …) inherit — no visible window after
-    the UAC approval, and no per-descendant conhost flashes (the console-less pythonw.exe
-    alternative re-created #54220/#56747 for every console-subsystem child).
+    The elevated child is console ``python.exe`` launched with ``SW_HIDE``: ShellExecuteW applies
+    the show-command to a console app's console, so the child owns a single hidden console its own
+    subprocesses (schtasks, taskkill, …) inherit — no visible window after UAC approval and no
+    per-descendant conhost flashes (console-less pythonw.exe re-created them for every child).
     """
     _assert_windows()
-    args = ["-m", "hermes_cli.main", *_current_profile_cli_args(), "gateway", command]
-    if extra_args:
-        args.extend(extra_args)
+    args = ["-m", "hermes_cli.main", *_current_profile_cli_args(), "gateway", command, *(extra_args or [])]
     params = subprocess.list2cmdline(args)
     cwd = str(Path(__file__).resolve().parent.parent)
-    elevated_python = sys.executable
     try:
-        result = ctypes.windll.shell32.ShellExecuteW(
-            None,
-            "runas",
-            elevated_python,
-            params,
-            cwd,
-            0,  # SW_HIDE: the child's console exists but is never shown.
-        )
+        result = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, cwd, 0)  # 0 = SW_HIDE
     except Exception as exc:
         print(f"⚠ Could not launch elevated gateway {command} prompt: {exc}")
         return False
@@ -248,11 +227,6 @@ def _launch_elevated_install(
                 os.environ[key] = old
 
 
-def _launch_elevated_uninstall() -> bool:
-    """Launch an elevated gateway uninstall via UAC and return True on handoff."""
-    return _launch_elevated_gateway_command("uninstall")
-
-
 # ---------------------------------------------------------------------------
 # Paths: where we stash our task script and where Startup lives
 # ---------------------------------------------------------------------------
@@ -260,13 +234,10 @@ def _launch_elevated_uninstall() -> bool:
 def get_task_name() -> str:
     """Scheduled Task name, scoped per profile."""
     _assert_windows()
-    # Local import to avoid circular module initialization during hermes_cli boot.
-    from hermes_cli.gateway import _profile_suffix
+    from hermes_cli.gateway import _profile_suffix  # local: avoids circular init during boot
 
     suffix = _profile_suffix()
-    if not suffix:
-        return _TASK_NAME_DEFAULT
-    return f"{_TASK_NAME_DEFAULT}_{suffix}"
+    return f"{_TASK_NAME_DEFAULT}_{suffix}" if suffix else _TASK_NAME_DEFAULT
 
 
 def _sanitize_filename(value: str) -> str:
@@ -275,15 +246,10 @@ def _sanitize_filename(value: str) -> str:
 
 
 def get_task_script_path() -> Path:
-    """The generated ``gateway.cmd`` wrapper kept beside the VBS launcher.
-
-    Lives under ``%LOCALAPPDATA%\\hermes\\gateway-service\\`` (or ``<HERMES_HOME>/gateway-service/``
-    so per-profile installs stay self-contained).
-    """
+    """The generated ``gateway.cmd`` wrapper under ``<HERMES_HOME>/gateway-service/`` (per-profile
+    installs stay self-contained); the VBS launcher lives beside it."""
     _assert_windows()
-    from hermes_cli.config import get_hermes_home
-
-    script_dir = Path(get_hermes_home()) / "gateway-service"
+    script_dir = _hermes_home() / "gateway-service"
     script_dir.mkdir(parents=True, exist_ok=True)
     return script_dir / f"{_sanitize_filename(get_task_name())}.cmd"
 
@@ -310,25 +276,15 @@ def _legacy_startup_entry_path() -> Path:
     return _startup_dir() / f"{_sanitize_filename(get_task_name())}.cmd"
 
 
-# ---------------------------------------------------------------------------
-# Stable working directory
-# ---------------------------------------------------------------------------
-
 def _stable_gateway_working_dir(project_root: Path) -> str:
-    """Return a stable cwd for detached/startup gateway runs.
-
-    Mirror the POSIX service invariant: anchor at ``HERMES_HOME`` whenever it exists so Scheduled
-    Task / Startup launches do not fail at the ``cd`` step after a transient checkout or worktree is
-    moved away. Fall back to the source checkout only if ``HERMES_HOME`` cannot be used yet.
-    """
+    """Stable cwd for detached/startup runs: anchor at HERMES_HOME when it exists (mirrors the POSIX
+    service invariant) so a moved checkout/worktree can't fail the ``cd`` step; else the checkout."""
     from hermes_cli.config import get_hermes_home
 
     try:
         home = get_hermes_home()
-        if home:
-            home_path = Path(home)
-            if home_path.is_dir():
-                return str(home_path)
+        if home and Path(home).is_dir():
+            return str(Path(home))
     except Exception:
         pass
     return str(project_root)
@@ -349,11 +305,9 @@ def _gateway_run_argv(python_exe: str, profile_arg: str) -> list[str]:
 
 def _launcher_settings() -> tuple[str, str, str, str]:
     """Return (python_path, working_dir, hermes_home, profile_arg) for generated launchers."""
-    # Local imports to avoid circular-init at module load time.
-    from hermes_cli.config import get_hermes_home
-    from hermes_cli.gateway import PROJECT_ROOT, _profile_arg, get_python_path
+    from hermes_cli.gateway import PROJECT_ROOT, _profile_arg, get_python_path  # avoid circular init
 
-    hermes_home = str(Path(get_hermes_home()))
+    hermes_home = str(_hermes_home())
     return (
         _preserve_hermes_home_path(get_python_path()),
         _stable_gateway_working_dir(PROJECT_ROOT),
@@ -362,112 +316,77 @@ def _launcher_settings() -> tuple[str, str, str, str]:
     )
 
 
-def _build_gateway_cmd_script(
-    python_path: str,
-    working_dir: str,
-    hermes_home: str,
-    profile_arg: str,
-) -> str:
-    """Build the ``gateway.cmd`` wrapper content (CRLF-terminated).
-
-    We intentionally do NOT inline PATH overrides here — cmd.exe inherits the per-user PATH the
-    Scheduled Task was created with, and forcibly rewriting PATH tends to break Homebrew/nvm-style
-    installations.
-    """
-    lines = ["@echo off", f"rem {_TASK_DESCRIPTION}"]
-    lines.append(f"cd /d {_quote_cmd_script_arg(working_dir)}")
-    lines.append(f'set "HERMES_HOME={hermes_home}"')
-    lines.append('set "PYTHONIOENCODING=utf-8"')
-    lines.append('set "HERMES_GATEWAY_DETACHED=1"')
-    lines.append('set "HERMES_SUPERVISED_CHILD=1"')
-    python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
-    # VIRTUAL_ENV lets the gateway's own python detection find the venv
-    # if someone imports hermes_constants-based logic during startup.
-    lines.append(f'set "VIRTUAL_ENV={_preserve_hermes_home_path(venv_dir)}"')
-    pythonpath_entries = [
+def _launcher_pythonpath_entries(extra_pythonpath: list[str]) -> list[str]:
+    return [
         _preserve_hermes_home_path(Path(__file__).resolve().parent.parent),
         *[_preserve_hermes_home_path(entry) for entry in extra_pythonpath],
     ]
-    lines.append(f'set "PYTHONPATH={";".join([*pythonpath_entries, "%PYTHONPATH%"])}"')
 
-    # Do NOT use `start` here; that creates an extra wrapper process and made
-    # gateway lifecycle/status harder to reason about.
-    # Do NOT use `--replace` for service-managed starts; repeated /Run calls
-    # should be idempotent, not churn parent/child takeover loops.
-    lines.append(" ".join(_quote_cmd_script_arg(a) for a in _gateway_run_argv(python_exe_path, profile_arg)))
-    lines.append("exit /b 0")
+
+def _build_gateway_cmd_script(python_path: str, working_dir: str, hermes_home: str, profile_arg: str) -> str:
+    """Build the ``gateway.cmd`` wrapper (CRLF-terminated).
+
+    No PATH overrides: cmd.exe inherits the per-user PATH the task was created with, and rewriting
+    it breaks Homebrew/nvm-style installs. No ``start`` (extra wrapper process muddles lifecycle/
+    status) and no ``--replace`` (repeated /Run calls must be idempotent, not takeover loops).
+    """
+    python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
+    pythonpath = ";".join([*_launcher_pythonpath_entries(extra_pythonpath), "%PYTHONPATH%"])
+    lines = [
+        "@echo off",
+        f"rem {_TASK_DESCRIPTION}",
+        f"cd /d {_quote_cmd_script_arg(working_dir)}",
+        f'set "HERMES_HOME={hermes_home}"',
+        *[f'set "{k}={v}"' for k, v in _GATEWAY_ENV],
+        # VIRTUAL_ENV lets the gateway's own python detection find the venv.
+        f'set "VIRTUAL_ENV={_preserve_hermes_home_path(venv_dir)}"',
+        f'set "PYTHONPATH={pythonpath}"',
+        " ".join(_quote_cmd_script_arg(a) for a in _gateway_run_argv(python_exe_path, profile_arg)),
+        "exit /b 0",
+    ]
     return "\r\n".join(lines) + "\r\n"
 
 
-def _quote_vbs_string(value: str) -> str:
-    """Quote a value as a VBScript double-quoted string literal.
+def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: str, profile_arg: str) -> str:
+    """Build the hidden-console ``gateway.vbs`` launcher (CRLF-terminated).
 
-    VBScript escapes an embedded double-quote by doubling it. A newline cannot appear inside a
-    literal, so refuse it (same guard as ``_quote_cmd_script_arg``).
-    """
-    if "\r" in value or "\n" in value:
-        raise ValueError(f"refusing to quote VBScript value containing newline: {value!r}")
-    return '"' + value.replace('"', '""') + '"'
-
-
-def _build_gateway_vbs_script(
-    python_path: str,
-    working_dir: str,
-    hermes_home: str,
-    profile_arg: str,
-) -> str:
-    """Build a hidden-console ``gateway.vbs`` launcher (CRLF-terminated).
-
-    The task runs this via ``wscript.exe``, not ``cmd.exe``: cmd.exe allocates a console, and at
-    logon Windows broadcasts ``CTRL_CLOSE_EVENT`` to console groups, killing the half-started
-    gateway with ``STATUS_CONTROL_C_EXIT``, which Task Scheduler treats as a user cancel so
-    ``RestartOnFailure`` never fires. wscript has no console; it runs ``python.exe`` with window
-    style 0 so the gateway owns one hidden console that descendants (git, gh, node) inherit
-    instead of flashing their own conhost. Mirrors ``_build_gateway_cmd_script`` for env + argv.
+    Run via ``wscript.exe``, not ``cmd.exe``: cmd.exe allocates a console, and at logon Windows
+    broadcasts CTRL_CLOSE_EVENT to console groups, killing the half-started gateway with
+    STATUS_CONTROL_C_EXIT — which Task Scheduler treats as a user cancel, so ``RestartOnFailure``
+    never fires. wscript has no console; it runs python.exe with window style 0 so the gateway owns
+    one hidden console that descendants (git, gh, node) inherit instead of flashing their own.
     """
     python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
     # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
     command_line = subprocess.list2cmdline(_gateway_run_argv(python_exe_path, profile_arg))
-
-    repo_root = _preserve_hermes_home_path(Path(__file__).resolve().parent.parent)
-    static_pythonpath = os.pathsep.join(
-        [repo_root, *[_preserve_hermes_home_path(entry) for entry in extra_pythonpath]]
-    )
-
+    static_pythonpath = os.pathsep.join(_launcher_pythonpath_entries(extra_pythonpath))
+    q = _quote_vbs_string
     lines = [
         f"' {_TASK_DESCRIPTION}",
         "Option Explicit",
         "Dim sh, env, existing_pp",
         'Set sh = CreateObject("WScript.Shell")',
         'Set env = sh.Environment("PROCESS")',
-        f"env.Item({_quote_vbs_string('HERMES_HOME')}) = {_quote_vbs_string(hermes_home)}",
-        f"env.Item({_quote_vbs_string('PYTHONIOENCODING')}) = {_quote_vbs_string('utf-8')}",
-        f"env.Item({_quote_vbs_string('HERMES_GATEWAY_DETACHED')}) = {_quote_vbs_string('1')}",
-        f"env.Item({_quote_vbs_string('HERMES_SUPERVISED_CHILD')}) = {_quote_vbs_string('1')}",
-        f"env.Item({_quote_vbs_string('VIRTUAL_ENV')}) = {_quote_vbs_string(_preserve_hermes_home_path(venv_dir))}",
-        # Mirror the cmd wrapper's ``PYTHONPATH=<static>;%PYTHONPATH%``: chain onto
-        # whatever PYTHONPATH the task environment already carries, at runtime.
-        f"existing_pp = env.Item({_quote_vbs_string('PYTHONPATH')})",
+        f"env.Item({q('HERMES_HOME')}) = {q(hermes_home)}",
+        *[f"env.Item({q(k)}) = {q(v)}" for k, v in _GATEWAY_ENV],
+        f"env.Item({q('VIRTUAL_ENV')}) = {q(_preserve_hermes_home_path(venv_dir))}",
+        # Mirror the cmd wrapper's ``PYTHONPATH=<static>;%PYTHONPATH%`` at runtime.
+        f"existing_pp = env.Item({q('PYTHONPATH')})",
         "If Len(existing_pp) > 0 Then",
-        f"  env.Item({_quote_vbs_string('PYTHONPATH')}) = {_quote_vbs_string(static_pythonpath + os.pathsep)} & existing_pp",
+        f"  env.Item({q('PYTHONPATH')}) = {q(static_pythonpath + os.pathsep)} & existing_pp",
         "Else",
-        f"  env.Item({_quote_vbs_string('PYTHONPATH')}) = {_quote_vbs_string(static_pythonpath)}",
+        f"  env.Item({q('PYTHONPATH')}) = {q(static_pythonpath)}",
         "End If",
-        f"sh.CurrentDirectory = {_quote_vbs_string(working_dir)}",
-        # Window style 0 = hidden; bWaitOnReturn False = detached/async. The
-        # console python's one console is created hidden and inherited by all
-        # descendants, so nothing ever flashes.
-        f"sh.Run {_quote_vbs_string(command_line)}, 0, False",
+        f"sh.CurrentDirectory = {q(working_dir)}",
+        # Window style 0 = hidden; bWaitOnReturn False = detached/async.
+        f"sh.Run {q(command_line)}, 0, False",
     ]
     return "\r\n".join(lines) + "\r\n"
 
 
 def _build_startup_launcher(script_path: Path) -> str:
-    """The tiny .vbs that goes in the Startup folder and chains hidden.
-
-    Bails out silently (``WScript.Quit 0``) if the target script is gone: stale Startup entries
-    pointing at vanished directories would otherwise error on every Windows login.
-    """
+    """The tiny Startup-folder .vbs that chains hidden. Quits silently if the target is gone so a
+    stale entry doesn't error on every login."""
     target = str(script_path.with_suffix(".vbs"))
     command = subprocess.list2cmdline(["wscript.exe", target])
     lines = [
@@ -484,14 +403,12 @@ def _build_startup_launcher(script_path: Path) -> str:
 
 
 def _write_task_script() -> Path:
-    """Generate and write the gateway.cmd wrapper. Return its absolute path."""
+    """Generate the gateway.cmd wrapper (kept as a compatibility artifact) and the console-less .vbs
+    launcher used by the Scheduled Task and Startup fallback. Return the .cmd path."""
     _assert_windows()
     settings = _launcher_settings()
     script_path = get_task_script_path()
     _atomic_write(script_path, _build_gateway_cmd_script(*settings), script_path.with_suffix(".tmp"))
-    # Also render the console-less .vbs launcher used by Scheduled Task and the
-    # Startup-folder fallback via wscript.exe (issue #45599 fix A). The .cmd
-    # wrapper stays as a generated helper/compatibility artifact.
     vbs_path = script_path.with_suffix(".vbs")
     _atomic_write(vbs_path, _build_gateway_vbs_script(*settings), vbs_path.with_name(vbs_path.name + ".tmp"))
     return script_path
@@ -519,11 +436,8 @@ def _resolve_task_user() -> str | None:
 
 
 def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | None) -> str:
-    """Render a Task Scheduler XML definition with safe long-running defaults.
-
-    ``launcher_path`` is the console-less ``.vbs`` run via ``wscript.exe``, not the ``.cmd``
-    (see ``_build_gateway_vbs_script`` for why cmd.exe must stay out of the chain).
-    """
+    """Task Scheduler XML with safe long-running defaults. ``launcher_path`` is the console-less
+    ``.vbs`` run via ``wscript.exe`` (see ``_build_gateway_vbs_script`` for why not cmd.exe)."""
     user_principal = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -578,9 +492,8 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
 def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, str]:
     """Create or replace the Scheduled Task. Returns (success, detail).
 
-    Always recreate instead of ``/Change``. Older Hermes builds and failed experiments may have left
-    repeat/restart settings on the task; ``/Change`` preserves those stale triggers and can make the
-    gateway relaunch every minute. Delete+create gives us a clean ONLOGON task every install.
+    Always delete+create instead of ``/Change``: older builds may have left repeat/restart settings
+    that ``/Change`` preserves and that relaunch the gateway every minute.
     """
     delete_code, delete_out, delete_err = _exec_schtasks(["/Delete", "/F", "/TN", task_name])
     delete_detail = (delete_err or delete_out or "").strip()
@@ -588,12 +501,9 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
         delete_detail = ""
     if delete_code != 0 and delete_detail and _is_access_denied(delete_detail):
         return (False, f"schtasks /Delete failed (code {delete_code}): {delete_detail}")
-    # Other /Delete failures are non-fatal: /Create /F below may still replace
-    # it. Keep the detail for the final error if creation also fails.
+    # Other /Delete failures are non-fatal: /Create /F may still replace it; keep the detail.
     user = _resolve_task_user()
-    # The Scheduled Task launches the console-less .vbs (issue #45599 fix A), not
-    # the .cmd. Immediate manual starts use _spawn_detached().
-    launcher_path = script_path.with_suffix(".vbs")
+    launcher_path = script_path.with_suffix(".vbs")   # the task launches the console-less .vbs
     xml_path = launcher_path.with_suffix(".task.xml")
     xml_path.write_text(
         _build_scheduled_task_xml(task_name, launcher_path, user), encoding="utf-16", newline=""
@@ -648,12 +558,10 @@ def _resolve_detached_python(python_exe: str) -> tuple[str, Path, list[str]]:
                 p = sibling
                 python_exe = str(sibling)
         except OSError:
-            # Can't stat the sibling — keep the original interpreter. A
-            # console-less gateway is worse than a hidden-console one, but a
-            # failed respawn is worse still.
+            # Can't stat the sibling — keep the original interpreter: a console-less gateway is
+            # worse than a hidden-console one, but a failed respawn is worse still.
             pass
-    venv_dir = p.parent.parent
-    return (python_exe, venv_dir, [])
+    return (python_exe, p.parent.parent, [])
 
 
 def _prepend_pythonpath(env_overlay: dict[str, str], entries: list[str]) -> None:
@@ -667,73 +575,46 @@ def _prepend_pythonpath(env_overlay: dict[str, str], entries: list[str]) -> None
 
 
 def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
-    """Build (argv, working_dir, env_overlay) for the gateway subprocess.
-
-    Same logical command as gateway.cmd, but assembled as a native argv for direct
-    ``subprocess.Popen`` so no cmd.exe layer sits in between.
-    """
+    """Build (argv, working_dir, env_overlay) for the gateway subprocess — the same logical command
+    as gateway.cmd, assembled as a native argv so no cmd.exe layer sits in between."""
     _assert_windows()
     from hermes_cli.gateway import PROJECT_ROOT
 
     python_path, working_dir, hermes_home, profile_arg = _launcher_settings()
     python_exe, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
-    project_root = _preserve_hermes_home_path(PROJECT_ROOT)
-
-    argv = _gateway_run_argv(python_exe, profile_arg)
     env_overlay = {
         "HERMES_HOME": hermes_home,
-        "PYTHONIOENCODING": "utf-8",
-        "HERMES_GATEWAY_DETACHED": "1",
-        "HERMES_SUPERVISED_CHILD": "1",
+        **dict(_GATEWAY_ENV),
         "VIRTUAL_ENV": _preserve_hermes_home_path(venv_dir),
     }
     _prepend_pythonpath(
         env_overlay,
-        [project_root, *[_preserve_hermes_home_path(entry) for entry in extra_pythonpath]],
+        [_preserve_hermes_home_path(PROJECT_ROOT), *[_preserve_hermes_home_path(entry) for entry in extra_pythonpath]],
     )
-    return argv, working_dir, env_overlay
+    return _gateway_run_argv(python_exe, profile_arg), working_dir, env_overlay
 
 
-def windowless_gateway_restart_spec(
-    run_argv: list[str],
-) -> tuple[list[str], str, dict[str, str]]:
-    """Return the (argv, cwd, env overlay) for a hidden-console gateway respawn.
+def windowless_gateway_restart_spec(run_argv: list[str]) -> tuple[list[str], str, dict[str, str]]:
+    """(argv, cwd, env overlay) for a hidden-console gateway respawn.
 
-    Returns ``(new_argv, working_dir, env_overlay)``. ``new_argv`` preserves every argument after
-    the interpreter (``-m hermes_cli.main [--profile X] gateway run [--replace]``) verbatim. On non-
-    Windows, or if ``run_argv`` doesn't start with a resolvable python, the argv is returned
-    unchanged with an empty overlay.
+    ``new_argv`` preserves every argument after the interpreter verbatim. On non-Windows, or if
+    ``run_argv`` doesn't start with a resolvable python, the argv is returned unchanged with an
+    empty overlay.
     """
-    if not run_argv:
-        return run_argv, "", {}
-    if sys.platform != "win32":
+    if not run_argv or sys.platform != "win32":
         return run_argv, "", {}
 
-    from hermes_cli.config import get_hermes_home
     from hermes_cli.gateway import PROJECT_ROOT
 
-    python_exe = run_argv[0]
-    rest = run_argv[1:]
-
-    # Normalize the leading interpreter token and derive the venv layout.
-    # If a caller passed something other than a python path (a non-python
-    # launcher), leave the argv alone.
     try:
-        hidden_console_python, venv_dir, extra_pythonpath = _resolve_detached_python(
-            python_exe
-        )
+        hidden_console_python, venv_dir, extra_pythonpath = _resolve_detached_python(run_argv[0])
     except Exception:
         return run_argv, "", {}
 
-    new_argv = [hidden_console_python, *rest]
-
-    working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
-    project_root = str(PROJECT_ROOT)
     try:
-        hermes_home = str(Path(get_hermes_home()).resolve())
+        hermes_home = str(_hermes_home().resolve())
     except Exception:
         hermes_home = ""
-
     env_overlay: dict[str, str] = {
         "PYTHONIOENCODING": "utf-8",
         "HERMES_GATEWAY_DETACHED": "1",
@@ -741,69 +622,51 @@ def windowless_gateway_restart_spec(
     }
     if hermes_home:
         env_overlay["HERMES_HOME"] = hermes_home
-    _prepend_pythonpath(env_overlay, [project_root, *extra_pythonpath])
-    return new_argv, working_dir, env_overlay
+    _prepend_pythonpath(env_overlay, [str(PROJECT_ROOT), *extra_pythonpath])
+    return [hidden_console_python, *run_argv[1:]], _stable_gateway_working_dir(PROJECT_ROOT), env_overlay
 
 
 def _spawn_detached(script_path: Path | None = None) -> int:
     """Launch the gateway as a fully detached background process.
 
-    We spawn ``python.exe -m hermes_cli.main gateway run`` directly — NOT through a cmd.exe shim —
-    because on Windows a cmd.exe child inherits the parent session's console handle and tends to get
-    reaped when the spawning shell exits.
+    Spawns ``python.exe -m hermes_cli.main gateway run`` directly — NOT through a cmd.exe shim, which
+    inherits the parent session's console handle and tends to get reaped when the shell exits.
+    ``script_path`` is accepted for API symmetry with older callers and ignored.
 
-    Arg ``script_path`` is accepted for API symmetry with older callers but ignored — we don't need
-    it now that we go direct.
+    Flags: CREATE_NEW_PROCESS_GROUP (no Ctrl+C from our group), CREATE_NO_WINDOW (hidden console
+    detached from ours, inheritable by descendants so nothing flashes), CREATE_BREAKAWAY_FROM_JOB
+    (escape a parent Job Object — some Windows Terminal versions wrap children in one).
     """
     _assert_windows()
     argv, working_dir, env_overlay = _build_gateway_argv()
-
-    # Inherit PATH etc. from the current env, overlay our required vars.
     env = {**os.environ, **env_overlay}
-    primary_env = {**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}
 
-    # CREATE_NEW_PROCESS_GROUP 0x00000200 — child gets its own group, won't
-    #                                       receive Ctrl+C from our group
-    # CREATE_NO_WINDOW         0x08000000 — child owns a hidden console:
-    #                                       detached from our console's
-    #                                       lifetime AND inheritable by its
-    #                                       descendants (no conhost flashes)
-    # CREATE_BREAKAWAY_FROM_JOB 0x01000000 — escape any job object the
-    #                                       parent is in (prevents parent-
-    #                                       job teardown from reaping us;
-    #                                       some Windows Terminal versions
-    #                                       wrap their children in a job).
-    flags = windows_detach_flags()
-
-    # Redirect any stray stdout/stderr output to a sidecar log. Python's
-    # logging module writes to gateway.log through a FileHandler, so the
-    # real gateway logs still land there — this just captures anything
-    # that goes to print() or native stderr.
-    from hermes_cli.config import get_hermes_home
-
-    log_dir = Path(get_hermes_home()) / "logs"
+    # Stray print()/native stderr goes to a sidecar log; real gateway logs still land in gateway.log
+    # via the logging FileHandler.
+    log_dir = _hermes_home() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     stray_log = log_dir / "gateway-stdio.log"
 
-    try:
+    def _popen(breakaway: str, flags: int):
         with open(stray_log, "ab", buffering=0) as log_fh:
-            proc = subprocess.Popen(
+            return subprocess.Popen(
                 argv,
                 cwd=working_dir,
-                env=primary_env,
+                env={**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: breakaway},
                 creationflags=flags,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=log_fh,
                 stderr=log_fh,
             )
+
+    try:
+        proc = _popen("1", windows_detach_flags())
         _LAST_SPAWN_BREAKAWAY_FALLBACK["fallback"] = False
     except OSError as exc:
-        # CREATE_BREAKAWAY_FROM_JOB can fail with "access denied" when the
-        # parent's job object doesn't permit breakaway (some Windows
-        # Terminal configs). Retry without the breakaway flag — in most
-        # setups the hidden-console CREATE_NO_WINDOW spawn is enough on
-        # its own.
+        # CREATE_BREAKAWAY_FROM_JOB fails with "access denied" when the parent's job object forbids
+        # breakaway (some Windows Terminal configs). Retry without it — the hidden-console
+        # CREATE_NO_WINDOW spawn is usually enough on its own.
         error_code = getattr(exc, "winerror", None)
         if error_code is None:
             error_code = exc.errno
@@ -812,17 +675,7 @@ def _spawn_detached(script_path: Path | None = None) -> int:
             "CREATE_BREAKAWAY_FROM_JOB",
             error_code,
         )
-        with open(stray_log, "ab", buffering=0) as log_fh:
-            proc = subprocess.Popen(
-                argv,
-                cwd=working_dir,
-                env={**env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"},
-                creationflags=windows_detach_flags_without_breakaway(),
-                close_fds=True,
-                stdin=subprocess.DEVNULL,
-                stdout=log_fh,
-                stderr=log_fh,
-            )
+        proc = _popen("0", windows_detach_flags_without_breakaway())
         _LAST_SPAWN_BREAKAWAY_FALLBACK["fallback"] = True
     return proc.pid
 
@@ -844,12 +697,10 @@ def _prompt_install_choices(
     start_on_login: bool | None = None,
 ) -> tuple[bool, bool]:
     """Return (start_now, start_on_login), asking before any UAC escalation."""
-    env_start_now = _install_choice_from_env("HERMES_GATEWAY_INSTALL_START_NOW")
-    env_start_on_login = _install_choice_from_env("HERMES_GATEWAY_INSTALL_START_ON_LOGIN")
     if start_now is None:
-        start_now = env_start_now
+        start_now = _install_choice_from_env("HERMES_GATEWAY_INSTALL_START_NOW")
     if start_on_login is None:
-        start_on_login = env_start_on_login
+        start_on_login = _install_choice_from_env("HERMES_GATEWAY_INSTALL_START_ON_LOGIN")
     if start_now is not None and start_on_login is not None:
         return start_now, start_on_login
 
@@ -865,11 +716,15 @@ def _prompt_install_choices(
     return start_now, start_on_login
 
 
+def _report_already_running(running_pids: list[int]) -> None:
+    print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
+
+
 def _start_or_report_running() -> None:
     """Spawn the gateway unless one is already running for this profile."""
     running_pids = _gateway_pids()
     if running_pids:
-        print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
+        _report_already_running(running_pids)
     else:
         pid = _spawn_detached()
         _report_gateway_start(f"direct spawn (PID {pid})")
@@ -882,13 +737,11 @@ def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -
     print(f"✓ Installed Windows login item: {entry}")
     print(f"  Task script: {script_path}")
 
-    # Re-running `hermes -p <profile> gateway install` must be safe.
-    # Startup-folder fallback only installs login persistence. Starting is
-    # controlled by the pre-UAC start_now answer so all user decisions happen
-    # before any elevation prompt.
+    # Re-running install must be safe: the fallback only installs login persistence; starting is
+    # controlled by the pre-UAC start_now answer so every user decision precedes elevation.
     running_pids = _gateway_pids()
     if running_pids:
-        print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
+        _report_already_running(running_pids)
     elif start_now:
         pid = _spawn_detached()
         _report_gateway_start(f"direct spawn (PID {pid})")
@@ -902,9 +755,7 @@ def _install_startup_fallback(script_path: Path, start_now: bool, detail: str) -
     _print_next_steps()
 
 
-def _offer_elevated_install(
-    headline: str, force: bool, start_now: bool, start_on_login: bool
-) -> bool:
+def _offer_elevated_install(headline: str, force: bool, start_now: bool, start_on_login: bool) -> bool:
     """Offer the UAC prompt for a Scheduled Task install. True when handed off to an elevated child."""
     from hermes_cli.setup import prompt_yes_no
 
@@ -931,12 +782,8 @@ def install(
     start_on_login: bool | None = None,
     elevated_handoff: bool = False,
 ) -> None:
-    """Install the gateway as a Windows Scheduled Task (with Startup fallback).
-
-    Idempotent: re-running updates the task to point at the current python/ project paths. ``force``
-    is accepted for API parity with ``launchd_install`` / ``systemd_install`` but isn't needed — we
-    always reconcile.
-    """
+    """Install the gateway as a Windows Scheduled Task (with Startup fallback). Idempotent — we
+    always reconcile; ``force`` exists for API parity with launchd/systemd."""
     _assert_windows()
     start_now, start_on_login = _prompt_install_choices(start_now, start_on_login)
 
@@ -952,10 +799,8 @@ def install(
     task_name = get_task_name()
     script_path = _write_task_script()
 
-    # On machines where the current user's scheduled-task ACL is locked down,
-    # schtasks /Create or /Change can sit for the timeout before returning
-    # Access Denied. We already collected all intent questions above, so avoid
-    # a mysterious post-question pause: ask for UAC before touching schtasks.
+    # On locked-down accounts schtasks can sit for the full timeout before returning Access Denied.
+    # All intent questions were asked above, so ask for UAC before touching schtasks.
     if not _is_running_as_admin() and not elevated_handoff:
         if _offer_elevated_install(
             "↻ Scheduled Task install may need administrator approval on this Windows account.",
@@ -978,22 +823,17 @@ def install(
         _print_next_steps()
         return
 
-    # schtasks create didn't work. Prefer a real Scheduled Task over the
-    # Startup-folder fallback when the only blocker is elevation. This gives
-    # users a UAC prompt instead of silently installing a less reliable login
-    # item, and keeps the fallback for locked-down boxes / cancelled prompts.
+    # Prefer a real Scheduled Task over the Startup fallback when elevation is the only blocker.
     if _is_access_denied(detail) and not _is_running_as_admin() and _offer_elevated_install(
         f"↻ Scheduled Task install needs administrator approval ({detail.splitlines()[0]})",
         force, start_now, start_on_login,
     ):
         return
 
-    # schtasks create didn't work. See if it's a "fall back to startup" case.
     if _should_fall_back(1, detail):
         _install_startup_fallback(script_path, start_now, detail)
         return
 
-    # Unknown schtasks error — surface it and bail.
     raise RuntimeError(f"Windows gateway install failed: {detail}")
 
 
@@ -1001,12 +841,8 @@ def _confirm_gateway_stable(
     initial_pids: list[int], confirm_s: float, interval_s: float,
     all_profiles: bool = False,
 ) -> list[int]:
-    """Re-check a freshly detected gateway for ``confirm_s`` seconds.
-
-    A single process-table hit only proves the child was *created*, not that it survived startup — a
-    gateway that crashes moments after spawn (or is reaped by the parent shell's Job Object,
-    #91675/#84185) passes a first-hit poll and then dies.
-    """
+    """Re-check a freshly detected gateway for ``confirm_s`` seconds: one process-table hit proves
+    the child was *created*, not that it survived startup (or a parent Job Object teardown)."""
     if confirm_s <= 0:
         return initial_pids
     from hermes_cli.gateway import find_gateway_pids
@@ -1027,21 +863,15 @@ def _wait_for_gateway_ready(
     confirm_s: float = 2.0,
     all_profiles: bool = False,
 ) -> list[int]:
-    """Poll for a live gateway process for up to ``timeout_s`` seconds.
-
-    A first process-table hit is treated as *provisional*: the gateway must then stay visible for
-    ``confirm_s`` more seconds before we report it ready (see :func:`_confirm_gateway_stable` — a
-    child that dies right after spawn must not earn a ✓, #91675).
-    """
+    """Poll for a live gateway for up to ``timeout_s``; a first hit is provisional until the gateway
+    stays visible for ``confirm_s`` more seconds (a child that dies right after spawn earns no ✓)."""
     from hermes_cli.gateway import find_gateway_pids
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         pids = list(find_gateway_pids(all_profiles=all_profiles))
         if pids:
-            confirmed = _confirm_gateway_stable(
-                pids, confirm_s, interval_s, all_profiles=all_profiles
-            )
+            confirmed = _confirm_gateway_stable(pids, confirm_s, interval_s, all_profiles=all_profiles)
             if confirmed:
                 return confirmed
             continue  # died during confirmation — keep polling until deadline
@@ -1051,31 +881,22 @@ def _wait_for_gateway_ready(
 
 # ---------------------------------------------------------------------------
 # Start attestation — honest reporting for deaths AFTER the liveness poll
-# ---------------------------------------------------------------------------
 #
-# The liveness poll (even with the confirmation window above) cannot observe
-# a death that happens after this CLI process exits — the exact #91675
-# failure mode, where the parent shell's Job Object tears the gateway down
-# on CLI exit. So every ✓ persists a small attestation marker recording
-# which PIDs we vouched for. The NEXT gateway CLI invocation checks the
-# marker: if those PIDs are gone and the lifecycle ledger shows no clean
-# exit for them, the earlier ✓ was a lie and we say so — once — with the
-# schtasks recovery hint.
+# The poll cannot observe a death after this CLI process exits (the parent shell's Job Object tears
+# the gateway down on CLI exit). So every ✓ persists a marker recording which PIDs we vouched for;
+# the NEXT gateway CLI invocation checks it: PIDs gone with no clean exit in the lifecycle ledger
+# means the earlier ✓ was a lie, and we say so — once — with the schtasks recovery hint.
+# ---------------------------------------------------------------------------
 
 _START_ATTESTATION_RELATIVE = ("state", "gateway.start-attestation.json")
 
 
 def _start_attestation_path() -> Path:
-    from hermes_cli.config import get_hermes_home
-
-    return Path(get_hermes_home()).joinpath(*_START_ATTESTATION_RELATIVE)
+    return _hermes_home().joinpath(*_START_ATTESTATION_RELATIVE)
 
 
 def _write_start_attestation(pids: list[int], via: str) -> None:
     """Persist the PIDs a ✓ vouched for. Best-effort, never raises."""
-    import json as _json
-    from datetime import datetime, timezone
-
     try:
         path = _start_attestation_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1085,7 +906,7 @@ def _write_start_attestation(pids: list[int], via: str) -> None:
             "ts": datetime.now(timezone.utc).isoformat(),
         }
         tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(_json.dumps(payload), encoding="utf-8")
+        tmp.write_text(json.dumps(payload), encoding="utf-8")
         tmp.replace(path)
     except Exception:
         logger.debug("Failed to write gateway start attestation", exc_info=True)
@@ -1100,43 +921,26 @@ def _clear_start_attestation() -> None:
 
 def _attested_pid_exited_cleanly(pid: int) -> bool:
     """True when the lifecycle ledger shows a clean exit for ``pid``."""
-    import json as _json
-
     try:
         from gateway.lifecycle_ledger import get_lifecycle_sentinel_path
-        from hermes_cli.config import get_hermes_home
 
-        sentinel_path = get_lifecycle_sentinel_path(Path(get_hermes_home()))
-        data = _json.loads(sentinel_path.read_text(encoding="utf-8"))
+        data = json.loads(get_lifecycle_sentinel_path(_hermes_home()).read_text(encoding="utf-8"))
     except Exception:
         return False
-    return (
-        isinstance(data, dict)
-        and data.get("phase") == "exited"
-        and data.get("pid") == pid
-    )
+    return isinstance(data, dict) and data.get("phase") == "exited" and data.get("pid") == pid
 
 
 def check_start_attestation(current_pids: list[int] | None = None) -> str | None:
-    """Surface (once) a gateway that died after a ✓ was printed for it.
+    """Surface (once) a gateway that died after a ✓ was printed for it. Never raises.
 
-    Reads the attestation marker from the last successful-looking start. Gateway running: the
-    start held, clear silently. PIDs gone with a clean-exit ledger record: planned stop, clear
-    silently. PIDs gone with NO clean-exit record: the ✓ was false (parent Job Object teardown
-    killed the child after the poll); return a warning and consume the marker so it prints once.
-    Never raises.
+    Gateway running, or PIDs gone with a clean-exit ledger record: clear silently. PIDs gone with NO
+    clean-exit record: the ✓ was false — return a warning and consume the marker so it prints once.
     """
-    import json as _json
-
     try:
-        path = _start_attestation_path()
-        data = _json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(_start_attestation_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
-        _clear_start_attestation()
-        return None
-    attested = [p for p in data.get("pids", []) if isinstance(p, int)]
+    attested = [p for p in data.get("pids", []) if isinstance(p, int)] if isinstance(data, dict) else []
     if not attested:
         _clear_start_attestation()
         return None
@@ -1149,16 +953,10 @@ def check_start_attestation(current_pids: list[int] | None = None) -> str | None
         except Exception:
             return None
 
-    if current_pids:
-        # Gateway is up — the previous start held, or something restarted it.
-        _clear_start_attestation()
-        return None
-
-    if any(_attested_pid_exited_cleanly(pid) for pid in attested):
-        _clear_start_attestation()
-        return None
-
     _clear_start_attestation()
+    if current_pids or any(_attested_pid_exited_cleanly(pid) for pid in attested):
+        return None
+
     via = data.get("via") or "direct spawn"
     ts = data.get("ts") or "unknown time"
     lines = [
@@ -1186,6 +984,12 @@ def _task_run_hint(fmt: str) -> str | None:
     return None
 
 
+def _print_task_run_hint(fmt: str) -> None:
+    hint = _task_run_hint(fmt)
+    if hint:
+        print(hint)
+
+
 def _print_start_attestation_warning() -> None:
     """Print the stale-attestation warning if one is pending. Never raises."""
     try:
@@ -1205,9 +1009,7 @@ def _report_gateway_start(via: str) -> None:
                 "⚠ The gateway could not break away from this shell's Job Object; "
                 "it may be killed when this shell exits."
             )
-            hint = _task_run_hint("  If it dies, start it with: schtasks /Run /TN {}")
-            if hint:
-                print(hint)
+            _print_task_run_hint("  If it dies, start it with: schtasks /Run /TN {}")
         _write_start_attestation(pids, via)
     else:
         print(
@@ -1219,24 +1021,16 @@ def _report_gateway_start(via: str) -> None:
             "parent Job Object, #91675.)"
         )
         print("  Check the log for startup errors:")
-        from hermes_cli.config import get_hermes_home
-        print(f"    type {Path(get_hermes_home())}\\logs\\gateway.log")
-        print(f"    type {Path(get_hermes_home())}\\logs\\gateway-stdio.log")
-        hint = _task_run_hint(
-            "  Recovery: schtasks /Run /TN {}   (starts the gateway outside any Job Object)"
-        )
-        if hint:
-            print(hint)
+        print(f"    type {_hermes_home()}\\logs\\gateway.log")
+        print(f"    type {_hermes_home()}\\logs\\gateway-stdio.log")
+        _print_task_run_hint("  Recovery: schtasks /Run /TN {}   (starts the gateway outside any Job Object)")
 
 
 def _print_next_steps() -> None:
-    from hermes_cli.config import get_hermes_home
-
-    hermes_home = Path(get_hermes_home())
     print()
     print("Next steps:")
     print("  hermes gateway status                      # Check status")
-    print(f"  type {hermes_home}\\logs\\gateway.log       # View logs")
+    print(f"  type {_hermes_home()}\\logs\\gateway.log       # View logs")
 
 
 def uninstall() -> None:
@@ -1244,9 +1038,6 @@ def uninstall() -> None:
     _assert_windows()
     task_name = get_task_name()
     script_path = get_task_script_path()
-    vbs_script_path = script_path.with_suffix(".vbs")
-    startup_entry = get_startup_entry_path()
-    legacy_startup_entry = _legacy_startup_entry_path()
 
     scheduled_task_removed = False
     if is_task_registered():
@@ -1261,7 +1052,7 @@ def uninstall() -> None:
             print(f"↻ Scheduled Task uninstall needs administrator approval ({detail or 'access denied'})")
             print("  UAC is Windows' admin approval prompt; it is needed to remove the Scheduled Task.")
             if prompt_yes_no("  Open the UAC prompt now?", False):
-                if _launch_elevated_uninstall():
+                if _launch_elevated_gateway_command("uninstall"):
                     print("✓ Launched elevated Hermes gateway uninstall prompt.")
                     print("  Approve the Windows UAC prompt, then run: hermes gateway status")
                     return
@@ -1272,10 +1063,10 @@ def uninstall() -> None:
             print(f"⚠ schtasks /Delete returned code {code}: {detail}")
 
     for path, label in [
-        (startup_entry, "Windows login item"),
-        (legacy_startup_entry, "legacy Windows login item"),
+        (get_startup_entry_path(), "Windows login item"),
+        (_legacy_startup_entry_path(), "legacy Windows login item"),
         (script_path, "Task script"),
-        (vbs_script_path, "Task launcher"),
+        (script_path.with_suffix(".vbs"), "Task launcher"),
     ]:
         try:
             path.unlink()
@@ -1319,11 +1110,10 @@ def query_task_status() -> dict[str, str]:
         key = key.strip().lower()
         value = value.strip()
         # Some Windows locales emit "Last Result" instead of "Last Run Result".
-        if key in {"status", "last run time", "last run result", "last result"}:
-            if key == "last result":
-                info.setdefault("last run result", value)
-            else:
-                info[key] = value
+        if key == "last result":
+            info.setdefault("last run result", value)
+        elif key in {"status", "last run time", "last run result"}:
+            info[key] = value
     return info
 
 
@@ -1334,135 +1124,127 @@ def _gateway_pids() -> list[int]:
     return list(find_gateway_pids())
 
 
-def _print_deep_probes() -> None:
-    """Print PASS/FAIL per individual probe of gateway liveness.
+def _probe(index: int, ok: bool, message: str) -> None:
+    print(f"  [{index}] {'PASS' if ok else 'FAIL':4s}  {message}")
 
-    The default ``status`` output collapses several signals into one ✓ / ✗ line, which is great when
-    they agree and confusing when they don't. The deep-probe block shows each underlying check
-    independently so the user can see exactly which signal is wrong.
 
-    Probes: [1] PID file present [2] Lock file present and held by some process [3]
-    gateway.status.get_running_pid() returns a PID [4] _pid_exists(pid) — OS confirms the process is
-    alive [5] gateway_state.json exists and parses (and is fresh-ish) [6] Last lifecycle event in
-    gateway-exit-diag.log
-    """
-    import json
-    from datetime import datetime, timezone
-
-    from hermes_cli.config import get_hermes_home
-
-    home = Path(get_hermes_home())
-    pid_path = home / "gateway.pid"
-    lock_path = home / "gateway.lock"
-    state_path = home / "gateway_state.json"
-    diag_path = home / "logs" / "gateway-exit-diag.log"
-
-    print()
-    print("Deep probes:")
-
-    def _probe(index: int, ok: bool, message: str) -> None:
-        print(f"  [{index}] {'PASS' if ok else 'FAIL':4s}  {message}")
-
-    # [1] PID file
-    pid_value: int | None = None
-    if pid_path.exists():
-        try:
-            data = json.loads(pid_path.read_text(encoding="utf-8"))
-            pid_value = int(data.get("pid")) if data.get("pid") is not None else None
-            _probe(1, True, f"PID file present: {pid_path} (pid={pid_value})")
-        except Exception as exc:
-            _probe(1, False, f"PID file present but unreadable: {exc}")
-    else:
+def _probe_pid_file(pid_path: Path) -> int | None:
+    if not pid_path.exists():
         _probe(1, False, f"PID file missing: {pid_path}")
+        return None
+    try:
+        data = json.loads(pid_path.read_text(encoding="utf-8"))
+        pid_value = int(data.get("pid")) if data.get("pid") is not None else None
+        _probe(1, True, f"PID file present: {pid_path} (pid={pid_value})")
+        return pid_value
+    except Exception as exc:
+        _probe(1, False, f"PID file present but unreadable: {exc}")
+        return None
 
-    # [2] Lock file present + held
-    if lock_path.exists():
-        try:
-            from gateway.status import is_gateway_runtime_lock_active
 
-            _probe(2, is_gateway_runtime_lock_active(lock_path), f"Lock file held by a live process: {lock_path}")
-        except Exception as exc:
-            _probe(2, False, f"Could not probe lock: {exc}")
-    else:
+def _probe_lock_file(lock_path: Path) -> None:
+    if not lock_path.exists():
         _probe(2, False, f"Lock file missing: {lock_path}")
+        return
+    try:
+        from gateway.status import is_gateway_runtime_lock_active
 
-    # [3] get_running_pid()
-    running_pid: int | None = None
+        _probe(2, is_gateway_runtime_lock_active(lock_path), f"Lock file held by a live process: {lock_path}")
+    except Exception as exc:
+        _probe(2, False, f"Could not probe lock: {exc}")
+
+
+def _probe_running_pid() -> int | None:
     try:
         from gateway.status import get_running_pid
 
         running_pid = get_running_pid(cleanup_stale=False)
         _probe(3, running_pid is not None, f"get_running_pid() => {running_pid}")
+        return running_pid
     except Exception as exc:
         _probe(3, False, f"get_running_pid() raised: {exc!r}")
+        return None
 
-    # [4] _pid_exists() on the probed PID
-    candidate_pid = running_pid if running_pid is not None else pid_value
-    if candidate_pid is not None:
-        try:
-            from gateway.status import _pid_exists
 
-            alive = bool(_pid_exists(candidate_pid))
-            _probe(4, alive, f"_pid_exists({candidate_pid}) => {alive}")
-        except Exception as exc:
-            _probe(4, False, f"_pid_exists raised: {exc!r}")
-    else:
+def _probe_pid_exists(candidate_pid: int | None) -> None:
+    if candidate_pid is None:
         _probe(4, False, "No candidate PID to verify")
+        return
+    try:
+        from gateway.status import _pid_exists
 
-    # [5] runtime status file
-    if state_path.exists():
-        try:
-            state_data = json.loads(state_path.read_text(encoding="utf-8"))
-            gateway_state = state_data.get("gateway_state")
-            updated_at = state_data.get("updated_at")
-            age_str = ""
-            if updated_at:
-                try:
-                    updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-                    age_seconds = int((datetime.now(timezone.utc) - updated_dt).total_seconds())
-                    age_str = f" (updated {age_seconds}s ago)"
-                except Exception:
-                    pass
-            _probe(5, gateway_state == "running", f"gateway_state.json state={gateway_state!r}{age_str}")
-        except Exception as exc:
-            _probe(5, False, f"gateway_state.json present but unreadable: {exc}")
-    else:
+        alive = bool(_pid_exists(candidate_pid))
+        _probe(4, alive, f"_pid_exists({candidate_pid}) => {alive}")
+    except Exception as exc:
+        _probe(4, False, f"_pid_exists raised: {exc!r}")
+
+
+def _probe_state_file(state_path: Path) -> None:
+    if not state_path.exists():
         _probe(5, False, f"gateway_state.json missing: {state_path}")
+        return
+    try:
+        state_data = json.loads(state_path.read_text(encoding="utf-8"))
+        gateway_state = state_data.get("gateway_state")
+        updated_at = state_data.get("updated_at")
+        age_str = ""
+        if updated_at:
+            try:
+                updated_dt = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                age_seconds = int((datetime.now(timezone.utc) - updated_dt).total_seconds())
+                age_str = f" (updated {age_seconds}s ago)"
+            except Exception:
+                pass
+        _probe(5, gateway_state == "running", f"gateway_state.json state={gateway_state!r}{age_str}")
+    except Exception as exc:
+        _probe(5, False, f"gateway_state.json present but unreadable: {exc}")
 
-    # [6] Last lifecycle event from the exit-diag log
-    if diag_path.exists():
-        try:
-            with open(diag_path, "rb") as fh:
-                # Read last ~4KB; one event is well under 500 bytes.
-                fh.seek(0, 2)
-                size = fh.tell()
-                fh.seek(max(0, size - 4096))
-                tail = fh.read().decode("utf-8", errors="replace").splitlines()
-            last_event = next((ln for ln in reversed(tail) if ln.strip()), "")
-            if last_event:
-                try:
-                    event = json.loads(last_event)
-                    tag = event.get("tag", "?")
-                    _probe(
-                        6, tag in ("gateway.start",),
-                        f"Last lifecycle event: tag={tag} pid={event.get('pid', '?')} ts={event.get('ts', '?')}",
-                    )
-                except Exception:
-                    _probe(6, False, f"Last lifecycle line not JSON: {last_event[:120]}")
-            else:
-                _probe(6, False, f"exit-diag log empty: {diag_path}")
-        except Exception as exc:
-            _probe(6, False, f"exit-diag log unreadable: {exc}")
-    else:
+
+def _probe_exit_diag(diag_path: Path) -> None:
+    if not diag_path.exists():
         _probe(6, False, f"exit-diag log missing: {diag_path}")
+        return
+    try:
+        with open(diag_path, "rb") as fh:
+            fh.seek(0, 2)   # last ~4KB; one event is well under 500 bytes
+            size = fh.tell()
+            fh.seek(max(0, size - 4096))
+            tail = fh.read().decode("utf-8", errors="replace").splitlines()
+        last_event = next((ln for ln in reversed(tail) if ln.strip()), "")
+        if not last_event:
+            _probe(6, False, f"exit-diag log empty: {diag_path}")
+            return
+        try:
+            event = json.loads(last_event)
+            tag = event.get("tag", "?")
+            _probe(
+                6, tag in ("gateway.start",),
+                f"Last lifecycle event: tag={tag} pid={event.get('pid', '?')} ts={event.get('ts', '?')}",
+            )
+        except Exception:
+            _probe(6, False, f"Last lifecycle line not JSON: {last_event[:120]}")
+    except Exception as exc:
+        _probe(6, False, f"exit-diag log unreadable: {exc}")
+
+
+def _print_deep_probes() -> None:
+    """Print PASS/FAIL per individual liveness signal, so when the collapsed ✓/✗ summary disagrees
+    with reality the user can see exactly which signal is wrong."""
+    home = _hermes_home()
+    print()
+    print("Deep probes:")
+    pid_value = _probe_pid_file(home / "gateway.pid")
+    _probe_lock_file(home / "gateway.lock")
+    running_pid = _probe_running_pid()
+    _probe_pid_exists(running_pid if running_pid is not None else pid_value)
+    _probe_state_file(home / "gateway_state.json")
+    _probe_exit_diag(home / "logs" / "gateway-exit-diag.log")
 
 
 def status(deep: bool = False) -> None:
     """Print a status report for the Windows gateway service."""
     _assert_windows()
-    # Surface (once) any gateway that died after a previous start printed ✓
-    # — the poll can't see deaths that happen after the CLI exits (#91675).
-    _print_start_attestation_warning()
+    _print_start_attestation_warning()   # once: a gateway that died after a previous ✓
     task_name = get_task_name()
     task_installed = is_task_registered()
     startup_installed = is_startup_entry_installed()
@@ -1471,10 +1253,9 @@ def status(deep: bool = False) -> None:
     if task_installed:
         print(f"✓ Scheduled Task registered: {task_name}")
         info = query_task_status()
-        if info:
-            for key in ("status", "last run time", "last run result"):
-                if key in info:
-                    print(f"  {key.title()}: {info[key]}")
+        for key in ("status", "last run time", "last run result"):
+            if key in info:
+                print(f"  {key.title()}: {info[key]}")
     elif startup_installed:
         entry = get_startup_entry_path()
         if not entry.exists():
@@ -1493,8 +1274,6 @@ def status(deep: bool = False) -> None:
         print(f"  Task name:        {task_name}")
         print(f"  Task script:      {get_task_script_path()}")
         print(f"  Startup entry:    {get_startup_entry_path()}")
-        # Surface the per-probe truth so the user can see *which* signal
-        # is lying when the high-level summary disagrees with reality.
         _print_deep_probes()
 
     if not task_installed and not startup_installed and not pids:
@@ -1506,18 +1285,13 @@ def status(deep: bool = False) -> None:
 def start() -> None:
     """Start the gateway using the canonical detached Windows launch path."""
     _assert_windows()
-    # Report (once) if the LAST start's ✓ turned out to be false — the child
-    # died after the poll window, e.g. parent Job Object teardown (#91675).
-    _print_start_attestation_warning()
+    _print_start_attestation_warning()   # once: the LAST start's ✓ turned out to be false
     running_pids = _gateway_pids()
     if running_pids:
-        print(f"✓ Gateway already running (PID: {', '.join(map(str, running_pids))})")
+        _report_already_running(running_pids)
         return
 
-    task_installed = is_task_registered()
-    startup_installed = is_startup_entry_installed()
-
-    if not task_installed and not startup_installed:
+    if not is_task_registered() and not is_startup_entry_installed():
         from hermes_cli.setup import prompt_yes_no
 
         print("✗ Gateway service is not installed")
@@ -1525,16 +1299,13 @@ def start() -> None:
             print("  Run: hermes gateway install")
             return
         install(force=False)
-        task_installed = is_task_registered()
-        startup_installed = is_startup_entry_installed()
-        if not task_installed and not startup_installed:
+        if not is_task_registered() and not is_startup_entry_installed():
             print("⚠ Gateway install did not complete in this process.")
             print("  If a UAC prompt opened, approve it, then run: hermes gateway start")
             return
 
-    # Manual starts use the same console-less direct spawn path as restart()
-    # and install --start-now. Scheduled Task / Startup entries are only login
-    # persistence mechanisms.
+    # Manual starts use the same console-less direct spawn as restart() and install --start-now;
+    # Scheduled Task / Startup entries are only login persistence.
     pid = _spawn_detached()
     _report_gateway_start(f"direct spawn (PID {pid})")
 
@@ -1542,9 +1313,8 @@ def start() -> None:
 def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:
     """Write the planned-stop marker and wait for the gateway PID to exit.
 
-    Windows cannot deliver POSIX signals to a Python asyncio loop (``loop.add_signal_handler``
-    raises NotImplementedError), so writing the marker is the ONLY way to ask a running gateway to
-    drain in-flight agents and persist ``resume_pending`` before exit.
+    Windows cannot deliver POSIX signals to a Python asyncio loop, so the marker is the ONLY way to
+    ask a running gateway to drain in-flight agents and persist ``resume_pending`` before exit.
     """
     if pid <= 0:
         return False
@@ -1556,9 +1326,7 @@ def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:
     try:
         write_planned_stop_marker(pid)
     except Exception:
-        # Best-effort: if the marker can't be written, we have no choice
-        # but to fall through to a hard kill.  Caller decides escalation.
-        pass
+        pass   # best-effort; caller escalates to a hard kill
 
     deadline = time.monotonic() + max(drain_timeout, 1.0)
     while time.monotonic() < deadline:
@@ -1569,15 +1337,13 @@ def _drain_gateway_pid(pid: int, drain_timeout: float) -> bool:
 
 
 def _windows_stop_drain_timeout() -> float:
-    """Return a bounded Windows gateway stop grace period."""
+    """Bounded stop grace period: a real graceful-drain window, but the CLI must never wedge."""
     try:
         from hermes_cli.gateway import _get_restart_drain_timeout
 
         configured = float(_get_restart_drain_timeout() or 30.0)
     except Exception:
         configured = 30.0
-    # Windows CLI stop must not wedge forever. Give the gateway a real
-    # graceful-drain window, then escalate to the known PID.
     return max(1.0, min(configured, 30.0))
 
 
@@ -1598,11 +1364,7 @@ def _force_terminate_known_gateway_pids(pids: list[int]) -> int:
         try:
             if not _pid_exists(pid):
                 continue
-            terminate_pid(
-                pid,
-                force=True,
-                expected_start_time=get_process_start_time(pid),
-            )
+            terminate_pid(pid, force=True, expected_start_time=get_process_start_time(pid))
             killed += 1
         except ProcessLookupError:
             continue
@@ -1628,80 +1390,61 @@ def _collect_gateway_stop_pids(primary_pid: int | None = None) -> list[int]:
 
 
 def stop() -> None:
-    """Stop the gateway.
-
-    Writes the planned-stop marker first so the gateway can drain in-flight agents and persist
-    ``resume_pending`` before exit (the gateway's marker-watcher thread picks this up — Windows
-    asyncio can't deliver SIGTERM to the loop, so the marker is our only IPC).
-    """
+    """Stop the gateway: planned-stop marker first so it can drain in-flight agents and persist
+    ``resume_pending`` (Windows asyncio can't receive SIGTERM — the marker is our only IPC), then
+    ``schtasks /End``, then a bounded hard-kill of known PIDs."""
     _assert_windows()
     from gateway.status import get_running_pid
 
-    # A user-initiated stop is a planned death: the attestation from the
-    # last start must not later be reported as a silent crash (#91675).
+    # A user-initiated stop is a planned death: don't later report it as a silent crash.
     _clear_start_attestation()
 
-    # Phase 1: ask the running gateway (if any) to drain itself by writing
-    # the planned-stop marker, then wait briefly for it to exit cleanly.
-    # On clean exit, sessions land with resume_pending=True and the next
-    # boot will auto-resume them.
     pid = get_running_pid()
     stop_pids = _collect_gateway_stop_pids(pid)
-    drained = False
-    if pid is not None:
-        drained = _drain_gateway_pid(pid, _windows_stop_drain_timeout())
+    drained = pid is not None and _drain_gateway_pid(pid, _windows_stop_drain_timeout())
 
     stopped_any = drained
     if is_task_registered():
         code, _out, err = _exec_schtasks(["/End", "/TN", get_task_name()])
-        # schtasks returns nonzero when the task isn't currently running — don't treat that as an error.
+        # schtasks returns nonzero when the task isn't currently running — not an error.
         if code == 0:
             stopped_any = True
         elif "not running" not in (err or "").lower():
             print(f"⚠ schtasks /End returned code {code}: {err.strip()}")
 
-    # Phase 3: hard-kill any still-known gateway processes. Avoid the generic
-    # process sweep here: Windows direct-spawn starts are profile-scoped, and a
-    # stop command must be bounded even if the scanner or shutdown path is wedged.
+    # No generic process sweep: direct-spawn starts are profile-scoped, and stop must stay bounded
+    # even if the scanner or shutdown path is wedged.
     stop_pids.extend(pid for pid in _collect_gateway_stop_pids() if pid not in stop_pids)
     killed = _force_terminate_known_gateway_pids(stop_pids)
     if killed:
         stopped_any = True
         print(f"✓ Killed {killed} gateway process(es)")
     if stopped_any:
-        if drained:
-            print("✓ Gateway stopped (drained cleanly)")
-        else:
-            print("✓ Gateway stopped")
+        print("✓ Gateway stopped (drained cleanly)" if drained else "✓ Gateway stopped")
     else:
         print("✗ No gateway was running")
 
 
 def _wait_for_gateway_absent(timeout_s: float = 30.0, interval_s: float = 0.5) -> bool:
-    """Block until no gateway process is detectable, or the timeout elapses.
-
-    ``stop()`` can return while the old gateway is still draining in-flight agents. Uses the
-    authoritative ``get_running_pid()`` plus the strict ``_gateway_pids()`` scan so a relaunch
-    never races a still-alive old process.
-    """
+    """Block until no gateway is detectable (authoritative ``get_running_pid()`` plus the strict
+    ``_gateway_pids()`` scan) or the timeout elapses, so a relaunch never races a draining process."""
     from gateway.status import get_running_pid
+
+    def _absent() -> bool:
+        return get_running_pid() is None and not _gateway_pids()
 
     deadline = time.monotonic() + max(timeout_s, interval_s)
     while time.monotonic() < deadline:
-        if get_running_pid() is None and not _gateway_pids():
+        if _absent():
             return True
         time.sleep(interval_s)
-    return get_running_pid() is None and not _gateway_pids()
+    return _absent()
 
 
 def restart() -> None:
-    """Stop the gateway then start it again.
-
-    Waits for the old gateway to be authoritatively gone first; otherwise ``start()``'s
-    "already running" guard sees the draining process and no-ops, and when it exits nothing
-    replaces it (a silent outage). Fails loudly if the process can't be cleared or the relaunch
-    doesn't produce a running gateway.
-    """
+    """Stop then start. Waits for the old gateway to be authoritatively gone first; otherwise
+    ``start()``'s "already running" guard sees the draining process and no-ops, and nothing
+    replaces it when it exits (a silent outage). Fails loudly on either side."""
     _assert_windows()
 
     stop()
@@ -1715,8 +1458,7 @@ def restart() -> None:
                 "start a duplicate. Investigate stray PIDs before retrying."
             )
 
-    # Give Windows a moment to release the listening port.
-    time.sleep(1.0)
+    time.sleep(1.0)   # let Windows release the listening port
     start()
 
     if not _wait_for_gateway_ready(timeout_s=15.0):
