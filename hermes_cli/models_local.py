@@ -91,13 +91,11 @@ def _ollama_host_from_env(env_host: str) -> str:
 
 
 def _get_ollama_base_url() -> str:
-    """Resolve the local Ollama-compatible endpoint URL.
-
-    Precedence: explicit ``providers.ollama.base_url`` (wires local endpoints without changing the
-    active provider) → active ``model.base_url`` when the active provider is ollama, or custom AND
-    the endpoint actually serves ``/api/tags`` (otherwise the picker would probe an unrelated
-    endpoint and hide the local catalog) → ``OLLAMA_HOST`` → Ollama's local default.
-    """
+    """Resolve the local Ollama-compatible endpoint URL: explicit ``providers.ollama.base_url``
+    (wires local endpoints without changing the active provider) → active ``model.base_url`` when
+    the active provider is ollama, or custom AND the endpoint actually serves ``/api/tags``
+    (otherwise the picker would probe an unrelated endpoint and hide the local catalog) →
+    ``OLLAMA_HOST`` → Ollama's local default."""
     from hermes_cli.models import _get_model_config_dict, should_use_ollama_native_catalog
     configured = _configured_ollama_base_url()
     if configured:
@@ -153,16 +151,10 @@ def _get_ollama_request_headers() -> dict[str, str]:
     return result
 
 
-def _get_ollama_native_headers(
-    base_url: Optional[str],
-    *,
-    api_key: Optional[str] = None,
-) -> dict[str, str]:
-    """Resolve Ollama credentials and headers for one endpoint origin.
-
-    Configured headers apply only when *base_url* shares the configured Ollama root; an explicit
-    *api_key* replaces any configured Authorization variant rather than inheriting it.
-    """
+def _get_ollama_native_headers(base_url: Optional[str], *, api_key: Optional[str] = None) -> dict[str, str]:
+    """Ollama credentials and headers for one endpoint origin. Configured headers apply only when
+    *base_url* shares the configured Ollama root; an explicit *api_key* replaces any configured
+    Authorization variant rather than inheriting it."""
     from hermes_cli.models import _get_ollama_request_headers
     configured_base = _configured_ollama_base_url()
     explicit_key = str(api_key or "").strip()
@@ -230,12 +222,9 @@ def probe_ollama_local_models(
     timeout: float = 2.0,
     headers: Optional[dict[str, str]] = None,
 ) -> Optional[list[str]]:
-    """Probe local Ollama-compatible models from native ``/api/tags``.
-
-    Returns ``None`` when the endpoint cannot be reached or returns malformed data, and a list
-    (possibly empty) when ``/api/tags`` was reachable — Ollama's authoritative local catalog
-    (``/v1/models`` is not required for local servers).
-    """
+    """Probe local Ollama-compatible models from native ``/api/tags`` (Ollama's authoritative local
+    catalog; ``/v1/models`` is not required for local servers). ``None`` when the endpoint cannot be
+    reached or returns malformed data; a list (possibly empty) when it was reachable."""
     from hermes_cli.models import _HERMES_USER_AGENT, _get_ollama_base_url, _urlopen_model_catalog_request
     root = _root_for_ollama_native_api(base_url or _get_ollama_base_url())
     if not root:
@@ -305,14 +294,11 @@ def should_use_ollama_native_catalog(
     base_url: Optional[str],
     headers: Optional[dict[str, str]] = None,
 ) -> bool:
-    """Return True when model discovery should use local Ollama ``/api/tags``.
-
-    Bare ``ollama`` is normalized to ``custom`` elsewhere so runtime paths share the OpenAI-
-    compatible client, but local Ollama's authoritative model list is ``/api/tags``. Use it when
-    the caller asked for Ollama explicitly, the base URL matches ``providers.ollama.base_url``,
-    or an ambiguous custom URL on Ollama's default port actually serves ``/api/tags``; other
-    custom endpoints keep the ``/models`` probe.
-    """
+    """True when model discovery should use local Ollama ``/api/tags``: the caller asked for Ollama
+    explicitly, the base URL matches ``providers.ollama.base_url``, or an ambiguous custom URL on
+    Ollama's default port actually serves ``/api/tags``. (Bare ``ollama`` is normalized to
+    ``custom`` elsewhere so runtime paths share the OpenAI client, but ``/api/tags`` is the
+    authoritative local list; other custom endpoints keep the ``/models`` probe.)"""
     from hermes_cli.models import probe_ollama_local_models
     requested = str(provider or "").strip().lower()
     root = _root_for_ollama_native_api(base_url or "")
@@ -383,11 +369,8 @@ def _ollama_local_catalog(force_refresh: bool) -> list[str]:
 
 
 def _lmstudio_server_root(base_url: Optional[str]) -> Optional[str]:
-    """LM Studio server root for native ``/api/v1`` endpoints.
-
-    Users paste either the OpenAI runtime URL (``.../v1``) or the native prefix (``.../api`` /
-    ``.../api/v1``); native probes append ``/api/v1/...`` themselves, so strip all accepted forms.
-    """
+    """LM Studio server root: users paste the OpenAI runtime URL (``.../v1``) or the native prefix
+    (``.../api``, ``.../api/v1``); native probes append ``/api/v1/...`` themselves."""
     return _strip_suffixes((base_url or "").strip().rstrip("/"), ("/api/v1", "/api", "/v1")) or None
 
 
@@ -406,10 +389,8 @@ def _lmstudio_fetch_raw_models(
     base_url: Optional[str] = None,
     timeout: float = 5.0,
 ) -> Optional[list[dict]]:
-    """Fetch the raw model list from LM Studio's ``/api/v1/models``.
-
-    None on network errors / malformed payloads; raises ``AuthError`` on HTTP 401/403.
-    """
+    """Raw model list from LM Studio's ``/api/v1/models``; None on network errors / malformed
+    payloads; raises ``AuthError`` on HTTP 401/403."""
     from hermes_cli.models import _urlopen_model_catalog_request
     server_root = _lmstudio_server_root(base_url)
     if not server_root:
@@ -461,12 +442,9 @@ def probe_lmstudio_models(
     base_url: Optional[str] = None,
     timeout: float = 5.0,
 ) -> Optional[list[str]]:
-    """Probe LM Studio's model listing.
-
-    Returns chat-capable model keys — a valid empty list when the server is reachable but has no
-    non-embedding models; ``None`` on network errors, malformed responses, or bad base URLs.
-    Raises ``AuthError`` on HTTP 401/403 so token issues surface separately from reachability.
-    """
+    """Chat-capable LM Studio model keys — a valid empty list when the server is reachable but has
+    no non-embedding models; ``None`` on network errors, malformed responses, or bad base URLs.
+    Raises ``AuthError`` on HTTP 401/403 so token issues surface separately from reachability."""
     from hermes_cli.models import _lmstudio_fetch_raw_models
     raw_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=timeout)
     if raw_models is None:
@@ -532,14 +510,13 @@ def ensure_lmstudio_model_loaded(
     """Ensure ``model`` is loaded and return verified runtime context.
 
     Existing loaded-instance context is authoritative. Cold loads omit ``context_length`` unless the
-    caller supplied an explicit override; the returned context must come from LM Studio's echoed or
-    refreshed state.
-    """
+    caller supplied an explicit override; the returned context comes from LM Studio's echoed or
+    refreshed state."""
     from hermes_cli.models import _urlopen_model_catalog_request
 
     def _result(context_length: Optional[int], *, load_attempted: bool = False, rejected: bool = False):
-        value = LMStudioLoadResult(context_length, load_attempted, rejected)
-        return value if return_load_result else context_length
+        result = LMStudioLoadResult(context_length, load_attempted, rejected)
+        return result if return_load_result else context_length
 
     server_root = _lmstudio_server_root(base_url)
     if not server_root:
@@ -548,9 +525,7 @@ def ensure_lmstudio_model_loaded(
     explicit_context = _positive_int(target_context_length)
     if target_context_length is not None and explicit_context is None:
         return _result(None)
-
-    raw_models = _lmstudio_raw_models_or_none(api_key, base_url, 10)
-    target_entry = _lmstudio_entry_for(raw_models, model) if raw_models is not None else None
+    target_entry = _lmstudio_entry_for(_lmstudio_raw_models_or_none(api_key, base_url, 10) or [], model)
     if target_entry is None:
         return _result(None)
 
@@ -569,12 +544,11 @@ def ensure_lmstudio_model_loaded(
     load_payload: dict[str, Any] = {"model": model, "echo_load_config": True}
     if explicit_context is not None:
         load_payload["context_length"] = explicit_context
-    load_headers = {**_lmstudio_request_headers(api_key), "Content-Type": "application/json"}
     try:
         load_request = urllib.request.Request(
             server_root + "/api/v1/models/load",
             data=json.dumps(load_payload).encode(),
-            headers=load_headers,
+            headers={**_lmstudio_request_headers(api_key), "Content-Type": "application/json"},
             method="POST",
         )
         with _urlopen_model_catalog_request(load_request, timeout=timeout) as resp:
@@ -622,12 +596,9 @@ def ollama_model_supports_thinking(
     api_key: Optional[str] = None,
     timeout: float = 5.0,
 ) -> Optional[bool]:
-    """Tri-state: True if an Ollama (Cloud or local) model advertises ``thinking``.
-
-    Probes native ``/api/show`` ``capabilities`` — the authoritative source, since OpenAI-compat
-    ``/v1/models`` omits it. False when the probe succeeded without it; None when the probe failed
-    so the caller picks the fallback (treated as "don't emit").
-    """
+    """Tri-state: True if an Ollama (Cloud or local) model advertises ``thinking`` in native
+    ``/api/show`` ``capabilities`` (authoritative; OpenAI-compat ``/v1/models`` omits it), False
+    when the probe succeeded without it, None when it failed (caller treats as "don't emit")."""
     import httpx
 
     server_url = (base_url or "").strip().rstrip("/")
@@ -714,11 +685,7 @@ def fetch_ollama_cloud_models(
 
     api_key = api_key or os.getenv("OLLAMA_API_KEY", "")
     base_url = base_url or os.getenv("OLLAMA_BASE_URL", "") or "https://ollama.com/v1"
-
-    live_models: list[str] = []
-    if api_key:
-        live_models = fetch_api_models(api_key, base_url, timeout=8.0) or []
-
+    live_models = (fetch_api_models(api_key, base_url, timeout=8.0) or []) if api_key else []
     mdev_models: list[str] = []
     try:
         from agent.models_dev import list_agentic_models

@@ -48,12 +48,9 @@ def _cache_catalog(
     result: dict[str, dict[str, Any]],
     ttl_seconds: Optional[float] = None,
 ) -> dict[str, dict[str, Any]]:
-    """Cache a catalog result, giving an empty one an expiry.
-
-    *ttl_seconds* expires a non-empty result too — only for a catalog whose contents depend on
-    server-side state the client cannot observe (an org's model policy can change while a long-
-    lived process holds the entry).
-    """
+    """Cache a catalog result, giving an empty one an expiry. *ttl_seconds* expires a non-empty
+    result too — only for a catalog whose contents depend on server-side state the client cannot
+    observe (an org's model policy can change while a long-lived process holds the entry)."""
     from hermes_cli.models import _pricing_cache, _pricing_cache_retry_after
     _pricing_cache[cache_key] = result
     if not result:
@@ -82,12 +79,9 @@ def _pricing_auth_fingerprint(api_key: str | None) -> str:
 
 
 def peek_cached_pricing(base_url: str) -> dict[str, dict[str, Any]]:
-    """Pricing already cached for *base_url*, or ``{}``. Never fetches.
-
-    Accepts a ``/v1``-suffixed URL as well as the pre-``/v1`` root the fetchers key on, and
-    prefers an authenticated catalog. Scans (callers hold no credential) newest first, skipping
-    expired entries, so a rotated credential does not keep answering from its predecessor's catalog.
-    """
+    """Pricing already cached for *base_url* (with or without ``/v1``), or ``{}``; never fetches.
+    Prefers an authenticated catalog, scanning newest first (callers hold no credential) and
+    skipping expired entries so a rotated credential does not answer from its predecessor's."""
     from hermes_cli.models import _pricing_cache
     root = _strip_v1((base_url or "").rstrip("/"))
     authed_prefix = root + _PRICING_AUTH_KEY_PREFIX
@@ -104,12 +98,9 @@ def _strip_v1(url: str) -> str:
 
 
 def _format_price_per_mtok(per_token_str: str) -> str:
-    """Per-token price string → human-friendly $/Mtok string.
-
-    Always 2 decimals so right-justified prices align on the decimal point. Sub-cent prices (deep-
-    discount cache-hit promos) widen precision until the value shows, keep one extra digit and trim
-    trailing zeros instead of collapsing to "$0.00".
-    """
+    """Per-token price string → $/Mtok string. Always 2 decimals so right-justified prices align;
+    sub-cent prices (deep-discount cache-hit promos) widen precision until the value shows, keep
+    one extra digit and trim trailing zeros instead of collapsing to "$0.00"."""
     try:
         val = float(per_token_str)
     except (TypeError, ValueError):
@@ -147,19 +138,12 @@ def _sale_pct(current: Any, original: Any) -> int | None:
     return int(round((1.0 - (cur / orig)) * 100))
 
 
-def compute_sale_discount(
-    prompt: str,
-    completion: str,
-    original: Any,
-) -> tuple[int, str, str] | None:
-    """Derive sale chrome from gateway ``pricing.original`` when cheaper (Nous Portal only; callers
-    gate on the provider and opted in via ``include_sale_original=True``).
-
-    Returns ``(discount_percent, was_prompt_raw, was_completion_raw)`` only when ``original`` is a
-    dict and the current prompt (fallback: completion) rate is strictly below the corresponding
-    original. Free / $0 models get a flat 100% off, with "was" prices only when the gateway served
-    an original (a natively-free stealth model gets bare "-100%" chrome).
-    """
+def compute_sale_discount(prompt: str, completion: str, original: Any) -> tuple[int, str, str] | None:
+    """Sale chrome from gateway ``pricing.original`` (Nous Portal only; callers gate on the provider
+    and opted in via ``include_sale_original=True``): ``(discount_percent, was_prompt_raw,
+    was_completion_raw)`` when ``original`` is a dict and the current prompt (fallback: completion)
+    rate is strictly below the original. Free / $0 models get a flat 100% off, with "was" prices
+    only when the gateway served an original (a natively-free stealth model gets bare "-100%")."""
     orig_dict = original if isinstance(original, dict) else {}
     was_prompt = orig_dict.get("prompt")
     was_completion = orig_dict.get("completion")
@@ -224,13 +208,10 @@ def fetch_models_with_pricing(
     include_sale_original: bool = False,
     cache_ttl_seconds: Optional[float] = None,
 ) -> dict[str, dict[str, Any]]:
-    """Fetch ``/v1/models`` and return ``{model_id: {prompt, completion, ...}}``.
-
-    Cached per *base_url* and per credential, so repeated calls are free and one caller's catalog
-    never answers another's read. Works with any OpenRouter-compatible endpoint (OpenRouter, Nous
-    Portal). *include_sale_original* (Nous Portal only) copies the gateway's pre-discount
-    ``pricing.original`` rates through as a nested ``original`` dict for sale chrome.
-    """
+    """Fetch ``/v1/models`` (any OpenRouter-compatible endpoint) → ``{model_id: {prompt, completion,
+    ...}}``, cached per *base_url* and per credential so one caller's catalog never answers
+    another's read. *include_sale_original* (Nous Portal only) copies the gateway's pre-discount
+    ``pricing.original`` rates through as a nested ``original`` dict for sale chrome."""
     from hermes_cli.models import _HERMES_USER_AGENT
     url_root = (base_url or "").rstrip("/")
     cache_key = url_root + _pricing_auth_fingerprint(api_key)
@@ -247,9 +228,8 @@ def fetch_models_with_pricing(
     if payload is None:
         return _cache_catalog(cache_key, {})
 
-    # Same document the reasoning-capability fetch would pull, and every picker/pricing surface
-    # goes through here — mirror it so a later hot-path lookup (and the next process) has an
-    # answer without its own round-trip.
+    # Same document the reasoning-capability fetch would pull — mirror it so a later hot-path
+    # lookup (and the next process) has an answer without its own round-trip.
     _seed_reasoning_caps(url, payload.get("data"))
 
     result: dict[str, dict[str, Any]] = {}
@@ -273,11 +253,7 @@ def fetch_models_with_pricing(
     return _cache_catalog(cache_key, result, cache_ttl_seconds)
 
 
-def fetch_ai_gateway_pricing(
-    timeout: float = 8.0,
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
+def fetch_ai_gateway_pricing(timeout: float = 8.0, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
     """Vercel AI Gateway /v1/models pricing, translating its ``input`` / ``output`` field names to
     the picker's ``prompt`` / ``completion`` (cache read/write names already match)."""
     from hermes_constants import AI_GATEWAY_BASE_URL
@@ -311,21 +287,16 @@ _DEFAULT_NOUS_INFERENCE_BASE = "https://inference-api.nousresearch.com"
 
 def _resolve_nous_pricing_credentials() -> tuple[str, str]:
     """``(api_key, base_url)`` for Nous Portal pricing; base_url is the bare origin (no ``/v1``).
-
-    Base URL precedence mirrors runtime credential resolution: ``NOUS_INFERENCE_BASE_URL`` env
-    override (staging / preview) → resolved runtime credential ``base_url`` → production default.
-    Without the override a staging profile's sale ``pricing.original`` would never reach the
-    pickers (prod has no ``original`` field).
-    """
+    Precedence mirrors runtime credential resolution: ``NOUS_INFERENCE_BASE_URL`` (staging /
+    preview) → resolved credential ``base_url`` → production default. Without the override a
+    staging profile's sale ``pricing.original`` would never reach the pickers."""
     try:
         from hermes_cli.auth import _nous_inference_env_override
 
         env_base = _nous_inference_env_override()
     except Exception:
         env_base = None
-
-    api_key = ""
-    creds_base = ""
+    api_key = creds_base = ""
     try:
         from hermes_cli.auth import resolve_nous_runtime_credentials
 
@@ -335,7 +306,6 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
             creds_base = (creds.get("base_url", "") or "").strip()
     except Exception:
         pass
-
     base_url = (env_base or creds_base or _DEFAULT_NOUS_INFERENCE_BASE).rstrip("/")
     if base_url.endswith("/v1"):
         base_url = base_url[:-3]
@@ -361,14 +331,10 @@ def _fetch_nous_pricing(api_key: str, base_url: str, *, force_refresh: bool) -> 
 
 
 def nous_policy_allowed_ids(*, force_refresh: bool = False) -> Optional[set[str]]:
-    """The Nous model ids the caller's org may reach, or ``None`` to not filter.
-
-    The gateway omits policy-blocked rows from an authenticated ``GET /v1/models``, so that
-    response's keys are the reachable set. ``None`` (leave the caller's list alone) covers the
-    three states that cannot narrow it: no policy (or a token too old to say), an anonymous read
-    whose catalog is unfiltered, and an empty read (a fetch failure, not an org that may reach
-    nothing).
-    """
+    """The Nous model ids the caller's org may reach (keys of an authenticated ``GET /v1/models``,
+    which omits policy-blocked rows), or ``None`` to not filter: no policy (or a token too old to
+    say), an anonymous read (unfiltered catalog), or an empty read (a fetch failure, not an org
+    that may reach nothing)."""
     from hermes_cli.models import _resolve_nous_pricing_credentials
     try:
         from hermes_cli.nous_account import nous_policy_present
@@ -395,15 +361,12 @@ def restrict_to_nous_policy(
     *,
     rescue_empty: bool = False,
 ) -> list[str]:
-    """*model_ids* narrowed to *allowed*, preserving the caller's order.
-
-    A ``:free`` sibling is kept when its base model is reachable, mirroring the gateway, which
-    admits a row when any of its requestable ids passes. Prefer over-listing: that costs a 403 from
-    the authoritative gate, while hiding a row the gate would serve is unrecoverable client-side.
-    *rescue_empty*: an allowlist naming only models the curated manifest lacks would leave an
-    empty picker — worse than no filter — so return the allowlist itself. Opt-in per list: an
-    already-empty list (a paid tier's gated models) means "nothing to gate", not "nothing survived".
-    """
+    """*model_ids* narrowed to *allowed*, preserving order. A ``:free`` sibling is kept when its
+    base model is reachable (the gateway admits a row when any requestable id passes); over-listing
+    costs a 403 from the authoritative gate, hiding a servable row is unrecoverable client-side.
+    *rescue_empty*: an allowlist naming only models the curated manifest lacks would leave an empty
+    picker — worse than no filter — so return the allowlist itself. Opt-in per list: an already-
+    empty list (a paid tier's gated models) means "nothing to gate", not "nothing survived"."""
     if not allowed:
         return list(model_ids)
     kept = [mid for mid in model_ids if mid in allowed or mid.split(":", 1)[0] in allowed]
@@ -437,13 +400,9 @@ def get_pricing_for_provider(provider: str, *, force_refresh: bool = False) -> d
     return fetcher(force_refresh=force_refresh) if fetcher else {}
 
 
-def _fireworks_pricing_from_models_dev(
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Fireworks picker pricing from the models.dev registry cache — no dedicated network fetch:
-    ``fetch_models_dev()`` already keeps a shared in-memory + disk cache (1h TTL), so this is a
-    pure dict transform with no per-render network call."""
+def _fireworks_pricing_from_models_dev(*, force_refresh: bool = False) -> dict[str, dict[str, str]]:
+    """Fireworks picker pricing from the models.dev registry cache (``fetch_models_dev()`` keeps a
+    shared in-memory + disk cache, 1h TTL) — a pure dict transform, no per-render network call."""
     cache_key = "models.dev/fireworks"
     if not force_refresh:
         cached = _cached_catalog(cache_key)
@@ -471,14 +430,9 @@ def _fireworks_pricing_from_models_dev(
     return _cache_catalog(cache_key, result)
 
 
-def _fetch_novita_pricing(
-    timeout: float = 8.0,
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """NovitaAI /v1/models pricing. Novita reports per-million-token prices in units of 0.0001 USD;
-    converted to the per-token strings the shared formatter expects. Cached on the resolved base
-    URL so menu renders don't re-hit the network."""
+def _fetch_novita_pricing(timeout: float = 8.0, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
+    """NovitaAI /v1/models pricing (per-million prices in units of 0.0001 USD → per-token strings),
+    cached on the resolved base URL so menu renders don't re-hit the network."""
     from hermes_cli.models import _HERMES_USER_AGENT
     api_key = os.getenv("NOVITA_API_KEY", "").strip()
     if not api_key:
@@ -509,14 +463,10 @@ def _fetch_novita_pricing(
     return _cache_catalog(cache_key, result)
 
 
-def _fetch_deepinfra_pricing(
-    timeout: float = 5.0,
-    *,
-    force_refresh: bool = False,
-) -> dict[str, dict[str, str]]:
-    """Picker-shape pricing for DeepInfra chat models: ``input_tokens`` / ``output_tokens`` /
-    ``cache_read_tokens`` in $/MTok → per-token ``prompt`` / ``completion`` / ``input_cache_read``.
-    Cached via the models-by-tag helper so repeated picker renders are free."""
+def _fetch_deepinfra_pricing(timeout: float = 5.0, *, force_refresh: bool = False) -> dict[str, dict[str, str]]:
+    """DeepInfra chat-model pricing: ``input_tokens`` / ``output_tokens`` / ``cache_read_tokens`` in
+    $/MTok → per-token ``prompt`` / ``completion`` / ``input_cache_read`` (cached by the by-tag
+    helper)."""
     from hermes_cli.models import _fetch_deepinfra_models_by_tag
     items = _fetch_deepinfra_models_by_tag("chat", timeout=timeout, force_refresh=force_refresh)
     result: dict[str, dict[str, str]] = {}
