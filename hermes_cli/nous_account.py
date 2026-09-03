@@ -523,9 +523,7 @@ def _tool_access_from_value(value: Any) -> Optional[NousToolAccessInfo]:
 
 def _coerced_dataclass(cls, value: Any):
     """Build ``cls`` from a payload dict (field names = payload keys), coercing by declared type."""
-    if not isinstance(value, dict):
-        return None
-    return cls(**{f.name: _COERCERS[f.type](value.get(f.name)) for f in fields(cls)})
+    return cls(**{f.name: _COERCERS[f.type](value.get(f.name)) for f in fields(cls)}) if isinstance(value, dict) else None
 
 
 def _subscription_from_payload(value: Any) -> Optional[NousPortalSubscriptionInfo]:
