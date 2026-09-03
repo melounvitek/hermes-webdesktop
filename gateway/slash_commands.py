@@ -136,6 +136,14 @@ def _restart_notify_payload(event: MessageEvent) -> dict:
     return data
 
 
+def _restart_dedup_payload(event: MessageEvent) -> dict:
+    """Platform + update_id of the triggering /restart, for redelivery detection."""
+    data = {"platform": event.source.platform.value if event.source.platform else None, "requested_at": time.time()}
+    if event.platform_update_id is not None:
+        data["update_id"] = event.platform_update_id
+    return data
+
+
 def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
     """Spawn ``hermes update --gateway`` detached so it survives the gateway restart it may trigger.
 
@@ -598,21 +606,12 @@ class GatewaySlashCommandsMixin(
                 self._restart_command_source = event.source
             return data
 
-        def _dedup_payload() -> dict:
-            data = {
-                "platform": event.source.platform.value if event.source.platform else None,
-                "requested_at": time.time(),
-            }
-            if event.platform_update_id is not None:
-                data["update_id"] = event.platform_update_id
-            return data
-
         # Save the requester's routing info so the new gateway process can notify them once back.
         await _write_marker(".restart_notify.json", _notify_payload, "notify file")
         # Record the triggering platform + update_id in a dedicated dedup marker. Unlike
         # .restart_notify.json (unlinked once the new gateway sends its notification) this persists
         # so a delayed Telegram redelivery is still detectable. Overwritten on every /restart.
-        await _write_marker(".restart_last_processed.json", _dedup_payload, "dedup marker")
+        await _write_marker(".restart_last_processed.json", lambda: _restart_dedup_payload(event), "dedup marker")
 
         active_agents = self._running_agent_count()
         # Under a service manager (systemd/launchd) or Docker/Podman, exit 75 so the supervisor /

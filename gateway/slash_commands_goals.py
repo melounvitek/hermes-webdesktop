@@ -19,6 +19,13 @@ def _plural(n: int, noun: str) -> str:
     return f"{n} {noun}{'s' if n != 1 else ''}"
 
 
+def _quiet_bool(fn) -> bool:
+    try:
+        return bool(fn())
+    except Exception:
+        return False
+
+
 def _mgr_call(prefix: str, fn, *args, errors=(RuntimeError, ValueError)):
     """``(result, None)`` from ``fn(*args)``, or ``(None, "<prefix>: <exc>")`` on a manager error."""
     try:
@@ -245,15 +252,13 @@ class GatewayGoalCommandsMixin:
 
         # Set: `/heartbeat every 10m <prompt>` (also accepts `10m <prompt>`).
         tokens = args.split(None, 2)
-        interval = None
-        prompt = ""
-        if tokens and tokens[0].lower() == "every" and len(tokens) >= 2:
+        interval, prompt = None, ""
+        if tokens[0].lower() == "every" and len(tokens) >= 2:
             interval = parse_interval(f"every {tokens[1]}")
             prompt = tokens[2] if len(tokens) > 2 else ""
-        elif tokens:
+        else:
             interval = parse_interval(tokens[0])
             prompt = args[len(tokens[0]):].strip() if interval and interval > 0 else ""
-
         if interval is None:
             return (
                 "Usage: /heartbeat every <interval> <prompt>  (e.g. /heartbeat every 10m Check CI)\n"
@@ -263,11 +268,9 @@ class GatewayGoalCommandsMixin:
             return f"Interval too small — minimum is {MIN_INTERVAL_SECONDS}s."
         if not prompt.strip():
             return "Usage: /heartbeat every <interval> <prompt> — the prompt is required."
-
-        try:
-            state = mgr.set(prompt, interval)
-        except ValueError as exc:
-            return f"Invalid heartbeat: {exc}"
+        state, err = _mgr_call("Invalid heartbeat", mgr.set, prompt, interval, errors=(ValueError,))
+        if err:
+            return err
         _watch()
         return (
             f"♥ Heartbeat set (every {format_interval(state.interval_seconds)}): {state.prompt}\n"
@@ -304,13 +307,10 @@ class GatewayGoalCommandsMixin:
         snapshot = list(getattr(agent, "_session_messages", None) or [])
         if not snapshot:
             return "Nothing to refine yet — the conversation is empty."
-
         try:
             agent._spawn_background_review(
-                messages_snapshot=snapshot,
-                review_memory=True,
-                review_skills="skill_manage" in getattr(agent, "valid_tool_names", set()),
-                focus=args or None,
+                messages_snapshot=snapshot, review_memory=True,
+                review_skills="skill_manage" in getattr(agent, "valid_tool_names", set()), focus=args or None,
             )
         except Exception as exc:
             return f"/refine failed to start: {exc}"
@@ -330,9 +330,7 @@ class GatewayGoalCommandsMixin:
         quick_key, agent, error = self._idle_cached_agent_or_error(event, "review")
         if error:
             return error
-
         snapshot = list(getattr(agent, "_session_messages", None) or [])
-
         from tools.approval import reset_current_session_key, set_current_session_key
 
         def _dispatch():
@@ -351,7 +349,6 @@ class GatewayGoalCommandsMixin:
             return str(exc)
         except Exception as exc:
             return f"/review failed to start: {exc}"
-
         from agent.review_engine import format_dispatch_note
         return format_dispatch_note(result, args)
 
@@ -397,11 +394,7 @@ class GatewayGoalCommandsMixin:
         return f"✓ Added subgoal {idx}: {text}"
 
     async def _handle_loop_command(self, event: MessageEvent) -> str:
-        """Handle /loop — recurring in-session wakeups, via ``dispatch_loop_command`` (CLI mirror).
-
-        New loops capture the event's routing (platform/chat/thread) so the idle loop-wakeup
-        watcher can inject ticks here after a restart.
-        """
+        """Handle /loop — recurring in-session wakeups, via ``dispatch_loop_command`` (CLI mirror)."""
         try:
             from hermes_cli.loops import LoopManager, dispatch_loop_command, goal_blocks_loop_tick
         except Exception as exc:
@@ -420,6 +413,8 @@ class GatewayGoalCommandsMixin:
             return "Loops unavailable (no active session)."
         mgr = LoopManager(session_id=sid)
 
+        # New loops capture the event's routing so the idle loop-wakeup watcher can inject ticks
+        # here after a restart; best-effort, empty fields dropped.
         route: dict = {}
         try:
             src = event.source
@@ -432,16 +427,11 @@ class GatewayGoalCommandsMixin:
         except Exception:
             route = {}
 
-        args = (event.get_command_args() or "").strip()
-        result = dispatch_loop_command(mgr, args, route=route)
+        result = dispatch_loop_command(mgr, (event.get_command_args() or "").strip(), route=route)
         output = result.get("output") or ""
-        if result.get("created"):
-            try:
-                if goal_blocks_loop_tick(mgr.session_id):
-                    output += (
-                        "\nNote: an active /goal is driving this session — loop "
-                        "wakeups defer until the goal finishes, pauses, or parks."
-                    )
-            except Exception:
-                pass
+        if result.get("created") and _quiet_bool(lambda: goal_blocks_loop_tick(mgr.session_id)):
+            output += (
+                "\nNote: an active /goal is driving this session — loop "
+                "wakeups defer until the goal finishes, pauses, or parks."
+            )
         return output
