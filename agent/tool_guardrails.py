@@ -133,14 +133,12 @@ class ToolCallGuardrailConfig:
         if flags["non_interactive_hard_stop_enabled"] and _is_non_interactive_platform(platform):
             flags["hard_stop_enabled"] = True
 
-        thresholds: dict[str, int] = {}
-        for field_name, (section_name, key) in _THRESHOLD_SOURCES.items():
+        def threshold(name: str, section_name: str, key: str) -> int:
             section = data.get(section_name)
-            if not isinstance(section, Mapping):
-                section = {}
-            thresholds[field_name] = _int_at_least(
-                section.get(key, data.get(field_name)), getattr(d, field_name), 1,
-            )
+            nested = section.get(key, data.get(name)) if isinstance(section, Mapping) else data.get(name)
+            return _int_at_least(nested, getattr(d, name), 1)
+
+        thresholds = {name: threshold(name, *src) for name, src in _THRESHOLD_SOURCES.items()}
         return cls(loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")), **flags, **thresholds)
 
 
