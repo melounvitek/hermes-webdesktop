@@ -465,11 +465,9 @@ def cron_status():
             try:
                 from gateway.status import get_running_pid, is_gateway_runtime_lock_active
 
-                if is_gateway_runtime_lock_active():
-                    gateway_alive_via_lock = True
-                    lock_pid = get_running_pid()
-                    if lock_pid:
-                        pids = [lock_pid]
+                gateway_alive_via_lock = is_gateway_runtime_lock_active()
+                lock_pid = get_running_pid() if gateway_alive_via_lock else None
+                pids = [lock_pid] if lock_pid else pids
             except Exception:
                 pass
         if pids or gateway_alive_via_lock:

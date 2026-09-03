@@ -299,6 +299,32 @@ def _redact_log_text(text: str) -> str:
     return _EMAIL_ADDRESS_RE.sub("[REDACTED_EMAIL]", text)
 
 
+def _read_tail_bytes(log_path: Path, size: int, max_bytes: int, tail_lines: int) -> tuple[bytes, bool]:
+    """Read the whole file, or enough of its tail for both views → (raw, truncated).
+
+    For oversized files, read backwards until we have ``max_bytes`` for the standalone upload
+    AND enough newline context to render the summary tail from the same snapshot.
+    """
+    with open(log_path, "rb") as f:
+        if size <= max_bytes:
+            return f.read(), False
+        chunk_size = 8192
+        pos = size
+        chunks: list[bytes] = []
+        total = 0
+        newline_count = 0
+        while pos > 0 and (total < max_bytes or newline_count <= tail_lines + 1) and total < max_bytes * 2:
+            read_size = min(chunk_size, pos)
+            pos -= read_size
+            f.seek(pos)
+            chunk = f.read(read_size)
+            chunks.insert(0, chunk)
+            total += len(chunk)
+            newline_count += chunk.count(b"\n")
+            chunk_size = min(chunk_size * 2, 65536)
+        return b"".join(chunks), pos > 0
+
+
 def _capture_log_snapshot(
     log_name: str, *, tail_lines: int, max_bytes: int = _MAX_LOG_BYTES, redact: bool = True,
 ) -> LogSnapshot:
@@ -320,31 +346,7 @@ def _capture_log_snapshot(
             # race: file was truncated between _resolve_log_path and stat
             return LogSnapshot(path=log_path, tail_text="(file empty)", full_text=None)
 
-        with open(log_path, "rb") as f:
-            if size <= max_bytes:
-                raw = f.read()
-                truncated = False
-            else:
-                # Read from the end until we have enough bytes for the standalone upload and
-                # enough newline context to render the summary tail from the same snapshot.
-                chunk_size = 8192
-                pos = size
-                chunks: list[bytes] = []
-                total = 0
-                newline_count = 0
-
-                while pos > 0 and (total < max_bytes or newline_count <= tail_lines + 1) and total < max_bytes * 2:
-                    read_size = min(chunk_size, pos)
-                    pos -= read_size
-                    f.seek(pos)
-                    chunk = f.read(read_size)
-                    chunks.insert(0, chunk)
-                    total += len(chunk)
-                    newline_count += chunk.count(b"\n")
-                    chunk_size = min(chunk_size * 2, 65536)
-
-                raw = b"".join(chunks)
-                truncated = pos > 0
+        raw, truncated = _read_tail_bytes(log_path, size, max_bytes, tail_lines)
 
         full_raw = raw
         if truncated and len(full_raw) > max_bytes:
