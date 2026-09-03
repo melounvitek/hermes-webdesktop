@@ -239,12 +239,10 @@ class SearchMixin:
         if "yes" in parent_check.stdout and basename_query:
             ls_result = self._exec(f"ls -1 {self._escape_shell_arg(parent)} 2>/dev/null | head -20")
             if ls_result.exit_code == 0 and ls_result.stdout.strip():
-                lower_q = basename_query.lower()
-                candidates = []
-                for entry in ls_result.stdout.strip().split('\n'):
-                    le = entry.lower()
-                    if entry and (lower_q in le or le in lower_q or le.startswith(lower_q[:3])):
-                        candidates.append(os.path.join(parent, entry))
+                lq = basename_query.lower()
+                candidates = [
+                    os.path.join(parent, e) for e in ls_result.stdout.strip().split('\n')
+                    if e and (lq in e.lower() or e.lower() in lq or e.lower().startswith(lq[:3]))]
                 if candidates:
                     hint_parts.append("Similar paths: " + ", ".join(candidates[:5]))
         return SearchResult(error=". ".join(hint_parts), total_count=0)
@@ -348,31 +346,35 @@ class SearchMixin:
         prune_expr = f" {self._prune_expr(protected_paths)} -o" if protected_paths else ""
         base = (f"find {self._escape_shell_arg(path)}{prune_expr}{hidden_filter_expr} "
                 f"-type f -name {self._escape_shell_arg(search_pattern)} ")
-        result = self._exec(f"{base}-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}", timeout=60)
-        stdout, limit_reason = _search_stdout_and_limit(result)
-        if not stdout.strip() and not limit_reason:
-            # BSD find (macOS) has no -printf.
-            result = self._exec(f"{base}2>/dev/null | sort -rn{pagination_expr}", timeout=60)
-            stdout, limit_reason = _search_stdout_and_limit(result)
+        # BSD find (macOS) has no -printf: retry without the mtime prefix.
+        lines, limit_reason = self._exec_lines_with_fallback(
+            f"{base}-printf '%T@ %p\\n' 2>/dev/null | sort -rn{pagination_expr}",
+            f"{base}2>/dev/null | sort -rn{pagination_expr}")
         files = []
-        for line in stdout.strip().split('\n'):
-            if not line:
-                continue
+        for line in lines:
             parts = line.split(' ', 1)
             files.append(parts[1] if len(parts) == 2 and parts[0].replace('.', '').isdigit() else line)
         if has_hidden_path_ancestor:
             normalized_root = search_root.resolve()
-            filtered_files = []
-            for file_path in files:
+
+            def rel_parts(file_path):
                 try:
-                    rel_parts = Path(file_path).resolve().relative_to(normalized_root).parts
+                    return Path(file_path).resolve().relative_to(normalized_root).parts
                 except ValueError:
-                    rel_parts = Path(file_path).parts
-                if not _has_hidden_part(rel_parts):
-                    filtered_files.append(file_path)
-            files = filtered_files[offset:offset + limit]
+                    return Path(file_path).parts
+            files = [f for f in files if not _has_hidden_part(rel_parts(f))][offset:offset + limit]
         return SearchResult(files=files, total_count=len(files),
                             truncated=bool(limit_reason), limit_reason=limit_reason)
+
+    def _exec_lines_with_fallback(self, cmd: str, fallback_cmd: str) -> tuple[List[str], Optional[str]]:
+        """Non-empty stdout lines of ``cmd``; when it yields nothing (and didn't time
+        out) run ``fallback_cmd`` instead. Returns ``(lines, limit_reason)``."""
+        result = self._exec(cmd, timeout=60)
+        stdout, limit_reason = _search_stdout_and_limit(result)
+        if not stdout.strip() and not limit_reason:
+            result = self._exec(fallback_cmd, timeout=60)
+            stdout, limit_reason = _search_stdout_and_limit(result)
+        return [f for f in stdout.strip().split('\n') if f], limit_reason
 
     def _search_files_rg(self, pattern: str, path: str, limit: int, offset: int) -> SearchResult:
         """File-name search via ``rg --files``, mtime-sorted when rg >= 13 supports --sortr."""
@@ -383,14 +385,9 @@ class SearchMixin:
         exclusion_args = f" {exclusion_globs}" if exclusion_globs else ""
         tail = (f"-g {self._escape_shell_arg(glob_pattern)}{exclusion_args} "
                 f"{self._escape_native_tool_arg(path)} 2>/dev/null | head -n {fetch_limit}")
-        result = self._exec(f"rg --files --sortr=modified {tail}", timeout=60)
-        stdout, limit_reason = _search_stdout_and_limit(result)
-        all_files = [f for f in stdout.strip().split('\n') if f]
-        if not all_files and not limit_reason:
-            # --sortr may have failed on older rg; retry without it.
-            result = self._exec(f"rg --files {tail}", timeout=60)
-            stdout, limit_reason = _search_stdout_and_limit(result)
-            all_files = [f for f in stdout.strip().split('\n') if f]
+        # --sortr may have failed on older rg; retry without it.
+        all_files, limit_reason = self._exec_lines_with_fallback(
+            f"rg --files --sortr=modified {tail}", f"rg --files {tail}")
         return SearchResult(
             files=all_files[offset:offset + limit], total_count=len(all_files),
             truncated=len(all_files) >= fetch_limit or bool(limit_reason), limit_reason=limit_reason,

@@ -225,8 +225,7 @@ class LintMixin:
             from agent.lsp.servers import SERVERS
         except Exception:  # noqa: BLE001
             return False
-        ext_lower = ext.lower()
-        return any(ext_lower in srv.extensions for srv in SERVERS)
+        return any(ext.lower() in srv.extensions for srv in SERVERS)
 
     def _has_ancestor_tsconfig(self, path: str) -> bool:
         """True iff a tsconfig.json exists in ``path``'s directory or any ancestor.
@@ -236,13 +235,12 @@ class LintMixin:
             return False
         try:
             d = os.path.dirname(os.path.abspath(path))
-            while True:
-                if os.path.isfile(os.path.join(d, "tsconfig.json")):
-                    return True
+            while not os.path.isfile(os.path.join(d, "tsconfig.json")):
                 parent = os.path.dirname(d)
                 if parent == d:
                     return False
                 d = parent
+            return True
         except Exception:  # noqa: BLE001
             return False
 
@@ -292,8 +290,6 @@ class LintMixin:
         try:
             from agent.lsp.reporter import report_for_file, truncate
             block = report_for_file(path, diagnostics)
-            if not block:
-                return ""
-            return truncate("LSP diagnostics introduced by this edit:\n" + block)
+            return truncate("LSP diagnostics introduced by this edit:\n" + block) if block else ""
         except Exception:  # noqa: BLE001
             return ""

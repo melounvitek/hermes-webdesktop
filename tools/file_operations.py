@@ -2,10 +2,9 @@
 """File operations (read, write, patch, search) over any terminal backend.
 
 Every operation is a shell command run through the backend's ``execute()``, so one
-implementation serves local, docker, ssh, singularity, modal, daytona and
-vercel_sandbox. Companions (names re-exported here): ``file_operations_common``
-(result dataclasses, line-ending/BOM helpers), ``file_operations_lint``
-(LintMixin), ``file_operations_search`` (SearchMixin).
+implementation serves every environment (local, docker, ssh, modal, ...). Companions,
+re-exported here: ``file_operations_common`` (result dataclasses, text helpers),
+``file_operations_lint`` (LintMixin), ``file_operations_search`` (SearchMixin).
 """
 
 import base64
@@ -69,10 +68,8 @@ _MAGIC_SIGNATURES: tuple = (
 
 def identify_binary_bytes(sample: bytes) -> str:
     """Best-effort human name for binary content from its magic bytes; never raises.
-
-    The ISO-media entry additionally requires ``ftyp`` at offset 4 — three
-    leading NULs alone are too weak a signature.
-    """
+    The ISO-media entry additionally requires ``ftyp`` at offset 4 (three leading
+    NULs alone are too weak a signature)."""
     for prefix, name in _MAGIC_SIGNATURES:
         if sample.startswith(prefix):
             if name.startswith("ISO media") and sample[4:8] != b"ftyp":
@@ -261,19 +258,14 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         return os.path.splitext(path)[1].lower() in IMAGE_EXTENSIONS
 
     def _add_line_numbers(self, content: str, start_line: int = 1) -> str:
-        """Prefix each line with a compact ``<n>|`` gutter, clamping long lines.
-
-        Compact, not fixed-width: padding cost ~16% more tokens per line for no
-        accuracy gain in A/B, while dropping numbers regressed line-referencing.
-        """
+        """Prefix each line with a compact ``<n>|`` gutter, clamping long lines. Not
+        fixed-width: padding cost ~16% more tokens per line for no accuracy gain in
+        A/B, while dropping numbers regressed line-referencing."""
         from tools.tool_output_limits import get_max_line_length
         max_line_length = get_max_line_length()
-        numbered = []
-        for i, line in enumerate(content.split('\n'), start=start_line):
-            if len(line) > max_line_length:
-                line = line[:max_line_length] + "... [truncated]"
-            numbered.append(f"{i}|{line}")
-        return '\n'.join(numbered)
+        return '\n'.join(
+            f"{i}|{line if len(line) <= max_line_length else line[:max_line_length] + '... [truncated]'}"
+            for i, line in enumerate(content.split('\n'), start=start_line))
 
     def _expand_path(self, path: str) -> str:
         """Expand ``~`` / ``~user`` via the backend's shell (its HOME, not the
