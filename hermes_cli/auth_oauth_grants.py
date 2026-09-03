@@ -17,7 +17,6 @@ from hermes_cli.auth_constants import _decode_jwt_claims
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
-
 # Pool providers whose OAuth refresh tokens are SINGLE-USE: redeeming rotates the pair and
 # revokes the old one, so a grant forked into two auth.json files is ONE credential with two
 # owners — the first to refresh strands the other with ``invalid_grant`` /
@@ -42,8 +41,7 @@ def _is_oauth_pool_payload(entry: Any) -> bool:
     return (
         str(entry.get("auth_type") or "").strip().lower() == "oauth"
         or bool(str(entry.get("refresh_token") or "").strip())
-        or str(entry.get("access_token") or "").startswith("sk-ant-oat")
-    )
+        or str(entry.get("access_token") or "").startswith("sk-ant-oat"))
 
 
 def _is_pkce_row(row: Dict[str, Any]) -> bool:
@@ -115,14 +113,12 @@ def strip_cloned_single_use_oauth_grants(profile_dir: Path) -> Dict[str, Any]:
         _save_auth_store(store, target_path=auth_path)
     except Exception:
         logger.debug(
-            "Failed to strip cloned single-use OAuth grants from %s", auth_path, exc_info=True,
-        )
+            "Failed to strip cloned single-use OAuth grants from %s", auth_path, exc_info=True)
     return stripped
 
 
 _OAUTH_TOKEN_FIELDS = (
-    "access_token", "refresh_token", "expires_at", "expires_at_ms", "last_refresh",
-)
+    "access_token", "refresh_token", "expires_at", "expires_at_ms", "last_refresh")
 
 _oauth_heal_notices: List[str] = []
 
@@ -185,8 +181,7 @@ def _oauth_freshness(entry: Dict[str, Any]) -> float:
 
 
 def _find_root_counterpart(
-    profile_row: Dict[str, Any], root_rows: List[Dict[str, Any]]
-) -> Optional[int]:
+    profile_row: Dict[str, Any], root_rows: List[Dict[str, Any]]) -> Optional[int]:
     """Index of the root OAuth row that shares a grant lineage with *profile_row*.
 
     Fallback per the one-grant-at-root rule: same provider + same OAuth client — every Anthropic
@@ -248,8 +243,7 @@ def _singleton_as_row(path: Path) -> Optional[Dict[str, Any]]:
     return {
         "access_token": data.get("accessToken"),
         "refresh_token": data.get("refreshToken"),
-        "expires_at_ms": data.get("expiresAt"),
-    }
+        "expires_at_ms": data.get("expiresAt")}
 
 
 # One-time heal for installs that ALREADY forked a single-use grant (fleets created before the
@@ -282,8 +276,7 @@ def heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, 
 
 
 def _heal_forked_provider_block(
-    profile_store: Dict[str, Any], root_store: Dict[str, Any], provider_id: str,
-) -> Optional[bool]:
+    profile_store: Dict[str, Any], root_store: Dict[str, Any], provider_id: str) -> Optional[bool]:
     """Consolidate a forked ``providers.<id>`` device-code block into root.
 
     Returns None when nothing matched, False when the profile copy was dropped (root already
@@ -328,8 +321,7 @@ def _pool_rows(store: Dict[str, Any], provider_id: str) -> Tuple[Any, List[Any]]
 
 
 def _adopt_if_fresher(
-    target: Dict[str, Any], candidate: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
+    target: Dict[str, Any], candidate: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """*target* carrying *candidate*'s pair when the candidate rotated later, else None."""
     if _oauth_freshness(candidate) > _oauth_freshness(target):
         return _adopt_oauth_material(target, candidate)
@@ -343,8 +335,7 @@ class _HealPass:
         self.profile_store, self.root_store = profile_store, root_store
         self.provider_id = provider_id
         self.summary: Dict[str, Any] = {
-            "adopted": False, "stripped_ids": [], "files": [], "providers_block": False,
-        }
+            "adopted": False, "stripped_ids": [], "files": [], "providers_block": False}
         self.profile_changed = self.root_changed = False
         self.p_pool, self.p_rows = _pool_rows(profile_store, provider_id)
         self.r_pool, self.r_rows = _pool_rows(root_store, provider_id)
@@ -352,8 +343,7 @@ class _HealPass:
         self.root_singleton = root_singleton
         self.root_singleton_row = (
             _singleton_as_row(root_singleton)
-            if root_singleton is not None and root_singleton.exists() else None
-        )
+            if root_singleton is not None and root_singleton.exists() else None)
 
     def _adopt_root_row(self, idx: int, row: Dict[str, Any]) -> None:
         merged = _adopt_if_fresher(self.r_rows[idx], row)
@@ -397,8 +387,7 @@ class _HealPass:
         if self.provider_id not in _DEVICE_CODE_BLOCK_PROVIDERS:
             return
         block_result = _heal_forked_provider_block(
-            self.profile_store, self.root_store, self.provider_id,
-        )
+            self.profile_store, self.root_store, self.provider_id)
         if block_result is not None:
             self.profile_changed = self.summary["providers_block"] = True
             if block_result:
@@ -421,8 +410,7 @@ class _HealPass:
             idx = next(
                 (i for i, r in enumerate(self.r_rows)
                  if _is_oauth_pool_payload(r) and _is_pkce_row(r)),
-                None,
-            )
+                None)
             if idx is not None:
                 self._adopt_root_row(idx, p_single)
         try:
@@ -439,14 +427,12 @@ class _HealPass:
         """
         if not (
             self.summary["adopted"] and self.root_singleton is not None
-            and self.root_singleton_row is not None
-        ):
+            and self.root_singleton_row is not None):
             return
         pkce_idx = next(
             (i for i, r in enumerate(self.r_rows)
              if _is_oauth_pool_payload(r) and r.get("source") == "hermes_pkce"),
-            None,
-        )
+            None)
         if pkce_idx is None:
             return
         pkce_row = self.r_rows[pkce_idx]
@@ -464,8 +450,7 @@ class _HealPass:
 def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, Any]]:
     from hermes_cli.auth import (
         _auth_file_path, _auth_store_lock, _global_auth_file_path, _load_auth_store,
-        _oauth_heal_clean_marks, _oauth_heal_notices, _same_path, _save_auth_store,
-    )
+        _oauth_heal_clean_marks, _oauth_heal_notices, _same_path, _save_auth_store)
     root_path = _global_auth_file_path()
     if root_path is None:
         return None  # classic mode: nothing to consolidate into
@@ -494,7 +479,9 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
     # Lock order: active (profile) store first, then the root source store — the same order
     # ``_provider_state_transaction`` uses.
     with _auth_store_lock():
-        profile_store = _load_auth_store(profile_path) if profile_path.exists() else {"providers": {}}
+        profile_store = (
+            _load_auth_store(profile_path) if profile_path.exists() else {"providers": {}}
+        )
         with _auth_store_lock(target_path=root_path):
             root_store = _load_auth_store(root_path) if root_path.exists() else {"providers": {}}
             run = _HealPass(profile_store, root_store, provider_id, root_singleton)
@@ -517,8 +504,7 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
                 from agent.anthropic_credentials import _write_hermes_oauth_credentials
                 _write_hermes_oauth_credentials(
                     singleton_row.get("access_token") or "", singleton_row.get("refresh_token"),
-                    singleton_row.get("expires_at_ms"), target=root_singleton,
-                )
+                    singleton_row.get("expires_at_ms"), target=root_singleton)
             if run.profile_changed and profile_path.exists():
                 _save_auth_store(profile_store, target_path=profile_path)
 
@@ -531,13 +517,11 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
         log_bits.append(", ".join(summary["files"]))
     verdict = (
         "profile copy was the live pair; root updated"
-        if summary["adopted"] else "root copy already newest; profile copy dropped"
-    )
+        if summary["adopted"] else "root copy already newest; profile copy dropped")
     message = (
         f"profile {profile_home.name}: consolidated forked {provider_id} OAuth grant "
         f"({'; '.join(log_bits) or 'no-op'}) into the root grant — {verdict}; "
-        f"this profile now borrows the root grant (#100339)"
-    )
+        f"this profile now borrows the root grant (#100339)")
     logger.info(message)
     _oauth_heal_notices.append(message)
     return summary

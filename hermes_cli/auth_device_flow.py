@@ -18,8 +18,7 @@ from typing import Any, Callable, Dict, FrozenSet, Optional
 from urllib.parse import urlparse
 from hermes_cli.auth_constants import (
     AuthError, DEFAULT_NOUS_PORTAL_URL, DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS,
-    DEVICE_CODE_GRANT_TYPE, OAUTH_OVER_SSH_DOCS_URL, httpx,
-)
+    DEVICE_CODE_GRANT_TYPE, OAUTH_OVER_SSH_DOCS_URL, httpx)
 from utils import is_truthy_value
 
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
@@ -48,8 +47,7 @@ def _is_remote_session() -> bool:
     """Detect environments where loopback OAuth can't reach the local browser."""
     return bool(
         os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY")
-        or any(os.getenv(var) for var in _REMOTE_IDE_ENV_VARS)
-    )
+        or any(os.getenv(var) for var in _REMOTE_IDE_ENV_VARS))
 
 
 def _names_console_browser(value: str) -> bool:
@@ -144,26 +142,24 @@ def _default_verify() -> bool | ssl.SSLContext:
 
 def _resolve_verify(
     *, insecure: Optional[bool] = None, ca_bundle: Optional[str] = None,
-    auth_state: Optional[Dict[str, Any]] = None,
-) -> bool | ssl.SSLContext:
+    auth_state: Optional[Dict[str, Any]] = None) -> bool | ssl.SSLContext:
     from hermes_cli.auth import _default_verify
     tls_state = auth_state.get("tls") if isinstance(auth_state, dict) else {}
     tls_state = tls_state if isinstance(tls_state, dict) else {}
     effective_insecure = (
         is_truthy_value(insecure, default=False) if insecure is not None
-        else is_truthy_value(tls_state.get("insecure", False), default=False)
-    )
+        else is_truthy_value(tls_state.get("insecure", False), default=False))
     effective_ca = (
         ca_bundle or tls_state.get("ca_bundle") or os.getenv("HERMES_CA_BUNDLE")
-        or os.getenv("SSL_CERT_FILE") or os.getenv("REQUESTS_CA_BUNDLE")
-    )
+        or os.getenv("SSL_CERT_FILE") or os.getenv("REQUESTS_CA_BUNDLE"))
     if effective_insecure:
         return False
     if effective_ca:
         ca_path = str(effective_ca)
         if not os.path.isfile(ca_path):
             logger.warning(
-                "CA bundle path does not exist: %s — falling back to default certificates", ca_path,
+                "CA bundle path does not exist: %s — falling back to default certificates",
+                ca_path,
             )
             return _default_verify()
         return ssl.create_default_context(cafile=ca_path)
@@ -176,14 +172,12 @@ def _request_device_code(
     """POST to the device code endpoint. Returns device_code, user_code, etc."""
     response = client.post(
         f"{portal_base_url}/api/oauth/device/code",
-        data={"client_id": client_id, **({"scope": scope} if scope else {})},
-    )
+        data={"client_id": client_id, **({"scope": scope} if scope else {})})
     response.raise_for_status()
     data = response.json()
     required_fields = [
         "device_code", "user_code", "verification_uri",
-        "verification_uri_complete", "expires_in", "interval",
-    ]
+        "verification_uri_complete", "expires_in", "interval"]
     missing = [f for f in required_fields if f not in data]
     if missing:
         raise ValueError(f"Device code response missing fields: {', '.join(missing)}")
@@ -199,14 +193,12 @@ def _nous_device_auth_timeout_message(portal_base_url: str) -> str:
         "  If the browser showed a CAPTCHA / 'You did not pass CAPTCHA' error,\n"
         "  finish signing in at the Portal in a normal browser tab, then retry:\n"
         "    hermes portal\n"
-        f"  Portal login: {portal}/login"
-    )
+        f"  Portal login: {portal}/login")
 
 
 def _print_device_code_instructions(
     verification_url: str, user_code: str, *, open_browser: bool, failure_dash: str = "--",
-    swallow_open_errors: bool = False,
-) -> None:
+    swallow_open_errors: bool = False) -> None:
     """Print the shared "To continue" device-code block and optionally open the browser.
 
     Callers decide *whether* to open (remote-session / graphical-browser gating differs per
@@ -236,8 +228,7 @@ def _poll_device_token_generic(
     validate_success: Callable[[Dict[str, Any]], None],
     on_non_json_error: Callable[["httpx.Response"], Exception],
     on_error: Callable[["httpx.Response", Dict[str, Any]], Exception],
-    on_timeout: Callable[[], Exception],
-) -> Dict[str, Any]:
+    on_timeout: Callable[[], Exception]) -> Dict[str, Any]:
     """RFC 8628 device-code polling loop shared by the Nous and xAI flows.
 
     ``authorization_pending`` sleeps and retries; ``slow_down`` grows the interval by 1s (cap 30s).
@@ -271,8 +262,7 @@ def _poll_device_token_generic(
 
 def _poll_for_token(
     client: httpx.Client, portal_base_url: str, client_id: str, device_code: str,
-    expires_in: int, poll_interval: int,
-) -> Dict[str, Any]:
+    expires_in: int, poll_interval: int) -> Dict[str, Any]:
     """Poll the Nous token endpoint until the user approves or the code expires."""
     def _validate(payload: Dict[str, Any]) -> None:
         if "access_token" not in payload:
@@ -288,18 +278,17 @@ def _poll_for_token(
             f"{portal_base_url}/api/oauth/token",
             data={
                 "grant_type": DEVICE_CODE_GRANT_TYPE, "client_id": client_id,
-                "device_code": device_code,
-            },
-        ),
+                "device_code": device_code}),
         expires_in=expires_in,
         poll_interval=max(1, min(poll_interval, DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS)),
         validate_success=_validate,
-        on_non_json_error=lambda _r: RuntimeError("Token endpoint returned a non-JSON error response"),
+        on_non_json_error=lambda _r: RuntimeError(
+            "Token endpoint returned a non-JSON error response"
+        ),
         on_error=_error,
         # Enriched at the SOURCE so the CLI login and the dashboard/desktop poller
         # (web_server._nous_poller surfaces str(e) to the UI) both inherit the guidance.
-        on_timeout=lambda: TimeoutError(_nous_device_auth_timeout_message(portal_base_url)),
-    )
+        on_timeout=lambda: TimeoutError(_nous_device_auth_timeout_message(portal_base_url)))
 
 
 def _prompt_yes_no(prompt: str, *, default: str) -> bool:
@@ -311,7 +300,9 @@ def _prompt_yes_no(prompt: str, *, default: str) -> bool:
     return answer in {"", "y", "yes"} if default == "y" else answer in {"y", "yes"}
 
 
-def _print_login_success(provider_id: str, config_path: Path, *, show_auth_state: bool = False) -> None:
+def _print_login_success(
+    provider_id: str, config_path: Path, *, show_auth_state: bool = False,
+) -> None:
     print()
     print("Login successful!")
     if show_auth_state:
@@ -323,8 +314,7 @@ def _print_login_success(provider_id: str, config_path: Path, *, show_auth_state
 def _offer_existing_oauth_credentials(
     provider_id: str, *, resolve: Callable[[], Dict[str, Any]],
     is_expiring: Callable[[str, int], bool], display_name: str, default_base_url: str,
-    expired_notice: Optional[str] = None,
-) -> bool:
+    expired_notice: Optional[str] = None) -> bool:
     """Offer to reuse still-valid stored OAuth credentials. Returns True when the user accepted.
 
     *resolve* attempts a refresh, so a resolved token should be valid — but double-check the
@@ -338,8 +328,7 @@ def _offer_existing_oauth_credentials(
             print(f"Existing {display_name} credentials found in Hermes auth store.")
             if _prompt_yes_no("Use existing credentials? [Y/n]: ", default="y"):
                 config_path = _update_config_for_provider(
-                    provider_id, existing.get("base_url", default_base_url),
-                )
+                    provider_id, existing.get("base_url", default_base_url))
                 _print_login_success(provider_id, config_path)
                 return True
         elif expired_notice:
