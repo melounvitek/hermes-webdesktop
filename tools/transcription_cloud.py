@@ -2,10 +2,9 @@
 
 OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, the REST
 multipart backends (xAI, ElevenLabs), and OpenAI audio credential resolution
-(config > keyless local server > env > managed Nous gateway).
-
-Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
-surface) and is imported lazily here so origin patches still intercept.
+(config > keyless local server > env > managed Nous gateway). Every name is
+re-imported by ``tools/transcription_tools.py`` (patch surface), which is
+imported lazily here so origin patches still intercept.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import logging
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urljoin
 
 from utils import is_truthy_value
@@ -35,12 +34,6 @@ def _has_xai_stt_credentials() -> bool:
     return bool(resolve_xai_http_credentials().get("api_key"))
 
 
-def _close_client(client: Any) -> None:
-    close = getattr(client, "close", None)
-    if callable(close):
-        close()
-
-
 def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, log_label: str, body):
     """Run ``body(client)`` against a fresh OpenAI SDK client (30s timeout, no SDK retries).
 
@@ -53,7 +46,9 @@ def _with_openai_client(api_key: str, base_url: Optional[str], file_path: str, l
         try:
             return body(client)
         finally:
-            _close_client(client)
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
     except Exception as e:
         return _openai_sdk_failure(e, file_path, log_label)
 
@@ -78,14 +73,21 @@ def _openai_sdk_failure(exc: BaseException, file_path: str, log_label: str) -> D
         APIError = APIConnectionError = APITimeoutError = ()
     if isinstance(exc, PermissionError):
         return _error_result(f"Permission denied: {file_path}")
-    if isinstance(exc, APIConnectionError):
-        return _error_result(f"Connection error: {exc}")
-    if isinstance(exc, APITimeoutError):
-        return _error_result(f"Request timeout: {exc}")
-    if isinstance(exc, APIError):
-        return _error_result(f"API error: {exc}")
+    for cls, label in ((APIConnectionError, "Connection error"), (APITimeoutError, "Request timeout"), (APIError, "API error")):
+        if isinstance(exc, cls):
+            return _error_result(f"{label}: {exc}")
     logger.error("%s transcription failed: %s", log_label, exc, exc_info=True)
     return _error_result(f"Transcription failed: {exc}")
+
+
+def _sdk_prompt_kwargs(language: Optional[str], prompt: Optional[str]) -> Dict[str, Any]:
+    """``language``/``prompt`` create-kwargs, each only when set so the bare request stays byte-identical."""
+    kwargs: Dict[str, Any] = {}
+    if language:
+        kwargs["language"] = language
+    if prompt:
+        kwargs["prompt"] = prompt
+    return kwargs
 
 
 def _transcribe_groq(
@@ -104,7 +106,6 @@ def _transcribe_groq(
     api_key = _resolve_provider_key("GROQ_API_KEY", "groq")
     if not api_key:
         return _error_result("GROQ_API_KEY not set")
-
     if not _HAS_OPENAI:
         return _error_result("openai package not installed")
 
@@ -116,25 +117,12 @@ def _transcribe_groq(
     language = language or _resolve_stt_language("groq")
 
     def _run(client):
-        create_kwargs = {
-            "model": model_name,
-            "response_format": "text",
-        }
-        if language:
-            create_kwargs["language"] = language
-        if prompt:
-            # Only sent when set so the no-hook, no-config request stays byte-identical.
-            create_kwargs["prompt"] = prompt
+        create_kwargs = {"model": model_name, "response_format": "text", **_sdk_prompt_kwargs(language, prompt)}
         with open(file_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=audio_file,
-                **create_kwargs,
-            )
-
+            transcription = client.audio.transcriptions.create(file=audio_file, **create_kwargs)
         transcript_text = str(transcription).strip()
         logger.info("Transcribed %s via Groq API (%s, lang=%s, %d chars)",
                      Path(file_path).name, model_name, language or "auto", len(transcript_text))
-
         return _ok_result(transcript_text, "groq")
 
     return _with_openai_client(api_key, GROQ_BASE_URL, file_path, "Groq", _run)
@@ -222,7 +210,6 @@ def _transcribe_openai(
             "Transcribed %s via %s (%s, %d chars)",
             Path(file_path).name, provider_label, model_name, len(transcript_text),
         )
-
         return _ok_result(transcript_text, provider_label)
 
     return _with_openai_client(api_key, base_url, file_path, provider_label, _run)
@@ -247,17 +234,13 @@ def _transcribe_mistral(
 
         with Mistral(api_key=api_key) as client:
             with open(file_path, "rb") as audio_file:
+                # Language: hook override > stt.mistral.language > stt.language > env > auto.
+                language = language or _resolve_stt_language("mistral")
                 complete_kwargs: Dict[str, Any] = {
                     "model": model_name,
                     "file": {"content": audio_file, "file_name": Path(file_path).name},
+                    **_sdk_prompt_kwargs(language, prompt),
                 }
-                # Language: hook override > stt.mistral.language > stt.language > env > auto.
-                language = language or _resolve_stt_language("mistral")
-                if language:
-                    complete_kwargs["language"] = language
-                if prompt:
-                    # Only sent when set so the no-hook, no-config request stays byte-identical.
-                    complete_kwargs["prompt"] = prompt
                 result = client.audio.transcriptions.complete(**complete_kwargs)
 
             transcript_text = _extract_transcript_text(result)
@@ -271,6 +254,9 @@ def _transcribe_mistral(
         return _cloud_failure(e, file_path, "Mistral transcription", type(e).__name__)
 
 
+# ---- REST multipart backends (xAI, ElevenLabs) ----------------------------
+
+
 def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, data: Dict[str, str]):
     import requests
 
@@ -281,22 +267,18 @@ def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, dat
         )
 
 
-def _http_error_detail(response, extract) -> str:
-    """``extract(json_body)`` -> detail string, falling back to the first 300 chars of the body."""
-    try:
-        return extract(response.json()) or response.text[:300]
-    except Exception:
-        return response.text[:300]
-
-
 def _rest_transcript(response, label: str, extract_detail, extract_text):
     """Turn a multipart STT response into ``(text, body, None)`` or ``(None, None, error_envelope)``.
 
-    Non-200 -> ``"<label> API error (HTTP n): detail"``; empty text -> the
+    Non-200 -> ``"<label> API error (HTTP n): detail"`` (JSON detail via
+    *extract_detail*, else the first 300 body chars); empty text -> the
     ``no_speech`` envelope so callers treat silence as non-fatal.
     """
     if response.status_code != 200:
-        detail = _http_error_detail(response, extract_detail)
+        try:
+            detail = extract_detail(response.json()) or response.text[:300]
+        except Exception:
+            detail = response.text[:300]
         return None, None, _error_result(f"{label} API error (HTTP {response.status_code}): {detail}")
     body = response.json()
     text = extract_text(body)
@@ -305,11 +287,24 @@ def _rest_transcript(response, label: str, extract_detail, extract_text):
     return text, body, None
 
 
-def _elevenlabs_error_detail(err_body: Dict[str, Any]) -> str:
-    error_value = err_body.get("detail") or err_body.get("error")
-    if isinstance(error_value, dict):
-        return str(error_value.get("message") or error_value)
-    return str(error_value) if error_value else ""
+def _rest_provider(
+    file_path: str,
+    provider: str,
+    label: str,
+    post: Callable[[], Any],
+    extract_detail,
+    extract_text,
+    log: Callable[[str, Dict[str, Any]], None],
+) -> Dict[str, Any]:
+    """Shared REST flow: ``post()`` -> envelope/transcript -> ``log(text, body)`` -> ok; exceptions -> ``_cloud_failure``."""
+    try:
+        transcript_text, body, error = _rest_transcript(post(), label, extract_detail, extract_text)
+        if error:
+            return error
+        log(transcript_text, body)
+        return _ok_result(transcript_text, provider)
+    except Exception as e:
+        return _cloud_failure(e, file_path, f"{label} transcription")
 
 
 def _transcribe_xai(
@@ -357,7 +352,7 @@ def _transcribe_xai(
     # Language: hook override > stt.xai.language > stt.language > env.
     language = language or _resolve_stt_language("xai", stt_config) or ""
 
-    try:
+    def _post() -> Any:
         from tools.xai_http import hermes_xai_user_agent
 
         data: Dict[str, str] = {}
@@ -375,7 +370,6 @@ def _transcribe_xai(
             )
 
         response = _post_transcription(api_key, _resolve_base_url(creds))
-
         if response.status_code in {401, 403} and creds.get("provider") == "xai-oauth":
             logger.info("xAI STT got HTTP %d; refreshing OAuth credentials and retrying once", response.status_code)
             try:
@@ -387,22 +381,27 @@ def _transcribe_xai(
                 logger.warning(
                     "xAI STT OAuth refresh-and-retry after HTTP %d failed: %s", response.status_code, retry_exc,
                 )
+        return response
 
-        transcript_text, result, error = _rest_transcript(
-            response, "xAI STT",
-            lambda body: body.get("error", {}).get("message", ""),
-            lambda body: body.get("text", "").strip(),
-        )
-        if error:
-            return error
+    def _log(transcript_text: str, result: Dict[str, Any]) -> None:
         logger.info(
             "Transcribed %s via xAI Grok STT (lang=%s, %.1fs audio, %d chars)",
             Path(file_path).name, result.get("language", language), result.get("duration", 0), len(transcript_text),
         )
-        return _ok_result(transcript_text, "xai")
 
-    except Exception as e:
-        return _cloud_failure(e, file_path, "xAI STT transcription")
+    return _rest_provider(
+        file_path, "xai", "xAI STT", _post,
+        lambda body: body.get("error", {}).get("message", ""),
+        lambda body: body.get("text", "").strip(),
+        _log,
+    )
+
+
+def _elevenlabs_error_detail(err_body: Dict[str, Any]) -> str:
+    error_value = err_body.get("detail") or err_body.get("error")
+    if isinstance(error_value, dict):
+        return str(error_value.get("message") or error_value)
+    return str(error_value) if error_value else ""
 
 
 def _transcribe_elevenlabs(
@@ -428,7 +427,8 @@ def _transcribe_elevenlabs(
     ).strip().rstrip("/")
     # Language: hook override > stt.elevenlabs.language(_code) > stt.language.
     language_code = language or _resolve_stt_language("elevenlabs", stt_config, extra_keys=("language_code",)) or ""
-    try:
+
+    def _post() -> Any:
         data: Dict[str, str] = {
             "model_id": model_name,
             "tag_audio_events": str(is_truthy_value(elevenlabs_config.get("tag_audio_events", False))).lower(),
@@ -436,22 +436,17 @@ def _transcribe_elevenlabs(
         }
         if language_code:
             data["language_code"] = language_code
+        return _post_audio_multipart(f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data)
 
-        response = _post_audio_multipart(f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data)
-
-        transcript_text, _body, error = _rest_transcript(
-            response, "ElevenLabs STT", _elevenlabs_error_detail, _extract_transcript_text,
-        )
-        if error:
-            return error
+    def _log(transcript_text: str, _body: Dict[str, Any]) -> None:
         logger.info(
             "Transcribed %s via ElevenLabs Scribe (%s, %d chars)",
             Path(file_path).name, model_name, len(transcript_text),
         )
-        return _ok_result(transcript_text, "elevenlabs")
 
-    except Exception as e:
-        return _cloud_failure(e, file_path, "ElevenLabs STT transcription")
+    return _rest_provider(
+        file_path, "elevenlabs", "ElevenLabs STT", _post, _elevenlabs_error_detail, _extract_transcript_text, _log,
+    )
 
 
 def _transcribe_deepinfra(
@@ -461,8 +456,7 @@ def _transcribe_deepinfra(
     language: Optional[str] = None,
     prompt: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Resolve DeepInfra credentials/model (via the shared ``hermes_cli.models``
-    helpers), then delegate to :func:`_transcribe_openai`."""
+    """Resolve DeepInfra credentials/model (shared ``hermes_cli.models`` helpers), then delegate to :func:`_transcribe_openai`."""
     from tools.transcription_tools import _load_stt_config, _resolve_provider_key, _transcribe_openai
     api_key = _resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
     if not api_key:
@@ -486,6 +480,9 @@ def _transcribe_deepinfra(
         file_path, model_name, api_key=api_key, base_url=base_url, provider_label="deepinfra",
         language=language, prompt=prompt,
     )
+
+
+# ---- OpenAI audio credential resolution -----------------------------------
 
 
 def _is_local_or_private_url(url: str) -> bool:

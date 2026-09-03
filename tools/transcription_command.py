@@ -2,10 +2,9 @@
 
 ``stt.providers.<name>: type: command`` registry, plugin-registered
 ``TranscriptionProvider`` dispatch, and the ``pre_transcription`` hook that
-threads prompt/language/model overrides into every backend.
-
-Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
-surface) and is imported lazily here so origin patches still intercept.
+threads prompt/language/model overrides into every backend. Every name is
+re-imported by ``tools/transcription_tools.py`` (patch surface), which is
+imported lazily here so origin patches still intercept.
 """
 
 from __future__ import annotations
@@ -17,12 +16,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from tools.tts_command_provider import (
-    command_env_passthrough as _command_stt_env_passthrough,
-    render_command_template as _render_command_stt_template,
+    _command_output_format, _command_timeout, _is_command_provider_config as _is_command_stt_provider_config,
+    _named_provider_config, _resolve_command_config, command_env_passthrough as _command_stt_env_passthrough,
+    command_failure_detail, render_command_template as _render_command_stt_template,
     run_command_provider as _run_command_stt,
 )
 from tools.transcription_common import (
-    BUILTIN_STT_PROVIDERS, _error_result, _get_stt_section, _log_prompt_unsupported, _ok_result,
+    BUILTIN_STT_PROVIDERS, _error_result, _log_prompt_unsupported, _ok_result,
 )
 
 # Log-record parity with the origin module.
@@ -31,86 +31,38 @@ logger = logging.getLogger("tools.transcription_tools")
 
 # ---- Command-provider registry (``stt.providers.<name>: type: command``) ---
 #
-# Mirrors the TTS command-provider registry: same placeholder grammar,
-# shell-quote-aware rendering and process-tree termination on timeout.
-# Resolution order: built-in name (always wins) > stt.providers.<name> command
-# > plugin-registered TranscriptionProvider > "No STT provider available".
-# The single-env-var HERMES_LOCAL_STT_COMMAND escape hatch stays untouched via
-# the built-in ``local_command`` path.
+# Mirrors the TTS command-provider registry (same placeholder grammar, quote-aware
+# rendering, process-tree termination on timeout). Resolution order: built-in name
+# (always wins) > stt.providers.<name> command > plugin TranscriptionProvider >
+# "No STT provider available". The single-env-var HERMES_LOCAL_STT_COMMAND escape
+# hatch stays untouched via the built-in ``local_command`` path.
 DEFAULT_COMMAND_STT_TIMEOUT_SECONDS = 300
 DEFAULT_COMMAND_STT_LANGUAGE = "en"
 DEFAULT_COMMAND_STT_OUTPUT_FORMAT = "txt"
 COMMAND_STT_OUTPUT_FORMATS = frozenset({"txt", "json", "srt", "vtt"})
+_NON_COMMAND_STT_NAMES = frozenset(BUILTIN_STT_PROVIDERS | {"none"})
 
 
-def _get_named_stt_provider_config(
-    stt_config: Dict[str, Any],
-    name: str,
-) -> Dict[str, Any]:
-    """Return the config for a user-declared STT provider, or {}.
-
-    ``stt.providers.<name>`` is canonical; ``stt.<name>`` is accepted for
-    back-compat only when *name* is not a built-in, so a user's ``stt.openai``
-    block still means the OpenAI provider. Built-in sections can't be mistaken
-    for command providers anyway: ``_is_command_stt_provider_config`` requires
-    an explicit ``command:``.
-    """
-    providers = _get_stt_section(stt_config, "providers")
-    section = providers.get(name)
-    if isinstance(section, dict):
-        return section
-    if name.lower() not in BUILTIN_STT_PROVIDERS:
-        return _get_stt_section(stt_config, name)
-    return {}
+def _get_named_stt_provider_config(stt_config: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """``stt.providers.<name>`` (canonical), else ``stt.<name>`` for non-built-in names only."""
+    return _named_provider_config(stt_config, name, BUILTIN_STT_PROVIDERS)
 
 
-def _is_command_stt_provider_config(config: Dict[str, Any]) -> bool:
-    """Return True when *config* declares a command-type STT provider."""
-    if not isinstance(config, dict):
-        return False
-    ptype = str(config.get("type") or "").strip().lower()
-    if ptype and ptype != "command":
-        return False
-    command = config.get("command")
-    return isinstance(command, str) and bool(command.strip())
-
-
-def _resolve_command_stt_provider_config(
-    provider: str,
-    stt_config: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    """Return the provider config if *provider* is a command type; None for built-ins, ``none``, unknown."""
-    if not provider:
-        return None
-    key = provider.lower().strip()
-    if key in BUILTIN_STT_PROVIDERS or key == "none":
-        return None
-    config = _get_named_stt_provider_config(stt_config, key)
-    return config if _is_command_stt_provider_config(config) else None
+def _resolve_command_stt_provider_config(provider: str, stt_config: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The provider config if *provider* is a command type; None for built-ins, ``none``, unknown."""
+    return _resolve_command_config(provider, stt_config, _NON_COMMAND_STT_NAMES)
 
 
 def _get_command_stt_timeout(config: Dict[str, Any]) -> float:
-    """Return timeout in seconds (``timeout`` > ``timeout_seconds``), falling back when invalid or <= 0."""
-    raw = config.get("timeout", config.get("timeout_seconds", DEFAULT_COMMAND_STT_TIMEOUT_SECONDS))
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        value = 0.0
-    return value if value > 0 else float(DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
+    return _command_timeout(config, DEFAULT_COMMAND_STT_TIMEOUT_SECONDS)
 
 
 def _get_command_stt_output_format(config: Dict[str, Any]) -> str:
-    """Return the validated output format (txt/json/srt/vtt)."""
-    raw = config.get("format") or config.get("output_format") or DEFAULT_COMMAND_STT_OUTPUT_FORMAT
-    fmt = str(raw).lower().strip().lstrip(".")
-    return fmt if fmt in COMMAND_STT_OUTPUT_FORMATS else DEFAULT_COMMAND_STT_OUTPUT_FORMAT
+    return _command_output_format(config, COMMAND_STT_OUTPUT_FORMATS, DEFAULT_COMMAND_STT_OUTPUT_FORMAT)
 
 
 def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:
-    """Return the transcript: non-empty output file > non-empty stdout (curl one-liners) > RuntimeError.
-
-    JSON output is returned raw — users configure ``format: txt`` or post-process.
-    """
+    """Transcript: non-empty output file > non-empty stdout (curl one-liners) > RuntimeError. JSON is returned raw."""
     if output_path.exists():
         try:
             content = output_path.read_text(encoding="utf-8").strip()
@@ -120,10 +72,7 @@ def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:
             return content
     if stdout and stdout.strip():
         return stdout.strip()
-    raise RuntimeError(
-        f"Command STT provider wrote no output file at {output_path} "
-        f"and produced no stdout"
-    )
+    raise RuntimeError(f"Command STT provider wrote no output file at {output_path} and produced no stdout")
 
 
 def _transcribe_command_stt(
@@ -137,9 +86,8 @@ def _transcribe_command_stt(
 ) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
 
-    Placeholders (all shell-quote-aware; ``{{``/``}}`` stay literal):
-    ``{input_path}`` original audio path, ``{output_path}`` file to write the
-    transcript to, ``{output_dir}`` its parent, ``{format}`` txt/json/srt/vtt,
+    Placeholders (shell-quote-aware; ``{{``/``}}`` stay literal): ``{input_path}``,
+    ``{output_path}`` (transcript file), ``{output_dir}``, ``{format}`` txt/json/srt/vtt,
     ``{language}`` (default ``en``), ``{model}`` (empty when unset).
     """
     from tools.transcription_tools import _resolve_stt_language
@@ -160,10 +108,8 @@ def _transcribe_command_stt(
     timeout = _get_command_stt_timeout(config)
     output_format = _get_command_stt_output_format(config)
     language = (
-        language_override
-        or config.get("language")
-        or _resolve_stt_language(provider_name, stt_config)
-        or DEFAULT_COMMAND_STT_LANGUAGE
+        language_override or config.get("language")
+        or _resolve_stt_language(provider_name, stt_config) or DEFAULT_COMMAND_STT_LANGUAGE
     )
     model = model_override or config.get("model") or ""
 
@@ -171,12 +117,9 @@ def _transcribe_command_stt(
         with tempfile.TemporaryDirectory(prefix=f"hermes-cmd-stt-{provider_name}-") as tmpdir:
             output_path = Path(tmpdir) / f"transcript.{output_format}"
             placeholders = {
-                "input_path": str(audio.resolve()),
-                "output_path": str(output_path),
-                "output_dir": str(output_path.parent),
-                "format": output_format,
-                "language": str(language),
-                "model": str(model),
+                "input_path": str(audio.resolve()), "output_path": str(output_path),
+                "output_dir": str(output_path.parent), "format": output_format,
+                "language": str(language), "model": str(model),
             }
             command = _render_command_stt_template(command_template, placeholders)
             logger.info("Transcribing %s via command STT provider '%s'...", audio.name, provider_name)
@@ -185,11 +128,9 @@ def _transcribe_command_stt(
     except subprocess.TimeoutExpired:
         return fail(f"STT command provider '{provider_name}' timed out after {timeout:g}s")
     except subprocess.CalledProcessError as exc:
-        detail_parts = [
-            f"{stream}: {text.strip()}" for stream, text in (("stderr", exc.stderr), ("stdout", exc.stdout)) if text
-        ]
-        detail = "; ".join(detail_parts) or "no command output"
-        return fail(f"STT command provider '{provider_name}' exited with code {exc.returncode}: {detail}")
+        return fail(
+            f"STT command provider '{provider_name}' exited with code {exc.returncode}: {command_failure_detail(exc)}"
+        )
     except RuntimeError as exc:
         return fail(str(exc))
     except OSError as exc:
@@ -222,22 +163,18 @@ def _dispatch_to_plugin_provider(
 ) -> Optional[Dict[str, Any]]:
     """Route to a plugin-registered transcription provider; None when no plugin claims the name.
 
-    Invariants (re-verified here even though the caller short-circuits first,
-    so a caller refactor can't silently break them): built-in names never reach
-    the registry; a same-name ``stt.providers.<name>: type: command`` wins over
-    a plugin. A matched plugin reporting ``is_available() == False`` returns an
-    error envelope — not None — because the user explicitly opted in via
-    ``stt.provider`` and the generic fall-through message would mislead.
-    Provider exceptions become the standard error envelope.
+    Invariants re-verified here (a caller refactor can't silently break them):
+    built-in names never reach the registry; a same-name ``stt.providers.<name>:
+    type: command`` wins over a plugin. A matched plugin with ``is_available() ==
+    False`` returns an error envelope — not None — because the user explicitly
+    opted in via ``stt.provider``. Provider exceptions become the error envelope.
     """
     if not provider:
         return None
     key = provider.lower().strip()
-    if key in BUILTIN_STT_PROVIDERS or key == "none":
+    if key in _NON_COMMAND_STT_NAMES:
         return None
-    if stt_config is not None and _is_command_stt_provider_config(
-        _get_named_stt_provider_config(stt_config, key)
-    ):
+    if stt_config is not None and _is_command_stt_provider_config(_get_named_stt_provider_config(stt_config, key)):
         return None
     try:
         from agent.transcription_registry import get_provider
@@ -292,9 +229,9 @@ def _dispatch_to_plugin_provider(
 # attempts to change it are logged and dropped.
 _PRE_TRANSCRIPTION_MUTABLE_FIELDS = ("prompt", "language", "model")
 
-# Whisper-family models only use the final ~224 tokens of the prompt; longer
-# values waste upload bytes and can trip stricter OpenAI-compatible servers.
-# Enforced client-side (truncate with a warning, never error), ~4 chars/token.
+# Whisper-family models only use the final ~224 tokens of the prompt; longer values
+# waste upload bytes and can trip stricter OpenAI-compatible servers. Enforced
+# client-side (truncate with a warning, never error), ~4 chars/token.
 _WHISPER_PROMPT_TOKEN_CAP = 224
 _PROMPT_CHARS_PER_TOKEN = 4
 _WHISPER_PROMPT_CAPPED_PROVIDERS = frozenset({"local", "openai", "groq", "deepinfra"})
@@ -314,10 +251,7 @@ def _enforce_prompt_length_limit(prompt: Optional[str], provider: str) -> Option
     logger.warning(
         "Transcription prompt is ~%d tokens; whisper-family provider '%s' "
         "only uses the final ~%d — truncating to the last %d characters.",
-        len(prompt) // _PROMPT_CHARS_PER_TOKEN,
-        provider,
-        _WHISPER_PROMPT_TOKEN_CAP,
-        max_chars,
+        len(prompt) // _PROMPT_CHARS_PER_TOKEN, provider, _WHISPER_PROMPT_TOKEN_CAP, max_chars,
     )
     return prompt[-max_chars:]
 
@@ -335,9 +269,8 @@ def _apply_pre_transcription_hook(
 
     Gated on ``has_hook`` so the no-hook path never builds hook kwargs, and
     fail-open: any hook-plumbing error leaves the dispatch untouched. Results
-    arrive in registration order (plugins discovered in sorted order) and are
-    applied field-by-field, so the last hook to write a field wins. Model
-    values are accepted as-is and flow through the same per-backend
+    arrive in registration order and are applied field-by-field, so the last
+    hook to write a field wins. Model values flow through the same per-backend
     normalization a caller-supplied model would.
 
     Returns ``(model, language_override, prompt)``; ``language_override`` is
@@ -351,13 +284,8 @@ def _apply_pre_transcription_hook(
             return model, None, prompt
 
         hook_results = invoke_hook(
-            "pre_transcription",
-            file_path=file_path,
-            provider=provider,
-            model=model,
-            language=language,
-            prompt=prompt,
-            source=source,
+            "pre_transcription", file_path=file_path, provider=provider,
+            model=model, language=language, prompt=prompt, source=source,
         )
         overrides: Dict[str, Any] = {}
         for hook_result in hook_results:

@@ -2,11 +2,9 @@
 
 faster-whisper loading (CUDA->CPU fallback, Apple Silicon pinning), the
 anti-hallucination transcribe kwargs and segment gate, and the local whisper CLI
-(``local_command``) provider. The cached-model singleton and its idle-unload
-watcher stay in ``transcription_tools`` (they own the module state).
-
-Split out of ``tools/transcription_tools.py``, which re-imports every name (patch
-surface) and is imported lazily here so origin patches still intercept.
+(``local_command``) provider. The cached-model singleton and idle-unload watcher
+stay in ``transcription_tools`` (module state), which re-imports every name here
+(patch surface) and is imported lazily so origin patches still intercept.
 """
 
 from __future__ import annotations
@@ -69,9 +67,8 @@ def _try_lazy_install_stt() -> bool:
     """Lazy-install faster-whisper and re-check dynamically so it's usable without a restart."""
     try:
         from tools.lazy_deps import ensure
-        # prompt=False: a bare input() deadlocks under the interactive CLI where
-        # prompt_toolkit owns stdin; the install is already gated by
-        # security.allow_lazy_installs, so reaching here is opt-in.
+        # prompt=False: a bare input() deadlocks under the interactive CLI where prompt_toolkit
+        # owns stdin; the install is already gated by security.allow_lazy_installs.
         ensure("stt.faster_whisper", prompt=False)
         if _ilu.find_spec("faster_whisper"):
             return True
@@ -89,10 +86,9 @@ def _try_lazy_install_stt() -> bool:
     return False
 
 
-# Substrings identifying a missing/unloadable CUDA runtime library: when
-# ctranslate2 can't dlopen one of these the "auto" device picker has already
-# committed to CUDA, so we fall back to CPU and reload. Deliberately narrow
-# (library names + dlopen phrasing) so legitimate runtime failures like "CUDA
+# Substrings identifying a missing/unloadable CUDA runtime library: the "auto" device
+# picker has already committed to CUDA, so we fall back to CPU and reload. Deliberately
+# narrow (library names + dlopen phrasing) so legitimate runtime failures like "CUDA
 # out of memory" surface to the user instead of silently running on CPU.
 _CUDA_LIB_ERROR_MARKERS = (
     "libcublas", "libcudnn", "libcudart", "cannot be loaded", "cannot open shared object",
@@ -111,10 +107,7 @@ def _sysctl_value(name: str) -> str:
     """Return a sysctl value, or an empty string when unavailable."""
     try:
         return subprocess.check_output(
-            ["/usr/sbin/sysctl", "-n", name],
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=2,
+            ["/usr/sbin/sysctl", "-n", name], stderr=subprocess.DEVNULL, text=True, timeout=2,
         ).strip()
     except Exception:
         return ""
@@ -140,10 +133,10 @@ def _get_idle_unload_seconds(local_cfg: Dict[str, Any]) -> int:
 def _load_local_whisper_model(model_name: str, device: str = "auto", compute_type: str = "auto"):
     """Load faster-whisper with graceful CUDA → CPU fallback.
 
-    ``device="auto"`` picks CUDA whenever the ctranslate2 wheel ships CUDA libs,
-    even on hosts without the NVIDIA runtime (WSL2, headless servers, CPU-only
-    dev boxes). Try the requested config first; on a CUDA library load failure
-    fall back to CPU + int8. Pass ``stt.local.device`` / ``compute_type`` to pin.
+    ``device="auto"`` picks CUDA whenever the ctranslate2 wheel ships CUDA libs, even
+    on hosts without the NVIDIA runtime (WSL2, headless servers). Try the requested
+    config first; on a CUDA library load failure fall back to CPU + int8. Pass
+    ``stt.local.device`` / ``compute_type`` to pin.
     """
     force_cpu = _should_force_faster_whisper_cpu()
     if force_cpu:
@@ -172,23 +165,18 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
         return WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
-# Silence-hallucination hardening for local faster-whisper (whisper decodes
-# junk like "You"/"Thank you." from pure silence). Three layers, all tunable
-# under ``stt.local``: Silero VAD so silence never reaches the model
-# (``vad: false`` restores raw behaviour for music/ambient audio);
-# condition_on_previous_text=False so one hallucinated token can't seed a run;
-# and the segment confidence gate in _is_hallucinated_segment.
+# Silence-hallucination hardening for local faster-whisper (whisper decodes junk like
+# "You"/"Thank you." from pure silence). Three layers, all tunable under ``stt.local``:
+# Silero VAD so silence never reaches the model (``vad: false`` restores raw behaviour
+# for music/ambient audio); condition_on_previous_text=False so one hallucinated token
+# can't seed a run; and the segment confidence gate in _is_hallucinated_segment.
 _VAD_MIN_SILENCE_MS_DEFAULT = 500
 _NO_SPEECH_PROB_THRESHOLD_DEFAULT = 0.6
 _LOGPROB_THRESHOLD_DEFAULT = -1.0
 
 
 def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Build the kwargs for EVERY local faster-whisper ``model.transcribe`` call.
-
-    Single owner for the anti-hallucination hardening — new local-whisper call
-    sites must go through here instead of hand-rolling kwargs.
-    """
+    """Kwargs for EVERY local faster-whisper ``model.transcribe`` call — single owner of the anti-hallucination hardening."""
     from tools.transcription_tools import _load_stt_config, _resolve_stt_language
     stt_config = stt_config if isinstance(stt_config, dict) else _load_stt_config()
     local_cfg = stt_config.get("local") or {}
@@ -205,11 +193,10 @@ def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -
             "min_silence_duration_ms": _config_number(local_cfg, "vad_min_silence_ms", _VAD_MIN_SILENCE_MS_DEFAULT, int)
         }
 
-    # Push the confidence gate into faster-whisper itself: its internal
-    # defaults drop low-confidence segments BEFORE our post-filter sees them,
-    # so without this the ``stt.local`` threshold knobs were dead for that
-    # first gate (non-English speech decodes at lower avg_logprob and was
-    # silently discarded). Same values feed both gates; defaults unchanged.
+    # Push the confidence gate into faster-whisper itself: its internal defaults drop
+    # low-confidence segments BEFORE our post-filter sees them, so the ``stt.local``
+    # threshold knobs were dead for that first gate (non-English speech decodes at
+    # lower avg_logprob and was silently discarded). Same values feed both gates.
     kwargs["no_speech_threshold"], kwargs["log_prob_threshold"] = _confidence_thresholds(local_cfg)
 
     forced_lang = _resolve_stt_language("local", stt_config)
@@ -234,9 +221,8 @@ def _confidence_thresholds(local_cfg: Dict[str, Any]) -> tuple[float, float]:
 def _is_hallucinated_segment(segment: Any, no_speech_threshold: float, logprob_threshold: float) -> bool:
     """True when a segment is very likely a silence hallucination.
 
-    Conservative AND gate (openai-whisper's own heuristic): the model must BOTH
-    think the window is non-speech AND have decoded it with low confidence, so
-    quiet-but-real speech survives. Unknown segment shapes are never dropped.
+    Conservative AND gate (openai-whisper's own heuristic): non-speech AND low decode
+    confidence, so quiet-but-real speech survives. Unknown segment shapes are never dropped.
     """
     try:
         no_speech_prob = float(getattr(segment, "no_speech_prob"))
@@ -254,8 +240,7 @@ def _join_confident_segments(segments: Any, local_cfg: Dict[str, Any]) -> str:
         if _is_hallucinated_segment(segment, no_speech_threshold, logprob_threshold):
             logger.debug(
                 "Dropping probable hallucinated segment %r (no_speech_prob=%.3f, avg_logprob=%.3f)",
-                getattr(segment, "text", ""),
-                getattr(segment, "no_speech_prob", float("nan")),
+                getattr(segment, "text", ""), getattr(segment, "no_speech_prob", float("nan")),
                 getattr(segment, "avg_logprob", float("nan")),
             )
             continue
@@ -290,10 +275,8 @@ def _transcribe_local_command(
                 return _error_result(prep_error)
 
             command = command_template.format(
-                input_path=shlex.quote(prepared_input),
-                output_dir=shlex.quote(output_dir),
-                language=shlex.quote(language),
-                model=shlex.quote(normalized_model),
+                input_path=shlex.quote(prepared_input), output_dir=shlex.quote(output_dir),
+                language=shlex.quote(language), model=shlex.quote(normalized_model),
             )
             # Scrub Hermes secrets from the child env (same policy as _run_command_stt).
             from tools.environments.local import hermes_subprocess_env
