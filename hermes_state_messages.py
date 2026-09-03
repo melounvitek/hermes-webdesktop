@@ -17,8 +17,7 @@ from agent.memory_manager import sanitize_context
 from agent.message_sanitization import _sanitize_surrogates
 from hermes_state_common import (
     _COMPRESSION_LOCK_ROW_SQL, _ENDED_ROW_SQL, _RESET_END_REASONS, _RESET_END_REASONS_SQL, _ended_by_compression,
-    _legacy_reset_child_sql, _placeholders,
-)
+    _legacy_reset_child_sql, _placeholders)
 
 # Log-record parity with the origin module (caplog tests pin "hermes_state").
 logger = logging.getLogger("hermes_state")
@@ -258,8 +257,7 @@ class SessionMessagesMixin:
             msg.get("platform_message_id") or msg.get("message_id"),
             1 if msg.get("observed") else 0, 1 if msg.get("_compressed_summary") else 0, 1,
             _str_or_none(msg.get("api_content")), _str_or_none(msg.get("display_kind")),
-            self._encode_display_metadata(msg.get("display_metadata")),
-        )
+            self._encode_display_metadata(msg.get("display_metadata")))
 
     @staticmethod
     def _bump_session_counters(conn, session_id: str, inserted: int, tool_calls: int, *, unit: bool) -> None:

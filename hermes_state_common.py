@@ -16,8 +16,7 @@ from typing import Any
 from agent.skill_commands import SKILL_EXCERPT_JOINT, SKILL_SCAFFOLD_SQL_LIKE, describe_skill_invocation
 from agent.context_compressor import (
     LEGACY_SUMMARY_PREFIX, SUMMARY_PREFIX, _MERGED_PRIOR_CONTEXT_HEADER, _MERGED_SUMMARY_DELIMITER,
-    _SUMMARY_END_MARKER,
-)
+    _SUMMARY_END_MARKER)
 
 
 # Session preview = head of the first user message, shown wherever a session has no
@@ -141,14 +140,11 @@ _PREVIEW_RAW_SUBQUERY_SQL = (
 # end_reason heuristic.
 _BRANCH_CHILD_SQL = (
     "json_extract(COALESCE({a}.model_config, '{{}}'), '$._branched_from') IS NOT NULL"
-    " OR EXISTS (SELECT 1 FROM sessions p"
-    "            WHERE p.id = {a}.parent_session_id"
-    "            AND p.end_reason = 'branched'"
-    "            AND {a}.started_at >= p.ended_at)"
+    " OR EXISTS (SELECT 1 FROM sessions p            WHERE p.id = {a}.parent_session_id"
+    "            AND p.end_reason = 'branched'            AND {a}.started_at >= p.ended_at)"
 )
 _COMPRESSION_CHILD_SQL = (
-    "EXISTS (SELECT 1 FROM sessions p"
-    "        WHERE p.id = {a}.parent_session_id"
+    "EXISTS (SELECT 1 FROM sessions p        WHERE p.id = {a}.parent_session_id"
     "        AND p.end_reason = 'compression')"
 )
 
@@ -185,8 +181,7 @@ _RECOVERABLE_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RECOVERABL
 # holding the lease) may clear it.  Superset of the recoverable set plus the TUI
 # gateway's automatic reasons.
 _AUTOMATIC_END_REASONS = frozenset(_RECOVERABLE_END_REASONS) | {
-    "tui_shutdown", "ws_disconnect", "idle_timeout", "lru_evict",
-}
+    "tui_shutdown", "ws_disconnect", "idle_timeout", "lru_evict"}
 
 
 def is_automatic_end_reason(reason) -> bool:
@@ -261,8 +256,7 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
     return _sql_freshest_of(
         f"(SELECT last_activity_at FROM sessions _act_s WHERE _act_s.id = {session_id_expr})",
         session_id_expr,
-        f"(SELECT started_at FROM sessions _act_s WHERE _act_s.id = {session_id_expr})",
-    )
+        f"(SELECT started_at FROM sessions _act_s WHERE _act_s.id = {session_id_expr})")
 
 
 SCHEMA_VERSION = 28
@@ -308,8 +302,7 @@ def _placeholders(items) -> str:
 
 _FTS_TRIGGERS = (
     "messages_fts_insert", "messages_fts_delete", "messages_fts_update",
-    "messages_fts_trigram_insert", "messages_fts_trigram_delete", "messages_fts_trigram_update",
-)
+    "messages_fts_trigram_insert", "messages_fts_trigram_delete", "messages_fts_trigram_update")
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -693,8 +686,7 @@ END;
 """
 
 _FTS_CJK_TRIGGERS = (
-    "messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update",
-)
+    "messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update")
 
 # Set when a tokenizer-less process dropped the cjk triggers to keep writes
 # alive: the cjk index is missing rows and must not serve reads until
@@ -912,10 +904,8 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
                 # Not a holder and polling cannot fix it: defer NOW.
                 logger.warning(
                     "Could not acquire %s %s (%s) — deferring rather than "
-                    "waiting out the %.0fs holder timeout on a "
-                    "non-contention error.",
-                    description, lock_path, exc, timeout_seconds,
-                )
+                    "waiting out the %.0fs holder timeout on a non-contention error.",
+                    description, lock_path, exc, timeout_seconds)
                 return None, handle
             if time.monotonic() < deadline:
                 time.sleep(poll_seconds)
@@ -928,10 +918,8 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
             logger.warning(
                 "%s %s is held by an orphaned file descriptor (recorded "
                 "holder pid %s is dead — a forked child inherited the lock "
-                "fd); breaking the stale lock and retaking it on a fresh "
-                "file.",
-                description, lock_path, (record or {}).get("pid"),
-            )
+                "fd); breaking the stale lock and retaking it on a fresh file.",
+                description, lock_path, (record or {}).get("pid"))
             try:
                 os.unlink(lock_path)
                 handle.close()
@@ -988,10 +976,8 @@ def _acquire_msvcrt_lock(lock_path, handle, timeout):
         except (BlockingIOError, OSError) as exc:
             if not is_advisory_lock_contention(exc):
                 logger.warning(
-                    "Could not acquire FTS rebuild lock %s (%s) — "
-                    "deferring on a non-contention error.",
-                    lock_path, exc,
-                )
+                    "Could not acquire FTS rebuild lock %s (%s) — deferring on a non-contention error.",
+                    lock_path, exc)
                 return None
             if time.monotonic() >= deadline:
                 return False
@@ -1023,8 +1009,7 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
         logger.warning(
             "Could not open FTS rebuild lock %s (%s) — deferring this rebuild "
             "rather than running it without cross-process authority.",
-            lock_path, exc,
-        )
+            lock_path, exc)
         yield False
         return
 
@@ -1034,8 +1019,7 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
             acquired = _acquire_msvcrt_lock(lock_path, handle, timeout)
         else:
             acquired, handle = _acquire_db_flock(
-                lock_path, handle, timeout, _FTS_REBUILD_LOCK_POLL_SECONDS, "FTS rebuild lock",
-            )
+                lock_path, handle, timeout, _FTS_REBUILD_LOCK_POLL_SECONDS, "FTS rebuild lock")
         if acquired is None:
             # Already logged with the real errno; "held by another process" would be a lie.
             acquired = False
@@ -1045,18 +1029,14 @@ def fts_rebuild_admission(db_path, *, timeout_seconds=None):
                 # Non-blocking probe from an in-process retry: keep it quiet.
                 logger.info(
                     "FTS rebuild lock %s is busy — deferring this retry "
-                    "(the stale-FTS breadcrumb keeps it retryable). "
-                    "Recorded holder: %s.",
-                    lock_path, _describe_lock_holder(record),
-                )
+                    "(the stale-FTS breadcrumb keeps it retryable). Recorded holder: %s.",
+                    lock_path, _describe_lock_holder(record))
             else:
                 logger.warning(
                     "FTS rebuild lock %s held by another process for more than "
                     "%.0fs — deferring this rebuild to avoid racing the holder "
-                    "(the stale-FTS breadcrumb keeps it retryable). "
-                    "Recorded holder: %s.",
-                    lock_path, timeout, _describe_lock_holder(record),
-                )
+                    "(the stale-FTS breadcrumb keeps it retryable). Recorded holder: %s.",
+                    lock_path, timeout, _describe_lock_holder(record))
         yield acquired
     finally:
         try:

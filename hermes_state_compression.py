@@ -13,8 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_state_common import (
     _COMPRESSION_LOCK_ROW_SQL as _LOCK_ROW_SQL, _ENDED_ROW_SQL, _ended_by_compression, _sql_session_last_active,
-    is_automatic_end_reason,
-)
+    is_automatic_end_reason)
 
 # Log-record parity with the origin module (caplog tests pin "hermes_state").
 logger = logging.getLogger("hermes_state")
