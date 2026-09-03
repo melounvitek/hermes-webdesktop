@@ -149,18 +149,13 @@ def _model_selection_request(session: dict[str, Any], requested_model: str) -> t
     requested_model = str(requested_model or "").strip()
     if not session_id or not requested_model or requested_model == "copilot-acp":
         return None
-    model_option = next(
-        (o for o in (session.get("configOptions") or []) if isinstance(o, dict) and "model" in (o.get("category"), o.get("id"))), None
-    )
-    if model_option is not None:
-        if requested_model not in _enabled_ids(model_option.get("options"), "value"):
+    options = [o for o in (session.get("configOptions") or []) if isinstance(o, dict) and "model" in (o.get("category"), o.get("id"))]
+    if options:
+        if requested_model not in _enabled_ids(options[0].get("options"), "value"):
             return None
-        params = {"sessionId": session_id, "configId": str(model_option.get("id") or "model"), "value": requested_model}
-        return "session/set_config_option", params
+        return "session/set_config_option", {"sessionId": session_id, "configId": str(options[0].get("id") or "model"), "value": requested_model}
     available = _enabled_ids((session.get("models") or {}).get("availableModels"), "modelId")
-    if available and requested_model not in available:
-        return None
-    return "session/set_model", {"sessionId": session_id, "modelId": requested_model}
+    return None if available and requested_model not in available else ("session/set_model", {"sessionId": session_id, "modelId": requested_model})
 
 
 def _format_messages_as_prompt(
@@ -208,8 +203,6 @@ def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
 
 def _effective_timeout(timeout: Any) -> float:
     """Normalise a float or httpx.Timeout-like object to wall-clock seconds (largest component wins)."""
-    if timeout is None:
-        return _DEFAULT_TIMEOUT_SECONDS
     if isinstance(timeout, (int, float)):
         return float(timeout)
     candidates = [getattr(timeout, attr, None) for attr in ("read", "write", "connect", "pool", "timeout")]
