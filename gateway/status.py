@@ -979,7 +979,7 @@ def derive_gateway_busy(*, gateway_running: bool, gateway_state: Any, active_age
     Degrades to False on unknown liveness / other state / unparseable count. Liveness keys
     off ``gateway_running``, NEVER ``updated_at`` -- a healthy idle gateway never advances it.
     """
-    if not gateway_running or gateway_state not in _DRAINABLE_GATEWAY_STATES:
+    if not derive_gateway_drainable(gateway_running=gateway_running, gateway_state=gateway_state):
         return False
     try:
         return int(active_agents) > 0
@@ -1106,17 +1106,6 @@ def remove_pid_file() -> None:
         pass
 
 
-def _process_is_stopped(pid: int) -> bool:
-    """True when ``/proc/<pid>/status`` reports a stopped / tracing-stop state (T/t)."""
-    try:
-        for line in Path(f"/proc/{pid}/status").read_text(encoding="utf-8").splitlines():
-            if line.startswith("State:"):
-                return line.split()[1] in {"T", "t"}
-    except OSError:
-        pass
-    return False
-
-
 def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optional[int]) -> bool:
     """True when a foreign scoped-lock record no longer names a live gateway.
 
@@ -1140,7 +1129,14 @@ def _scoped_lock_record_is_stale(existing: dict[str, Any], existing_pid: Optiona
         )
     ):
         return True
-    return _process_is_stopped(existing_pid)
+    # Stopped / tracing-stop state (T/t) in /proc/<pid>/status.
+    try:
+        for line in Path(f"/proc/{existing_pid}/status").read_text(encoding="utf-8").splitlines():
+            if line.startswith("State:"):
+                return line.split()[1] in {"T", "t"}
+    except OSError:
+        pass
+    return False
 
 
 def acquire_scoped_lock(
@@ -1507,52 +1503,51 @@ def take_over_scoped_lock_holder(
     owner_pid, owner_start_time, target_home = owner
     # Snapshot while the owner is alive; afterwards children are reparented.
     owner_children = _snapshot_gateway_children(owner_pid)
-    replaced = _terminate_scoped_lock_owner_once(
-        owner_pid, owner_start_time, target_home,
-        graceful_attempts=graceful_attempts, force_attempts=force_attempts,
-    )
+    if not write_takeover_marker(owner_pid, target_home=target_home, target_start_time=owner_start_time):
+        return None
+    try:
+        replaced = _terminate_verified_owner(
+            owner_pid, owner_start_time, graceful_attempts=graceful_attempts, force_attempts=force_attempts
+        )
+    finally:
+        # The target normally consumes the marker; clean up any remainder.
+        clear_takeover_marker(target_home)
     if replaced is not None:
         reap_gateway_children(owner_children, parent_pid=owner_pid)
     return replaced
 
 
-def _terminate_scoped_lock_owner_once(
-    owner_pid: int, owner_start_time: int, target_home: Path, *, graceful_attempts: int, force_attempts: int
+def _terminate_verified_owner(
+    owner_pid: int, owner_start_time: int, *, graceful_attempts: int, force_attempts: int
 ) -> Optional[int]:
-    """Marker-write + bounded identity-aware termination of a verified owner.
+    """Bounded identity-aware SIGTERM-then-SIGKILL of a verified owner; the PID once it exited, else None.
 
-    Each signal step: ``ProcessLookupError`` => already gone (return the PID);
-    ``PermissionError``/``OSError`` => refuse (None) without escalating.
+    Each signal step: ``ProcessLookupError`` => already gone; any other ``OSError`` => refuse
+    without escalating.
     """
-    if not write_takeover_marker(owner_pid, target_home=target_home, target_start_time=owner_start_time):
+    state = _scoped_lock_owner_state(owner_pid, owner_start_time)
+    if state == "exited":
+        return owner_pid
+    if state != "same":
         return None
-    try:
-        state = _scoped_lock_owner_state(owner_pid, owner_start_time)
-        if state == "exited":
+    for attempts, delay, kwargs in (
+        (graceful_attempts, 0.5, {"force": False}),
+        (force_attempts, 0.25, {"force": True, "expected_start_time": owner_start_time}),
+    ):
+        try:
+            terminate_pid(owner_pid, **kwargs)
+        except ProcessLookupError:
             return owner_pid
-        if state != "same":
+        except OSError:
             return None
-        for attempts, delay, kwargs in (
-            (graceful_attempts, 0.5, {"force": False}),
-            (force_attempts, 0.25, {"force": True, "expected_start_time": owner_start_time}),
-        ):
-            try:
-                terminate_pid(owner_pid, **kwargs)
-            except ProcessLookupError:
-                return owner_pid
-            except OSError:
-                return None
-            exited, safe_to_force = _wait_for_scoped_lock_owner_exit(
-                owner_pid, owner_start_time, attempts=attempts, delay=delay
-            )
-            if exited:
-                return owner_pid
-            if not safe_to_force:
-                return None
-        return None
-    finally:
-        # The target normally consumes the marker; clean up any remainder.
-        clear_takeover_marker(target_home)
+        exited, safe_to_force = _wait_for_scoped_lock_owner_exit(
+            owner_pid, owner_start_time, attempts=attempts, delay=delay
+        )
+        if exited:
+            return owner_pid
+        if not safe_to_force:
+            return None
+    return None
 
 
 def write_planned_stop_marker(target_pid: int) -> bool:
