@@ -61,16 +61,6 @@ def _resolve_timezone_name() -> str:
     return ""
 
 
-def _get_zoneinfo(name: str) -> Optional[ZoneInfo]:
-    if not name:
-        return None
-    try:
-        return ZoneInfo(name)
-    except Exception as exc:
-        logger.warning("Invalid timezone '%s': %s. Falling back to server local time.", name, exc)
-        return None
-
-
 def get_timezone() -> Optional[ZoneInfo]:
     """Return the active profile's configured ZoneInfo, or None (server-local)."""
     cache_identity = _timezone_cache_identity()
@@ -81,7 +71,12 @@ def get_timezone() -> Optional[ZoneInfo]:
     # Resolve outside the lock (config file I/O); first writer wins so concurrent resolvers of the
     # same identity converge on one ZoneInfo object.
     name = _resolve_timezone_name()
-    tz = _get_zoneinfo(name)
+    tz = None
+    if name:
+        try:
+            tz = ZoneInfo(name)
+        except Exception as exc:
+            logger.warning("Invalid timezone '%s': %s. Falling back to server local time.", name, exc)
     with _cache_lock:
         return _tz_cache.setdefault(cache_identity, (name, tz))[1]
 

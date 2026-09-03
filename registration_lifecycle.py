@@ -50,10 +50,8 @@ class ReplacementCoordinator:
         with self._lock:
             yield
 
-    def acquire(
-        self, slot: Hashable, *, current: Any, previous: Any, restore: Callable[[Any], bool],
-        finalize: Callable[[], None] | None = None,
-    ) -> ReplacementLease:
+    def acquire(self, slot: Hashable, *, current: Any, previous: Any, restore: Callable[[Any], bool],
+                finalize: Callable[[], None] | None = None) -> ReplacementLease:
         """Attach a new live generation to the matching active predecessor."""
         with self._lock:
             leases = self._active.setdefault(slot, [])
@@ -63,7 +61,10 @@ class ReplacementCoordinator:
             return lease
 
     def dispose(self, lease: ReplacementLease) -> None:
-        """Remove *lease*, restoring the nearest still-live predecessor."""
+        """Remove *lease*, restoring the nearest still-live predecessor.
+
+        ``restore`` -> ``finalize`` -> slot pruning each run even when an earlier step raises.
+        """
         with self._lock:
             if not lease.active:
                 return
@@ -75,25 +76,20 @@ class ReplacementCoordinator:
             try:
                 try:
                     if latest is lease:
-                        replacement = lease.previous
-                        predecessor = lease.predecessor
-                        while predecessor is not None:
-                            if predecessor.active:
-                                replacement = predecessor.current
-                                break
-                            replacement = predecessor.previous
-                            predecessor = predecessor.predecessor
-                        lease.restore(replacement)
+                        # Restore the nearest still-live predecessor, else the last dead generation's previous.
+                        replacement, predecessor = lease.previous, lease.predecessor
+                        while predecessor is not None and not predecessor.active:
+                            replacement, predecessor = predecessor.previous, predecessor.predecessor
+                        lease.restore(predecessor.current if predecessor is not None else replacement)
                 finally:
                     if lease.finalize is not None:
                         lease.finalize()
             finally:
-                if leases:
-                    live = [item for item in leases if item.active]
-                    if live:
-                        self._active[lease.slot] = live
-                    else:
-                        self._active.pop(lease.slot, None)
+                live = [item for item in leases if item.active]
+                if live:
+                    self._active[lease.slot] = live
+                elif leases:
+                    self._active.pop(lease.slot, None)
 
 
 replacement_coordinator = ReplacementCoordinator()
