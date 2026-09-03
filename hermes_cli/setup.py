@@ -770,10 +770,10 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
 # First-time mode picker: (menu label, runner) — a None runner falls through to Full Setup.
 _FIRST_TIME_MODES = (
     ("Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
-     lambda config, home, is_existing: _run_first_time_quick_setup(config, home, is_existing)),
+     lambda *a: _run_first_time_quick_setup(*a)),
     ("Full setup — configure every provider, tool & option yourself (bring your own keys)", None),
     ("Blank Slate — everything off except the bare minimum; opt in to each capability",
-     lambda config, home, is_existing: _run_blank_slate_setup(config, home, is_existing)),
+     lambda *a: _run_blank_slate_setup(*a)),
 )
 
 
@@ -811,7 +811,6 @@ def _run_setup_wizard_impl(args):
 
     # Existing installation == a provider is configured
     from hermes_cli.auth import get_active_provider
-
     is_existing = bool(
         get_env_value("OPENROUTER_API_KEY") or get_env_value("OPENAI_BASE_URL") or get_active_provider() is not None
     )

@@ -14,11 +14,7 @@ _EOF_CHARS = {"\x04", "\x1a", ""}  # "" == stream closed
 
 
 def _collect_masked_input(
-    read_char: Callable[[], str],
-    write: Callable[[str], object],
-    prompt: str,
-    *,
-    mask: str = "*",
+    read_char: Callable[[], str], write: Callable[[str], object], prompt: str, *, mask: str = "*",
 ) -> str:
     """Read one secret line while writing a mask character per typed char."""
     value: list[str] = []

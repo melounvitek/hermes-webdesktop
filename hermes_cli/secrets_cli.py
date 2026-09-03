@@ -26,27 +26,11 @@ from rich.table import Table
 _BWS_VERSION = "2.0.0"
 
 from hermes_cli._secrets_common import (
-    arg,
-    cfg_str,
-    cli_version,
-    disable_secret_source,
-    flag,
-    print_status_panel,
-    print_table,
-    prompt_index,
-    register_subcommands,
-    require_enabled,
-    rotate_token,
-    secret_cli_env,
-    section_cfg,
+    arg, cfg_str, cli_version, disable_secret_source, flag, print_status_panel, print_table,
+    prompt_index, register_subcommands, require_enabled, rotate_token, secret_cli_env, section_cfg,
     yn,
 )
-from hermes_cli.config import (
-    get_env_path,
-    load_config,
-    save_config,
-    save_env_value,
-)
+from hermes_cli.config import get_env_path, load_config, save_config, save_env_value
 from hermes_cli.secret_prompt import masked_secret_prompt
 
 # Old names kept bound: tests monkeypatch ``secrets_cli._bws_version``.
@@ -540,9 +524,7 @@ _REGION_PRESETS = [
 
 
 def _resolve_server_url(
-    args: argparse.Namespace,
-    secrets_cfg: dict,
-    console: Console,
+    args: argparse.Namespace, secrets_cfg: dict, console: Console,
 ) -> Optional[str]:
     """Pick a Bitwarden server URL for setup.
 
