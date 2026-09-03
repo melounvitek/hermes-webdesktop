@@ -239,8 +239,7 @@ def repo_status(cwd: str) -> dict | None:
     return {
         "branch": branch, "defaultBranch": _default_branch_name(cwd), "detached": detached,
         "ahead": ahead, "behind": behind,
-        "staged": sum(f["staged"] for f in files), "unstaged": sum(f["unstaged"] for f in files),
-        "untracked": sum(f["untracked"] for f in files), "conflicted": sum(f["conflicted"] for f in files),
+        **{flag: sum(f[flag] for f in files) for flag in ("staged", "unstaged", "untracked", "conflicted")},
         "changed": len(files), "added": added, "removed": removed, "files": files[:200],
     }
 
@@ -248,15 +247,22 @@ def repo_status(cwd: str) -> dict | None:
 # ── review pane ──────────────────────────────────────────────────────────────
 
 
+def _review_result(cwd: str, files: list[dict], base: str | None) -> dict:
+    files.sort(key=lambda f: f["path"])
+    _fill_untracked_counts(cwd, files)
+    return {"files": files, "base": base}
+
+
 def review_list(cwd: str, scope: str, base_ref: str | None) -> dict:
     """Changed files for a scope. Mirrors the Electron reviewList shapes."""
+    empty = {"files": [], "base": None}
     if not _is_dir(cwd):
-        return {"files": [], "base": None}
+        return empty
 
     if scope in ("branch", "lastTurn"):
         base = _branch_base(cwd) if scope == "branch" else base_ref
         if not base:
-            return {"files": [], "base": None}
+            return empty
         rng = f"{base}...HEAD" if scope == "branch" else base
         files = [
             {"path": path, "added": a, "removed": r, "status": "M", "staged": False}
@@ -270,25 +276,20 @@ def review_list(cwd: str, scope: str, base_ref: str | None) -> dict:
                 for tag, _xy, path in _walk_entries(raw)
                 if tag == "?" and path not in seen
             ]
-        files.sort(key=lambda f: f["path"])
-        _fill_untracked_counts(cwd, files)
-        return {"files": files, "base": base}
+        return _review_result(cwd, files, base)
 
     code, raw = _status_z(cwd)
     if code != 0:
-        return {"files": [], "base": None}
+        return empty
     staged = _numstat(cwd, ["--cached"])
     unstaged = _numstat(cwd, [])
-
     files = []
     for tag, xy, path in _walk_entries(raw):
         sa, sr = staged.get(path, (0, 0))
         ua, ur = unstaged.get(path, (0, 0))
         files.append({"path": path, "added": sa + ua, "removed": sr + ur,
                       "status": _status_letter(tag, xy), "staged": _entry_staged(tag, xy)})
-    files.sort(key=lambda f: f["path"])
-    _fill_untracked_counts(cwd, files)
-    return {"files": files, "base": None}
+    return _review_result(cwd, files, None)
 
 
 def _all_add_diff(cwd: str, file_path: str) -> str:
@@ -328,7 +329,7 @@ def review_stage(cwd: str, file_path: str | None) -> dict:
 
 
 def review_unstage(cwd: str, file_path: str | None) -> dict:
-    _git_ok(cwd, ["reset", "-q", "HEAD", "--", file_path] if file_path else ["reset", "-q", "HEAD"])
+    _git_ok(cwd, ["reset", "-q", "HEAD", *(["--", file_path] if file_path else [])])
     return {"ok": True}
 
 
@@ -414,18 +415,15 @@ def _gh(cwd: str, args: list[str]) -> tuple[bool, str]:
 
 def review_ship_info(cwd: str) -> dict:
     """gh availability/auth + this branch's PR. ghReady false when gh missing/unauthed."""
-    if not _is_dir(cwd):
-        return {"ghReady": False, "pr": None}
-    auth_ok, _ = _gh(cwd, ["auth", "status"])
-    if not auth_ok:
+    if not _is_dir(cwd) or not _gh(cwd, ["auth", "status"])[0]:
         return {"ghReady": False, "pr": None}
     view_ok, out = _gh(cwd, ["pr", "view", "--json", "url,state,number"])
-    if not view_ok:
-        return {"ghReady": True, "pr": None}
-    try:
-        pr = json.loads(out)
-    except json.JSONDecodeError:
-        pr = None
+    pr = None
+    if view_ok:
+        try:
+            pr = json.loads(out)
+        except json.JSONDecodeError:
+            pass
     if pr and pr.get("url"):
         return {"ghReady": True, "pr": {"url": pr["url"], "state": pr.get("state"), "number": pr.get("number")}}
     return {"ghReady": True, "pr": None}
@@ -541,14 +539,16 @@ def _main_root(cwd: str) -> str:
     return trees[0]["path"] if trees else cwd
 
 
+_BRANCH_SANITIZERS = (
+    (r"\s+", "-"), (r"[^\w./-]", ""), (r"-{2,}", "-"), (r"/{2,}", "/"), (r"\.{2,}", "."), (r"^[-./]+|[-./]+$", ""),
+)
+
+
 def _sanitize_branch(name: str) -> str:
     value = str(name or "")
-    value = re.sub(r"\s+", "-", value)
-    value = re.sub(r"[^\w./-]", "", value)
-    value = re.sub(r"-{2,}", "-", value)
-    value = re.sub(r"/{2,}", "/", value)
-    value = re.sub(r"\.{2,}", ".", value)
-    return re.sub(r"^[-./]+|[-./]+$", "", value)
+    for pattern, repl in _BRANCH_SANITIZERS:
+        value = re.sub(pattern, repl, value)
+    return value
 
 
 def _slugify(name: str) -> str:
@@ -621,8 +621,8 @@ def worktree_add(cwd: str, options: dict) -> dict:
             # known ref is still there to branch from.
             _git(root, ["fetch", remote, existing])
             _git_ok(root, ["worktree", "add", "--track", "-b", existing, target, requested])
-            return {"path": target, "branch": existing, "repoRoot": root}
-        _git_ok(root, ["worktree", "add", target, existing])
+        else:
+            _git_ok(root, ["worktree", "add", target, existing])
         return {"path": target, "branch": existing, "repoRoot": root}
 
     slug = _slugify(options.get("name") or f"work-{os.urandom(4).hex()}")
