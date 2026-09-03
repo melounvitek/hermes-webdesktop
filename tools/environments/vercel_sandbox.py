@@ -41,9 +41,8 @@ _SNAPSHOT_STORE_NAME = "vercel_sandbox_snapshots.json"
 
 def _ensure_vercel_sdk() -> None:
     """Lazy-install vercel SDK on demand. Idempotent."""
-    # The vercel SDK (>=0.7) ships default-on usage telemetry. Hermes policy is no
-    # outbound telemetry without explicit opt-in, so disable it before the SDK is
-    # ever imported. Only the default is set — an explicit user value is never overridden.
+    # The SDK (>=0.7) ships default-on telemetry; Hermes policy is opt-in only, so disable it
+    # before the SDK is imported. setdefault: an explicit user value is never overridden.
     os.environ.setdefault("VERCEL_TELEMETRY_DISABLED", "1")
     ensure_lazy_dep("terminal.vercel")
 
@@ -76,60 +75,40 @@ def _retry_vercel_call(label: str, callback, *, attempts: int):
             time.sleep(0.1 * attempt)
 
 
-def _coerce_text(value: Any) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return "" if value is None else str(value)
-
-
-def _extract_result_output(result: Any) -> str:
+def _result_parts(result: Any) -> tuple[str, int]:
+    """(output, returncode) from an SDK command result; tolerates raw strings and older result shapes."""
     try:
-        return _coerce_text(result.output())
+        value = result.output()
     except (AttributeError, TypeError):
-        return _coerce_text(result)
-
-
-def _extract_result_returncode(result: Any) -> int:
-    attr = "exit_code" if hasattr(result, "exit_code") else "returncode"
-    exit_code = getattr(result, attr, None)
-    return exit_code if isinstance(exit_code, int) else 1
+        value = result
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    exit_code = getattr(result, "exit_code" if hasattr(result, "exit_code") else "returncode", None)
+    return ("" if value is None else str(value)), (exit_code if isinstance(exit_code, int) else 1)
 
 
 def _load_snapshots() -> dict:
     return _load_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME)
 
 
-def _save_snapshots(data: dict) -> None:
-    _save_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME, data)
-
-
-def _get_snapshot_id(task_id: str) -> str | None:
-    snapshot_id = _load_snapshots().get(task_id) if task_id else None
-    return snapshot_id if isinstance(snapshot_id, str) and snapshot_id else None
-
-
 def _store_snapshot(task_id: str, snapshot_id: str) -> None:
     if task_id and snapshot_id:
-        _save_snapshots({**_load_snapshots(), task_id: snapshot_id})
+        _save_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME, {**_load_snapshots(), task_id: snapshot_id})
 
 
-def _delete_snapshot(task_id: str, snapshot_id: str | None = None) -> None:
+def _delete_snapshot(task_id: str, snapshot_id: str) -> None:
+    """Drop the stored id for ``task_id`` only if it still equals ``snapshot_id``."""
     snapshots = _load_snapshots()
-    existing = snapshots.get(task_id) if task_id else None
-    if existing is not None and (snapshot_id is None or existing == snapshot_id):
-        snapshots.pop(task_id, None)
-        _save_snapshots(snapshots)
+    if task_id and snapshots.get(task_id) == snapshot_id:
+        snapshots.pop(task_id)
+        _save_json_store(get_hermes_home() / _SNAPSHOT_STORE_NAME, snapshots)
 
 
 def _extract_snapshot_id(snapshot: Any) -> str | None:
     """Accept SDK objects or raw dicts; attribute lookup first, then dict keys."""
     getters = [lambda k: getattr(snapshot, k, None)] + ([snapshot.get] if isinstance(snapshot, dict) else [])
-    for get in getters:
-        for key in ("snapshot_id", "snapshotId", "id"):
-            value = get(key)
-            if isinstance(value, str) and value:
-                return value
-    return None
+    candidates = (get(key) for get in getters for key in ("snapshot_id", "snapshotId", "id"))
+    return next((v for v in candidates if isinstance(v, str) and v), None)
 
 
 @cache
@@ -189,13 +168,12 @@ class VercelSandboxEnvironment(BaseEnvironment):
     def _create_sandbox(self) -> Sandbox:
         _ensure_vercel_sdk()
         from vercel.sandbox import Sandbox
-        snapshot_id = _get_snapshot_id(self._task_id) if self._persistent else None
-        if snapshot_id:
+        snapshot_id = _load_snapshots().get(self._task_id) if self._persistent and self._task_id else None
+        if isinstance(snapshot_id, str) and snapshot_id:
             try:
-                return _retry_vercel_call(
-                    "sandbox restore",
-                    lambda: Sandbox.create(**self._create_kwargs, source={"type": "snapshot", "snapshot_id": snapshot_id}),
-                    attempts=_CREATE_RETRY_ATTEMPTS)
+                source = {"type": "snapshot", "snapshot_id": snapshot_id}
+                return _retry_vercel_call("sandbox restore", lambda: Sandbox.create(**self._create_kwargs, source=source),
+                                          attempts=_CREATE_RETRY_ATTEMPTS)
             except Exception as exc:
                 logger.warning("Vercel: failed to restore snapshot %s for task %s; falling back to a fresh sandbox: %s",
                                snapshot_id, self._task_id, exc)
@@ -228,18 +206,18 @@ class VercelSandboxEnvironment(BaseEnvironment):
         except Exception as exc:
             logger.debug("Vercel: home detection failed for task %s: %s", self._task_id, exc)
             return self._workspace_root
-        home = _extract_result_output(result).strip()
+        home = _result_parts(result)[0].strip()
         return home if home.startswith("/") else self._workspace_root
 
     def _wait_for_running(self, timeout: timedelta = _RUNNING_WAIT_TIMEOUT) -> None:
-        sandbox = self._require_sandbox()
+        sandbox, running = self._require_sandbox(), _sandbox_status_type().RUNNING
         status = sandbox.status
-        if status is None or status == _sandbox_status_type().RUNNING:
+        if status is None or status == running:
             return
         if _is_terminal(status):
             raise RuntimeError(f"Sandbox entered terminal state: {status}")
         try:
-            sandbox.wait_for_status(_sandbox_status_type().RUNNING, timeout=max(timeout, timedelta(seconds=1)),
+            sandbox.wait_for_status(running, timeout=max(timeout, timedelta(seconds=1)),
                                     poll_interval=timedelta(milliseconds=250))
         except TimeoutError as exc:
             status = sandbox.status
@@ -247,15 +225,14 @@ class VercelSandboxEnvironment(BaseEnvironment):
                 raise RuntimeError(f"Sandbox entered terminal state: {status}") from exc
             raise RuntimeError(f"Sandbox did not reach running state (last status: {status})") from exc
 
-    def _close_sandbox_client(self, sandbox: Sandbox | None) -> None:
-        if sandbox is not None:
-            with contextlib.suppress(Exception):
-                sandbox.client.close()
+    @staticmethod
+    def _close_sandbox_client(sandbox: Sandbox | None) -> None:
+        with contextlib.suppress(Exception):  # None sandbox -> AttributeError -> no-op
+            sandbox.client.close()
 
-    def _stop_sandbox(self, sandbox: Sandbox | None) -> None:
-        if sandbox is None:
-            return
-        with contextlib.suppress(Exception):
+    @staticmethod
+    def _stop_sandbox(sandbox: Sandbox | None) -> None:
+        with contextlib.suppress(Exception):  # None sandbox -> AttributeError -> no-op
             try:
                 sandbox.stop(blocking=True, timeout=timedelta(seconds=15), poll_interval=timedelta(milliseconds=500))
             except TypeError:  # older SDKs: stop() takes no arguments
@@ -295,9 +272,10 @@ class VercelSandboxEnvironment(BaseEnvironment):
         self._attach_fresh_sandbox(requested_cwd)
 
     def _run_checked(self, script: str, label: str) -> None:
-        result = self._require_sandbox().run_command("bash", ["-lc", script], cwd=self._workspace_root)
-        if _extract_result_returncode(result) != 0:
-            raise RuntimeError(f"Vercel {label} failed: {_extract_result_output(result).strip()}")
+        output, returncode = _result_parts(
+            self._require_sandbox().run_command("bash", ["-lc", script], cwd=self._workspace_root))
+        if returncode != 0:
+            raise RuntimeError(f"Vercel {label} failed: {output.strip()}")
 
     def _vercel_upload(self, host_path: str, remote_path: str) -> None:
         self._vercel_bulk_upload([(host_path, remote_path)])
@@ -332,10 +310,8 @@ class VercelSandboxEnvironment(BaseEnvironment):
                 self._sync_manager.sync()
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120, stdin_data: str | None = None):
-        """``timeout`` is not forwarded (the SDK has no per-exec timeout); the base
-        ``_wait_for_process`` enforces it by killing the sandbox via ``cancel_fn``.
-        ``stdin_data`` is discarded: ``_stdin_mode = "heredoc"`` makes the base
-        ``execute()`` embed stdin into the command string before calling this."""
+        """``timeout`` is enforced by the base ``_wait_for_process`` via ``cancel_fn`` (the SDK has no
+        per-exec timeout); ``stdin_data`` is already embedded as a heredoc by the base ``execute()``."""
         del timeout, stdin_data
         sandbox = self._require_sandbox()
         workspace_root = self._workspace_root
@@ -346,8 +322,7 @@ class VercelSandboxEnvironment(BaseEnvironment):
                 self._stop_sandbox(sandbox)
 
         def exec_fn() -> tuple[str, int]:
-            result = sandbox.run_command("bash", ["-lc" if login else "-c", cmd_string], cwd=workspace_root)
-            return _extract_result_output(result), _extract_result_returncode(result)
+            return _result_parts(sandbox.run_command("bash", ["-lc" if login else "-c", cmd_string], cwd=workspace_root))
         return _ThreadedProcessHandle(exec_fn, cancel_fn=cancel)
 
     def cleanup(self):

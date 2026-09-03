@@ -53,10 +53,9 @@ class SSHEnvironment(BaseEnvironment):
 
         self.control_dir = Path(tempfile.gettempdir()) / "hermes-ssh"
         self.control_dir.mkdir(parents=True, exist_ok=True)
-        # Short, deterministic socket name: the full path must stay under macOS's
-        # 104-byte sun_path limit (raw user@host:port + SSH's 16-byte random suffix
-        # under a deep $TMPDIR exceeds it), and stability across reconnects keeps
-        # ControlMaster reuse working.
+        # Short, deterministic socket name: the path must stay under macOS's 104-byte sun_path
+        # limit (raw user@host:port + SSH's 16-byte suffix under a deep $TMPDIR exceeds it), and
+        # stability across reconnects keeps ControlMaster reuse working.
         _socket_id = hashlib.sha256(f"{user}@{host}:{port}".encode()).hexdigest()[:16]
         self.control_socket = self.control_dir / f"{_socket_id}.sock"
         _ensure_ssh_available()
@@ -121,8 +120,6 @@ class SSHEnvironment(BaseEnvironment):
                 return home
         return "/root" if self.user == "root" else f"/home/{self.user}"
 
-    # -- File sync (via FileSyncManager) --------------------------------
-
     def _ensure_remote_dirs(self) -> None:
         """Create base ~/.hermes directory tree on remote in one SSH call."""
         base = f"{self._remote_home}/.hermes"
@@ -139,11 +136,8 @@ class SSHEnvironment(BaseEnvironment):
             raise _sync_error(f"scp failed: {result.stderr.strip()}", f"File sync to {self.user}@{self.host}")
 
     def _ssh_bulk_upload(self, files: list[tuple[str, str]]) -> None:
-        """Upload many files in a single tar-over-SSH stream.
-
-        Local ``tar c`` is piped through one SSH connection to remote ``tar x``;
-        directory creation is batched into a single ``mkdir -p`` beforehand.
-        """
+        """Upload many files in one tar-over-SSH stream: local ``tar c`` piped through one SSH
+        connection to remote ``tar x``, after a single batched ``mkdir -p``."""
         if not files:
             return
         base = f"{self._remote_home}/.hermes"
@@ -229,8 +223,6 @@ class SSHEnvironment(BaseEnvironment):
     def _before_execute(self) -> None:
         """Sync files to remote via FileSyncManager (rate-limited internally)."""
         self._sync_manager.sync()
-
-    # -- Execution ------------------------------------------------------
 
     def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:

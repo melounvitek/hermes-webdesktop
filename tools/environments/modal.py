@@ -99,22 +99,18 @@ class _AsyncWorker:
         self._started = threading.Event()
 
     def start(self):
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        def _run_loop():
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self._started.set()
+            self._loop.run_forever()
+        self._thread = threading.Thread(target=_run_loop, daemon=True)
         self._thread.start()
         self._started.wait(timeout=30)
 
-    def _run_loop(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._started.set()
-        self._loop.run_forever()
-
     def run_coroutine(self, coro, timeout=600):
         from agent.async_utils import safe_schedule_threadsafe
-        if self._loop is None or self._loop.is_closed():
-            if asyncio.iscoroutine(coro):
-                coro.close()
-            raise RuntimeError("AsyncWorker loop is not running")
+        # safe_schedule_threadsafe closes the coroutine and returns None for a missing/closed loop.
         future = safe_schedule_threadsafe(coro, self._loop)
         if future is None:
             raise RuntimeError("AsyncWorker loop is not running")
@@ -148,11 +144,10 @@ class ModalEnvironment(BaseEnvironment):
         self._worker = _AsyncWorker()
         self._sync_manager: FileSyncManager | None = None  # initialized after sandbox creation
         sandbox_kwargs = dict(modal_sandbox_kwargs or {})
-        restored_snapshot_id, restored_from_legacy_key = None, False
-        if self._persistent:
-            restored_snapshot_id, restored_from_legacy_key = _get_snapshot_restore_candidate(self._task_id)
-            if restored_snapshot_id:
-                logger.info("Modal: restoring from snapshot %s", restored_snapshot_id[:20])
+        restored_snapshot_id, restored_from_legacy_key = (
+            _get_snapshot_restore_candidate(self._task_id) if self._persistent else (None, False))
+        if restored_snapshot_id:
+            logger.info("Modal: restoring from snapshot %s", restored_snapshot_id[:20])
         ensure_lazy_dep("terminal.modal")
         import modal as _modal
         cred_mounts = []
@@ -215,10 +210,8 @@ class ModalEnvironment(BaseEnvironment):
 
     def _modal_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via base64 piped through stdin."""
-        b64 = base64.b64encode(Path(host_path).read_bytes()).decode("ascii")
-        container_dir = str(Path(remote_path).parent)
-        cmd = f"mkdir -p {shlex.quote(container_dir)} && base64 -d > {shlex.quote(remote_path)}"
-        self._exec_with_stdin(cmd, b64, timeout=30)
+        cmd = f"mkdir -p {shlex.quote(str(Path(remote_path).parent))} && base64 -d > {shlex.quote(remote_path)}"
+        self._exec_with_stdin(cmd, base64.b64encode(Path(host_path).read_bytes()).decode("ascii"), timeout=30)
 
     def _modal_bulk_upload(self, files: list[tuple[str, str]]) -> None:
         """Upload many files as one in-memory gzipped tar streamed through stdin
@@ -241,16 +234,13 @@ class ModalEnvironment(BaseEnvironment):
             exit_code = await proc.wait.aio()
             if exit_code != 0:
                 raise RuntimeError(f"Modal bulk download failed (exit {exit_code})")
-            return data
-        tar_bytes = self._worker.run_coroutine(_download(), timeout=120)
-        dest.write_bytes(tar_bytes.encode() if isinstance(tar_bytes, str) else tar_bytes)
+            return data.encode() if isinstance(data, str) else data
+        dest.write_bytes(self._worker.run_coroutine(_download(), timeout=120))
 
     def _modal_delete(self, remote_paths: list[str]) -> None:
         """Batch-delete remote files via exec."""
-        rm_cmd = quoted_rm_command(remote_paths)
-
         async def _rm():
-            proc = await self._sandbox.exec.aio("bash", "-c", rm_cmd)
+            proc = await self._sandbox.exec.aio("bash", "-c", quoted_rm_command(remote_paths))
             await proc.wait.aio()
         self._worker.run_coroutine(_rm(), timeout=15)
 
@@ -272,10 +262,7 @@ class ModalEnvironment(BaseEnvironment):
                 stdout = _as_text(await process.stdout.read.aio())
                 stderr = _as_text(await process.stderr.read.aio())
                 exit_code = await process.wait.aio()
-                output = stdout
-                if stderr:
-                    output = f"{stdout}\n{stderr}" if stdout else stderr
-                return output, exit_code
+                return "\n".join(part for part in (stdout, stderr) if part), exit_code
             return worker.run_coroutine(_do(), timeout=timeout + 30)
         return _ThreadedProcessHandle(exec_fn, cancel_fn=cancel)
 
@@ -288,12 +275,11 @@ class ModalEnvironment(BaseEnvironment):
             self._sync_manager.sync_back()
         if self._persistent:
             async def _snapshot():
-                img = await self._sandbox.snapshot_filesystem.aio()
-                return img.object_id
+                return (await self._sandbox.snapshot_filesystem.aio()).object_id
             try:
                 snapshot_id = self._worker.run_coroutine(_snapshot(), timeout=60)
             except Exception:
-                snapshot_id = None
+                snapshot_id = None  # snapshot errors are non-fatal; the sandbox is still terminated
             if snapshot_id:
                 try:
                     _store_direct_snapshot(self._task_id, snapshot_id)
