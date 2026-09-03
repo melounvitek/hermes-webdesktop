@@ -17,6 +17,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from functools import partial
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseBackend, UIElement, image_dimensions_from_bytes
@@ -96,11 +97,10 @@ _escalation_warned: set = set()               # sids already warned that a bypas
 def _configured_permission_mode() -> str:
     """Configured cua mode (standard | bounded); "standard" if unresolvable. bounded needs a
     computer_use.capability_manifest; the backend fails loudly without it."""
-    try:
+    with contextlib.suppress(Exception):
         from tools.computer_use.cua_backend import _cua_configured_permission_mode
         return _cua_configured_permission_mode()
-    except Exception:
-        return "standard"
+    return "standard"
 
 def _cua_permission_mode(session_id: str) -> str:
     """Map Hermes's approval bypass onto Cua's immutable mode. Both identity namespaces are consulted — DB
@@ -239,9 +239,8 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     def __init__(self) -> None:
         self.calls: List[Tuple[str, Dict[str, Any]]] = []
 
-    def start(self) -> None: pass
-    def stop(self) -> None: pass
-    def is_available(self) -> bool: return True
+    start = stop = lambda self: None
+    is_available = lambda self: True
 
     def _record(self, name: str, kw: Dict[str, Any], result: Any = None) -> Any:
         self.calls.append((name, kw))
@@ -376,9 +375,9 @@ def _listing(key: str, method: str):
     return handler
 
 def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
-    if args.get("element") is not None:
-        return f"{action} element #{args['element']}{fg}"
-    return f"{action} at {tuple(args['coordinate'])}{fg}" if args.get("coordinate") else action + fg
+    where = (f" element #{args['element']}" if args.get("element") is not None
+             else f" at {tuple(args['coordinate'])}" if args.get("coordinate") else "")
+    return f"{action}{where}{fg}"
 
 @dataclass(frozen=True)
 class _ActionSpec:
@@ -553,27 +552,14 @@ def _bounds_scale(elements: List[UIElement], image_width: int, image_height: int
 def _bounds_space_note(elements: List[UIElement], image_width: int, image_height: int) -> Optional[str]:
     return _bounds_hints(elements, image_width, image_height)[1]
 
-@dataclass
-class _CaptureView:
-    """One capture's derived facts, computed once for every response branch. ``width``/``height`` are the decoded
-    screenshot dims when an image is present, else the backend's; ``visible`` is the capped element list."""
-    cap: CaptureResult
-    visible: List[UIElement]
-    truncated: int
-    width: int
-    height: int
-    bounds_scale: Optional[float] = None
-    bounds_note: Optional[str] = None
-    elements_file: Optional[str] = None
-    screenshot_path: Optional[str] = None
-    dims_omitted: Optional[Tuple[int, int]] = None  # image below the provider minimum
-    has_image: bool = False
+def _view(cap: CaptureResult, visible: List[UIElement], width: int, height: int, **facts: Any) -> SimpleNamespace:
+    """One capture's derived facts, computed once for every response branch: ``visible`` is the capped element list,
+    ``dims_omitted`` an image below the provider minimum; ``facts`` override the None/False defaults."""
+    return SimpleNamespace(**{**dict(cap=cap, visible=visible, total=len(cap.elements), width=width, height=height,
+                                     truncated=len(cap.elements) - len(visible), bounds_scale=None, bounds_note=None,
+                                     elements_file=None, screenshot_path=None, dims_omitted=None, has_image=False), **facts})
 
-    @property
-    def total(self) -> int:
-        return len(self.cap.elements)
-
-def _capture_view(cap: CaptureResult, max_elements: int) -> _CaptureView:
+def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
     visible, dims = cap.elements[:max_elements], None
     with contextlib.suppress(Exception):  # (width, height) of the inline PNG/JPEG screenshot, else the backend's
         dims = image_dimensions_from_bytes(base64.b64decode(cap.png_b64, validate=False)) if cap.png_b64 else None
@@ -583,13 +569,12 @@ def _capture_view(cap: CaptureResult, max_elements: int) -> _CaptureView:
     lost_detail = len(cap.elements) > len(visible) or any(len(e.label) > _MAX_ELEMENT_LABEL_CHARS for e in visible)
     too_small = bool(dims) and min(dims) < _MIN_PROVIDER_IMAGE_DIMENSION
     has_image = bool(cap.png_b64) and cap.mode != "ax" and not too_small
-    return _CaptureView(
-        cap, visible, len(cap.elements) - len(visible), width, height, bounds_scale=scale, bounds_note=note,
-        elements_file=_spill_elements_to_file(cap) if lost_detail else None,
-        screenshot_path=_persist_capture_image(cap) if has_image else None,
-        dims_omitted=dims if too_small else None, has_image=has_image)
+    return _view(cap, visible, width, height, bounds_scale=scale, bounds_note=note,
+                 elements_file=_spill_elements_to_file(cap) if lost_detail else None,
+                 screenshot_path=_persist_capture_image(cap) if has_image else None,
+                 dims_omitted=dims if too_small else None, has_image=has_image)
 
-def _capture_summary_lines(v: _CaptureView) -> List[str]:
+def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
     """Human-readable capture summary; line ORDER is contract. Indexes only what is surfaced in `elements`,
     otherwise the summary names indices the model can't find."""
     cap, bounds_note = v.cap, v.bounds_note
@@ -613,7 +598,7 @@ def _capture_summary_lines(v: _CaptureView) -> List[str]:
            f"{_MIN_PROVIDER_IMAGE_DIMENSION}x{_MIN_PROVIDER_IMAGE_DIMENSION} provider minimum)"] if v.dims_omitted else []),
     ]
 
-def _multimodal_capture(v: _CaptureView, summary: str) -> Dict[str, Any]:
+def _multimodal_capture(v: SimpleNamespace, summary: str) -> Dict[str, Any]:
     cap = v.cap  # envelope carrying the screenshot (not the elements array, so no truncation note)
     return {
         "_multimodal": True,
@@ -625,7 +610,7 @@ def _multimodal_capture(v: _CaptureView, summary: str) -> Dict[str, Any]:
                                                           elements_file=v.elements_file, bounds_scale=v.bounds_scale)},
     }
 
-def _text_capture_payload(v: _CaptureView, summary: str, extra: Optional[Dict[str, Any]] = None) -> str:
+def _text_capture_payload(v: SimpleNamespace, summary: str, extra: Optional[Dict[str, Any]] = None) -> str:
     """JSON text payload shared by the AX, vision-unavailable and aux-vision branches. Key order is contract:
     fixed fields, ``extra`` branch markers, then set optionals."""
     cap = v.cap
@@ -670,9 +655,8 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         # Recapture the exact window when known: on Linux several unrelated windows may share an app name, so
         # app-only recapture can switch targets.
         target = getattr(backend, "_last_target", None) or {}
-        pid, window_id = target.get("pid"), target.get("window_id")
-        exact = pid is not None and window_id is not None
-        cap = backend.capture(mode=_capture_after_mode(), **({"pid": pid, "window_id": window_id} if exact
+        exact = {k: target.get(k) for k in ("pid", "window_id")}
+        cap = backend.capture(mode=_capture_after_mode(), **(exact if None not in exact.values()
                                                             else {"app": getattr(backend, "_last_app", None)}))
     except Exception as e:
         logger.warning("follow-up capture failed: %s", e)
@@ -793,12 +777,11 @@ def _should_route_through_aux_vision() -> bool:
 
 def _capture_after_mode() -> str:
     """Mode for ``capture_after`` follow-ups. Default ``som`` (screenshot)."""
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.config import load_config
         mode = str(((load_config() or {}).get("computer_use") or {}).get("capture_after_mode", "som") or "som")
-    except Exception:
-        return "som"
-    return mode if (mode := mode.strip().lower()) in {"som", "vision", "ax"} else "som"
+        return mode if (mode := mode.strip().lower()) in {"som", "vision", "ax"} else "som"
+    return "som"
 
 _VISION_PROMPT = ("Describe what is visible in this desktop application screenshot in concise but specific "
                   "terms. Mention the app name and window title if visible, the overall layout, any labelled "
@@ -850,8 +833,8 @@ def _route_capture_through_aux_vision(
         return None
     # Same element cap as every other capture branch; dumping cap.elements in full would bypass max_elements
     # exactly for non-vision main models. Dimensions are the backend's on this branch.
-    view = _CaptureView(cap, cap.elements if visible_elements is None else visible_elements, truncated_elements,
-                        cap.width, cap.height, elements_file=elements_file, screenshot_path=screenshot_path)
+    view = _view(cap, cap.elements if visible_elements is None else visible_elements, cap.width, cap.height,
+                 truncated=truncated_elements, elements_file=elements_file, screenshot_path=screenshot_path)
     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
                                                  "vision_analysis_routed_via": "auxiliary.vision"})
 
