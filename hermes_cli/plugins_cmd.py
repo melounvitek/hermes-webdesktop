@@ -816,25 +816,7 @@ def cmd_update(name: str) -> None:
             before_pull=lambda: console.print(f"[dim]Updating {name}...[/dim]"))
     except PluginOperationError as exc:
         _fail(console, f"[red]Error:[/red] {exc}")
-    # Re-scan: an update can introduce malicious content. The pull has already mutated the
-    # tree, so a dangerous verdict disables the plugin rather than leaving it active.
-    if _scan_on_install_enabled():
-        from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
-
-        scan_result = scan_plugin(target, source=name)
-        allowed, reason = should_allow_plugin_install(scan_result)
-        if allowed is not True:
-            console.print()
-            console.print(f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}")
-            console.print(format_scan_report(scan_result))
-            if scan_result.verdict == "dangerous":
-                if name in _get_enabled_set() or name not in _get_disabled_set():
-                    _set_plugin_enabled(name, enable=False)
-                console.print(
-                    f"[red]Plugin '{name}' has been disabled.[/red] Review the "
-                    f"findings, then re-enable with `hermes plugins enable {name}` "
-                    f"if you trust them.")
-
+    _rescan_after_update(target, name, console)
     _post_pull_housekeeping(target, console)
 
     # Re-consent when the new version declares capabilities the granted set lacks or the
@@ -855,6 +837,28 @@ def cmd_update(name: str) -> None:
         console.print(f"[dim]{out}[/dim]")
 
 
+def _rescan_after_update(target: Path, name: str, console) -> None:
+    """Re-scan after ``git pull``: the tree is already mutated, so a dangerous verdict disables
+    the plugin rather than leaving it active."""
+    if not _scan_on_install_enabled():
+        return
+    from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
+    scan_result = scan_plugin(target, source=name)
+    allowed, reason = should_allow_plugin_install(scan_result)
+    if allowed is True:
+        return
+    console.print()
+    console.print(f"[yellow]⚠ Security scan flagged the updated plugin:[/yellow] {reason}")
+    console.print(format_scan_report(scan_result))
+    if scan_result.verdict == "dangerous":
+        if name in _get_enabled_set() or name not in _get_disabled_set():
+            _set_plugin_enabled(name, enable=False)
+        console.print(
+            f"[red]Plugin '{name}' has been disabled.[/red] Review the "
+            f"findings, then re-enable with `hermes plugins enable {name}` "
+            f"if you trust them.")
+
+
 def _post_pull_housekeeping(target: Path, console) -> None:
     """After ``git pull``: drop stale ``__pycache__`` and copy any new ``.example`` files."""
     _clear_plugin_bytecode(target)
@@ -863,9 +867,7 @@ def _post_pull_housekeeping(target: Path, console) -> None:
 
 def _record_pulled_revision(target: Path, metadata: dict, install_record: dict) -> None:
     """After a pull, store the new HEAD in the plugin's install-metadata record (if it has one)."""
-    if not install_record:
-        return
-    git_exe = _resolve_git_executable()
+    git_exe = _resolve_git_executable() if install_record else None
     if git_exe:
         install_record["revision"] = _git_head_revision(target, git_exe)
         metadata[target.name] = install_record
