@@ -198,6 +198,7 @@ def validate_env_var_name_for_write(key: str) -> None:
         raise ValueError(f"Invalid environment variable name: {key!r}")
     _reject_denylisted_env_var(key)
 
+
 # Serializes all config read/write paths and guards the module-level caches below. libyaml's
 # C extension is not thread-safe for concurrent safe_load() on one file, and tool threads
 # (approval, browser, setup flows) load/save config concurrently during long agent runs.
@@ -1138,7 +1139,6 @@ _CUSTOM_PROVIDER_LIKE_FIELDS = {"base_url", "api_key", "rate_limit_delay", "api_
 @dataclass
 class ConfigIssue:
     """A detected config structure problem."""
-
     severity: str  # "error", "warning"
     message: str
     hint: str
@@ -1180,6 +1180,19 @@ def _validate_voice(config: Dict[str, Any], issues: List[ConfigIssue]) -> None:
             "Set voice.submit_mode to direct (submit immediately) or draft (edit before sending)"))
 
 
+def _validate_entry_list(
+    entries: list, label: str, issues: List[ConfigIssue], fields, *, non_dict: Tuple[str, str, str],
+) -> None:
+    """Validate each list entry: ``non_dict`` = (severity, message-with-{i}-and-{type}, hint) for
+    non-dict items; dict items get ``_require_fields`` with *fields*."""
+    severity, message, hint = non_dict
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            issues.append(ConfigIssue(severity, message.format(i=i, type=type(entry).__name__), hint))
+        else:
+            _require_fields(issues, entry, f"{label}[{i}]", fields)
+
+
 def _validate_custom_providers(cp: Any, issues: List[ConfigIssue]) -> None:
     """custom_providers must be a list of dicts, not a dict."""
     if isinstance(cp, dict):
@@ -1198,27 +1211,16 @@ def _validate_custom_providers(cp: Any, issues: List[ConfigIssue]) -> None:
                 f"Root-level keys {sorted(suspicious)} look like custom_providers entry fields",
                 "These should be indented under a '- name: ...' list entry, not at root level"))
     elif isinstance(cp, list):
-        for i, entry in enumerate(cp):
-            if not isinstance(entry, dict):
-                issues.append(ConfigIssue(
-                    "warning",
-                    f"custom_providers[{i}] is not a dict (got {type(entry).__name__})",
-                    "Each entry should have at minimum: name, base_url"))
-                continue
-            _require_fields(issues, entry, f"custom_providers[{i}]", _CP_REQUIRED_FIELDS)
+        _validate_entry_list(cp, "custom_providers", issues, _CP_REQUIRED_FIELDS, non_dict=(
+            "warning", "custom_providers[{i}] is not a dict (got {type})",
+            "Each entry should have at minimum: name, base_url"))
 
 
 def _validate_fallback_model(fb: Any, issues: List[ConfigIssue]) -> None:
     """fallback_model: single dict OR list of dicts (chain)."""
     if isinstance(fb, list):
-        for i, entry in enumerate(fb):
-            if not isinstance(entry, dict):
-                issues.append(ConfigIssue(
-                    "error",
-                    f"fallback_model[{i}] should be a dict, got {type(entry).__name__}",
-                    "Each entry needs provider + model"))
-            else:
-                _require_fields(issues, entry, f"fallback_model[{i}]", _FB_REQUIRED_FIELDS)
+        _validate_entry_list(fb, "fallback_model", issues, _FB_REQUIRED_FIELDS, non_dict=(
+            "error", "fallback_model[{i}] should be a dict, got {type}", "Each entry needs provider + model"))
     elif not isinstance(fb, dict):
         issues.append(ConfigIssue(
             "error",
@@ -1507,6 +1509,19 @@ def _warn_invalid_platform_toolsets(results: Dict[str, Any], quiet: bool) -> Non
         logger.debug("platform_toolsets validation skipped: %s", _ts_val_err)
 
 
+def _offer_list(heading: str, items: List[str], question: str) -> bool:
+    """Print a bulleted offer list and ask; False (with the "set later" hint) when declined."""
+    print(heading)
+    for item in items:
+        print(f"    • {item}")
+    print()
+    if not _ask_yes_no(question):
+        print("  Set later with: hermes config set <key> <value>")
+        return False
+    print()
+    return True
+
+
 def _offer_new_optional_env_vars(current_ver: int, latest_ver: int, results: Dict[str, Any]) -> None:
     """Interactively offer env vars that are NEW since the user's previous config version."""
     new_var_names: set = set()
@@ -1517,16 +1532,12 @@ def _offer_new_optional_env_vars(current_ver: int, latest_ver: int, results: Dic
         for name in sorted(new_var_names)
         if not get_env_value(name) and name in OPTIONAL_ENV_VARS
     ]
-    if not new_and_unset:
+    if not new_and_unset or not _offer_list(
+        f"\n  {len(new_and_unset)} new optional key(s) in this update:",
+        [f"{name} — {info.get('description', '')}" for name, info in new_and_unset],
+        "  Configure new keys? [y/N]: ",
+    ):
         return
-    print(f"\n  {len(new_and_unset)} new optional key(s) in this update:")
-    for name, info in new_and_unset:
-        print(f"    • {name} — {info.get('description', '')}")
-    print()
-    if not _ask_yes_no("  Configure new keys? [y/N]: "):
-        print("  Set later with: hermes config set <key> <value>")
-        return
-    print()
     for name, info in new_and_unset:
         print(f"  {info.get('description', name)}")
         if info.get("url"):
@@ -1537,14 +1548,12 @@ def _offer_new_optional_env_vars(current_ver: int, latest_ver: int, results: Dic
 
 def _offer_skill_config_vars(missing_skill_config: List[Dict[str, Any]], results: Dict[str, Any]) -> None:
     """Prompt for skill-declared settings that are missing/empty and persist the answers."""
-    print(f"\n  {len(missing_skill_config)} skill setting(s) not configured:")
-    for var in missing_skill_config:
-        print(f"    • {var['key']} — {var['description']} (from skill: {var.get('skill', 'unknown')})")
-    print()
-    if not _ask_yes_no("  Configure skill settings? [y/N]: "):
-        print("  Set later with: hermes config set <key> <value>")
+    if not _offer_list(
+        f"\n  {len(missing_skill_config)} skill setting(s) not configured:",
+        [f"{v['key']} — {v['description']} (from skill: {v.get('skill', 'unknown')})" for v in missing_skill_config],
+        "  Configure skill settings? [y/N]: ",
+    ):
         return
-    print()
     config = read_raw_config()
     try:
         from agent.skill_utils import SKILL_CONFIG_PREFIX
@@ -2068,7 +2077,6 @@ def require_readable_config_before_write(
 
 def atomic_config_write(config_path: Path, data: Any, **kwargs: Any) -> None:
     """Fail-closed atomic write for ``config.yaml`` (``require_readable_config_before_write`` first)."""
-
     require_readable_config_before_write(config_path)
     atomic_yaml_write(config_path, data, **kwargs)
 
@@ -2279,7 +2287,6 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
         config_path = get_config_path()
         path_key = str(config_path)
 
-    
         user_sig, cache_sig = _load_config_cache_sig(config_path)
 
         cached = _LOAD_CONFIG_CACHE.get(path_key)
@@ -2877,7 +2884,6 @@ def _section(title: str) -> None:
 def _show_managed_banner() -> None:
     """Surface administrator-pinned settings so the user knows why a config.yaml value may not
     be the effective one."""
-
     managed_keys = managed_scope.managed_config_keys()
     managed_env = managed_scope.load_managed_env()
     if not managed_keys and not managed_env:
@@ -3526,7 +3532,6 @@ def _exit_if_key_managed(key: str, action: str) -> None:
     """A key pinned by the managed layer cannot be set/unset (the next load would reinstate it):
     hard-reject and name the source. Distinct from ``is_managed()``; env-shaped keys route to the
     .env writers, which carry their own guard."""
-
     if managed_scope.is_key_managed(key):
         managed_dir = managed_scope.get_managed_dir()
         src = (managed_dir / "config.yaml") if managed_dir else "the managed scope"
@@ -3800,10 +3805,19 @@ def _cmd_config_unset(args):
     _run_write_command(unset_config_value, key)
 
 
+def _tools_suffix(info: Dict[str, Any], fmt: str) -> str:
+    tools = info.get("tools", [])
+    return fmt.format(", ".join(tools[:2])) if tools else ""
+
+
+def _print_banner(text: str) -> None:
+    print()
+    print(color(text, Colors.CYAN, Colors.BOLD))
+    print()
+
+
 def _cmd_config_migrate(args):
-    print()
-    print(color("🔄 Checking configuration for updates...", Colors.CYAN, Colors.BOLD))
-    print()
+    _print_banner("🔄 Checking configuration for updates...")
 
     missing_env = get_missing_env_vars(required_only=False)
     missing_config = get_missing_config_fields()
@@ -3831,9 +3845,7 @@ def _cmd_config_migrate(args):
     if optional_missing:
         print(f"\n  ℹ️  {len(optional_missing)} optional API key(s) not configured:")
         for var in optional_missing:
-            tools = var.get("tools", [])
-            tools_str = f" (enables: {', '.join(tools[:2])})" if tools else ""
-            print(f"     • {var['name']}{tools_str}")
+            print(f"     • {var['name']}{_tools_suffix(var, ' (enables: {})')}")
 
     print()
     results = migrate_config(interactive=True, quiet=False)
@@ -3852,9 +3864,7 @@ def _cmd_config_migrate(args):
 
 def _cmd_config_check(args):
     """Non-interactive report of what's missing."""
-    print()
-    print(color("📋 Configuration Status", Colors.CYAN, Colors.BOLD))
-    print()
+    _print_banner("📋 Configuration Status")
 
     current_ver, latest_ver = check_config_version()
     if current_ver >= latest_ver:
@@ -3876,9 +3886,7 @@ def _cmd_config_check(args):
         if get_env_value(var_name):
             print(f"    ✓ {var_name}")
         else:
-            tools = info.get("tools", [])
-            tools_str = f" → {', '.join(tools[:2])}" if tools else ""
-            print(color(f"    ○ {var_name}{tools_str}", Colors.DIM))
+            print(color(f"    ○ {var_name}{_tools_suffix(info, ' → {}')}", Colors.DIM))
 
     missing_config = get_missing_config_fields()
     if missing_config:
