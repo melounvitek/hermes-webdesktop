@@ -1,18 +1,11 @@
-"""Context-aware side questions (``/btw``).
+"""Context-aware side questions (``/btw``): answer a question ABOUT the conversation without
+touching it (no synthetic turns, no role-alternation risk, no prompt-cache invalidation).
 
-Answers a quick question ABOUT the current conversation without touching it (no
-synthetic turns, no role-alternation risk, no prompt-cache invalidation). Two
-paths, picked automatically:
-
-* **Cache-parity fork (preferred).** With a live parent ``AIAgent``, a detached
-  fork from :func:`agent.background_review.build_cache_parity_fork` replays the
-  parent's snapshot verbatim against the warm prefix cache. Tool calls are denied
-  at dispatch, persistence is detached, usage goes to the parent.
-* **One-shot digest (fallback).** With no live parent (e.g. the gateway evicted
-  the cached agent), a rendered transcript goes through :func:`agent.oneshot.run_oneshot`.
-
-``auxiliary.side_question.provider`` / ``.model`` route the fork to another model
-and replay a compact digest (cold cache on a different model).
+Preferred path: a detached cache-parity fork of the live parent ``AIAgent`` replays its
+snapshot verbatim against the warm prefix cache (tools denied at dispatch, persistence
+detached, usage attributed to the parent). Fallback (no live parent, e.g. gateway evicted
+the agent): a rendered transcript through :func:`agent.oneshot.run_oneshot`.
+``auxiliary.side_question.provider``/``.model`` route the fork elsewhere with a compact digest.
 """
 
 import logging
@@ -33,30 +26,19 @@ _PER_MESSAGE_CHAR_CAP = 2000
 _TRANSCRIPT_CHAR_BUDGET = 24000
 
 _FORK_PROMPT = (
-    "The user asked a quick SIDE question with /btw while the main work "
-    "continues in the original session.\n"
-    "Rules:\n"
-    "- Answer ONLY the side question, using the conversation above as "
-    "context. Do not continue, redo, or critique the main task.\n"
-    "- Do NOT call any tools — they are disabled for this side question. "
-    "Answer directly in text.\n"
-    "- If the conversation does not contain enough information to answer, "
-    "say so plainly instead of guessing.\n"
-    "- Be concise and direct."
+    "The user asked a quick SIDE question with /btw while the main work continues in the original "
+    "session.\nRules:\n- Answer ONLY the side question, using the conversation above as context. Do not continue, "
+    "redo, or critique the main task.\n- Do NOT call any tools — they are disabled for this side question. Answer "
+    "directly in text.\n- If the conversation does not contain enough information to answer, say so plainly instead "
+    "of guessing.\n- Be concise and direct."
 )
 
 _ONESHOT_INSTRUCTIONS = (
-    "You are the same AI assistant that is currently working inside the "
-    "conversation transcribed below. The user has asked a quick SIDE question "
-    "with /btw while the main work continues.\n"
-    "Rules:\n"
-    "- Answer ONLY the side question. Do not continue, redo, or critique the "
-    "main task.\n"
-    "- Use the transcript as your primary context; it is a snapshot and may "
-    "not include the very latest activity.\n"
-    "- If the transcript does not contain enough information to answer, say "
-    "so plainly instead of guessing.\n"
-    "- Be concise and direct."
+    "You are the same AI assistant that is currently working inside the conversation transcribed below. The user "
+    "has asked a quick SIDE question with /btw while the main work continues.\nRules:\n- Answer ONLY the side "
+    "question. Do not continue, redo, or critique the main task.\n- Use the transcript as your primary context; it "
+    "is a snapshot and may not include the very latest activity.\n- If the transcript does not contain enough "
+    "information to answer, say so plainly instead of guessing.\n- Be concise and direct."
 )
 
 _ROLE_LABELS = {"user": "USER", "assistant": "ASSISTANT", "tool": "TOOL RESULT"}
@@ -65,10 +47,8 @@ _ROLE_LABELS = {"user": "USER", "assistant": "ASSISTANT", "tool": "TOOL RESULT"}
 def trim_snapshot_for_fork(history: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
     """Drop trailing messages until the snapshot ends with a completed assistant text.
 
-    A mid-turn snapshot can end on unresolved ``tool_calls``, a tool result, or
-    the in-flight user message; appending the side question after any of those
-    breaks role alternation on strict providers. Trimming only the TAIL keeps
-    the warm prefix-cache property.
+    A mid-turn tail (unresolved ``tool_calls``, tool result, in-flight user message) breaks
+    role alternation on strict providers; trimming only the TAIL keeps the warm prefix cache.
     """
     msgs = list(history or [])
     while msgs:
@@ -79,16 +59,9 @@ def trim_snapshot_for_fork(history: Optional[List[Dict[str, Any]]]) -> List[Dict
     return msgs
 
 
-def render_history_for_side_question(
-    history: Optional[List[Dict[str, Any]]],
-    char_budget: int = _TRANSCRIPT_CHAR_BUDGET,
-) -> str:
-    """Render a snapshot as a plain-text transcript (fallback path only).
-
-    Newest-biased fit to ``char_budget``. Tool calls are summarized by name, tool
-    results included truncated (so "what did that output" stays answerable), the
-    system prompt skipped.
-    """
+def render_history_for_side_question(history: Optional[List[Dict[str, Any]]], char_budget: int = _TRANSCRIPT_CHAR_BUDGET) -> str:
+    """Plain-text transcript for the fallback path: newest-biased fit to ``char_budget``,
+    tool calls summarized by name, tool results truncated, system prompt skipped."""
     lines: List[str] = []
     for msg in history or []:
         if not isinstance(msg, dict):
@@ -105,65 +78,47 @@ def render_history_for_side_question(
     kept: List[str] = []
     used = 0
     for line in reversed(lines):
-        cost = len(line) + 1
-        if used + cost > char_budget and kept:
+        if used + len(line) + 1 > char_budget and kept:
             break
         kept.append(line)
-        used += cost
-    kept.reverse()
-
+        used += len(line) + 1
     if not kept:
         return "(no prior conversation)"
     prefix = "[...older conversation omitted...]\n" if len(kept) < len(lines) else ""
-    return prefix + "\n".join(kept)
+    return prefix + "\n".join(reversed(kept))
 
 
 def _side_question_task_config() -> Dict[str, Any]:
     """Return ``auxiliary.side_question`` from config (or ``{}``)."""
     try:
         from hermes_cli.config import load_config_readonly
-
-        cfg = load_config_readonly()
+        aux = load_config_readonly().get("auxiliary")
     except Exception:
         return {}
-    aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
-    task = aux.get(SIDE_QUESTION_TASK, {})
+    task = aux.get(SIDE_QUESTION_TASK) if isinstance(aux, dict) else None
     return task if isinstance(task, dict) else {}
 
 
 def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Dict[str, Any]]]) -> str:
     """Answer via a cache-parity fork of ``parent_agent`` on the calling thread.
 
-    The thread-scoped tool whitelist is emptied so any tool call is denied at
-    dispatch: ``tools[]`` stays byte-identical for cache parity, but the side
-    question can never mutate anything.
+    An empty thread-scoped tool whitelist denies every tool call at dispatch: ``tools[]``
+    stays byte-identical for cache parity, but the side question can never mutate anything.
     """
     from agent.background_review import (
-        _digest_history,
-        _record_review_usage_to_parent,
-        _snapshot_review_usage,
-        build_cache_parity_fork,
+        _digest_history, _record_review_usage_to_parent, _snapshot_review_usage, build_cache_parity_fork,
     )
     from hermes_cli.plugins import clear_thread_tool_whitelist, set_thread_tool_whitelist
 
-    fork, _rt, routed = build_cache_parity_fork(
-        parent_agent, _side_question_task_config(),
-        max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question",
-    )
+    fork, _rt, routed = build_cache_parity_fork(parent_agent, _side_question_task_config(),
+                                                max_iterations=_FORK_MAX_ITERATIONS, write_origin="side_question")
     try:
-        set_thread_tool_whitelist(
-            set(),
-            deny_msg_fmt=(
-                "Side question (/btw) denied tool call: {tool_name}. "
-                "Tools are disabled here — answer directly from the "
-                "conversation context."
-            ),
-        )
+        set_thread_tool_whitelist(set(), deny_msg_fmt=(
+            "Side question (/btw) denied tool call: {tool_name}. "
+            "Tools are disabled here — answer directly from the conversation context."))
         snapshot = trim_snapshot_for_fork(history)
-        result = fork.run_conversation(
-            user_message=f"{_FORK_PROMPT}\n\nSide question: {question}",
-            conversation_history=_digest_history(snapshot) if routed else snapshot,
-        )
+        result = fork.run_conversation(user_message=f"{_FORK_PROMPT}\n\nSide question: {question}",
+                                       conversation_history=_digest_history(snapshot) if routed else snapshot)
         answer = (result or {}).get("final_response", "") or ""
         if not answer and result and result.get("error"):
             raise RuntimeError(str(result["error"]))
@@ -171,11 +126,8 @@ def _answer_via_fork(parent_agent: Any, question: str, history: Optional[List[Di
     finally:
         clear_thread_tool_whitelist()
         # Attribute the fork's usage to the parent session; teardown never raises.
-        for step in (
-            lambda: _record_review_usage_to_parent(parent_agent, _snapshot_review_usage(fork)),
-            fork.shutdown_memory_provider,
-            fork.close,
-        ):
+        for step in (lambda: _record_review_usage_to_parent(parent_agent, _snapshot_review_usage(fork)),
+                     fork.shutdown_memory_provider, fork.close):
             try:
                 step()
             except Exception:
@@ -187,30 +139,19 @@ def _answer_via_oneshot(question: str, history: Optional[List[Dict[str, Any]]], 
     from agent.oneshot import run_oneshot
 
     user_input = (
-        "Conversation transcript (snapshot):\n"
-        "-----\n"
-        f"{render_history_for_side_question(history)}\n"
-        "-----\n\n"
+        f"Conversation transcript (snapshot):\n-----\n{render_history_for_side_question(history)}\n-----\n\n"
         f"Side question: {question}"
     )
-    return run_oneshot(
-        instructions=_ONESHOT_INSTRUCTIONS, user_input=user_input, task=SIDE_QUESTION_TASK, **run_kwargs
-    )
+    return run_oneshot(instructions=_ONESHOT_INSTRUCTIONS, user_input=user_input, task=SIDE_QUESTION_TASK, **run_kwargs)
 
 
 def answer_side_question(
-    question: str,
-    history: Optional[List[Dict[str, Any]]],
-    *,
-    parent_agent: Any = None,
-    main_runtime: Optional[Dict[str, Any]] = None,
-    max_tokens: int = 2048,
-    temperature: Optional[float] = 0.3,
+    question: str, history: Optional[List[Dict[str, Any]]], *, parent_agent: Any = None,
+    main_runtime: Optional[Dict[str, Any]] = None, max_tokens: int = 2048, temperature: Optional[float] = 0.3,
     timeout: float = 180.0,
 ) -> str:
-    """Answer ``question`` against a snapshot of ``history``: cache-parity fork when
-    ``parent_agent`` is live, else (or on empty answer / failure) the one-shot digest.
-    Raises on failure — callers surface the error on their own UI."""
+    """Fork when ``parent_agent`` is live, else (or on empty answer / failure) the one-shot
+    digest. Raises on failure — callers surface the error on their own UI."""
     question = (question or "").strip()
     if not question:
         raise ValueError("answer_side_question requires a non-empty question")
@@ -224,7 +165,5 @@ def answer_side_question(
         except Exception:
             logger.warning("/btw cache-parity fork failed; falling back to one-shot", exc_info=True)
 
-    return _answer_via_oneshot(
-        question, history,
-        main_runtime=main_runtime, max_tokens=max_tokens, temperature=temperature, timeout=timeout,
-    )
+    return _answer_via_oneshot(question, history, main_runtime=main_runtime, max_tokens=max_tokens,
+                               temperature=temperature, timeout=timeout)

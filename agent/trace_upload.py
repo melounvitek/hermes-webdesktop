@@ -1,16 +1,11 @@
 """Upload a Hermes session transcript to Hugging Face as an agent trace.
 
-The SQLite session (``hermes_state.SessionDB``) is re-emitted in the **Claude
-Code JSONL** shape, one of the formats the HF Agent Trace Viewer auto-detects
-(docs: https://huggingface.co/docs/hub/agent-traces).
-
-* **Zero LLM turn.** Deterministic export; ``hermes trace upload`` calls
-  :func:`upload_session_trace` directly.
-* **Private by default.** Traces can contain prompts, tool output, local paths and
-  secrets: the dataset is created private and every text body goes through the
-  secret redactor (``force=True``) unless the caller passes ``redact=False``.
-* **Never raises.** Returns a user-facing status string. Programmatic callers
-  wanting the URL use :func:`build_trace_jsonl` + :func:`_do_upload` directly.
+The SQLite session is re-emitted in the **Claude Code JSONL** shape the HF Agent Trace Viewer
+auto-detects (https://huggingface.co/docs/hub/agent-traces). Deterministic, zero LLM turns.
+Private by default: traces can contain prompts, tool output, local paths and secrets, so the
+dataset is created private and every text body goes through the secret redactor (``force=True``)
+unless the caller passes ``redact=False``. :func:`upload_session_trace` never raises — it returns a
+user-facing status string; programmatic callers use :func:`build_trace_jsonl` + :func:`_do_upload`.
 """
 
 from __future__ import annotations
@@ -19,6 +14,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -46,17 +42,15 @@ class TraceRedactionError(RuntimeError):
     """Raised when a trace cannot be safely redacted before upload."""
 
 
-# ---------------------------------------------------------------------------
-# Conversion: Hermes OpenAI-format messages -> Claude Code JSONL
-# ---------------------------------------------------------------------------
+# --- Conversion: Hermes OpenAI-format messages -> Claude Code JSONL ---
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def _redact(text: Any, enabled: bool) -> Any:
-    """Redact secrets from a string body when enabled; non-strings pass through.
-    ``force=True``: an upload always scrubs even if log redaction is disabled."""
+    """Redact secrets from a string body when enabled (``force=True``: an upload always scrubs
+    even if log redaction is disabled); non-strings pass through."""
     if not enabled or not isinstance(text, str) or not text:
         return text
     try:
@@ -78,8 +72,7 @@ def _part_to_block(part: Any, redact: bool) -> Dict[str, Any]:
     if ptype == "text":
         return _text_block(part.get("text", ""), redact)
     if ptype in ("image_url", "image"):
-        # The viewer renders text turns; don't inline base64 blobs.
-        return {"type": "text", "text": "[image omitted]"}
+        return {"type": "text", "text": "[image omitted]"}  # the viewer renders text turns; no base64
     return _text_block(json.dumps(part), redact)
 
 
@@ -94,23 +87,23 @@ def _content_to_blocks(content: Any, redact: bool) -> List[Dict[str, Any]]:
     return [_text_block(json.dumps(content), redact)]
 
 
+def _parse_tool_args(raw_args: Any) -> Dict[str, Any]:
+    if not isinstance(raw_args, str):
+        return raw_args if isinstance(raw_args, dict) else {}
+    try:
+        return json.loads(raw_args) if raw_args.strip() else {}
+    except (json.JSONDecodeError, ValueError):
+        return {"_raw": raw_args}
+
+
 def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]:
     """Convert OpenAI tool_calls into Anthropic ``tool_use`` content blocks."""
     blocks: List[Dict[str, Any]] = []
-    if not isinstance(tool_calls, list):
-        return blocks
-    for tc in tool_calls:
+    for tc in tool_calls if isinstance(tool_calls, list) else ():
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function") or {}
-        raw_args = fn.get("arguments")
-        if isinstance(raw_args, str):
-            try:
-                parsed = json.loads(raw_args) if raw_args.strip() else {}
-            except (json.JSONDecodeError, ValueError):
-                parsed = {"_raw": raw_args}
-        else:
-            parsed = raw_args if isinstance(raw_args, dict) else {}
+        parsed = _parse_tool_args(fn.get("arguments"))
         if redact:
             try:
                 parsed = json.loads(_redact(json.dumps(parsed), redact))
@@ -135,14 +128,13 @@ def _git_branch(cwd: str) -> str:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=cwd,
         )
-        return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def _assistant_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
-    blocks = _content_to_blocks(msg.get("content"), redact)
-    blocks.extend(_tool_calls_to_blocks(msg.get("tool_calls"), redact))
+    blocks = _content_to_blocks(msg.get("content"), redact) + _tool_calls_to_blocks(msg.get("tool_calls"), redact)
     return {"role": "assistant", "model": model or "unknown", "content": blocks or [{"type": "text", "text": ""}]}
 
 
@@ -181,13 +173,9 @@ def build_trace_jsonl(
     cwd: str = "",
     redact: bool = True,
 ) -> str:
-    """Render Hermes conversation messages as Claude Code JSONL text.
-
-    Each non-system message becomes one line: ``user``/``tool`` -> ``{"type":
-    "user"}``, ``assistant`` -> ``{"type": "assistant"}`` with text + ``tool_use``
-    blocks. Tool results ride on user turns as a ``tool_result`` block keyed by
-    ``tool_call_id``; turns link via ``uuid`` / ``parentUuid``.
-    """
+    """Render messages as Claude Code JSONL: one line per non-system message (``user``/``tool`` ->
+    type user, ``assistant`` -> type assistant with text + ``tool_use`` blocks; tool results ride
+    on user turns as ``tool_result`` keyed by ``tool_call_id``; turns link via ``parentUuid``)."""
     lines: List[str] = []
     parent: Optional[str] = None
     base_ts = _now_iso()
@@ -218,16 +206,14 @@ def build_trace_jsonl(
     return "\n".join(lines) + ("\n" if lines else "")
 
 
-# ---------------------------------------------------------------------------
-# Upload
-# ---------------------------------------------------------------------------
+# --- Upload ---
 
 def _resolve_hf_token() -> Optional[str]:
     """Return the user's Hugging Face token from the usual env vars."""
     for var in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
-        val = os.getenv(var)
-        if val and val.strip():
-            return val.strip()
+        val = (os.getenv(var) or "").strip()
+        if val:
+            return val
     return None
 
 
@@ -241,17 +227,13 @@ def _do_upload(
 ) -> str:
     """Create (idempotently) the private dataset and push the trace file.
     Returns a user-facing status string. Never raises."""
-    try:
+    with suppress(Exception):  # lazy-install unavailable/declined — the import below surfaces the hint
         from tools import lazy_deps
         lazy_deps.ensure("tool.trace_upload", prompt=False)
-    except Exception:
-        # Lazy-install unavailable/declined — the import below surfaces the hint.
-        pass
     try:
         from huggingface_hub import HfApi
     except ImportError:
-        return ("Hugging Face upload needs the `huggingface_hub` package "
-                "(`pip install huggingface_hub`).")
+        return "Hugging Face upload needs the `huggingface_hub` package (`pip install huggingface_hub`)."
 
     api = HfApi(token=token)
     try:
@@ -289,8 +271,8 @@ def _do_upload(
 
 
 def load_session_messages(session_id: str, db_path=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Load ``(messages, meta)`` from the SQLite store. ``meta`` is ``{}`` when the
-    session row is missing (messages may still exist for a live, untitled session)."""
+    """Load ``(messages, meta)`` from the SQLite store; ``meta`` is ``{}`` when the session row is
+    missing (messages may still exist for a live, untitled session)."""
     from hermes_state import SessionDB
     db = SessionDB(db_path=db_path) if db_path else SessionDB()
     try:
@@ -315,8 +297,8 @@ def upload_session_trace(
     db_path=None,
     token: Optional[str] = None,
 ) -> str:
-    """CLI/gateway entry point: load, convert, upload to the user's private
-    ``{user}/hermes-traces`` dataset. Returns a status string, never raises."""
+    """CLI/gateway entry point: load, convert, upload to the user's private ``{user}/hermes-traces``
+    dataset. Returns a status string, never raises."""
     if not session_id:
         return "No active session to upload."
 
@@ -329,14 +311,10 @@ def upload_session_trace(
     except Exception as e:
         logger.warning("Failed to load session %s for trace upload: %s", session_id, e)
         return f"Could not load session {session_id}: {e}"
-
     if not messages:
         return "No transcript to upload for this session yet."
-
     try:
-        jsonl = build_trace_jsonl(
-            messages, session_id=session_id, model=model or meta.get("model") or "", cwd=cwd, redact=redact,
-        )
+        jsonl = build_trace_jsonl(messages, session_id=session_id, model=model or meta.get("model") or "", cwd=cwd, redact=redact)
     except TraceRedactionError:
         return _REDACTION_BLOCKED_MESSAGE
     if not jsonl.strip():

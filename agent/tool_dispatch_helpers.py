@@ -1,12 +1,10 @@
 """Tool-dispatch helpers — parallelism gating, multimodal envelopes, mutation tracking.
 
-Stateless module-level utilities extracted from ``run_agent.py``, which
-re-exports each name so existing ``from run_agent import ...`` imports keep
-working. Groups: batch-parallelism planner (path-overlap admission; V4A patch
-scope comes from patch-body headers, not a decoy ``path=``), multimodal
-``{"_multimodal": True, "content": [...], "text_summary": ...}`` envelope
-helpers, per-turn file-mutation verifier inputs, trajectory normalisation, and
-the tool-result message constructor with its untrusted-content wrapping.
+Stateless utilities extracted from ``run_agent.py`` (which re-exports each name): the
+batch-parallelism planner (path-overlap admission; V4A patch scope comes from patch-body
+headers, not a decoy ``path=``), multimodal ``{"_multimodal": True, "content": [...],
+"text_summary": ...}`` envelope helpers, file-mutation verifier inputs, trajectory
+normalisation, and the tool-result message constructor with untrusted-content wrapping.
 """
 
 from __future__ import annotations
@@ -45,15 +43,13 @@ _PARALLEL_SAFE_TOOLS = frozenset({
     "web_search",
 })
 
-# Filesystem tools admitted by path overlap. Readers may share a subtree; a
-# writer conflicts with ANY overlapping reservation. This keeps a batched
-# read_file/search_files from observing pre-mutation state when the model
-# batches it alongside the patch/write_file it depends on.
+# Filesystem tools admitted by path overlap: readers may share a subtree, a writer conflicts
+# with ANY overlapping reservation (so a batched read never observes pre-mutation state).
 _PATH_SCOPED_READERS = frozenset({"read_file", "search_files"})
 _PATH_SCOPED_WRITERS = frozenset({"write_file", "patch"})
 _PATH_SCOPED_TOOLS = _PATH_SCOPED_READERS | _PATH_SCOPED_WRITERS
 
-# Patterns that indicate a terminal command may modify/delete files.
+# Terminal commands that may modify/delete files.
 _DESTRUCTIVE_PATTERNS = re.compile(
     r"""(?:^|\s|&&|\|\||;|`)(?:
         rm\s|rmdir\s|
@@ -90,23 +86,18 @@ _PARALLEL_SAFE_BRIDGE_LOOKUPS = frozenset({"tool_search", "tool_describe"})
 
 
 def _peel_bridge_call(tool_name: str, function_args: dict) -> tuple[str, dict]:
-    """Resolve a ``tool_call`` bridge invocation to ``(underlying_name, underlying_args)``.
-
-    With tool search active the model emits the literal name ``tool_call`` for
-    every deferred tool, so admission must be decided on the underlying tool
-    (as the executors' unwrap does). An unparseable bridge call is returned
-    unchanged: it stays a sequential barrier and fails at dispatch as before.
-    """
+    """Resolve a ``tool_call`` bridge invocation to ``(underlying_name, underlying_args)`` so
+    admission is decided on the real tool (as the executors' unwrap does). An unparseable
+    bridge call is returned unchanged: it stays a sequential barrier and fails at dispatch."""
     try:
         from tools.tool_search import TOOL_CALL_NAME, resolve_underlying_call
-        if tool_name != TOOL_CALL_NAME:
-            return tool_name, function_args
-        underlying, underlying_args, err = resolve_underlying_call(function_args)
-        if err is not None or not underlying:
-            return tool_name, function_args
-        return underlying, underlying_args
+        if tool_name == TOOL_CALL_NAME:
+            underlying, underlying_args, err = resolve_underlying_call(function_args)
+            if err is None and underlying:
+                return underlying, underlying_args
     except Exception:
-        return tool_name, function_args
+        pass
+    return tool_name, function_args
 
 
 def _batch_admission(tool_call, execution_cwd: Optional[Path]) -> tuple[str, List[Path], bool] | None:
@@ -121,16 +112,11 @@ def _batch_admission(tool_call, execution_cwd: Optional[Path]) -> tuple[str, Lis
         _raw = tool_call.function.arguments
         logging.debug(
             "Could not parse args for %s — treating as sequential barrier; raw=%s",
-            tool_name,
-            _raw[:200] if isinstance(_raw, str) else repr(_raw)[:200],
+            tool_name, _raw[:200] if isinstance(_raw, str) else repr(_raw)[:200],
         )
         return None
     if not isinstance(function_args, dict):
-        logging.debug(
-            "Non-dict args for %s (%s) — treating as sequential barrier",
-            tool_name,
-            type(function_args).__name__,
-        )
+        logging.debug("Non-dict args for %s (%s) — treating as sequential barrier", tool_name, type(function_args).__name__)
         return None
 
     name, args = _peel_bridge_call(tool_name, function_args)
@@ -147,21 +133,23 @@ def _batch_admission(tool_call, execution_cwd: Optional[Path]) -> tuple[str, Lis
 def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = None) -> List[tuple]:
     """Split a tool-call batch into ordered ``("parallel"|"sequential", calls)`` segments.
 
-    Segments preserve the model's call order exactly — a later call never
-    crosses an earlier barrier — so result ordering and side-effect boundaries
-    match fully-sequential execution. Barriers: ``_NEVER_PARALLEL_TOOLS``,
-    unparseable/non-dict args, and anything not parallel-safe (built-in list,
-    bridge lookups, opted-in MCP tools). Path-scoped tools join a run only when
-    their paths don't conflict with the run's reservations: reader↔reader
-    overlap commutes and stays parallel; any overlap involving a writer closes
-    the run so the call starts a NEW run after the conflicting one lands.
-    ``search_files`` reserves its root (default ``.``) as a reader. Parallel
-    runs shorter than two calls demote to sequential (the sequential executor
-    owns the richer inline dispatch); adjacent sequential segments merge.
+    Call order is preserved exactly (a later call never crosses an earlier barrier), so
+    result order and side-effect boundaries match fully-sequential execution. Barriers:
+    ``_NEVER_PARALLEL_TOOLS``, unparseable/non-dict args, anything not parallel-safe.
+    Path-scoped tools join a run only if they don't conflict with its reservations:
+    reader↔reader overlap stays parallel; any overlap involving a writer closes the run so
+    the call starts a NEW run after the conflicting one lands. Runs shorter than two calls
+    demote to sequential (it owns the richer inline dispatch); adjacent sequential merge.
     """
     segments: List[tuple] = []
     current: list = []
     reserved_paths: list[tuple[Path, bool]] = []  # (canonical_path, is_writer) for the current run
+
+    def _extend_sequential(calls: list) -> None:
+        if segments and segments[-1][0] == "sequential":
+            segments[-1][1].extend(calls)
+        else:
+            segments.append(("sequential", list(calls)))
 
     def _close_parallel() -> None:
         nonlocal current, reserved_paths
@@ -169,14 +157,7 @@ def _plan_tool_batch_segments(tool_calls, *, execution_cwd: Optional[Path] = Non
             segments.append(("parallel", current))
         elif current:
             _extend_sequential(current)
-        current = []
-        reserved_paths = []
-
-    def _extend_sequential(calls: list) -> None:
-        if segments and segments[-1][0] == "sequential":
-            segments[-1][1].extend(calls)
-        else:
-            segments.append(("sequential", list(calls)))
+        current, reserved_paths = [], []
 
     for tool_call in tool_calls:
         admission = _batch_admission(tool_call, execution_cwd)
@@ -207,9 +188,8 @@ def _should_parallelize_tool_batch(tool_calls) -> bool:
 
 
 def _canonical_path(raw_path: str, execution_cwd: Optional[Path] = None) -> Path:
-    """Canonical, OS-aware path for overlap detection (realpath for symlinks on
-    existing components, normcase for case-insensitive platforms); relative
-    paths resolve against *execution_cwd* or ``Path.cwd()``."""
+    """Canonical, OS-aware path for overlap detection (realpath + normcase); relative paths
+    resolve against *execution_cwd* or ``Path.cwd()``."""
     expanded = Path(raw_path).expanduser()
     base = execution_cwd if execution_cwd is not None else Path.cwd()
     candidate = expanded if expanded.is_absolute() else base / expanded
@@ -221,33 +201,20 @@ def _extract_parallel_scope_paths(
     function_args: dict,
     execution_cwd: Optional[Path] = None,
 ) -> List[Path]:
-    """Every canonical path this call reserves for overlap checks.
-
-    *execution_cwd* should be the cwd the tool will actually use (may differ
-    from the process cwd on WSL / sandboxed backends). For V4A ``patch`` the
-    scope comes from patch-body file headers. An empty result means the scope
-    is unknown and the planner must treat the call as a sequential barrier.
-    """
+    """Every canonical path this call reserves for overlap checks. *execution_cwd* is the cwd
+    the tool will actually use (may differ from the process cwd on WSL / sandboxed backends);
+    V4A ``patch`` scope comes from patch-body headers. Empty = unknown scope = barrier."""
     if tool_name not in _PATH_SCOPED_TOOLS:
         return []
 
-    raw_paths: List[str] = []
     if tool_name == "patch" and (function_args.get("mode") or "replace") == "patch":
-        raw_paths.extend(_extract_file_mutation_targets(tool_name, function_args))
+        raw_paths = _extract_file_mutation_targets(tool_name, function_args)
     else:
         raw_path = function_args.get("path")
-        if isinstance(raw_path, str) and raw_path.strip():
-            raw_paths.append(raw_path)
-        elif tool_name == "search_files":
-            # search_files defaults its root to the cwd; reserve that rather than
-            # demoting every bare search to a barrier.
-            raw_paths.append(".")
-
+        # search_files defaults its root to the cwd; reserving it beats demoting every bare search.
+        raw_paths = [raw_path] if isinstance(raw_path, str) and raw_path.strip() else ["."] if tool_name == "search_files" else []
     # dict.fromkeys dedupes while preserving first-seen order.
-    return list(dict.fromkeys(
-        _canonical_path(raw, execution_cwd)
-        for raw in raw_paths if isinstance(raw, str) and raw.strip()
-    ))
+    return list(dict.fromkeys(_canonical_path(raw, execution_cwd) for raw in raw_paths if isinstance(raw, str) and raw.strip()))
 
 
 def _extract_parallel_scope_path(
@@ -261,23 +228,18 @@ def _extract_parallel_scope_path(
 
 
 def _paths_overlap(left: Path, right: Path) -> bool:
-    """True when two already-canonical paths may refer to the same subtree."""
-    left_parts = left.parts
-    right_parts = right.parts
+    """True when two already-canonical paths may refer to the same subtree (an empty path
+    overlaps nothing)."""
+    left_parts, right_parts = left.parts, right.parts
     if not left_parts or not right_parts:
-        # Empty paths are guarded upstream; only two non-empty equal prefixes overlap.
-        return bool(left_parts) == bool(right_parts) and bool(left_parts)
+        return False
     common_len = min(len(left_parts), len(right_parts))
     return left_parts[:common_len] == right_parts[:common_len]
 
 
 def _is_multimodal_tool_result(value: Any) -> bool:
     """True for the multimodal envelope: dict with ``_multimodal=True`` and a ``content`` list."""
-    return (
-        isinstance(value, dict)
-        and value.get("_multimodal") is True
-        and isinstance(value.get("content"), list)
-    )
+    return isinstance(value, dict) and value.get("_multimodal") is True and isinstance(value.get("content"), list)
 
 
 def _is_text_part(p: Any) -> bool:
@@ -286,13 +248,13 @@ def _is_text_part(p: Any) -> bool:
 
 def _multimodal_text_summary(value: Any) -> str:
     """Plain-text view of a tool result (logging, previews, string-only providers)."""
+    if isinstance(value, str):
+        return value
     if _is_multimodal_tool_result(value):
         if value.get("text_summary"):
             return str(value["text_summary"])
         parts = [str(p.get("text", "")) for p in value.get("content") or [] if _is_text_part(p)]
         return "\n".join(parts) if parts else "[multimodal tool result]"
-    if isinstance(value, str):
-        return value
     try:
         return json.dumps(value, default=str)
     except Exception:
@@ -322,12 +284,8 @@ _V4A_MOVE_HEADER = re.compile(r'^\*\*\*\s*Move\s+File:\s*(.+?)\s*->\s*(.+)$', re
 
 
 def _extract_file_mutation_targets(tool_name: str, args: Dict[str, Any]) -> List[str]:
-    """File paths a ``write_file`` / ``patch`` call targets.
-
-    Replace mode uses ``args["path"]``; V4A patch mode parses the
-    ``*** Update/Add/Delete/Move File:`` headers so each file in a multi-file
-    patch is tracked separately.
-    """
+    """File paths a ``write_file`` / ``patch`` call targets: ``args["path"]`` in replace mode,
+    every ``*** Update/Add/Delete/Move File:`` header in V4A patch mode."""
     if tool_name not in _FILE_MUTATING_TOOLS:
         return []
     mode = "replace" if tool_name == "write_file" else (args.get("mode") or "replace")
@@ -361,13 +319,10 @@ def _extract_landed_file_mutation_paths(
         return targets
     if not isinstance(data, dict):
         return targets
-
     files = data.get("files_modified")
     landed = [str(p) for p in files if p] if isinstance(files, list) else []
-    if landed:
-        return landed
     resolved = data.get("resolved_path")
-    return [str(resolved)] if resolved else targets
+    return landed or ([str(resolved)] if resolved else targets)
 
 
 def _extract_error_preview(result: Any, max_len: int = 180) -> str:
@@ -389,8 +344,8 @@ def _extract_error_preview(result: Any, max_len: int = 180) -> str:
 
 
 def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
-    """Shallow copy with image blobs stripped for trajectory saving: multimodal
-    results become their text summary, image parts become ``[screenshot]``."""
+    """Shallow copy for trajectory saving: multimodal results become their text summary,
+    image parts become ``[screenshot]``."""
     if not isinstance(msg, dict):
         return msg
     content = msg.get("content")
@@ -398,9 +353,7 @@ def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
         return {**msg, "content": _multimodal_text_summary(content)}
     if isinstance(content, list):
         return {**msg, "content": [
-            {"type": "text", "text": "[screenshot]"}
-            if isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}
-            else p
+            {"type": "text", "text": "[screenshot]"} if isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"} else p
             for p in content
         ]}
     return msg
@@ -420,19 +373,14 @@ def make_tool_result_message(
     *,
     effect_disposition: str | None = None,
 ) -> dict:
-    """Build a tool-result message with the OpenAI ``name`` field (wire format)
-    and the internal ``tool_name`` field (session DB).
-
-    Content from high-risk tools (web_extract, web_search, browser_*, mcp_*) is
-    wrapped in untrusted-data delimiters — the architectural defense against
-    indirect prompt injection; see ``_maybe_wrap_untrusted``.
+    """Build a tool-result message: OpenAI ``name`` (wire format) plus internal ``tool_name``
+    (session DB). High-risk tool content (web_extract, web_search, browser_*, mcp_*) is
+    wrapped in untrusted-data delimiters — the defense against indirect prompt injection.
     """
     # Replay-recovery callers bypass the executor's canonical-id helper, so normalize here too.
     tool_call_id = _normalize_tool_call_id(tool_call_id)
-
-    # Order matters: detect elision on the RAW content and append the notice
-    # first, THEN wrap, so the notice sits inside the untrusted block next to
-    # the data it describes — once, at construction time (cache-safe).
+    # Elision notice is appended to the RAW content first, THEN wrapped, so it sits inside
+    # the untrusted block next to the data it describes — once, at construction (cache-safe).
     wrapped = _maybe_wrap_untrusted(name, _maybe_append_elision_notice(name, content))
     message = stamp_message_timestamp({
         "role": "tool",
@@ -453,14 +401,12 @@ def make_tool_result_message(
     return message
 
 
-# Tools whose results carry attacker-controllable content. Short outputs
-# (under 32 chars) skip wrapping: the overhead outweighs any injection risk.
+# Tools whose results carry attacker-controllable content; outputs under 32 chars skip wrapping.
 _UNTRUSTED_TOOL_NAMES = frozenset({"web_extract", "web_search"})
 _UNTRUSTED_TOOL_PREFIXES = ("browser_", "mcp_")
 _UNTRUSTED_WRAP_MIN_CHARS = 32
 
-# Case-insensitive so attacker content can't forge or prematurely close the
-# boundary with a differently-cased tag the model would still read as one.
+# Case-insensitive so a differently-cased tag can't forge or prematurely close the boundary.
 _DELIMITER_TOKEN_RE = re.compile(r"untrusted_tool_result", re.IGNORECASE)
 
 
@@ -472,21 +418,16 @@ def _is_text_item(item: Any) -> bool:
     return _is_text_part(item) and isinstance(item.get("text"), str)
 
 
-# --- Upstream-elision detection ---
-# Some MCP servers elide data SERVER-SIDE and mark it inside the payload
-# ('...13 more items', '"has_more": true', 'saved to sandbox', 'data_preview'
-# envelopes). The result looks structurally complete, so models treat the
-# visible slice as the whole dataset. Conservative, explicit markers only —
-# not a generic truncation heuristic. One notice is appended at construction
-# time, never mutated later (prompt-cache safe).
+# Some MCP servers elide data SERVER-SIDE and mark it inside a structurally complete payload,
+# so models treat the visible slice as the whole dataset. Conservative explicit markers only —
+# not a generic truncation heuristic; the notice is appended once at construction (cache-safe).
 _UPSTREAM_ELISION_PATTERNS = (
     re.compile(r"\.\.\.\s*\d+\s+more\s+items?", re.IGNORECASE),
     re.compile(r'"has_more"\s*:\s*true', re.IGNORECASE),
     re.compile(r"saved to sandbox", re.IGNORECASE),
     re.compile(r"data_preview", re.IGNORECASE),
 )
-# Tiny results can't hide an elided enumeration; markers for the sizes that
-# matter (20-50K) are always inside the first 64KB.
+# Tiny results can't hide an elided enumeration; markers for the sizes that matter sit in the first 64KB.
 _ELISION_SCAN_MIN_CHARS = 1_000
 _ELISION_SCAN_MAX_CHARS = 65_536
 
@@ -513,19 +454,17 @@ def _maybe_append_elision_notice(name: str, content: Any) -> Any:
 
 
 def _tool_output_risk_metadata(name: str, content: Any) -> Optional[Dict[str, Any]]:
-    """Internal-only advisory classification of attacker-controlled output.
-
-    Records deterministic finding ids, never blocks or redacts, and omits the scanned text.
-    """
+    """Internal-only advisory classification of attacker-controlled output: deterministic
+    finding ids, never blocks or redacts, omits the scanned text."""
     if not _is_untrusted_tool(name):
         return None
     if isinstance(content, str):
         text_parts = [content]
     elif isinstance(content, list):
         text_parts = [item["text"] for item in content if _is_text_item(item)]
-        if not text_parts:
-            return None
     else:
+        return None
+    if not text_parts:
         return None
 
     findings: List[str] = []
@@ -533,29 +472,21 @@ def _tool_output_risk_metadata(name: str, content: Any) -> Optional[Dict[str, An
         for finding in scan_for_threats(text, scope="context"):
             if finding not in findings:
                 findings.append(finding)
-    return {
-        "risk": "high" if findings else "low",
-        "findings": findings,
-        "redacted": False,
-    }
+    return {"risk": "high" if findings else "low", "findings": findings, "redacted": False}
 
 
 def _neutralize_delimiters(content: str) -> str:
-    """Defang embedded ``untrusted_tool_result`` tokens so poisoned content
-    can't close the trust boundary early (hyphens keep it readable but non-matching)."""
+    """Defang embedded ``untrusted_tool_result`` tokens so poisoned content can't close the
+    trust boundary early (hyphens keep it readable but non-matching)."""
     return _DELIMITER_TOKEN_RE.sub("untrusted-tool-result", content)
 
 
 def _maybe_wrap_untrusted(name: str, content: Any) -> Any:
-    """Wrap high-risk tool content in untrusted-data delimiters.
-
-    Strings are neutralized and wrapped in exactly one block; text parts of a
-    multimodal list are wrapped individually (non-text parts preserved, outer
-    list rebuilt — compare by value, not ``is``). Unchanged when the tool is
-    not high-risk, the content is neither str nor list, or a string is too
-    short. There is deliberately no "already wrapped" fast-path: it would be
-    attacker-forgeable, so harmless re-wrapping is the safe choice.
-    """
+    """Wrap high-risk tool content in untrusted-data delimiters: strings are neutralized and
+    wrapped in exactly one block; text parts of a multimodal list are wrapped individually
+    (outer list rebuilt — compare by value, not ``is``). Unchanged for non-high-risk tools,
+    non-str/list content, or short strings. Deliberately no "already wrapped" fast-path:
+    it would be attacker-forgeable, so harmless re-wrapping is the safe choice."""
     if not _is_untrusted_tool(name):
         return content
     if isinstance(content, str):
@@ -580,28 +511,12 @@ def _maybe_wrap_untrusted(name: str, content: Any) -> Any:
 
 
 __all__ = [
-    "_NEVER_PARALLEL_TOOLS",
-    "_PARALLEL_SAFE_TOOLS",
-    "_PATH_SCOPED_TOOLS",
-    "_PATH_SCOPED_READERS",
-    "_PATH_SCOPED_WRITERS",
-    "_DESTRUCTIVE_PATTERNS",
-    "_REDIRECT_OVERWRITE",
-    "_is_destructive_command",
-    "_plan_tool_batch_segments",
-    "_should_parallelize_tool_batch",
-    "_canonical_path",
-    "_extract_parallel_scope_path",
-    "_extract_parallel_scope_paths",
-    "_paths_overlap",
-    "_is_multimodal_tool_result",
-    "_multimodal_text_summary",
-    "_append_subdir_hint_to_multimodal",
-    "_extract_file_mutation_targets",
-    "_extract_landed_file_mutation_paths",
-    "_extract_error_preview",
-    "_trajectory_normalize_msg",
-    "_detect_upstream_elision",
-    "_maybe_append_elision_notice",
+    "_NEVER_PARALLEL_TOOLS", "_PARALLEL_SAFE_TOOLS", "_PATH_SCOPED_TOOLS", "_PATH_SCOPED_READERS",
+    "_PATH_SCOPED_WRITERS", "_DESTRUCTIVE_PATTERNS", "_REDIRECT_OVERWRITE", "_is_destructive_command",
+    "_plan_tool_batch_segments", "_should_parallelize_tool_batch", "_canonical_path",
+    "_extract_parallel_scope_path", "_extract_parallel_scope_paths", "_paths_overlap",
+    "_is_multimodal_tool_result", "_multimodal_text_summary", "_append_subdir_hint_to_multimodal",
+    "_extract_file_mutation_targets", "_extract_landed_file_mutation_paths", "_extract_error_preview",
+    "_trajectory_normalize_msg", "_detect_upstream_elision", "_maybe_append_elision_notice",
     "make_tool_result_message",
 ]

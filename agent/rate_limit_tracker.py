@@ -86,10 +86,7 @@ def has_rate_limit_headers(lowered: Mapping[str, str]) -> bool:
     return any(k.startswith("x-ratelimit-") for k in lowered)
 
 
-def parse_rate_limit_headers(
-    headers: Mapping[str, str],
-    provider: str = "",
-) -> Optional[RateLimitState]:
+def parse_rate_limit_headers(headers: Mapping[str, str], provider: str = "") -> Optional[RateLimitState]:
     """Parse x-ratelimit-* headers into a RateLimitState (None if none present)."""
     lowered = lower_headers(headers)
     if not has_rate_limit_headers(lowered):
@@ -128,8 +125,8 @@ def _fmt_seconds(seconds: float) -> str:
     if s < 3600:
         m, sec = divmod(s, 60)
         return f"{m}m {sec}s" if sec else f"{m}m"
-    h, remainder = divmod(s, 3600)
-    m = remainder // 60
+    h, m = divmod(s, 3600)
+    m //= 60
     return f"{h}h {m}m" if m else f"{h}h"
 
 
@@ -143,7 +140,6 @@ def _bucket_line(label: str, bucket: RateLimitBucket, label_width: int = 14) -> 
     """Format one bucket as a single line."""
     if bucket.limit <= 0:
         return f"  {label:<{label_width}}  (no data)"
-
     pct = bucket.usage_pct
     used, limit, remaining = map(_fmt_count, (bucket.used, bucket.limit, bucket.remaining))
     reset = _fmt_seconds(bucket.remaining_seconds_now)
@@ -156,35 +152,22 @@ def format_rate_limit_display(state: RateLimitState) -> str:
         return "No rate limit data yet — make an API request first."
 
     age = state.age_seconds
-    if age < 5:
-        freshness = "just now"
-    elif age < 60:
-        freshness = f"{int(age)}s ago"
-    else:
-        freshness = f"{_fmt_seconds(age)} ago"
+    freshness = "just now" if age < 5 else f"{int(age)}s ago" if age < 60 else f"{_fmt_seconds(age)} ago"
 
     provider_label = state.provider.title() if state.provider else "Provider"
-
-    labeled = [
-        ("Requests/min", state.requests_min),
-        ("Requests/hr", state.requests_hour),
-        ("Tokens/min", state.tokens_min),
-        ("Tokens/hr", state.tokens_hour),
-    ]
+    labeled = [("Requests/min", state.requests_min), ("Requests/hr", state.requests_hour),
+               ("Tokens/min", state.tokens_min), ("Tokens/hr", state.tokens_hour)]
     lines = [f"{provider_label} Rate Limits (captured {freshness}):", ""]
     lines += [_bucket_line(label, bucket) for label, bucket in labeled[:2]]
     lines += [""] + [_bucket_line(label, bucket) for label, bucket in labeled[2:]]
 
-    warnings = []
-    for label, bucket in labeled:
-        if bucket.limit > 0 and bucket.usage_pct >= 80:
-            reset = _fmt_seconds(bucket.remaining_seconds_now)
-            warnings.append(f"  ⚠ {label.lower()} at {bucket.usage_pct:.0f}% — resets in {reset}")
-
+    warnings = [
+        f"  ⚠ {label.lower()} at {bucket.usage_pct:.0f}% — resets in {_fmt_seconds(bucket.remaining_seconds_now)}"
+        for label, bucket in labeled
+        if bucket.limit > 0 and bucket.usage_pct >= 80
+    ]
     if warnings:
-        lines.append("")
-        lines.extend(warnings)
-
+        lines += [""] + warnings
     return "\n".join(lines)
 
 
@@ -193,16 +176,14 @@ def format_rate_limit_compact(state: RateLimitState) -> str:
     if not state.has_data:
         return "No rate limit data."
 
-    rm, rh, tm, th = state.requests_min, state.requests_hour, state.tokens_min, state.tokens_hour
-
-    parts = []
-    if rm.limit > 0:
-        parts.append(f"RPM: {rm.remaining}/{rm.limit}")
-    if rh.limit > 0:
-        parts.append(f"RPH: {_fmt_count(rh.remaining)}/{_fmt_count(rh.limit)} (resets {_fmt_seconds(rh.remaining_seconds_now)})")
-    if tm.limit > 0:
-        parts.append(f"TPM: {_fmt_count(tm.remaining)}/{_fmt_count(tm.limit)}")
-    if th.limit > 0:
-        parts.append(f"TPH: {_fmt_count(th.remaining)}/{_fmt_count(th.limit)} (resets {_fmt_seconds(th.remaining_seconds_now)})")
-
-    return " | ".join(parts)
+    # (tag, bucket, count formatter, show reset) — RPM stays raw digits, hourly windows show the reset.
+    windows = (
+        ("RPM", state.requests_min, str, False),
+        ("RPH", state.requests_hour, _fmt_count, True),
+        ("TPM", state.tokens_min, _fmt_count, False),
+        ("TPH", state.tokens_hour, _fmt_count, True),
+    )
+    return " | ".join(
+        f"{tag}: {fmt(b.remaining)}/{fmt(b.limit)}" + (f" (resets {_fmt_seconds(b.remaining_seconds_now)})" if reset else "")
+        for tag, b, fmt, reset in windows if b.limit > 0
+    )
