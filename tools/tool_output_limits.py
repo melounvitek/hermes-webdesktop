@@ -47,7 +47,8 @@ def get_tool_output_limits() -> Dict[str, int]:
     _cached_limits = {
         "max_bytes": _coerce_positive_int(section.get("max_bytes"), DEFAULT_MAX_BYTES),
         "max_lines": _coerce_positive_int(section.get("max_lines"), DEFAULT_MAX_LINES),
-        "max_line_length": _coerce_positive_int(section.get("max_line_length"), DEFAULT_MAX_LINE_LENGTH),
+        "max_line_length": _coerce_positive_int(
+            section.get("max_line_length"), DEFAULT_MAX_LINE_LENGTH),
     }
     return _cached_limits
 

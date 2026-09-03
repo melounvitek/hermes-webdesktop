@@ -287,5 +287,6 @@ def enforce_turn_budget(
         if replacement != content:
             total_size += len(replacement) - size
             tool_messages[idx]["content"] = replacement
-            logger.info("Budget enforcement: persisted tool result %s (%d chars)", tool_use_id, size)
+            logger.info("Budget enforcement: persisted tool result %s (%d chars)",
+                        tool_use_id, size)
     return tool_messages

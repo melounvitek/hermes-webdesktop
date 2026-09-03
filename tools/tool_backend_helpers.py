@@ -148,7 +148,8 @@ def resolve_provider_secret(
             return ""
     except Exception:  # pragma: no cover — secret_scope is in-repo
         pass
-    key = str(env_getter(env_var) or "").strip() if env_getter is not None else _dotenv_value(env_var)
+    key = (str(env_getter(env_var) or "").strip() if env_getter is not None
+           else _dotenv_value(env_var))
     if key or not provider_id:
         return key
     try:

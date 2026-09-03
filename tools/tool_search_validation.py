@@ -24,7 +24,8 @@ def _schema_for_local_validation(node: Any) -> Any:
         return node
     # Literal keywords hold instance data, not schemas: copy byte-for-byte.
     normalized = {
-        key: copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS else _schema_for_local_validation(value)
+        key: (copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS
+              else _schema_for_local_validation(value))
         for key, value in node.items() if key != "nullable"}
     if node.get("nullable") is not True:
         return normalized
