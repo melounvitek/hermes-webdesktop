@@ -198,16 +198,14 @@ class SessionGatewayMixin:
         self, session_id: str, *, source: str, user_id: str = None, session_key: str = None,
         chat_id: str = None, chat_type: str = None, thread_id: str = None, display_name: str = None,
         origin_json: str = None, include_compression_ancestors: bool = False) -> None:
-        """Persist the gateway routing peer for an existing session row.
-
-        ``display_name`` / ``origin_json``: ``None`` leaves the stored value untouched (consumers read
-        routing data from state.db, not sessions.json). ``include_compression_ancestors`` keeps a
-        compression lineage on one routing peer when an explicit resume moves its tip to another lane;
-        per-turn refreshes update only the supplied row. Self-healing: a missing target row (deferred
-        ``create_session`` write, or crash between routing publication and row creation) is INSERTed with
-        full identity rather than no-opped, so a gateway row is never first-created by the identity-less
-        lazy writer (``update_token_counts``) and left unroutable forever.
-        """
+        """Persist the gateway routing peer for an existing session row. ``display_name`` / ``origin_json``:
+        ``None`` leaves the stored value untouched (consumers read routing data from state.db, not
+        sessions.json). ``include_compression_ancestors`` keeps a compression lineage on one routing peer
+        when an explicit resume moves its tip to another lane; per-turn refreshes update only the supplied
+        row. Self-healing: a missing target row (deferred ``create_session`` write, or crash between routing
+        publication and row creation) is INSERTed with full identity rather than no-opped, so a gateway row
+        is never first-created by the identity-less lazy writer (``update_token_counts``) and left
+        unroutable forever."""
         if not session_id or not session_key:
             return
         identity = (session_key, source, user_id, chat_id, chat_type, thread_id, display_name, origin_json)
@@ -375,9 +373,7 @@ class SessionGatewayMixin:
         self, *, source: str, user_id: Optional[str] = None, session_key: Optional[str] = None,
         chat_id: Optional[str] = None, chat_type: Optional[str] = None, thread_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Find the latest recoverable gateway session for a routing peer.
-
-        The durable ``session_key`` on the row rebuilds a missing/pruned ``sessions.json`` mapping. Rows
+        """Find the latest recoverable gateway session for a routing peer. The durable ``session_key`` on the row rebuilds a missing/pruned ``sessions.json`` mapping. Rows
         ended only by the old ``agent_close`` bug or a mistaken TUI ``ws_orphan_reap`` are recoverable;
         explicit boundaries (/new, /resume switches, compression splits) are not. Ranked by
         ``last_activity_at`` (fallback ``started_at`` — alone it resurrected days-old zombies); rows with
@@ -387,8 +383,7 @@ class SessionGatewayMixin:
         exact-key fallback requires the complete peer tuple (never cross chats/threads/users) plus a profile
         fence: a Telegram DM's tuple is identical for every bot, so a sibling profile's legacy row would
         otherwise be adopted. Ours = profile_name is the owner or NULL; stores outside the profile tree
-        derive no owner and stay unfenced.
-        """
+        derive no owner and stay unfenced."""
         if not session_key:
             return None
         with self._read_ctx() as conn:
@@ -646,14 +641,12 @@ class SessionGatewayMixin:
 
     def fail_handoff(
         self, session_id: str, error: str, *, only_states: Optional[Tuple[str, ...]] = None) -> bool:
-        """Mark a handoff failed and record the reason; True when a row transitioned.
-
-        ``only_states`` makes the write a compare-and-swap on ``handoff_state``. Waiters
-        that give up (CLI 60s poll, Desktop bounded poll) MUST pass ``only_states=("pending",)``:
-        once the watcher has claimed the row (``running``) it owns the terminal state, and an
-        unconditional waiter-side fail races the dispatch — the gateway later overwrites
-        ``failed`` → ``completed`` after the user was told the gateway is down (split-brain:
-        the handoff delivered and ``switch_session`` re-pointed the session). The watcher
+        """Mark a handoff failed and record the reason; True when a row transitioned. ``only_states`` makes
+        the write a compare-and-swap on ``handoff_state``. Waiters that give up (CLI 60s poll, Desktop
+        bounded poll) MUST pass ``only_states=("pending",)``: once the watcher has claimed the row
+        (``running``) it owns the terminal state, and an unconditional waiter-side fail races the dispatch —
+        the gateway later overwrites ``failed`` → ``completed`` after the user was told the gateway is down
+        (split-brain: the handoff delivered and ``switch_session`` re-pointed the session). The watcher
         fails its OWN claimed row unconditionally."""
         states = tuple(only_states) if only_states else ()
         sql = _HANDOFF_FAIL_SQL + "id = ?" + (
@@ -661,15 +654,13 @@ class SessionGatewayMixin:
         return self._write_rowcount(sql, (error[:500], session_id, *states)) > 0
 
     def reclaim_stale_running_handoffs(self, error: str) -> List[str]:
-        """Fail every handoff stuck in ``running``; returns the ids reclaimed.
-
-        Only the gateway watcher sets ``running``, for one in-process dispatch — so a
-        ``running`` row at watcher startup belongs to a PREVIOUS gateway that died
-        mid-dispatch. It is poisonous: ``request_handoff`` only accepts NULL/``completed``/
-        ``failed``, so the session could never hand off again, with no error surfaced.
-        Failing rather than re-queueing is deliberate: the dead gateway may already have
-        switched the session key and dispatched the synthetic turn, so a blind retry risks
-        double delivery; a clean terminal state the user can retry from is right."""
+        """Fail every handoff stuck in ``running``; returns the ids reclaimed. Only the gateway watcher sets
+        ``running``, for one in-process dispatch — so a ``running`` row at watcher startup belongs to a
+        PREVIOUS gateway that died mid-dispatch. It is poisonous: ``request_handoff`` only accepts
+        NULL/``completed``/``failed``, so the session could never hand off again, with no error surfaced.
+        Failing rather than re-queueing is deliberate: the dead gateway may already have switched the
+        session key and dispatched the synthetic turn, so a blind retry risks double delivery; a clean
+        terminal state the user can retry from is right."""
         def _do(conn):
             cur = conn.execute("SELECT id FROM sessions WHERE handoff_state = 'running'")
             ids = [r[0] for r in cur.fetchall()]

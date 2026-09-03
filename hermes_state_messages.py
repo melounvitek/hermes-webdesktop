@@ -542,20 +542,17 @@ class SessionMessagesMixin:
         model_config_patch: Optional[Dict[str, Any]] = None, watermark: Optional[int] = None,
         lock_holder: Optional[str] = None, tail_count: int = 0,
     ) -> int:
-        """Non-destructive in-place compaction under ONE durable session id: soft-archive the
-        active rows (``active=0, compacted=1`` — "summarized away", still searchable) and
-        insert *compacted_messages* as fresh active rows, atomically. Returns the new active
-        count; ``message_count`` becomes the ACTIVE count.
-
-        *watermark* (captured at compression START): rows with ``id > watermark`` arrived
-        during the slow summary and are re-sequenced after the compacted set by a pure-SQL
-        column clone (fresh ids); ``None`` archives everything. *lock_holder*: the commit
-        verifies in-txn that the lease is still held, so a reclaimed lease fails instead of
-        clobbering the winner. *tail_count*: the LAST N compacted rows are the verbatim
-        carried-forward tail; their originals and the watermark clones' originals are
-        superseded duplicates and get rewind-style flags (``active=0, compacted=0``) so
-        search doesn't return each carried message once per compaction.
-        ``model_config_patch`` merges in the same txn (``None`` removes a key)."""
+        """Non-destructive in-place compaction under ONE durable session id: soft-archive the active rows
+        (``active=0, compacted=1`` — "summarized away", still searchable) and insert *compacted_messages* as
+        fresh active rows, atomically. Returns the new active count (``message_count`` becomes the ACTIVE
+        count). *watermark* (captured at compression START): rows with ``id > watermark`` arrived during the
+        slow summary and are re-sequenced after the compacted set by a pure-SQL column clone (fresh ids);
+        ``None`` archives everything. *lock_holder*: the commit verifies in-txn that the lease is still held,
+        so a reclaimed lease fails instead of clobbering the winner. *tail_count*: the LAST N compacted rows
+        are the verbatim carried-forward tail; their originals and the watermark clones' originals are
+        superseded duplicates and get rewind-style flags (``active=0, compacted=0``) so search doesn't return
+        each carried message once per compaction. ``model_config_patch`` merges in the same txn (``None``
+        removes a key)."""
         from hermes_state import SessionCompressionInProgressError
         def _do(conn):
             if lock_holder is not None:

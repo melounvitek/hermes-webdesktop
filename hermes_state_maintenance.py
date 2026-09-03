@@ -122,23 +122,20 @@ class SessionMaintenanceMixin:
         heartbeat_staleness_seconds: Optional[float] = None,
         heartbeat_ownership_grace_seconds: Optional[float] = None, respect_gateway_heartbeats: bool = True,
     ) -> List[str]:
-        """Close session rows orphaned by a dead gateway process (its in-process disconnect grace
-        timer died with it, leaving ``ended_at IS NULL`` forever).  Rows of ``sources`` whose
-        ``started_at`` AND canonical last activity are both older than ``max_idle_seconds`` get
-        ``end_reason='startup_orphan_reap'`` (the ``started_at`` predicate protects fresh
-        compression/branch children whose copied activity is old).  Only pass sources whose
-        lifecycle the caller owns — never messaging platforms like ``telegram`` (ending those
-        triggers a routing loop).  ``exclude_ids`` spares rows this process still holds.
-        Non-destructive: messages kept, row resumable, first-reason-wins.
-
-        With ``respect_gateway_heartbeats`` a row is reaped only when no live backend (heartbeat
-        within ``heartbeat_staleness_seconds``, default ``2 * max_idle_seconds``) could own it: B
-        owns S if ``B.started_at <= S.started_at + grace`` (default = staleness) — grace covers a
-        migrating backend whose sessions predate its first heartbeat, bounded so a PID-reuse
-        respawn cannot protect rows forever.  Disable the gate only for state.db-owned sources.
-        SELECT, live-lease validation and UPDATE run in one ``BEGIN IMMEDIATE`` transaction;
-        active leases/locks spare the row, expired guards are removed so their owner is fenced.
-        """
+        """Close session rows orphaned by a dead gateway process (its in-process disconnect grace timer died
+        with it, leaving ``ended_at IS NULL`` forever).  Rows of ``sources`` whose ``started_at`` AND
+        canonical last activity are both older than ``max_idle_seconds`` get
+        ``end_reason='startup_orphan_reap'`` (the ``started_at`` predicate protects fresh compression/branch
+        children whose copied activity is old).  Only pass sources whose lifecycle the caller owns — never
+        messaging platforms like ``telegram`` (ending those triggers a routing loop).  ``exclude_ids`` spares
+        rows this process still holds.  Non-destructive: messages kept, row resumable, first-reason-wins.
+        With ``respect_gateway_heartbeats`` a row is reaped only when no live backend (heartbeat within
+        ``heartbeat_staleness_seconds``, default ``2 * max_idle_seconds``) could own it: B owns S if
+        ``B.started_at <= S.started_at + grace`` (default = staleness) — grace covers a migrating backend
+        whose sessions predate its first heartbeat, bounded so a PID-reuse respawn cannot protect rows
+        forever.  Disable the gate only for state.db-owned sources.  SELECT, live-lease validation and UPDATE
+        run in one ``BEGIN IMMEDIATE`` transaction; active leases/locks spare the row, expired guards are
+        removed so their owner is fenced."""
         srcs = tuple(s for s in sources if s)
         if max_idle_seconds <= 0 or not srcs:
             return []

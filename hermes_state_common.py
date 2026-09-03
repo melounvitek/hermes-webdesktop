@@ -861,20 +861,15 @@ def _lock_holder_provably_dead(record) -> bool:
 
 
 def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, description):
-    """Bounded POSIX flock acquire with orphaned-holder staleness break.
-
-    Returns ``(acquired, handle)``; *handle* may have been re-opened and the caller
-    closes whichever comes back. *acquired* is True, False (a holder kept the lock past
-    the deadline), or None (non-contention ``OSError``, already logged; callers treat it
-    as not acquired without the held-by-another-process warning).
-
-    ``flock`` belongs to the open file DESCRIPTION, which ``fork()`` duplicates: a holder
-    that forks then dies leaves the lock held forever by a child that never releases.
-    When the process that ACQUIRED is provably dead yet the flock is held, the file is
-    unlinked and retaken on a fresh inode; the orphan's flock stays on the old inode
-    blocking nobody. Every successful acquire verifies its inode still names
-    *lock_path*, so a racer that locked a dead inode retries instead of running
-    alongside the breaker. Indeterminate liveness defers."""
+    """Bounded POSIX flock acquire with orphaned-holder staleness break. Returns ``(acquired, handle)``;
+    *handle* may have been re-opened and the caller closes whichever comes back. *acquired* is True, False
+    (a holder kept the lock past the deadline), or None (non-contention ``OSError``, already logged; callers
+    treat it as not acquired without the held-by-another-process warning). ``flock`` belongs to the open
+    file DESCRIPTION, which ``fork()`` duplicates: a holder that forks then dies leaves the lock held forever
+    by a child that never releases. When the process that ACQUIRED is provably dead yet the flock is held,
+    the file is unlinked and retaken on a fresh inode; the orphan's flock stays on the old inode blocking
+    nobody. Every successful acquire verifies its inode still names *lock_path*, so a racer that locked a
+    dead inode retries instead of running alongside the breaker. Indeterminate liveness defers."""
     import fcntl
 
     deadline = time.monotonic() + timeout_seconds
@@ -969,13 +964,10 @@ def _acquire_msvcrt_lock(lock_path, handle, timeout):
 
 @contextlib.contextmanager
 def fts_rebuild_admission(db_path, *, timeout_seconds=None):
-    """Serialize full structural FTS rebuilds on *db_path* across processes.
-
-    Yields True when this process holds the authority, False when the bounded acquire timed out or the lock
+    """Serialize full structural FTS rebuilds on *db_path* across processes. Yields True when this process holds the authority, False when the bounded acquire timed out or the lock
     file could not be opened. On False the caller must NOT rebuild (fail closed); the stale breadcrumb
     guarantees a retry. ``db_path`` None (in-memory DB) yields True. Opportunistic in-process retries pass
-    ``timeout_seconds=0`` so a live holder never stalls a long-lived writer; the orphan break still applies.
-    """
+    ``timeout_seconds=0`` so a live holder never stalls a long-lived writer; the orphan break still applies."""
     if db_path is None:
         yield True
         return

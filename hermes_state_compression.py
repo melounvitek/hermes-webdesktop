@@ -177,16 +177,13 @@ class SessionCompressionMixin:
         watermark: Optional[int] = None, watermark_ceiling: Optional[int] = None) -> None:
         """Atomically close a parent and publish its durable compression child: closure, child row, and
         handoff commit in one transaction, so readers see the live parent or a complete child, never an
-        ended parent with a missing/empty child.
-
-        *watermark* (parent's ``get_active_message_watermark`` at compression start): parent rows with ``id
+        ended parent with a missing/empty child. *watermark* (parent's ``get_active_message_watermark`` at compression start): parent rows with ``id
         > watermark`` — appends landed during the slow summary — are column-cloned into the child AFTER the
         handoff. *watermark_ceiling* bounds the clone: the rotation path flushes its OWN transcript to the
         parent just before publishing and those rows are already in the handoff, so only ``(watermark,
         watermark_ceiling]`` is foreign tail (``None`` = unbounded). *require_lease_refresh* +
         *compression_lock_holder* refreshes the lease on the same ``conn`` before the expiry check (no
-        TOCTOU window), so a refresher that died on transient DB errors gets one last chance.
-        """
+        TOCTOU window), so a refresher that died on transient DB errors gets one last chance."""
         from hermes_state import CompressionSessionBusyError
         def _do(conn):
             if require_lease_refresh and compression_lock_holder:
@@ -364,14 +361,12 @@ class SessionCompressionMixin:
         self._write_session_column("compression_recovery_deadline", session_id, normalized or None)
 
     def refresh_compression_lock(self, session_id: str, holder: str, ttl_seconds: float = 300.0) -> bool:
-        """Extend the compression lock lease if ``holder`` still owns it.
-
-        Ownership is decided by ``holder`` alone, deliberately NOT ``expires_at``: a live
-        owner whose refresher stalled past its TTL must be able to revive its still-
-        unclaimed row, otherwise it keeps compressing with no lease — the window in which
-        a competing path can fork the lineage. It cannot resurrect a lock someone else
-        took: SQLite serialises writes, so the reclaim (DELETE-expired + INSERT OR IGNORE)
-        never interleaves with this UPDATE."""
+        """Extend the compression lock lease if ``holder`` still owns it. Ownership is decided by ``holder``
+        alone, deliberately NOT ``expires_at``: a live owner whose refresher stalled past its TTL must be
+        able to revive its still-unclaimed row, otherwise it keeps compressing with no lease — the window in
+        which a competing path can fork the lineage. It cannot resurrect a lock someone else took: SQLite
+        serialises writes, so the reclaim (DELETE-expired + INSERT OR IGNORE) never interleaves with this
+        UPDATE."""
         if not session_id or not holder:
             return False
         expires_at = time.time() + ttl_seconds
