@@ -1,12 +1,8 @@
-"""Local-environment toolchain probe for the system prompt.
-
-When the terminal backend is local, surface one deterministic line about Python
-tooling state (python3/python versions, missing pip module, pip bound to a
-different Python, PEP 668) so models don't discover it by hitting walls. Cheap
-(~50ms), cached for the process lifetime, "" when the environment is clean.
-Remote backends are skipped (the sandbox has its own probe in agent/prompt_builder).
-Toggle via ``agent.environment_probe`` in config.yaml (default True).
-"""
+"""Local-environment toolchain probe for the system prompt: when the terminal backend
+is local, one deterministic line about Python tooling (python3/python versions, missing
+pip, pip bound to another Python, PEP 668) so models don't discover it by hitting
+walls. Cached per process; "" when clean. Remote backends are skipped (the sandbox has
+its own probe in agent/prompt_builder). Toggle: ``agent.environment_probe`` in config.yaml."""
 
 from __future__ import annotations
 
@@ -67,59 +63,51 @@ def _run(cmd: list[str], timeout: float = 3.0) -> tuple[int, str, str]:
                 result = subprocess.run(
                     cmd, stdout=out_f, stderr=err_f, timeout=timeout, check=False,
                     # CREATE_NO_WINDOW (0 on POSIX): pythonw hosts would flash a console
-                    stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
-                )
+                    stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
             except subprocess.TimeoutExpired:
                 return -1, "", "timeout"
             out_f.seek(0)
             err_f.seek(0)
-            out = out_f.read().decode("utf-8", "replace").strip()
-            err = err_f.read().decode("utf-8", "replace").strip()
-            return result.returncode, out, err
+            return (result.returncode, out_f.read().decode("utf-8", "replace").strip(),
+                    err_f.read().decode("utf-8", "replace").strip())
     except FileNotFoundError:
         return -1, "", "not found"
     except OSError as exc:
         return -1, "", f"oserror: {exc}"
 
 
-def _python_version_of(binary: str) -> Optional[str]:
-    """Return a short version string like ``3.12.4`` for ``binary``, or None."""
+def _py_out(binary: str, *args: str) -> Optional[str]:
+    """stdout of ``<binary> *args`` when the binary is on PATH and exits 0, else None."""
     if not shutil.which(binary):
         return None
+    rc, out, _err = _run([binary, *args])
+    return out if rc == 0 else None
+
+
+def _python_version_of(binary: str) -> Optional[str]:
+    """Return a short version string like ``3.12.4`` for ``binary``, or None."""
     code = "import sys; print('.'.join(map(str, sys.version_info[:3])))"
-    rc, out, _err = _run([binary, "-c", code])
-    return out if rc == 0 and out else None
+    return _py_out(binary, "-c", code) or None
 
 
 def _has_pip_module(binary: str) -> bool:
     """True if ``<binary> -m pip --version`` succeeds."""
-    if not shutil.which(binary):
-        return False
-    return _run([binary, "-m", "pip", "--version"])[0] == 0
+    return _py_out(binary, "-m", "pip", "--version") is not None
 
 
 def _detect_pep668(binary: str) -> bool:
     """True when ``<binary>`` is PEP-668 externally-managed (``EXTERNALLY-MANAGED``
     marker next to the stdlib, as Debian/Ubuntu ship)."""
-    if not shutil.which(binary):
-        return False
-    code = (
-        "import sys, os;"
-        "stdlib = os.path.dirname(os.__file__);"
-        "marker = os.path.join(stdlib, 'EXTERNALLY-MANAGED');"
-        "print('yes' if os.path.exists(marker) else 'no')"
-    )
-    rc, out, _err = _run([binary, "-c", code])
-    return rc == 0 and out.strip() == "yes"
+    code = ("import os; print('yes' if os.path.exists(os.path.join("
+            "os.path.dirname(os.__file__), 'EXTERNALLY-MANAGED')) else 'no')")
+    return (_py_out(binary, "-c", code) or "").strip() == "yes"
 
 
 def _pip_python_version() -> Optional[str]:
     """If ``pip`` is on PATH, the Python version it's bound to — the trailing
     ``(python X.Y)`` of ``pip --version`` (e.g. ``"3.12"``), else None."""
-    if not shutil.which("pip"):
-        return None
-    rc, out, _err = _run(["pip", "--version"])
-    if rc == 0 and out and "(python " in out and out.endswith(")"):
+    out = _py_out("pip", "--version") or ""
+    if "(python " in out and out.endswith(")"):
         return out.rsplit("(python ", 1)[1][:-1].strip()
     return None
 
@@ -151,20 +139,17 @@ def _build_probe_line() -> str:
     mismatch = bool(pip_bound_to and py3_ver and not py3_ver.startswith(pip_bound_to))
     if py3_ver is not None and py3_has_pip and not mismatch and (not py3_pep668 or has_uv):
         return ""
-
     # Compact factual summary; ONE line so it doesn't dominate the prompt.
     bits: list[str] = []
     if py3_ver:
         bits.append(f"python3={py3_ver}" + ("" if py3_has_pip else " (no pip module)"))
     else:
         bits.append("python3=missing")
-
     if py_ver and py_ver != py3_ver:
         bits.append(f"python={py_ver}")
     elif not py_ver and py3_ver:
         # Common on Debian/Ubuntu — stop the model typing `python`.
         bits.append("python=missing (use python3)")
-
     if pip_bound_to:
         if mismatch:
             bits.append(f"pip→python{pip_bound_to} (mismatch)")
@@ -173,7 +158,6 @@ def _build_probe_line() -> str:
     elif not py3_has_pip:
         # (when `pip` is off PATH but `python3 -m pip` works, say nothing)
         bits.append("pip=missing")
-
     if py3_pep668:
         bits.append("PEP 668=yes (use venv or uv)")
     if has_uv:
@@ -189,7 +173,6 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     global _WAIT_ALREADY_TIMED_OUT
     if force_refresh:
         _reset_cache_for_tests()
-
     # Resolve the backend HERE, in the caller's context: under gateway multiplexing the
     # routed profile's backend lives in the per-turn terminal scope, which the worker
     # thread does not inherit. Remote backends answer "" without consulting the cache
@@ -197,10 +180,8 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     backend = _resolve_terminal_backend()
     if backend in _REMOTE_BACKENDS or _plugin_backend_is_remote(backend):
         return ""
-
     if _PROBE_DONE.is_set():
         return _CACHED_LINE or ""
-
     _ensure_probe_started()
     wait_timeout = 0.05 if _WAIT_ALREADY_TIMED_OUT else _PROBE_WAIT_TIMEOUT
     if not _PROBE_DONE.wait(timeout=wait_timeout):
@@ -210,9 +191,7 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
             _WAIT_ALREADY_TIMED_OUT = True
             logger.warning(
                 "env_probe did not finish within %.0fs; building the system "
-                "prompt without the Python toolchain line",
-                _PROBE_WAIT_TIMEOUT,
-            )
+                "prompt without the Python toolchain line", _PROBE_WAIT_TIMEOUT)
         return ""
     return _CACHED_LINE or ""
 
@@ -239,8 +218,7 @@ def _ensure_probe_started() -> None:
         if _PROBE_DONE.is_set() or (_PROBE_THREAD is not None and _PROBE_THREAD.is_alive()):
             return
         _PROBE_THREAD = threading.Thread(
-            target=_probe_worker, args=(_PROBE_GEN,), name="env-probe", daemon=True,
-        )
+            target=_probe_worker, args=(_PROBE_GEN,), name="env-probe", daemon=True)
         _PROBE_THREAD.start()
 
 

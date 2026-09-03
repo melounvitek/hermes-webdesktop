@@ -1,13 +1,10 @@
-"""Hermes-owned PYTHONPATH stripping for child processes.
-
-Launchers prepend the repo root and the Hermes venv's site-packages so the backend
-can ``import tools``; leaked into a child Python of a DIFFERENT version they load
-the backend's C extensions and crash. Only entries proven Hermes-owned by *path
-provenance* are removed — never by a cross-version heuristic. Module state
-(``_hermes_repo_root_aliases``, ``_in_venv``, ``_hermes_site_packages``) stays in
-``tools.environments.local`` (read via :func:`_state`) so tests monkeypatching it
-there keep working.
-"""
+"""Hermes-owned PYTHONPATH stripping for child processes. Launchers prepend the repo
+root and the Hermes venv's site-packages so the backend can ``import tools``; leaked
+into a child Python of a DIFFERENT version they load the backend's C extensions and
+crash. Only entries proven Hermes-owned by *path provenance* are removed — never by a
+cross-version heuristic. Module state (``_hermes_repo_root_aliases``, ``_in_venv``,
+``_hermes_site_packages``) lives in ``tools.environments.local`` (via :func:`_state`)
+so tests monkeypatching it there keep working."""
 
 import logging
 import os
@@ -49,7 +46,6 @@ def _build_hermes_repo_root_aliases(
     home_candidates = [configured_home]
     if configured_home.parent.name == "profiles":
         home_candidates.append(configured_home.parent.parent)
-
     for home in home_candidates:
         try:
             resolved_home = home.resolve()
@@ -58,7 +54,6 @@ def _build_hermes_repo_root_aliases(
                 candidates.append(home / os.path.relpath(str(resolved_root), str(resolved_home)))
         except (OSError, ValueError):
             pass
-
     # Repo-level junction recovery (commonpath raises across drives, so the
     # home-relative mapping above cannot express a cross-drive link).
     for home in home_candidates:
@@ -79,11 +74,9 @@ def _validated_runtime_venv(env: dict) -> Path | None:
     """Producer-owned runtime venv identified by VIRTUAL_ENV, or None. The variable
     alone is not provenance (users carry unrelated venvs): require the legacy Windows
     base-Python producer's exact ``<repo>/venv`` layout AND a real ``pyvenv.cfg``."""
-    value = env.get("VIRTUAL_ENV")
-    if not value:
-        return None
-    candidate = Path(value)
-    if not any(_same_path(candidate, root / "venv") for root in _state()._hermes_repo_root_aliases):
+    candidate = Path(env.get("VIRTUAL_ENV") or "")
+    if not env.get("VIRTUAL_ENV") or not any(
+            _same_path(candidate, root / "venv") for root in _state()._hermes_repo_root_aliases):
         return None
     try:
         return candidate if (candidate / "pyvenv.cfg").is_file() else None
@@ -120,10 +113,9 @@ def _get_hermes_site_packages(env: dict) -> list[Path]:
 
 
 def _strip_hermes_owned_pythonpath_and_runtime_markers(env: dict) -> None:
-    """Strip Hermes-owned PYTHONPATH entries, then the runtime marker vars. Ordering
-    is load-bearing: PYTHONPATH filtering runs BEFORE the markers are removed so a
-    validated Windows base-interpreter launch (VIRTUAL_ENV -> <repo>/venv) can
-    still prove ownership."""
+    """Strip Hermes-owned PYTHONPATH entries, then the runtime marker vars. Order is
+    load-bearing: PYTHONPATH filtering runs BEFORE the markers go so a validated Windows
+    base-interpreter launch (VIRTUAL_ENV -> <repo>/venv) can still prove ownership."""
     _strip_hermes_owned_pythonpath(env)
     for _marker in _ACTIVE_VENV_MARKER_VARS:
         env.pop(_marker, None)
@@ -137,11 +129,9 @@ def _strip_hermes_owned_pythonpath(env: dict) -> None:
     if not pp:
         return
     owned_paths = [*_get_hermes_site_packages(env), *_state()._hermes_repo_root_aliases]
-    kept: list[str] = []
-    stripped: list[str] = []
-    for entry in pp.split(os.pathsep):
-        owned = entry != "" and any(_same_path(Path(entry), p) for p in owned_paths)
-        (stripped if owned else kept).append(entry)
+    entries = pp.split(os.pathsep)
+    stripped = [e for e in entries if e and any(_same_path(Path(e), p) for p in owned_paths)]
+    kept = [e for e in entries if e not in stripped]
     if kept:
         env["PYTHONPATH"] = os.pathsep.join(kept)
     else:

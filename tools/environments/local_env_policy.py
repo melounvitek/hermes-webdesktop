@@ -1,7 +1,6 @@
-"""Secret-scrub policy for Hermes child processes: pure data + predicates for
-which env names are Hermes-managed credentials. The env *builders* applying it
-(``_sanitize_subprocess_env``, ``_make_run_env``, ``hermes_subprocess_env``,
-``build_subprocess_env``) live in ``tools.environments.local``."""
+"""Secret-scrub policy for Hermes child processes: pure data + predicates for which env
+names are Hermes-managed credentials. The env *builders* applying it (``_make_run_env``,
+``_sanitize_subprocess_env``, ``hermes_subprocess_env``) live in ``tools.environments.local``."""
 
 import os
 
@@ -9,14 +8,11 @@ import os
 _HERMES_PROVIDER_ENV_FORCE_PREFIX = "_HERMES_FORCE_"
 
 # Hermes-managed AWS *inference* credentials for ``auth_type="aws_sdk"`` (Bedrock):
-# deliberately only the Bedrock bearer token, which no aws/terraform/boto3 toolchain
-# uses. The general AWS credential chain stays inheritable on purpose — the local
-# terminal is the user's trusted operator shell (SECURITY.md §3.2) and env_passthrough
-# can never re-allow a blocklisted name (GHSA-rhgp-j443-p4rf), so blocking it would
-# be unrecoverable for every aws/terraform user.
-_AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({
-    "AWS_BEARER_TOKEN_BEDROCK",
-})
+# only the Bedrock bearer token, which no aws/terraform/boto3 toolchain uses. The
+# general AWS chain stays inheritable on purpose — the local terminal is the user's
+# trusted operator shell (SECURITY.md §3.2) and env_passthrough can never re-allow a
+# blocklisted name (GHSA-rhgp-j443-p4rf), so blocking it would be unrecoverable.
+_AWS_SDK_CREDENTIAL_ENV_VARS = frozenset({"AWS_BEARER_TOKEN_BEDROCK"})
 
 _STATIC_PROVIDER_ENV_BLOCKLIST = frozenset({
     "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_API_BASE", "OPENAI_ORG_ID",
@@ -63,8 +59,7 @@ def _build_provider_env_blocklist() -> frozenset:
         for name, metadata in OPTIONAL_ENV_VARS.items():
             category = metadata.get("category")
             if category in {"tool", "messaging"} or (
-                category == "setting" and metadata.get("password")
-            ):
+                    category == "setting" and metadata.get("password")):
                 blocked.add(name)
     except ImportError:
         pass
@@ -87,8 +82,8 @@ _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 # env_passthrough registration stay sealed (GHSA-rhgp-j443-p4rf). CONTEXT-GATED via
 # ``_buzz_terminal_context_active``: a Telegram/CLI/cron session on a host that also
 # runs a Buzz gateway must not get the signing key. Values are used directly, never
-# scope-resolved (UnscopedSecretError under multiplex), and the snapshot treats them
-# as profile-scoped. Prefix-based so future BUZZ_* names need no code change.
+# scope-resolved (UnscopedSecretError under multiplex); the snapshot treats them as
+# profile-scoped. Prefix-based so future BUZZ_* names need no code change.
 _TERMINAL_FIRST_PARTY_ENV_PREFIXES = ("BUZZ_",)
 
 
@@ -99,11 +94,10 @@ def _matches_terminal_first_party_prefix(name: str) -> bool:
 
 
 def _buzz_terminal_context_active() -> bool:
-    """True when this process/session operates as a Buzz agent: ``BUZZ_MANAGED_AGENT``
-    in the process env (set only by Buzz Desktop's buzz-acp harness), or the live
-    session's platform is ``buzz`` via the gateway ContextVar — authoritative under
-    a concurrent multi-session host, so a sibling Telegram session resolves its OWN
-    platform."""
+    """True when this process/session operates as a Buzz agent: ``BUZZ_MANAGED_AGENT`` in
+    the process env (set only by Buzz Desktop's buzz-acp harness), or the live session's
+    platform is ``buzz`` via the gateway ContextVar — authoritative under a concurrent
+    multi-session host, so a sibling Telegram session resolves its OWN platform."""
     if os.environ.get("BUZZ_MANAGED_AGENT"):
         return True
     try:
@@ -120,11 +114,10 @@ def _is_terminal_first_party_env(name: str) -> bool:
     return _matches_terminal_first_party_prefix(name) and _buzz_terminal_context_active()
 
 
-# Active-venv markers that must NOT leak: a leaked VIRTUAL_ENV/CONDA_PREFIX makes
-# uv/poetry sync ANOTHER project's deps into the Hermes venv (the venv stays
-# reachable via PATH so stripping is safe), and PYTHONHOME redirects any child
-# interpreter's stdlib to the Hermes venv (version-mismatch crashes). PYTHONPATH is
-# handled separately — only Hermes-owned entries are removed.
+# Active-venv markers that must NOT leak: VIRTUAL_ENV/CONDA_PREFIX make uv/poetry sync
+# ANOTHER project's deps into the Hermes venv (still reachable via PATH, so stripping
+# is safe); PYTHONHOME redirects a child interpreter's stdlib to the Hermes venv
+# (version-mismatch crashes). PYTHONPATH is handled separately (Hermes-owned entries only).
 _ACTIVE_VENV_MARKER_VARS = ("VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME")
 
 
@@ -152,10 +145,9 @@ def _plugin_terminal_env_strip_keys() -> frozenset:
         return frozenset()
 
 
-# Tier-1 secrets: stripped from EVERY spawned subprocess even under
-# inherit_credentials (claude/codex/gemini). Not provider credentials — no child
-# needs them and they are the highest-value secrets to keep from a compromised
-# dependency. Provider keys are the conditional Tier-2 strip.
+# Tier-1 secrets: stripped from EVERY spawned subprocess even under inherit_credentials
+# (claude/codex/gemini). Not provider credentials — no child needs them and they are the
+# highest-value secrets to keep from a compromised dependency. Provider keys = Tier 2.
 _ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
     # GitHub auth
     "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_APP_ID", "GITHUB_APP_PRIVATE_KEY_PATH",
