@@ -98,11 +98,9 @@ def _plugin_rows_for(category: str) -> list[dict]:
     return _plugin_provider_rows(module, markers, **kwargs)
 
 
-_plugin_image_gen_providers = partial(_plugin_rows_for, "image_gen")
-_plugin_video_gen_providers = partial(_plugin_rows_for, "video_gen")  # the only Video Generation rows
-_plugin_web_search_providers = partial(_plugin_rows_for, "web")
-_plugin_browser_providers = partial(_plugin_rows_for, "browser")
-_plugin_tts_providers = partial(_plugin_rows_for, "tts")
+_plugin_image_gen_providers, _plugin_video_gen_providers, _plugin_web_search_providers, \
+    _plugin_browser_providers, _plugin_tts_providers = (
+        partial(_plugin_rows_for, cat) for cat in ("image_gen", "video_gen", "web", "browser", "tts"))
 
 
 def web_provider_capabilities(backend: str) -> list:
@@ -238,8 +236,6 @@ def _toolset_needs_configuration_prompt(ts_key: str, config: dict, *, force_fres
 def _any_plugin_provider_available(registry_module: str) -> bool:
     """True when any provider in the plugin registry reports ``is_available()``."""
     registry = _plugin_registry(registry_module)
-    if registry is None:
-        return False
     try:
         for provider in registry.list_providers():
             try:
@@ -258,27 +254,21 @@ def _configure_tool_category(ts_key: str, cat: dict, config: dict, *, force_fres
     chosen provider goes through the key-update prompts instead of the new-enable prompts."""
     from hermes_cli.tools_config import _prompt_choice, _provider_env_ready, get_nous_subscription_features
 
-    icon = cat.get("icon", "")
     name = cat["name"]
     providers = _visible_providers(cat, config, force_fresh=force_fresh)
-
-    if len(providers) == 1:
-        provider = providers[0]
-        print()
-        print(color(f"  --- {icon} {name} ({provider['name']}) ---", Colors.CYAN))
-        if not reconfigure:
-            if provider.get("tag"):
-                _print_info(f"  {provider['tag']}")
-            if cat.get("setup_note"):
-                _print_info(f"  {cat['setup_note']}")
-        _configure_provider(provider, config, force_fresh=force_fresh, reconfigure=reconfigure)
-        return
+    single = len(providers) == 1
+    title = "Choose a provider" if reconfigure else cat.get("setup_title", "Choose a provider")
 
     print()
-    title = "Choose a provider" if reconfigure else cat.get("setup_title", "Choose a provider")
-    print(color(f"  --- {icon} {name} - {title} ---", Colors.CYAN))
+    heading = f"({providers[0]['name']})" if single else f"- {title}"
+    print(color(f"  --- {cat.get('icon', '')} {name} {heading} ---", Colors.CYAN))
+    if single and not reconfigure and providers[0].get("tag"):
+        _print_info(f"  {providers[0]['tag']}")
     if not reconfigure and cat.get("setup_note"):
         _print_info(f"  {cat['setup_note']}")
+    if single:
+        _configure_provider(providers[0], config, force_fresh=force_fresh, reconfigure=reconfigure)
+        return
     print()
 
     # Logged-in Nous users get a marker on rows included in their subscription (cost-extra vs. included).
@@ -287,7 +277,7 @@ def _configure_tool_category(ts_key: str, cat: dict, config: dict, *, force_fres
         try:
             _nous_logged_in = bool(get_nous_subscription_features(config, force_fresh=force_fresh).nous_auth_present)
         except Exception:
-            _nous_logged_in = False
+            pass
 
     provider_choices = []  # plain text labels only (no ANSI codes in menu items)
     for p in providers:
@@ -327,9 +317,7 @@ def _web_tier_matches(provider: dict, config: dict) -> bool:
     if not row_tier:
         return True
     web_cfg = config.get("web") if isinstance(config.get("web"), dict) else {}
-    tiers = web_cfg.get("provider_tier")
-    if not isinstance(tiers, dict):
-        tiers = {}
+    tiers = web_cfg.get("provider_tier") if isinstance(web_cfg.get("provider_tier"), dict) else {}
     configured = str(tiers.get(provider["web_backend"], "") or "").lower().strip()
     if configured in ("free", "paid"):
         return configured == row_tier
@@ -361,8 +349,7 @@ def _managed_provider_active(provider: dict, config: dict, managed_feature: str,
     provider must be the row's vendor or ``nous``."""
     from hermes_cli.tools_config import get_nous_subscription_features
 
-    features = get_nous_subscription_features(config, force_fresh=force_fresh)
-    feature = features.features.get(managed_feature)
+    feature = get_nous_subscription_features(config, force_fresh=force_fresh).features.get(managed_feature)
     if feature is None:
         return False
     if managed_feature in ("image_gen", "video_gen"):
@@ -459,20 +446,16 @@ _ACTIVE_CHECKS: tuple[tuple[str, Callable[[dict, dict], bool]], ...] = (
 def _is_provider_active(provider: dict, config: dict, *, force_fresh: bool = False) -> bool:
     """Check if a provider entry matches the currently active config."""
     managed_feature = provider.get("managed_nous_feature")
-    plugin_name = provider.get("image_gen_plugin_name")
-    if plugin_name and not managed_feature:
-        # Managed entries fall through to the managed branch, which also checks use_gateway — otherwise a
-        # managed FAL pick and a direct-key FAL pick would both report active.
-        image_cfg = config.get("image_gen", {})
-        if not (isinstance(image_cfg, dict) and image_cfg.get("provider") == plugin_name):
-            return False
-        # A direct-key entry is only active when the managed route is OFF.
-        return not is_truthy_value(image_cfg.get("use_gateway"), default=False)
-
-    video_plugin_name = provider.get("video_gen_plugin_name")
-    if video_plugin_name and not managed_feature:
-        video_cfg = config.get("video_gen", {})
-        return isinstance(video_cfg, dict) and video_cfg.get("provider") == video_plugin_name
+    # Managed entries fall through to the managed branch, which also checks use_gateway — otherwise a
+    # managed FAL pick and a direct-key FAL pick would both report active.
+    for section in ("image_gen", "video_gen"):
+        plugin_name = provider.get(f"{section}_plugin_name")
+        if plugin_name and not managed_feature:
+            gen_cfg = config.get(section, {})
+            if not (isinstance(gen_cfg, dict) and gen_cfg.get("provider") == plugin_name):
+                return False
+            # A direct-key image gen entry is only active when the managed route is OFF.
+            return section == "video_gen" or not is_truthy_value(gen_cfg.get("use_gateway"), default=False)
 
     if managed_feature:
         return _managed_provider_active(provider, config, managed_feature, force_fresh)
@@ -511,21 +494,13 @@ def _plugin_model_catalog(registry_module: str, plugin_name: str):
     """``(catalog_dict, default_model_id)`` for a plugin provider; ``catalog_dict`` is shaped like the legacy
     ``FAL_MODELS`` table so the picker path is shared. ``({}, None)`` if unregistered or no models."""
     registry = _plugin_registry(registry_module)
-    if registry is None:
-        return {}, None
-    try:
+    try:  # a missing registry / unknown provider surfaces as AttributeError here — same ({}, None) outcome
         provider = registry.get_provider(plugin_name)
-    except Exception:
-        return {}, None
-    if provider is None:
-        return {}, None
-    try:
         models = provider.list_models() or []
         default = provider.default_model()
     except Exception:
         return {}, None
-    catalog = {m["id"]: m for m in models if isinstance(m, dict) and "id" in m}
-    return catalog, default
+    return {m["id"]: m for m in models if isinstance(m, dict) and "id" in m}, default
 
 
 _plugin_image_gen_catalog = partial(_plugin_model_catalog, "agent.image_gen_registry")
@@ -585,16 +560,17 @@ def _configure_imagegen_model(backend_name: str, config: dict) -> None:
     _pick_model_from_catalog(catalog, default_model, backend["config_key"], backend["display"], config)
 
 
-def _configure_imagegen_model_for_plugin(plugin_name: str, config: dict) -> None:
-    """Prompt for a model from a plugin-registered image gen backend's catalog."""
-    catalog, default_model = _plugin_image_gen_catalog(plugin_name)
-    _pick_model_from_catalog(catalog, default_model, "image_gen", plugin_name, config)
+def _configure_gen_model_for_plugin(section: str, plugin_name: str, config: dict) -> None:
+    """Prompt for a model from a plugin-registered image/video gen catalog (video rows keep their historical
+    two-space indent)."""
+    catalog_fn = _plugin_image_gen_catalog if section == "image_gen" else _plugin_video_gen_catalog
+    catalog, default_model = catalog_fn(plugin_name)
+    _pick_model_from_catalog(catalog, default_model, section, plugin_name, config,
+                             row_indent="" if section == "image_gen" else "  ")
 
 
-def _configure_videogen_model_for_plugin(plugin_name: str, config: dict) -> None:
-    """Prompt for a video gen model from a plugin's catalog (rows keep their historical two-space indent)."""
-    catalog, default_model = _plugin_video_gen_catalog(plugin_name)
-    _pick_model_from_catalog(catalog, default_model, "video_gen", plugin_name, config, row_indent="  ")
+_configure_imagegen_model_for_plugin = partial(_configure_gen_model_for_plugin, "image_gen")
+_configure_videogen_model_for_plugin = partial(_configure_gen_model_for_plugin, "video_gen")
 
 
 def _configure_xai_imagine_storage(section_name: str, config: dict) -> None:
@@ -619,21 +595,23 @@ def _configure_xai_imagine_storage(section_name: str, config: dict) -> None:
                    else "  xAI stored public URLs enabled without automatic expiry")
 
 
-def _select_plugin_gen_provider(section: str, plugin_name: str, config: dict, *, use_gateway: bool = False) -> None:
-    """Persist a plugin-backed image/video gen provider selection and run its model picker.
-    ``use_gateway=True`` (Nous-managed pick) stores ``<section>.provider: nous``; BYOK picks store the
-    plugin name. Any legacy ``use_gateway`` key is removed so old read-time shims cannot override the
-    selection."""
+def _select_into(config: dict, section: str, key: str, vendor, managed) -> dict:
+    """Write ``config[section][key] = vendor`` (``nous`` for a managed pick) and drop any legacy ``use_gateway``
+    key so the old read-time shim cannot override the new choice. Returns the section dict."""
     from hermes_cli.tools_config import _cfg_section
 
     cfg = _cfg_section(config, section)
-    cfg["provider"] = NOUS_MANAGED_PROVIDER if use_gateway else plugin_name
+    cfg[key] = NOUS_MANAGED_PROVIDER if managed else vendor
     cfg.pop("use_gateway", None)
+    return cfg
+
+
+def _select_plugin_gen_provider(section: str, plugin_name: str, config: dict, *, use_gateway: bool = False) -> None:
+    """Persist a plugin-backed image/video gen provider selection (``nous`` for a Nous-managed pick, else the
+    plugin name) and run its model picker."""
+    cfg = _select_into(config, section, "provider", plugin_name, use_gateway)
     _print_success(f"  {section}.provider set to: {cfg['provider']}")
-    if section == "image_gen":
-        _configure_imagegen_model_for_plugin(plugin_name, config)
-    else:
-        _configure_videogen_model_for_plugin(plugin_name, config)
+    _configure_gen_model_for_plugin(section, plugin_name, config)
     if plugin_name == "xai":
         _configure_xai_imagine_storage(section, config)
 
@@ -665,8 +643,7 @@ def _configure_stt_model(stt_provider: str, config: dict) -> None:
     model_key = _STT_MODEL_CONFIG_KEY.get(stt_provider, "model")
     current = str(prov_cfg.get(model_key) or "").strip()
     ordered = list(catalog)
-    default_idx = ordered.index(current) if current in ordered else 0
-    chosen = ordered[_prompt_choice("  Select STT model:", ordered, default_idx)]
+    chosen = ordered[_prompt_choice("  Select STT model:", ordered, ordered.index(current) if current in ordered else 0)]
     prov_cfg[model_key] = chosen
     _print_success(f"  STT model set to: {chosen}")
 
@@ -678,37 +655,25 @@ _PROVIDER_MARKER_SECTIONS = {
 }
 
 
-def _drop_use_gateway(section) -> None:
-    if isinstance(section, dict):
-        section.pop("use_gateway", None)
-
-
 def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> None:
     """Persist the provider/backend config keys for a selected provider.
     Pure, non-interactive core of :func:`_configure_provider` (no env prompts, post-setup hooks, Nous
     auth gating or model pickers) shared by the CLI and the GUI ``PUT .../provider`` endpoint. Each pick
     writes exactly ONE provider string per category (``nous`` for managed rows) and removes any legacy
     ``use_gateway`` key so the read-time shim cannot override the new choice."""
-    from hermes_cli.tools_config import TOOL_CATEGORIES, _cfg_section
+    from hermes_cli.tools_config import TOOL_CATEGORIES
 
-    def _set_selection(section_key: str, name_key: str, vendor_value) -> None:
-        section = _cfg_section(config, section_key)
-        section[name_key] = NOUS_MANAGED_PROVIDER if managed_feature else vendor_value
-        _drop_use_gateway(section)
-
-    if provider.get("tts_provider"):
-        _set_selection("tts", "provider", provider["tts_provider"])
-    if provider.get("stt_provider"):
-        _set_selection("stt", "provider", provider["stt_provider"])
+    for marker, section_key in (("tts_provider", "tts"), ("stt_provider", "stt")):
+        if provider.get(marker):
+            _select_into(config, section_key, "provider", provider[marker], managed_feature)
 
     if "browser_provider" in provider:
         bp = provider["browser_provider"]
-        browser_cfg = config.setdefault("browser", {})
         if bp or managed_feature:
             # Browser Use mode (browser.backend) composes with the provider — keep the driver choice intact.
-            _set_selection("browser", "cloud_provider", bp)
+            _select_into(config, "browser", "cloud_provider", bp, managed_feature)
         else:
-            browser_cfg.pop("use_gateway", None)
+            config.setdefault("browser", {}).pop("use_gateway", None)
     if provider.get("browser_backend"):
         config.setdefault("browser", {})["backend"] = provider["browser_backend"]
     # Local engine rows ("Local Browser" resets to auto, "Lightpanda" sets lightpanda); composes with browser.backend.
@@ -716,16 +681,14 @@ def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> 
         config.setdefault("browser", {})["engine"] = provider["browser_engine"]
 
     if provider.get("web_backend"):
-        _set_selection("web", "backend", provider["web_backend"])
-        web_cfg = config.get("web")
-        if isinstance(web_cfg, dict):
-            tier = provider.get("web_tier")
-            tiers = web_cfg.setdefault("provider_tier", {}) if tier else web_cfg.get("provider_tier")
-            if isinstance(tiers, dict):
-                if tier:
-                    tiers[provider["web_backend"]] = tier
-                else:
-                    tiers.pop(provider["web_backend"], None)
+        web_cfg = _select_into(config, "web", "backend", provider["web_backend"], managed_feature)
+        tier = provider.get("web_tier")
+        tiers = web_cfg.setdefault("provider_tier", {}) if tier else web_cfg.get("provider_tier")
+        if isinstance(tiers, dict):
+            if tier:
+                tiers[provider["web_backend"]] = tier
+            else:
+                tiers.pop(provider["web_backend"], None)
 
     if provider.get("computer_use_backend"):
         config.setdefault("computer_use", {})["backend"] = provider["computer_use_backend"]
@@ -736,7 +699,7 @@ def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> 
         section = config.setdefault(managed_feature, {})
         if isinstance(section, dict):
             section["provider"] = NOUS_MANAGED_PROVIDER
-            _drop_use_gateway(section)
+            section.pop("use_gateway", None)
     elif not managed_feature:
         # Non-gateway pick — clear any stale legacy use_gateway key on the category. Resolve the category from
         # the row's own markers first (plugin-injected rows are NOT in TOOL_CATEGORIES' hardcoded lists), then
@@ -745,14 +708,15 @@ def _write_provider_config(provider: dict, config: dict, *, managed_feature) -> 
         if not sections:
             sections = [cat_key for cat_key, cat in TOOL_CATEGORIES.items() if provider in cat.get("providers", [])][:1]
         for section_key in sections:
-            _drop_use_gateway(config.get(section_key))
+            if isinstance(config.get(section_key), dict):
+                config[section_key].pop("use_gateway", None)
 
 
 def apply_provider_selection(ts_key: str, provider_name: str, config: dict) -> None:
     """Non-interactively persist a provider selection for a toolset (config keys only — API keys, post-setup
     hooks, auth gating and model pickers are separate GUI endpoints). ``provider_name`` is resolved among
     :func:`_visible_providers` rows; raises ``KeyError`` for an unknown toolset or provider."""
-    from hermes_cli.tools_config import TOOL_CATEGORIES, _cfg_section
+    from hermes_cli.tools_config import TOOL_CATEGORIES
 
     cat = TOOL_CATEGORIES.get(ts_key)
     if cat is None:
@@ -775,9 +739,7 @@ def apply_provider_selection(ts_key: str, provider_name: str, config: dict) -> N
         ("image_gen", "fal" if provider.get("imagegen_backend") and not managed_feature else None)]
     for section_key, vendor in selections:
         if vendor:
-            section = _cfg_section(config, section_key)
-            section["provider"] = NOUS_MANAGED_PROVIDER if managed_feature else vendor
-            section.pop("use_gateway", None)
+            _select_into(config, section_key, "provider", vendor, managed_feature)
 
 
 def _nous_provider_gate(provider: dict, config: dict, managed_feature, *, force_fresh: bool) -> bool:
@@ -811,24 +773,17 @@ def _nous_provider_gate(provider: dict, config: dict, managed_feature, *, force_
 
 def _finish_provider_selection(provider: dict, config: dict, managed_feature) -> None:
     """Model pickers that follow a provider pick: plugin image/video gen, in-tree FAL, STT."""
-    from hermes_cli.tools_config import _cfg_section
-
-    plugin_name = provider.get("image_gen_plugin_name")
-    if plugin_name:
-        _select_plugin_image_gen_provider(plugin_name, config, use_gateway=bool(managed_feature))
-        return
-    video_plugin = provider.get("video_gen_plugin_name")
-    if video_plugin:
-        _select_plugin_video_gen_provider(video_plugin, config, use_gateway=bool(managed_feature))
-        return
+    for section in ("image_gen", "video_gen"):
+        plugin_name = provider.get(f"{section}_plugin_name")
+        if plugin_name:
+            _select_plugin_gen_provider(section, plugin_name, config, use_gateway=bool(managed_feature))
+            return
     backend = provider.get("imagegen_backend")
     if backend:
         _configure_imagegen_model(backend, config)
         # In-tree FAL is the only non-plugin backend: "nous" for a managed row, "fal" for BYOK, drop legacy
         # use_gateway — never clobber a managed pick back onto direct keys.
-        img_cfg = _cfg_section(config, "image_gen")
-        img_cfg["provider"] = NOUS_MANAGED_PROVIDER if managed_feature else "fal"
-        img_cfg.pop("use_gateway", None)
+        _select_into(config, "image_gen", "provider", "fal", managed_feature)
     # STT rows prompt for a model after the pick (skipped for managed rows — the gateway pins it).
     if provider.get("stt_provider") and not managed_feature:
         _configure_stt_model(provider["stt_provider"], config)
@@ -883,16 +838,15 @@ def _prompt_secret(
     Reconfigure mode shows the current value and re-prompts ("Enter to keep current"); the new-enable
     flow prompts with ``default_val`` visible when one exists, else as a password, and ``strip`` decides
     whether whitespace is trimmed (and whitespace-only counts as skipped)."""
-    if reconfigure:
-        existing = get_env_value(key)
-        if existing:
-            _print_info(f"  {key}: configured ({existing[:8]}...)")
+    existing = get_env_value(key) if reconfigure else ""
+    if existing:
+        _print_info(f"  {key}: configured ({existing[:8]}...)")
     if url:
         _print_info(f"  {url_label}: {url}")
     if reconfigure:
-        value = _prompt(f"    {label} (Enter to keep current)", password=not default_val)
-        if value and value.strip():
-            save_env_value(key, value.strip())
+        value = (_prompt(f"    {label} (Enter to keep current)", password=not default_val) or "").strip()
+        if value:
+            save_env_value(key, value)
             _print_success("    Updated")
         else:
             _print_info("    Kept current")
@@ -1046,15 +1000,12 @@ def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
         providers = []
 
     if not providers:
-        _print_warning(
-            "  No authenticated providers found. Configure a provider first "
-            "with `hermes model`, then re-run this.")
+        _print_warning("  No authenticated providers found. Configure a provider first "
+                       "with `hermes model`, then re-run this.")
         return
 
     provider_labels = [label for _slug, label, _models in format_aux_picker_entries(
-        providers, current_provider=current_provider, current_base_url=current_base_url)]
-    provider_labels.append("Cancel")
-
+        providers, current_provider=current_provider, current_base_url=current_base_url)] + ["Cancel"]
     pidx = _prompt_choice("  Choose vision provider:", provider_labels, 0)
     if pidx >= len(providers):
         _print_info("  Cancelled")
@@ -1063,8 +1014,7 @@ def _configure_vision_provider_model(config: dict, vision_cfg: dict) -> None:
     chosen = providers[pidx]
     slug = chosen.get("slug")
     models = list(chosen.get("models", []))
-    model_choices = list(models) + ["Type a custom model id…"]
-    midx = _prompt_choice(f"  Choose vision model for {chosen.get('name') or slug}:", model_choices, 0)
+    midx = _prompt_choice(f"  Choose vision model for {chosen.get('name') or slug}:", models + ["Type a custom model id…"], 0)
     if midx < len(models):
         model = models[midx]
     else:

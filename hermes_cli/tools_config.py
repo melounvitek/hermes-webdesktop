@@ -16,40 +16,26 @@ from hermes_cli.toolset_scope import (
     _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform)
 # Re-exports: keep ``hermes_cli.tools_config.X`` callers and test patch targets resolving.
 from hermes_cli.tools_config_cua import (  # noqa: F401
-    _post_setup_no_window_flags, _cua_driver_cmd, _cua_version_summary, _resolved_cua_driver_cmd,
-    _cua_driver_env, _CUA_DRIVER_CONTRACT_CACHE, _cua_driver_contract_status, _cua_driver_install_ready,
-    _pip_install, _cua_install_target_writable, _cua_driver_version, install_cua_driver,
-    _CUA_INSTALLER_TIMEOUT, _CUA_INSTALLER_DRAIN_GRACE, _CUA_BACKGROUND_UPDATE_TIMEOUT, _CUA_LOCK_STALE_AFTER,
-    _cua_install_home, _cua_install_lock_dir, _cua_windows_install_lock_file,
+    _post_setup_no_window_flags, _cua_driver_cmd, _cua_version_summary, _resolved_cua_driver_cmd, _cua_driver_env,
+    _cua_driver_contract_status, _cua_driver_install_ready, _pip_install, _cua_install_target_writable,
+    install_cua_driver, _CUA_INSTALLER_TIMEOUT, _CUA_INSTALLER_DRAIN_GRACE, _CUA_LOCK_STALE_AFTER,
     _clear_stale_windows_cua_install_lock, _clear_stale_cua_install_lock, _cua_install_lock_held,
-    _cua_release_endpoint_reachable, _ps_single_quote, _cua_driver_autostart_registered_windows,
-    _repair_cua_driver_autostart_windows, _remove_quietly, _print_cua_platform_notes,
-    _run_cua_driver_installer)
+    _cua_release_endpoint_reachable, _repair_cua_driver_autostart_windows, _run_cua_driver_installer)
 from hermes_cli.tools_config_post_setup import (  # noqa: F401
-    _ensure_browser_use_cli, _post_setup_lightpanda, _post_setup_agent_browser, _post_setup_camofox,
-    _KITTENTTS_WHEEL_URL, _PIP_POST_SETUP_HOOKS, _post_setup_pip, _post_setup_spotify, _post_setup_langfuse,
-    _post_setup_xai_grok, _POST_SETUP_HOOKS, _run_post_setup, valid_post_setup_keys, run_post_setup_command,
-    _POST_SETUP_INSTALLED, _post_setup_already_installed, _module_installed,
-    _RESTORABLE_PYTHON_TOOL_DEPENDENCIES, active_restorable_python_tool_dependencies,
-    restorable_python_tool_dependency, _agent_browser_installed, _camofox_installed, _lightpanda_installed,
-    _cloud_agent_browser_installed, _POST_SETUP_READY)
+    _ensure_browser_use_cli, _run_post_setup, valid_post_setup_keys, run_post_setup_command, _POST_SETUP_INSTALLED,
+    _post_setup_already_installed, _module_installed, active_restorable_python_tool_dependencies,
+    restorable_python_tool_dependency, _POST_SETUP_READY)
 from hermes_cli.tools_config_providers import (  # noqa: F401
-    _plugin_provider_rows, _plugin_image_gen_providers, _plugin_video_gen_providers,
-    _plugin_web_search_providers, _plugin_browser_providers, _plugin_tts_providers, web_provider_capabilities,
-    _PLUGIN_ROW_BUILDERS, _visible_providers, provider_readiness_status, _toolset_needs_configuration_prompt,
-    _any_plugin_provider_available, _configure_tool_category, _web_tier_matches, _is_provider_active,
-    _detect_active_provider_index, _fal_model_catalog, IMAGEGEN_BACKENDS, _plugin_model_catalog,
-    _plugin_image_gen_catalog, _plugin_video_gen_catalog, _pick_model_from_catalog, _configure_imagegen_model,
-    _configure_imagegen_model_for_plugin, _configure_videogen_model_for_plugin,
-    _configure_xai_imagine_storage, _select_plugin_gen_provider, _select_plugin_image_gen_provider,
-    _select_plugin_video_gen_provider, STT_MODEL_CATALOG, _STT_MODEL_CONFIG_KEY, _configure_stt_model,
-    _PROVIDER_MARKER_SECTIONS, _write_provider_config, apply_provider_selection, _nous_provider_gate,
-    _finish_provider_selection, _print_provider_selection, _configure_provider, _reconfigure_provider,
+    _plugin_image_gen_providers, _plugin_video_gen_providers, _plugin_web_search_providers, _plugin_browser_providers,
+    _plugin_tts_providers, web_provider_capabilities, _visible_providers, provider_readiness_status,
+    _toolset_needs_configuration_prompt, _configure_tool_category, _web_tier_matches, _is_provider_active,
+    _detect_active_provider_index, IMAGEGEN_BACKENDS, _plugin_image_gen_catalog, _plugin_video_gen_catalog,
+    _configure_imagegen_model, _configure_imagegen_model_for_plugin, _configure_videogen_model_for_plugin,
+    _select_plugin_image_gen_provider, _select_plugin_video_gen_provider, STT_MODEL_CATALOG, _configure_stt_model,
+    _write_provider_config, apply_provider_selection, _configure_provider, _reconfigure_provider,
     _configure_vision_backend, _configure_vision_provider_model, _configure_simple_requirements)
 from hermes_cli.tools_config_mcp import (  # noqa: F401
-    _mcp_match_filter, _mcp_preselected, _apply_mcp_checklist, _configure_mcp_tools_interactive,
-    _apply_toolset_change, _apply_mcp_change, _print_tools_list, _known_tool_platforms,
-    tools_disable_enable_command)
+    _configure_mcp_tools_interactive, _apply_toolset_change, _apply_mcp_change, tools_disable_enable_command)
 
 logger = logging.getLogger(__name__)
 
@@ -443,13 +429,6 @@ def enabled_mcp_server_names(config: dict) -> Set[str]:
     return names
 
 
-def _exempt_explicit_platform_native(default_off: Set[str], platform: str, *, explicitly_configured: bool) -> None:
-    """Let platform-native default-off toolsets (``discord`` on discord) through on explicit config (mutates
-    ``default_off``): off for unconfigured platforms as a security opt-in, but a saved list is that opt-in."""
-    if explicitly_configured:
-        default_off -= {ts for ts in default_off if platform in (_TOOLSET_PLATFORM_RESTRICTIONS.get(ts) or ())}
-
-
 #: Toolsets young enough that absence from a saved ``platform_toolsets`` list means "never offered", not
 #: "declined": saving ``hermes tools`` freezes a platform's composite into an explicit list nothing adds to, so
 #: a later toolset stays off forever for picker users while ``[hermes-cli]`` users inherit it.
@@ -500,13 +479,16 @@ def _configurable_subset_of(tool_names: Set[str], platform: str) -> Set[str]:
 def _default_off_toolsets(platform: str, explicitly_configured: bool) -> Set[str]:
     """Toolsets to strip from an implicit (composite-derived) enable set. A platform named after a default-off
     toolset (``homeassistant``) keeps it, except platform-restricted ones (``discord`` on discord stays OFF); a
-    configured HASS_TOKEN is an explicit opt-in that must survive platforms resolving without a saved list."""
+    configured HASS_TOKEN is an explicit opt-in that must survive platforms resolving without a saved list.
+    Platform-native default-off toolsets (``discord`` on discord) are off for unconfigured platforms as a
+    security opt-in — an explicitly saved list IS that opt-in and lets them through."""
     default_off = set(_DEFAULT_OFF_TOOLSETS)
     if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
         default_off.remove(platform)
     if "homeassistant" in default_off and _homeassistant_credentials_present():
         default_off.remove("homeassistant")
-    _exempt_explicit_platform_native(default_off, platform, explicitly_configured=explicitly_configured)
+    if explicitly_configured:
+        default_off -= {ts for ts in default_off if platform in (_TOOLSET_PLATFORM_RESTRICTIONS.get(ts) or ())}
     return default_off
 
 
@@ -571,7 +553,7 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
     # An explicitly saved list (even a composite like ``hermes-discord``) is an opt-in to the platform's
-    # native default-off toolsets — see _exempt_explicit_platform_native.
+    # native default-off toolsets — see _default_off_toolsets.
     explicitly_configured = isinstance(toolset_names, list)
     if not explicitly_configured:
         toolset_names = [_platform_default_toolset(platform)]
@@ -988,38 +970,28 @@ def _apply_platform_checklist(config: dict, pkey: str, new_enabled: Set[str], pr
     _save_platform_tools(config, pkey, new_enabled)
 
 
-def _configure_all_platforms(config: dict, platform_keys: List[str]) -> bool:
-    """'Configure all platforms (global)' menu entry. Returns True when config was saved."""
-    all_current: Set[str] = set()
-    for pk in platform_keys:
-        all_current |= _current_platform_tools(config, pk)
-    new_enabled = _prompt_toolset_checklist("All platforms", all_current, force_fresh=True)
+def _configure_platforms(config: dict, platform_keys: List[str], *, all_platforms: bool = False) -> bool:
+    """Checklist + key setup + save for one platform, or for every platform at once (the 'Configure all
+    platforms (global)' menu entry). Returns True when config was saved."""
+    label = "All platforms" if all_platforms else PLATFORMS[platform_keys[0]]["label"]
+    current = {pk: _current_platform_tools(config, pk) for pk in platform_keys}
+    all_current = set().union(*current.values())
+    new_enabled = _prompt_toolset_checklist(label, all_current, force_fresh=True)
     selected_to_configure = _toolsets_needing_setup(new_enabled, config)
     _configure_list(selected_to_configure, config)
     if new_enabled == all_current and not selected_to_configure:
-        print(color("  No changes", Colors.DIM))
+        print(color("  No changes" if all_platforms else f"  No changes to {label}", Colors.DIM))
         return False
     for pk in platform_keys:
-        _apply_platform_checklist(config, pk, new_enabled, _current_platform_tools(config, pk),
-                                  set(selected_to_configure), indent="    ", header=True)
+        # Global: re-read after each save — reconciling agent.disabled_toolsets for one platform can change
+        # what the next platform resolves to. Single platform: diff against the pre-checklist snapshot.
+        prev = _current_platform_tools(config, pk) if all_platforms else current[pk]
+        _apply_platform_checklist(config, pk, new_enabled, prev, set(selected_to_configure),
+                                  indent="    " if all_platforms else "  ", header=all_platforms)
     save_config(config)
-    print(color("  ✓ Saved configuration for all platforms", Colors.GREEN))
+    print(color("  ✓ Saved configuration for all platforms" if all_platforms else f"  ✓ Saved {label} configuration",
+                Colors.GREEN))
     return True
-
-
-def _configure_one_platform(config: dict, pkey: str) -> None:
-    """Per-platform checklist + key setup + save."""
-    pinfo = PLATFORMS[pkey]
-    current_enabled = _current_platform_tools(config, pkey)
-    new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled, force_fresh=True)
-    selected_to_configure = _toolsets_needing_setup(new_enabled, config)
-    _configure_list(selected_to_configure, config)
-    if new_enabled == current_enabled and not selected_to_configure:
-        print(color(f"  No changes to {pinfo['label']}", Colors.DIM))
-        return
-    _apply_platform_checklist(config, pkey, new_enabled, current_enabled, set(selected_to_configure))
-    save_config(config)
-    print(color(f"  ✓ Saved {pinfo['label']} configuration", Colors.GREEN))
 
 
 def tools_command(args=None, first_install: bool = False, config: dict = None):
@@ -1072,11 +1044,11 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
         elif idx == mcp_idx:
             _configure_mcp_tools_interactive(config)
         elif idx == global_idx:
-            if _configure_all_platforms(config, platform_keys):
+            if _configure_platforms(config, platform_keys, all_platforms=True):
                 for ci, pk in enumerate(platform_keys):
                     platform_choices[ci] = _platform_menu_label(config, pk)
         else:
-            _configure_one_platform(config, platform_keys[idx])
+            _configure_platforms(config, [platform_keys[idx]])
             platform_choices[idx] = _platform_menu_label(config, platform_keys[idx])
         print()
 
