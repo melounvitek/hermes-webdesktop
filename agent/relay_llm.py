@@ -142,16 +142,12 @@ class _ManagedAttempt:
         """Re-raise the provider's own error, or recover a completed provider result.
         Must be called from the ``except`` handling ``exc`` (bare ``raise``)."""
         callback_error = self.raw_response.get("error")
-        if (
-            callback_error is not None
-            and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)
-        ):
+        if (callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)):
             raise callback_error
         if (not isinstance(exc, Exception) or callback_error is not None or "value" not in self.raw_response):
             raise
         logger.warning(
-            "NeMo Relay LLM post-processing failed after provider success; "
-            "returning the provider response",
+            "NeMo Relay LLM post-processing failed after provider success; returning the provider response",
             exc_info=True,
         )
         if not defer_logical_completion:
@@ -192,9 +188,7 @@ async def execute_async(
     if attempt is None:
         return await callback(request)
     try:
-        managed = await attempt.run_managed(
-            attempt.runtime.relay.llm.execute, partial(attempt.invoke_async, callback)
-        )
+        managed = await attempt.run_managed(attempt.runtime.relay.llm.execute, partial(attempt.invoke_async, callback))
     except BaseException as exc:
         return attempt.resolve_failure(exc, defer_logical_completion)
     return attempt.result(managed, defer_logical_completion)
@@ -440,13 +434,10 @@ class ManagedLlmStream(Iterator[Any]):
 
     def _recoverable_relay_failure(self, exc: BaseException) -> bool:
         """Relay post-processing failed after the provider already succeeded."""
-        recoverable = (
-            isinstance(exc, Exception) and self._provider_completed and self._callback_error is None
-        )
+        recoverable = (isinstance(exc, Exception) and self._provider_completed and self._callback_error is None)
         if recoverable:
             logger.warning(
-                "NeMo Relay stream post-processing failed after provider success; "
-                "preserving the provider result",
+                "NeMo Relay stream post-processing failed after provider success; preserving the provider result",
                 exc_info=True,
             )
         return recoverable
@@ -491,10 +482,7 @@ class ManagedLlmStream(Iterator[Any]):
             raise StopIteration from None
         except BaseException as exc:
             callback_error = self._callback_error
-            if (
-                callback_error is not None
-                and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)
-            ):
+            if (callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)):
                 self._close(logical_outcome="failed")
                 raise callback_error
             if self._recoverable_relay_failure(exc):
@@ -595,9 +583,7 @@ class ManagedLlmStream(Iterator[Any]):
 stream = ManagedLlmStream
 
 
-_ANTHROPIC_APPEND_DELTAS = {
-    "text_delta": "text", "thinking_delta": "thinking", "signature_delta": "signature"
-}
+_ANTHROPIC_APPEND_DELTAS = {"text_delta": "text", "thinking_delta": "thinking", "signature_delta": "signature"}
 
 
 class AnthropicStreamAccumulator:
@@ -637,9 +623,7 @@ class AnthropicStreamAccumulator:
         if field is not None:
             block[field] = str(block.get(field) or "") + str(delta.get(field) or "")
         elif delta_type == "input_json_delta":
-            block["_partial_json"] = str(block.pop("_partial_json", "")) + str(
-                delta.get("partial_json") or ""
-            )
+            block["_partial_json"] = str(block.pop("_partial_json", "")) + str(delta.get("partial_json") or "")
         elif delta_type == "citations_delta" and "citation" in delta:
             block.setdefault("citations", []).append(delta["citation"])
 
@@ -705,9 +689,8 @@ def _logical_parent(
 
 
 def _complete_logical(
-    logical: _LogicalCall | None, *, outcome: str, model_name: str | None = None,
-    provider_name: str | None = None, response_model_name: str | None = None,
-    operation_lease: relay_runtime.RelayOperationLease | None = None,
+    logical: _LogicalCall | None, *, outcome: str, model_name: str | None = None, provider_name: str | None = None,
+    response_model_name: str | None = None, operation_lease: relay_runtime.RelayOperationLease | None = None,
 ) -> None:
     if logical is None:
         return

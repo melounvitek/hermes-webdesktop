@@ -54,15 +54,11 @@ def execute(
             )
         )
     except BaseException as exc:
-        if (
-            callback_error is not None
-            and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)
-        ):
+        if (callback_error is not None and relay_runtime._is_relay_wrapped_callback_error(exc, callback_error)):
             raise callback_error
         if isinstance(exc, Exception) and callback_error is None and "value" in raw_result:
             logger.warning(
-                "NeMo Relay tool post-processing failed after dispatch success; "
-                "returning the Hermes tool result",
+                "NeMo Relay tool post-processing failed after dispatch success; returning the Hermes tool result",
                 exc_info=True,
             )
             return raw_result["value"], observed_args

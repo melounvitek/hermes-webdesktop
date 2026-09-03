@@ -25,9 +25,8 @@ def _unprefix_oauth_tool_name(name: str) -> str:
 
 # build_kwargs params forwarded to build_anthropic_kwargs, with the defaults applied when absent.
 _BUILD_KWARG_DEFAULTS = {
-    "max_tokens": 16384, "reasoning_config": None, "tool_choice": None, "is_oauth": False,
-    "preserve_dots": False, "context_length": None, "base_url": None, "fast_mode": False,
-    "drop_context_1m_beta": False,
+    "max_tokens": 16384, "reasoning_config": None, "tool_choice": None, "is_oauth": False, "preserve_dots": False,
+    "context_length": None, "base_url": None, "fast_mode": False, "drop_context_1m_beta": False,
 }
 
 
@@ -54,8 +53,7 @@ class AnthropicTransport(ProviderTransport):
         return convert_tools_to_anthropic(tools)
 
     def build_kwargs(
-        self, model: str, messages: List[Dict[str, Any]],
-        tools: Optional[List[Dict[str, Any]]] = None, **params,
+        self, model: str, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None, **params,
     ) -> Dict[str, Any]:
         """Build Anthropic messages.create() kwargs (converts messages and tools internally)."""
         from agent.anthropic_adapter import build_anthropic_kwargs
