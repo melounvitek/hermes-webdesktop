@@ -28,7 +28,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote as _urlquote
@@ -152,12 +152,6 @@ class State(enum.Enum):
 class _CacheEntry:
     state: State
     payload: Any = None
-    chat_id: str = ""
-    created_at: float = field(default_factory=time.time)
-    updated_at: float = field(default_factory=time.time)
-
-
-_KEEP = object()  # sentinel: leave entry.payload untouched
 
 
 class RequestCache:
@@ -168,20 +162,17 @@ class RequestCache:
 
     def register_pending(self, chat_id: str) -> str:
         rid = str(uuid.uuid4())
-        self._entries[rid] = _CacheEntry(state=State.PENDING, chat_id=chat_id)
+        self._entries[rid] = _CacheEntry(state=State.PENDING)
         return rid
 
     def get(self, request_id: str) -> Optional[_CacheEntry]:
         return self._entries.get(request_id)
 
-    def _transition(self, request_id: str, allowed: Set[State], state: State, payload: Any = _KEEP) -> None:
+    def _transition(self, request_id: str, allowed: Set[State], state: State, payload: Any = None) -> None:
         entry = self._entries.get(request_id)
-        if entry is None or entry.state not in allowed:
-            return
-        entry.state = state
-        if payload is not _KEEP:
-            entry.payload = payload
-        entry.updated_at = time.time()
+        if entry is not None and entry.state in allowed:
+            entry.state = state
+            entry.payload = entry.payload if state is State.DELIVERED else payload
 
     def set_ready(self, request_id: str, payload: Any) -> None:
         self._transition(request_id, {State.PENDING}, State.READY, payload)
