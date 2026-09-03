@@ -403,9 +403,7 @@ def _salvage_reduce_todo_snapshot(out: List[Dict[str, Any]]) -> None:
 
 
 def salvage_grown_transcript(
-    original: List[Dict[str, Any]],
-    candidate: List[Dict[str, Any]],
-    budget: Optional[int] = None,
+    original: List[Dict[str, Any]], candidate: List[Dict[str, Any]], budget: Optional[int] = None,
 ) -> Optional[List[Dict[str, Any]]]:
     """Mechanically shrink a compression candidate, or return ``None``.
 
@@ -1406,8 +1404,7 @@ def _strip_images_from_tool_msg(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]
 
 
 def _retire_stale_tool_result_images(
-    result: List[Dict[str, Any]],
-    keep_newest: int = _MAX_KEEP_TOOL_IMAGES,
+    result: List[Dict[str, Any]], keep_newest: int = _MAX_KEEP_TOOL_IMAGES,
 ) -> int:
     """Replace image payloads on older tool results with text placeholders.
 
@@ -1904,11 +1901,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._micro_compact_turns_since_pass = 0
 
     def _begin_compression_telemetry(
-        self,
-        *,
-        current_tokens: int | None,
-        attempt_id: str | None = None,
-        session_id: str | None = None,
+        self, *, current_tokens: int | None, attempt_id: str | None = None, session_id: str | None = None,
         trigger_source: str | None = None,
     ) -> Dict[str, Any]:
         """Initialize content-free per-attempt compression telemetry."""
@@ -1937,10 +1930,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         return telemetry
 
     def _record_compression_regions(
-        self,
-        *,
-        head_messages: List[Dict[str, Any]],
-        middle_messages: List[Dict[str, Any]],
+        self, *, head_messages: List[Dict[str, Any]], middle_messages: List[Dict[str, Any]],
         tail_messages: List[Dict[str, Any]],
     ) -> None:
         telemetry = getattr(self, "_active_compression_telemetry", None)
@@ -1951,15 +1941,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         telemetry["protected_tail_tokens"] = estimate_messages_tokens_rough(tail_messages)
 
     def _record_aux_compression_call(
-        self,
-        *,
-        prompt_messages: List[Dict[str, Any]],
-        max_tokens: int | None,
-        duration_ms: int,
-        aux_provider: str | None = None,
-        aux_model: str | None = None,
-        effective_aux_context: int | None = None,
-        phase_timings: Dict[str, Any] | None = None,
+        self, *, prompt_messages: List[Dict[str, Any]], max_tokens: int | None, duration_ms: int,
+        aux_provider: str | None = None, aux_model: str | None = None,
+        effective_aux_context: int | None = None, phase_timings: Dict[str, Any] | None = None,
     ) -> None:
         telemetry = getattr(self, "_active_compression_telemetry", None)
         if not isinstance(telemetry, dict):
@@ -2466,14 +2450,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return False
 
     def update_model(
-        self,
-        model: str,
-        context_length: int,
-        base_url: str = "",
-        api_key: Any = "",
-        provider: str = "",
-        api_mode: str = "",
-        max_tokens: int | None = None,
+        self, model: str, context_length: int, base_url: str = "", api_key: Any = "", provider: str = "",
+        api_mode: str = "", max_tokens: int | None = None,
     ) -> None:
         """Update model info after a model switch or fallback activation."""
         runtime_changed = (model, provider, base_url, api_mode) != (
@@ -2588,27 +2566,14 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         return floored
 
     def __init__(
-        self,
-        model: str,
-        threshold_percent: float = 0.50,
-        protect_first_n: int = 3,
-        protect_last_n: int = 20,
-        summary_target_ratio: float = 0.20,
-        quiet_mode: bool = False,
-        summary_model_override: str = None,
-        base_url: str = "",
-        api_key: str = "",
-        config_context_length: int | None = None,
-        provider: str = "",
-        api_mode: str = "",
-        abort_on_summary_failure: bool = False,
-        max_tokens: int | None = None,
-        model_thresholds: dict[str, float] | None = None,
-        threshold_tokens_cap: Any = None,
-        proactive_prune_tokens: int = 0,
-        proactive_prune_min_result_chars: int = 8000,
-        proactive_prune_min_reclaim_tokens: int = 4096,
-        min_tail_user_messages: int = 1,
+        self, model: str, threshold_percent: float = 0.50, protect_first_n: int = 3,
+        protect_last_n: int = 20, summary_target_ratio: float = 0.20, quiet_mode: bool = False,
+        summary_model_override: str = None, base_url: str = "", api_key: str = "",
+        config_context_length: int | None = None, provider: str = "", api_mode: str = "",
+        abort_on_summary_failure: bool = False, max_tokens: int | None = None,
+        model_thresholds: dict[str, float] | None = None, threshold_tokens_cap: Any = None,
+        proactive_prune_tokens: int = 0, proactive_prune_min_result_chars: int = 8000,
+        proactive_prune_min_reclaim_tokens: int = 4096, min_tail_user_messages: int = 1,
         tail_mode: str = "lean",
     ):
         self.model = model
@@ -3082,8 +3047,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _prune_old_tool_results(
         self, messages: List[Dict[str, Any]], protect_tail_count: int,
-        protect_tail_tokens: int | None = None,
-        min_prune_chars: int = _PRUNE_MIN_CHARS,
+        protect_tail_tokens: int | None = None, min_prune_chars: int = _PRUNE_MIN_CHARS,
     ) -> tuple[List[Dict[str, Any]], int]:
         """Replace old tool results with 1-line summaries; dedup, arg truncation, pressure demotion.
 
@@ -3314,9 +3278,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         }
 
     def _build_static_fallback_summary(
-        self,
-        turns_to_summarize: List[Dict[str, Any]],
-        reason: str | None = None,
+        self, turns_to_summarize: List[Dict[str, Any]], reason: str | None = None,
     ) -> str:
         """Build a deterministic handoff when the LLM summarizer is unavailable.
 
@@ -3593,11 +3555,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         return content
 
     def _generate_summary(
-        self,
-        turns_to_summarize: List[Dict[str, Any]],
-        focus_topic: Optional[str] = None,
-        memory_context: str = "",
-        bypass_cooldown: bool = False,
+        self, turns_to_summarize: List[Dict[str, Any]], focus_topic: Optional[str] = None,
+        memory_context: str = "", bypass_cooldown: bool = False,
     ) -> Optional[str]:
         """Generate a structured summary of conversation turns.
 
@@ -3662,12 +3621,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             return self._on_summary_failure(e, turns_to_summarize, focus_topic, memory_context)
 
     def _build_summary_prompt(
-        self,
-        content_to_summarize: str,
-        summary_budget: int,
-        focus_topic: Optional[str],
-        memory_context: str,
-        has_user_turn: bool,
+        self, content_to_summarize: str, summary_budget: int, focus_topic: Optional[str],
+        memory_context: str, has_user_turn: bool,
     ) -> str:
         """Assemble the summarizer prompt (fresh or iterative-update form).
 
@@ -3820,10 +3775,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return prompt
 
     def _on_summary_failure(
-        self,
-        e: Exception,
-        turns_to_summarize: List[Dict[str, Any]],
-        focus_topic: Optional[str],
+        self, e: Exception, turns_to_summarize: List[Dict[str, Any]], focus_topic: Optional[str],
         memory_context: str,
     ) -> Optional[str]:
         """Classify a summary-call failure; retry on the main model once or arm a cooldown.
@@ -4164,10 +4116,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
     @classmethod
     def _find_context_summaries(
-        cls,
-        messages: List[Dict[str, Any]],
-        start: int,
-        end: int,
+        cls, messages: List[Dict[str, Any]], start: int, end: int,
     ) -> list[tuple[int, str]]:
         """Find handoff summaries inside a compression window."""
         n = len(messages)
@@ -4183,10 +4132,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
     @classmethod
     def _find_latest_context_summary(
-        cls,
-        messages: List[Dict[str, Any]],
-        start: int,
-        end: int,
+        cls, messages: List[Dict[str, Any]], start: int, end: int,
     ) -> tuple[Optional[int], str]:
         """Find the newest handoff summary inside a compression window."""
         summaries = cls._find_context_summaries(messages, start, end)
@@ -4445,10 +4391,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return last_any
 
     def _ensure_last_assistant_message_in_tail(
-        self,
-        messages: List[Dict[str, Any]],
-        cut_idx: int,
-        head_end: int,
+        self, messages: List[Dict[str, Any]], cut_idx: int, head_end: int,
     ) -> int:
         """Guarantee the most recent assistant reply is in the protected tail (#29824).
 
@@ -4469,10 +4412,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return max(new_cut, head_end + 1)
 
     def _ensure_last_user_message_in_tail(
-        self,
-        messages: List[Dict[str, Any]],
-        cut_idx: int,
-        head_end: int,
+        self, messages: List[Dict[str, Any]], cut_idx: int, head_end: int,
     ) -> int:
         """Guarantee the most recent user message is in the protected tail.
 
@@ -4509,11 +4449,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return adjusted
 
     def _ensure_last_n_user_messages_in_tail(
-        self,
-        messages: List[Dict[str, Any]],
-        cut_idx: int,
-        head_end: int,
-        n: int,
+        self, messages: List[Dict[str, Any]], cut_idx: int, head_end: int, n: int,
     ) -> int:
         """Guarantee the last N actionable user messages are in the protected tail.
 
@@ -4565,8 +4501,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             return False
 
     def _find_tail_cut_by_tokens(
-        self, messages: List[Dict[str, Any]], head_end: int,
-        token_budget: int | None = None,
+        self, messages: List[Dict[str, Any]], head_end: int, token_budget: int | None = None,
     ) -> int:
         """Walk backward accumulating tokens until the budget; return the tail start index.
 
@@ -4656,10 +4591,7 @@ This compaction should PRIORITISE preserving all information related to the focu
 
 
     def _scan_window_handoffs(
-        self,
-        messages: List[Dict[str, Any]],
-        compress_start: int,
-        compress_end: int,
+        self, messages: List[Dict[str, Any]], compress_start: int, compress_end: int,
         turns_to_summarize: List[Dict[str, Any]],
     ) -> "_HandoffScan":
         """Rehydrate ``_previous_summary`` / user-turn provenance from in-transcript handoffs.
@@ -4779,8 +4711,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return compress_start, compress_end
 
     def _log_compression_start(
-        self, display_tokens: int, compress_start: int, compress_end: int,
-        n_turns: int, tail_msgs: int,
+        self, display_tokens: int, compress_start: int, compress_end: int, n_turns: int, tail_msgs: int,
     ) -> None:
         logger.info(
             "Context compression triggered (%d tokens >= %d threshold)",
@@ -4904,8 +4835,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         )
 
     def _assemble_tail(
-        self, messages: List[Dict[str, Any]], compress_end: int, tail_start: int,
-        summary_indices: set,
+        self, messages: List[Dict[str, Any]], compress_end: int, tail_start: int, summary_indices: set,
     ) -> List[Dict[str, Any]]:
         """Protected tail with already-folded handoff rows dropped and merged handoffs unwrapped."""
         tail_messages: List[Dict[str, Any]] = []
@@ -5053,12 +4983,8 @@ This compaction should PRIORITISE preserving all information related to the focu
         return compressed
 
     def compress(
-        self,
-        messages: List[Dict[str, Any]],
-        current_tokens: Optional[int] = None,
-        focus_topic: Optional[str] = None,
-        force: bool = False,
-        memory_context: str = "",
+        self, messages: List[Dict[str, Any]], current_tokens: Optional[int] = None,
+        focus_topic: Optional[str] = None, force: bool = False, memory_context: str = "",
         bypass_cooldown: bool = False,
     ) -> List[Dict[str, Any]]:
         """Compress conversation messages by summarizing middle turns.
@@ -5303,8 +5229,7 @@ def user_originated_turn_view(message: Any) -> Optional[Dict[str, Any]]:
 
 
 def history_before_user_originated_turn(
-    messages: List[Dict[str, Any]],
-    index: int,
+    messages: List[Dict[str, Any]], index: int,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Return a rewind prefix and canonical live view for ``index``.
 
