@@ -1,14 +1,12 @@
 """Profiles dashboard routes.
 
-Two routers because route order matters: ``sessions_router``
-(/api/profiles/sessions*, projects/tree, pull-requests) was registered long
-before the generic ``/api/profiles/{name}`` routes on ``router``; the original
-global registration order is preserved rather than relying on Starlette's
-literal-before-param matching.
+Two routers because route order matters: ``sessions_router`` (/api/profiles/sessions*,
+projects/tree, pull-requests) was registered long before the generic
+``/api/profiles/{name}`` routes on ``router``; the original global registration order is
+preserved rather than relying on Starlette's literal-before-param matching.
 
-web_server-owned helpers are reached via the late-binding seam in
-:mod:`hermes_cli.web_deps` so tests that ``monkeypatch.setattr(web_server,
-"_helper", ...)`` keep working.
+web_server-owned helpers are reached via the late-binding seam in :mod:`hermes_cli.web_deps`
+so tests that ``monkeypatch.setattr(web_server, "_helper", ...)`` keep working.
 """
 
 import contextlib
@@ -24,32 +22,24 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
 
 from hermes_cli.web_deps import late
 from hermes_cli.web_models import (
-    ProfileCreate,
-    ProfileActiveUpdate,
-    ProfileExport,
-    ProfileImport,
-    ProfileRename,
-    ProfileSoulUpdate,
-    ProfileDescriptionUpdate,
-    ProfileModelUpdate,
-    ProfileDescribeAuto,
-    SessionPrScanBody,
-)
+    ProfileCreate, ProfileActiveUpdate, ProfileExport, ProfileImport, ProfileRename,
+    ProfileSoulUpdate, ProfileDescriptionUpdate, ProfileModelUpdate, ProfileDescribeAuto,
+    SessionPrScanBody)
+from hermes_cli.web_server_profiles import _hermes_home_scope
 
 # Same logger the handlers used before extraction (identical logger object).
 _log = logging.getLogger("hermes_cli.web_server")
 
-# Per-profile session reads report failures in the response's ``errors``
-# array, which the desktop sidebar does not surface — an empty sidebar can
-# look healthy while nothing logs. Warn once per (profile, message) per
-# process so a persistent failure is loud in errors.log without turning every
-# sidebar poll into log spam.
+# Per-profile session reads report failures in the response's ``errors`` array, which the
+# desktop sidebar does not surface — an empty sidebar can look healthy while nothing logs.
+# Warn once per (profile, message) per process so a persistent failure is loud in
+# errors.log without turning every sidebar poll into log spam.
 _profile_read_warned: set = set()
 
 
@@ -64,8 +54,7 @@ def _warn_profile_read_error(profile: str, exc: Exception) -> None:
 sessions_router = APIRouter()
 router = APIRouter()
 
-# Late-bound web_server helpers (resolved at call time; cycle-safe,
-# monkeypatch-transparent).
+# Late-bound web_server helpers (resolved at call time; cycle-safe, monkeypatch-transparent).
 _cron_profile_home = late("_cron_profile_home")
 _fallback_profile_dicts = late("_fallback_profile_dicts")
 _hub_action_name = late("_hub_action_name")
@@ -84,30 +73,24 @@ _normalize_main_model_assignment = late("_normalize_main_model_assignment")
 # ---------------------------------------------------------------------------
 
 
-def _profile_attr(info, name: str, default: Any = None) -> Any:
-    try:
-        return getattr(info, name)
-    except Exception:
-        return default
-
-
 def _profile_to_dict(info) -> Dict[str, Any]:
+    attr = functools.partial(getattr, info)
     return {
-        "name": _profile_attr(info, "name", ""),
-        "path": str(_profile_attr(info, "path", "")),
-        "is_default": bool(_profile_attr(info, "is_default", False)),
-        "model": _profile_attr(info, "model"),
-        "provider": _profile_attr(info, "provider"),
-        "has_env": bool(_profile_attr(info, "has_env", False)),
-        "skill_count": int(_profile_attr(info, "skill_count", 0) or 0),
-        "gateway_running": bool(_profile_attr(info, "gateway_running", False)),
-        "description": _profile_attr(info, "description", "") or "",
-        "description_auto": bool(_profile_attr(info, "description_auto", False)),
-        "display_name": _profile_attr(info, "display_name", "") or "",
-        "distribution_name": _profile_attr(info, "distribution_name"),
-        "distribution_version": _profile_attr(info, "distribution_version"),
-        "distribution_source": _profile_attr(info, "distribution_source"),
-        "has_alias": _profile_attr(info, "alias_path") is not None,
+        "name": attr("name", ""),
+        "path": str(attr("path", "")),
+        "is_default": bool(attr("is_default", False)),
+        "model": attr("model", None),
+        "provider": attr("provider", None),
+        "has_env": bool(attr("has_env", False)),
+        "skill_count": int(attr("skill_count", 0) or 0),
+        "gateway_running": bool(attr("gateway_running", False)),
+        "description": attr("description", "") or "",
+        "description_auto": bool(attr("description_auto", False)),
+        "display_name": attr("display_name", "") or "",
+        "distribution_name": attr("distribution_name", None),
+        "distribution_version": attr("distribution_version", None),
+        "distribution_source": attr("distribution_source", None),
+        "has_alias": attr("alias_path", None) is not None,
     }
 
 
@@ -118,67 +101,47 @@ def _profile_setup_command(name: str) -> str:
 
 
 def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
-    """Write the main model assignment into a specific profile's config.yaml.
-
-    Scopes ``load_config``/``save_config`` to ``profile_dir`` via the
-    context-local HERMES_HOME override so the write lands in the target
-    profile's config rather than the dashboard process's active profile.
-    Clears any stale ``base_url`` / ``context_length`` the same way
-    ``POST /api/model/set`` does, since the new model may differ.
-    """
+    """Write the main model assignment into ``profile_dir``'s config.yaml (HERMES_HOME-scoped,
+    so it lands in the target profile rather than the dashboard's active one). Clears stale
+    ``base_url`` / ``context_length`` the same way ``POST /api/model/set`` does."""
     from hermes_cli.web_server import load_config, save_config
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
-    token = set_hermes_home_override(str(profile_dir))
-    try:
+    with _hermes_home_scope(profile_dir):
         provider, model = _normalize_main_model_assignment(provider, model)
         cfg = load_config()
         cfg["model"] = _apply_main_model_assignment(cfg.get("model", {}), provider, model)
         save_config(cfg)
-    finally:
-        reset_hermes_home_override(token)
 
 
 def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
-    """Disable every installed skill in ``profile_dir`` not in ``keep``.
+    """Disable every installed skill in ``profile_dir`` not in ``keep``; returns how many
+    were newly disabled.
 
-    Profiles manage skill activation via a *disabled* list — all installed
-    skills are active by default and users opt out. The builder's skill step
-    uses "replace" semantics: the user picks exactly which seeded built-in /
-    optional skills stay active, and everything else gets added to the disabled
-    list. (Hub skills are installed separately via subprocess and are active on
-    install.) Scoped to the profile via the HERMES_HOME override. Returns the
-    number of skills newly disabled.
+    Profiles manage activation via a *disabled* list (everything installed is active by
+    default). The builder's skill step has "replace" semantics: the user picks exactly which
+    seeded skills stay active. Hub skills are installed separately via subprocess and are
+    active on install.
     """
     from hermes_cli.web_server import load_config
-    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     from hermes_cli.skills_config import get_disabled_skills, save_disabled_skills
 
     keep_set = {s.strip() for s in keep if s and s.strip()}
-    disabled_count = 0
-    token = set_hermes_home_override(str(profile_dir))
-    try:
-        installed: List[str] = []
+    with _hermes_home_scope(profile_dir):
         skills_root = profile_dir / "skills"
-        if skills_root.is_dir():
-            for md in skills_root.rglob("SKILL.md"):
-                installed.append(md.parent.name)
+        installed = [md.parent.name for md in skills_root.rglob("SKILL.md")] if skills_root.is_dir() else []
         cfg = load_config()
         disabled = get_disabled_skills(cfg)
+        newly = 0
         for name in installed:
             if name not in keep_set and name not in disabled:
                 disabled.add(name)
-                disabled_count += 1
-        if disabled_count:
+                newly += 1
+        if newly:
             save_disabled_skills(cfg, disabled)
-    finally:
-        reset_hermes_home_override(token)
-    return disabled_count
+    return newly
 
-# Returned by the offloaded file readers below to mean "the file is not there",
-# which a plain ``None`` cannot express: ``desktop.json`` may legitimately hold
-# the document ``null``, and that is an existing-but-empty overlay rather than
-# an absent one.
+# Returned by the offloaded file readers below to mean "the file is not there", which a plain
+# ``None`` cannot express: ``desktop.json`` may legitimately hold the document ``null``.
 _MISSING = object()
 
 
@@ -283,9 +246,27 @@ def _open_profile_db(name: str, home, errors: Optional[List[Dict[str, str]]]):
         return None
 
 
-# Bounded cache lifetime for the expensive sidebar scan. Short enough that the
-# UI never shows meaningfully stale data, long enough to coalesce the desktop's
-# reconnect/focus/change poll bursts into one scan.
+def _read_profile_db(name: str, home, errors: Optional[List[Dict[str, str]]],
+                     fn: Callable[[Any], Any]) -> Any:
+    """``fn(db)`` against the profile's read-only DB, or None when it can't be opened or
+    ``fn`` raises (warned once, recorded in ``errors`` when given). Always closes the DB."""
+    db = _open_profile_db(name, home, errors)
+    if db is None:
+        return None
+    try:
+        return fn(db)
+    except Exception as exc:
+        _warn_profile_read_error(name, exc)
+        if errors is not None:
+            errors.append({"profile": name, "error": str(exc)})
+        return None
+    finally:
+        db.close()
+
+
+# Bounded cache lifetime for the expensive sidebar scan. Short enough that the UI never shows
+# meaningfully stale data, long enough to coalesce the desktop's reconnect/focus/change poll
+# bursts into one scan.
 _SIDEBAR_CACHE_TTL_SECONDS = 5.0
 _SIDEBAR_CACHE_MAX_ENTRIES = 32
 _SIDEBAR_PROFILE_CACHE_MAX_ENTRIES = 256
@@ -320,8 +301,8 @@ def _sidebar_profile_cache_put(key, value):
     db_path, fingerprint = key[:2]
     snapshot = copy.deepcopy(value)
     with _SIDEBAR_PROFILE_CACHE_LOCK:
-        # A changed DB/WAL makes all older parameter variants for that profile
-        # obsolete. Remove them eagerly rather than waiting for LRU pressure.
+        # A changed DB/WAL obsoletes every older parameter variant for that profile; drop
+        # them eagerly rather than waiting for LRU pressure.
         for existing in [k for k in _SIDEBAR_PROFILE_CACHE
                          if k[0] == db_path and k[1] != fingerprint]:
             _SIDEBAR_PROFILE_CACHE.pop(existing, None)
@@ -339,12 +320,11 @@ def _sidebar_profile_cache_clear():
 def _sidebar_singleflight_cache(func):
     """Coalesce concurrent sidebar scans and briefly reuse their response.
 
-    Every uncached refresh opens every profile database and runs several
-    session queries per profile. Desktop reconnect/focus/change bursts overlap
-    identical scans in AnyIO worker threads, amplifying YAML/SQLite work and
-    starving the uvicorn event loop for the GIL. The short TTL bounds UI
-    staleness; the single-flight lock guarantees one expensive scan at a time.
-    Cached values are copied on store and hit so FastAPI serialization or a
+    Every uncached refresh opens every profile database and runs several session queries
+    per profile. Desktop reconnect/focus/change bursts overlap identical scans in AnyIO
+    worker threads, amplifying YAML/SQLite work and starving the uvicorn loop for the GIL.
+    The short TTL bounds UI staleness; the single-flight lock guarantees one expensive scan
+    at a time. Cached values are copied on store and hit so FastAPI serialization or a
     caller cannot mutate shared state.
     """
     signature = inspect.signature(func)
@@ -382,16 +362,16 @@ def _sidebar_singleflight_cache(func):
         if cached is not miss:
             return cached
 
-        # A plain Lock is intentional: FastAPI executes this sync handler in
-        # the AnyIO worker pool, so contenders sleep without holding the GIL.
+        # A plain Lock is intentional: FastAPI executes this sync handler in the AnyIO
+        # worker pool, so contenders sleep without holding the GIL.
         with refresh_lock:
             cached = _lookup(key)
             if cached is not miss:
                 return cached
             result = func(*args, **kwargs)
-            # A 200 carrying errors[] is a FAILED profile scan, not a successful
-            # empty page. Caching it would hold the empty recents in front of a
-            # store that has already recovered, for the whole TTL.
+            # A 200 carrying errors[] is a FAILED profile scan, not a successful empty page.
+            # Caching it would hold the empty recents in front of a store that has already
+            # recovered, for the whole TTL.
             if isinstance(result, dict) and result.get("errors"):
                 return result
             try:
@@ -414,12 +394,16 @@ def _sidebar_singleflight_cache(func):
     return wrapped
 
 
+def _csv_list(value: Optional[str]) -> List[str]:
+    return [s.strip() for s in (value or "").split(",") if s.strip()]
+
+
 @sessions_router.get("/api/profiles/sessions")
 def get_profiles_sessions(
-    # ``le=500`` caps the per-request page size — this endpoint fans out across
-    # EVERY profile's state.db, so an unbounded limit multiplies the damage.
-    # 500 (not 100) because real desktop callers use limit=200 and the electron
-    # remote-merge over-fetches ``limit + offset``.
+    # ``le=500`` caps the per-request page size — this endpoint fans out across EVERY
+    # profile's state.db, so an unbounded limit multiplies the damage. 500 (not 100) because
+    # real desktop callers use limit=200 and the electron remote-merge over-fetches
+    # ``limit + offset``.
     limit: int = Query(20, ge=0, le=500),
     offset: int = Query(0, ge=0),
     min_messages: int = 0,
@@ -433,11 +417,10 @@ def get_profiles_sessions(
 ):
     """Unified, read-only session list aggregated across ALL profiles.
 
-    Process-light: opens each profile's ``state.db`` directly from disk — it
-    does NOT spawn a dashboard backend per profile. Each row is tagged with its
-    owning ``profile`` so the desktop renders one list and only spins up a
-    backend when the user interacts. Rows omit ``system_prompt`` /
-    ``model_config`` unless ``full=1`` — same projection as ``/api/sessions``.
+    Process-light: opens each profile's ``state.db`` directly from disk — it does NOT spawn
+    a dashboard backend per profile. Each row is tagged with its owning ``profile`` so the
+    desktop renders one list and only spins up a backend when the user interacts. Rows omit
+    ``system_prompt`` / ``model_config`` unless ``full=1`` — same projection as ``/api/sessions``.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
@@ -449,52 +432,42 @@ def get_profiles_sessions(
     else:
         targets = _profile_targets("GET /api/profiles/sessions", lightweight=True)
 
-    # Source scoping (see /api/sessions): recents pass exclude_sources=cron,
-    # the cron-jobs section passes source=cron — two independent lists so
-    # newest cron sessions can't starve the recents page.
+    # Source scoping (see /api/sessions): recents pass exclude_sources=cron, the cron-jobs
+    # section passes source=cron — two independent lists so newest cron sessions can't
+    # starve the recents page.
     filters = dict(
         source=source or None,
-        sources=[s.strip() for s in (sources or "").split(",") if s.strip()] or None,
-        exclude_sources=[s.strip() for s in (exclude_sources or "").split(",") if s.strip()] or None,
+        sources=_csv_list(sources) or None,
+        exclude_sources=_csv_list(exclude_sources) or None,
         min_message_count=max(0, min_messages),
         include_archived=archived == "include",
         archived_only=archived == "only",
     )
-    # Over-fetch per profile so the merged+sorted window is correct for the
-    # requested page. Capped so a huge profile can't blow up the response.
+    # Over-fetch per profile so the merged+sorted window is correct for the requested page.
+    # Capped so a huge profile can't blow up the response.
     per_profile = min(max(limit + offset, limit), 500)
 
     merged: List[Dict[str, Any]] = []
-    total = 0
-    profile_totals: Dict[str, int] = {}
+    totals: Dict[str, int] = {}
     errors: List[Dict[str, str]] = []
     now = time.time()
     for name, home in targets:
-        db = _open_profile_db(name, home, errors)
-        if db is None:
-            continue
-        try:
+        def _read(db, name=name):
             rows = db.list_sessions_rich(
                 limit=per_profile, offset=0, order_by_last_active=order == "recent",
                 # Same SQL-level blob skip as /api/sessions.
                 compact_rows=not full, include_pinned=True, **filters,
             )
-            profile_total = db.session_count(exclude_children=True, **filters)
-            total += profile_total
-            profile_totals[name] = profile_total
+            totals[name] = db.session_count(exclude_children=True, **filters)
             merged.extend(_tag_rows(rows, name, now))
-        except Exception as exc:
-            _warn_profile_read_error(name, exc)
-            errors.append({"profile": name, "error": str(exc)})
-        finally:
-            db.close()
+        _read_profile_db(name, home, errors, _read)
 
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
     window = _pinned_window(merged, offset, limit)
     if not full:
         _strip_session_list_rows(window)
-    return {"sessions": window, "total": total, "profile_totals": profile_totals,
+    return {"sessions": window, "total": sum(totals.values()), "profile_totals": totals,
             "limit": limit, "offset": offset, "errors": errors}
 
 
@@ -510,19 +483,16 @@ def get_profiles_sessions_sidebar(
 ):
     """Batched sidebar session slices — one profile-DB open per refresh.
 
-    The desktop sidebar needs three source-scoped windows per refresh: recents
-    (local chats), cron sessions, and messaging-platform sessions. Served as
-    three ``/api/profiles/sessions`` calls they reopened every profile's DB
-    three times; this opens each once and runs the three queries together.
-    Same row projection and 300s active heuristic as the per-slice endpoint.
+    The desktop sidebar needs three source-scoped windows per refresh: recents (local
+    chats), cron sessions, and messaging-platform sessions. Served as three
+    ``/api/profiles/sessions`` calls they reopened every profile's DB three times; this
+    opens each once. Same row projection and 300s active heuristic as the per-slice endpoint.
 
-    ``recents_profile`` scopes the WHOLE payload, not just recents — the
-    sidebar has one scope, so a concrete profile must never show another
-    profile's Telegram threads or cronjobs; ``all`` asks for everything.
-
-    The caller passes the source taxonomy (``recents_exclude`` /
-    ``messaging_exclude`` CSV, ``source=cron`` is implicit). All slices use
-    ``min_messages=1`` / ``archived=exclude`` / recency order.
+    ``recents_profile`` scopes the WHOLE payload, not just recents — the sidebar has one
+    scope, so a concrete profile must never show another profile's Telegram threads or
+    cronjobs; ``all`` asks for everything. The caller passes the source taxonomy
+    (``recents_exclude`` / ``messaging_exclude`` CSV, ``source=cron`` is implicit). All
+    slices use ``min_messages=1`` / ``archived=exclude`` / recency order.
     """
     targets = _profile_targets("GET /api/profiles/sessions/sidebar", lightweight=True)
 
@@ -543,13 +513,25 @@ def get_profiles_sessions_sidebar(
     now = time.time()
 
     def _slice(db, *, source=None, exclude=None, cap):
-        # include_pinned: a pinned conversation must reach the sidebar even
-        # when it has aged past the window, or its Pinned row renders empty.
+        # include_pinned: a pinned conversation must reach the sidebar even when it has aged
+        # past the window, or its Pinned row renders empty.
         return db.list_sessions_rich(
             source=source, exclude_sources=exclude or None, limit=cap, offset=0,
             min_message_count=1, include_archived=False, archived_only=False,
             order_by_last_active=True, compact_rows=True, include_pinned=True,
         )
+
+    def _build_slices(db, cache_key):
+        slices = {
+            "recents": _slice(db, exclude=recents_exclude_list, cap=recents_cap),
+            # Aggregated in SQL rather than over the recents window: the window is a page,
+            # and a total that shrank when you scrolled would be worse than no total at all.
+            "usage": db.usage_totals(),
+            "cron": _slice(db, source="cron", cap=cron_cap),
+            "messaging": _slice(db, exclude=messaging_exclude_list, cap=messaging_cap),
+        }
+        _sidebar_profile_cache_put(cache_key, slices)
+        return slices
 
     for name, home in targets:
         if recents_scope != "all" and name != recents_scope:
@@ -562,31 +544,15 @@ def get_profiles_sessions_sidebar(
                              tuple(messaging_exclude_list))
         slices = _sidebar_profile_cache_get(profile_cache_key)
         if slices is None:
-            db = _open_profile_db(name, home, errors)
-            if db is None:
+            slices = _read_profile_db(name, home, errors,
+                                      lambda db: _build_slices(db, profile_cache_key))
+            if slices is None:
                 continue
-            try:
-                slices = {
-                    "recents": _slice(db, exclude=recents_exclude_list, cap=recents_cap),
-                    # Aggregated in SQL rather than over the recents window: the
-                    # window is a page, and a total that shrank when you scrolled
-                    # would be worse than no total at all.
-                    "usage": db.usage_totals(),
-                    "cron": _slice(db, source="cron", cap=cron_cap),
-                    "messaging": _slice(db, exclude=messaging_exclude_list, cap=messaging_cap),
-                }
-                _sidebar_profile_cache_put(profile_cache_key, slices)
-            except Exception as exc:
-                _warn_profile_read_error(name, exc)
-                errors.append({"profile": name, "error": str(exc)})
-                continue
-            finally:
-                db.close()
 
         profile_rows = slices["recents"]
-        # A full window means more rows remain on disk — all "load more" needs,
-        # at no cost beyond the rows already read. Discount pinned back-fills:
-        # they arrive past the LIMIT and would fake a full page on a short list.
+        # A full window means more rows remain on disk — all "load more" needs, at no cost
+        # beyond the rows already read. Discount pinned back-fills: they arrive past the
+        # LIMIT and would fake a full page on a short list.
         unpinned_count = sum(1 for s in profile_rows if not s.get("pinned"))
         recents_truncated[name] = unpinned_count >= recents_cap
         recents_rows.extend(_tag_rows(profile_rows, name, now))
@@ -612,9 +578,9 @@ def get_profiles_sessions_sidebar(
 def _merge_by_id(into: Dict[str, Dict[str, Any]], entries: List[Dict[str, Any]], child_key: str) -> None:
     """Fold ``entries`` into ``into`` by id, recursing through one child list.
 
-    Repos merge their lanes, lanes merge their sessions. Counts add up and the
-    newest activity wins; everything else is first-writer, since the entries
-    describe the same path either way.
+    Repos merge their lanes, lanes merge their sessions. Counts add up and the newest
+    activity wins; everything else is first-writer, since the entries describe the same
+    path either way.
     """
     for entry in entries:
         existing = into.get(entry["id"])
@@ -639,12 +605,11 @@ def _merge_profile_tree(
 ) -> None:
     """Fold one profile's projects into the shared tree, keyed by folder.
 
-    The same checkout in two profiles is one group, as is ``__no_project__``
-    (every profile has one, which would otherwise put a "Home" on screen per
-    profile). Keying on the path also folds a declared project (``p_<hash>``)
-    with the auto entry another profile grows for the same folder. Sessions
-    carry the owning profile — the row badge and profile filter read that; a
-    group header never claims a single owner.
+    The same checkout in two profiles is one group, as is ``__no_project__`` (every profile
+    has one, which would otherwise put a "Home" on screen per profile). Keying on the path
+    also folds a declared project (``p_<hash>``) with the auto entry another profile grows
+    for the same folder. Sessions carry the owning profile — the row badge and profile
+    filter read that; a group header never claims a single owner.
     """
     for project in projects:
         lane_sessions = (s for r in project.get("repos") or []
@@ -660,8 +625,8 @@ def _merge_profile_tree(
             merged[key] = project
             continue
 
-        # A declared project carries the label, color and icon the user chose,
-        # so it wins the identity when it meets another profile's auto entry.
+        # A declared project carries the label, color and icon the user chose, so it wins
+        # the identity when it meets another profile's auto entry.
         if existing.get("isAuto") and not project.get("isAuto"):
             existing, project = project, existing
             merged[key] = existing
@@ -681,19 +646,17 @@ def _merge_profile_tree(
 def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000):
     """Project tree for every profile at once, for the all-profiles sidebar.
 
-    ``projects.tree`` over JSON-RPC answers for the backend's own profile only.
-    This runs the same authoritative builder once per profile against that
-    profile's ``state.db``, scoping its other inputs (projects.db, repo-scan
-    policy, HERMES_HOME junk filters) through the context-local home override.
-    Projects merge across profiles so a group stands for a checkout rather than
-    a checkout-and-owner; the profile shows up per row for the filter.
+    ``projects.tree`` over JSON-RPC answers for the backend's own profile only. This runs
+    the same authoritative builder once per profile against that profile's ``state.db``,
+    scoping its other inputs (projects.db, repo-scan policy, HERMES_HOME junk filters)
+    through the context-local home override. Projects merge across profiles so a group
+    stands for a checkout rather than a checkout-and-owner.
 
-    Discovery is off: a repo with zero sessions is the same repo in every
-    profile (the disk scan would multiply empty lanes by the profile count),
-    and it is the one part of the builder that writes (policy reconciliation),
-    which this read-only fan-out must not do to a profile the user isn't driving.
+    Discovery is off: a repo with zero sessions is the same repo in every profile (the disk
+    scan would multiply empty lanes by the profile count), and it is the one part of the
+    builder that writes (policy reconciliation), which this read-only fan-out must not do
+    to a profile the user isn't driving.
     """
-    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tui_gateway import server as gateway_server
 
     merged: Dict[str, Dict[str, Any]] = {}
@@ -701,35 +664,26 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
     errors: List[Dict[str, str]] = []
 
     for name, home in _profile_targets("GET /api/profiles/projects/tree", lightweight=False):
-        db = _open_profile_db(name, home, errors)
-        if db is None:
-            continue
-        token = set_hermes_home_override(str(home))
-        try:
-            tree, _active_id = gateway_server._build_project_tree(
-                db, preview_limit=preview_limit, hydrate=False,
-                session_limit=session_limit, include_discovered=False)
-            _merge_profile_tree(merged, tree["projects"], name, preview_limit)
-            scoped_session_ids.extend(tree["scoped_session_ids"])
-        except Exception as exc:
-            _warn_profile_read_error(name, exc)
-            errors.append({"profile": name, "error": str(exc)})
-        finally:
-            reset_hermes_home_override(token)
-            db.close()
+        def _read(db, name=name, home=home):
+            with _hermes_home_scope(home):
+                tree, _active_id = gateway_server._build_project_tree(
+                    db, preview_limit=preview_limit, hydrate=False,
+                    session_limit=session_limit, include_discovered=False)
+                _merge_profile_tree(merged, tree["projects"], name, preview_limit)
+                scoped_session_ids.extend(tree["scoped_session_ids"])
+        _read_profile_db(name, home, errors, _read)
 
     return {
         "projects": sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True),
-        # Ownership is per profile, so no project is "the active one" here; the
-        # desktop only reads active_id to bias its overview sort.
+        # Ownership is per profile, so no project is "the active one" here; the desktop only
+        # reads active_id to bias its overview sort.
         "active_id": None, "scoped_session_ids": scoped_session_ids, "errors": errors,
     }
 
 
-# `gh pr create` prints the PR url and nothing else, so a tool result whose
-# whole output IS a PR url means this session opened that PR. Anything looser —
-# a url inside prose, a `gh pr view` payload, an issue link — is a session
-# TALKING about a PR, which is not the same claim.
+# `gh pr create` prints the PR url and nothing else, so a tool result whose whole output IS
+# a PR url means this session opened that PR. Anything looser — a url inside prose, a
+# `gh pr view` payload, an issue link — is a session TALKING about a PR, not the same claim.
 _PR_URL_RE = re.compile(r"^https://github\.com/[\w.-]+/[\w.-]+/pull/(\d+)/?$")
 
 
@@ -749,37 +703,31 @@ def _pr_url_from_tool_output(content: str) -> Optional[Tuple[int, str]]:
 def post_profiles_sessions_pull_requests(body: SessionPrScanBody):
     """The PR each of these sessions opened, recovered from its own transcript.
 
-    A session records the branch it started on, but one that starts in the main
-    checkout and works in a worktree has no branch of its own, so its PR is
-    invisible to that join. The evidence is in the conversation: ``gh pr
-    create`` ran and its output is a bare PR url (see
-    ``_pr_url_from_tool_output``). Read-only across every profile; the caller
-    asks once per session and remembers the answer.
+    A session records the branch it started on, but one that starts in the main checkout
+    and works in a worktree has no branch of its own, so its PR is invisible to that join.
+    The evidence is in the conversation: ``gh pr create`` ran and its output is a bare PR
+    url (see ``_pr_url_from_tool_output``). Read-only across every profile; the caller asks
+    once per session and remembers the answer.
     """
     wanted = list(dict.fromkeys(s for s in (body.ids or []) if s))[:2000]
     if not wanted:
         return {"pull_requests": {}, "scanned": []}
 
     found: Dict[str, Dict[str, Any]] = {}
-    for name, home in _profile_targets("POST /api/profiles/sessions/pull-requests", lightweight=False):
-        db = _open_profile_db(name, home, None)
-        if db is None:
-            continue
-        try:
-            for pr in db.find_pr_url_messages(wanted):
-                parsed = _pr_url_from_tool_output(pr["content"])
-                if parsed:
-                    # Ordered oldest-first, so a later `gh pr create` in the same
-                    # conversation wins — the replacement PR is the one the
-                    # session ended on.
-                    found[pr["session_id"]] = {"number": parsed[0], "url": parsed[1]}
-        except Exception as exc:
-            _warn_profile_read_error(name, exc)
-        finally:
-            db.close()
 
-    # Every id we looked at, so the caller can remember "asked, nothing there"
-    # and never scan this session again.
+    def _read(db):
+        for pr in db.find_pr_url_messages(wanted):
+            parsed = _pr_url_from_tool_output(pr["content"])
+            if parsed:
+                # Ordered oldest-first, so a later `gh pr create` in the same conversation
+                # wins — the replacement PR is the one the session ended on.
+                found[pr["session_id"]] = {"number": parsed[0], "url": parsed[1]}
+
+    for name, home in _profile_targets("POST /api/profiles/sessions/pull-requests", lightweight=False):
+        _read_profile_db(name, home, None, _read)
+
+    # Every id we looked at, so the caller can remember "asked, nothing there" and never
+    # scan this session again.
     return {"pull_requests": found, "scanned": wanted}
 
 
@@ -799,12 +747,12 @@ async def create_profile_endpoint(body: ProfileCreate):
     from hermes_cli import profiles as profiles_mod
     explicit_source = (body.clone_from or "").strip()
     if explicit_source:
-        # Duplicating a specific profile: clone its config/skills/SOUL (or full
-        # state when clone_all) from the named source rather than "default".
+        # Duplicating a specific profile: clone its config/skills/SOUL (or full state when
+        # clone_all) from the named source rather than "default".
         clone, clone_from, clone_config = True, explicit_source, not body.clone_all
     elif body.clone_all:
-        # Historical dashboard clone-all behavior: a full-copy request with no
-        # explicit dropdown source copies from default.
+        # Historical dashboard clone-all behavior: a full-copy request with no explicit
+        # dropdown source copies from default.
         clone, clone_from, clone_config = True, "default", False
     else:
         clone = body.clone_from_default
@@ -815,20 +763,19 @@ async def create_profile_endpoint(body: ProfileCreate):
         path = profiles_mod.create_profile(
             name=body.name, clone_from=clone_from, clone_all=body.clone_all,
             clone_config=clone_config, no_skills=body.no_skills, description=body.description)
-        # Match the CLI's profile-create flow: fresh named profiles get the
-        # bundled skills. Cloning already copied the source's skills (incl.
-        # user-installed); no_skills wrote the opt-out marker so seeding no-ops.
+        # Match the CLI's profile-create flow: fresh named profiles get the bundled skills.
+        # Cloning already copied the source's skills (incl. user-installed); no_skills wrote
+        # the opt-out marker so seeding no-ops.
         if not clone:
             profiles_mod.seed_profile_skills(path, quiet=True)
 
-        # Match the CLI: named profiles get a ~/.local/bin wrapper when the
-        # alias is safe to create.
+        # Match the CLI: named profiles get a ~/.local/bin wrapper when the alias is safe.
         if not profiles_mod.check_alias_collision(body.name):
             profiles_mod.create_wrapper_script(body.name)
 
-    # Everything below is best-effort: the profile already exists, so a hiccup
-    # must not 500 the whole create — the user can fix it from the relevant
-    # dashboard page or `<profile> setup` afterward.
+    # Everything below is best-effort: the profile already exists, so a hiccup must not 500
+    # the whole create — the user can fix it from the relevant dashboard page or
+    # `<profile> setup` afterward.
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()
     model_set = bool(provider and model) and _best_effort(
@@ -838,16 +785,16 @@ async def create_profile_endpoint(body: ProfileCreate):
         "Writing MCP servers for new profile %s failed", body.name,
         fn=lambda: _write_profile_mcp_servers(path, body.mcp_servers), default=0
     ) if body.mcp_servers else 0
-    # "keep" skill selection has replace semantics: disable every seeded skill
-    # not in the list. Skipped when empty (legacy: keep the bundle).
+    # "keep" skill selection has replace semantics: disable every seeded skill not in the
+    # list. Skipped when empty (legacy: keep the bundle).
     skills_disabled = _best_effort(
         "Applying skill selection for new profile %s failed", body.name,
         fn=lambda: _disable_unselected_skills(path, body.keep_skills), default=0
     ) if body.keep_skills else 0
 
-    # Skills-hub installs are spawned async, scoped to the new profile via
-    # `-p <name>` (a fresh subprocess re-binds skills_hub.SKILLS_DIR to the
-    # profile's HERMES_HOME at import). PIDs go back for the UI to poll.
+    # Skills-hub installs are spawned async, scoped to the new profile via `-p <name>` (a
+    # fresh subprocess re-binds skills_hub.SKILLS_DIR to the profile's HERMES_HOME at
+    # import). PIDs go back for the UI to poll.
     def _spawn_install(ident: str):
         return _spawn_hermes_action(["-p", body.name, "skills", "install", ident, "--yes"],
                                     _hub_action_name("install", ident)).pid
@@ -866,38 +813,34 @@ async def create_profile_endpoint(body: ProfileCreate):
 
 @router.get("/api/profiles/active")
 async def get_active_profile_endpoint():
-    """``active`` is the sticky default written by ``hermes profile use`` (what
-    new CLI invocations pick up); ``current`` is the profile this running
-    dashboard/gateway is scoped to (derived from HERMES_HOME)."""
+    """``active`` is the sticky default written by ``hermes profile use`` (what new CLI
+    invocations pick up); ``current`` is the profile this running dashboard/gateway is
+    scoped to (derived from HERMES_HOME)."""
     from hermes_cli import profiles as profiles_mod
 
     def _run():
-        # Both reads touch the filesystem: get_active_profile() reads the
-        # active_profile state file and get_active_profile_name() resolves
-        # HERMES_HOME against the profiles root. Batched into one hop so the
-        # sidebar's polling costs a single executor round-trip, not two.
-        try:
-            active = profiles_mod.get_active_profile() or "default"
-        except Exception:
-            active = "default"
-        try:
-            current = profiles_mod.get_active_profile_name() or "default"
-        except Exception:
-            current = "default"
-        return {"active": active, "current": current}
+        # Both reads touch the filesystem; batched into one hop so the sidebar's polling
+        # costs a single executor round-trip, not two.
+        def _or_default(fn):
+            try:
+                return fn() or "default"
+            except Exception:
+                return "default"
+        return {"active": _or_default(profiles_mod.get_active_profile),
+                "current": _or_default(profiles_mod.get_active_profile_name)}
 
     return await run_in_threadpool(_run)
 
 
 @router.post("/api/profiles/active")
 async def set_active_profile_endpoint(body: ProfileActiveUpdate):
-    """Set the sticky active profile (mirrors ``hermes profile use``). Does not
-    retarget the already-running dashboard — it changes which profile
-    subsequent CLI commands and gateways use."""
+    """Set the sticky active profile (mirrors ``hermes profile use``). Does not retarget the
+    already-running dashboard — it changes which profile subsequent CLI commands and
+    gateways use."""
     from hermes_cli import profiles as profiles_mod
     with _profile_errors("POST /api/profiles/active failed"):
-        # set_active_profile() stats the target profile, creates the state
-        # directory and writes active_profile through a temp file + replace.
+        # set_active_profile() stats the target, creates the state directory and writes
+        # active_profile through a temp file + replace.
         await run_in_threadpool(profiles_mod.set_active_profile, body.name)
     return {"ok": True, "active": profiles_mod.normalize_profile_name(body.name)}
 
@@ -907,20 +850,21 @@ async def get_profile_setup_command(name: str):
     return {"command": _profile_setup_command(name)}
 
 
+# (executable, flag) — a flag of None means the emulator takes one quoted `sh -lc '…'` string
+# after -e; "" means the argv follows the executable directly (kitty).
+_LINUX_TERMINALS = (
+    ("x-terminal-emulator", "-e"), ("gnome-terminal", "--"), ("konsole", "-e"),
+    ("xfce4-terminal", None), ("mate-terminal", None), ("lxterminal", None),
+    ("tilix", "-e"), ("alacritty", "-e"), ("kitty", ""), ("xterm", "-e"),
+)
+
+
 def _linux_terminal_commands(command: str) -> list:
     sh = ["sh", "-lc", command]
     quoted = f"sh -lc '{command}'"
     return [
-        ("x-terminal-emulator", ["x-terminal-emulator", "-e", *sh]),
-        ("gnome-terminal", ["gnome-terminal", "--", *sh]),
-        ("konsole", ["konsole", "-e", *sh]),
-        ("xfce4-terminal", ["xfce4-terminal", "-e", quoted]),
-        ("mate-terminal", ["mate-terminal", "-e", quoted]),
-        ("lxterminal", ["lxterminal", "-e", quoted]),
-        ("tilix", ["tilix", "-e", *sh]),
-        ("alacritty", ["alacritty", "-e", *sh]),
-        ("kitty", ["kitty", *sh]),
-        ("xterm", ["xterm", "-e", *sh]),
+        (exe, [exe, "-e", quoted] if flag is None else [exe, *([flag] if flag else []), *sh])
+        for exe, flag in _LINUX_TERMINALS
     ]
 
 
@@ -951,14 +895,13 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
     from hermes_cli import profiles as profiles_mod
     with _profile_errors("PATCH /api/profiles/%s failed", name,
                          bad_request=(ValueError, FileExistsError)):
-        # rename_profile() stops a running gateway through the same 10-second
-        # _stop_gateway_process() poll that delete does, then renames the
-        # profile directory, rewrites the Honcho host blocks and regenerates
-        # the wrapper script.
+        # rename_profile() stops a running gateway through the same 10-second poll that
+        # delete does, then renames the directory, rewrites the Honcho host blocks and
+        # regenerates the wrapper script.
         path = await run_in_threadpool(profiles_mod.rename_profile, name, body.new_name)
-    # For the default profile the rename lands as a presentation-only
-    # display_name; the canonical id ("default") is unchanged. Always return
-    # the canonical id so callers keying on `name` stay correct.
+    # For the default profile the rename lands as a presentation-only display_name; the
+    # canonical id ("default") is unchanged and always returned so callers keying on `name`
+    # stay correct.
     try:
         is_default = profiles_mod.normalize_profile_name(name) == "default"
     except ValueError:
@@ -970,13 +913,12 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
 
 @router.delete("/api/profiles/{name}")
 async def delete_profile_endpoint(name: str):
-    """The dashboard collects the user's confirmation in its own dialog, so
-    ``yes=True`` always skips the CLI's interactive prompt."""
+    """The dashboard collects the user's confirmation in its own dialog, so ``yes=True``
+    always skips the CLI's interactive prompt."""
     from hermes_cli import profiles as profiles_mod
     with _profile_errors("DELETE /api/profiles/%s failed", name):
-        # delete_profile() stops a running gateway by polling its PID once
-        # every 500 ms for up to 10 s, then rmtree()s the profile directory;
-        # on the loop that parks every request past the desktop's 10 s
+        # delete_profile() polls a running gateway's PID for up to 10 s, then rmtree()s the
+        # directory; on the loop that parks every request past the desktop's 10 s
         # WebSocket ready-probe.
         path = await run_in_threadpool(profiles_mod.delete_profile, name, yes=True)
     return {"ok": True, "path": str(path)}
@@ -987,8 +929,8 @@ async def get_profile_soul(name: str):
     soul_path = _resolve_profile_dir(name) / "SOUL.md"
 
     def _run():
-        # Probe and read in the same hop: two round-trips would also widen the
-        # window between the existence check and the read.
+        # Probe and read in the same hop: two round-trips would also widen the window
+        # between the existence check and the read.
         if not soul_path.exists():
             return _MISSING
         return soul_path.read_text(encoding="utf-8")
@@ -1009,22 +951,19 @@ async def update_profile_soul(name: str, body: ProfileSoulUpdate):
     def _run():
         from utils import atomic_write_text
 
-        # PUT replaces the whole persona document. A bare write_text() truncates
-        # SOUL.md before the new body lands, and the paired GET reports an
-        # unreadable file as ``{"content": "", "exists": False}`` — so an
-        # interrupted save reads as "never set" and the editor's next Save
-        # persists that empty document over it.
+        # PUT replaces the whole persona document. A bare write_text() truncates SOUL.md
+        # before the new body lands, and the paired GET reports an unreadable file as
+        # ``{"content": "", "exists": False}`` — so an interrupted save reads as "never set"
+        # and the editor's next Save persists that empty document over it.
         #
-        # preserve_mode keeps an existing file's mode/owner across the replace.
-        # create_mode=0o644 covers the first save: named profiles seed SOUL.md
-        # at the umask default (profiles chmods only .env to 0600) and SOUL.md
-        # is not a secret. (The default profile's seeder runs on every
-        # load_config, so its file already exists and preserve_mode applies.)
+        # preserve_mode keeps an existing file's mode/owner across the replace. create_mode
+        # 0o644 covers the first save: named profiles seed SOUL.md at the umask default
+        # (profiles chmods only .env to 0600) and SOUL.md is not a secret.
         atomic_write_text(soul_path, body.content, preserve_mode=True, create_mode=0o644)
 
     try:
-        # atomic_write_text() writes a temp file, fsyncs it and replaces the
-        # original — blocking for as long as the filesystem takes to commit.
+        # atomic_write_text() writes a temp file, fsyncs and replaces — blocking for as long
+        # as the filesystem takes to commit.
         await run_in_threadpool(_run)
     except OSError as e:
         _log.exception("PUT /api/profiles/%s/soul failed", name)
@@ -1034,9 +973,9 @@ async def update_profile_soul(name: str, body: ProfileSoulUpdate):
 
 @router.put("/api/profiles/{name}/description")
 async def update_profile_description_endpoint(name: str, body: ProfileDescriptionUpdate):
-    """Set or clear a profile's role description (kanban routing signal).
-    Non-empty stores it as user-authored (``description_auto: false``) so the
-    auto-describer won't overwrite it on a sweep."""
+    """Set or clear a profile's role description (kanban routing signal). Non-empty stores
+    it as user-authored (``description_auto: false``) so the auto-describer won't overwrite
+    it on a sweep."""
     from hermes_cli import profiles as profiles_mod
     profile_dir = _resolve_profile_dir(name)
     text = (body.description or "").strip()
@@ -1050,10 +989,9 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
 
 @router.put("/api/profiles/{name}/model")
 async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
-    """Set the main model (``model.default`` + ``model.provider``) for a
-    specific profile's config.yaml without touching the dashboard's own
-    active profile. Mirrors ``POST /api/model/set`` (main scope) scoped to
-    the named profile via the HERMES_HOME override."""
+    """Set the main model (``model.default`` + ``model.provider``) for a specific profile's
+    config.yaml without touching the dashboard's own active profile. Mirrors
+    ``POST /api/model/set`` (main scope) via the HERMES_HOME override."""
     profile_dir = _resolve_profile_dir(name)
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()
@@ -1061,7 +999,6 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
         raise HTTPException(status_code=400, detail="provider and model are required")
     with _profile_errors("PUT /api/profiles/%s/model failed", name,
                          not_found=(), bad_request=()):
-        # _write_profile_model() reads and rewrites the profile's config.yaml.
         await run_in_threadpool(_write_profile_model, profile_dir, provider, model)
     return {"ok": True, "provider": provider, "model": model}
 
@@ -1069,12 +1006,11 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
 @router.post("/api/profiles/{name}/describe-auto")
 async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
     """Auto-generate a profile's description via the auxiliary LLM
-    (``auxiliary.profile_describer``); mirrors ``hermes profile describe
-    <name> --auto``. A failed generation (no aux client, LLM error, …) is
-    ``ok: false`` with a reason rather than an HTTP error so the UI can
-    surface it inline and let the operator fix config and retry."""
-    # Resolution stays on the loop: a name check plus one stat, and it owns
-    # the 400/404 mapping that the 500 fallback below would flatten.
+    (``auxiliary.profile_describer``); mirrors ``hermes profile describe <name> --auto``.
+    A failed generation (no aux client, LLM error, …) is ``ok: false`` with a reason rather
+    than an HTTP error so the UI can surface it inline and let the operator retry."""
+    # Resolution stays on the loop: a name check plus one stat, and it owns the 400/404
+    # mapping that the 500 fallback below would flatten.
     _resolve_profile_dir(name)
 
     def _run():
@@ -1083,25 +1019,23 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
 
     with _profile_errors("POST /api/profiles/%s/describe-auto failed", name,
                          not_found=(), bad_request=()):
-        # describe_profile() is a synchronous LLM round-trip with a 60 s
-        # ceiling; held on the loop it stalls every other dashboard request.
+        # describe_profile() is a synchronous LLM round-trip with a 60 s ceiling; held on
+        # the loop it stalls every other dashboard request.
         outcome = await run_in_threadpool(_run)
     return {
         "ok": bool(outcome.ok),
         "reason": outcome.reason,
         "description": outcome.description,
-        # Only a successful generation is an auto-authored description. A failed
-        # sweep leaves any existing description untouched, so don't claim it's
-        # auto-generated.
+        # Only a successful generation is an auto-authored description. A failed sweep
+        # leaves any existing description untouched, so don't claim it's auto-generated.
         "description_auto": bool(outcome.ok),
     }
 
 
 # ── Export / Import ──────────────────────────────────────────────────────────
-# Profile sharing for the desktop: wraps hermes_cli.profiles.export_profile /
-# import_profile (the same machinery behind `hermes profile export|import`).
-# Paths are exchanged, not bytes — the desktop's local and pooled backends
-# share the filesystem with the native save/open dialogs that produce them.
+# Profile sharing for the desktop: wraps hermes_cli.profiles.export_profile / import_profile
+# (the machinery behind `hermes profile export|import`). Paths are exchanged, not bytes —
+# the desktop's local and pooled backends share the filesystem with the native dialogs.
 
 
 def _read_desktop_overlay(profile_dir: Path) -> Any:
@@ -1150,9 +1084,8 @@ async def import_profile_endpoint(body: ProfileImport):
             profiles_mod.create_wrapper_script(imported)
     _best_effort("Creating wrapper for imported profile %s failed", imported, fn=_wrapper)
 
-    # Surface the bundled desktop appearance overlay (if the archive carried
-    # one) so the desktop can apply theme/interface prefs without another
-    # round-trip.
+    # Surface the bundled desktop appearance overlay (if the archive carried one) so the
+    # desktop can apply theme/interface prefs without another round-trip.
     desktop_overlay = None
     if (profile_dir / "desktop.json").is_file():
         desktop_overlay = _best_effort(
@@ -1163,13 +1096,13 @@ async def import_profile_endpoint(body: ProfileImport):
 
 @router.get("/api/profiles/{name}/desktop-overlay")
 async def get_profile_desktop_overlay(name: str):
-    """The desktop appearance/interface overlay bundled with an imported
-    profile (``desktop.json`` at the profile root), or ``exists: false``."""
+    """The desktop appearance/interface overlay bundled with an imported profile
+    (``desktop.json`` at the profile root), or ``exists: false``."""
     profile_dir = _resolve_profile_dir(name)
 
     def _run():
-        # Probe and read in one hop; _MISSING (not None) because desktop.json
-        # may legitimately hold the document ``null``.
+        # Probe and read in one hop; _MISSING (not None) because desktop.json may
+        # legitimately hold the document ``null``.
         if not (profile_dir / "desktop.json").is_file():
             return _MISSING
         return _read_desktop_overlay(profile_dir)
@@ -1178,8 +1111,6 @@ async def get_profile_desktop_overlay(name: str):
         overlay = await run_in_threadpool(_run)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not read desktop.json: {e}")
-    # _MISSING rather than None: an overlay file holding the document ``null``
-    # exists, and must not be reported as absent.
     if overlay is _MISSING:
         return {"exists": False, "desktop": None}
     return {"exists": True, "desktop": overlay}
