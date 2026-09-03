@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 _DEFAULT_COOLDOWN_SECONDS = 60.0
 _DEFAULT_LOG_EVERY_N = 1
 _DEFAULT_INFO_LOG_MIN_DELTA_MB = 0.0
+# Even forced trims honor a short floor: AIAgent.close() forces a trim, and delegate
+# batches close N child subagents back-to-back in the SAME process — without a floor
+# that stacks N+1 uncooled full gc.collect() passes (50-500ms each in a large gateway
+# process). 5s coalesces the burst while keeping the parent's final close-trim effective.
+_FORCE_FLOOR_SECONDS = 5.0
 _trim_lock = threading.Lock()
 _last_trim_monotonic = 0.0
 _probe_done = False
@@ -31,17 +36,13 @@ _trim_call_count = 0
 
 
 def _config_settings() -> tuple[bool, float, int, float]:
-    """Return fail-open settings from the normal Hermes config path."""
-    enabled = True
+    """Return fail-open ``(enabled, cooldown, log_every_n, info_log_min_delta_mb)`` from config."""
     settings: Any = None
     try:
-        # Read-only access: settings are only .get()ed and coerced, never
-        # mutated — use the no-deepcopy variant. This runs on EVERY trim
-        # attempt (before the cooldown check), and generating a full-config
-        # deepcopy per attempt is exactly the allocator garbage this module
-        # exists to release.
+        # Read-only, no-deepcopy variant: this runs on EVERY trim attempt (before the
+        # cooldown check), and a full-config deepcopy per attempt is exactly the
+        # allocator garbage this module exists to release.
         from hermes_cli.config import load_config_readonly
-
         config = load_config_readonly() or {}
         context = config.get("context") if isinstance(config, dict) else None
         settings = context.get("memory_trim") if isinstance(context, dict) else None
@@ -49,14 +50,12 @@ def _config_settings() -> tuple[bool, float, int, float]:
         pass
     if not isinstance(settings, dict):
         settings = {}
-    if isinstance(settings.get("enabled"), bool):
-        enabled = settings["enabled"]
+    enabled = settings["enabled"] if isinstance(settings.get("enabled"), bool) else True
     return (
         enabled,
         _cooldown_seconds(settings.get("cooldown_seconds")),
         _coerce(settings.get("log_every_n"), _DEFAULT_LOG_EVERY_N, int, 1),
-        _coerce(settings.get("info_log_min_delta_mb"), _DEFAULT_INFO_LOG_MIN_DELTA_MB, float, 0.0),
-    )
+        _coerce(settings.get("info_log_min_delta_mb"), _DEFAULT_INFO_LOG_MIN_DELTA_MB, float, 0.0))
 
 
 def _coerce(value: Any, default, cast, floor):
@@ -84,16 +83,12 @@ def _read_proc_status() -> str | None:
 
 
 def collect_memory_snapshot(history_bytes: int | None = None) -> dict[str, int | None]:
-    """Return lightweight process-memory telemetry for trim logs and canaries.
+    """Lightweight process-memory telemetry for trim logs and canaries.
 
-    ``VmRSS`` and ``RssAnon`` are Linux-only best effort fields. The helper is intentionally
-    dependency-free so allocation recovery never requires psutil.
+    ``VmRSS`` / ``RssAnon`` are Linux-only best effort; deliberately psutil-free.
     """
     snapshot: dict[str, int | None] = {
-        "rss_kib": None,
-        "rss_anon_kib": None,
-        "thread_count": threading.active_count(),
-    }
+        "rss_kib": None, "rss_anon_kib": None, "thread_count": threading.active_count()}
     status = _read_proc_status()
     if status:
         for line in status.splitlines():
@@ -110,10 +105,9 @@ def collect_memory_snapshot(history_bytes: int | None = None) -> dict[str, int |
 
 def _should_log_trim(
     *, force: bool, log_every_n: int, call_count: int, before: dict[str, int | None],
-    after: dict[str, int | None], info_log_min_delta_mb: float,
-) -> bool:
-    # trim_memory calls this only after malloc_trim reported success. A forced
-    # successful trim is an explicit observability event, regardless of RSS.
+    after: dict[str, int | None], info_log_min_delta_mb: float) -> bool:
+    # Called only after malloc_trim reported success; a forced successful trim is an
+    # explicit observability event regardless of RSS.
     if force:
         return True
     if call_count % log_every_n:
@@ -136,8 +130,7 @@ def _probe_glibc_malloc_trim() -> Callable[[int], int] | None:
     try:
         if platform.libc_ver()[0].lower() != "glibc":
             return None
-        libc = ctypes.CDLL(None)
-        trim = libc.malloc_trim
+        trim = ctypes.CDLL(None).malloc_trim
         trim.argtypes = [ctypes.c_size_t]
         trim.restype = ctypes.c_int
         _malloc_trim = trim
@@ -147,11 +140,7 @@ def _probe_glibc_malloc_trim() -> Callable[[int], int] | None:
 
 
 def trim_memory(
-    *,
-    force: bool = False,
-    reason: str = "",
-    cooldown_seconds: float | None = None,
-) -> bool:
+    *, force: bool = False, reason: str = "", cooldown_seconds: float | None = None) -> bool:
     """Collect cycles and ask glibc to release free heap pages.
 
     Returns ``True`` only when ``malloc_trim(0)`` ran and reported success. Unsupported allocators,
@@ -169,15 +158,8 @@ def trim_memory(
             return False
         now = time.monotonic()
         cooldown = configured_cooldown if cooldown_seconds is None else _cooldown_seconds(cooldown_seconds)
-        if not force and _last_trim_monotonic and now - _last_trim_monotonic < cooldown:
-            return False
-        # Even forced trims honor a short floor: AIAgent.close() forces a trim,
-        # and delegate batches close N child subagents back-to-back in the SAME
-        # process — without a floor that stacks N+1 uncooled full gc.collect()
-        # passes (50-500ms each in a large gateway process). 5s coalesces the
-        # burst while keeping the parent's final close-trim effective.
-        _FORCE_FLOOR_SECONDS = 5.0
-        if force and _last_trim_monotonic and now - _last_trim_monotonic < _FORCE_FLOOR_SECONDS:
+        since_last = now - _last_trim_monotonic
+        if _last_trim_monotonic and since_last < (_FORCE_FLOOR_SECONDS if force else cooldown):
             return False
         # Record the attempt before calling into libc so repeated failures do not
         # turn every turn boundary into an expensive full collection.
@@ -193,19 +175,16 @@ def trim_memory(
             _trim_call_count += 1
             if released and _should_log_trim(
                 force=force, log_every_n=log_every_n, call_count=_trim_call_count,
-                before=before, after=after, info_log_min_delta_mb=info_log_min_delta_mb,
-            ):
+                before=before, after=after, info_log_min_delta_mb=info_log_min_delta_mb):
                 logger.info(
                     "memory trim: reason=%s malloc_trim=%s rss_kib=%s->%s "
                     "rss_anon_kib=%s->%s threads=%s duration_ms=%.1f",
                     reason or "cleanup", trim_result,
                     before.get("rss_kib"), after.get("rss_kib"),
                     before.get("rss_anon_kib"), after.get("rss_anon_kib"),
-                    after.get("thread_count"), duration_ms,
-                )
+                    after.get("thread_count"), duration_ms)
             return released
         except Exception as exc:
             logger.warning(
-                "memory trim failed after %s: %s: %s", reason or "cleanup", type(exc).__name__, exc,
-            )
+                "memory trim failed after %s: %s: %s", reason or "cleanup", type(exc).__name__, exc)
             return False
