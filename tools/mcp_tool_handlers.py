@@ -33,7 +33,6 @@ def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     # Lazy import: tools.approval routes the prompt to whichever surface owns the session.
     try:
         from tools.approval import request_elicitation_consent
-
         answer = request_elicitation_consent(
             f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run. This "
             f"tool is write-capable (no readOnlyHint=true annotation) and may modify external state.",
@@ -113,8 +112,7 @@ def _strike(server_name: str, message: str, **extra) -> str:
 
 
 def _mcp_loop_running() -> bool:
-    loop = _core._mcp_loop
-    return loop is not None and loop.is_running()
+    return _core._mcp_loop is not None and _core._mcp_loop.is_running()
 
 
 def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
@@ -153,12 +151,8 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
         return None
     from tools.mcp_oauth_manager import get_manager
     manager = get_manager()
-
-    async def _recover():
-        return await manager.handle_401(server_name, None)
-
     try:
-        recovered = _core._run_on_mcp_loop(_recover, timeout=10)
+        recovered = _core._run_on_mcp_loop(lambda: manager.handle_401(server_name, None), timeout=10)
     except Exception as rec_exc:
         logger.warning("MCP OAuth '%s': recovery attempt failed: %s", server_name, rec_exc)
         recovered = False
@@ -223,7 +217,6 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
             # No MCP loop to wait on (non-async adapters, tests) — still request the respawn
             # so the next call lands on a live transport.
             _core._signal_reconnect(srv)
-
     if not reconnected:
         return _strike(
             server_name,
@@ -277,9 +270,8 @@ def _invoke_with_recovery(server_name: str, call_once: Callable[[], str], op: st
 
 def _mark_server_call_started(server: Any) -> None:
     """Record a user-visible MCP operation when the server supports it."""
-    mark_tool_call = getattr(server, "mark_tool_call", None)
-    if callable(mark_tool_call):
-        mark_tool_call()
+    if callable(getattr(server, "mark_tool_call", None)):
+        server.mark_tool_call()
 
 
 @asynccontextmanager
@@ -320,7 +312,6 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
     if not (_watch_children is not None and inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
         return await _call_coro if asyncio.iscoroutine(_call_coro) else _call_coro
-
     rpc_task = asyncio.ensure_future(_call_coro)
     watch_task = asyncio.ensure_future(_watch_children())
     try:
@@ -388,7 +379,6 @@ def _render_call_tool_result(result, server_name: str) -> str:
     ``.is_error`` is ``.isError`` before mcp 2.0."""
     if mcp_field(result, "is_error", "isError", False):
         return tool_error(_sanitize_error(_truncate_mcp_text_result(_error_result_text(result) or "MCP tool returned an error")))
-
     text_result = _render_content_blocks(result, server_name)
     structured = _capped_structured_content(result)
     meta = _strip_reserved_meta_keys(mcp_field(result, "meta", "meta"))
@@ -436,9 +426,8 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 finally:
                     server._pending_call_context = None
             # Round-trip completed: transport is healthy even if the tool returned isError.
-            _mark_proven = getattr(server, "_mark_session_proven", None)
-            if _mark_proven is not None:
-                _mark_proven()
+            if getattr(server, "_mark_session_proven", None) is not None:
+                server._mark_session_proven()
             return _render_call_tool_result(result, server_name)
 
         def _on_failure(exc):
@@ -502,9 +491,9 @@ def _render_resource_list(all_resources, server_name: str) -> dict:
         if "uri" in entry:
             entry["uri"] = str(entry["uri"])
         # Key stays camelCase — this is the tool's own JSON output shape.
-        _mime = mcp_field(r, "mime_type", "mimeType")
-        if _mime:
-            entry["mimeType"] = _mime
+        mime = mcp_field(r, "mime_type", "mimeType")
+        if mime:
+            entry["mimeType"] = mime
         resources.append(entry)
     return {"resources": resources}
 
@@ -539,8 +528,7 @@ def _render_get_prompt(result, server_name: str) -> dict:
     for msg in getattr(result, "messages", []):
         entry = _pick(msg, ("role", "role"))
         if hasattr(msg, "content"):
-            content = msg.content
-            entry["content"] = strip_unicode_tags(content.text if hasattr(content, "text") else str(content))
+            entry["content"] = strip_unicode_tags(msg.content.text if hasattr(msg.content, "text") else str(msg.content))
         messages.append(entry)
     resp = {"messages": messages}
     if getattr(result, "description", None):
@@ -552,6 +540,7 @@ def _utility_factory(op: str, log_label: str, rpc, render, required: Optional[st
     """``(server_name, tool_timeout) -> sync handler`` for one utility tool."""
     def _factory(server_name: str, tool_timeout: float):
         return _make_utility_handler(server_name, tool_timeout, op, log_label, rpc, render, required)
+
     return _factory
 
 

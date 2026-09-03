@@ -101,12 +101,10 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     if not schema:
         return dict(_EMPTY_OBJECT_SCHEMA)
     from tools.schema_sanitizer import collapse_const_unions, strip_nullable_unions
-
     normalized = _rewrite_local_refs(schema)
     normalized = strip_nullable_unions(normalized, keep_nullable_hint=True)
     normalized = collapse_const_unions(normalized)
     normalized = _repair_object_shape(normalized)
-
     if not isinstance(normalized, dict):
         return dict(_EMPTY_OBJECT_SCHEMA)
     if normalized.get("type") == "object" and "properties" not in normalized:

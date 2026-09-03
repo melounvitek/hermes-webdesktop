@@ -35,6 +35,11 @@ class MCPServerRunMixin:
                 except (asyncio.CancelledError, Exception):
                     pass
 
+    def _event_waiters(self) -> tuple:
+        """Fresh ``(shutdown, reconnect)`` wait tasks; cancel them via ``_cancel_waiters``."""
+        return (asyncio.ensure_future(self._shutdown_event.wait()),
+                asyncio.ensure_future(self._reconnect_event.wait()))
+
     def _recycle_if_due(self) -> bool:
         """Latch a stdio idle/lifetime recycle when its deadline has passed."""
         recycle_reason = self._stdio_recycle_reason()
@@ -56,26 +61,21 @@ class MCPServerRunMixin:
         keepalive_interval = max(
             _core._MIN_KEEPALIVE_INTERVAL,
             float(self._config.get("keepalive_interval", _core._DEFAULT_KEEPALIVE_INTERVAL)))
-
-        shutdown_task = asyncio.create_task(self._shutdown_event.wait())
-        reconnect_task = asyncio.create_task(self._reconnect_event.wait())
+        shutdown_task, reconnect_task = self._event_waiters()
         try:
             while True:
                 if self._recycle_if_due():
                     return "recycle"
-
                 timeout = keepalive_interval
                 recycle_deadline = self._next_stdio_recycle_deadline()
                 if recycle_deadline is not None:
                     timeout = max(0.0, min(timeout, recycle_deadline - time.monotonic()))
-
                 done, _pending = await asyncio.wait(
                     {shutdown_task, reconnect_task}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
                 if done:
                     break
                 if self._recycle_if_due():
                     return "recycle"
-
                 # Timeout: probe for a stale session — but NEVER while an RPC is in flight (a
                 # concurrent ping can wedge the single stdio stream, and a busy server is
                 # provably alive anyway).
@@ -98,7 +98,6 @@ class MCPServerRunMixin:
                     self._mark_session_proven()
         finally:
             await self._cancel_waiters(shutdown_task, reconnect_task)
-
         if self._shutdown_event.is_set():
             self._fail_inflight_calls("shutdown")
             return "shutdown"
@@ -112,8 +111,7 @@ class MCPServerRunMixin:
         """Wait, while parked, for a reconnect request or shutdown. Returns ``"shutdown"`` or
         ``"reconnect"`` (explicit request or, with ``timeout``, the periodic self-probe); the
         reconnect event is cleared first. Shutdown wins a tie."""
-        shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
-        reconnect_task = asyncio.ensure_future(self._reconnect_event.wait())
+        shutdown_task, reconnect_task = self._event_waiters()
         try:
             await asyncio.wait({shutdown_task, reconnect_task}, return_when=asyncio.FIRST_COMPLETED, timeout=timeout)
         finally:
@@ -154,10 +152,8 @@ class MCPServerRunMixin:
         self._auth_type = (config.get("auth") or "").lower().strip()
         self._idle_timeout_seconds = _core._get_lifecycle_seconds(config, "idle_timeout_seconds")
         self._max_lifetime_seconds = _core._get_lifecycle_seconds(config, "max_lifetime_seconds")
-
         # The _MCP_*_TYPES flags are False until the lazy SDK import runs.
         _core._ensure_mcp_sdk()
-
         sampling_config = config.get("sampling", {})
         self._sampling = (_core.SamplingHandler(self.name, sampling_config)
                           if sampling_config.get("enabled", True) and _core._MCP_SAMPLING_TYPES else None)
@@ -166,12 +162,10 @@ class MCPServerRunMixin:
         elicitation_config = config.get("elicitation", {})
         self._elicitation = (_core.ElicitationHandler(self.name, elicitation_config, owner=self)
                              if elicitation_config.get("enabled", True) and _core._MCP_ELICITATION_TYPES else None)
-
         if "url" in config and "command" in config:
             logger.warning("MCP server '%s' has both 'url' and 'command' in config. "
                            "Using HTTP transport ('url'). Remove 'command' to silence "
                            "this warning.", self.name)
-
         if not self._is_http():
             return True
         try:
@@ -206,17 +200,12 @@ class MCPServerRunMixin:
         """
         if not await self._prepare_run(config):
             return
-
         self._reconnect_retries = 0
         budget = _RetryBudget()
-
         while True:
             try:
-                if self._is_http():
-                    lifecycle_reason = await self._run_http(config)
-                else:
-                    lifecycle_reason = await self._run_stdio(config)
-                if not await self._on_clean_return(lifecycle_reason, budget):
+                run_transport = self._run_http if self._is_http() else self._run_stdio
+                if not await self._on_clean_return(await run_transport(config), budget):
                     break
             except asyncio.CancelledError:
                 # Not a connection failure: re-raise so cancellation reaches asyncio and
@@ -253,11 +242,9 @@ class MCPServerRunMixin:
             logger.info("MCP server '%s': reconnect after teardown race "
                         "(in-flight calls were failed); not charging the "
                         "rapid-drop budget", self.name)
-            self._teardown_race = False
-            budget.backoff = 1.0
+            self._teardown_race, budget.backoff = False, 1.0
         elif self._session_proven:
-            self._reconnect_retries = 0
-            budget.backoff = 1.0
+            self._reconnect_retries, budget.backoff = 0, 1.0
         else:
             self._reconnect_retries += 1
             if self._reconnect_retries > _core._MAX_RECONNECT_RETRIES:
@@ -280,8 +267,7 @@ class MCPServerRunMixin:
         again instead of burning 5 rapid retries. False on shutdown."""
         if await self._park(revival_reason):
             return False
-        self._reconnect_retries = _core._MAX_RECONNECT_RETRIES
-        budget.backoff = 1.0
+        self._reconnect_retries, budget.backoff = _core._MAX_RECONNECT_RETRIES, 1.0
         return True
 
     async def _park_initial_failure(self, exc: Exception, revival_reason: str, budget: "_RetryBudget") -> bool:
@@ -291,8 +277,7 @@ class MCPServerRunMixin:
         self._ready.set()
         if await self._park(revival_reason):
             return False
-        budget.initial_retries = 0
-        self._reconnect_retries = 0
+        budget.initial_retries = self._reconnect_retries = 0
         budget.backoff = 1.0
         self._error = None
         self._ready.clear()
@@ -314,20 +299,16 @@ class MCPServerRunMixin:
                            "failed, marking unavailable while retrying: %s: %s",
                            self.name, type(root).__name__, root)
             self._recycled_reason = None
-
         # Initial-connect ladder: a transient blip at startup must not kill the server. Gated
         # on _ever_connected (never cleared), not _ready (cleared every reconnect cycle).
         if not self._ever_connected:
             return await self._on_initial_connect_error(exc, root, failure_class, budget)
-
         if self._shutdown_event.is_set():
             logger.debug("MCP server '%s' disconnected during shutdown: %s: %s",
                          self.name, type(root).__name__, root)
             return False
-
         if failure_class == "permanent":
             return await self._on_permanent_error(root, budget)
-
         self._reconnect_retries += 1
         if self._reconnect_retries > _core._MAX_RECONNECT_RETRIES:
             logger.warning(
@@ -337,7 +318,6 @@ class MCPServerRunMixin:
                 self.name, _core._MAX_RECONNECT_RETRIES, _core._PARKED_RETRY_INTERVAL,
                 type(root).__name__, root)
             return await self._park_and_rearm("from parked state", budget)
-
         logger.debug("MCP server '%s' connection lost (attempt %d/%d), "
                      "reconnecting in %.0fs: %s: %s",
                      self.name, self._reconnect_retries, _core._MAX_RECONNECT_RETRIES,
@@ -351,19 +331,12 @@ class MCPServerRunMixin:
             # Deterministic failure (bad command, non-MCP URL, 401/403): park at once instead
             # of burning the ladder. Auth failures park rather than return so the task stays
             # alive to pick up fresh tokens later.
-            if _core._is_auth_error(root):
-                logger.warning(
-                    "MCP server '%s' failed initial authentication, "
-                    "parking until credentials change; re-authenticate with `hermes mcp login %s` "
-                    "(state: connecting → parked): %s: %s",
-                    self.name, self.name, type(root).__name__, root)
-            else:
-                logger.warning(
-                    "MCP server '%s' failed initial connection with a "
-                    "permanent error, parking without retries (state: connecting → parked): %s: %s",
-                    self.name, type(root).__name__, root)
+            detail = (f"authentication, parking until credentials change; re-authenticate with "
+                      f"`hermes mcp login {self.name}`" if _core._is_auth_error(root)
+                      else "connection with a permanent error, parking without retries")
+            logger.warning("MCP server '%s' failed initial %s (state: connecting → parked): %s: %s",
+                           self.name, detail, type(root).__name__, root)
             return await self._park_initial_failure(exc, "after permanent initial failure", budget)
-
         budget.initial_retries += 1
         if budget.initial_retries > _core._MAX_INITIAL_CONNECT_RETRIES:
             logger.warning(
@@ -372,7 +345,6 @@ class MCPServerRunMixin:
                 "requested (state: connecting → parked): %s: %s",
                 self.name, _core._MAX_INITIAL_CONNECT_RETRIES, type(root).__name__, root)
             return await self._park_initial_failure(exc, "after initial connection failures", budget)
-
         logger.debug(
             "MCP server '%s' initial connection failed (attempt %d/%d), retrying in %.0fs: %s: %s",
             self.name, budget.initial_retries, _core._MAX_INITIAL_CONNECT_RETRIES, budget.backoff,
@@ -381,8 +353,7 @@ class MCPServerRunMixin:
         if self._shutdown_event.is_set():
             self._error = exc
             self._ready.set()
-            return False
-        return True
+        return not self._shutdown_event.is_set()
 
     async def _on_permanent_error(self, root: BaseException, budget: "_RetryBudget") -> bool:
         # An auth failure on a PROVEN session is often a corrupt OAuth lock from a raced
@@ -395,8 +366,7 @@ class MCPServerRunMixin:
                 "healthy session — marking suspect and forcing "
                 "one reconnect instead of parking (state: connected → suspect): %s: %s",
                 self.name, type(root).__name__, root)
-            self._reconnect_retries = 0
-            budget.backoff = 1.0
+            self._reconnect_retries, budget.backoff = 0, 1.0
             await asyncio.sleep(_core._jittered(1.0))
             return not self._shutdown_event.is_set()
         # Deterministic failure on a working server: park now.
@@ -426,9 +396,8 @@ class MCPServerRunMixin:
     async def shutdown(self):
         """Signal the Task to exit and wait for clean resource teardown."""
         self._shutdown_event.set()
-        # _shutdown_event alone unblocks _wait_for_lifecycle_event (it checks shutdown first),
-        # but setting reconnect too closes any race where the helper misses the shutdown flag
-        # after returning "reconnect".
+        # Also set reconnect: closes any race where _wait_for_lifecycle_event misses the
+        # shutdown flag after returning "reconnect".
         self._reconnect_event.set()
         if self._task and not self._task.done():
             try:
@@ -453,7 +422,6 @@ class MCPServerRunMixin:
         AND when the reconnect budget is exhausted, so a dead server never leaves phantom tool
         definitions bloating the prompt cache and producing "not connected" errors."""
         from tools.registry import registry
-
         for tool_name in list(getattr(self, "_registered_tool_names", [])):
             registry.deregister(tool_name, scope=_core._server_registry_scope(self.name))
             _core._forget_mcp_tool_server(tool_name)
