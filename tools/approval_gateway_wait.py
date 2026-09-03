@@ -15,7 +15,6 @@ import logging
 import threading
 import time
 import uuid
-from typing import Optional
 
 from tools.interrupt import is_interrupted
 
@@ -31,27 +30,10 @@ class _ApprovalEntry:
         self.data = dict(data)
         self.data.setdefault("request_id", uuid.uuid4().hex)
         self.acknowledged = False
-        self.result: Optional[str] = None  # "once"|"session"|"always"|"deny"
+        self.result: str | None = None  # "once"|"session"|"always"|"deny"
         # Free-text reason from ``/deny <reason>`` so the agent can adapt
         # instead of only hearing "denied".
-        self.reason: Optional[str] = None
-
-
-def _hook_payload(approval_data: dict, session_key: str, surface: str) -> dict:
-    primary_key = approval_data.get("pattern_key", "")
-    return {
-        "command": approval_data.get("command", ""),
-        "description": approval_data.get("description", ""),
-        "pattern_key": primary_key,
-        "pattern_keys": list(approval_data.get("pattern_keys", [primary_key])),
-        "session_key": session_key,
-        "surface": surface,
-    }
-
-
-def _hook_outcome(resolved: bool, choice: Optional[str]) -> str:
-    """Unresolved (timeout) and a None choice both mean the user never answered."""
-    return "timeout" if not resolved else (choice or "timeout")
+        self.reason: str | None = None
 
 
 def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:
@@ -61,14 +43,14 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     so activity heartbeats reach the agent's inactivity tracker every ~10s —
     otherwise the gateway watchdog kills the agent while the user is still
     responding (mirrors ``_wait_for_process()`` cadence). The loop is recorded
-    as human-wait time so the concurrent batch deadline excludes it (#79719).
+    as human-wait time so the concurrent batch deadline excludes it.
 
     ``is_interrupted()`` deliberately does NOT distinguish a deliberate /stop
     from a gateway inactivity timeout — both resolve as 'deny' (not
     outcome='timeout'). The per-thread interrupt flag carries no stable
-    machine-checkable cause, so a fail-closed deny preserves #8697 semantics;
-    changing this needs a dedicated interrupt-cause channel, not string
-    matching (#85125).
+    machine-checkable cause, so a fail-closed deny preserves the historical
+    semantics; changing this needs a dedicated interrupt-cause channel, not
+    string matching.
     """
     from tools.approval import _get_approval_timeout, human_wait_window
 
@@ -94,8 +76,18 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
                 touch_activity_if_due(activity_state, "waiting for user approval")
 
 
-def _await_coalesced_leader(session_key: str, leader, approval_data: dict,
-                            *, surface: str = "gateway"):
+def _finish(payload: dict, resolved: bool, choice: str | None, reason, **extra) -> dict:
+    """Fire the post hook and build the decision dict. Unresolved (timeout) and
+    a None choice both mean the user never answered."""
+    from tools.approval import _fire_approval_hook
+    _fire_approval_hook(
+        "post_approval_response", **payload,
+        choice="timeout" if not resolved else (choice or "timeout"), **extra,
+    )
+    return {"resolved": resolved, "choice": choice, "reason": reason, **extra}
+
+
+def _await_coalesced_leader(session_key: str, leader, payload: dict):
     """Wait on an already-pending identical approval instead of re-prompting.
 
     Adopts the leader's decision: ``session``/``always`` → approval (same dict
@@ -107,10 +99,7 @@ def _await_coalesced_leader(session_key: str, leader, approval_data: dict,
     so observers see the follower's lifecycle without a duplicate prompt.
     """
     from tools.approval import _fire_approval_hook
-
-    payload = _hook_payload(approval_data, session_key, surface)
     _fire_approval_hook("pre_approval_request", **payload, coalesced=True)
-
     state = _poll_event(
         leader.event, session_key,
         interrupt_log="Coalesced approval wait interrupted by user signal — "
@@ -124,20 +113,10 @@ def _await_coalesced_leader(session_key: str, leader, approval_data: dict,
     else:
         choice = leader.result
         resolved = choice is not None
-
     if choice == "once":
         # The post hook fires for the fresh prompt's own lifecycle, not here.
         return None
-    _fire_approval_hook(
-        "post_approval_response", **payload,
-        choice=_hook_outcome(resolved, choice), coalesced=True,
-    )
-    return {
-        "resolved": resolved,
-        "choice": choice,
-        "reason": getattr(leader, "reason", None),
-        "coalesced": True,
-    }
+    return _finish(payload, resolved, choice, getattr(leader, "reason", None), coalesced=True)
 
 
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
@@ -158,23 +137,25 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     """
     from tools import approval as _approval
 
-    payload = _hook_payload(approval_data, session_key, surface)
-
-    leader = None
+    primary_key = approval_data.get("pattern_key", "")
+    payload = {
+        "command": approval_data.get("command", ""),
+        "description": approval_data.get("description", ""),
+        "pattern_key": primary_key,
+        "pattern_keys": list(approval_data.get("pattern_keys", [primary_key])),
+        "session_key": session_key,
+        "surface": surface,
+    }
+    keys = list(approval_data.get("pattern_keys") or [])
     with _approval._lock:
-        for existing in _approval._gateway_queues.get(session_key, []):
-            data = existing.data
-            if (
-                data.get("command") == approval_data.get("command")
-                and list(data.get("pattern_keys") or [])
-                == list(approval_data.get("pattern_keys") or [])
-            ):
-                leader = existing
-                break
-    if leader is not None:
-        adopted = _await_coalesced_leader(
-            session_key, leader, approval_data, surface=surface
+        leader = next(
+            (e for e in _approval._gateway_queues.get(session_key, [])
+             if e.data.get("command") == approval_data.get("command")
+             and list(e.data.get("pattern_keys") or []) == keys),
+            None,
         )
+    if leader is not None:
+        adopted = _await_coalesced_leader(session_key, leader, payload)
         if adopted is not None:
             return adopted
 
@@ -192,16 +173,13 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
 
     # Plugins hear about the request before the gateway does (real-time observers).
     _approval._fire_approval_hook("pre_approval_request", **payload)
-
     # Bridges sync agent thread → async gateway.
     try:
         notify_cb(dict(entry.data))
     except Exception as exc:
         logger.warning("Gateway approval notify failed: %s", exc)
         _drop_entry()
-        _approval._fire_approval_hook(
-            "post_approval_response", **payload, choice="notify_failed"
-        )
+        _approval._fire_approval_hook("post_approval_response", **payload, choice="notify_failed")
         return {"resolved": False, "choice": None, "notify_failed": True}
 
     state = _poll_event(
@@ -212,11 +190,5 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     if state == "interrupted":
         entry.result = "deny"
         entry.event.set()
-    resolved = state != "timeout"
     _drop_entry()
-
-    choice = entry.result
-    _approval._fire_approval_hook(
-        "post_approval_response", **payload, choice=_hook_outcome(resolved, choice)
-    )
-    return {"resolved": resolved, "choice": choice, "reason": entry.reason}
+    return _finish(payload, state != "timeout", entry.result, entry.reason)

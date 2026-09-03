@@ -6,7 +6,7 @@ deadline in agent/tool_executor.py excludes this time so a slow human answer
 never times a batch out — but ONLY this time. Measuring at the source (rather
 than residency in the authorization gate, which is arbitrary code) is what keeps
 a wedged pre_tool_call plugin or a dead approval client from growing the
-exclusion 1:1 with wall clock and defeating the deadline entirely (#79719).
+exclusion 1:1 with wall clock and defeating the deadline entirely.
 
 Keyed by session so one gateway session's pending approval cannot extend a
 different session's batch deadline. State is process-global like the rest of
@@ -48,19 +48,16 @@ def human_wait_ceiling() -> float:
     drift. Never call while holding ``_human_wait_lock`` — it reads the
     config cache. ``_get_approval_timeout`` caps at
     ``agent.deadline.MAX_SAFE_TIMEOUT_S`` so the value is always safe for
-    ``Lock.acquire(timeout=...)`` / ``Thread.join(timeout=...)`` (#83220).
+    ``Lock.acquire(timeout=...)`` / ``Thread.join(timeout=...)``.
     """
     from tools.approval import _get_approval_timeout
-
     return float(_get_approval_timeout()) + HUMAN_WAIT_MARGIN_S
 
 
 def _clamped_window_seconds(started: float, now: float, ceiling: float) -> float:
-    """Seconds an open window contributes: elapsed, floored at 0, capped.
-
-    Shared by the close-time accrual and the open-window read so the two
-    clamps stay identical by construction.
-    """
+    """Seconds an open window contributes: elapsed, floored at 0, capped. Shared
+    by the close-time accrual and the open-window read so the two clamps stay
+    identical by construction."""
     return min(max(0.0, now - started), ceiling)
 
 
@@ -75,14 +72,12 @@ def _human_wait_state(session_key: str) -> _HumanWaitState:
     """
     state = _human_wait_states.get(session_key)
     if state is None:
-        if len(_human_wait_states) >= _HUMAN_WAIT_MAX_SESSIONS:
-            for key in list(_human_wait_states):
-                if len(_human_wait_states) < _HUMAN_WAIT_MAX_SESSIONS:
-                    break
-                if _human_wait_states[key].pending == 0:
-                    del _human_wait_states[key]
-        state = _HumanWaitState()
-        _human_wait_states[session_key] = state
+        for key in list(_human_wait_states):
+            if len(_human_wait_states) < _HUMAN_WAIT_MAX_SESSIONS:
+                break
+            if _human_wait_states[key].pending == 0:
+                del _human_wait_states[key]
+        state = _human_wait_states[session_key] = _HumanWaitState()
     return state
 
 
@@ -90,7 +85,6 @@ def _resolve_key(session_key: str | None) -> str:
     if session_key is not None:
         return session_key
     from tools.approval import get_current_session_key
-
     return get_current_session_key()
 
 
@@ -101,7 +95,7 @@ def human_wait_window(session_key: str | None = None):
     Wrap ONLY code that is genuinely parked waiting for a user's answer (the
     CLI approval prompt, the gateway approval poll loop). The concurrent tool
     batch deadline excludes this time; wrapping anything else re-creates the
-    #79719 hang where arbitrary wedged code pushes the deadline out forever.
+    hang where arbitrary wedged code pushes the deadline out forever.
 
     Overlapping windows for the same session coalesce (pending counter), so
     two serialized approval prompts don't double-count the same wall clock.
@@ -141,7 +135,7 @@ def human_wait_seconds(session_key: str | None = None) -> float:
     baseline delta to zero (the safe direction: the deadline fires sooner).
     Deadline consumers snapshot a baseline at batch start and use the delta.
     Each window's contribution is clamped to :func:`human_wait_ceiling`
-    (belt-and-braces for #79719).
+    (belt-and-braces against the wedged-window hang).
     """
     key = _resolve_key(session_key)
     now = time.monotonic()
