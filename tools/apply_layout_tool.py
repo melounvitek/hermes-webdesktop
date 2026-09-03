@@ -1,20 +1,14 @@
-#!/usr/bin/env python3
 """Apply a layout preset in the Hermes desktop GUI (``layout.apply`` via ``desktop_ui``).
 
-The renderer resolves the id against its layouts registry (core, plugin, and user
-presets are one list) and applies it through the layout picker's own code path; only
-the active window's session acts, so a background turn never rearranges the desktop.
-Preset ids are free-form on purpose: plugins and users mint their own. The renderer
-answers with the applied id/title, or the list of available ids when unknown, so the
-model can self-correct without a registry-listing tool.
+The renderer resolves the id against its layouts registry (core, plugin and user
+presets are one list); only the active window's session acts, so a background turn
+never rearranges the desktop. Preset ids are free-form on purpose. The renderer
+answers with the applied id/title, or the available ids when unknown, so the model
+can self-correct without a registry-listing tool.
 """
 
 from tools import desktop_ui
 from tools.registry import registry, tool_error
-
-# Renderer answers via the blocking-prompt bridge; layout apply is synchronous
-# there, so the bridge timeout is generous.
-_TIMEOUT_NOTE = "Layout apply is only available in the Hermes desktop app."
 
 
 def apply_layout_tool(preset: str) -> str:
@@ -23,11 +17,8 @@ def apply_layout_tool(preset: str) -> str:
     if not name:
         return tool_error("preset is required — a layout preset id, e.g. 'default' or 'focus'.")
     return desktop_ui.emit_or_error(
-        "layout.apply",
-        {"preset": name},
-        f"Failed to apply layout '{name}': ",
-        _TIMEOUT_NOTE,
-        {"success": True, "preset": name},
+        "layout.apply", {"preset": name}, f"Failed to apply layout '{name}': ",
+        "Layout apply is only available in the Hermes desktop app.", {"success": True, "preset": name},
     )
 
 
