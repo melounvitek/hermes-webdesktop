@@ -2734,7 +2734,6 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     return final_response
 
 
-
 def cleanup_task_resources(agent, task_id: str) -> None:
     """Per-turn VM + browser cleanup for a task.
 
@@ -4226,10 +4225,6 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
     # Cross-turn stale-stream circuit breaker (see ``_stale_streak()``).
     _check_stale_giveup(agent)
     return _StreamingCall(agent, api_kwargs, on_first_delta).run()
-
-# ── Provider fallback ──────────────────────────────────────────────────
-
-
 
 __all__ = [
     "interruptible_api_call",
