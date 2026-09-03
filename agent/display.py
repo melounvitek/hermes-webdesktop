@@ -33,6 +33,15 @@ def _display_url(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _http_url(candidate: str) -> str | None:
+    """``candidate`` when it parses as an absolute http(s) URL, else None."""
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return None
+    return candidate if parsed.scheme.lower() in {"http", "https"} and parsed.netloc else None
+
+
 def _hex_rgb(h: str) -> tuple[int, int, int]:
     return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
 
@@ -217,13 +226,13 @@ def _split_shell_words(segment: str) -> list[str]:
 
 
 def _strip_shell_pipe_tail(segment: str) -> str:
+    """Drop a trailing ``| head/tail/wc/sort/uniq ...`` pipeline stage."""
     words = _split_shell_words(segment)
-    out: list[str] = []
     for i, word in enumerate(words):
         if word == "|" and _shell_basename(words[i + 1] if i + 1 < len(words) else "") in _SHELL_PIPE_TAIL_HEADS:
+            words = words[:i]
             break
-        out.append(word)
-    return " ".join(out).strip()
+    return " ".join(words).strip()
 
 
 def _split_shell_compound(command: str) -> list[str]:
@@ -255,11 +264,11 @@ def _split_shell_compound(command: str) -> list[str]:
 
 
 def _shell_head_word(segment: str) -> str:
+    """Command name of a segment, skipping leading ``VAR=value`` assignments."""
     words = _split_shell_words(segment)
-    index = 0
-    while index < len(words) and re.match(r"^[A-Za-z_]\w*=", words[index]):
-        index += 1
-    return _shell_basename(words[index] if index < len(words) else "")
+    while words and re.match(r"^[A-Za-z_]\w*=", words[0]):
+        words.pop(0)
+    return _shell_basename(words[0] if words else "")
 
 
 def _clean_shell_segment(segment: str) -> str:
@@ -302,20 +311,15 @@ def summarize_shell_command(command: str) -> str:
             core.append(cleaned)
     if not core:
         return original
-    if len(core) == 1:
-        return core[0]
     count = len(core) - 1
-    return f"{core[0]} + {count} {'command' if count == 1 else 'commands'}"
+    return core[0] if not count else f"{core[0]} + {count} {'command' if count == 1 else 'commands'}"
 
 
 def _read_file_line_label(args: dict) -> str:
-    offset = args.get("offset")
-    limit = args.get("limit")
+    offset, limit = args.get("offset"), args.get("limit")
     if not isinstance(offset, int) or offset <= 0:
         return ""
-    if not isinstance(limit, int) or limit <= 1:
-        return f"L{offset}"
-    return f"L{offset}-{offset + limit - 1}"
+    return f"L{offset}-{offset + limit - 1}" if isinstance(limit, int) and limit > 1 else f"L{offset}"
 
 
 def redact_browser_typed_text_for_display(value: Any, typed_text: Any) -> Any:
@@ -370,18 +374,11 @@ def _delegate_task_goals(tasks: Any, *, per_goal_len: int) -> list[str]:
 
 def _browser_exec_step_label(args: dict, max_chars: int = 80) -> str | None:
     """User-friendly step label from browser_exec code's leading comment."""
-    code = str(args.get("code", "") or "").strip()
-    if not code:
-        return None
-    first = code.split("\n", 1)[0].strip()
-    if not first.startswith("#"):
-        return None
-    label = first.lstrip("#").strip()
+    first = str(args.get("code", "") or "").strip().split("\n", 1)[0].strip()
+    label = first.lstrip("#").strip() if first.startswith("#") else ""
     if not label:
         return None
-    if len(label) > max_chars:
-        label = label[: max_chars - 1] + "…"
-    return label
+    return label[: max_chars - 1] + "…" if len(label) > max_chars else label
 
 
 _PRIMARY_ARGS = {
@@ -477,10 +474,8 @@ def _preview_send_message(args: dict, _max_len: int) -> str:
 def _preview_skill_view(args: dict, max_len: int) -> str | None:
     name = _oneline(str(args.get("name") or ""))
     file_path = args.get("file_path")
-    if file_path:
-        file_path = _oneline(str(file_path))
-        return _truncate_preview(f"{name} → {file_path}" if name else file_path, max_len) or None
-    return _truncate_preview(name, max_len) or None
+    label = (f"{name} → {_oneline(str(file_path))}" if name else _oneline(str(file_path))) if file_path else name
+    return _truncate_preview(label, max_len) or None
 
 
 # Tool-specific preview builders: f(args, max_len) -> preview. Tools not listed
@@ -536,15 +531,7 @@ def prepare_tool_preview(
     full_text = build_tool_preview(tool_name, args, max_len=0) or fallback
     text = _truncate_preview(full_text, max_len)
     truncated = text != full_text
-    url = None
-    if truncated:
-        candidate = _display_url(full_text)
-        try:
-            parsed = urlsplit(candidate)
-        except ValueError:
-            parsed = None
-        if parsed and parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
-            url = candidate
+    url = _http_url(_display_url(full_text)) if truncated else None
     return ToolPreview(text=text, truncated=truncated, url=url)
 
 
@@ -669,13 +656,11 @@ def _resolve_skill_manage_paths(args: dict) -> list[Path]:
         return []
     skill_dir = Path(existing["path"])
     file_path = args.get("file_path")
-    if action in {"edit", "patch"}:
-        return [skill_dir / file_path] if file_path else [skill_dir / "SKILL.md"]
-    if action in {"write_file", "remove_file"}:
-        return [skill_dir / file_path] if file_path else []
     if action == "delete":
         return [path for path in sorted(skill_dir.rglob("*")) if path.is_file()]
-    return []
+    if file_path and action in {"edit", "patch", "write_file", "remove_file"}:
+        return [skill_dir / file_path]
+    return [skill_dir / "SKILL.md"] if action in {"edit", "patch"} else []
 
 
 def _resolve_local_edit_paths(tool_name: str, function_args: dict | None) -> list[Path]:
@@ -741,10 +726,9 @@ def extract_edit_diff(
     """Extract a unified diff from a file-edit tool result."""
     if tool_name == "patch" and result:
         data = safe_json_loads(result)
-        if isinstance(data, dict):
-            diff = data.get("diff")
-            if isinstance(diff, str) and diff.strip():
-                return diff
+        diff = data.get("diff") if isinstance(data, dict) else None
+        if isinstance(diff, str) and diff.strip():
+            return diff
     if tool_name not in {"write_file", "patch", "skill_manage"} or not _result_succeeded(result):
         return None
     return _diff_from_snapshot(snapshot)
@@ -897,17 +881,9 @@ class KawaiiSpinner:
             pass
         return fallback
 
-    @classmethod
-    def get_waiting_faces(cls) -> list:
-        return cls._skin_spinner_list("waiting_faces", cls.KAWAII_WAITING)
-
-    @classmethod
-    def get_thinking_faces(cls) -> list:
-        return cls._skin_spinner_list("thinking_faces", cls.KAWAII_THINKING)
-
-    @classmethod
-    def get_thinking_verbs(cls) -> list:
-        return cls._skin_spinner_list("thinking_verbs", cls.THINKING_VERBS)
+    get_waiting_faces = classmethod(lambda cls: cls._skin_spinner_list("waiting_faces", cls.KAWAII_WAITING))
+    get_thinking_faces = classmethod(lambda cls: cls._skin_spinner_list("thinking_faces", cls.KAWAII_THINKING))
+    get_thinking_verbs = classmethod(lambda cls: cls._skin_spinner_list("thinking_verbs", cls.THINKING_VERBS))
 
     def __init__(self, message: str = "", spinner_type: str = 'dots', print_fn=None):
         self.message = message
@@ -1019,10 +995,7 @@ class KawaiiSpinner:
             self._write(f"\r{self._clear_line_blanks()}\r", end='', flush=True)
         if final_message:
             elapsed = f" ({time.time() - self.start_time:.1f}s)" if self.start_time else ""
-            if is_tty:
-                self._write(f"  {final_message}", flush=True)
-            else:
-                self._write(f"  [done] {final_message}{elapsed}", flush=True)
+            self._write(f"  {final_message}" if is_tty else f"  [done] {final_message}{elapsed}", flush=True)
 
     def __enter__(self):
         self.start()
@@ -1058,12 +1031,11 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
 
     # Terminal: non-zero exit code is the canonical failure signal.
     if tool_name == "terminal":
-        if isinstance(data, dict):
-            exit_code = data.get("exit_code")
-            if exit_code is not None and exit_code != 0:
-                err_msg = data.get("error")
-                return True, f" [{_trim_error(str(err_msg))}]" if err_msg else f" [exit {exit_code}]"
-        return False, ""
+        exit_code = data.get("exit_code") if isinstance(data, dict) else None
+        if exit_code is None or exit_code == 0:
+            return False, ""
+        err_msg = data.get("error")
+        return True, f" [{_trim_error(str(err_msg))}]" if err_msg else f" [exit {exit_code}]"
 
     if isinstance(data, dict):
         # Memory: distinguish "store full" from real errors.
@@ -1111,15 +1083,11 @@ def _cute_web_extract(a: dict, _r) -> str:
 def _cute_todo_list(a: dict, result) -> str:
     todos_arg = a.get("todos")
     total = done = 0
-    if result:
-        try:
-            data = safe_json_loads(result)
-            if data:
-                s = data.get("summary", {})
-                total = s.get("total", 0)
-                done = s.get("completed", 0)
-        except Exception:
-            pass
+    try:
+        summary = (safe_json_loads(result) or {}).get("summary", {}) if result else {}
+        total, done = summary.get("total", 0), summary.get("completed", 0)
+    except Exception:
+        pass
     if todos_arg is None:
         detail = f"{done}/{total} task(s)" if total > 0 else "reading tasks"
     elif a.get("merge", False):
