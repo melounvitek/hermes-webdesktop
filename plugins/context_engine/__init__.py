@@ -75,7 +75,6 @@ class _EngineCollector(_loader.NoopPluginContext):
                 return
         except Exception:
             pass
-
         try:
             from hermes_cli.plugins import get_plugin_manager
             manager = get_plugin_manager()
