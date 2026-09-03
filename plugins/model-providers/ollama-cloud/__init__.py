@@ -5,8 +5,6 @@ high|max (``max`` is undocumented but real — ~2.5x more thinking tokens on
 DeepSeek V4); Hermes' ``xhigh`` maps to ``max``.
 """
 
-from __future__ import annotations
-
 from typing import Any
 
 from agent.reasoning_effort import OLLAMA_CLOUD_EFFORTS, OLLAMA_CLOUD_OVERRIDES, clamp_effort
@@ -38,11 +36,8 @@ class OllamaCloudProfile(ProviderProfile):
 
 
 ollama_cloud = OllamaCloudProfile(
-    name="ollama-cloud",
-    aliases=("ollama_cloud",),
-    default_aux_model="nemotron-3-nano:30b",
-    env_vars=("OLLAMA_API_KEY",),
-    base_url="https://ollama.com/v1",
+    name="ollama-cloud", aliases=("ollama_cloud",), default_aux_model="nemotron-3-nano:30b",
+    env_vars=("OLLAMA_API_KEY",), base_url="https://ollama.com/v1",
 )
 
 register_provider(ollama_cloud)
