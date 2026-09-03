@@ -79,13 +79,33 @@ class ClientLifecycleMixin:
 
     @staticmethod
     def _is_openai_client_closed(client: Any) -> bool:
-        """``is_closed`` is a property on httpx.Client but a method on openai.OpenAI (a bare getattr is always truthy)."""
+        """Check if an OpenAI client is closed.
+
+        Handles both property and method forms of is_closed:
+        - httpx.Client.is_closed is a bool property
+        - openai.OpenAI.is_closed is a method returning bool
+
+        Prior bug: getattr(client, "is_closed", False) returned the bound method,
+        which is always truthy, causing unnecessary client recreation on every call.
+        """
         from unittest.mock import Mock
+
         if isinstance(client, Mock):
             return False
-        is_closed = getattr(client, "is_closed", None)
-        closed = is_closed is not None and (is_closed() if callable(is_closed) else bool(is_closed))
-        return bool(closed) or bool(getattr(getattr(client, "_client", None), "is_closed", False))
+
+        is_closed_attr = getattr(client, "is_closed", None)
+        if is_closed_attr is not None:
+            # Handle method (openai SDK) vs property (httpx)
+            if callable(is_closed_attr):
+                if is_closed_attr():
+                    return True
+            elif bool(is_closed_attr):
+                return True
+
+        http_client = getattr(client, "_client", None)
+        if http_client is not None:
+            return bool(getattr(http_client, "is_closed", False))
+        return False
 
     @staticmethod
     def _build_keepalive_http_client(base_url: str = "", *, verify: Any = True) -> Any:

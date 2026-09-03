@@ -169,13 +169,15 @@ class GatewaySlashCommandsMixin(
     # ------------------------------------------------------------------ shared helpers
     def _cached_agent_for(self, session_key: str):
         """Peek the cached AIAgent for *session_key* without evicting it, or None. Entries are
-        ``(agent, signature, ...)`` tuples (bare agents from test doubles accepted); lock/cache may
-        be absent on fixtures that skip ``__init__``."""
+        ``(agent, signature, ...)`` tuples (bare agents from test doubles accepted). Every historical
+        caller read the cache ONLY under ``_agent_cache_lock``; fixtures that skip ``__init__`` (no lock
+        or no cache) get None rather than an unlocked read."""
         cache = getattr(self, "_agent_cache", None)
-        if cache is None:
+        lock = getattr(self, "_agent_cache_lock", None)
+        if cache is None or lock is None:
             return None
         try:
-            with getattr(self, "_agent_cache_lock", None) or contextlib.nullcontext():
+            with lock:
                 entry = cache.get(session_key)
         except Exception:
             return None

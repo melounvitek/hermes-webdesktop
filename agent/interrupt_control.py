@@ -40,6 +40,15 @@ def _ic_lock(agent, attr: str):
     return contextlib.nullcontext() if lock is None else lock
 
 
+def _ic_slot(agent, lock_attr: str, slot: str):
+    """Read the pending-text ``slot`` guarded by ``lock_attr``. An initialized agent always has both
+    attributes, so under the lock the slot is read directly and a missing one fails loud (a real bug);
+    only ``__init__``-less test stubs (no lock) get the ``getattr`` fallback."""
+    if getattr(agent, lock_attr, None) is None:
+        return getattr(agent, slot, None)
+    return getattr(agent, slot)
+
+
 def _ic_codex_method(agent, name: str):
     """Codex app-server owns its model/tool loop; return its ``name`` hook or None."""
     if getattr(agent, "api_mode", None) != "codex_app_server":
@@ -188,7 +197,7 @@ class InterruptControlMixin:
         """Clear the interrupt request and per-thread tool signal. ``preserve_redirect`` is only for the
         conversation loop rebuilding the same logical turn after cancelling a model request."""
         with _ic_lock(self, "_pending_redirect_lock"):
-            if preserve_redirect and not getattr(self, "_pending_redirect", None):
+            if preserve_redirect and not _ic_slot(self, "_pending_redirect_lock", "_pending_redirect"):
                 return False
             self._interrupt_requested = False
             self._interrupt_message = self._tool_interrupt_reason = None
@@ -211,7 +220,7 @@ class InterruptControlMixin:
             return False
         cleaned = text.strip()
         with _ic_lock(self, "_pending_steer_lock"):
-            existing = getattr(self, "_pending_steer", None)
+            existing = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
             self._pending_steer = (existing + "\n" + cleaned) if existing else cleaned
         return True
 
@@ -243,7 +252,7 @@ class InterruptControlMixin:
         with _ic_lock(self, "_pending_redirect_lock"):
             if _model_active is None or not _model_active.is_set():
                 return False  # response completed before we got the lock: surface queues a new turn
-            existing = getattr(self, "_pending_redirect", None)
+            existing = _ic_slot(self, "_pending_redirect_lock", "_pending_redirect")
             if self._interrupt_requested and not existing:
                 return False
             self._pending_redirect = (
@@ -265,18 +274,18 @@ class InterruptControlMixin:
     def _has_pending_redirect(self) -> bool:
         """Return whether an active-turn redirect is waiting to be applied."""
         with _ic_lock(self, "_pending_redirect_lock"):
-            return bool(getattr(self, "_pending_redirect", None))
+            return bool(_ic_slot(self, "_pending_redirect_lock", "_pending_redirect"))
 
     def _drain_pending_redirect(self) -> Optional[str]:
         """Return and clear pending active-turn correction text."""
         with _ic_lock(self, "_pending_redirect_lock"):
-            text = getattr(self, "_pending_redirect", None)
+            text = _ic_slot(self, "_pending_redirect_lock", "_pending_redirect")
             self._pending_redirect = None
         return text
 
     def _drain_pending_steer(self) -> Optional[str]:
         """Return the pending steer text (if any) and clear the slot; None when nothing is pending."""
         with _ic_lock(self, "_pending_steer_lock"):
-            text = getattr(self, "_pending_steer", None)
+            text = _ic_slot(self, "_pending_steer_lock", "_pending_steer")
             self._pending_steer = None
         return text

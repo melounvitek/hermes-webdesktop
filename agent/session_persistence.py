@@ -104,8 +104,13 @@ def _durable_content(content: Any) -> Any:
 
 
 def _persist_lock(agent):
-    """Close and turn-start persistence can run on separate CLI threads: one critical section."""
-    return getattr(agent, "_session_persist_lock", None) or nullcontext()
+    """Close and turn-start persistence can run on separate CLI threads: one critical section.
+
+    ``__init__`` always creates ``_session_persist_lock``; only ``object.__new__``-built test stubs lack it
+    (they run unlocked, matching the historical ``if persist_lock is None`` branch).
+    """
+    lock = getattr(agent, "_session_persist_lock", None)
+    return nullcontext() if lock is None else lock
 
 
 # --- flush phases (module-level so the flush also works bound onto duck-typed agents) ---

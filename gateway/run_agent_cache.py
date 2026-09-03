@@ -581,11 +581,16 @@ class GatewayAgentCacheMixin:
         if state is not None:
             state.conversation.ephemeral_pin = None
             state.conversation.vc_last = None
-        # Tests build runners with ``_agent_cache_lock = None``; evict lock-free then.
-        _cache = getattr(self, "_agent_cache", None)
+        # Tests build runners with ``_agent_cache_lock = None``; evict lock-free then. With the lock
+        # present ``_agent_cache`` is read directly (an initialized runner always has it).
+        _lock = getattr(self, "_agent_cache_lock", None)
         evicted = None
-        if _cache is not None:
-            with getattr(self, "_agent_cache_lock", None) or nullcontext():
+        if _lock:
+            with _lock:
+                evicted = self._agent_cache.pop(session_key, None)
+        else:
+            _cache = getattr(self, "_agent_cache", None)
+            if _cache is not None:
                 evicted = _cache.pop(session_key, None)
         agent = _first_agent(evicted)
         # Never tear down an agent that's mid-turn — its client, sandbox and child subagents are in use.

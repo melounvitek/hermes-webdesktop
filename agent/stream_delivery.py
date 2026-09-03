@@ -203,9 +203,13 @@ class StreamDeliveryMixin:
         self._deliver_interim(visible, already_streamed=already_streamed, record=undelivered_parts or [visible])
 
     def _ensure_stream_writer_state(self) -> None:
-        """Lazily create the single-writer guard fields (``AIAgent.__new__``-built instances skip ``agent_init``).
+        """Lazily create the single-writer guard fields (#65991).
 
-        See #65991.
+        The fields are normally set unconditionally in ``agent_init`` (``_STREAM_STATE``), so every
+        ``__init__``-built agent shares ONE lock from birth and the lazy path below is never taken by
+        two threads. Only agents constructed via ``AIAgent.__new__`` (test doubles, legacy/partially-
+        initialized instances) skip that path; claiming/checking the writer must not crash those, so
+        initialize the fields on first use.
         """
         if getattr(self, "_stream_writer_lock", None) is None:
             self._stream_writer_lock = threading.Lock()
