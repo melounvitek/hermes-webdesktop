@@ -180,9 +180,7 @@ def evaluate_credits_notices(
     # mid-session top-up flips current_band → None so the clear path removes the line.
     current_band: Optional[tuple[float, str, int]] = None
     if uf is not None and state.purchased_micros <= 0:
-        for band in CREDITS_USAGE_BANDS:
-            if uf >= band[0]:
-                current_band = band
+        current_band = next((b for b in reversed(CREDITS_USAGE_BANDS) if uf >= b[0]), None)
 
     # ── usage gauge: highest crossed band only; replace on band change (climb or
     # step-down); clear below the lowest band or when the denominator vanishes.
