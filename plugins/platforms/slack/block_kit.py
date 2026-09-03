@@ -200,10 +200,8 @@ def _list_block(items: List[Tuple[int, bool, str]]) -> Block:
         key = (indent, ordered)
         if key != cur_key:
             cur = {
-                "type": "rich_text_list",
-                "style": "ordered" if ordered else "bullet",
-                "indent": indent,
-                "elements": []}
+                "type": "rich_text_list", "style": "ordered" if ordered else "bullet",
+                "indent": indent, "elements": []}
             elements.append(cur)
             cur_key = key
         cur["elements"].append(
@@ -305,7 +303,6 @@ def _render_table(rows: List[str]) -> str:
 
 def render_blocks(markdown: str, mrkdwn_fn=None) -> Optional[List[Block]]:
     """Convert agent markdown to a Slack Block Kit ``blocks`` list.
-
     Args:
         markdown: The agent's response text (standard markdown).
         mrkdwn_fn: Optional callable converting a markdown paragraph to Slack
@@ -315,8 +312,7 @@ def render_blocks(markdown: str, mrkdwn_fn=None) -> Optional[List[Block]]:
     Returns:
         A list of Block Kit block dicts, or ``None`` when the content is empty,
         exceeds Slack's structural limits, or hits an unexpected shape — the
-        caller then falls back to the flat ``text`` payload.  Never raises.
-    """
+        caller then falls back to the flat ``text`` payload.  Never raises."""
     if not markdown or not markdown.strip():
         return None
     fmt = mrkdwn_fn or (lambda s: s)
@@ -519,7 +515,6 @@ def _clamp_text_obj(text_obj: Dict[str, Any], limit: int) -> Dict[str, Any]:
 
 def sanitize_blocks(blocks: Optional[List[Block]]) -> Optional[List[Block]]:
     """Clamp an outbound ``blocks`` payload to Slack's hard limits.
-
     Defensive boundary applied wherever the adapter attaches ``blocks`` to
     ``chat.postMessage`` / ``chat.update``.  One oversized or malformed block
     fails the WHOLE call with ``invalid_blocks`` — approval cards then never
@@ -540,8 +535,7 @@ def sanitize_blocks(blocks: Optional[List[Block]]) -> Optional[List[Block]]:
     * The payload is capped at Slack's 50-block maximum.
 
     Returns the sanitized list, or ``None`` when nothing valid remains — the
-    caller then sends the plain ``text`` fallback alone.  Never raises.
-    """
+    caller then sends the plain ``text`` fallback alone.  Never raises."""
     if not blocks:
         return None
     try:
