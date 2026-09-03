@@ -23,7 +23,8 @@ import time as _time_mod
 from pathlib import Path
 from typing import Optional
 from hermes_cli.main_tui_launch import _npm_lifecycle_env
-from hermes_cli.main_web_build import _hash_source_tree, _nixos_build_env, _stamp_is_current, _write_build_stamp
+from hermes_cli.main_web_build import (
+    _hash_source_tree, _nixos_build_env, _stamp_is_current, _write_build_stamp)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.main")
@@ -233,12 +234,17 @@ _PE_MACHINE_TO_NAME = {_PE_MACHINE_ARM64: "ARM64", _PE_MACHINE_AMD64: "AMD64", _
 _MACHINE_ATTRIBUTE_USER_ENABLED = 0x00000001
 
 
+def _kernel32():
+    import ctypes
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
 def _windows_native_machine_from_iswow64() -> Optional[str]:
     """IsWow64Process2's OS-native machine, or None. HANDLE types are bound explicitly: ctypes'
     default ``c_int`` truncates the ``(HANDLE)-1`` pseudo-handle → ``ERROR_INVALID_HANDLE`` on Win64."""
     import ctypes
     from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _kernel32()
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.GetCurrentProcess.argtypes = []
     kernel32.IsWow64Process2.argtypes = [
@@ -258,7 +264,7 @@ def _windows_user_runnable_pe_machines() -> Optional[set]:
     AMD64-on-ARM64 emulation); None when unavailable (pre-Win11 22000) so callers fall back."""
     import ctypes
     from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _kernel32()
     kernel32.GetMachineTypeAttributes.argtypes = [wintypes.USHORT, ctypes.POINTER(ctypes.c_int)]
     kernel32.GetMachineTypeAttributes.restype = ctypes.c_long
 
@@ -446,24 +452,18 @@ def _electron_download_cache_dirs() -> list[Path]:
     first): ``unpack-electron`` extracts from a zip here, NOT node_modules, so a corrupt zip poisons
     the build."""
     home = Path.home()
-    candidates: list[Path] = []
     override = os.environ.get("electron_config_cache") or os.environ.get("ELECTRON_CACHE")
-    if override:
-        candidates.append(Path(override))
+    candidates: list[Optional[str | Path]] = [override]
     if sys.platform == "darwin":
         candidates.append(home / "Library" / "Caches" / "electron")
     elif sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
-        if local:
-            candidates.append(Path(local) / "electron" / "Cache")
-        candidates.append(home / "AppData" / "Local" / "electron" / "Cache")
+        candidates += [Path(local) / "electron" / "Cache" if local else None,
+                       home / "AppData" / "Local" / "electron" / "Cache"]
     else:
         xdg = os.environ.get("XDG_CACHE_HOME")
-        if xdg:
-            candidates.append(Path(xdg) / "electron")
-        candidates.append(home / ".cache" / "electron")
-
-    return list(dict.fromkeys(c.expanduser() for c in candidates))
+        candidates += [Path(xdg) / "electron" if xdg else None, home / ".cache" / "electron"]
+    return list(dict.fromkeys(Path(c).expanduser() for c in candidates if c))
 
 
 def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] = None) -> list[Path]:
@@ -1118,6 +1118,8 @@ def _desktop_linux_needs_disable_setuid_sandbox(packaged_executable: Path) -> bo
 
 _LINUX_PASSWORD_STORES = frozenset({"gnome-libsecret", "kwallet", "kwallet5", "kwallet6", "basic"})
 
+_GPU_FLAG_WORDS = {**dict.fromkeys(("1", "true", "yes", "on"), "1"), **dict.fromkeys(("0", "false", "no", "off"), "0")}
+
 
 def _detect_linux_password_store() -> str | None:
     """Chromium password-store backend for this Linux session (KDE env → GNOME Keyring socket → D-Bus
@@ -1165,23 +1167,18 @@ def _desktop_launch_options() -> tuple[list[str], str, str, str]:
     elif isinstance(raw_flags, (list, tuple)):
         flags = [str(f) for f in raw_flags if str(f).strip()]
 
+    def _choice(key: str, allowed) -> str:
+        raw = desktop_cfg.get(key, "auto")
+        low = raw.strip().lower() if isinstance(raw, str) else ""
+        return low if low in allowed else "auto"
+
     raw_gpu = desktop_cfg.get("disable_gpu", "auto")
     if isinstance(raw_gpu, bool):
         disable_gpu = "1" if raw_gpu else "0"
     elif isinstance(raw_gpu, str):
-        low = raw_gpu.strip().lower()
-        if low in ("1", "true", "yes", "on"):
-            disable_gpu = "1"
-        elif low in ("0", "false", "no", "off"):
-            disable_gpu = "0"
-
-    raw_store = desktop_cfg.get("password_store", "auto")
-    if isinstance(raw_store, str) and raw_store.strip().lower() in _LINUX_PASSWORD_STORES:
-        password_store = raw_store.strip().lower()
-
-    raw_ozone = desktop_cfg.get("ozone_platform_hint", "auto")
-    if isinstance(raw_ozone, str) and raw_ozone.strip().lower() in ("auto", "x11", "wayland"):
-        ozone_hint = raw_ozone.strip().lower()
+        disable_gpu = _GPU_FLAG_WORDS.get(raw_gpu.strip().lower(), "auto")
+    password_store = _choice("password_store", _LINUX_PASSWORD_STORES)
+    ozone_hint = _choice("ozone_platform_hint", ("auto", "x11", "wayland"))
     return flags, disable_gpu, password_store, ozone_hint
 
 
@@ -1361,16 +1358,14 @@ def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
     from hermes_constants import with_hermes_node_path
     # with_hermes_node_path() copies os.environ when called with no arg.
     env = with_hermes_node_path()
-    if getattr(args, "fake_boot", False):
-        env["HERMES_DESKTOP_BOOT_FAKE"] = "1"
-    if getattr(args, "ignore_existing", False):
-        env["HERMES_DESKTOP_IGNORE_EXISTING"] = "1"
+    for attr, key in (
+        ("fake_boot", "HERMES_DESKTOP_BOOT_FAKE"), ("ignore_existing", "HERMES_DESKTOP_IGNORE_EXISTING")):
+        if getattr(args, attr, False):
+            env[key] = "1"
     if getattr(args, "hermes_root", None):
         env["HERMES_DESKTOP_HERMES_ROOT"] = str(Path(args.hermes_root).expanduser().resolve())
-    if getattr(args, "cwd", None):
-        env["HERMES_DESKTOP_CWD"] = str(Path(args.cwd).expanduser().resolve())
-    else:
-        env["HERMES_DESKTOP_CWD"] = os.getcwd()
+    cwd = getattr(args, "cwd", None)
+    env["HERMES_DESKTOP_CWD"] = str(Path(cwd).expanduser().resolve()) if cwd else os.getcwd()
 
     config_electron_flags, config_disable_gpu, config_password_store, config_ozone_hint = (
         _desktop_launch_options())

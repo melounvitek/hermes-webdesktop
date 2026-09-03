@@ -632,7 +632,8 @@ def _is_electron_packaged_web_dist(path: str) -> bool:
     return "app.asar" in path.replace("\\", "/")
 
 
-def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_nonce: str, _token_file: str) -> None:
+def _route_named_profile_dashboard(
+    args, _headless_backend: bool, _ssh_owner_nonce: str, _token_file: str) -> None:
     """Route a named-profile launch to the single MACHINE dashboard (per-request ``?profile=`` scoping
     makes one server per profile pure fragmentation).
 
@@ -681,16 +682,14 @@ def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_non
         "--port", str(args.port),
         "--host", args.host,
         "--open-profile", _launch_profile]
-    if _ssh_owner_nonce:
-        reexec_argv.extend(["--ssh-owner-nonce", _ssh_owner_nonce])
-    if _token_file:
-        reexec_argv.extend(["--ssh-session-token-file", _token_file])
-    if args.no_open:
-        reexec_argv.append("--no-open")
-    if getattr(args, "insecure", False):
-        reexec_argv.append("--insecure")
-    if getattr(args, "skip_build", False):
-        reexec_argv.append("--skip-build")
+    for enabled, extra in (
+        (_ssh_owner_nonce, ["--ssh-owner-nonce", _ssh_owner_nonce]),
+        (_token_file, ["--ssh-session-token-file", _token_file]),
+        (args.no_open, ["--no-open"]),
+        (getattr(args, "insecure", False), ["--insecure"]),
+        (getattr(args, "skip_build", False), ["--skip-build"])):
+        if enabled:
+            reexec_argv.extend(extra)
     from tools.environments.local import build_subprocess_env
     # HERMES_HOME is pinned to the machine root below — the factory must not
     # re-inject a profile home.

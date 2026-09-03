@@ -171,10 +171,7 @@ def _web_ui_build_needed(web_dir: Path) -> bool:
     """
     project_root = _web_project_root(web_dir)
     dist_dir = _web_dist_dir(web_dir)
-    sentinel = dist_dir / ".vite" / "manifest.json"
-    if not sentinel.exists():
-        sentinel = dist_dir / "index.html"
-    if not sentinel.exists():
+    if not any(p.exists() for p in (dist_dir / ".vite" / "manifest.json", dist_dir / "index.html")):
         return True
     return not _stamp_is_current(
         _web_ui_stamp_path(), lambda: _compute_web_ui_content_hash(project_root, web_dir))

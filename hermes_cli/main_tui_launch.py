@@ -111,7 +111,8 @@ def _child_workspace_dirs(dir: Path):
             yield child
 
 
-def _termux_workspace_install_context(dir: Path, *, include_child_workspaces: bool = False) -> tuple[Path, tuple[str, ...]]:
+def _termux_workspace_install_context(
+    dir: Path, *, include_child_workspaces: bool = False) -> tuple[Path, tuple[str, ...]]:
     """Return Termux-only ``(cwd, npm_args)`` for installing deps for *dir* only."""
     ws_root = _workspace_root(dir)
     if ws_root == dir:
@@ -341,14 +342,9 @@ def _ensure_tui_node() -> None:
         return
 
     parts = os.environ.get("PATH", "").split(os.pathsep)
-    extras: list[Path] = []
-
     resolved = (result.stdout or "").strip()
-    if resolved:
-        extras.append(Path(resolved).resolve().parent)
-
-    extras.extend([Path(hermes_home) / "node" / "bin", Path.home() / ".local" / "bin"])
-
+    extras = [Path(resolved).resolve().parent] if resolved else []
+    extras += [Path(hermes_home) / "node" / "bin", Path.home() / ".local" / "bin"]
     for extra in extras:
         s = str(extra)
         if extra.is_dir() and s not in parts:
@@ -676,7 +672,8 @@ def _setup_tui_worktree() -> dict:
             # multi-agent box; on a thread so it can't block launch.
             import threading as _threading
 
-            _threading.Thread(target=_maintain_pack_health, args=(repo,), name="pack-maintenance", daemon=True).start()
+            _threading.Thread(
+                target=_maintain_pack_health, args=(repo,), name="pack-maintenance", daemon=True).start()
         wt_info = _setup_worktree()
     except Exception as exc:
         print(f"✗ Failed to create TUI worktree: {exc}", file=sys.stderr)
@@ -705,7 +702,8 @@ def _launch_tui(
         apply_terminal_config_to_env(env=env)
     except Exception:
         logger.debug("Failed to apply terminal config bridge for TUI launch", exc_info=True)
-    active_session_fd, active_session_file = tempfile.mkstemp(prefix="hermes-tui-active-session-", suffix=".json")
+    active_session_fd, active_session_file = tempfile.mkstemp(
+        prefix="hermes-tui-active-session-", suffix=".json")
     os.close(active_session_fd)
     env["HERMES_TUI_ACTIVE_SESSION_FILE"] = active_session_file
     env.setdefault("NODE_ENV", "development" if tui_dev else "production")
@@ -718,20 +716,15 @@ def _launch_tui(
 
     _apply_tui_python_env(env)
 
-    if model:
-        env["HERMES_MODEL"] = model
-        env["HERMES_INFERENCE_MODEL"] = model
-    if provider:
-        env["HERMES_TUI_PROVIDER"] = provider
-        env["HERMES_INFERENCE_PROVIDER"] = provider
-    tui_toolsets = _normalize_tui_toolsets(toolsets)
-    if tui_toolsets:
-        env["HERMES_TUI_TOOLSETS"] = ",".join(tui_toolsets)
+    skills_value = ""
     if skills:
-        value = ",".join(_split_comma_items(skills)) if isinstance(skills, (list, tuple)) else str(skills).strip()
-        if value:
-            env["HERMES_TUI_SKILLS"] = value
+        skills_value = (
+            ",".join(_split_comma_items(skills)) if isinstance(skills, (list, tuple)) else str(skills).strip())
     for key, value in (
+        ("HERMES_MODEL", model), ("HERMES_INFERENCE_MODEL", model),
+        ("HERMES_TUI_PROVIDER", provider), ("HERMES_INFERENCE_PROVIDER", provider),
+        ("HERMES_TUI_TOOLSETS", ",".join(_normalize_tui_toolsets(toolsets))),
+        ("HERMES_TUI_SKILLS", skills_value),
         ("HERMES_TUI_QUERY", query), ("HERMES_TUI_IMAGE", image),
         ("HERMES_TUI_CHECKPOINTS", "1" if checkpoints else None),
         ("HERMES_TUI_PASS_SESSION_ID", "1" if pass_session_id else None),
