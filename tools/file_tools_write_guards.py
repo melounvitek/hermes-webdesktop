@@ -88,14 +88,11 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     return None
 
 
-# ---------------------------------------------------------------------------
-# Protected agent-instruction files (always-ask approval gate)
-# ---------------------------------------------------------------------------
+# ── Protected agent-instruction files (always-ask approval gate) ─────────
 # Files that steer FUTURE agent behavior are a prompt-injection persistence
-# vector: an injected edit to AGENTS.md / CLAUDE.md / SOUL.md / .cursorrules
-# (or a project-local .hermes tree) outlives the turn. Writes ALWAYS require
-# human approval — even under --yolo — and fail closed without a human channel.
-# Basenames match in ANY directory and case-insensitively (loaders probe variants).
+# vector (AGENTS.md / CLAUDE.md / SOUL.md / .cursorrules / project .hermes tree).
+# Writes ALWAYS require human approval — even under --yolo — and fail closed
+# without a human channel. Basenames match in ANY directory, case-insensitively.
 _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
     "agents.md", "claude.md", "soul.md", ".cursorrules"})
 
@@ -213,28 +210,25 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
         decision = _approval._await_gateway_decision(session_key, notify_cb, approval_data, surface="gateway")
         if decision.get("notify_failed"):
             return blocked.format(why="requires approval but the approval request could not be delivered.")
-        # Any tapped scope is a one-operation grant; nothing is persisted.
-        if decision.get("resolved") and decision.get("choice") in {"once", "session", "always"}:
-            return None
-        return timed_out if not decision.get("resolved") else denied
-
-    # CLI surface: per-thread approval callback (prompt_toolkit panel).
-    try:
-        from tools.terminal_tool import _get_approval_callback
-        callback = _get_approval_callback()
-    except Exception:
-        callback = None
-
-    if callback is not None:
+        choice, timed = decision.get("choice"), not decision.get("resolved")
+    else:
+        # CLI surface: per-thread approval callback (prompt_toolkit panel).
+        try:
+            from tools.terminal_tool import _get_approval_callback
+            callback = _get_approval_callback()
+        except Exception:
+            callback = None
+        if callback is None:
+            # No human channel (script, cron, background thread): fail closed —
+            # auto-approving here would recreate the persistence vector.
+            return blocked.format(why=_NO_HUMAN)
         choice = _approval.prompt_dangerous_approval(
             display, description, allow_permanent=False, allow_session=False, approval_callback=callback)
-        if choice in {"once", "session", "always"}:
-            return None
-        return timed_out if choice == "timeout" else denied
-
-    # No human channel (script, cron, background thread): fail closed —
-    # auto-approving here would recreate the persistence vector.
-    return blocked.format(why=_NO_HUMAN)
+        timed = choice == "timeout"
+    # Any tapped scope is a one-operation grant; nothing is persisted.
+    if not timed and choice in {"once", "session", "always"}:
+        return None
+    return timed_out if timed else denied
 
 
 def _check_protected_instruction_write(paths: list[str], task_id: str = "default") -> str | None:
@@ -380,9 +374,7 @@ def _check_binary_document_write(filepath: str, task_id: str = "default") -> str
     return None
 
 
-# ---------------------------------------------------------------------------
-# Internal display text must never be persisted as file content
-# ---------------------------------------------------------------------------
+# ── Internal display text must never be persisted as file content ────────
 _READ_DEDUP_STATUS_MESSAGE = (
     "File unchanged since last read. The content from "
     "the earlier read_file result in this conversation is "

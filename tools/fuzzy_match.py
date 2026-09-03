@@ -79,12 +79,9 @@ def _strip_boundary(lines: list[str]) -> list[str]:
 
 
 def _build_orig_to_norm_map(original: str) -> list[int]:
-    """Map each original index to its index in ``_unicode_normalize(original)``.
-
-    UNICODE_MAP replacements can expand one char into several, so the map is
-    needed to translate normalised spans back. Length is ``len(original)+1``;
-    the last entry is a sentinel one past the final character.
-    """
+    """Map each original index to its index in ``_unicode_normalize(original)``
+    (replacements can expand one char into several). Length ``len(original)+1``;
+    the last entry is a sentinel one past the final character."""
     result: list[int] = []
     norm_pos = 0
     for char in original:
@@ -177,18 +174,9 @@ def _map_normalized_positions(original: str, normalized: str,
 # ORIGINAL content.
 
 def _strategy_exact(content: str, pattern: str) -> list[Span]:
-    """Strategy 1: exact, non-overlapping occurrences (str.replace semantics)."""
-    matches = []
-    start = 0
-    while True:
-        pos = content.find(pattern, start)
-        if pos == -1:
-            break
-        matches.append((pos, pos + len(pattern)))
-        # Advance past the whole match: overlapping spans would corrupt the
-        # file under replace_all (reverse-order apply on stale offsets).
-        start = pos + len(pattern)
-    return matches
+    """Strategy 1: exact, non-overlapping occurrences (str.replace semantics —
+    overlapping spans would corrupt the file under replace_all)."""
+    return [m.span() for m in re.finditer(re.escape(pattern), content)]
 
 
 def _strategy_line_trimmed(content: str, pattern: str) -> list[Span]:
