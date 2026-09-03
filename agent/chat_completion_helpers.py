@@ -1077,6 +1077,97 @@ def _inline_nonstream_hard_timeout(stale_timeout: float):
         return stale_timeout
 
 
+class _InlineRequest:
+    """Lifecycle state for one inline non-streaming request (#75301).
+
+    Every transition happens under ``lock``: ``done`` stops a late timer bumping
+    the stale streak after unwind; ``cancelled`` makes a user/monitor interrupt
+    own the outcome so a racing timer can't misclassify the kill as staleness;
+    ``stale`` is the one-shot transition.
+    """
+
+    def __init__(self, agent, api_kwargs: dict, stale_timeout: float):
+        self.agent = agent
+        self.api_kwargs = api_kwargs
+        self.stale_timeout = stale_timeout
+        self.client = None
+        self.done = False
+        self.stale = False
+        self.cancelled = False
+        self.lock = threading.Lock()
+        self.abort_hook = self.abort  # single bound object: identity-checked on cleanup
+
+    def _abort_client(self, client, reason: str, log_msg: str) -> None:
+        try:
+            self.agent._abort_request_openai_client(client, reason=reason)
+        except Exception:
+            logger.debug(log_msg, exc_info=True)
+
+    def abort(self, reason: str) -> bool:
+        """Abort the inline request from a watchdog/interrupt thread.
+
+        Returns True when this call owned the stale transition (so the timer
+        callback only reports/bumps once, and never after an interrupt or a
+        completed request). Aborts under the lock (same contract as
+        _RequestClientRegistry): once released the finally may cache the client
+        and the NEXT call check it out, so a late abort would poison an
+        innocent request.
+        """
+        with self.lock:
+            if self.done:
+                return False
+            if reason == "stale_call_kill":
+                if self.cancelled:
+                    return False
+                newly_stale = not self.stale
+                if newly_stale:
+                    self.stale = True
+                    # Bump BEFORE releasing: a fast retry's reset must not be
+                    # overtaken by this older timer restoring the streak.
+                    _bump_stale_streak(self.agent)
+            else:
+                # Interrupt wins the lock -> owns the outcome; a later timer
+                # must not count it as staleness.
+                self.cancelled = True
+                newly_stale = False
+            if self.client is not None:
+                self._abort_client(self.client, reason, f"Inline request abort failed ({reason})")
+            return newly_stale
+
+    def make_client(self, reason: str, kind: str = "openai"):
+        # Only OpenAI-wire requests reach direct_api_call; ``kind`` exists
+        # for signature parity with the dispatch helper.
+        client = self.agent._create_request_openai_client(reason=reason, api_kwargs=self.api_kwargs)
+        with self.lock:
+            self.client = client
+            stale_before_dispatch = self.stale
+            if stale_before_dispatch:
+                # Timer fired during client construction: the abort found no
+                # socket, so dispatching now would open one AFTER the only
+                # watchdog fired. Fail here instead. (Residual ms-scale window
+                # before httpx opens its socket is accepted.)
+                self._abort_client(
+                    client, "stale_call_kill",
+                    "Inline abort after late client registration failed",
+                )
+        if stale_before_dispatch:
+            raise TimeoutError(
+                "Non-streaming API call timed out before request dispatch "
+                f"(threshold: {int(self.stale_timeout)}s)"
+            )
+        self.agent._active_request_abort = self.abort_hook
+        return client
+
+    def mark_done(self) -> None:
+        with self.lock:
+            self.done = True
+
+    def pop_client(self):
+        with self.lock:
+            client, self.client = self.client, None
+        return client
+
+
 def direct_api_call(agent, api_kwargs: dict):
     """Run a non-streaming LLM call inline on the conversation thread.
 
@@ -1093,78 +1184,7 @@ def direct_api_call(agent, api_kwargs: dict):
     """
     _check_stale_giveup(agent)
     agent._touch_activity("waiting for non-streaming API response")
-    # Lifecycle state, every transition under the lock (#75301): ``done``
-    # stops a late timer bumping the stale streak after unwind; ``cancelled``
-    # makes a user/monitor interrupt own the outcome so a racing timer can't
-    # misclassify the kill as staleness; ``stale`` is the one-shot transition.
-    request_state = {"client": None, "done": False, "stale": False, "cancelled": False}
-    request_client_lock = threading.Lock()
     activity_hb_stop = threading.Event()
-
-    def _abort_active_request(reason: str) -> bool:
-        """Abort the inline request from a watchdog/interrupt thread.
-
-        Returns True when this call owned the stale transition (so the
-        timer callback only reports/bumps once, and never after an
-        interrupt or a completed request).
-        """
-        # Abort under the lock (same contract as _RequestClientRegistry):
-        # once released the finally may cache the client and the NEXT call
-        # check it out, so a late abort would poison an innocent request.
-        with request_client_lock:
-            if request_state["done"]:
-                return False
-            if reason == "stale_call_kill" and request_state["cancelled"]:
-                return False
-            if reason != "stale_call_kill":
-                # Interrupt wins the lock -> owns the outcome; a later timer
-                # must not count it as staleness.
-                request_state["cancelled"] = True
-            newly_stale = reason == "stale_call_kill" and not request_state["stale"]
-            if newly_stale:
-                request_state["stale"] = True
-                # Bump BEFORE releasing: a fast retry's reset must not be
-                # overtaken by this older timer restoring the streak.
-                _bump_stale_streak(agent)
-            request_client = request_state["client"]
-            if request_client is not None:
-                try:
-                    agent._abort_request_openai_client(request_client, reason=reason)
-                except Exception:
-                    logger.debug(
-                        "Inline request abort failed (%s)", reason, exc_info=True
-                    )
-            return newly_stale
-
-    def _make_client(reason: str, kind: str = "openai"):
-        # Only OpenAI-wire requests reach direct_api_call; ``kind`` exists
-        # for signature parity with the dispatch helper.
-        client = agent._create_request_openai_client(reason=reason, api_kwargs=api_kwargs)
-        stale_before_dispatch = False
-        with request_client_lock:
-            request_state["client"] = client
-            if request_state["stale"]:
-                # Timer fired during client construction: the abort found no
-                # socket, so dispatching now would open one AFTER the only
-                # watchdog fired. Fail here instead. (Residual ms-scale window
-                # before httpx opens its socket is accepted.)
-                stale_before_dispatch = True
-                try:
-                    agent._abort_request_openai_client(
-                        client, reason="stale_call_kill"
-                    )
-                except Exception:
-                    logger.debug(
-                        "Inline abort after late client registration failed",
-                        exc_info=True,
-                    )
-        if stale_before_dispatch:
-            raise TimeoutError(
-                "Non-streaming API call timed out before request dispatch "
-                f"(threshold: {int(stale_timeout)}s)"
-            )
-        agent._active_request_abort = _abort_active_request
-        return client
 
     def _activity_heartbeat() -> None:
         # Do not put the API call itself on another worker thread — that is
@@ -1190,15 +1210,15 @@ def direct_api_call(agent, api_kwargs: dict):
     # hanging until TCP dies (#85252).
     hard_timeout = _inline_nonstream_hard_timeout(stale_timeout)
     if hard_timeout is not None and "timeout" not in api_kwargs:
-        api_kwargs = dict(api_kwargs)
-        api_kwargs["timeout"] = hard_timeout
+        api_kwargs = {**api_kwargs, "timeout": hard_timeout}
     activity_hb.start()
+    request = _InlineRequest(agent, api_kwargs, stale_timeout)
 
     def _on_stale() -> None:
         # Timer thread: aborts sockets only, never issues a request (keeps
         # the no-worker property). False = request finished or an interrupt
         # owns the outcome; stay silent.
-        if not _abort_active_request("stale_call_kill"):
+        if not request.abort("stale_call_kill"):
             return
         elapsed = time.time() - call_start
         _report_stale_nonstream_kill(
@@ -1218,13 +1238,13 @@ def direct_api_call(agent, api_kwargs: dict):
     succeeded = False
     try:
         response = _dispatch_nonstreaming_api_request(
-            agent, api_kwargs, make_client=_make_client
+            agent, api_kwargs, make_client=request.make_client
         )
     except Exception:
         if getattr(agent, "_interrupt_requested", False):
             raise InterruptedError("Agent interrupted during API call") from None
-        with request_client_lock:
-            was_stale = request_state["stale"]
+        with request.lock:
+            was_stale = request.stale
         if was_stale:
             # Our own abort caused the transport error: raise a retryable
             # TimeoutError, never InterruptedError ("the user wants to stop").
@@ -1241,23 +1261,19 @@ def direct_api_call(agent, api_kwargs: dict):
         # arrival and unwind is a no-op and cannot overwrite the reset below.
         # If a timer already won, the request still completed: return it (the
         # reset undoes the bump; the finally discards the poisoned client).
-        with request_client_lock:
-            request_state["done"] = True
+        request.mark_done()
         _reset_stale_streak(agent)
         succeeded = True
         return response
     finally:
         if stale_watchdog is not None:
             stale_watchdog.cancel()
-        with request_client_lock:
-            request_state["done"] = True
+        request.mark_done()
         activity_hb_stop.set()
         activity_hb.join(timeout=2.0)
-        if getattr(agent, "_active_request_abort", None) is _abort_active_request:
+        if getattr(agent, "_active_request_abort", None) is request.abort_hook:
             agent._active_request_abort = None
-        with request_client_lock:
-            request_client = request_state["client"]
-            request_state["client"] = None
+        request_client = request.pop_client()
         if request_client is not None:
             agent._close_request_openai_client(
                 request_client,
