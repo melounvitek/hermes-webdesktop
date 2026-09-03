@@ -43,11 +43,9 @@ def _codex_request_failure_details(error: BaseException) -> tuple[int | None, st
         seen.add(id(current))
         exception_classes.append(type(current).__name__)
         if request_body_bytes is None:
-            try:
-                request = getattr(current, "request", None)
-                content = request.content if request is not None else None
-            except Exception:
-                content = None
+            content = None
+            with suppress(Exception):
+                content = getattr(getattr(current, "request", None), "content", None)
             if isinstance(content, str):
                 request_body_bytes = len(content.encode("utf-8"))
             elif isinstance(content, (bytes, bytearray, memoryview)):
@@ -252,8 +250,7 @@ def _codex_item_completion_payload(item: dict) -> tuple[str, bool]:
     """(result_text, is_error) for a completed tool item; mirrors the projector's tool-result content."""
     item_type = item.get("type") or ""
     if item_type == "commandExecution":
-        out = item.get("aggregatedOutput") or ""
-        exit_code = item.get("exitCode")
+        out, exit_code = item.get("aggregatedOutput") or "", item.get("exitCode")
         is_error = bool(exit_code is not None and exit_code != 0)
         return (f"[exit {exit_code}]\n{out}" if is_error else out), is_error
     if item_type == "fileChange":
@@ -266,8 +263,7 @@ def _codex_item_completion_payload(item: dict) -> tuple[str, bool]:
         result = item.get("result")
         return (json.dumps(result, ensure_ascii=False)[:4000] if result is not None else ""), False
     if item_type == "dynamicToolCall":
-        content_items = item.get("contentItems") or []
-        success = item.get("success", True)
+        content_items, success = item.get("contentItems") or [], item.get("success", True)
         has_items = isinstance(content_items, list) and content_items
         return (json.dumps(content_items, ensure_ascii=False)[:4000] if has_items else f"success={success}"), not bool(success)
     return "", False
@@ -598,10 +594,10 @@ class _CodexResponseAssembler:
         # settled pending calls merge back in stream order.
         self.output_indexes, self.output_sequences = [], []
         self.text_deltas, self.commentary_text_deltas = [], []
-        # Announced-but-unconfirmed function calls keyed by item id.
+        # pending_function_calls: announced-but-unconfirmed function calls keyed by item id.
+        # announced_output_order: first-observed (sequence, output_index) per announced item id
+        # so a later .done keeps its announced position when merged with settled calls.
         self.pending_function_calls: Dict[str, Dict[str, Any]] = {}
-        # First-observed (sequence, output_index) per announced item id so a later
-        # .done keeps its announced position when merged with settled calls.
         self.announced_output_order: Dict[str, tuple] = {}
 
     def _safe(self, cb: Callable | None, label: str, *args: Any) -> None:
@@ -815,10 +811,8 @@ def _sanitize_consumer_codex_request(agent: Any, request: dict[str, Any]) -> dic
     backend_predicate = getattr(agent, "_is_codex_backend", None)
     if not (callable(backend_predicate) and bool(backend_predicate())):
         return sanitized
-    dropped_from: list[str] = []
-    if "prompt_cache_retention" in sanitized:
-        del sanitized["prompt_cache_retention"]
-        dropped_from.append("top-level")
+    dropped_from = ["top-level"] if "prompt_cache_retention" in sanitized else []
+    sanitized.pop("prompt_cache_retention", None)
     # Copy before editing (caller's mapping must not mutate); drop when emptied.
     extra_body = sanitized.get("extra_body")
     if isinstance(extra_body, dict) and "prompt_cache_retention" in extra_body:
