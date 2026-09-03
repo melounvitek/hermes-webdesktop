@@ -7,8 +7,7 @@
 - ``resolve_provider()`` picks the active provider via the documented priority chain.
 - ``OAUTH_PROVIDER_FLOWS`` maps each OAuth provider to its resolver/status builder; the flows live in
   ``auth_nous``/``auth_codex``/``auth_xai``/``auth_qwen``/``auth_minimax``/``auth_spotify`` and are
-  re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface.
-"""
+  re-imported here so ``hermes_cli.auth.<name>`` stays the public/patchable surface."""
 
 from __future__ import annotations
 
@@ -295,8 +294,7 @@ except Exception:
 def get_anthropic_key() -> str:
     """First usable Anthropic credential (``.env`` preferred over a stale shell export), or ``""``.
 
-    Order mirrors ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars``.
-    """
+    Order mirrors ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars``."""
     from hermes_cli.config import get_env_value_prefer_dotenv
 
     for var in PROVIDER_REGISTRY["anthropic"].api_key_env_vars:
@@ -474,8 +472,7 @@ def _global_auth_file_path() -> Optional[Path]:
     (classic mode, or a custom HERMES_HOME that is not a profile).
 
     Read-only fallback path, so no pytest seat belt here: ``_load_global_auth_store()`` wraps the
-    read in try/except; the write-side seat belt lives on ``_auth_file_path()``.
-    """
+    read in try/except; the write-side seat belt lives on ``_auth_file_path()``."""
     try:
         from hermes_constants import get_default_hermes_root
         global_root = get_default_hermes_root()
@@ -558,8 +555,7 @@ def _file_lock(
 
     Falls back to a depth-only guard when neither ``fcntl`` nor ``msvcrt`` is available. Callers
     supply their own ``threading.local`` so independent locks (profile store vs global root vs the
-    shared Nous store) track reentrancy separately.
-    """
+    shared Nous store) track reentrancy separately."""
     if getattr(holder, "depth", 0) > 0:
         holder.depth += 1
         try:
@@ -614,8 +610,7 @@ def _auth_store_lock(
 
     Lock ordering invariant: when held together with ``_nous_shared_store_lock``, acquire
     ``_auth_store_lock`` FIRST (outer) and the shared Nous lock SECOND (inner). Violating it risks
-    deadlock against a concurrent import on the shared store.
-    """
+    deadlock against a concurrent import on the shared store."""
     auth_path = target_path if target_path is not None else _auth_file_path()
     with _file_lock(
         auth_path.with_suffix(".lock"), _auth_lock_holder_for(auth_path), timeout_seconds,
@@ -690,8 +685,7 @@ def _write_private_file_atomic(
 
     ``os.open(O_EXCL, 0o600)`` closes the TOCTOU window where ``write_text()`` + post-write
     ``chmod`` briefly exposed tokens at process umask. The per-process random temp suffix avoids
-    collisions between concurrent writers and stale leftovers from a crashed prior write.
-    """
+    collisions between concurrent writers and stale leftovers from a crashed prior write."""
     target.parent.mkdir(parents=True, exist_ok=True)
     secure_parent_dir(target)  # refuses to chmod /, top-level dirs, or the install tree
     tmp_path = target.with_name(f"{target.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}")
@@ -755,8 +749,7 @@ def _load_provider_state_with_source(
     """Provider state plus the auth.json path it came from (profile first, then the global root).
 
     Refresh paths that rotate single-use OAuth refresh tokens must write the updated chain back to
-    the same store they read.
-    """
+    the same store they read."""
     state = _provider_state_in(auth_store, provider_id)
     if state is not None:
         return state, _auth_file_path()
@@ -777,8 +770,7 @@ def _provider_state_transaction(provider_id: str):
     Profile-backed refresh paths must take the global auth-store lock before any provider-specific
     shared-store lock. Re-reading the source after the target lock is acquired prevents both stale
     refreshes and whole-file lost updates without inverting the documented auth -> shared lock
-    order.
-    """
+    order."""
     with _auth_store_lock():
         auth_store = _load_auth_store()
         state, source_path = _load_provider_state_with_source(auth_store, provider_id)
@@ -875,8 +867,7 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     In profile mode the profile's pool is authoritative; the global-root ``auth.json`` is a
     read-only fallback applied per provider ONLY when the profile has zero entries for that
     provider, so profile workers can see globally-authed providers while ``hermes auth add`` inside
-    the profile fully shadows global on the next read.
-    """
+    the profile fully shadows global on the next read."""
     pool = _load_auth_store().get("credential_pool")
     pool = pool if isinstance(pool, dict) else {}
     global_store = _load_global_auth_store()
@@ -913,8 +904,7 @@ def _merge_disk_cooldown_state(
 
     ``write_credential_pool`` persists an in-memory snapshot that may predate another process
     marking the same credential exhausted/dead; without this merge the later rewrite resurrects a
-    rate-limited key as healthy and both processes resume hammering it.
-    """
+    rate-limited key as healthy and both processes resume hammering it."""
     if not isinstance(disk_entry, dict):
         return entry
     try:
@@ -958,8 +948,7 @@ def write_credential_pool(
 
     Entries present on disk but missing from *entries* (added by another process after the caller's
     snapshot) are merged back in unless listed in *removed_ids*, so a rotation/exhaustion rewrite
-    never drops a concurrent credential.
-    """
+    never drops a concurrent credential."""
     removed = {rid for rid in (removed_ids or ()) if rid}
     with _auth_store_lock():
         auth_store = _load_auth_store()
@@ -1060,8 +1049,7 @@ def _config_selects_provider(normalized: str) -> bool:
     MoA presets are explicit model selections too: ``provider: anthropic`` in a MoA slot opts into
     Anthropic credentials for that slot even when the main model is another provider; otherwise
     Claude Code OAuth entries get pruned by ``load_pool("anthropic")`` and MoA advisors fail with
-    "no ANTHROPIC_API_KEY" while the picker says Anthropic is logged in.
-    """
+    "no ANTHROPIC_API_KEY" while the picker says Anthropic is logged in."""
     from hermes_cli.config import load_config
     cfg = load_config()
     if _slot_selects(cfg.get("model"), normalized):
@@ -1103,8 +1091,7 @@ def _explicit_env_credentials_present(normalized: str) -> bool:
     openrouter; same ``.auth_type`` / ``.api_key_env_vars`` shape). AWS SDK providers (Bedrock) have
     empty ``api_key_env_vars``, so check their explicit env credentials directly — NOT boto3's full
     chain: ambient EC2 IMDS / SSO profiles must not auto-surface, but AWS_BEARER_TOKEN_BEDROCK or an
-    access-key pair in .env is as explicit as pasting ANTHROPIC_API_KEY.
-    """
+    access-key pair in .env is as explicit as pasting ANTHROPIC_API_KEY."""
     pconfig = PROVIDER_REGISTRY.get(normalized)
     if pconfig is None:
         from hermes_cli.providers import get_provider
@@ -1138,8 +1125,7 @@ def _keyless_provider_has_explicit_config(normalized: str) -> bool:
     Uses has_explicit_vertex_config(), NOT has_vertex_credentials(): the latter also counts an
     ambient GOOGLE_APPLICATION_CREDENTIALS path (commonly set for unrelated GCP work). Only
     Hermes-scoped signals (VERTEX_PROJECT_ID / vertex.project_id / VERTEX_CREDENTIALS_PATH) count
-    here.
-    """
+    here."""
     if normalized in _VERTEX_PROVIDER_IDS:
         from agent.vertex_adapter import has_explicit_vertex_config
         return bool(has_explicit_vertex_config())
@@ -1315,8 +1301,7 @@ def _scoped_key_env_reader() -> Callable[[str], str]:
     Under multiplex a secondary profile's API keys live only in its secret scope, not os.environ; a
     bare getenv would report "No LLM provider configured" for every secondary profile. Catch ONLY
     ImportError: any other failure inside auxiliary_client must propagate, since silently falling
-    back to os.getenv would reintroduce that fail-open with zero trace.
-    """
+    back to os.getenv would reintroduce that fail-open with zero trace."""
     try:
         from agent.auxiliary_client import _scoped_key_env
         return _scoped_key_env
@@ -1358,8 +1343,7 @@ def _config_model_provider() -> Tuple[Any, Optional[str]]:
     """``(model_cfg, provider)`` from config.yaml when ``model.provider`` names a registry provider.
 
     The normal chat/gateway path resolves config.provider upstream in resolve_requested_provider();
-    this is the safety net for the lone direct caller (main.py resolve_provider("auto")).
-    """
+    this is the safety net for the lone direct caller (main.py resolve_provider("auto"))."""
     try:
         from hermes_cli.config import load_config
 
@@ -1412,8 +1396,7 @@ def resolve_provider(
     provider: 1. explicit CLI api_key/base_url -> "openrouter"; 2. config.yaml ``model.provider``;
     3. OPENAI_API_KEY / OPENROUTER_API_KEY env -> "openrouter"; 4. OpenRouter credential pool;
     5. provider-specific env keys; 6. auth.json ``active_provider`` (OAuth); 7. AWS Bedrock
-    credential chain; 8. AuthError(no_provider_configured).
-    """
+    credential chain; 8. AuthError(no_provider_configured)."""
     normalized = (requested or "auto").strip().lower()
     normalized = _plugin_aliases().get(normalized, normalized)
 
@@ -1683,8 +1666,7 @@ def get_nous_auth_status() -> Dict[str, Any]:
     """Status snapshot for Nous auth, memoised ~15s keyed on the auth.json mtime.
 
     Prefers the auth-store provider state (the live source of truth for refresh) and validates it by
-    resolving runtime credentials so revoked refresh sessions do not show up as a healthy login.
-    """
+    resolving runtime credentials so revoked refresh sessions do not show up as a healthy login."""
     global _nous_auth_status_cache
     now = time.monotonic()
     auth_file_key, mtime = _auth_file_cache_key()
@@ -1706,8 +1688,7 @@ class OAuthProviderFlow:
 
     Entries name module-level callables (strings) rather than binding them, so
     ``monkeypatch.setattr("hermes_cli.auth.resolve_codex_runtime_credentials", ...)`` and friends
-    keep intercepting: ``resolve()`` / ``status()`` look the name up in this module at call time.
-    """
+    keep intercepting: ``resolve()`` / ``status()`` look the name up in this module at call time."""
 
     provider_id: str
     resolve_fn: str
@@ -1853,8 +1834,7 @@ def _external_process_auth_evidence(provider_id: str) -> tuple[bool, Optional[st
     store). False means "not verifiable from here", NOT "signed out" — the Copilot CLI may hold its
     session in an OS keychain Hermes can't read. Deliberately subprocess-free: this runs from status
     endpoints and pickers, and spawning ``gh auth token`` there re-creates the cold-start stall
-    copilot_auth.py works to avoid.
-    """
+    copilot_auth.py works to avoid."""
     if provider_id != "copilot-acp":
         return False, None
     # 1. Supported env tokens — the same vars the Copilot CLI itself honors.
@@ -1898,8 +1878,7 @@ def _external_process_spec(
 
     How to launch the CLI comes from the provider's own profile, so a provider shipped outside this
     tree describes its binary/args instead of inheriting another vendor's (copilot-acp's
-    HERMES_COPILOT_ACP_COMMAND / COPILOT_CLI_PATH / HERMES_COPILOT_ACP_ARGS live in its profile).
-    """
+    HERMES_COPILOT_ACP_COMMAND / COPILOT_CLI_PATH / HERMES_COPILOT_ACP_ARGS live in its profile)."""
     base_url = _provider_env_base_url(pconfig) or pconfig.inference_base_url
     try:
         from providers import get_provider_profile as _get_provider_profile
@@ -1923,8 +1902,7 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     ``configured``/``logged_in`` stay structural (the executable resolves or a TCP endpoint is set)
     because the spawned subprocess owns its real auth. ``auth_verified``/``auth_source`` carry
     positive credential evidence when Hermes can see some — absence of evidence is not absence of
-    auth.
-    """
+    auth."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         return {"configured": False}
@@ -1981,8 +1959,7 @@ def _get_azure_foundry_auth_status() -> Dict[str, Any]:
     * ``auth_mode == "entra_id"``: ``azure-identity`` importable (no token is minted here; ``hermes
       doctor`` runs the live probe). Never invokes the Entra credential chain, keeping CLI startup
       latency flat regardless of token-service / az login state.
-    * ``auth_mode == "api_key"`` (default): ``AZURE_FOUNDRY_API_KEY`` set with a usable value.
-    """
+    * ``auth_mode == "api_key"`` (default): ``AZURE_FOUNDRY_API_KEY`` set with a usable value."""
     info: Dict[str, Any] = {"provider": "azure-foundry"}
     try:
         from hermes_cli.config import load_config, get_env_value_prefer_dotenv
@@ -2137,8 +2114,7 @@ def _update_config_for_provider(
 
     *default_model*, when given, is written as ``model.default`` in the same step so the gateway
     (which re-reads config per message) can't pick up the new provider before model selection
-    finishes and send an OpenRouter-style ``vendor/model`` name to a direct API.
-    """
+    finishes and send an OpenRouter-style ``vendor/model`` name to a direct API."""
     with _auth_store_lock():  # so auto-resolution picks this provider
         auth_store = _load_auth_store()
         auth_store["active_provider"] = provider_id

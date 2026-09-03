@@ -1,8 +1,7 @@
 """Shared constants, the lazy ``httpx`` proxy and :class:`AuthError` for the auth package.
 
 Pure leaf: imports nothing from ``hermes_cli.auth`` so the per-provider modules
-(``auth_nous``, ``auth_codex``, ...) can import it at module scope without cycles.
-"""
+(``auth_nous``, ``auth_codex``, ...) can import it at module scope without cycles."""
 
 from __future__ import annotations
 
