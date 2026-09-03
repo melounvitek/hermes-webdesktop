@@ -584,7 +584,7 @@ def _update_node_dependencies() -> list[str]:
     # See #43564.
     print("→ Warming npx cache for agent-browser...")
     with suppress(Exception):
-        from tools.browser_tool import warm_agent_browser_npx_cache
+        from tools.browser_tool_install import warm_agent_browser_npx_cache
         warm_agent_browser_npx_cache()
 
     if not _m()._npm_lockfile_changed(shared_hermes_root):

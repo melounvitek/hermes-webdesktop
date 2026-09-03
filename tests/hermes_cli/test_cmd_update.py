@@ -1078,7 +1078,7 @@ class TestNodeRuntimeNpmResolution:
         )
 
         with patch(
-            "tools.browser_tool.warm_agent_browser_npx_cache", return_value=True
+            "tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True
         ):
             failed = hm._update_node_dependencies()
         assert failed == ["ui-tui, web workspaces"]
@@ -1280,7 +1280,7 @@ class TestUpdateNodeDependencies:
         """The npx cache warm-up is covered by its own dedicated test below;
         stub it out everywhere else so it doesn't add a spurious npm/npx
         call to the workspace-install assertions in this class."""
-        with patch("tools.browser_tool.warm_agent_browser_npx_cache", return_value=True):
+        with patch("tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True):
             yield
 
     def _npm_calls(self, mock_run):
@@ -1468,7 +1468,7 @@ class TestUpdateNodeDependencies:
         mock_popen.side_effect = self._make_popen([], returncode=1, stderr_lines=["npm ERR!\n"])
 
         with patch(
-            "tools.browser_tool.warm_agent_browser_npx_cache", return_value=True
+            "tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True
         ) as mock_warm:
             hm._update_node_dependencies()
 
