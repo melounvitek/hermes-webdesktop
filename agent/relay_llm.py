@@ -322,93 +322,88 @@ class ManagedLlmStream(Iterator[Any]):
         self._accept_chunk = accept_chunk
         self._raw_chunks: list[tuple[Any, Any]] = []
         self._prefetched_chunks: list[Any] = []
+        self._stream_factory = stream_factory
+        self._on_stream_created = on_stream_created
+        self._completed_response_predicate = completed_response_predicate
+        self._finalizer = finalizer
         attempt = _ManagedAttempt.resolve(session_id, request, metadata, name=name, model_name=model_name)
         if attempt is None:
-            self._start_unmanaged(request, stream_factory, on_stream_created, completed_response_predicate)
+            self._start_unmanaged(request)
             return
         self._logical = attempt.logical
-        self._start_managed(
-            attempt, stream_factory, on_stream_created, completed_response_predicate, finalizer
-        )
+        self._start_managed(attempt)
 
-    def _start_unmanaged(
-        self, request: dict[str, Any], stream_factory: Callable[[dict[str, Any]], Any],
-        on_stream_created: Callable[[Any], None] | None,
-        completed_response_predicate: Callable[[Any], bool] | None,
-    ) -> None:
-        raw_stream = stream_factory(request)
-        if completed_response_predicate is not None and completed_response_predicate(raw_stream):
+    def _start_unmanaged(self, request: dict[str, Any]) -> None:
+        raw_stream = self._stream_factory(request)
+        predicate = self._completed_response_predicate
+        if predicate is not None and predicate(raw_stream):
             self.final_response = raw_stream
             self._stream = iter(())
             return
         self._raw_stream_resource = raw_stream
-        if on_stream_created is not None:
-            on_stream_created(raw_stream)
+        if self._on_stream_created is not None:
+            self._on_stream_created(raw_stream)
         self._stream = iter(raw_stream)
 
-    def _start_managed(
-        self, attempt: _ManagedAttempt, stream_factory: Callable[[dict[str, Any]], Any],
-        on_stream_created: Callable[[Any], None] | None,
-        completed_response_predicate: Callable[[Any], bool] | None, finalizer: Callable[[], Any],
-    ) -> None:
-        """Open Relay's stream on a private event loop owned by this iterator."""
+    async def _provider_stream(self, attempt: _ManagedAttempt, next_request: Any):
+        """Relay's provider callback: run the factory and yield JSON-encoded chunks."""
         run_callback = attempt.run_callback
-
-        async def provider_stream(next_request: Any):
-            raw_stream = None
-            try:
-                raw_stream = run_callback(stream_factory, attempt.provider_request(next_request))
-                if completed_response_predicate is not None and run_callback(
-                    completed_response_predicate, raw_stream
-                ):
-                    self.final_response = raw_stream
-                    self._provider_completed = True
-                    return
-                if on_stream_created is not None:
-                    run_callback(on_stream_created, raw_stream)
-                raw_iterator = run_callback(iter, raw_stream)
-                while True:
-                    try:
-                        chunk = run_callback(next, raw_iterator)
-                    except StopIteration:
-                        break
-                    if self._accept_chunk is not None and not run_callback(self._accept_chunk, chunk):
-                        break
-                    encoded_chunk = _jsonable(chunk)
-                    self._raw_chunks.append((encoded_chunk, chunk))
-                    yield encoded_chunk
+        raw_stream = None
+        try:
+            raw_stream = run_callback(self._stream_factory, attempt.provider_request(next_request))
+            predicate = self._completed_response_predicate
+            if predicate is not None and run_callback(predicate, raw_stream):
+                self.final_response = raw_stream
                 self._provider_completed = True
-            except BaseException as exc:
-                self._callback_error = exc
-                raise
-            finally:
-                close = getattr(raw_stream, "close", None)
-                if callable(close):
-                    try:
-                        run_callback(close)
-                    except BaseException as exc:
-                        self._close_error = exc
-                        raise
+                return
+            if self._on_stream_created is not None:
+                run_callback(self._on_stream_created, raw_stream)
+            raw_iterator = run_callback(iter, raw_stream)
+            while True:
+                try:
+                    chunk = run_callback(next, raw_iterator)
+                except StopIteration:
+                    break
+                if self._accept_chunk is not None and not run_callback(self._accept_chunk, chunk):
+                    break
+                encoded_chunk = _jsonable(chunk)
+                self._raw_chunks.append((encoded_chunk, chunk))
+                yield encoded_chunk
+            self._provider_completed = True
+        except BaseException as exc:
+            self._callback_error = exc
+            raise
+        finally:
+            close = getattr(raw_stream, "close", None)
+            if callable(close):
+                try:
+                    run_callback(close)
+                except BaseException as exc:
+                    self._close_error = exc
+                    raise
+
+    def _relay_finalizer(self, attempt: _ManagedAttempt) -> Any:
+        # Relay may call this while unwinding a provider-stream failure; keep the
+        # original error instead of a secondary "missing terminal response".
+        if self._callback_error is not None:
+            return None
+        try:
+            response = self.final_response
+            if response is None:
+                response = attempt.run_callback(self._finalizer)
+            if self._logical_model_name is not None:
+                self._logical_response_model_name = _response_model_name(response)
+            return _jsonable(response)
+        except BaseException as exc:
+            self._callback_error = exc
+            raise
+
+    def _start_managed(self, attempt: _ManagedAttempt) -> None:
+        """Open Relay's stream on a private event loop owned by this iterator."""
 
         def observe_chunk(chunk: Any) -> None:
             if self._on_chunk is not None:
-                run_callback(self._on_chunk, _jsonable(chunk))
-
-        def relay_finalizer() -> Any:
-            # Relay may call this while unwinding a provider-stream failure; keep the
-            # original error instead of a secondary "missing terminal response".
-            if self._callback_error is not None:
-                return None
-            try:
-                response = self.final_response
-                if response is None:
-                    response = run_callback(finalizer)
-                if self._logical_model_name is not None:
-                    self._logical_response_model_name = _response_model_name(response)
-                return _jsonable(response)
-            except BaseException as exc:
-                self._callback_error = exc
-                raise
+                attempt.run_callback(self._on_chunk, _jsonable(chunk))
 
         self._runtime_lease = attempt.runtime.acquire_operation_lease()
         try:
@@ -421,7 +416,8 @@ class ManagedLlmStream(Iterator[Any]):
         try:
             self._stream = loop.run_until_complete(
                 attempt.run_managed(
-                    attempt.runtime.relay.llm.stream_execute, provider_stream, observe_chunk, relay_finalizer,
+                    attempt.runtime.relay.llm.stream_execute, partial(self._provider_stream, attempt),
+                    observe_chunk, partial(self._relay_finalizer, attempt),
                 )
             )
         except BaseException as exc:
