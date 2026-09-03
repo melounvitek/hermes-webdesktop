@@ -1,7 +1,8 @@
-"""Credential sections of `hermes status` (API keys, OAuth providers, Nous Tool Gateway, API-key
-providers), run through ``status._SECTIONS`` with the shared ``_StatusContext``. Origin helpers
-(``_row``, ``_first_env_value``, ...) are imported lazily from ``hermes_cli.status`` so tests that
-monkeypatch that module keep working."""
+"""Credential sections of `hermes status`, run through ``status._SECTIONS`` with its shared context.
+Origin helpers (``_row``, ``_first_env_value``, ...) are resolved through the ``hermes_cli.status``
+module object so tests that monkeypatch that module keep working."""
+
+from datetime import datetime, timezone
 
 from hermes_cli.auth import AuthError
 from hermes_cli.nous_account import (
@@ -15,7 +16,6 @@ def _format_iso_timestamp(value) -> str:
     text = value.strip() if isinstance(value, str) else ""
     if not text:
         return "(unknown)"
-    from datetime import datetime, timezone
     try:
         parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
     except Exception:
@@ -26,7 +26,6 @@ def _format_iso_timestamp(value) -> str:
 
 
 def _qwen_expiry(expires_at_ms) -> str:
-    from datetime import datetime, timezone
     return datetime.fromtimestamp(int(expires_at_ms) / 1000, tz=timezone.utc).isoformat()
 
 
@@ -46,26 +45,15 @@ def _oauth_block(name: str, status: dict, hint: str, rows) -> None:
 
 # Values may be a single env var name (str) or a tuple of alternates (first found wins).
 _API_KEYS: dict[str, str | tuple[str, ...]] = {
-    "OpenRouter": "OPENROUTER_API_KEY",
-    "OpenAI": "OPENAI_API_KEY",
-    "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
-    "DeepSeek": "DEEPSEEK_API_KEY",
-    "xAI / Grok": "XAI_API_KEY",
-    "NVIDIA NIM": "NVIDIA_API_KEY",
-    "Z.AI / GLM": "GLM_API_KEY",
-    "Kimi": "KIMI_API_KEY",
-    "StepFun Step Plan": "STEPFUN_API_KEY",
-    "MiniMax": "MINIMAX_API_KEY",
-    "MiniMax-CN": "MINIMAX_CN_API_KEY",
-    "DeepInfra": "DEEPINFRA_API_KEY",
-    "Firecrawl": "FIRECRAWL_API_KEY",
-    "Tavily": "TAVILY_API_KEY",
-    "Keenable": "KEENABLE_API_KEY",
+    "OpenRouter": "OPENROUTER_API_KEY", "OpenAI": "OPENAI_API_KEY",
+    "Google / Gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "DeepSeek": "DEEPSEEK_API_KEY",
+    "xAI / Grok": "XAI_API_KEY", "NVIDIA NIM": "NVIDIA_API_KEY", "Z.AI / GLM": "GLM_API_KEY",
+    "Kimi": "KIMI_API_KEY", "StepFun Step Plan": "STEPFUN_API_KEY", "MiniMax": "MINIMAX_API_KEY",
+    "MiniMax-CN": "MINIMAX_CN_API_KEY", "DeepInfra": "DEEPINFRA_API_KEY", "Firecrawl": "FIRECRAWL_API_KEY",
+    "Tavily": "TAVILY_API_KEY", "Keenable": "KEENABLE_API_KEY",
     "Browser Use": "BROWSER_USE_API_KEY",  # Optional — local browser works without this
     "Browserbase": "BROWSERBASE_API_KEY",  # Optional — direct credentials only
-    "FAL": "FAL_KEY",
-    "ElevenLabs": "ELEVENLABS_API_KEY",
-    "GitHub": "GITHUB_TOKEN"}
+    "FAL": "FAL_KEY", "ElevenLabs": "ELEVENLABS_API_KEY", "GitHub": "GITHUB_TOKEN"}
 
 # OAuth detail rows: (label, status key, formatter, gate) — see _oauth_block.
 _FILE_REFRESH_ROWS = (
@@ -86,23 +74,25 @@ _OAUTH_BLOCKS = (
     ("xAI OAuth", "get_xai_oauth_auth_status", "hermes auth add xai-oauth", _FILE_REFRESH_ROWS))
 
 _APIKEY_PROVIDERS = {
-    "Z.AI / GLM":       ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"),
-    "Kimi / Moonshot":  ("KIMI_API_KEY",),
-    "StepFun Step Plan": ("STEPFUN_API_KEY",),
-    "MiniMax":          ("MINIMAX_API_KEY",),
-    "MiniMax (China)":  ("MINIMAX_CN_API_KEY",),
-    "DeepInfra":        ("DEEPINFRA_API_KEY",)}
+    "Z.AI / GLM": ("GLM_API_KEY", "ZAI_API_KEY", "Z_AI_API_KEY"), "Kimi / Moonshot": ("KIMI_API_KEY",),
+    "StepFun Step Plan": ("STEPFUN_API_KEY",), "MiniMax": ("MINIMAX_API_KEY",),
+    "MiniMax (China)": ("MINIMAX_CN_API_KEY",), "DeepInfra": ("DEEPINFRA_API_KEY",)}
+
+# Nous Tool Gateway per-feature state: first matching (predicate(feature, nous_auth), text(feature)).
+_FEATURE_STATES = (
+    (lambda f, _: f.managed_by_nous, lambda f: "active via Nous subscription"),
+    (lambda f, _: f.active, lambda f: f"active via {f.current_provider or 'configured provider'}"),
+    (lambda f, auth: f.included_by_default and auth, lambda f: "included by subscription, not currently selected"),
+    (lambda f, auth: f.key == "modal" and auth, lambda f: "available via subscription (optional)"))
 
 
 def _render_api_keys(ctx):
     _status._section("API Keys")
-    for name, env_ref in _API_KEYS.items():
-        value = _status._first_env_value(env_ref)
-        _status._row(name, bool(value), _status.redact_key(value))
-    # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
     from hermes_cli.auth import get_anthropic_key
-    anthropic_value = get_anthropic_key()
-    _status._row("Anthropic", bool(anthropic_value), _status.redact_key(anthropic_value))
+    # Anthropic uses the dedicated lookup (it also resolves OAuth tokens).
+    for name, env_ref in (*_API_KEYS.items(), ("Anthropic", get_anthropic_key)):
+        value = env_ref() if callable(env_ref) else _status._first_env_value(env_ref)
+        _status._row(name, bool(value), _status.redact_key(value))
 
 
 def _render_auth_providers(ctx):
@@ -162,18 +152,9 @@ def _render_nous_gateway(ctx):
         print("  Nous Portal   ✓ managed tools available" if features.nous_auth_present
               else "  Nous Portal   ✗ not logged in")
         for f in features.items():
-            if f.managed_by_nous:
-                state = "active via Nous subscription"
-            elif f.active:
-                state = f"active via {f.current_provider or 'configured provider'}"
-            elif f.included_by_default and features.nous_auth_present:
-                state = "included by subscription, not currently selected"
-            elif f.key == "modal" and features.nous_auth_present:
-                state = "available via subscription (optional)"
-            else:
-                state = "not configured"
-            mark = _status.check_mark(f.available or f.active or f.managed_by_nous)
-            print(f"  {f.label:<15} {mark} {state}")
+            state = next((text(f) for match, text in _FEATURE_STATES if match(f, features.nous_auth_present)),
+                         "not configured")
+            _status._row(f.label, f.available or f.active or f.managed_by_nous, state, 15, " ")
     elif ctx.nous_logged_in or ctx.nous_inference_present:
         # Nous OAuth without entitlement, or an opaque inference key without Portal account
         # information, cannot enable the Tool Gateway.
@@ -189,8 +170,7 @@ def _render_apikey_providers(ctx):
     _status._section("API-Key Providers")
     for pname, env_vars in _APIKEY_PROVIDERS.items():
         configured = bool(_status._first_env_value(env_vars))
-        state = "configured" if configured else "not configured (run: hermes model)"
-        print(f"  {pname:<16} {_status.check_mark(configured)} {state}")
+        _status._row(pname, configured, "configured" if configured else "not configured (run: hermes model)", 16, " ")
 
     # LM Studio reachability: probe only when it is the active provider so users with foreign
     # configs see no noise. Auth rejection vs. a silent empty list is the common support case.
@@ -206,7 +186,7 @@ def _render_apikey_providers(ctx):
             msg = f"reachable ({len(models)} model(s)) at {base}" if ok else f"unreachable at {base}"
         except AuthError:
             ok, msg = False, "auth rejected — set LM_API_KEY"
-        print(f"  {'LM Studio':<16} {_status.check_mark(ok)} {msg}")
+        _status._row("LM Studio", ok, msg, 16, " ")
 
 
 import hermes_cli.status as _status  # noqa: E402  (bottom: hermes_cli.status imports this module)
