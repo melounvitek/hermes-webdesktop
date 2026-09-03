@@ -681,7 +681,7 @@ class TestOfficialSkillsCatalogEndpoint:
             lambda self: metas,
         )
         monkeypatch.setattr(
-            "hermes_cli.web_server_profiles._installed_hub_identifiers",
+            "hermes_cli.web_routers.skills._installed_hub_identifiers",
             lambda profile=None: {"official/gifs/gif-search": {"name": "gif-search"}},
         )
         r = self.client.get("/api/skills/hub/official")
