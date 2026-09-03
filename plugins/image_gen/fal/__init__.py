@@ -14,7 +14,8 @@ from plugins.image_gen._common import StaticImageGenProvider, catalog_rows
 logger = logging.getLogger(__name__)
 
 _PASSTHROUGH_KWARGS = (
-    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale")
+    "num_inference_steps", "guidance_scale", "num_images", "output_format", "seed", "upscale",
+)
 
 
 class FalImageGenProvider(StaticImageGenProvider):
