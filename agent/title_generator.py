@@ -1,11 +1,9 @@
 """Auto-generate short session titles from the user's opening message.
 
-Two stages, both off the critical path: an **instant** deterministic title derived from the first
-user message (written before the model is called, cannot fail), then an **upgrade** from one
-small-model call (cheap tier, thinking off, JSON-constrained). Provenance ``derived < llm < user``
-is enforced by the storage layer, so stage 2 only replaces stage 1 and neither replaces a name the
-user typed.
-"""
+Two stages, both off the critical path: an **instant** deterministic title (written before the model
+is called, cannot fail), then an **upgrade** from one small-model call (cheap tier, thinking off,
+JSON-constrained). Storage enforces provenance ``derived < llm < user``: stage 2 only replaces stage 1
+and neither replaces a name the user typed."""
 
 import json
 import logging
@@ -88,9 +86,8 @@ _MACHINE_PREFIXES = (
 
 
 def _title_config() -> dict:
-    """``auxiliary.title_generation`` from config (lazy read-only import: no hermes_cli cycle, no migration writes)."""
+    """``auxiliary.title_generation`` (lazy read-only import: no hermes_cli cycle, no migration writes)."""
     from hermes_cli.config import load_config_readonly
-
     return ((load_config_readonly() or {}).get("auxiliary") or {}).get("title_generation") or {}
 
 
@@ -105,7 +102,6 @@ def _title_language() -> str:
 def _auto_title_enabled() -> bool:
     try:
         from utils import is_truthy_value
-
         return is_truthy_value(_title_config().get("enabled"), default=True)
     except Exception:
         logger.debug("Failed to read title_generation.enabled", exc_info=True)
@@ -115,8 +111,7 @@ def _auto_title_enabled() -> bool:
 def strip_control_wrappers(text: str) -> str:
     """Remove leading control wrappers (nested too) so a slash-command turn reduces to the prose the user typed."""
     current = (text or "").strip()
-    # Bounded: each pass must remove at least one wrapper or we stop.
-    for _ in range(len(_CONTROL_WRAPPERS) * 2):
+    for _ in range(len(_CONTROL_WRAPPERS) * 2):  # bounded: each pass must remove a wrapper or we stop
         stripped = _strip_one_wrapper(current)
         if stripped == current:
             break
@@ -138,13 +133,12 @@ def _strip_one_wrapper(text: str) -> str:
 
 
 def _summarize_user_message(user_message: str) -> str:
-    """Text worth titling: a ``/skill`` invocation embeds the whole skill body, so describe it first, then strip wrappers."""
+    """Text worth titling: describe a ``/skill`` invocation (it embeds the whole skill body), then strip wrappers."""
     if not user_message:
         return ""
     described = None
     try:
         from agent.skill_commands import describe_skill_invocation
-
         described = describe_skill_invocation(user_message)
     except Exception:
         logger.debug("Skill-scaffolding summary failed; titling raw", exc_info=True)
@@ -177,8 +171,7 @@ def _first_line(text: str) -> str:
 
 
 def _extract_title_text(content: str) -> str:
-    """Title from a model response: strict JSON, then a loose JSON scan, then first-line prose
-    (a provider ignoring ``response_format`` still titles)."""
+    """Strict JSON, then a loose JSON scan, then first-line prose (a provider ignoring ``response_format`` still titles)."""
     if not content:
         return ""
     raw = content.strip()
@@ -200,7 +193,6 @@ def _extract_title_text(content: str) -> str:
     # Prose fallback: scrub <think> blocks so reasoning can't leak into a title.
     try:
         from agent.agent_runtime_helpers import strip_think_blocks
-
         raw = strip_think_blocks(None, raw).strip()
     except Exception:
         logger.debug("strip_think_blocks unavailable for title output", exc_info=True)
@@ -240,8 +232,8 @@ def generate_title(
     main_runtime: dict = None,
     runtime_validator: Optional[RuntimeValidator] = None,
 ) -> Optional[str]:
-    """Title from the user's opening message alone (waiting for the assistant made this slow and
-    bought nothing). ``runtime_validator`` runs right before the request; False skips silently."""
+    """Title from the opening message alone (waiting for the assistant made this slow and bought
+    nothing). ``runtime_validator`` runs right before the request; False skips silently."""
     if not _auto_title_enabled():
         logger.debug("Auto-title skipped: auxiliary.title_generation.enabled=false")
         return None
@@ -250,8 +242,7 @@ def generate_title(
             if not runtime_validator():
                 logger.debug("Title generation skipped: runtime validator returned False")
                 return None
-        except Exception:
-            # Fail open: a broken validator must not disable titling.
+        except Exception:  # fail open: a broken validator must not disable titling
             logger.debug("Title runtime validator raised; proceeding", exc_info=True)
     user_snippet = _summarize_user_message(user_message)[:MAX_TITLE_INPUT_CHARS]
     if not user_snippet.strip():
@@ -294,14 +285,11 @@ def _has_upgraded_title(session_db, session_id: str) -> bool:
 
 
 def _persist_session_title(session_db, session_id, title, *, source, dedupe=True):
-    """Persist a title at *source* authority via ``set_auto_title`` (precedence check + write in
-    one transaction, so a manual ``/title`` is never overwritten); None when a higher-authority
-    title held the row.
-
-    ``ValueError`` = unique-title index rejected the name → append ``#N`` via
-    ``get_next_title_in_lineage``. ``dedupe=False`` re-raises instead: the derived title is on the
-    critical path, collides constantly ("hi"), and the model replaces it a second later anyway.
-    """
+    """Persist at *source* authority via ``set_auto_title`` (precedence check + write in one
+    transaction, so a manual ``/title`` is never overwritten); None when a higher authority held the row.
+    ``ValueError`` = unique-title index collision → append ``#N`` via ``get_next_title_in_lineage``;
+    ``dedupe=False`` re-raises instead (the derived title is on the critical path, collides constantly
+    on "hi", and the model replaces it a second later anyway)."""
     auto_fn = getattr(session_db, "set_auto_title", None)
 
     def _set(candidate):
@@ -330,8 +318,7 @@ def _persist_session_title(session_db, session_id, title, *, source, dedupe=True
 
 
 def apply_instant_title(session_db, session_id: str, user_message: str, title_callback: Optional[TitleCallback] = None) -> Optional[str]:
-    """Write the derived title synchronously (cheap enough to run inline). Returns the title
-    written, or None (no usable text, or a title of at least ``derived`` authority exists). Never raises."""
+    """Write the derived title inline. Returns it, or None (no usable text, or a ``derived``+ title exists). Never raises."""
     if not session_db or not session_id:
         return None
     try:
@@ -356,20 +343,17 @@ def auto_title_session(
     title_callback: Optional[TitleCallback] = None,
     runtime_validator: Optional[RuntimeValidator] = None,
 ) -> None:
-    """Generate and store the model title (daemon-thread target); skips sessions already carrying
-    an ``llm``/``user`` title. Never lets an exception escape (the threading excepthook would spray
-    a traceback into the terminal); the canonical trigger is the post-``hermes update``
-    stale-module window, where lazy imports read NEW source against OLD cached modules."""
+    """Generate and store the model title (daemon-thread target); skips sessions already carrying an
+    ``llm``/``user`` title (a ``derived`` one is expected — upgrading it is the point). Never lets an
+    exception escape (the threading excepthook would spray a traceback into the terminal); the canonical
+    trigger is the post-``hermes update`` window where lazy imports read NEW source against OLD modules."""
     try:
-        # A derived title is expected here — upgrading it is the point.
         if not session_db or not session_id or _has_upgraded_title(session_db, session_id):
             return
-        # This daemon thread starts AFTER the turn's ambient conversation context was reset;
-        # republish it so the title call carries the same Portal ``conversation=`` tag
-        # (root-of-lineage) and bills usage to this session.
+        # This thread starts AFTER the turn's ambient context was reset; republish it so the call carries
+        # the same Portal ``conversation=`` tag (root-of-lineage) and bills usage to this session.
         from agent.aux_accounting import set_accounting_context
         from agent.portal_tags import set_conversation_context
-
         conversation_id = session_id
         with suppress(Exception):
             conversation_id = session_db.get_conversation_root(session_id) or session_id
@@ -379,9 +363,7 @@ def auto_title_session(
             user_message, failure_callback=failure_callback, main_runtime=main_runtime, runtime_validator=runtime_validator,
         )
         source = "llm"
-        if not title:
-            # The inline attempt declines collisions rather than scan the lineage on the critical
-            # path; off that path the scan is affordable.
+        if not title:  # the inline attempt declined collisions; off the critical path the lineage scan is affordable
             title, source = derive_title(user_message), "derived"
             if not title:
                 return
@@ -409,7 +391,7 @@ def _is_real_user_turn(message: Any) -> bool:
 
 
 def _session_is_untitled(session_db, session_id: str) -> bool:
-    """No title of any provenance. False when it can't tell — no model call per turn for an unreadable title."""
+    """No title of any provenance; False when it can't tell (no model call per turn for an unreadable title)."""
     getter = getattr(session_db, "get_session_title", None)
     if not callable(getter):
         return False
@@ -430,19 +412,17 @@ def maybe_auto_title(
     title_callback: Optional[TitleCallback] = None,
     runtime_validator: Optional[RuntimeValidator] = None,
 ) -> None:
-    """Title a session from its opening message: instant inline, then upgraded on a daemon thread.
-    Call at the START of a turn, before the model is invoked."""
+    """Instant inline title, then a daemon-thread upgrade. Call at the START of a turn, before the model."""
     if not session_db or not session_id or not user_message:
         return
-    # History may be pre- or post-message. Skip only when BOTH past the opening turn AND already named:
-    # count alone left a machinery-opened session nameless; title alone never titles on an old store.
+    # History may be pre- or post-message. Skip only when BOTH past the opening turn AND named: count alone
+    # left a machinery-opened session nameless; title alone never titles on an old store.
     user_msg_count = sum(1 for m in (conversation_history or []) if _is_real_user_turn(m))
     if user_msg_count > 1 and not _session_is_untitled(session_db, session_id):
         return
     if not is_titleable_user_message(user_message):
         return
-    # Config read after the cheap guards so the file isn't touched every turn.
-    if not _auto_title_enabled():
+    if not _auto_title_enabled():  # config read after the cheap guards so the file isn't touched every turn
         logger.debug("Auto-title skipped: auxiliary.title_generation.enabled=false")
         return
     apply_instant_title(session_db, session_id, user_message, title_callback)

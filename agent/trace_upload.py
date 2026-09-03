@@ -1,12 +1,9 @@
-"""Upload a Hermes session transcript to Hugging Face as an agent trace.
-
-The SQLite session is re-emitted in the **Claude Code JSONL** shape the HF Agent Trace Viewer
-auto-detects (https://huggingface.co/docs/hub/agent-traces). Deterministic, zero LLM turns.
-Private by default: traces can contain prompts, tool output, local paths and secrets, so the
-dataset is created private and every text body goes through the secret redactor (``force=True``)
-unless the caller passes ``redact=False``. :func:`upload_session_trace` never raises — it returns a
-user-facing status string; programmatic callers use :func:`build_trace_jsonl` + :func:`_do_upload`.
-"""
+"""Upload a Hermes session transcript to Hugging Face as an agent trace, re-emitted in the **Claude Code
+JSONL** shape the HF Agent Trace Viewer auto-detects (https://huggingface.co/docs/hub/agent-traces).
+Deterministic, zero LLM turns. Private by default: traces can carry prompts, tool output, local paths and
+secrets, so the dataset is created private and every text body passes the secret redactor (``force=True``)
+unless ``redact=False``. :func:`upload_session_trace` never raises (returns a user-facing status string);
+programmatic callers use :func:`build_trace_jsonl` + :func:`_do_upload`."""
 
 from __future__ import annotations
 
@@ -50,8 +47,7 @@ def _now_iso() -> str:
 
 
 def _redact(text: Any, enabled: bool) -> Any:
-    """Redact secrets from a string body when enabled (``force=True``: an upload always scrubs
-    even if log redaction is disabled); non-strings pass through."""
+    """Redact a string body when enabled (``force=True``: an upload scrubs even if log redaction is off)."""
     if not enabled or not isinstance(text, str) or not text:
         return text
     try:
@@ -162,9 +158,8 @@ _ROLE_RENDERERS: Dict[Any, Tuple[str, Any]] = {
 
 
 def build_trace_jsonl(messages: List[Dict[str, Any]], *, session_id: str, model: str = "", cwd: str = "", redact: bool = True) -> str:
-    """Render messages as Claude Code JSONL: one line per non-system message (``user``/``tool`` ->
-    type user, ``assistant`` -> type assistant with text + ``tool_use`` blocks; tool results ride
-    on user turns as ``tool_result`` keyed by ``tool_call_id``; turns link via ``parentUuid``)."""
+    """One JSONL line per non-system message: ``user``/``tool`` -> type user (tool results ride on user turns as
+    ``tool_result`` keyed by ``tool_call_id``), ``assistant`` -> text + ``tool_use`` blocks; turns link via ``parentUuid``."""
     lines: List[str] = []
     parent: Optional[str] = None
     base_ts = _now_iso()
@@ -201,8 +196,7 @@ def _resolve_hf_token() -> Optional[str]:
 
 
 def _do_upload(jsonl: str, *, token: str, session_id: str, dataset_name: str = DEFAULT_DATASET_NAME, private: bool = True) -> str:
-    """Create (idempotently) the private dataset and push the trace file.
-    Returns a user-facing status string. Never raises."""
+    """Create the dataset (idempotent) and push the trace file; user-facing status string, never raises."""
     with suppress(Exception):  # lazy-install unavailable/declined — the import below surfaces the hint
         from tools import lazy_deps
         lazy_deps.ensure("tool.trace_upload", prompt=False)
@@ -239,8 +233,8 @@ def _do_upload(jsonl: str, *, token: str, session_id: str, dataset_name: str = D
 
 
 def load_session_messages(session_id: str, db_path=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Load ``(messages, meta)`` from the SQLite store; ``meta`` is ``{}`` when the session row is
-    missing (messages may still exist for a live, untitled session)."""
+    """``(messages, meta)`` from SQLite; ``meta`` is ``{}`` when the session row is missing (a live, untitled
+    session may still have messages)."""
     from hermes_state import SessionDB
     db = SessionDB(db_path=db_path) if db_path else SessionDB()
     try:
@@ -265,8 +259,7 @@ def upload_session_trace(
     db_path=None,
     token: Optional[str] = None,
 ) -> str:
-    """CLI/gateway entry point: load, convert, upload to the user's private ``{user}/hermes-traces``
-    dataset. Returns a status string, never raises."""
+    """CLI/gateway entry point: load, convert, upload to ``{user}/hermes-traces``. Status string, never raises."""
     if not session_id:
         return "No active session to upload."
     token = token or _resolve_hf_token()

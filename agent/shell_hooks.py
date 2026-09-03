@@ -1,12 +1,8 @@
-"""Shell-script hooks bridge.
-
-Reads the ``hooks:`` block from config, prompts for first-use consent per ``(event, command)``
-pair, and registers callbacks on the plugin hook manager so every ``invoke_hook()`` site dispatches
-to the configured scripts. Wire protocol: stdin JSON ``{hook_event_name, tool_name, tool_input,
-session_id, cwd, extra}``; optional stdout JSON ``{"decision"|"action": "block"|"modify", ...}`` /
-``{"context": ...}`` translated by ``_parse_response``. Exit code 2 blocks a ``pre_tool_call`` even
-without JSON (Claude-Code / Cursor compatible). Hooks fail open unless ``fail_closed``.
-"""
+"""Shell-script hooks bridge: ``hooks:`` config → first-use consent per ``(event, command)`` →
+callbacks on the plugin hook manager, so every ``invoke_hook()`` site dispatches to the scripts.
+Wire: stdin JSON ``{hook_event_name, tool_name, tool_input, session_id, cwd, extra}``; optional stdout
+JSON ``{"decision"|"action": "block"|"modify", ...}`` / ``{"context": ...}`` via ``_parse_response``.
+Exit code 2 blocks a ``pre_tool_call`` even without JSON (Claude-Code / Cursor). Fail open unless ``fail_closed``."""
 
 from __future__ import annotations
 
@@ -53,9 +49,8 @@ _TRUTHY = {"1", "true", "yes", "on"}
 # kwargs promoted to top-level payload keys; everything else lands under ``extra``.
 _TOP_LEVEL_PAYLOAD_KEYS = {"tool_name", "args", "session_id", "parent_session_id"}
 
-# (home, event, matcher, command) wired to the plugin manager in this process. Matcher is in the key
-# (one script may register per-tool under one event); home so multiplexed-gateway profiles can register
-# identical triples.
+# (home, event, matcher, command) wired in this process: matcher in the key (one script may register
+# per-tool under one event), home so multiplexed-gateway profiles can register identical triples.
 _registered: Set[Tuple[str, str, Optional[str], str]] = set()
 _registered_lock = threading.Lock()
 # Non-POSIX fallback for allowlist read-modify-write. Must be separate from _registered_lock, which
@@ -122,8 +117,8 @@ class _ToolMatcherMixin:
             return True
         if tool_name is None:
             return False
-        if self.compiled_matcher is None:
-            return tool_name == self.matcher  # regex failed to compile: literal fallback
+        if self.compiled_matcher is None:  # regex failed to compile: literal fallback
+            return tool_name == self.matcher
         return self.compiled_matcher.fullmatch(tool_name) is not None
 
 
@@ -142,14 +137,13 @@ class ShellHookSpec(_ToolMatcherMixin):
 # --- Public API ---
 
 def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = False) -> List[ShellHookSpec]:
-    """Register every configured shell hook on the plugin manager; idempotent. Returns the specs
-    newly wired up; skipped entries (unknown, malformed, not allowlisted, registered) are logged only."""
+    """Register every configured shell hook (idempotent); returns the newly wired specs. Skipped
+    entries (unknown, malformed, not allowlisted, already registered) are logged only."""
     if not isinstance(cfg, dict):
         return []
-    # Safe mode: hooks are user customizations too — fire zero user-configured code.
     from utils import env_var_enabled
 
-    if env_var_enabled("HERMES_SAFE_MODE"):
+    if env_var_enabled("HERMES_SAFE_MODE"):  # hooks are user customizations too — fire zero user-configured code
         logger.info("HERMES_SAFE_MODE=1 — shell-hook registration skipped")
         return []
     effective_accept = _resolve_effective_accept(cfg, accept_hooks)
@@ -158,11 +152,9 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
         return []
     registered: List[ShellHookSpec] = []
     from hermes_cli.plugins import get_plugin_manager  # lazy: avoids import cycle
-
     manager = get_plugin_manager()
     home_key = _home_key()
-    # Idempotence + allowlist read happen under the lock; the TTY prompt runs outside it; mutation
-    # re-takes the lock and re-checks in case two callers raced.
+    # Idempotence + allowlist read under the lock; TTY prompt outside it; mutation re-takes the lock and re-checks.
     for spec in specs:
         key = (home_key, spec.event, spec.matcher, spec.command)
         with _registered_lock:
@@ -195,16 +187,15 @@ def iter_configured_hooks(cfg: Optional[Dict[str, Any]]) -> List[ShellHookSpec]:
 
 
 def re_register_config_hooks() -> None:
-    """Re-register config hooks after a plugin force-reload cleared the manager's hooks. Only the
-    current home's keys are cleared (profile A's reload never drops profile B); never re-prompts."""
+    """Re-register after a plugin force-reload cleared the manager's hooks; only this home's keys
+    are cleared (profile A's reload never drops B), never re-prompts."""
     _forget_home_registrations(_registered, _registered_lock)
     from hermes_cli.config import load_config
-
     register_from_config(load_config())
 
 
 def reset_for_tests() -> None:
-    """Clear the idempotence set.  Test-only helper."""
+    """Test-only: clear the idempotence set."""
     with _registered_lock:
         _registered.clear()
 
@@ -300,8 +291,7 @@ _POPEN_ERRORS = ((FileNotFoundError, "command not found"), (PermissionError, "co
 
 
 def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
-    """Run ``spec.command`` with ``stdin_json`` on stdin; the single subprocess site.
-    Returns a diagnostic dict with the same keys for every outcome."""
+    """The single subprocess site: run ``spec.command`` with ``stdin_json`` on stdin. Same result keys for every outcome."""
     result: Dict[str, Any] = {
         "returncode": None, "stdout": "", "stderr": "", "timed_out": False, "elapsed_seconds": 0.0, "error": None,
     }
@@ -317,9 +307,8 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     if not argv:
         return failed("empty command")
     t0 = time.monotonic()
-    # Own process group on POSIX so a timed-out hook's descendants are reaped with it; Windows tree
-    # cleanup goes through kill_process_tree (taskkill /T). Hooks that finish in time keep detached
-    # helpers alive.
+    # Own process group on POSIX so a timed-out hook's descendants are reaped with it (Windows: kill_process_tree
+    # / taskkill /T). Hooks that finish in time keep detached helpers alive.
     popen_kwargs: Dict[str, Any] = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
     try:
         proc = subprocess.Popen(
@@ -363,10 +352,9 @@ def _fail_closed_block(spec: ShellHookSpec, reason: str) -> Dict[str, Any]:
 
 
 def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``_spawn`` diagnostic dict → the hook's contribution (shared by the live callback and
-    ``run_once``). Spawn error/timeout fail open unless fail_closed; exit 2 on a blocking event blocks
-    (message from stdout JSON, then stderr, then default); other non-zero exits warn then parse
-    stdout; unparseable stdout on a fail_closed hook blocks."""
+    """``_spawn`` result → hook contribution (live callback and ``run_once``). Spawn error/timeout fail
+    open unless fail_closed; exit 2 on a blocking event blocks (message: stdout JSON, then stderr, then
+    default); other non-zero exits warn then parse stdout; unparseable stdout on a fail_closed hook blocks."""
     blocking_event = spec.event in _BLOCKING_EVENTS
     fail_closed = spec.fail_closed and blocking_event
     if r["error"]:
@@ -417,9 +405,8 @@ def _block_message(primary: Any, secondary: Any) -> str:
     return raw if isinstance(raw, str) and raw else _DEFAULT_BLOCK_MESSAGE
 
 
-# pre_tool_call response dialects, checked in order: Hermes ``action`` then Claude-Code ``decision``.
-# (verb key, block-message primary, block-message secondary, modify payload key) — the Claude-Code shape
-# is translated to the canonical one expected by get_pre_tool_call_block_message.
+# pre_tool_call dialects in check order — Hermes ``action`` then Claude-Code ``decision`` — as (verb key,
+# block-message primary, secondary, modify payload key); both translate to the canonical Hermes shape.
 _PRE_TOOL_DIALECTS = (("action", "message", "reason", "args"), ("decision", "reason", "message", "tool_input"))
 
 
@@ -487,7 +474,7 @@ def load_allowlist() -> Dict[str, Any]:
 
 
 def save_allowlist(data: Dict[str, Any]) -> None:
-    """Atomically persist the allowlist; on OSError log and keep the in-process approval."""
+    """Atomic write; on OSError log and keep the in-process approval."""
     p = allowlist_path()
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -574,8 +561,7 @@ def _record_approval(event: str, command: str) -> None:
 
 
 def revoke(command: str) -> int:
-    """Remove every allowlist entry matching ``command``; returns the count removed.
-    Live callbacks in the current process stay registered until restart."""
+    """Remove every allowlist entry for ``command``; returns the count. Live callbacks stay registered until restart."""
     with _locked_update_approvals() as data:
         before = len(data.get("approvals", []))
         data["approvals"] = [e for e in data.get("approvals", []) if not _entry_matches(e, None, command)]
@@ -588,8 +574,7 @@ _SCRIPT_EXTENSIONS: Tuple[str, ...] = (
 
 
 def _command_script_path(command: str) -> str:
-    """Script path from ``command``: first token with a script extension, then a path-like token,
-    then the first token (``python3 /p/hook.py``, ``/usr/bin/env bash x.sh``)."""
+    """First token with a script extension, else the first path-like token, else the first token."""
     try:
         parts = split_command_line(command) or [command]
     except ValueError:
@@ -631,8 +616,7 @@ def script_mtime_iso(command: str) -> Optional[str]:
 
 
 def script_is_executable(command: str) -> bool:
-    """True iff ``command`` is runnable as configured: a bare script needs X_OK, an
-    interpreter-prefixed one only R_OK (mirrors what ``_spawn`` does)."""
+    """Runnable as configured: a bare script needs X_OK, an interpreter-prefixed one only R_OK (as ``_spawn`` does)."""
     path = _command_script_path(command)
     expanded = os.path.expanduser(path)
     if not path or not os.path.isfile(expanded):
@@ -646,8 +630,7 @@ def script_is_executable(command: str) -> bool:
 
 
 def run_once(spec: ShellHookSpec, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Fire one hook with a synthetic payload (``hermes hooks test`` / doctor); routes through
-    ``_serialize_payload`` and ``_evaluate_result`` so the result matches production exactly."""
+    """Fire one hook with a synthetic payload (``hermes hooks test`` / doctor) through the production path."""
     result = _spawn(spec, _serialize_payload(spec.event, kwargs))
     result["parsed"] = _evaluate_result(spec, result)
     return result

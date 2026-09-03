@@ -1,9 +1,6 @@
-"""Shared session activity observation contract.
-
-Observation-only: timestamp + bounded description/provenance. Notification, timeout, kill and
-retry policy live in their own components. Provenance is a small closed enum of *noun* sources;
-the default agent clock stamps ``unknown`` unless a writer passes an explicit ``provenance=``.
-"""
+"""Shared session activity observation contract: timestamp + bounded description/provenance, observation
+only (notification, timeout, kill and retry policy live elsewhere). Provenance is a small closed enum of
+*noun* sources; the default agent clock stamps ``unknown`` unless a writer passes ``provenance=``."""
 
 from __future__ import annotations
 
@@ -14,10 +11,9 @@ from typing import Any, Mapping, Optional
 
 ACTIVITY_DESCRIPTION_MAX = 120
 
-# Durable SessionDB heartbeat cadence. Contract: MUST stay >= 30s — the SessionDB write path is
-# contended and this observation-only projection never justifies extra write pressure. A code
-# constant on purpose (no config can turn it into a high-frequency writer); matches the kanban
-# auto-heartbeat. force_persist (terminal stamps) is the only bypass.
+# Durable SessionDB heartbeat cadence. Contract: MUST stay >= 30s — the SessionDB write path is contended and
+# this observation-only projection never justifies extra write pressure. A code constant on purpose (no config
+# can make it a high-frequency writer); matches the kanban auto-heartbeat. force_persist (terminal stamps) is the only bypass.
 SESSION_ACTIVITY_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 
 
@@ -49,8 +45,7 @@ def normalize_activity_provenance(provenance: Optional[ActivityProvenance | str]
 
 
 def reset_session_activity_persist_window(agent: Any) -> None:
-    """Clear the durable persist rate-limit so the next stamp writes through (terminal compression
-    labels must not stay stuck on mid-compress text)."""
+    """Clear the persist rate-limit so the next stamp writes through (terminal compression labels must not stick on mid-compress text)."""
     with suppress(Exception):
         agent._session_activity_last_persist_mono = 0.0
 
@@ -68,17 +63,12 @@ def build_activity_snapshot(
     clock = float(now if now is not None else time.time())
     desc = bound_activity_description(last_activity_description)
     prov = normalize_activity_provenance(last_activity_provenance).value
-    snap: dict[str, Any] = {
+    return {
         "last_activity_at": when,
         "last_activity_description": desc,
         "last_activity_provenance": prov,
         "seconds_since_activity": round(clock - when, 1) if when is not None else None,
         # Short aliases used by existing gateway/delegate readers.
-        "last_activity_ts": when,
-        "last_activity_desc": desc,
-        "description": desc,
-        "provenance": prov,
+        "last_activity_ts": when, "last_activity_desc": desc, "description": desc, "provenance": prov,
+        **(extra or {}),
     }
-    if extra:
-        snap.update(dict(extra))
-    return snap

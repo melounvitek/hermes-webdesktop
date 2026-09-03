@@ -1,8 +1,5 @@
-"""Public, plugin-safe lifecycle API for delegated Hermes subagents.
-
-Exposes immutable contracts, not ``AIAgent`` objects; plugins obtain it via
-``PluginContext.subagent_lifecycle``.
-"""
+"""Public, plugin-safe lifecycle API for delegated Hermes subagents: immutable contracts, not ``AIAgent``
+objects. Plugins obtain it via ``PluginContext.subagent_lifecycle``."""
 
 from __future__ import annotations
 
@@ -156,9 +153,7 @@ class _Registry:
 
 
 _REGISTRY = _Registry()
-# Daemon pool: a wedged/abandoned child must never block interpreter exit.
-from tools.daemon_pool import DaemonThreadPoolExecutor as _DaemonExecutor
-
+from tools.daemon_pool import DaemonThreadPoolExecutor as _DaemonExecutor  # daemon: a wedged child never blocks exit
 _EXECUTOR = _DaemonExecutor(max_workers=8, thread_name_prefix="hermes-lifecycle")
 _SECRET = secrets.token_bytes(32)
 _ACTIVE_PARENT_AGENT: contextvars.ContextVar[Any] = contextvars.ContextVar("hermes_subagent_lifecycle_parent", default=None)
@@ -209,8 +204,8 @@ _HANDLE_FIELD_CHECKS: tuple[tuple[str, Callable[[Any], bool]], ...] = (
     ("capability", lambda v: isinstance(v, str)),
 )
 
-# Launch-request rejections in check order: (predicate, error). The type check leads so later
-# predicates may dereference request fields.
+# Launch-request rejections in check order: (predicate, error). The type check leads so later predicates may
+# dereference request fields.
 _REQUEST_REJECTIONS: tuple[tuple[Callable[[Any], bool], str], ...] = (
     (lambda r: not isinstance(r, SubagentLaunchRequest) or not isinstance(r.goal, str) or not r.goal.strip() or len(r.goal) > _MAX_GOAL_CHARS,
      "goal must be a non-empty string of at most 16000 characters."),
@@ -230,9 +225,9 @@ def _handle_is_well_formed(handle: Any) -> bool:
 
 
 class SubagentLifecycleService:
-    """Stable public service returned by :attr:`PluginContext.subagent_lifecycle`. Children run
-    in-process only; completed results stay until process exit, and ``reconnect`` reports that a
-    serialized handle cannot reconnect after a restart instead of launching work again."""
+    """Stable public service behind :attr:`PluginContext.subagent_lifecycle`. Children run in-process only;
+    completed results stay until process exit; ``reconnect`` reports that a serialized handle cannot
+    reconnect after a restart instead of launching work again."""
 
     def __init__(self, parent_agent_resolver: Callable[[], Any]) -> None:
         self._parent_agent_resolver = parent_agent_resolver
@@ -250,9 +245,8 @@ class SubagentLifecycleService:
             self._cleanup_locked()
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
-        # Delegate construction stays internal: plugins never import private delegation helpers.
+        # Lazy: delegate construction stays internal, plugins never import private delegation helpers.
         from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
-
         child = _build_child_preserving_parent_tools(
             task_index=0, goal=request.goal, context=request.context,
             toolsets=list(request.allowed_toolsets) if request.allowed_toolsets else None,
@@ -362,7 +356,6 @@ class SubagentLifecycleService:
             record.started_at = record.updated_at = time.time()
         try:
             from tools.delegate_tool import _run_child_lifecycle
-
             raw = _run_child_lifecycle(0, goal, record.agent, parent)
             is_dict = isinstance(raw, dict)
             raw = raw if is_dict else {}
@@ -411,7 +404,6 @@ class SubagentLifecycleService:
             raise SubagentLifecycleError("metadata exceeds 8192 bytes.")
         if request.allowed_toolsets:
             from toolsets import TOOLSETS
-
             unknown = set(request.allowed_toolsets) - set(TOOLSETS)
             if unknown:
                 raise SubagentLifecycleError(f"Unknown toolsets: {', '.join(sorted(unknown))}.")
