@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 import traceback
 from contextlib import suppress
 from types import SimpleNamespace
@@ -86,9 +87,7 @@ def reset_client_cache():
 
 def invalidate_runtime_client(region: str) -> bool:
     """Evict one region's cached ``bedrock-runtime`` client (stale HTTP pool); True if evicted."""
-    existed = region in _bedrock_runtime_client_cache
-    _bedrock_runtime_client_cache.pop(region, None)
-    return existed
+    return _bedrock_runtime_client_cache.pop(region, None) is not None
 
 
 # --- Bedrock Mantle / OpenAI Responses support ---
@@ -178,10 +177,10 @@ def configure_bedrock_openai_client_kwargs(
     """Install SigV4 auth on OpenAI SDK kwargs for Bedrock Mantle. Real API keys keep the
     SDK's bearer auth; the ``aws-sdk``/``no-key-required`` placeholders mean IAM chain auth."""
     base_url = str(client_kwargs.get("base_url") or "")
-    if not is_bedrock_openai_base_url(base_url):
-        return client_kwargs
     api_key = client_kwargs.get("api_key")
-    if isinstance(api_key, str) and api_key.strip() and api_key not in {"aws-sdk", "no-key-required"}:
+    if not is_bedrock_openai_base_url(base_url) or (
+        isinstance(api_key, str) and api_key.strip() and api_key not in {"aws-sdk", "no-key-required"}
+    ):
         return client_kwargs
     region = bedrock_openai_region_from_base_url(base_url) or resolve_bedrock_runtime_region()
     client_kwargs["api_key"] = "aws-sdk"
@@ -206,8 +205,7 @@ def _stale_error_types() -> tuple:
         ("urllib3.exceptions", ("ProtocolError", "NewConnectionError", "ConnectionError")),
     ):
         with suppress(ImportError):  # pragma: no cover — both present with boto3
-            mod = importlib.import_module(module)
-            types += [getattr(mod, name) for name in names]
+            types += [getattr(importlib.import_module(module), name) for name in names]
     return tuple(types)
 
 
@@ -228,13 +226,11 @@ def is_streaming_access_denied_error(exc: BaseException) -> bool:
     msg = str(exc).lower()
     if "invokemodelwithresponsestream" not in msg:
         return False
-    try:
+    with suppress(ImportError):  # pragma: no cover — botocore always present with boto3
         from botocore.exceptions import ClientError
-    except ImportError:  # pragma: no cover — botocore always present with boto3
-        ClientError = None  # type: ignore[assignment]
-    if ClientError is not None and isinstance(exc, ClientError):
-        code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
-        return code in ("AccessDeniedException", "UnauthorizedException")
+        if isinstance(exc, ClientError):
+            code = (getattr(exc, "response", None) or {}).get("Error", {}).get("Code", "")
+            return code in ("AccessDeniedException", "UnauthorizedException")
     return "not authorized" in msg or "accessdenied" in msg
 
 
@@ -255,9 +251,8 @@ def _boto3_chain_has_credentials() -> bool:
     with suppress(Exception):
         import botocore.session
         credentials = botocore.session.get_session().get_credentials()
-        if credentials is not None:
-            resolved = credentials.get_frozen_credentials()
-            return bool(resolved and resolved.access_key)
+        resolved = credentials.get_frozen_credentials() if credentials is not None else None
+        return bool(resolved and resolved.access_key)
     return False
 
 
@@ -283,9 +278,7 @@ def resolve_bedrock_region(env: Optional[Dict[str, str]] = None) -> str:
         return explicit
     with suppress(Exception):
         import botocore.session
-        region = botocore.session.get_session().get_config_variable("region")
-        if region:
-            return region
+        return botocore.session.get_session().get_config_variable("region") or "us-east-1"
     return "us-east-1"
 
 
@@ -294,11 +287,9 @@ def resolve_bedrock_runtime_region(config: Optional[Dict[str, Any]] = None) -> s
     non-runtime Bedrock endpoint must use this so auxiliary calls never leave the primary
     runtime's region when config and ambient AWS env disagree. Pass *config* to skip disk."""
     if config is None:
-        try:
+        with suppress(Exception):
             from hermes_cli.config import load_config_readonly
             config = load_config_readonly()
-        except Exception:
-            config = {}
     cfg_region = str(((config or {}).get("bedrock") or {}).get("region") or "").strip()
     return cfg_region or resolve_bedrock_region()
 
@@ -393,22 +384,23 @@ def _without_cache_points(blocks: Any) -> Optional[list]:
 def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]:
     """Copy of Converse kwargs with ``placement``'s cachePoint removed; the SAME object
     back when nothing was stripped (callers use identity to decide a retry cannot help)."""
-    if placement in ("system", "tools"):
-        tool_config = kwargs.get("toolConfig")
-        cleaned = _without_cache_points(kwargs.get("system") if placement == "system" else (tool_config or {}).get("tools"))
-        if cleaned is None:
-            return kwargs
-        return {**kwargs, "system": cleaned} if placement == "system" else {**kwargs, "toolConfig": {**tool_config, "tools": cleaned}}
     if placement == "messages":
         messages = kwargs.get("messages")
-        if not isinstance(messages, list):
-            return kwargs
-        cleaned_contents = [_without_cache_points(msg.get("content") if isinstance(msg, dict) else None) for msg in messages]
+        cleaned_contents = [
+            _without_cache_points(msg.get("content") if isinstance(msg, dict) else None) for msg in messages
+        ] if isinstance(messages, list) else []
         if all(content is None for content in cleaned_contents):
             return kwargs
         return {**kwargs, "messages": [
             msg if content is None else {**msg, "content": content} for msg, content in zip(messages, cleaned_contents)
         ]}
+    if placement == "system":
+        cleaned = _without_cache_points(kwargs.get("system"))
+        return kwargs if cleaned is None else {**kwargs, "system": cleaned}
+    if placement == "tools":
+        tool_config = kwargs.get("toolConfig")
+        cleaned = _without_cache_points((tool_config or {}).get("tools"))
+        return kwargs if cleaned is None else {**kwargs, "toolConfig": {**tool_config, "tools": cleaned}}
     return kwargs
 
 
@@ -473,8 +465,7 @@ def _image_block_from_data_url(url: str) -> Dict:
         raw_bytes = base64.b64decode(data)
     except Exception:
         raw_bytes = data.encode("utf-8")
-    image_format = media_type.split("/")[-1] if "/" in media_type else "jpeg"
-    return {"image": {"format": image_format, "source": {"bytes": raw_bytes}}}
+    return {"image": {"format": media_type.split("/")[-1] if "/" in media_type else "jpeg", "source": {"bytes": raw_bytes}}}
 
 
 def _convert_content_to_converse(content) -> List[Dict]:
@@ -486,11 +477,9 @@ def _convert_content_to_converse(content) -> List[Dict]:
     for part in content:
         if isinstance(part, str):
             blocks.append({"text": _safe_text(part)})
-        elif not isinstance(part, dict):
-            continue
-        elif part.get("type", "") == "text":
+        elif isinstance(part, dict) and part.get("type", "") == "text":
             blocks.append({"text": _safe_text(part.get("text", ""))})
-        elif part.get("type", "") == "image_url":
+        elif isinstance(part, dict) and part.get("type", "") == "image_url":
             image_url = part.get("image_url", {})
             url = image_url.get("url", "") if isinstance(image_url, dict) else ""
             blocks.append(_image_block_from_data_url(url) if url.startswith("data:") else {"text": f"[Image: {url}]"})
@@ -500,12 +489,8 @@ def _convert_content_to_converse(content) -> List[Dict]:
 def _system_blocks(content) -> List[Dict]:
     """System content → text blocks; blank parts are dropped, not placeholder-filled."""
     parts = [content] if isinstance(content, str) else content if isinstance(content, list) else []
-    blocks: List[Dict] = []
-    for part in parts:
-        text = part.get("text", "") if isinstance(part, dict) and part.get("type") == "text" else part
-        if isinstance(text, str) and text.strip():
-            blocks.append({"text": text})
-    return blocks
+    texts = [part.get("text", "") if isinstance(part, dict) and part.get("type") == "text" else part for part in parts]
+    return [{"text": text} for text in texts if isinstance(text, str) and text.strip()]
 
 
 def _tool_use_block(tool_use_id, name, input_dict) -> Dict:
@@ -518,10 +503,8 @@ def _tool_use_block_from(tu: Dict) -> Dict:
 
 def _decode_redacted(encoded) -> Optional[bytes]:
     """Strict base64 → bytes; None for empty/non-str/undecodable input."""
-    if not isinstance(encoded, str) or not encoded:
-        return None
     try:
-        return base64.b64decode(encoded, validate=True)
+        return base64.b64decode(encoded, validate=True) if isinstance(encoded, str) and encoded else None
     except (ValueError, TypeError):
         return None
 
@@ -566,16 +549,13 @@ def _assistant_blocks(msg: Dict, content) -> List[Dict]:
     authoritative; otherwise redacted thinking from ``reasoning_details`` (byte-for-byte
     round-trip), then text, then tool calls."""
     ordered_blocks = msg.get("bedrock_content_blocks")
-    if isinstance(ordered_blocks, list) and ordered_blocks:
-        content_blocks = _replay_ordered_blocks(ordered_blocks)
-        if content_blocks:
-            return content_blocks
-    content_blocks = []
-    for detail in (msg.get("reasoning_details") or []):
-        if isinstance(detail, dict) and detail.get("type") == "redacted_thinking":
-            redacted = _decode_redacted(detail.get("data") or detail.get("redactedContentBase64"))
-            if redacted is not None:
-                content_blocks.append({"reasoningContent": {"redactedContent": redacted}})
+    if isinstance(ordered_blocks, list) and (content_blocks := _replay_ordered_blocks(ordered_blocks)):
+        return content_blocks
+    redacted = [
+        _decode_redacted(d.get("data") or d.get("redactedContentBase64"))
+        for d in (msg.get("reasoning_details") or []) if isinstance(d, dict) and d.get("type") == "redacted_thinking"
+    ]
+    content_blocks: List[Dict] = [{"reasoningContent": {"redactedContent": r}} for r in redacted if r is not None]
     if isinstance(content, str) and content.strip():
         content_blocks.append({"text": content})
     elif isinstance(content, list):
@@ -676,9 +656,9 @@ class _ResponseParts:
             reasoning_content="\n\n".join(self.reasoning_parts) if self.reasoning_parts else None,
             bedrock_content_blocks=ordered_blocks or None,
         )
-        cache_read_tokens = usage_data.get("cacheReadInputTokens", 0)
-        cache_write_tokens = usage_data.get("cacheWriteInputTokens", 0)
-        output_tokens = usage_data.get("outputTokens", 0)
+        cache_read_tokens, cache_write_tokens, output_tokens = (
+            usage_data.get(k, 0) for k in ("cacheReadInputTokens", "cacheWriteInputTokens", "outputTokens")
+        )
         prompt_tokens = usage_data.get("inputTokens", 0) + cache_read_tokens + cache_write_tokens
         usage = SimpleNamespace(
             prompt_tokens=prompt_tokens, completion_tokens=output_tokens, total_tokens=prompt_tokens + output_tokens,
@@ -788,7 +768,7 @@ def stream_converse_with_callbacks(
                 on_reasoning(delta["reasoningContent"])
         elif "contentBlockStop" in event:
             if current_tool is not None:
-                input_dict = _parse_tool_args(current_tool["input_json"]) if current_tool["input_json"] else {}
+                input_dict = _parse_tool_args(current_tool["input_json"])  # "" → {} via the JSON-error path
                 parts.tool_calls.append(_tool_call_ns(current_tool["toolUseId"], current_tool["name"], input_dict))
                 if current_block_index is not None and current_block_index in stream_blocks:
                     stream_blocks[current_block_index]["toolUse"]["input"] = input_dict
@@ -829,10 +809,7 @@ def build_converse_kwargs(
         kwargs["system"] = system_prompt + [dict(_CACHE_POINT)] if cache_here("system") else system_prompt
     from agent.anthropic_adapter import _forbids_sampling_params
     if not _forbids_sampling_params(model):
-        if temperature is not None:
-            inference_config["temperature"] = temperature
-        if top_p is not None:
-            inference_config["topP"] = top_p
+        inference_config.update({k: v for k, v in (("temperature", temperature), ("topP", top_p)) if v is not None})
     if stop_sequences:
         inference_config["stopSequences"] = stop_sequences
     converse_tools = convert_tools_to_converse(tools) if tools else []
@@ -919,13 +896,11 @@ def _list_foundation_models(client, filter_set: set, models: List[Dict[str, Any]
 
 def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any]]) -> None:
     """Append active cross-region inference profiles whose IDs are not already present (paginated)."""
-    profiles = []
-    next_token = None
+    profiles, next_token = [], None
     while True:
         response = client.list_inference_profiles(**({"nextToken": next_token} if next_token else {}))
         profiles.extend(response.get("inferenceProfileSummaries", []))
-        next_token = response.get("nextToken")
-        if not next_token:
+        if not (next_token := response.get("nextToken")):
             break
     seen_ids = {m["id"].lower() for m in models}
     for profile in profiles:
@@ -943,7 +918,6 @@ def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any
 def discover_bedrock_models(region: str, provider_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """Discover foundation models + inference profiles (cached 1h per region/filter), sorted
     ``global.`` profiles first then by name; [] when the client cannot be built."""
-    import time
     cache_key = f"{region}:{','.join(sorted(provider_filter or []))}"
     cached = _discovery_cache.get(cache_key)
     if cached and (time.time() - cached["timestamp"]) < _DISCOVERY_CACHE_TTL_SECONDS:
@@ -955,14 +929,14 @@ def discover_bedrock_models(region: str, provider_filter: Optional[List[str]] = 
         return []
     models: List[Dict[str, Any]] = []
     filter_set = {f.lower() for f in (provider_filter or [])}
-    try:
-        _list_foundation_models(client, filter_set, models)
-    except Exception as e:
-        logger.warning("Failed to list Bedrock foundation models: %s", e)
-    try:
-        _list_inference_profiles(client, filter_set, models)
-    except Exception as e:
-        logger.debug("Skipping inference profile discovery: %s", e)
+    for step, log, message in (
+        (_list_foundation_models, logger.warning, "Failed to list Bedrock foundation models: %s"),
+        (_list_inference_profiles, logger.debug, "Skipping inference profile discovery: %s"),
+    ):
+        try:
+            step(client, filter_set, models)
+        except Exception as e:
+            log(message, e)
     models.sort(key=lambda m: (0 if m["id"].startswith("global.") else 1, m["name"].lower()))
     _discovery_cache[cache_key] = {"timestamp": time.time(), "models": models}
     return models
@@ -1017,10 +991,7 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
     authoritative source ("prompt is too long: 1300032 tokens > 1000000 maximum"); length
     validation runs before inference so the probe costs nothing. An accepted tier is
     returned as a safe lower bound; None (no creds / network / unparseable) → static table."""
-    try:
-        from agent.model_metadata import parse_context_limit_from_error
-    except ImportError:  # pragma: no cover — same package
-        return None
+    from agent.model_metadata import parse_context_limit_from_error
     try:
         client = _get_bedrock_runtime_client(region)
     except Exception as exc:  # boto3 missing / credential resolution failure
@@ -1050,10 +1021,7 @@ def get_bedrock_context_length(model_id: str, region: str = "", probe: bool = Tr
     """Context window: live probe (if ``probe`` and ``region``) → static table → default. The
     table is fallback only: a stale substring match silently caps the window (a 1M Opus
     pinned to 200K via "opus-4"). ``probe=False`` / empty region skips the network call."""
-    if probe and region:
-        probed = probe_bedrock_context_length(model_id, region)
-        if probed:
-            return probed
-    model_lower = model_id.lower()
-    matches = [key for key in BEDROCK_CONTEXT_LENGTHS if key in model_lower]
+    if probe and region and (probed := probe_bedrock_context_length(model_id, region)):
+        return probed
+    matches = [key for key in BEDROCK_CONTEXT_LENGTHS if key in model_id.lower()]
     return BEDROCK_CONTEXT_LENGTHS[max(matches, key=len)] if matches else BEDROCK_DEFAULT_CONTEXT_LENGTH
