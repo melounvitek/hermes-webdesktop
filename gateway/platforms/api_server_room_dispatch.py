@@ -63,8 +63,7 @@ def _room_dispatch_error(exc: Exception, *, _openai_error) -> "web.Response":
 async def _normalize_room_dispatch(
     self, request: "web.Request", body: Any, *, _api_server) -> tuple[Any, "web.Response | None"]:
     """Validate and normalize a scoped RoomLink dispatch request."""
-    _openai_error = _api_server._openai_error
-    room_token = self._room_grant_token(request)
+    _openai_error, room_token = _api_server._openai_error, self._room_grant_token(request)
     if not room_token:
         return body, None
     if not isinstance(body, dict) or set(body) - {"input", "hosted_room_dispatch"}:

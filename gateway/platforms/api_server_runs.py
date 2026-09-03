@@ -24,15 +24,13 @@ from gateway.platforms.api_server_run_idempotency import TERMINAL_STATUSES
 
 logger = logging.getLogger("gateway.platforms.api_server")
 _ROOM_RETENTION_REQUEST_KEY = (
-    RequestKey("hermes.room_run_retention_until", float)
-    if RequestKey is not None
+    RequestKey("hermes.room_run_retention_until", float) if RequestKey is not None
     else "hermes.room_run_retention_until")
 # Forwarded subagent lifecycle fields; free-text ones are secret-redacted.
 _SUBAGENT_EVENT_KEYS = (
-    "goal", "task_count", "task_index", "subagent_id", "child_session_id",
-    "delegation_id", "parent_id", "depth", "model", "tool_count", "status",
-    "summary", "duration_seconds", "input_tokens", "output_tokens",
-    "reasoning_tokens", "api_calls", "cost_usd", "files_read", "files_written",
+    "goal", "task_count", "task_index", "subagent_id", "child_session_id", "delegation_id", "parent_id",
+    "depth", "model", "tool_count", "status", "summary", "duration_seconds", "input_tokens",
+    "output_tokens", "reasoning_tokens", "api_calls", "cost_usd", "files_read", "files_written",
     "output_tail")
 _SUBAGENT_TEXT_KEYS = ("goal", "summary", "output_tail")
 # Terminal usage payload: (wire key, agent attribute), in wire order.
@@ -115,11 +113,9 @@ def _idempotency_capabilities(self, *, store_type) -> dict[str, Any]:
 
 
 def _close_run_state(self) -> None:
-    store = getattr(self, "_run_idempotency_store", None)
-    if store is None:
-        return
     try:
-        store.close()
+        if getattr(self, "_run_idempotency_store", None) is not None:
+            self._run_idempotency_store.close()
     except Exception:
         logger.debug("Failed to close run idempotency store for %s", self.name, exc_info=True)
 
@@ -154,13 +150,11 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
 
     def _push(event: Dict[str, Any]) -> None:
         self._set_run_status(
-            run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event")
-        )
+            run_id, self._run_statuses.get(run_id, {}).get("status", "running"), last_event=event.get("event"))
         q = self._run_streams.get(run_id)
-        if q is None:
-            return
-        with suppress(Exception):
-            loop.call_soon_threadsafe(q.put_nowait, event)
+        if q is not None:
+            with suppress(Exception):
+                loop.call_soon_threadsafe(q.put_nowait, event)
 
     def _callback(event_type: str, tool_name: str = None, preview: str = None, args=None, **kwargs):
         # _thinking / subagent.tool / subagent_progress are deliberately dropped (UI noise);
@@ -174,12 +168,10 @@ def _make_run_event_callback(self, run_id: str, loop: "asyncio.AbstractEventLoop
                 event["preview"] = redact_sensitive_text(str(preview), force=True)
             for key in _SUBAGENT_EVENT_KEYS:
                 value = kwargs.get(key)
-                if value is None:
-                    continue
-                # Free text may carry child tool output: force secret redaction on this public stream.
-                if key in _SUBAGENT_TEXT_KEYS and isinstance(value, str):
-                    value = redact_sensitive_text(value, force=True)
-                event[key] = value
+                if value is not None:
+                    # Free text may carry child tool output: force secret redaction on this public stream.
+                    redact = key in _SUBAGENT_TEXT_KEYS and isinstance(value, str)
+                    event[key] = redact_sensitive_text(value, force=True) if redact else value
             _push(event)
 
     return _callback
@@ -265,10 +257,9 @@ def _resolve_conversation_history(
     if raw_history:
         if not isinstance(raw_history, list):
             return [], instructions, None, _json_error(
-                _openai_error, "'conversation_history' must be an array of message objects", status=400
-            )
+                _openai_error, "'conversation_history' must be an array of message objects", status=400)
         for i, entry in enumerate(raw_history):
-            if not isinstance(entry, dict) or "role" not in entry or "content" not in entry:
+            if not isinstance(entry, dict) or {"role", "content"} - set(entry):
                 return [], instructions, None, _json_error(
                     _openai_error, f"conversation_history[{i}] must have 'role' and 'content' fields",
                     status=400)
@@ -288,9 +279,8 @@ def _resolve_conversation_history(
             if isinstance(msg, dict) and msg.get("role") and msg.get("content"):
                 content = msg["content"]
                 if isinstance(content, list):  # flatten multi-part content blocks to text
-                    content = " ".join(
-                        part.get("text", "") for part in content
-                        if isinstance(part, dict) and part.get("type") == "text")
+                    content = " ".join(p.get("text", "") for p in content
+                                       if isinstance(p, dict) and p.get("type") == "text")
                 conversation_history.append({"role": msg["role"], "content": str(content)})
     return conversation_history, instructions, stored_session_id, None
 
@@ -335,8 +325,7 @@ class _RunLaunch:
 
     @property
     def approval_session_key(self) -> str:
-        # Approval queues are isolated per run: session ids are conversation scopes, not
-        # authorization namespaces, so resolving one run's approval must not unblock another's.
+        # Isolated per run: session ids are conversation scopes, not authorization namespaces.
         return self.run_id
 
     def put_event(self, event: Optional[Dict]) -> None:
@@ -345,26 +334,17 @@ class _RunLaunch:
             self.queue.put_nowait(event)
 
 
-def _optional_dict(body: Any, key: str) -> Optional[dict]:
-    value = body.get(key) if isinstance(body, dict) else None
-    return value if isinstance(value, dict) else None
-
-
 def _forget_run(self, run_id: str, *tables) -> None:
     """Drop *run_id* from the given run-keyed dicts/sets, then release its owner stamp."""
     for table in tables:
-        if isinstance(table, set):
-            table.discard(run_id)
-        else:
-            table.pop(run_id, None)
+        (table.discard if isinstance(table, set) else lambda k: table.pop(k, None))(run_id)
     self._release_run_owner_if_forgotten(run_id)
 
 
 def _retire_live_run(self, run_id: str) -> None:
     """Retire agent/task/approval control state once the executor-backed task is done."""
-    _forget_run(
-        self, run_id, self._active_run_agents, self._active_run_tasks,
-        self._run_approval_sessions, self._stopping_run_ids)
+    _forget_run(self, run_id, self._active_run_agents, self._active_run_tasks, self._run_approval_sessions,
+                self._stopping_run_ids)
 
 
 def _drop_run_transport(self, run_id: str) -> None:
@@ -385,8 +365,10 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     body, room_error = await self._normalize_room_dispatch(request, body)
     if room_error is not None:
         return room_error
-    room_dispatch = _optional_dict(body, "hosted_room_dispatch")
-    room_execution_policy = _optional_dict(body, "_room_execution_policy")
+    room_dispatch, room_execution_policy = (
+        v if isinstance(v, dict) else None for v in (
+            (body.get("hosted_room_dispatch"), body.get("_room_execution_policy"))
+            if isinstance(body, dict) else (None, None)))
     idempotency_key = request.headers.get("Idempotency-Key", "").strip()
     if len(idempotency_key) > 255 or any(ord(ch) < 33 or ord(ch) > 126 for ch in idempotency_key):
         return _json_error(
@@ -443,10 +425,8 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
     # An explicit or chained session owns its routing key and is never rebound to the header.
     _declared_selected = not session_id and bool(gateway_session_key)
     session_id = session_id or self._declared_conversation_session(gateway_session_key) or run_id
-    q: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
-    created_at = time.time()
-    self._run_streams[run_id] = q
-    self._run_streams_created[run_id] = created_at
+    q = self._run_streams[run_id] = asyncio.Queue()
+    created_at = self._run_streams_created[run_id] = time.time()
     self._run_approval_sessions[run_id] = run_id  # approval session key (see _RunLaunch)
     initial_status = self._set_run_status(
         run_id, "queued", created_at=created_at, session_id=session_id, model=body.get("model", self._model_name))
@@ -465,22 +445,16 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         self, run_id, q, session_id, gateway_session_key, _declared_selected, user_message,
         conversation_history,
         agent_kwargs=dict(
-            ephemeral_system_prompt=instructions, session_id=session_id,
-            gateway_session_key=gateway_session_key,
-            requested_model=agent_overrides.get("requested_model"),
-            requested_provider=agent_overrides.get("requested_provider"),
-            model_options=agent_overrides.get("model_options"), route=route,
-            room_dispatch=room_dispatch, room_execution_policy=room_execution_policy),
+            ephemeral_system_prompt=instructions, session_id=session_id, gateway_session_key=gateway_session_key,
+            route=route, room_dispatch=room_dispatch, room_execution_policy=room_execution_policy,
+            **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get())
     self._activate_admitted_request()
-    task = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
-    self._active_run_tasks[run_id] = task
-    try:
+    task = self._active_run_tasks[run_id] = asyncio.create_task(_execute_run(self, launch, _api_server=_api_server))
+    with suppress(TypeError):
         self._background_tasks.add(task)  # tracked for shutdown drain
-    except TypeError:
-        pass
     if hasattr(task, "add_done_callback"):
         task.add_done_callback(self._background_tasks.discard)
     return _accepted_response(run_id, "started", gateway_session_key, replayed=False)
@@ -597,8 +571,7 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             _finish("failed", error=_redact_api_error_text(result.get("error") or "agent run failed"))
         else:
             # Undelivered steer text rides on the terminal event/status for client replay.
-            pending_steer = result.get("pending_steer")
-            extra = {"pending_steer": pending_steer} if pending_steer else {}
+            extra = {"pending_steer": result["pending_steer"]} if result.get("pending_steer") else {}
             _finish("completed", extra, output=result.get("final_response", ""), usage=usage)
     except asyncio.CancelledError:
         _finish("cancelled")
@@ -646,7 +619,7 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
     return self._run_idempotency_store.owns_run(scope, run_id)
 
 
-def _load_owned_run(self, request: "web.Request", *, _api_server, permission: Optional[str], active_fallback: bool):
+def _load_owned_run(self, request, *, _api_server, permission: Optional[str], active_fallback: bool):
     """Authenticate (*permission* -> room-grant aware; ``None`` -> API key only) and resolve
     ``(run_id, status, agent, task, error)``; *active_fallback* reports a live in-process run
     without pollable status as ``running`` instead of 404."""
@@ -713,17 +686,13 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     return response
 
 
-def _emit_to_stream(self, run_id: str, event: Dict[str, Any]) -> None:
+def _mark_run_event(self, run_id: str, name: str, **fields: Any) -> None:
+    """Record a control-plane event on the run status and (best effort) its SSE stream."""
+    self._set_run_status(run_id, "running", last_event=name)
     q = self._run_streams.get(run_id)
     if q is not None:
         with suppress(Exception):
-            q.put_nowait(event)
-
-
-def _mark_run_event(self, run_id: str, name: str, **fields: Any) -> None:
-    """Record a control-plane event on the run status and its SSE stream."""
-    self._set_run_status(run_id, "running", last_event=name)
-    _emit_to_stream(self, run_id, _run_event(run_id, name, **fields))
+            q.put_nowait(_run_event(run_id, name, **fields))
 
 
 _APPROVAL_CHOICE_ALIASES = {"approve": "once", "approved": "once", "allow": "once"}
@@ -849,10 +818,9 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     """Expire old SSE buffers without treating transport age as run age."""
     if now is None:
         now = time.time()
-    stale = [
-        run_id for run_id, created_at in list(self._run_streams_created.items())
-        if now - created_at > self._RUN_STREAM_TTL and run_id not in self._run_stream_subscribers]
-    for run_id in stale:
+    for run_id, created_at in list(self._run_streams_created.items()):
+        if now - created_at <= self._RUN_STREAM_TTL or run_id in self._run_stream_subscribers:
+            continue
         logger.debug("[api_server] sweeping expired run transport %s", run_id)
         task = self._active_run_tasks.get(run_id)
         # Transport TTL bounds buffering; live control state survives until the task returns.

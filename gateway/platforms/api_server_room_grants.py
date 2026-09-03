@@ -2,7 +2,7 @@
 
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 try:
     from aiohttp import web
@@ -25,18 +25,13 @@ def _require_unchanged_execution_policy(claims: dict[str, Any], execution_policy
         raise RoomGrantReauthorizationRequired("room execution policy changed")
 
 
-def _invalid_room_grant(_openai_error) -> "web.Response":
-    return _json_error(
-        _openai_error, "Room authorization is invalid or expired.",
-        err_type="gateway_auth_error", code="invalid_room_grant", status=401)
-
-
-def _room_grant_error_response(exc: Exception, *, _openai_error) -> "web.Response":
-    if not isinstance(exc, RoomGrantReauthorizationRequired):
-        return _invalid_room_grant(_openai_error)
-    return _json_error(
-        _openai_error, "Room authorization needs to be renewed.",
-        err_type="gateway_auth_error", code="room_reauthorization_required", status=403)
+def _room_grant_error_response(exc: Optional[Exception] = None, *, _openai_error) -> "web.Response":
+    """401 invalid grant, or 403 reauthorization-required for a revoked/superseded grant."""
+    if isinstance(exc, RoomGrantReauthorizationRequired):
+        message, code, status = "Room authorization needs to be renewed.", "room_reauthorization_required", 403
+    else:
+        message, code, status = "Room authorization is invalid or expired.", "invalid_room_grant", 401
+    return _json_error(_openai_error, message, err_type="gateway_auth_error", code=code, status=status)
 
 
 def _hard_expiry(claims: dict[str, Any]) -> float:
@@ -57,8 +52,7 @@ def _local_target(claims: dict[str, Any] | None, _api_request_profile) -> tuple[
     from gateway import hosted_rooms
     profile = _api_request_profile.get() or "default"
     installation_id = hosted_rooms.local_authority_gateway_id()
-    if claims is not None and (
-        claims["target_profile"] != profile or claims["target_install_id"] != installation_id):
+    if claims is not None and (claims["target_profile"], claims["target_install_id"]) != (profile, installation_id):
         raise ValueError("room grant target does not match this profile")
     return profile, installation_id
 
@@ -85,11 +79,8 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
 
 
 def _room_grant_token(request: "web.Request") -> str:
-    authorization = str(request.headers.get("Authorization") or "")
-    scheme, separator, token = authorization.partition(" ")
-    if not separator or scheme.lower() != "hermesroom":
-        return ""
-    return token.strip()
+    scheme, separator, token = str(request.headers.get("Authorization") or "").partition(" ")
+    return token.strip() if separator and scheme.lower() == "hermesroom" else ""
 
 
 def _room_grant_secret(self) -> bytes:
@@ -156,13 +147,9 @@ async def _handle_room_member_invitation(
     except Exception as exc:
         return _json_error(_openai_error, str(exc), code="invalid_room_invitation", status=400)
     return web.json_response({
-        "object": "hermes.room_member.invitation",
-        "grant": token,
-        "target_profile": profile,
-        "catalog": catalog,
-        "expires_at": float(claims["expires_at"]),
-        "status_expires_at": float(claims["status_expires_at"]),
-    }, status=201)
+        "object": "hermes.room_member.invitation", "grant": token, "target_profile": profile,
+        "catalog": catalog, "expires_at": float(claims["expires_at"]),
+        "status_expires_at": float(claims["status_expires_at"])}, status=201)
 
 
 async def _handle_room_member_capabilities(
@@ -214,11 +201,8 @@ async def _handle_room_member_grant_refresh(
     except Exception as exc:
         return _room_grant_error_response(exc, _openai_error=_openai_error)
     return web.json_response({
-        "object": "hermes.room_member.grant",
-        "grant": token,
-        "expires_at": now + dispatch_ttl,
-        "status_expires_at": hard_expiry,
-        "execution_policy": execution_policy})
+        "object": "hermes.room_member.grant", "grant": token, "expires_at": now + dispatch_ttl,
+        "status_expires_at": hard_expiry, "execution_policy": execution_policy})
 
 
 async def _handle_room_member_grant_revoke(
@@ -240,5 +224,5 @@ async def _handle_room_member_grant_revoke(
         hosted_rooms.revoke_room_grant_scope(
             hosted_rooms.default_db_path(), claims=claims, expires_at=_hard_expiry(claims))
     except Exception:
-        return _invalid_room_grant(_openai_error)
+        return _room_grant_error_response(_openai_error=_openai_error)
     return web.json_response({"object": "hermes.room_member.grant.revocation", "revoked": True})

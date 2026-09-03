@@ -60,7 +60,6 @@ class RunIdempotencyStore:
     def durable(self) -> bool:
         """Whether reservations survive this process."""
         return self._db_path is not None
-
     def __init__(self, db_path: str = None):
         if db_path is None:
             try:
@@ -106,9 +105,7 @@ class RunIdempotencyStore:
         self._tighten_permissions()
 
     def _tighten_permissions(self) -> None:
-        if not self._db_path:
-            return
-        for suffix in ("", "-wal", "-shm"):
+        for suffix in ("", "-wal", "-shm") if self._db_path else ():
             candidate = Path(self._db_path + suffix)
             try:
                 if candidate.exists():
@@ -146,9 +143,8 @@ class RunIdempotencyStore:
                 "scope,idempotency_key,fingerprint,run_id,status_json,"
                 "owner_pid,owner_started,retention_until,created_at,updated_at"
                 ") VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    scope, key, fingerprint, run_id, encoded,
-                    int(owner_pid or 0), int(owner_started or 0), retention_until, now, now))
+                (scope, key, fingerprint, run_id, encoded, int(owner_pid or 0), int(owner_started or 0),
+                 retention_until, now, now))
             self._conn.commit()
             return "created", _record(run_id, encoded, owner_pid, owner_started, now) | {"status": status}
 
@@ -182,8 +178,7 @@ class RunIdempotencyStore:
                 terminal = False
             if terminal:
                 self._conn.execute(
-                    "DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?",
-                    (stale_scope, stale_key))
+                    "DELETE FROM run_idempotency WHERE scope=? AND idempotency_key=?", (stale_scope, stale_key))
 
     def status_for_run(self, scope: str, run_id: str, *, retention_until: float = 0) -> dict[str, Any] | None:
         """Load one durable run status inside its authenticated scope."""
