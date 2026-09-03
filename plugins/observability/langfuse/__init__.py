@@ -300,9 +300,8 @@ def _truncate_text(value: str, max_chars: int) -> Any:
     # Redact BEFORE truncating so a secret straddling the cut cannot leak.
     if _capture_mode() == "sanitized":
         value = _redact_secrets(value)
-    if len(value) <= max_chars:
-        return value
-    return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
+    over = len(value) - max_chars
+    return value if over <= 0 else value[:max_chars] + f"... [truncated {over} chars]"
 
 
 def _maybe_parse_json_string(value: str) -> Any:

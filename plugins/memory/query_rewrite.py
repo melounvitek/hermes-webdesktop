@@ -50,9 +50,7 @@ def _bounded_user_message(message: str) -> str:
     text = (message or "").strip()
     if len(text) <= _MAX_INPUT_CHARS:
         return text
-    head = text[:3_000].rstrip()
-    tail = text[-900:].lstrip()
-    return f"{head}\n\n[... middle omitted ...]\n\n{tail}"
+    return f"{text[:3_000].rstrip()}\n\n[... middle omitted ...]\n\n{text[-900:].lstrip()}"
 
 
 def _extract_response_text(response: Any) -> str:

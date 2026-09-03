@@ -919,11 +919,8 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _recall_disabled(self) -> bool:
         """Guards shared by the async and synchronous recall paths."""
-        for skip, why in (
-            (self._memory_mode == "tools", "tools-only mode"),
-            (not self._auto_recall, "auto_recall disabled"),
-            (self._shutting_down.is_set(), "shutting down"),
-        ):
+        for skip, why in ((self._memory_mode == "tools", "tools-only mode"), (not self._auto_recall, "auto_recall disabled"),
+                          (self._shutting_down.is_set(), "shutting down")):
             if skip:
                 logger.debug("Prefetch: skipped (%s)", why)
                 return True
@@ -1157,8 +1154,7 @@ class HindsightMemoryProvider(MemoryProvider):
         return [] if self._memory_mode == "context" else [RETAIN_SCHEMA, RECALL_SCHEMA, REFLECT_SCHEMA]
 
     def _tool_retain(self, args: dict) -> str:
-        content = args["content"]
-        context = args.get("context")
+        content, context = args["content"], args.get("context")
         item = self._build_retain_kwargs(content, context=context, tags=args.get("tags"),
                                          occurred_at=args.get("occurred_at"))
         logger.debug("Tool hindsight_retain: bank=%s, content_len=%d, context=%s",
@@ -1193,10 +1189,9 @@ class HindsightMemoryProvider(MemoryProvider):
     }
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
-        entry = self._TOOL_HANDLERS.get(tool_name)
-        if entry is None:
+        required, handler = self._TOOL_HANDLERS.get(tool_name, ("", None))
+        if handler is None:
             return tool_error(f"Unknown tool: {tool_name}")
-        required, handler = entry
         if not args.get(required, ""):
             return tool_error(f"Missing required parameter: {required}")
         try:
