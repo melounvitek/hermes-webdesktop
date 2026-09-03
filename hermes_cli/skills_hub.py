@@ -23,13 +23,10 @@ _VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _VALID_CATEGORY_RE = re.compile(r"^[a-z][a-z0-9_/-]*$")
 _TRUST_STYLE = {"builtin": "bright_cyan", "trusted": "green", "community": "yellow", "local": "dim"}
 _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
-# Browse per-source limits. When the centralized index is available,
-# parallel_search_sources skips the external API sources and serves everything
-# from "hermes-index", so that entry MUST cover the whole catalog or browse
-# silently caps the hub (it shipped at 50, then 5000 — both truncated). The
-# index is disk-cached and browse paginates client-side, so a ceiling above the
-# catalog size is right. The external limits only apply when the index is
-# unavailable (offline / first run before the cache populates).
+# Browse per-source limits. With the centralized index available, parallel_search_sources
+# serves everything from "hermes-index", so that entry MUST exceed the whole catalog or browse
+# silently caps the hub (50 and 5000 both truncated). The index is disk-cached and browse
+# paginates client-side. The external limits only apply when the index is unavailable.
 _BROWSE_LIMITS = {
     "hermes-index": 1000000, "official": 200, "skills-sh": 200, "well-known": 50,
     "github": 200, "clawhub": 500, "lobehub": 500, "browse-sh": 500}
@@ -42,10 +39,7 @@ _EXTRA_META_LABELS = (
     ("endpoint", "Endpoint"), ("install_command", "Install Command"),
     ("installs", "Installs"), ("weekly_installs", "Weekly Installs"))
 
-
-# ---------------------------------------------------------------------------
-# Small shared helpers
-# ---------------------------------------------------------------------------
+# --- Small shared helpers ---
 
 def _display_source(r) -> str:
     """Source label for a result row: GitHub-tap rows surface their per-tap provider label."""
@@ -155,18 +149,14 @@ def _format_extra_metadata_lines(extra: Dict[str, Any]) -> list[str]:
     return lines
 
 
-# ---------------------------------------------------------------------------
-# Identifier / source resolution
-# ---------------------------------------------------------------------------
+# --- Identifier / source resolution ---
 
 def _resolve_short_name(name: str, sources, console: Console) -> str:
-    """Resolve a short skill name (e.g. 'pptx') to a full identifier by searching all sources.
+    """Short name (e.g. 'pptx') -> full identifier via search; "" when ambiguous/missing.
 
-    Exactly one exact match -> its identifier. Several -> the single official one wins,
-    otherwise they are listed and "" is returned. None -> suggestions (or an error) and "".
+    One exact match wins; several -> the single official one, else they are listed.
     """
     from tools.skills_hub import unified_search
-
     c = console or _console
     c.print(f"[dim]Resolving '{name}'...[/]")
     results = unified_search(name, sources, source_filter="all", limit=20)
@@ -202,11 +192,8 @@ def _resolve_short_name(name: str, sources, console: Console) -> str:
 
 
 def _resolve_source_meta_and_bundle(identifier: str, sources):
-    """Resolve (meta, bundle, source) from a single source adapter.
-
-    Meta and bundle must come from the same adapter: pairing skills.sh catalog metadata with a
-    ClawHub zip of a same-named skill is how `inspect` once showed the wrong SKILL.md. Falls
-    back to the first adapter that at least produced metadata.
+    """(meta, bundle, source) from ONE adapter — mixing skills.sh metadata with a ClawHub zip of
+    a same-named skill once showed the wrong SKILL.md. Falls back to the first meta-only hit.
     """
     first_meta = None
     first_meta_source = None
@@ -261,6 +248,15 @@ def _existing_categories() -> List[str]:
         return []
 
 
+def _line_input(prompt: str) -> Optional[str]:
+    """Stripped interactive line; None on EOF/Ctrl-C."""
+    from hermes_cli.cli_output import line_input
+    try:
+        return line_input(prompt).strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+
 def _prompt_for_skill_name(c: Console, url: str, default: str = "") -> Optional[str]:
     """Prompt interactively for a skill name. Returns None on cancel/EOF."""
     c.print()
@@ -272,10 +268,8 @@ def _prompt_for_skill_name(c: Console, url: str, default: str = "") -> Optional[
     c.print(
         f"[bold]Enter a skill name{default_hint}:[/] "
         f"[dim](lowercase letters, digits, hyphens, underscores; starts with a letter)[/]")
-    from hermes_cli.cli_output import line_input
-    try:
-        answer = line_input("Name: ").strip()
-    except (EOFError, KeyboardInterrupt):
+    answer = _line_input("Name: ")
+    if answer is None:
         return None
     if not answer and default:
         answer = default
@@ -297,11 +291,7 @@ def _prompt_for_category(c: Console, existing: List[str]) -> str:
         c.print(
             "[bold]Category[/] [dim](optional — press Enter to install flat at ~/.hermes/skills/<name>/)[/]"
         )
-    from hermes_cli.cli_output import line_input
-    try:
-        answer = line_input("Category: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return ""
+    answer = _line_input("Category: ")
     if not answer:
         return ""
     if not _VALID_CATEGORY_RE.match(answer):
@@ -310,19 +300,12 @@ def _prompt_for_category(c: Console, existing: List[str]) -> str:
     return answer
 
 
-# ---------------------------------------------------------------------------
-# search / browse / inspect
-# ---------------------------------------------------------------------------
+# --- search / browse / inspect ---
 
 def do_search(query: str, source: str = "all", limit: int = 10,
               console: Optional[Console] = None, as_json: bool = False) -> None:
-    """Search registries and display results as a Rich table.
-
-    ``as_json=True`` writes a JSON array instead — the scripting handle where the full
-    identifier stays intact (no Rich status spinner contaminates stdout).
-    """
+    """Search registries -> Rich table, or a clean JSON array (``as_json``) for scripting."""
     from tools.skills_hub import unified_search
-
     c = console or _console
     sources = _sources()
     if as_json:
@@ -357,11 +340,8 @@ def do_search(query: str, source: str = "all", limit: int = 10,
 
 
 def _rank_and_page(all_results, page: int, page_size: int):
-    """Dedupe by identifier (higher trust wins), sort official-first, slice one page.
-
-    identifier is unique per skill; name is not (browse-sh skills from different sites can
-    share a task name). Returns (deduped, page_items, page, total_pages, start).
-    """
+    """Dedupe by identifier (higher trust wins; names are NOT unique across browse-sh sites),
+    sort official-first, slice one page -> (deduped, page_items, page, total_pages, start)."""
     seen: dict = {}
     for r in all_results:
         rank = _TRUST_RANK.get(r.trust_level, 0)
@@ -378,7 +358,6 @@ def _rank_and_page(all_results, page: int, page_size: int):
 def _fetch_browse_results(c: Console, source: str):
     """Parallel fetch from all (or filtered) sources with a live per-source progress spinner."""
     from tools.skills_hub import parallel_search_sources
-
     with c.status("[bold]Fetching skills from registries...") as status:
         # parallel_search_sources invokes the callback from the collecting thread as each
         # source completes; the page itself is rendered once over the final, fully sorted set.
@@ -464,7 +443,6 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
 def browse_skills(page: int = 1, page_size: int = 20, source: str = "all") -> dict:
     """Paginated hub browse for programmatic callers (e.g. TUI gateway)."""
     from tools.skills_hub import parallel_search_sources
-
     page_size = max(1, min(page_size, 100))
     # The shared parallel walker carries the index-aware source-skip logic — querying
     # hermes-index AND the external APIs at once would double-count every skill.
@@ -526,9 +504,7 @@ def inspect_skill(identifier: str) -> Optional[dict]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# install
-# ---------------------------------------------------------------------------
+# --- install ---
 
 def _install_blocked(c: Console, bundle, message: str, verdict: str, detail: str,
                      q_path: Optional[Path] = None, lead: str = "") -> None:
@@ -542,11 +518,8 @@ def _install_blocked(c: Console, bundle, message: str, verdict: str, detail: str
 
 def _resolve_url_bundle_name(c: Console, bundle, meta, identifier: str,
                              name_override: str, skip_confirm: bool) -> bool:
-    """Give a URL-sourced bundle a name when SKILL.md has none.
-
-    Order: (1) --name override, (2) interactive prompt on a TTY, (3) refuse with an
-    actionable error on non-interactive surfaces. Returns False when the install must abort.
-    """
+    """Name a URL-sourced bundle whose SKILL.md has none: --name override, else TTY prompt,
+    else an actionable refusal on non-interactive surfaces. False => abort the install."""
     bundle_meta = getattr(bundle, "metadata", {}) or {}
     if bundle.source != "url" or (bundle.name and not bundle_meta.get("awaiting_name")):
         return True
@@ -586,11 +559,8 @@ def _resolve_url_bundle_name(c: Console, bundle, meta, identifier: str,
 
 
 def _announce_blueprint(c: Console, skill_name: str) -> None:
-    """Register an installed skill's ``metadata.hermes.blueprint`` as a Suggested Cron Job.
-
-    Registered as a suggestion, never auto-scheduled: installing must not silently create a
-    recurring job; the user accepts via /suggestions. Best-effort: never raises.
-    """
+    """Offer an installed skill's ``metadata.hermes.blueprint`` via /suggestions — never
+    auto-scheduled (installing must not silently create a recurring job). Never raises."""
     try:
         from tools.blueprints import BlueprintError, blueprint_spec_for_installed, register_blueprint_suggestion
         try:
@@ -656,7 +626,6 @@ def _scan_quarantined(c: Console, q_path: Path, bundle, meta, identifier: str):
     """Run the cached security scan on the quarantined bundle and print the report."""
     from tools.skills_hub import HUB_DIR, source_url_for_bundle
     from tools.skills_guard import scan_skill_cached, format_scan_report
-
     c.print("[bold]Running security scan...[/]")
     if bundle.source == "official":
         scan_source = "official"
@@ -705,13 +674,11 @@ def do_install(identifier: str, category: str = "", force: bool = False,
                source_id: Optional[str] = None) -> None:
     """Fetch, quarantine, scan, confirm, and install a skill.
 
-    ``source_id`` pins resolution to a single source adapter (e.g. ``clawhub``). Callers that
-    already know a skill's provenance (``do_update`` reads it from the lockfile) must pass it so
-    a bare identifier cannot be fuzzy-resolved to a same-named skill in another registry.
+    ``source_id`` pins resolution to one adapter; callers that know the provenance (``do_update``)
+    must pass it so a bare identifier cannot resolve to a same-named skill elsewhere.
     """
     from tools.skills_hub import ensure_hub_dirs, quarantine_bundle, install_from_quarantine, HubLockFile
     from tools.skills_guard import should_allow_install
-
     c = console or _console
     ensure_hub_dirs()
     sources = _pinned_sources(c, _sources(), source_id, identifier)
@@ -792,12 +759,8 @@ def do_install(identifier: str, category: str = "", force: bool = False,
 
 
 def _print_tier1_advisory(skill_dir, console) -> None:
-    """Print the advisory SkillEvaluator Tier 1 report, if available.
-
-    Never raises and never blocks the install: scanner missing, disabled via
-    ``skills.tier1_advisory: false``, or erroring all degrade to silence. Secrets-class findings
-    render red, the rest yellow.
-    """
+    """Advisory SkillEvaluator Tier 1 report. Never raises/blocks: scanner missing, disabled via
+    ``skills.tier1_advisory: false``, or erroring all degrade to silence. Secrets render red."""
     try:
         from tools.skillevaluator_scan import format_tier1_report, run_tier1_scan, tier1_advisory_enabled
         if not tier1_advisory_enabled():
@@ -819,23 +782,17 @@ def _print_tier1_advisory(skill_dir, console) -> None:
         logging.getLogger(__name__).debug("Tier 1 advisory scan skipped: %s", exc)
 
 
-# ---------------------------------------------------------------------------
-# list / check / update / audit
-# ---------------------------------------------------------------------------
+# --- list / check / update / audit ---
 
 def do_list(source_filter: str = "all",
             enabled_only: bool = False,
             console: Optional[Console] = None) -> None:
-    """List installed skills, distinguishing hub, builtin, and local skills.
-
-    Enabled/disabled state comes from the active profile's config: ``hermes -p <profile>``
-    swaps ``HERMES_HOME`` at process start, so no explicit profile flag is needed here.
-    """
+    """List installed skills (hub / builtin / local). Enabled state comes from the active
+    profile's config — ``-p`` swaps HERMES_HOME at process start, so no profile flag here."""
     from tools.skills_hub import HubLockFile, ensure_hub_dirs
     from tools.skills_sync import _read_manifest
     from tools.skills_tool import _find_all_skills
     from agent.skill_utils import get_disabled_skill_names
-
     c = console or _console
     ensure_hub_dirs()
     hub_installed = {e["name"]: e for e in HubLockFile().list_installed()}
@@ -886,7 +843,6 @@ def do_list(source_filter: str = "all",
 def do_check(name: Optional[str] = None, console: Optional[Console] = None) -> None:
     """Check hub-installed skills for upstream updates."""
     from tools.skills_hub import check_for_skill_updates
-
     c = console or _console
     results = check_for_skill_updates(name=name)
     if not results:
@@ -907,7 +863,6 @@ def _has_local_edits(installed: dict) -> bool:
     """True when the on-disk content no longer matches the install-time hash."""
     from tools.skills_hub import SKILLS_DIR
     from tools.skills_guard import content_hash
-
     recorded_hash = installed.get("content_hash", "")
     skill_path = SKILLS_DIR / installed.get("install_path", "")
     if not (recorded_hash and skill_path.is_dir()):
@@ -920,13 +875,9 @@ def _has_local_edits(installed: dict) -> bool:
 
 def do_update(name: Optional[str] = None, console: Optional[Console] = None,
               force: bool = False) -> None:
-    """Update hub-installed skills with upstream changes.
-
-    Locally edited skills are skipped unless ``force=True`` — updating would rmtree-replace the
-    user's work, so destructive replacement must be an explicit caller choice.
-    """
+    """Update hub-installed skills. Locally edited ones are skipped unless ``force`` — the
+    update rmtree-replaces the user's work, so that must be an explicit choice."""
     from tools.skills_hub import HubLockFile, check_for_skill_updates
-
     c = console or _console
     lock = HubLockFile()
     updates = [entry for entry in check_for_skill_updates(name=name) if entry.get("status") == "update_available"]
@@ -964,14 +915,9 @@ def do_update(name: Optional[str] = None, console: Optional[Console] = None,
 
 def do_audit(name: Optional[str] = None, console: Optional[Console] = None,
              deep: bool = False) -> None:
-    """Re-run security scan on installed hub skills.
-
-    ``deep=True`` adds an opt-in AST-level diagnostic on Python files (review aid only — not a
-    security gate; skills_guard verdicts are unchanged).
-    """
+    """Re-scan installed hub skills; ``deep`` adds an AST diagnostic (review aid, not a gate)."""
     from tools.skills_hub import HubLockFile, SKILLS_DIR
     from tools.skills_guard import scan_skill, format_scan_report
-
     c = console or _console
     installed = HubLockFile().list_installed()
     if not installed:
@@ -997,16 +943,13 @@ def do_audit(name: Optional[str] = None, console: Optional[Console] = None,
         c.print()
 
 
-# ---------------------------------------------------------------------------
-# uninstall / reset / bundled-skill management
-# ---------------------------------------------------------------------------
+# --- uninstall / reset / bundled-skill management ---
 
 def do_uninstall(name: str, console: Optional[Console] = None,
                  skip_confirm: bool = False,
                  invalidate_cache: bool = True) -> None:
     """Remove a hub-installed skill with confirmation."""
     from tools.skills_hub import uninstall_skill
-
     c = console or _console
     # skip_confirm bypasses the prompt (TUI mode, where input() hangs)
     if not skip_confirm and not _confirm_or_cancel(c, f"\n[bold]Uninstall '{name}'?[/]"):
@@ -1025,7 +968,6 @@ def do_reset(name: str, restore: bool = False,
              invalidate_cache: bool = True) -> None:
     """Reset a bundled skill's manifest tracking (+ optionally restore from bundled)."""
     from tools.skills_sync import reset_bundled_skill
-
     c = console or _console
     if not skip_confirm and restore and not _confirm_or_cancel(
         c, f"\n[bold]Restore '{name}' from bundled source?[/]",
@@ -1047,7 +989,6 @@ def do_list_modified(console: Optional[Console] = None,
                      as_json: bool = False) -> None:
     """List bundled skills the user has edited (which `hermes update` keeps)."""
     from tools.skills_sync import list_user_modified_bundled_skills
-
     c = console or _console
     modified = list_user_modified_bundled_skills()
     if as_json:
@@ -1081,7 +1022,6 @@ def _print_diff_line(c: Console, line: str) -> None:
 def do_diff(name: str, console: Optional[Console] = None) -> None:
     """Show how the user's copy of a bundled skill differs from the stock version."""
     from tools.skills_sync import diff_bundled_skill
-
     c = console or _console
     result = diff_bundled_skill(name)
     if not result["ok"]:
@@ -1110,14 +1050,9 @@ def do_opt_out(remove: bool = False,
                console: Optional[Console] = None,
                skip_confirm: bool = False,
                invalidate_cache: bool = True) -> None:
-    """Opt the active profile out of bundled-skill seeding.
-
-    Always writes the .no-bundled-skills marker. With ``remove``, also deletes already-present
-    bundled skills that are pristine (manifest-tracked AND unmodified); user-edited and
-    non-bundled skills are never touched.
-    """
+    """Write the .no-bundled-skills marker; with ``remove`` also delete pristine (tracked AND
+    unmodified) bundled skills. User-edited and non-bundled skills are never touched."""
     from tools.skills_sync import set_bundled_skills_opt_out, remove_pristine_bundled_skills
-
     c = console or _console
     res = set_bundled_skills_opt_out(True)  # the marker first: always-safe
     if not res["ok"]:
@@ -1159,7 +1094,6 @@ def do_opt_in(sync: bool = False,
               invalidate_cache: bool = True) -> None:
     """Remove the opt-out marker so bundled-skill seeding resumes."""
     from tools.skills_sync import set_bundled_skills_opt_out, sync_skills
-
     c = console or _console
     res = set_bundled_skills_opt_out(False)
     if not res["ok"]:
@@ -1180,7 +1114,6 @@ def do_repair_official(name: str, restore: bool = False,
                        invalidate_cache: bool = True) -> None:
     """Backfill or restore official optional skills from repo source."""
     from tools.skills_sync import restore_official_optional_skill
-
     c = console or _console
     if restore and not skip_confirm and not _confirm_or_cancel(
         c, f"\n[bold]Restore official optional skill '{name}' from repo source?[/]",
@@ -1202,9 +1135,7 @@ def do_repair_official(name: str, restore: bool = False,
         _clear_skills_cache()
 
 
-# ---------------------------------------------------------------------------
-# taps / publish / snapshot
-# ---------------------------------------------------------------------------
+# --- taps / publish / snapshot ---
 
 # action -> (TapsManager method, success line, failure line)
 _TAP_OPS = {
@@ -1216,7 +1147,6 @@ _TAP_OPS = {
 def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> None:
     """Manage taps (custom GitHub repo sources)."""
     from tools.skills_hub import TapsManager
-
     c = console or _console
     mgr = TapsManager()
     if action == "list":
@@ -1260,7 +1190,6 @@ def do_publish(skill_path: str, target: str = "github", repo: str = "",
     """Publish a local skill to a registry (GitHub PR or ClawHub submission)."""
     from tools.skills_hub import GitHubAuth, SKILLS_DIR
     from tools.skills_guard import scan_skill, format_scan_report
-
     c = console or _console
     path = Path(skill_path)
     if not path.is_absolute():
@@ -1311,7 +1240,6 @@ def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
     """Fork, branch, upload, and open a PR with the skill. Returns (success, message)."""
     import base64
     import httpx
-
     headers = auth.get_headers()
     api = "https://api.github.com/repos"
 
@@ -1379,7 +1307,6 @@ def _github_publish(skill_path: Path, skill_name: str, target_repo: str,
 def do_snapshot_export(output_path: str, console: Optional[Console] = None) -> None:
     """Export current hub skill configuration to a portable JSON file."""
     from tools.skills_hub import HubLockFile, TapsManager
-
     c = console or _console
     installed = HubLockFile().list_installed()
     tap_list = TapsManager().list_taps()
@@ -1409,7 +1336,6 @@ def do_snapshot_import(input_path: str, force: bool = False,
                        console: Optional[Console] = None) -> None:
     """Re-install skills from a snapshot file."""
     from tools.skills_hub import TapsManager
-
     c = console or _console
     inp = Path(input_path)
     if not inp.exists():
@@ -1445,9 +1371,7 @@ def do_snapshot_import(input_path: str, force: bool = False,
     c.print("[bold green]Snapshot import complete.[/]\n")
 
 
-# ---------------------------------------------------------------------------
-# CLI argparse entry point
-# ---------------------------------------------------------------------------
+# --- CLI argparse entry point ---
 
 def _snapshot_cli(args) -> None:
     snap_action = getattr(args, "snapshot_action", None)
@@ -1480,10 +1404,8 @@ _CLI_ACTIONS = {
     "list": lambda a: do_list(source_filter=a.source,
                               enabled_only=getattr(a, "enabled_only", False)),
     "check": lambda a: do_check(name=getattr(a, "name", None)),
-    "update": lambda a: do_update(name=getattr(a, "name", None),
-                                  force=getattr(a, "force", False)),
-    "audit": lambda a: do_audit(name=getattr(a, "name", None),
-                                deep=getattr(a, "deep", False)),
+    "update": lambda a: do_update(name=getattr(a, "name", None), force=getattr(a, "force", False)),
+    "audit": lambda a: do_audit(name=getattr(a, "name", None), deep=getattr(a, "deep", False)),
     "uninstall": lambda a: do_uninstall(a.name, skip_confirm=getattr(a, "yes", False)),
     "reset": lambda a: do_reset(a.name, restore=getattr(a, "restore", False),
                                 skip_confirm=getattr(a, "yes", False)),
@@ -1510,16 +1432,11 @@ def skills_command(args) -> None:
     handler(args)
 
 
-# ---------------------------------------------------------------------------
-# Slash command entry point (/skills in chat)
-# ---------------------------------------------------------------------------
+# --- Slash command entry point (/skills in chat) ---
 
 def _opt_value(args: List[str], flag: str, default: str, last: bool = False) -> str:
-    """Value following `flag` in args (default if absent/trailing).
-
-    `last=True` lets a repeated flag's final occurrence win (the historical behaviour of the
-    install/publish/browse parsers); otherwise the first wins.
-    """
+    """Value following `flag` (default if absent/trailing); `last` makes a repeated flag's final
+    occurrence win (historical install/publish/browse behaviour), else the first."""
     found = default
     for i, a in enumerate(args):
         if a == flag and i + 1 < len(args):

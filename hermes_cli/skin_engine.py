@@ -103,8 +103,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
             "thinking_verbs": [
                 "forging", "marching", "sizing the field", "holding the line",
                 "hammering plans", "tempering steel", "plotting impact", "raising the shield"],
-            "wings": [["⟪⚔", "⚔⟫"], ["⟪▲", "▲⟫"], ["⟪╸", "╺⟫"], ["⟪⛨", "⛨⟫"]],
-        },
+            "wings": [["⟪⚔", "⚔⟫"], ["⟪▲", "▲⟫"], ["⟪╸", "╺⟫"], ["⟪⛨", "⛨⟫"]]},
         "branding": {
             "agent_name": "Ares Agent",
             "welcome": "Welcome to Ares Agent! Type your message or /help for commands.",
@@ -230,8 +229,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "charting currents", "sounding the depth", "reading foam lines",
                 "steering the trident", "tracking undertow", "plotting sea lanes",
                 "calling the swell", "measuring pressure"],
-            "wings": [["⟪≈", "≈⟫"], ["⟪Ψ", "Ψ⟫"], ["⟪∿", "∿⟫"], ["⟪◌", "◌⟫"]],
-        },
+            "wings": [["⟪≈", "≈⟫"], ["⟪Ψ", "Ψ⟫"], ["⟪∿", "∿⟫"], ["⟪◌", "◌⟫"]]},
         "branding": {
             "agent_name": "Poseidon Agent",
             "welcome": "Welcome to Poseidon Agent! Type your message or /help for commands.",
@@ -282,8 +280,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "finding traction", "measuring the grade", "resetting the boulder",
                 "counting the ascent", "testing leverage", "setting the shoulder",
                 "pushing uphill", "enduring the loop"],
-            "wings": [["⟪◉", "◉⟫"], ["⟪◬", "◬⟫"], ["⟪◌", "◌⟫"], ["⟪⬤", "⬤⟫"]],
-        },
+            "wings": [["⟪◉", "◉⟫"], ["⟪◬", "◬⟫"], ["⟪◌", "◌⟫"], ["⟪⬤", "⬤⟫"]]},
         "branding": {
             "agent_name": "Sisyphus Agent",
             "welcome": "Welcome to Sisyphus Agent! Type your message or /help for commands.",
@@ -336,8 +333,7 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
                 "banking into the draft", "measuring burn", "reading the updraft",
                 "tracking ember fall", "setting wing angle", "holding the flame core",
                 "plotting a hot landing", "coiling for lift"],
-            "wings": [["⟪✦", "✦⟫"], ["⟪▲", "▲⟫"], ["⟪◌", "◌⟫"], ["⟪◇", "◇⟫"]],
-        },
+            "wings": [["⟪✦", "✦⟫"], ["⟪▲", "▲⟫"], ["⟪◌", "◌⟫"], ["⟪◇", "◇⟫"]]},
         "branding": {
             "agent_name": "Charizard Agent",
             "welcome": "Welcome to Charizard Agent! Type your message or /help for commands.",
