@@ -1,11 +1,10 @@
 """security-guidance plugin — fast pattern-matched security warnings on file writes.
 
-Scans content written by ``write_file`` / ``patch`` / ``skill_manage`` for known dangerous
-code patterns and appends a ``⚠️ Security guidance`` block to the tool result; the file is
-still written and the model self-corrects next turn. Warn (not block) by default because
-patterns have a real false-positive rate (``eval(`` in a tokenizer, ECB in a test fixture);
-``SECURITY_GUIDANCE_BLOCK=1`` refuses the write instead, ``SECURITY_GUIDANCE_DISABLE=1`` is
-a kill switch. Pattern data is ``patterns.py`` (Apache-2.0 fork, see LICENSE / NOTICE).
+Scans content written by ``write_file`` / ``patch`` / ``skill_manage`` for known dangerous patterns
+and appends a ``⚠️ Security guidance`` block to the tool result; the file is still written and the
+model self-corrects next turn. Warn (not block) by default because patterns have a real false-positive
+rate (``eval(`` in a tokenizer, ECB in a test fixture); ``SECURITY_GUIDANCE_BLOCK=1`` refuses the write
+instead, ``SECURITY_GUIDANCE_DISABLE=1`` is a kill switch. Pattern data: ``patterns.py`` (Apache-2.0 fork).
 """
 
 from __future__ import annotations
@@ -42,24 +41,14 @@ def _compile_rules() -> List[Dict[str, Any]]:
     """Pre-compile regexes once; substrings stay plain (``in`` beats a literal regex)."""
     compiled: List[Dict[str, Any]] = []
     for rule in _patterns.SECURITY_PATTERNS:
-        regex = None
-        re_src = rule.get("regex")
-        if re_src:
-            try:
-                regex = re.compile(re_src)
-            except re.error as err:
-                logger.warning(
-                    "security-guidance: skipping rule %s — invalid regex %r: %s",
-                    rule["ruleName"], re_src, err,
-                )
-                continue
+        try:
+            regex = re.compile(rule["regex"]) if rule.get("regex") else None
+        except re.error as err:
+            logger.warning("security-guidance: skipping rule %s — invalid regex %r: %s", rule["ruleName"], rule["regex"], err)
+            continue
         compiled.append({
-            "ruleName": rule["ruleName"],
-            "reminder": rule["reminder"],
-            "path_filter": rule.get("path_filter"),
-            "path_check": rule.get("path_check"),
-            "substrings": tuple(rule.get("substrings", ())),
-            "regex": regex,
+            "ruleName": rule["ruleName"], "reminder": rule["reminder"], "path_filter": rule.get("path_filter"),
+            "path_check": rule.get("path_check"), "substrings": tuple(rule.get("substrings", ())), "regex": regex,
         })
     return compiled
 
@@ -68,11 +57,8 @@ _COMPILED: List[Dict[str, Any]] = _compile_rules()
 
 
 def _rule_matches(entry: Dict[str, Any], path: str, content: str) -> bool:
-    """One rule against one write. Path predicates are best-effort: an exception is a non-match.
-
-    path_check rules fire on the path ALONE (e.g. "you're editing a workflow file") and never
-    pattern-match content; path_filter gates content rules to relevant file types.
-    """
+    """One rule against one write; a raising path predicate is a non-match. path_check rules fire on
+    the path ALONE and never scan content; path_filter gates content rules to relevant file types."""
     try:
         if entry["path_check"] is not None:
             return bool(entry["path_check"](path))
@@ -80,9 +66,7 @@ def _rule_matches(entry: Dict[str, Any], path: str, content: str) -> bool:
             return False
     except Exception:
         return False
-    return any(sub in content for sub in entry["substrings"]) or (
-        entry["regex"] is not None and bool(entry["regex"].search(content))
-    )
+    return any(sub in content for sub in entry["substrings"]) or (entry["regex"] is not None and bool(entry["regex"].search(content)))
 
 
 def _scan_content(path: str, content: str) -> List[Tuple[str, str]]:
@@ -99,14 +83,8 @@ def _scan_args(tool_name: str, args: Any) -> List[Tuple[str, str]]:
     if _env_flag("SECURITY_GUIDANCE_DISABLE") or spec is None or not isinstance(args, dict):
         return []
     path_key, content_keys = spec
-    path = args.get(path_key) or ""
-    if not isinstance(path, str):
-        path = ""
-    findings: List[Tuple[str, str]] = []
-    for val in (args.get(ck) for ck in content_keys):
-        if isinstance(val, str) and val:
-            findings.extend(_scan_content(path, val))
-    return findings
+    path = raw_path if isinstance(raw_path := args.get(path_key), str) else ""
+    return [finding for val in (args.get(ck) for ck in content_keys) if isinstance(val, str) and val for finding in _scan_content(path, val)]
 
 
 def _format_warning_block(findings: List[Tuple[str, str]]) -> str:
@@ -125,29 +103,19 @@ def _format_warning_block(findings: List[Tuple[str, str]]) -> str:
 
 def _on_pre_tool_call(tool_name: str = "", args: Any = None, **_: Any) -> Optional[Dict[str, str]]:
     """Block mode only: refuse the write if any pattern matches (None = let it through)."""
-    if not _env_flag("SECURITY_GUIDANCE_BLOCK"):
-        return None
-    findings = _scan_args(tool_name, args)
+    findings = _scan_args(tool_name, args) if _env_flag("SECURITY_GUIDANCE_BLOCK") else []
     if not findings:
         return None
     return {
         "action": "block",
-        "message": (
-            "security-guidance refused this write: "
-            + _format_warning_block(findings)
-            + "\n\nTo override, unset SECURITY_GUIDANCE_BLOCK and retry."
-        ),
+        "message": "security-guidance refused this write: " + _format_warning_block(findings) + "\n\nTo override, unset SECURITY_GUIDANCE_BLOCK and retry.",
     }
 
 
-def _on_transform_tool_result(
-    tool_name: str = "", args: Any = None, result: Any = None, **_: Any,
-) -> Optional[str]:
+def _on_transform_tool_result(tool_name: str = "", args: Any = None, result: Any = None, **_: Any) -> Optional[str]:
     """Warn mode: append the warning block to the result string (None = unchanged)."""
     # In block mode pre_tool_call already handled it — the tool didn't run, no result to wrap.
-    if _env_flag("SECURITY_GUIDANCE_BLOCK") or not isinstance(result, str):
-        return None
-    findings = _scan_args(tool_name, args)
+    findings = [] if _env_flag("SECURITY_GUIDANCE_BLOCK") or not isinstance(result, str) else _scan_args(tool_name, args)
     if not findings:
         return None
     # Don't decorate error results — the model already has bigger problems.

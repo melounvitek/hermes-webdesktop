@@ -14,12 +14,8 @@ import httpx
 from hermes_cli.auth import AuthError, resolve_spotify_runtime_credentials
 
 
-class SpotifyError(RuntimeError):
-    """Base Spotify tool error."""
-
-
-class SpotifyAuthRequiredError(SpotifyError):
-    """Raised when the user needs to authenticate with Spotify first."""
+class SpotifyError(RuntimeError): """Base Spotify tool error."""
+class SpotifyAuthRequiredError(SpotifyError): """Raised when the user needs to authenticate with Spotify first."""
 
 
 class SpotifyAPIError(SpotifyError):
@@ -27,14 +23,10 @@ class SpotifyAPIError(SpotifyError):
 
     def __init__(self, message: str, *, status_code: Optional[int] = None, response_body: Optional[str] = None) -> None:
         super().__init__(message)
-        self.status_code = status_code
-        self.response_body = response_body
-        self.path: Optional[str] = None
+        self.status_code, self.response_body, self.path = status_code, response_body, None
 
 
-def _empty_204(message: str) -> Dict[str, Any]:
-    """Explanatory payload returned instead of a bare 204 for the player endpoints."""
-    return {"status_code": 204, "empty": True, "message": message}
+_empty_204 = lambda message: {"status_code": 204, "empty": True, "message": message}  # noqa: E731  explanatory stand-in for a bare 204
 
 
 class SpotifyClient:
@@ -52,22 +44,13 @@ class SpotifyClient:
         return str(self._runtime.get("base_url") or "").rstrip("/")
 
     def request(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: Optional[Dict[str, Any]] = None,
-        json_body: Optional[Dict[str, Any]] = None,
-        allow_retry_on_401: bool = True,
-        empty_response: Optional[Dict[str, Any]] = None,
+        self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None, json_body: Optional[Dict[str, Any]] = None,
+        allow_retry_on_401: bool = True, empty_response: Optional[Dict[str, Any]] = None,
     ) -> Any:
         response = httpx.request(
-            method,
-            f"{self.base_url}{path}",
+            method, f"{self.base_url}{path}",
             headers={"Authorization": f"Bearer {self._runtime['access_token']}", "Content-Type": "application/json"},
-            params=_strip_none(params),
-            json=_strip_none(json_body) if json_body is not None else None,
-            timeout=30.0,
+            params=_strip_none(params), json=_strip_none(json_body) if json_body is not None else None, timeout=30.0,
         )
         if response.status_code == 401 and allow_retry_on_401:
             # One forced token refresh, then retry exactly once.
@@ -76,10 +59,8 @@ class SpotifyClient:
         if response.status_code >= 400:
             detail = response.text.strip()
             message = _friendly_spotify_error_message(
-                status_code=response.status_code,
-                detail=_extract_spotify_error_detail(response, fallback=detail),
-                path=path,
-                retry_after=response.headers.get("Retry-After"),
+                status_code=response.status_code, detail=_extract_spotify_error_detail(response, fallback=detail),
+                path=path, retry_after=response.headers.get("Retry-After"),
             )
             error = SpotifyAPIError(message, status_code=response.status_code, response_body=detail)
             error.path = path
@@ -90,9 +71,7 @@ class SpotifyClient:
             return response.json()
         return {"success": True, "text": response.text}
 
-    # -- player -----------------------------------------------------------
-
-    # Player reads return an explanatory payload instead of a bare 204.
+    # -- player: reads return an explanatory payload instead of a bare 204 --------
 
     def get_playback_state(self, *, market: Optional[str] = None) -> Any:
         return self.request("GET", "/me/player", params={"market": market}, empty_response=_empty_204(
@@ -125,24 +104,19 @@ def _friendly_spotify_error_message(*, status_code: int, detail: str, path: str,
         return "Spotify authentication failed or expired. Run `hermes auth spotify` again."
     if status_code == 403:
         if is_playback_path:
-            return (
-                "Spotify rejected this playback request. Playback control usually requires a Spotify Premium account "
-                "and an active Spotify Connect device."
-            )
+            return ("Spotify rejected this playback request. Playback control usually requires a Spotify Premium account "
+                    "and an active Spotify Connect device.")
         if "scope" in detail.lower() or "permission" in detail.lower():
             return "Spotify rejected the request because the current auth scope is insufficient. Re-run `hermes auth spotify` to refresh permissions."
         return "Spotify rejected the request. The account may not have permission for this action."
     if status_code == 404:
-        if is_playback_path:
-            return "Spotify could not find an active playback device or player session for this request."
-        return "Spotify resource not found."
+        return "Spotify could not find an active playback device or player session for this request." if is_playback_path else "Spotify resource not found."
     if status_code == 429:
         return "Spotify rate limit exceeded." + (f" Retry after {retry_after} seconds." if retry_after else "")
     return detail or f"Spotify API request failed with status {status_code}."
 
 
-def _strip_none(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    return {key: value for key, value in (payload or {}).items() if value is not None}
+_strip_none = lambda payload: {key: value for key, value in (payload or {}).items() if value is not None}  # noqa: E731
 
 
 def _check_type(item_type: str, expected_type: Optional[str]) -> None:
@@ -155,16 +129,13 @@ def normalize_spotify_id(value: str, expected_type: Optional[str] = None) -> str
     cleaned = (value or "").strip()
     if not cleaned:
         raise SpotifyError("Spotify id/uri/url is required.")
-    if cleaned.startswith("spotify:"):
-        parts = cleaned.split(":")
-        if len(parts) >= 3:
-            _check_type(parts[1], expected_type)
-            return parts[2]
-    if "open.spotify.com" in cleaned:
-        path_parts = [part for part in urlparse(cleaned).path.split("/") if part]
-        if len(path_parts) >= 2:
-            _check_type(path_parts[0], expected_type)
-            return path_parts[1]
+    # (type, id) segments of a URI or URL; a bare id (or malformed ref) has no segments and passes through.
+    parts = cleaned.split(":")[1:] if cleaned.startswith("spotify:") else []
+    if len(parts) < 2 and "open.spotify.com" in cleaned:
+        parts = [part for part in urlparse(cleaned).path.split("/") if part]
+    if len(parts) >= 2:
+        _check_type(parts[0], expected_type)
+        return parts[1]
     return cleaned
 
 

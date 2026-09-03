@@ -12,36 +12,20 @@ and ``kind: backend`` bundled plugins auto-load with no ``plugins.enabled`` opt-
 
 from __future__ import annotations
 
-from plugins.spotify.tools import (
-    SPOTIFY_ALBUMS_SCHEMA,
-    SPOTIFY_DEVICES_SCHEMA,
-    SPOTIFY_LIBRARY_SCHEMA,
-    SPOTIFY_PLAYBACK_SCHEMA,
-    SPOTIFY_PLAYLISTS_SCHEMA,
-    SPOTIFY_QUEUE_SCHEMA,
-    SPOTIFY_SEARCH_SCHEMA,
-    _check_spotify_available,
-    _handle_spotify_albums,
-    _handle_spotify_devices,
-    _handle_spotify_library,
-    _handle_spotify_playback,
-    _handle_spotify_playlists,
-    _handle_spotify_queue,
-    _handle_spotify_search,
-)
+from plugins.spotify import tools as _t
 
 _TOOLS = (
-    ("spotify_playback",  SPOTIFY_PLAYBACK_SCHEMA,  _handle_spotify_playback,  "🎵"),
-    ("spotify_devices",   SPOTIFY_DEVICES_SCHEMA,   _handle_spotify_devices,   "🔈"),
-    ("spotify_queue",     SPOTIFY_QUEUE_SCHEMA,     _handle_spotify_queue,     "📻"),
-    ("spotify_search",    SPOTIFY_SEARCH_SCHEMA,    _handle_spotify_search,    "🔎"),
-    ("spotify_playlists", SPOTIFY_PLAYLISTS_SCHEMA, _handle_spotify_playlists, "📚"),
-    ("spotify_albums",    SPOTIFY_ALBUMS_SCHEMA,    _handle_spotify_albums,    "💿"),
-    ("spotify_library",   SPOTIFY_LIBRARY_SCHEMA,   _handle_spotify_library,   "❤️"),
+    ("spotify_playback",  _t.SPOTIFY_PLAYBACK_SCHEMA,  _t._handle_spotify_playback,  "🎵"),
+    ("spotify_devices",   _t.SPOTIFY_DEVICES_SCHEMA,   _t._handle_spotify_devices,   "🔈"),
+    ("spotify_queue",     _t.SPOTIFY_QUEUE_SCHEMA,     _t._handle_spotify_queue,     "📻"),
+    ("spotify_search",    _t.SPOTIFY_SEARCH_SCHEMA,    _t._handle_spotify_search,    "🔎"),
+    ("spotify_playlists", _t.SPOTIFY_PLAYLISTS_SCHEMA, _t._handle_spotify_playlists, "📚"),
+    ("spotify_albums",    _t.SPOTIFY_ALBUMS_SCHEMA,    _t._handle_spotify_albums,    "💿"),
+    ("spotify_library",   _t.SPOTIFY_LIBRARY_SCHEMA,   _t._handle_spotify_library,   "❤️"),
 )
 
 
 def register(ctx) -> None:
     """Register all Spotify tools. Called once by the plugin loader."""
     for name, schema, handler, emoji in _TOOLS:
-        ctx.register_tool(name=name, toolset="spotify", schema=schema, handler=handler, check_fn=_check_spotify_available, emoji=emoji)
+        ctx.register_tool(name=name, toolset="spotify", schema=schema, handler=handler, check_fn=_t._check_spotify_available, emoji=emoji)
