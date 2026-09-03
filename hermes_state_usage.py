@@ -13,37 +13,25 @@ from typing import Any, Dict, List, Optional, Tuple
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
 
-_TOKEN_UPDATE_ABSOLUTE_SQL = """UPDATE sessions SET
-                   input_tokens = ?,
-                   output_tokens = ?,
-                   cache_read_tokens = ?,
-                   cache_write_tokens = ?,
-                   reasoning_tokens = ?,
-                   estimated_cost_usd = COALESCE(?, 0),
-                   actual_cost_usd = CASE
-                       WHEN ? IS NULL THEN actual_cost_usd
-                       ELSE ?
-                   END,
-                   cost_status = COALESCE(?, cost_status),
-                   cost_source = COALESCE(?, cost_source),
-                   pricing_version = COALESCE(?, pricing_version),
-                   billing_provider = COALESCE(billing_provider, ?),
-                   billing_base_url = COALESCE(billing_base_url, ?),
-                   billing_mode = COALESCE(billing_mode, ?),
-                   model = COALESCE(model, ?),
-                   api_call_count = ?
-                   WHERE id = ?"""
+_TOKEN_COUNTERS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens")
 
-_TOKEN_UPDATE_DELTA_SQL = """UPDATE sessions SET
-                   input_tokens = input_tokens + ?,
-                   output_tokens = output_tokens + ?,
-                   cache_read_tokens = cache_read_tokens + ?,
-                   cache_write_tokens = cache_write_tokens + ?,
-                   reasoning_tokens = reasoning_tokens + ?,
-                   estimated_cost_usd = COALESCE(estimated_cost_usd, 0) + COALESCE(?, 0),
+
+def _token_update_sql(delta: bool) -> str:
+    """``UPDATE sessions`` for one usage report: *delta* adds to the stored counters (CLI
+    per-call path), otherwise sets them (gateway cumulative path). Cost/route columns
+    COALESCE-fill either way (statement text is pinned by the SQL trace harness)."""
+    def add(col: str) -> str:  # "col + ?" / "COALESCE(col, 0) + ?" in delta mode, bare "?" otherwise
+        return f"{col} + ?" if delta else "?"
+    def add0(col: str) -> str:
+        return f"COALESCE({col}, 0) + ?" if delta else "?"
+    counters = "".join(f"                   {c} = {add(c)},\n" for c in _TOKEN_COUNTERS)
+    estimated = "COALESCE(estimated_cost_usd, 0) + COALESCE(?, 0)" if delta else "COALESCE(?, 0)"
+    return (
+        "UPDATE sessions SET\n" + counters
+        + f"""                   estimated_cost_usd = {estimated},
                    actual_cost_usd = CASE
                        WHEN ? IS NULL THEN actual_cost_usd
-                       ELSE COALESCE(actual_cost_usd, 0) + ?
+                       ELSE {add0("actual_cost_usd")}
                    END,
                    cost_status = COALESCE(?, cost_status),
                    cost_source = COALESCE(?, cost_source),
@@ -52,8 +40,13 @@ _TOKEN_UPDATE_DELTA_SQL = """UPDATE sessions SET
                    billing_base_url = COALESCE(billing_base_url, ?),
                    billing_mode = COALESCE(billing_mode, ?),
                    model = COALESCE(model, ?),
-                   api_call_count = COALESCE(api_call_count, 0) + ?
+                   api_call_count = {add0("api_call_count")}
                    WHERE id = ?"""
+    )
+
+
+_TOKEN_UPDATE_ABSOLUTE_SQL = _token_update_sql(delta=False)
+_TOKEN_UPDATE_DELTA_SQL = _token_update_sql(delta=True)
 
 _MODEL_USAGE_UPSERT_SQL = """INSERT INTO session_model_usage (
                    session_id, model, billing_provider, billing_base_url, billing_mode,
