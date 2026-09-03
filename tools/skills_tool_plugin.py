@@ -91,20 +91,17 @@ def _serve_skill_file(
         content = _read_skill_text(target)
     except UnicodeDecodeError:
         return _json({
-            "success": True, "name": label, "file": file_path,
-            "content": f"[Binary file: {target.name}, size: {target.stat().st_size} bytes]",
-            "is_binary": True})
+            "success": True, "name": label, "file": file_path, "is_binary": True,
+            "content": f"[Binary file: {target.name}, size: {target.stat().st_size} bytes]"})
     except Exception as exc:
         if not read_error_prefix:
             raise
         return _fail(f"Failed to read '{file_path}': {exc}")
     if mark_read:
         _mark_background_review_read(target)
-    return _json({
+    return _json({  # _source_path: internal, feeds the repeat-view dedup fingerprint
         "success": True, "name": label, "file": file_path, "content": content,
-        "file_type": target.suffix,
-        # Internal: absolute source path for the repeat-view dedup fingerprint.
-        "_source_path": str(target)})
+        "file_type": target.suffix, "_source_path": str(target)})
 
 
 def _mark_background_review_read(path: Path) -> None:
@@ -142,9 +139,8 @@ def _serve_plugin_skill(
     if _st._is_skill_disabled(qualified_name):
         return _fail(f"Skill '{qualified_name}' is disabled.")
     if not _st.skill_matches_platform(parsed_frontmatter):
-        return _fail(
-            f"Skill '{qualified_name}' is not supported on this platform.",
-            readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
+        return _fail(f"Skill '{qualified_name}' is not supported on this platform.",
+                     readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
     if file_path:
         return _serve_skill_file(skill_md.parent, file_path, qualified_name, read_error_prefix=True)
     if any(p in content.lower() for p in _INJECTION_PATTERNS):

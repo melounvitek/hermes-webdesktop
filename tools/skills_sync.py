@@ -188,8 +188,7 @@ def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Opt
             continue
         if rel in st.hub_paths:  # the hub owns its install paths
             continue
-        if _dir_hash(candidate) != origin_hash:
-            # Moving a customized copy would edit the user's work; warn so they migrate deliberately.
+        if _dir_hash(candidate) != origin_hash:  # moving a customized copy would edit user work
             st.say(
                 f"  ⚠ {skill_name}: upstream moved this skill to {_rel_skills_posix(dest)}, but your "
                 f"modified copy at {rel} was kept — it will not receive updates. "
@@ -230,13 +229,12 @@ def _recover_orphan_backup(dest: Path) -> None:
     """If an interrupted update left the user's only copy in ``dest.bak`` with dest gone, move it
     back so the skill isn't misread as user-deleted."""
     orphan = dest.with_suffix(".bak")
-    if not orphan.exists() or dest.exists():
-        return
-    try:
-        _move_dir(orphan, dest)
-        logger.info("Recovered orphaned skill backup: %s", orphan)
-    except OSError:
-        logger.warning("Could not recover orphaned skill backup %s", orphan, exc_info=True)
+    if orphan.exists() and not dest.exists():
+        try:
+            _move_dir(orphan, dest)
+            logger.info("Recovered orphaned skill backup: %s", orphan)
+        except OSError:
+            logger.warning("Could not recover orphaned skill backup %s", orphan, exc_info=True)
 
 
 def _defer_to_external(st: _SyncState, skill_name: str, dest: Path, bundled_hash: str) -> None:
@@ -349,7 +347,6 @@ def sync_skills(quiet: bool = False) -> dict:
     if not bundled_dir.exists():
         return {"copied": [], "updated": [], "skipped": 0, "user_modified": [], "cleaned": [],
                 "suppressed": [], "total_bundled": 0, "optional_provenance_backfilled": []}
-
     _skills_dir().mkdir(parents=True, exist_ok=True)
     bundled_skills = _discover_bundled_skills(bundled_dir)
     if essential_only:

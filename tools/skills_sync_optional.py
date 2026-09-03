@@ -56,18 +56,16 @@ def _hub_lock_entries(data: Optional[dict]) -> List[dict]:
 
 
 def _read_hub_install_paths() -> Set[str]:
-    """Hub-lock install paths as POSIX strings. Hub-installed skills are owned by the
-    hub: rename recovery must not move them even when content matches a bundled
-    origin hash, or the lock's ``install_path`` dangles."""
+    """Hub-lock install paths as POSIX strings. Hub-installed skills are owned by the hub: rename
+    recovery must not move them even when content matches a bundled origin hash (dangling lock)."""
     return {str(e["install_path"]).strip("/") for e in _hub_lock_entries(_load_hub_lock()) if e.get("install_path")}
 
 
 def _iter_optional_skills(optional_dir: Path, *, root_relative: bool) -> Iterator[Tuple[Path, Path, str]]:
     """Yield ``(skill_md, src, install_path)`` for every safe official optional skill."""
     for skill_md in sorted(optional_dir.rglob("SKILL.md")):
-        excluded = (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir)
-                    if root_relative else is_excluded_skill_path(skill_md))
-        if excluded:
+        if (is_excluded_skill_path(skill_md.relative_to(optional_dir), root=optional_dir)
+                if root_relative else is_excluded_skill_path(skill_md)):
             continue
         try:
             yield skill_md, skill_md.parent, _safe_rel_install_path(skill_md.parent, optional_dir)
@@ -119,8 +117,8 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
     for folder_name, install_path, src in targets if restore else []:
         dest = ss._skills_dir() / Path(*install_path.split("/"))
         canonical_ok = dest.exists() and ss._dir_hash(dest) == ss._dir_hash(src)
-        # Active copies by frontmatter name or folder slug — the curator may have moved
-        # the skill into another category; ``dest`` itself is handled below.
+        # Active copies by frontmatter name or folder slug (the curator may have moved the skill
+        # into another category); ``dest`` itself is handled below.
         names = {folder_name, ss._read_skill_name(src / "SKILL.md", folder_name)}
         for md in ss._iter_active_skill_mds(sort=True):
             match = md.parent

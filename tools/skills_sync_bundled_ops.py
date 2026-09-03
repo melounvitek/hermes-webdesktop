@@ -36,10 +36,8 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     if not in_manifest and not is_bundled:
         return _fail("not_in_manifest", f"'{name}' is not a tracked bundled skill. Nothing to reset. "
                      f"(Hub-installed skills use `hermes skills uninstall`.)")
-    # Delete the user's copy BEFORE touching the manifest so a failed rmtree can't
-    # leave the skill in a manifest-less limbo.
     deleted_user_copy = False
-    if restore:
+    if restore:  # delete the user's copy BEFORE the manifest so a failed rmtree can't strand it
         if not is_bundled:
             return _fail("bundled_missing", f"'{name}' has no bundled source — manifest entry preserved "
                          f"but cannot restore from bundled (skill was removed upstream).")
@@ -57,10 +55,10 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     if not restore:
         action, message = "manifest_cleared", (f"Cleared manifest entry for '{name}'. Future `hermes update` runs "
                                                f"will re-baseline against your current copy and accept upstream changes.")
-    elif deleted_user_copy:
-        action, message = "restored", f"Restored '{name}' from bundled source."
     else:
-        action, message = "restored", f"Restored '{name}' (no prior user copy, re-copied from bundled)."
+        action = "restored"
+        message = (f"Restored '{name}' from bundled source." if deleted_user_copy
+                   else f"Restored '{name}' (no prior user copy, re-copied from bundled).")
     return {"ok": True, "action": action, "message": message, "synced": synced}
 
 
@@ -84,9 +82,10 @@ def _read_for_diff(path: Path) -> Tuple[Optional[bytes], Optional[str]]:
     """``(raw_bytes, text)`` for diffing; ``text=None`` for binary, ``(None, None)`` if unreadable."""
     try:
         data = path.read_bytes()
-        return data, (None if b"\x00" in data else data.decode("utf-8"))
     except OSError:
         return None, None
+    try:
+        return data, (None if b"\x00" in data else data.decode("utf-8"))
     except UnicodeDecodeError:
         return data, None
 

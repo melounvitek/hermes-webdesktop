@@ -206,8 +206,7 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
         return [dict(s) for s in cached[2]]
     skills = []
     seen_names: set = set()
-    # Project dirs iterate through the quarantine chokepoint (scan-time injection gate).
-    for scan_dir in dirs_to_scan:
+    for scan_dir in dirs_to_scan:  # project dirs go through the quarantine chokepoint
         _iter = iter_project_skill_files if scan_dir in project_dirs else lambda d: iter_skill_index_files(d, "SKILL.md")
         for skill_md in _iter(scan_dir):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
@@ -221,9 +220,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                     continue
                 description = frontmatter.get("description", "")
                 if not description:  # first non-heading body line (a null value stays null)
-                    description = next(
-                        (ln for ln in map(str.strip, body.strip().split("\n")) if ln and not ln.startswith("#")),
-                        description)
+                    description = next((ln for ln in map(str.strip, body.strip().split("\n"))
+                                        if ln and not ln.startswith("#")), description)
                 seen_names.add(name)
                 skills.append({"name": name, "description": _truncate_description(description),
                                "category": _get_category_from_path(skill_md)})
@@ -231,8 +229,8 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 logger.debug("Failed to read skill file %s: %s", skill_md, e)
             except Exception as e:
                 logger.debug("Skipping skill at %s: failed to parse: %s", skill_md, e, exc_info=True)
-    # Keyed by the signature computed BEFORE the scan: a write racing the scan
-    # changes the signature, so the next call re-scans instead of serving a torn result.
+    # Keyed by the signature computed BEFORE the scan: a write racing the scan changes the
+    # signature, so the next call re-scans instead of serving a torn result.
     _SKILLS_CACHE[cache_key] = (signature, now, skills)
     return [dict(s) for s in skills]
 
@@ -291,8 +289,8 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
     except Exception as exc:
         logger.debug("Failed pruning inactive memory-provider skills: %s", exc)
     plugin_skill_md = pm.find_plugin_skill(name)
-    # Memory providers load through plugins.memory, not the general PluginManager: load
-    # the namespaced provider once so its collector can forward its skills into the registry.
+    # Memory providers load through plugins.memory, not the general PluginManager: load the
+    # namespaced provider once so its collector can forward its skills into the registry.
     if plugin_skill_md is None and namespace == active_memory_provider:
         try:
             from plugins.memory import load_memory_provider
