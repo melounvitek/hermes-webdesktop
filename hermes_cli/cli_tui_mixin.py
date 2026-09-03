@@ -393,8 +393,7 @@ class CLITuiMixin:
             input_area,
             input_rule_bot,
             voice_status_bar,
-            completions_menu,
-        ]
+            completions_menu]
         return [item for item in ordered if item is not None]
 
     def _tui_spinner_loop(self):
@@ -630,8 +629,7 @@ class CLITuiMixin:
             choices.append("Cancel")
             hint = (
                 f"Current: {state.get('current_model', 'unknown')} "
-                f"on {state.get('current_provider', 'unknown')}"
-            )
+                f"on {state.get('current_provider', 'unknown')}")
         else:
             provider_data = state.get("provider_data") or {}
             model_list = state.get("model_list") or []
@@ -652,8 +650,7 @@ class CLITuiMixin:
             else:
                 hint = "No models listed for this provider. Use Back or Cancel."
         return self._render_scroll_list_panel(
-            state, title, hint, choices, min_width=46, max_width=84, indent='  ',
-        )
+            state, title, hint, choices, min_width=46, max_width=84, indent='  ')
 
     def _get_command_palette_display_fragments(self):
         state = self._command_palette_state
@@ -774,8 +771,7 @@ class CLITuiMixin:
         try:
             _stash = self._prompt_stash
             return self._render_stash_panel(
-                _stash.panel_rows(), _stash.panel_cursor, self._get_tui_terminal_width(),
-            )
+                _stash.panel_rows(), _stash.panel_cursor, self._get_tui_terminal_width())
         except Exception:
             return []
 
@@ -1314,8 +1310,7 @@ class CLITuiMixin:
         from cli import (
             _apply_backslash_line_continuation,
             _is_backslash_line_continuation,
-            _looks_like_slash_command,
-        )
+            _looks_like_slash_command)
         if self._tui_enter_overlay(event):
             return
         buf = event.app.current_buffer
@@ -1431,8 +1426,7 @@ class CLITuiMixin:
                     with open(_hermes_home / "interrupt_debug.log", "a", encoding="utf-8") as _f:
                         _f.write(
                             f"{time.strftime('%H:%M:%S')} ENTER: queued interrupt msg={str(payload)[:60]!r}, "
-                            f"agent_running={self._agent_running}\n"
-                        )
+                            f"agent_running={self._agent_running}\n")
                 except Exception:
                     pass
         # First-touch onboarding: one-line tip about the /busy knob on the first busy-while-
@@ -1816,8 +1810,7 @@ class CLITuiMixin:
             CLI_CONFIG,
             _bind_prompt_submit_keys,
             _cli_multiline_shortcuts_enabled,
-            _preserve_ctrl_enter_newline,
-        )
+            _preserve_ctrl_enter_newline)
         from prompt_toolkit.keys import Keys
         kb = KeyBindings()
         _multiline_shortcuts_enabled = _cli_multiline_shortcuts_enabled(self.config or CLI_CONFIG)
@@ -1825,8 +1818,7 @@ class CLITuiMixin:
 
         kb.add(Keys.Ignore, eager=True)(self._tui_handle_ignored_terminal_sequence)
         _bind_prompt_submit_keys(
-            kb, self._tui_handle_enter, multiline_shortcuts_enabled=_multiline_shortcuts_enabled,
-        )
+            kb, self._tui_handle_enter, multiline_shortcuts_enabled=_multiline_shortcuts_enabled)
         kb.add('escape', 'enter')(self._tui_insert_newline)
         # Ctrl+J inserts a newline (Claude Code / Codex / OpenCode). Windows Terminal delivers
         # Ctrl+Enter as the same c-j code. display.cli_multiline_shortcuts: false restores legacy
@@ -1852,8 +1844,7 @@ class CLITuiMixin:
         kb.add('c-q')(self._tui_handle_ctrl_q)
         kb.add('c-d')(self._tui_handle_ctrl_d)
         _modal_prompt_active = Condition(
-            lambda: bool(self._secret_state or self._sudo_state or self._slash_confirm_state)
-        )
+            lambda: bool(self._secret_state or self._sudo_state or self._slash_confirm_state))
         kb.add('escape', filter=_modal_prompt_active, eager=True)(self._tui_handle_escape_modal)
         kb.add('escape', 'escape', filter=~_modal_prompt_active)(self._tui_handle_double_escape)
         kb.add('c-z')(self._tui_handle_ctrl_z)
@@ -1869,11 +1860,9 @@ class CLITuiMixin:
         # unbound there and arrives as ('escape', 'g') — register it as a fallback.
         _editor_filter = Condition(
             lambda: not self._clarify_state and not self._approval_state
-            and not self._sudo_state and not self._secret_state
-        )
+            and not self._sudo_state and not self._secret_state)
         kb.add('c-g', filter=_editor_filter)(
-            kb.add('escape', 'g', filter=_editor_filter)(self._tui_handle_open_in_editor)
-        )
+            kb.add('escape', 'g', filter=_editor_filter)(self._tui_handle_open_in_editor))
         # Ctrl+S prompt stash: park a draft, send something else, bring it back. Suppressed while
         # a modal prompt owns the composer so Ctrl+S can't stash a password.
         _stash_filter = Condition(
@@ -1896,8 +1885,7 @@ class CLITuiMixin:
         _clarify_nav = Condition(lambda: bool(self._clarify_state) and not self._clarify_freetext)
         _clarify_batch = Condition(
             lambda: bool(self._clarify_state) and bool(self._clarify_state.get("questions"))
-            and not self._clarify_freetext
-        )
+            and not self._clarify_freetext)
         kb.add('up', filter=_clarify_nav)(self._tui_clarify_up)
         kb.add('down', filter=_clarify_nav)(self._tui_clarify_down)
         # Multi-select: Space toggles the checkbox under the cursor.
@@ -2005,16 +1993,14 @@ class CLITuiMixin:
         spinner_widget = Window(
             content=FormattedTextControl(self._tui_spinner_text),
             height=self._tui_spinner_height,
-            wrap_lines=True,
-        )
+            wrap_lines=True)
         # Petdex mascot — right-aligned Kitty placeholder or half-block sprite above the prompt;
         # height 0 when no pet is enabled. The animation thread queues virtual Kitty frames;
         # after_render writes them out-of-band while prompt_toolkit owns the placeholder grid.
         self._pet_widget = Window(
             content=FormattedTextControl(self._pet_fragments),
             height=self._pet_widget_height,
-            align=WindowAlign.RIGHT,
-        )
+            align=WindowAlign.RIGHT)
         # Hint line above the input: only for interactive prompts that need extra instructions
         # (sudo countdown, approval navigation, clarify); the agent-running hint is the placeholder.
         spacer = Window(content=FormattedTextControl(self._tui_hint_text), height=self._tui_hint_height)
@@ -2023,11 +2009,9 @@ class CLITuiMixin:
         secret_widget = self._tui_overlay_widget(self._get_secret_display_fragments, "_secret_state")
         approval_widget = self._tui_overlay_widget(self._get_approval_display_fragments, "_approval_state")
         slash_confirm_widget = self._tui_overlay_widget(
-            self._get_slash_confirm_display_fragments, "_slash_confirm_state",
-        )
+            self._get_slash_confirm_display_fragments, "_slash_confirm_state")
         model_picker_widget = self._tui_overlay_widget(
-            self._get_model_picker_display_fragments, "_model_picker_state",
-        )
+            self._get_model_picker_display_fragments, "_model_picker_state")
         command_palette_widget = self._tui_overlay_widget(
             self._get_command_palette_display_fragments, "_command_palette_state")
         # Rules above/below the input; narrow terminals hide the bottom one to recover a row.

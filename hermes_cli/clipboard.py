@@ -50,8 +50,7 @@ def _linux_backends():
     return (
         (_is_wsl(), _wsl_has_image, _wsl_save),
         (bool(os.environ.get("WAYLAND_DISPLAY")), _wayland_has_image, _wayland_save),
-        (True, _xclip_has_image, _xclip_save),
-    )
+        (True, _xclip_has_image, _xclip_save))
 
 
 def save_clipboard_image(dest: Path) -> bool:
@@ -206,9 +205,7 @@ _PS_IMAGE_STRATEGIES = (
         _PS_FILEDROP_HIT
         + "if ($null -eq $hit) { exit 1 }"
         "[System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($hit))"
-        "} catch { exit 1 }",
-    ),
-)
+        "} catch { exit 1 }"))
 
 
 def _ps_clipboard(exe: str, timeout: int, label: str, dest: Path | None = None) -> bool:

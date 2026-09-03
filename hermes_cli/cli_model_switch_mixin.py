@@ -21,8 +21,7 @@ from utils import base_url_host_matches
 # override and restored wholesale on rollback.
 _RUNTIME_FIELDS = (
     "model", "provider", "requested_provider", "_explicit_api_key", "_explicit_base_url",
-    "api_key", "base_url", "api_mode",
-)
+    "api_key", "base_url", "api_mode")
 
 
 def _runtime_fields(cli) -> dict:
@@ -57,8 +56,7 @@ def _merge_preflight_warning(cli, result, custom_providers) -> None:
             messages=list(cli.conversation_history or []),
             custom_providers=custom_providers if custom_providers is not None
             else getattr(cli.agent, "_custom_providers", None),
-            config_context_length=getattr(cli.agent, "_config_context_length", None),
-        )
+            config_context_length=getattr(cli.agent, "_config_context_length", None))
     except Exception as exc:
         logger.debug("preflight-compression switch warning failed: %s", exc)
 
@@ -78,8 +76,7 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
         f"[Note: model was just switched from {_display_old} to {_display_new} "
         f"via {result.provider_label or result.target_provider}. "
         f"{'This override applies to the next turn only. ' if one_turn else ''}"
-        f"Adjust your self-identification accordingly.]"
-    )
+        f"Adjust your self-identification accordingly.]")
     _cprint(f"  ✓ Model switched: {_display_new}")
     _cprint(f"    Provider: {result.provider_label or result.target_provider}")
 
@@ -93,8 +90,7 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
             base_url=result.base_url or cli.base_url or "",
             api_key=result.api_key or cli.api_key or "", model_info=mi,
             config_context_length=getattr(agent, "_config_context_length", None) if agent else None,
-            custom_providers=getattr(agent, "_custom_providers", None) if agent else None,
-        )
+            custom_providers=getattr(agent, "_custom_providers", None) if agent else None)
     except Exception:
         if strict_context:
             raise
@@ -107,8 +103,7 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
         _cprint(f"    Capabilities: {mi.format_capabilities()}")
     cache_enabled = (
         (base_url_host_matches(result.base_url or "", "openrouter.ai") and "claude" in result.new_model.lower())
-        or result.api_mode == "anthropic_messages"
-    )
+        or result.api_mode == "anthropic_messages")
     if cache_enabled:
         _cprint("    Prompt caching: enabled")
     if result.warning_message:
@@ -116,16 +111,14 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
 
 
 def _switch_model_from(
-    cli, raw_input, *, is_global, explicit_provider, user_providers, custom_providers
-):
+    cli, raw_input, *, is_global, explicit_provider, user_providers, custom_providers):
     """``switch_model`` seeded with this CLI's live route."""
     from hermes_cli.model_switch import switch_model
     return switch_model(
         raw_input=raw_input, current_provider=cli.provider or "", current_model=cli.model or "",
         current_base_url=cli.base_url or "", current_api_key=cli.api_key or "", is_global=is_global,
         explicit_provider=explicit_provider, user_providers=user_providers,
-        custom_providers=custom_providers,
-    )
+        custom_providers=custom_providers)
 
 
 def _run_confirm_and_apply(cli, target, *args) -> None:
@@ -142,8 +135,7 @@ def _run_confirm_and_apply(cli, target, *args) -> None:
 
 
 def _commit_model_switch(
-    cli, result, *, persist_global: bool, one_turn: bool = False, picker: bool = False
-) -> None:
+    cli, result, *, persist_global: bool, one_turn: bool = False, picker: bool = False) -> None:
     """Stage + swap, print the summary, persist (session row unless --once; config on --global).
     ``picker``: tolerate context-resolution errors and label the config write "(--global)"; the
     typed path additionally records the one-turn restore snapshot."""
@@ -207,8 +199,7 @@ def _show_model_picker(cli, ctx, force_refresh: bool) -> None:
     cli._open_model_picker(
         providers, cli.model or "unknown", get_label(cli.provider) if cli.provider else "unknown",
         user_provs=ctx.user_providers if ctx is not None else None,
-        custom_provs=ctx.custom_providers if ctx is not None else None,
-    )
+        custom_provs=ctx.custom_providers if ctx is not None else None)
 
 
 class CLIModelSwitchMixin:
@@ -247,15 +238,12 @@ class CLIModelSwitchMixin:
 
         try:
             from hermes_cli.model_normalize import (
-                _AGGREGATOR_PROVIDERS, normalize_model_for_provider
-            )
+                _AGGREGATOR_PROVIDERS, normalize_model_for_provider)
             if resolved_provider not in _AGGREGATOR_PROVIDERS:
                 _adopt(
                     normalize_model_for_provider(current_model, resolved_provider),
                     lambda new: (
-                        f"Normalized model '{current_model}' to '{new}' for {resolved_provider}."
-                    ),
-                )
+                        f"Normalized model '{current_model}' to '{new}' for {resolved_provider}."))
         except Exception:
             pass
 
@@ -264,8 +252,7 @@ class CLIModelSwitchMixin:
             return _adopt_with_mode(
                 lambda m: normalize_copilot_model_id(m, api_key=self.api_key),
                 lambda m: copilot_model_api_mode(m, api_key=self.api_key),
-                lambda new: f"Normalized Copilot model '{current_model}' to '{new}'.",
-            )
+                lambda new: f"Normalized Copilot model '{current_model}' to '{new}'.")
 
         from hermes_cli.models import opencode_provider_family
         if opencode_provider_family(resolved_provider) is not None:
@@ -275,9 +262,7 @@ class CLIModelSwitchMixin:
                 lambda m: opencode_model_api_mode(resolved_provider, m),
                 lambda new: (
                     f"Stripped provider prefix from '{current_model}'; "
-                    f"using '{new}' for {resolved_provider}."
-                ),
-            )
+                    f"using '{new}' for {resolved_provider}."))
 
         if resolved_provider != "openai-codex":
             return changed
@@ -288,8 +273,7 @@ class CLIModelSwitchMixin:
             if not self._model_is_default:
                 self._console_print(
                     f"[yellow]⚠️  Stripped provider prefix from '{current_model}'; "
-                    f"using '{slug}' for OpenAI Codex.[/]"
-                )
+                    f"using '{slug}' for OpenAI Codex.[/]")
             self.model = slug
             current_model = slug
             changed = True
@@ -327,8 +311,7 @@ class CLIModelSwitchMixin:
                 result.target_provider, base_url=result.base_url, model=result.new_model,
             ) or None,
             "base_url": result.base_url or None,
-            "api_mode": result.api_mode or None,
-        }
+            "api_mode": result.api_mode or None}
         try:
             db.update_session_model(sid, result.new_model)
             db.patch_session_model_config(sid, {"gateway_runtime": route, **route})
@@ -355,8 +338,7 @@ class CLIModelSwitchMixin:
         # Stricter than the TUI gateway's recovery (which keeps bare "custom" when a
         # base_url exists) — the CLI's resolve path would hard-fail on it.
         stored_provider = _heal_bare_custom_provider(
-            _stored_runtime.get("provider") or None, base_url=stored_base_url, model=stored_model,
-        )
+            _stored_runtime.get("provider") or None, base_url=stored_base_url, model=stored_model)
         model_changed = stored_model != self.model
         provider_changed = bool(stored_provider) and stored_provider != self.provider
         if not model_changed and not provider_changed:
@@ -389,16 +371,14 @@ class CLIModelSwitchMixin:
                 logger.debug(
                     "Credential re-resolution for resumed session provider "
                     "%s failed; keeping ambient credentials",
-                    stored_provider, exc_info=True,
-                )
+                    stored_provider, exc_info=True)
         # Mid-chat /resume swaps the live agent; on startup --resume _init_agent picks up
         # self.model / self.provider.
         if self.agent is not None:
             try:
                 self.agent.switch_model(
                     new_model=self.model, new_provider=self.provider, api_key=self.api_key or "",
-                    base_url=self.base_url or "", api_mode=self.api_mode or "",
-                )
+                    base_url=self.base_url or "", api_mode=self.api_mode or "")
             except Exception:
                 logger.debug("In-place agent model swap on resume failed", exc_info=True)
         msg = f"Model restored from session: {stored_model}"
@@ -420,8 +400,7 @@ class CLIModelSwitchMixin:
             "current_provider": current_provider,
             "user_provs": user_provs,
             "custom_provs": custom_provs,
-            "filter": "",
-        }
+            "filter": ""}
         self._invalidate(min_interval=0.0)
 
     def _confirm_expensive_model_switch(self, result) -> bool:
@@ -433,32 +412,27 @@ class CLIModelSwitchMixin:
             warning = combined_selection_warning(
                 result.new_model, provider=result.target_provider,
                 base_url=result.base_url or self.base_url or "",
-                api_key=result.api_key or self.api_key or "", model_info=result.model_info,
-            )
+                api_key=result.api_key or self.api_key or "", model_info=result.model_info)
         except Exception:
             warning = None
         if warning is None:
             return True
         choices = [
             ("once", "Switch anyway", "Use this model for the current Hermes session."),
-            ("cancel", "Cancel", "Keep the current model."),
-        ]
+            ("cancel", "Cancel", "Keep the current model.")]
         raw = self._prompt_text_input_modal(
-            title=f"!!! {warning.title} !!!", detail=warning.message, choices=choices, timeout=120,
-        )
+            title=f"!!! {warning.title} !!!", detail=warning.message, choices=choices, timeout=120)
         return self._normalize_slash_confirm_choice(raw, choices) == "once"
 
     def _confirm_and_apply_model_switch_result(
-        self, result, persist_global: bool, custom_providers=None
-    ) -> None:
+        self, result, persist_global: bool, custom_providers=None) -> None:
         from cli import _cprint
         try:
             if result.success and not self._confirm_expensive_model_switch(result):
                 _cprint("  Model switch cancelled.")
                 return
             self._apply_model_switch_result(
-                result, persist_global, custom_providers=custom_providers
-            )
+                result, persist_global, custom_providers=custom_providers)
         except Exception as exc:
             _cprint(f"  ✗ Model selection failed: {exc}")
 
@@ -474,8 +448,7 @@ class CLIModelSwitchMixin:
             **_runtime_fields(self),
             "agent_primary_runtime": copy.deepcopy(
                 getattr(agent, "_primary_runtime", None)
-            ) if agent is not None else None,
-        }
+            ) if agent is not None else None}
 
     def _restore_model_runtime_snapshot(self, snapshot: dict | None) -> None:
         """Restore a model runtime captured before a one-turn override."""
@@ -505,8 +478,7 @@ class CLIModelSwitchMixin:
                     new_model=snapshot.get("model", ""), new_provider=snapshot.get("provider", ""),
                     api_key=snapshot.get("api_key", ""), base_url=snapshot.get("base_url", ""),
                     api_mode=snapshot.get("api_mode", ""),
-                    capabilities=snapshot.get("capabilities"),
-                )
+                    capabilities=snapshot.get("capabilities"))
             except Exception as exc:
                 logger.warning("CLI one-turn model restore failed: %s", exc)
 
@@ -529,8 +501,7 @@ class CLIModelSwitchMixin:
     @staticmethod
     def _compute_model_picker_viewport(
         selected: int, scroll_offset: int, n: int, term_rows: int, reserved_below: int = 6,
-        panel_chrome: int = 6, min_visible: int = 3,
-    ) -> tuple[int, int]:
+        panel_chrome: int = 6, min_visible: int = 3) -> tuple[int, int]:
         """Resolve (scroll_offset, visible) for the /model picker viewport. ``reserved_below``
         matches the approval/clarify panels (input, status bar, separators); ``panel_chrome`` is
         borders + blanks + hint row. The offset slides to keep ``selected`` on screen."""
@@ -557,8 +528,7 @@ class CLIModelSwitchMixin:
             if should_clear_context_pin(
                 model_cfg.get("default") or model_cfg.get("model"), result.new_model,
                 model_cfg.get("base_url"), result.base_url,
-                model_cfg.get("provider"), result.target_provider,
-            ):
+                model_cfg.get("provider"), result.target_provider):
                 save_config_value("model.context_length", None)
         except Exception:
             save_config_value("model.context_length", None)
@@ -591,21 +561,18 @@ class CLIModelSwitchMixin:
                 self.agent.switch_model(
                     new_model=result.new_model, new_provider=result.target_provider,
                     api_key=result.api_key, base_url=result.base_url, api_mode=result.api_mode,
-                    capabilities=getattr(result, "runtime_capabilities", None),
-                )
+                    capabilities=getattr(result, "runtime_capabilities", None))
             except Exception as exc:
                 for _k, _v in _cli_snapshot.items():
                     setattr(self, _k, _v)
                 _cprint(
                     f"  ⚠ Model switch to {result.new_model} failed ({exc}); "
-                    f"staying on {old_model}."
-                )
+                    f"staying on {old_model}.")
                 return False
         return True
 
     def _apply_model_switch_result(
-        self, result, persist_global: bool, custom_providers=None
-    ) -> None:
+        self, result, persist_global: bool, custom_providers=None) -> None:
         """Picker-path commit (see _commit_model_switch)."""
         from cli import _cprint
         if not result.success:
@@ -637,8 +604,7 @@ class CLIModelSwitchMixin:
                     pass
             state.update(
                 stage="model", provider_data=provider_data, model_list=model_list,
-                selected=0, filter="", _filtered_pairs=None,
-            )
+                selected=0, filter="", _filtered_pairs=None)
             self._invalidate(min_interval=0.0)
             return
         if stage == "model":
@@ -654,8 +620,7 @@ class CLIModelSwitchMixin:
                 state.update(
                     stage="provider", filter="", _filtered_pairs=None,
                     selected=next((i for i, p in enumerate(state.get("providers") or [])
-                                   if p.get("slug") == provider_data.get("slug")), 0),
-                )
+                                   if p.get("slug") == provider_data.get("slug")), 0))
                 self._invalidate(min_interval=0.0)
                 return
             if selected > back_idx:  # cancel row (and anything past it)
@@ -666,15 +631,13 @@ class CLIModelSwitchMixin:
                     self, visible_labels[selected], is_global=persist_global,
                     explicit_provider=provider_data.get("slug"),
                     user_providers=state.get("user_provs"),
-                    custom_providers=state.get("custom_provs"),
-                )
+                    custom_providers=state.get("custom_provs"))
                 # Capture before close — picker state is cleared on close.
                 _picker_custom_provs = state.get("custom_provs")
                 self._close_model_picker()
                 _run_confirm_and_apply(
                     self, self._confirm_and_apply_model_switch_result,
-                    result, persist_global, _picker_custom_provs,
-                )
+                    result, persist_global, _picker_custom_provs)
                 return
             self._close_model_picker()
 
@@ -704,8 +667,7 @@ class CLIModelSwitchMixin:
         one_turn = request.is_once
         persist_global = resolve_persist_behavior(
             request.is_global, request.is_session, is_once=one_turn,
-            explicit_provider=request.explicit_provider,
-        )
+            explicit_provider=request.explicit_provider)
 
         # --refresh: wipe the picker cache so every authed provider's /v1/models is re-fetched.
         if request.force_refresh:
@@ -721,8 +683,7 @@ class CLIModelSwitchMixin:
         try:
             ctx = load_picker_context().with_overrides(
                 current_provider=self.provider or "", current_model=self.model or "",
-                current_base_url=self.base_url or "",
-            )
+                current_base_url=self.base_url or "")
         except Exception:
             ctx = None
         # switch_model() + _open_model_picker still need the raw provider dicts.
@@ -735,20 +696,17 @@ class CLIModelSwitchMixin:
         result = _switch_model_from(
             self, request.target, is_global=persist_global,
             explicit_provider=request.explicit_provider,
-            user_providers=user_provs, custom_providers=custom_provs,
-        )
+            user_providers=user_provs, custom_providers=custom_provs)
         if not result.success:
             _cprint(f"  ✗ {result.error_message}")
             return
         _merge_preflight_warning(self, result, custom_provs)
         _run_confirm_and_apply(
             self, self._confirm_and_apply_cli_model_switch,
-            result, persist_global, one_turn, custom_provs,
-        )
+            result, persist_global, one_turn, custom_provs)
 
     def _confirm_and_apply_cli_model_switch(
-        self, result, persist_global: bool, one_turn: bool, custom_provs=None
-    ) -> None:
+        self, result, persist_global: bool, one_turn: bool, custom_provs=None) -> None:
         """Confirm an expensive model switch and apply it (typed /model path). Runs on a worker
         thread when the TUI is active (see _run_confirm_and_apply) so the modal can render."""
         from cli import _cprint
@@ -782,8 +740,7 @@ class CLIModelSwitchMixin:
             return
         result = crs.apply(
             load_config(), new_value,
-            persist_callback=(save_config if new_value is not None else None),
-        )
+            persist_callback=(save_config if new_value is not None else None))
         prefix = "✓" if result.success else "✗"
         for line in result.message.splitlines():
             _cprint(f"  {prefix} {line}" if line.startswith("openai_runtime") else f"    {line}")
@@ -817,9 +774,7 @@ class CLIModelSwitchMixin:
         self._pending_moa_restore_model = {
             key: getattr(self, key, None)
             for key in (
-                "requested_provider", "provider", "model", "api_key", "base_url", "api_mode",
-            )
-        }
+                "requested_provider", "provider", "model", "api_key", "base_url", "api_mode")}
         self.requested_provider = "moa"
         self.provider = "moa"
         self.model = preset

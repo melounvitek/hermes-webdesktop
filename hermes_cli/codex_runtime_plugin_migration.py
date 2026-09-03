@@ -70,8 +70,7 @@ _KEYS_DROPPED_WITH_WARNING = {"sampling"}
 # (hermes key, codex key, skip note) — timeouts are emitted as floats or skipped when non-numeric.
 _TIMEOUT_KEYS = (
     ("timeout", "tool_timeout_sec", "timeout (not numeric)"),
-    ("connect_timeout", "startup_timeout_sec", "connect_timeout (not numeric)"),
-)
+    ("connect_timeout", "startup_timeout_sec", "connect_timeout (not numeric)"))
 
 
 def _str_map(d: dict) -> dict[str, str]:
@@ -130,8 +129,7 @@ def _translate_one_server(name: str, hermes_cfg: dict) -> tuple[Optional[dict], 
 # env-var passthrough (HERMES_HOME, PYTHONPATH) could carry one in pathological cases.
 _TOML_ESCAPES = (
     ("\\", "\\\\"), ('"', '\\"'), ("\b", "\\b"), ("\t", "\\t"),
-    ("\n", "\\n"), ("\f", "\\f"), ("\r", "\\r"),
-)
+    ("\n", "\\n"), ("\f", "\\f"), ("\r", "\\r"))
 
 
 def _escape_toml_string(value: str) -> str:

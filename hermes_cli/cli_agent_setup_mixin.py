@@ -93,8 +93,7 @@ def _tool_calls_summary(tool_calls) -> str:
 _RESUME_EVENT_TEXT = {
     "model_switch": "model changed",
     "async_delegation_complete": "background delegation completed",
-    "auto_continue": "resumed interrupted turn",
-}
+    "auto_continue": "resumed interrupted turn"}
 
 def _collect_resume_entries(display_history, disp: dict, clean_assistant):
     """Displayable ``(role, text)`` recap entries from stored history, truncated per the
@@ -153,8 +152,7 @@ def _collect_resume_entries(display_history, disp: dict, clean_assistant):
 # (skin key, fallback) for recap panel colors: body text, session label, border, assistant label.
 _RESUME_SKIN_COLORS = (
     ("banner_text", "#FFF8DC"), ("session_label", "#DAA520"), ("session_border", "#8B8682"),
-    ("ui_ok", "#8FBC8F"),
-)
+    ("ui_ok", "#8FBC8F"))
 
 
 def _resume_panel_colors() -> tuple:

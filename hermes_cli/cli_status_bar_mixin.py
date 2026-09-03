@@ -22,8 +22,7 @@ _STRONG = "class:status-bar-strong"
 _AGENT_COUNTERS = (
     "session_input_tokens", "session_output_tokens", "session_cache_read_tokens",
     "session_cache_write_tokens", "session_prompt_tokens", "session_completion_tokens",
-    "session_total_tokens", "session_api_calls",
-)
+    "session_total_tokens", "session_api_calls")
 
 
 def _threshold_style(value, ladder, fallback: str) -> str:
@@ -135,8 +134,7 @@ class CLIStatusBarMixin:
 
     @staticmethod
     def _format_prompt_elapsed(
-        prompt_start_time: Optional[float], prompt_duration: float, live: bool = False
-    ) -> str:
+        prompt_start_time: Optional[float], prompt_duration: float, live: bool = False) -> str:
         """Per-prompt elapsed time. Always a string (``⏲ 0s`` on fresh start); seconds stay
         visible at every scale so it increments smoothly (``1m 59s → 2m → 2m 1s``). ⏱ while
         live, ⏲ frozen — width-1 glyphs (no variation selector) keep the bar aligned."""
@@ -196,11 +194,9 @@ class CLIStatusBarMixin:
             "duration": format_duration_compact(elapsed_seconds),
             "session_title": self._get_status_bar_session_title(),
             "prompt_elapsed": self._format_prompt_elapsed(
-                prompt_start, getattr(self, "_prompt_duration", 0.0), live=turn_live,
-            ),
+                prompt_start, getattr(self, "_prompt_duration", 0.0), live=turn_live),
             "idle_since": self._format_idle_since(
-                getattr(self, "_last_turn_finished_at", None), turn_live=turn_live,
-            ),
+                getattr(self, "_last_turn_finished_at", None), turn_live=turn_live),
             "context_tokens": 0,
             "context_length": None,
             "context_percent": None,
@@ -214,15 +210,13 @@ class CLIStatusBarMixin:
             "focus_label": "",  # /focus badge: the reduced-output mode is never invisible.
             "goal_active": False,
             "goal_turns_used": 0,
-            "goal_max_turns": 0,
-        }
+            "goal_max_turns": 0}
 
         try:
             from hermes_cli.focus_view import focus_statusbar_segment
 
             snapshot["focus_label"] = focus_statusbar_segment(
-                bool(getattr(self, "_focus_view_enabled", False))
-            )
+                bool(getattr(self, "_focus_view_enabled", False)))
         except Exception:
             pass
 
@@ -291,8 +285,7 @@ class CLIStatusBarMixin:
                 _anchored = anchored_context_tokens(
                     _msgs if isinstance(_msgs, list) else [],
                     getattr(agent, "_turn_base_usage_anchor", None),
-                    charge_stale_thinking=False,
-                )
+                    charge_stale_thinking=False)
                 if _anchored is not None and _anchored > 0:
                     context_tokens = _anchored
             except Exception:
@@ -542,8 +535,7 @@ class CLIStatusBarMixin:
             from agent.turn_summary import format_token_flow
 
             produced = (getattr(agent, "session_output_tokens", 0) or 0) - (
-                getattr(self, "_turn_token_baseline", 0) or 0
-            )
+                getattr(self, "_turn_token_baseline", 0) or 0)
             return format_token_flow(produced)
         except Exception:
             return ""
@@ -651,11 +643,9 @@ class CLIStatusBarMixin:
                     or self._pet_slug != pet.slug
                     or self._pet_cols != cols
                     or self._pet_scale != scale
-                    or self._pet_renderer.mode != renderer_mode
-                ):
+                    or self._pet_renderer.mode != renderer_mode):
                     self._pet_renderer = pet_render.PetRenderer(
-                        str(pet.spritesheet), mode=renderer_mode, scale=scale, unicode_cols=cols
-                    )
+                        str(pet.spritesheet), mode=renderer_mode, scale=scale, unicode_cols=cols)
                     self._pet_slug = pet.slug
                     self._pet_cols = cols
                     self._pet_scale = scale
@@ -711,8 +701,7 @@ class CLIStatusBarMixin:
             or self._clarify_state
             or self._sudo_state
             or self._secret_state
-            or getattr(self, "_slash_confirm_state", None)
-        )
+            or getattr(self, "_slash_confirm_state", None))
         return derive_pet_state(
             awaiting_input=awaiting_input,
             busy=getattr(self, "_agent_running", False),
@@ -968,8 +957,7 @@ class CLIStatusBarMixin:
         return result
 
     def _status_bar_segments(
-        self, snapshot, width: int, field_set, yolo_active: bool, *, styled: bool
-    ) -> list:
+        self, snapshot, width: int, field_set, yolo_active: bool, *, styled: bool) -> list:
         """Ordered status-bar segments for one width tier (<52 / <76 / wide), each a list of
         ``(style, text)`` fragments. Shared by the plain-text and prompt_toolkit renderers so
         the two can never drift; ``styled`` selects the graphical context bar."""
@@ -1026,8 +1014,7 @@ class CLIStatusBarMixin:
                 add("cache_hit", self._cache_hit_rate_style(cache[0]), cache[1])
             if wide:
                 for name, key, glyph in (
-                    ("latency", "avg_latency_label", "◷"), ("tps", "avg_velocity_label", "↑"),
-                ):
+                    ("latency", "avg_latency_label", "◷"), ("tps", "avg_velocity_label", "↑")):
                     label = snapshot.get(key) or ""
                     if label:
                         add(name, _DIM, f"{glyph} {label}")
@@ -1067,8 +1054,7 @@ class CLIStatusBarMixin:
             show_title = field_set is None or "title" in field_set
             session_title = (snapshot.get("session_title") or "") if show_title else ""
             segs = self._status_bar_segments(
-                snapshot, width, field_set, self._is_session_yolo_active(), styled=False
-            )
+                snapshot, width, field_set, self._is_session_yolo_active(), styled=False)
             parts = ["".join(t for _, t in seg) for seg in segs] or [f"⚕ {model_short}"]
             # Narrow bars always join the battery with │; wider tiers use the tier separator.
             if battery_label:
@@ -1085,8 +1071,7 @@ class CLIStatusBarMixin:
         if (
             not self._status_bar_visible
             or getattr(self, "_model_picker_state", None)
-            or getattr(self, "_command_palette_state", None)
-        ):
+            or getattr(self, "_command_palette_state", None)):
             return []
         try:
             snapshot = self._get_status_bar_snapshot()
@@ -1100,8 +1085,7 @@ class CLIStatusBarMixin:
 
             session_title = (snapshot.get("session_title") or "") if _ok("title") else ""
             segs = self._status_bar_segments(
-                snapshot, width, field_set, self._is_session_yolo_active(), styled=True
-            )
+                snapshot, width, field_set, self._is_session_yolo_active(), styled=True)
             sep = " · " if width < 76 else " │ "
             frags: list = []
             for seg in segs or [[(_SB, " ⚕ "), (_STRONG, snapshot["model_short"])]]:
