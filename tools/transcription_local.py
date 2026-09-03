@@ -3,8 +3,7 @@
 faster-whisper loading (CUDA->CPU fallback, Apple Silicon pinning), the
 anti-hallucination transcribe kwargs and segment gate, and the local whisper CLI
 (``local_command``) provider. The cached-model singleton and idle-unload watcher
-stay in ``transcription_tools`` (module state), which re-imports every name here
-(patch surface) and is imported lazily so origin patches still intercept.
+stay in ``transcription_tools`` (module state) and are read from it lazily.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import importlib.util as _ilu
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from tools.transcription_audio import _run_quiet
+from tools.transcription_audio import _find_whisper_binary, _prepare_local_audio, _run_quiet
 from tools.transcription_common import (
     DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_STT_LANGUAGE, GROQ_MODELS, LOCAL_STT_COMMAND_ENV,
     OPENAI_MODELS, _config_number, _error_result, _log_prompt_unsupported, _ok_result,
@@ -30,7 +29,6 @@ logger = logging.getLogger("tools.transcription_tools")
 
 
 def _get_local_command_template() -> Optional[str]:
-    from tools.transcription_tools import _find_whisper_binary
     configured = os.getenv(LOCAL_STT_COMMAND_ENV, "").strip()
     if configured:
         return configured
@@ -225,7 +223,7 @@ def _transcribe_local_command(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Run the configured local STT command template and read back a .txt transcript."""
-    from tools.transcription_tools import _prepare_local_audio, _resolve_stt_language
+    from tools.transcription_tools import _resolve_stt_language
     if prompt:
         _log_prompt_unsupported("STT provider 'local_command'")
     command_template = _get_local_command_template()

@@ -246,7 +246,7 @@ CONFIG_SCHEMA = _config_schema_with_virtual_fields()
 def _is_command_provider_block(value: Any) -> bool:
     """True when *value* declares a command-type voice provider.
 
-    Mirrors the runtime discriminators (``tools.tts_tool._is_command_provider_config`` /
+    Mirrors the runtime discriminators (``tools.tts_command_provider._is_command_provider_config`` /
     ``tools.transcription_tools._is_command_stt_provider_config``) and the desktop's
     ``isCommandProvider``: ``type`` is OPTIONAL and case/space-insensitive (absent or
     normalizing to ``"command"``); ``command`` MUST be a non-empty string.
@@ -278,7 +278,7 @@ def _custom_provider_options(kind: str, builtin_names: List[str], cfg: Dict[str,
     if kind == "tts":
         from tools.tts_tool import BUILTIN_TTS_PROVIDERS as _runtime_builtins
     else:
-        from tools.transcription_tools import BUILTIN_STT_PROVIDERS as _runtime_builtins
+        from tools.transcription_common import BUILTIN_STT_PROVIDERS as _runtime_builtins
 
     def _add(name: Any) -> None:
         stripped = name.strip() if isinstance(name, str) else ""
@@ -319,7 +319,6 @@ def _custom_provider_options(kind: str, builtin_names: List[str], cfg: Dict[str,
 def _memory_provider_schema_options(cfg: Dict[str, Any]) -> List[str]:
     """Discovered memory providers plus the currently-configured one, so a value that is no
     longer discoverable (e.g. plugin removed from disk) never vanishes from the dropdown."""
-    from hermes_cli.web_server import _memory_provider_options
     options = _memory_provider_options()
     memory = cfg.get("memory")
     current = _normalize_memory_provider_name(memory.get("provider") if isinstance(memory, dict) else None)
@@ -343,7 +342,8 @@ def _schema_with_dynamic_provider_options() -> Dict[str, Dict[str, Any]]:
     that reads the schema. ``CONFIG_SCHEMA`` is never mutated; changed entries are
     shallow-copied onto a copied mapping.
     """
-    from hermes_cli.web_server import _plugin_terminal_backend_rows, load_config
+    from hermes_cli.web_server_profiles import _plugin_terminal_backend_rows
+    from hermes_cli.config import load_config
     try:
         cfg = load_config()
     except Exception:  # pragma: no cover - schema must survive config errors
@@ -393,7 +393,7 @@ def _normalize_main_model_assignment(provider: str, model: str) -> tuple[str, st
     2. Model-format normalization for the resolved provider via
        ``normalize_model_for_provider`` (custom/user providers keep the model verbatim).
     """
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     from hermes_cli.config import get_compatible_custom_providers
     from hermes_cli.models import _AGGREGATOR_PROVIDERS, _KNOWN_PROVIDER_NAMES, normalize_provider
     from hermes_cli.model_normalize import normalize_model_for_provider
@@ -595,7 +595,7 @@ def _register_custom_endpoint(base_url: str, api_key: str, model: str) -> None:
     ``hermes model`` custom flow) so the picker gets a proper ready row instead of a "needs
     setup" dead-end. Dedups by base_url; never blocks the already-persisted assignment."""
     try:
-        from hermes_cli.main import _auto_provider_name, _save_custom_provider
+        from hermes_cli.main_provider_setup import _auto_provider_name, _save_custom_provider
 
         _save_custom_provider(base_url, api_key, model, name=_auto_provider_name(base_url))
     except Exception:
@@ -627,7 +627,7 @@ def _stale_aux_pins(cfg: dict, new_provider: str) -> list:
 
 
 def _cron_model_impact(cfg: dict, provider: str, model: str) -> Any:
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     try:
         effective_config = load_config()
         effective_provider, effective_model = resolve_cron_model_drift_defaults(effective_config)
@@ -642,7 +642,7 @@ def _cron_model_impact(cfg: dict, provider: str, model: str) -> Any:
 
 
 def _apply_main_assignment_sync(cfg: dict, provider: str, model: str, base_url: str, api_key: str) -> dict:
-    from hermes_cli.web_server import save_config
+    from hermes_cli.config import save_config
     if not provider or not model:
         raise HTTPException(status_code=400, detail="provider and model required for main")
     provider, model = _normalize_main_model_assignment(provider, model)
@@ -673,7 +673,7 @@ def _apply_main_assignment_sync(cfg: dict, provider: str, model: str, base_url: 
 
 
 def _apply_aux_assignment_sync(cfg: dict, provider: str, model: str, task: str, base_url: str, api_key: str) -> dict:
-    from hermes_cli.web_server import save_config
+    from hermes_cli.config import save_config
     aux = cfg.get("auxiliary")
     if not isinstance(aux, dict):
         aux = {}
@@ -736,7 +736,7 @@ def _apply_model_assignment_sync(
     Runs inside ``_profile_scope`` (worker thread) so every load_config/save_config lands in
     the requested profile. Raises HTTPException for validation errors.
     """
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     cfg = load_config()
     if scope == "main":
         return _apply_main_assignment_sync(cfg, provider, model, base_url, api_key)
@@ -790,7 +790,7 @@ def _denormalize_config_from_web(config: Dict[str, Any]) -> Dict[str, Any]:
     removed). A partial update (Settings autosave diff) that OMITS the key means "unchanged"
     and must leave the on-disk override alone — not be treated as an explicit 0.
     """
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     config = dict(config)
     config.pop("_model_meta", None)
 

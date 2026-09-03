@@ -2,9 +2,8 @@
 
 Binary discovery, the shared ffmpeg m4a encode (transcode + silence trim),
 source/format validation, WeChat .silk decoding, CAF conversion and the
-best-effort cloud pre-upload silence trim. Every name is re-imported by
-``tools/transcription_tools.py`` (patch surface), which is imported lazily here
-so origin patches still intercept.
+best-effort cloud pre-upload silence trim. Facade-owned state (``_HAS_PILK``,
+``_safe_find_spec``) is read lazily from ``tools.transcription_tools``.
 """
 
 from __future__ import annotations
@@ -66,7 +65,6 @@ def _transcode_audio_for_stt(file_path: str, work_dir: str) -> tuple[Optional[st
     """Transcode to a compact 16 kHz mono AAC/m4a for STT upload; ``(converted_path, None)`` or ``(None, error)``.
     Newer OpenAI models reject containers ``whisper-1`` accepted (notably Ogg/Opus voice notes) and
     gateway downloads may carry a misleading extension."""
-    from tools.transcription_tools import _find_ffmpeg_binary, _run_ffmpeg_stt_encode
     ffmpeg = _find_ffmpeg_binary()
     if not ffmpeg:
         return None, "audio needs transcoding for the STT API, but ffmpeg was not found"
@@ -144,7 +142,6 @@ def _prepare_audio_for_transcription(file_path: str) -> tuple[Optional[str], Opt
 
 def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], Optional[str]]:
     """Normalize audio for local CLI STT when needed."""
-    from tools.transcription_tools import _find_ffmpeg_binary
     audio_path = Path(file_path)
     if audio_path.suffix.lower() in LOCAL_NATIVE_AUDIO_FORMATS:
         return file_path, None
@@ -166,7 +163,6 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
 
 def _convert_caf_to_wav(file_path: str) -> Optional[str]:
     """Convert CAF to WAV using ffmpeg or afconvert (macOS)."""
-    from tools.transcription_tools import _find_ffmpeg_binary
     audio_path = Path(file_path)
     wav_path = os.path.join(audio_path.parent, f"{audio_path.stem}.wav")
     ffmpeg = _find_ffmpeg_binary()
@@ -209,7 +205,6 @@ def _probe_audio_duration(file_path: str) -> Optional[float]:
     """Return the audio duration in seconds via ffprobe, or None. Canonical sync probe;
     ``gateway/run.py._probe_audio_duration`` and the Telegram adapter carry local variants — keep
     the command shape in sync."""
-    from tools.transcription_tools import _find_ffprobe_binary
     ffprobe = _find_ffprobe_binary()
     if not ffprobe:
         return None
@@ -234,7 +229,6 @@ def _cloud_trim_settings(stt_config: Dict[str, Any]) -> tuple[bool, int, int]:
 def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> Optional[str]:
     """Return a silence-trimmed copy of *file_path* for cloud upload, or None (= upload the original).
     On success the caller owns deleting the returned file's parent directory."""
-    from tools.transcription_tools import _find_ffmpeg_binary, _probe_audio_duration, _run_ffmpeg_stt_encode
     enabled, threshold_db, keep_ms = _cloud_trim_settings(stt_config)
     if not enabled:
         return None

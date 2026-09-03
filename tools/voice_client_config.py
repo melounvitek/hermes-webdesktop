@@ -69,8 +69,8 @@ def _deepinfra_model(section: Dict[str, Any], kind: str) -> Optional[str]:
 
 
 # ── STT ──
-# provider -> (env var, default-model attr on transcription_tools, base_url).
-# ``base_url`` is a transcription_tools attr name or a literal URL.
+# provider -> (env var, default-model attr on transcription_common, base_url).
+# ``base_url`` is a transcription_common attr name or a literal URL.
 _STT_KEYED: Dict[str, tuple[str, str, str]] = {
     "groq": ("GROQ_API_KEY", "DEFAULT_GROQ_STT_MODEL", "GROQ_BASE_URL"),
     "mistral": ("MISTRAL_API_KEY", "DEFAULT_MISTRAL_STT_MODEL", "https://api.mistral.ai/v1"),
@@ -78,6 +78,7 @@ _STT_KEYED: Dict[str, tuple[str, str, str]] = {
 
 
 def _resolve_stt_client_config() -> Dict[str, Any]:
+    from tools import transcription_common as tc
     from tools import transcription_tools as tt
 
     stt_config = tt._load_stt_config()
@@ -88,7 +89,7 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
     # declared command providers, and anything plugin-registered.
     if tt._is_local_stt_provider(provider, stt_config):
         return _relay("local provider")
-    if provider not in tt.BUILTIN_STT_PROVIDERS:
+    if provider not in tc.BUILTIN_STT_PROVIDERS:
         return _relay("command/plugin provider")
 
     language = tt._resolve_stt_language(
@@ -106,8 +107,8 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
         api_key = tt._resolve_provider_key(env_var, provider)
         if not api_key:
             return _relay("no credentials")
-        return direct(STT_WIRE_OPENAI, getattr(tt, base, base), api_key,
-                      section.get("model") or getattr(tt, default_model))
+        return direct(STT_WIRE_OPENAI, getattr(tc, base, base), api_key,
+                      section.get("model") or getattr(tc, default_model))
     if provider == "openai":
         # Covers the Nous-managed selection too: the resolver returns the user's
         # own gateway token + managed base URL — exactly what the client should use.
@@ -115,20 +116,20 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
             api_key, base_url = tt._resolve_openai_audio_client_config()
         except ValueError as exc:
             return _relay(f"openai resolution failed: {exc}")
-        return direct(STT_WIRE_OPENAI, base_url, api_key, section.get("model") or tt.DEFAULT_STT_MODEL)
+        return direct(STT_WIRE_OPENAI, base_url, api_key, section.get("model") or tc.DEFAULT_STT_MODEL)
     if provider == "xai":
         # API key only: an xAI OAuth bearer refreshes server-side mid-session and
         # would strand the client on the first 401.
         api_key = str(tt.get_env_value("XAI_API_KEY") or "").strip()
         if not api_key:
             return _relay("xai oauth (server-managed) or no credentials")
-        return direct(STT_WIRE_XAI, env_base_url("XAI_STT_BASE_URL", tt.XAI_STT_BASE_URL), api_key, None)
+        return direct(STT_WIRE_XAI, env_base_url("XAI_STT_BASE_URL", tc.XAI_STT_BASE_URL), api_key, None)
     if provider == "elevenlabs":
         api_key = tt._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")
         if not api_key:
             return _relay("no credentials")
-        return direct(STT_WIRE_ELEVENLABS, env_base_url("ELEVENLABS_STT_BASE_URL", tt.ELEVENLABS_STT_BASE_URL),
-                      api_key, section.get("model") or tt.DEFAULT_ELEVENLABS_STT_MODEL)
+        return direct(STT_WIRE_ELEVENLABS, env_base_url("ELEVENLABS_STT_BASE_URL", tc.ELEVENLABS_STT_BASE_URL),
+                      api_key, section.get("model") or tc.DEFAULT_ELEVENLABS_STT_MODEL)
     if provider == "deepinfra":
         api_key = tt._resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
         if not api_key:
@@ -144,6 +145,7 @@ def _resolve_stt_client_config() -> Dict[str, Any]:
 # ── TTS ──
 def _resolve_tts_client_config() -> Dict[str, Any]:
     from tools import tts_tool as tts
+    from tools import tts_tool_openai, tts_tool_providers
 
     tts_config = tts._load_tts_config()
     provider = tts._get_provider(tts_config)
@@ -153,24 +155,24 @@ def _resolve_tts_client_config() -> Dict[str, Any]:
     if provider == "openai":
         # Covers the direct-key, custom-base_url, and Nous-managed selections.
         try:
-            api_key, base_url, is_managed = tts._resolve_openai_audio_client_config()
+            api_key, base_url, is_managed = tts_tool_openai._resolve_openai_audio_client_config()
         except ValueError as exc:
             return _relay(f"openai resolution failed: {exc}")
         oai = _section(tts_config, "openai")
-        model = oai.get("model") or tts.DEFAULT_OPENAI_MODEL
+        model = oai.get("model") or tts_tool_openai.DEFAULT_OPENAI_MODEL
         config_base = oai.get("base_url")
         base_url = config_base or base_url
         # The managed gateway only proxies MANAGED_OPENAI_TTS_MODELS — same
         # coercion text_to_speech applies server-side.
-        if is_managed and not config_base and model not in tts.MANAGED_OPENAI_TTS_MODELS:
-            model = tts.DEFAULT_OPENAI_MODEL
+        if is_managed and not config_base and model not in tts_tool_openai.MANAGED_OPENAI_TTS_MODELS:
+            model = tts_tool_openai.DEFAULT_OPENAI_MODEL
         speed_default = tts_config.get("speed", 1.0) if isinstance(tts_config, dict) else 1.0
         try:
             speed = float(oai.get("speed", speed_default))
         except (TypeError, ValueError):
             speed = 1.0
         return _direct(TTS_WIRE_OPENAI, "openai", base_url, api_key, model,
-                       voice=oai.get("voice") or tts.DEFAULT_OPENAI_VOICE, speed=speed)
+                       voice=oai.get("voice") or tts_tool_openai.DEFAULT_OPENAI_VOICE, speed=speed)
     if provider == "elevenlabs":
         api_key = tts._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs")
         if not api_key:
@@ -178,8 +180,8 @@ def _resolve_tts_client_config() -> Dict[str, Any]:
         el = _section(tts_config, "elevenlabs")
         return _direct(TTS_WIRE_ELEVENLABS, "elevenlabs",
                        str(el.get("base_url") or "https://api.elevenlabs.io/v1").rstrip("/"),
-                       api_key, el.get("model_id") or tts.DEFAULT_ELEVENLABS_MODEL_ID,
-                       voice=el.get("voice_id") or tts.DEFAULT_ELEVENLABS_VOICE_ID, speed=None)
+                       api_key, el.get("model_id") or tts_tool_providers.DEFAULT_ELEVENLABS_MODEL_ID,
+                       voice=el.get("voice_id") or tts_tool_providers.DEFAULT_ELEVENLABS_VOICE_ID, speed=None)
     if provider == "deepinfra":
         api_key = tts._resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
         if not api_key:

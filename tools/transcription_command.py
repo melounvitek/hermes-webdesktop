@@ -2,9 +2,8 @@
 
 ``stt.providers.<name>: type: command`` registry, plugin-registered
 ``TranscriptionProvider`` dispatch, and the ``pre_transcription`` hook that
-threads prompt/language/model overrides into every backend. Every name is
-re-imported by ``tools/transcription_tools.py`` (patch surface), which is
-imported lazily here so origin patches still intercept.
+threads prompt/language/model overrides into every backend. ``_resolve_stt_language``
+is read lazily from ``tools.transcription_tools``.
 """
 
 from __future__ import annotations

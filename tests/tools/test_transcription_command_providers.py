@@ -25,8 +25,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-from tools.transcription_tools import (
-    BUILTIN_STT_PROVIDERS,
+from tools.transcription_common import BUILTIN_STT_PROVIDERS
+from tools.transcription_command import (
     COMMAND_STT_OUTPUT_FORMATS,
     DEFAULT_COMMAND_STT_LANGUAGE,
     DEFAULT_COMMAND_STT_OUTPUT_FORMAT,
@@ -37,6 +37,8 @@ from tools.transcription_tools import (
     _render_command_stt_template,
     _resolve_command_stt_provider_config,
     _transcribe_command_stt,
+)
+from tools.transcription_tools import (
     transcribe_audio,
 )
 

@@ -2,9 +2,9 @@
 
 OpenAI-SDK-shaped backends (groq, openai, deepinfra), Mistral Voxtral, REST multipart
 backends (xAI, ElevenLabs), and OpenAI audio credential resolution (config > keyless
-local server > env > managed Nous gateway). Every name is re-imported by
-``tools/transcription_tools.py`` (patch surface), imported lazily here so origin
-patches still intercept.
+local server > env > managed Nous gateway). Facade-owned state and helpers
+(``_HAS_OPENAI``, ``_resolve_provider_key``, ``_resolve_stt_language``, ``_load_stt_config``,
+``get_env_value``) are read lazily from ``tools.transcription_tools``.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def _transcribe_openai(
     """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape, shared by every
     OpenAI-compatible endpoint (DeepInfra etc.): explicit ``api_key``/``base_url`` skip the
     OpenAI-only auth chain; ``provider_label`` names the response's provider."""
-    from tools.transcription_tools import _HAS_OPENAI, _resolve_openai_audio_client_config, _resolve_stt_language
+    from tools.transcription_tools import _HAS_OPENAI, _resolve_stt_language
     if api_key is None:
         try:
             api_key, fallback_base = _resolve_openai_audio_client_config()
@@ -329,7 +329,7 @@ def _transcribe_deepinfra(
     file_path: str, model_name: str, *, language: Optional[str] = None, prompt: Optional[str] = None
 ) -> Dict[str, Any]:
     """Resolve DeepInfra credentials/model (shared ``hermes_cli.models`` helpers), then delegate to :func:`_transcribe_openai`."""
-    from tools.transcription_tools import _load_stt_config, _resolve_provider_key, _transcribe_openai
+    from tools.transcription_tools import _load_stt_config, _resolve_provider_key
     api_key = _resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
     if not api_key:
         return _error_result("DEEPINFRA_API_KEY not set")
@@ -364,7 +364,7 @@ def _is_local_or_private_url(url: str) -> bool:
 def _direct_openai_credentials(cfg_api_key: str, cfg_base_url: str) -> Optional[tuple[str, str]]:
     """Direct-credential ladder: config key > keyless local base_url (placeholder key so the SDK
     constructs a client) > env key; None if none apply."""
-    from tools.transcription_tools import resolve_openai_audio_api_key
+    from tools.tool_backend_helpers import resolve_openai_audio_api_key
     if cfg_api_key:
         return cfg_api_key, (cfg_base_url or OPENAI_BASE_URL)
     # A local OpenAI-compatible server needs no key — send a placeholder so the SDK doesn't refuse to
@@ -380,10 +380,11 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
     ``"nous"`` -> managed gateway ONLY (a direct OPENAI_API_KEY must NOT override it); any other
     stored provider -> direct credentials ONLY (no silent managed fallback); never-configured ->
     legacy ladder: direct credentials, then the managed gateway. Failures raise ValueError."""
-    from tools.transcription_tools import (
-        _load_stt_config, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
-        resolve_managed_tool_gateway)
-    from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_error
+    from tools.transcription_tools import _load_stt_config
+    from tools.managed_tool_gateway import resolve_managed_tool_gateway
+    from tools.tool_backend_helpers import (
+        NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
+        read_selection, selection_error)
     openai_cfg = _load_stt_config().get("openai") or {}
     selected = read_selection("stt")
 

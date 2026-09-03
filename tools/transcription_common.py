@@ -1,8 +1,4 @@
-"""Constants, result envelopes and tiny config readers shared by every STT module.
-
-Every name is re-imported by ``tools/transcription_tools.py``, so
-``tools.transcription_tools.<name>`` keeps resolving (and monkeypatching).
-"""
+"""Constants, result envelopes and tiny config readers shared by every STT module."""
 
 from __future__ import annotations
 
@@ -11,7 +7,7 @@ import os
 import subprocess  # noqa: F401  (type annotation only)
 from typing import Any, Dict
 
-from tools.tts_command_provider import _get_provider_section as _get_stt_section  # noqa: F401  (re-exported)
+from tools.tts_command_provider import _get_provider_section as _get_stt_section
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")

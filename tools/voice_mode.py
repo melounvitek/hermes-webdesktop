@@ -848,7 +848,8 @@ def create_audio_recorder() -> AudioRecorder | TermuxAudioRecorder:
 def transcribe_recording(wav_path: str, model: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe a WAV via ``transcribe_audio()``, filtering Whisper hallucinations;
     returns ``{success, transcript[, error]}``."""
-    from tools.transcription_tools import MAX_FILE_SIZE, transcribe_audio
+    from tools.transcription_common import MAX_FILE_SIZE
+    from tools.transcription_tools import transcribe_audio
 
     result = transcribe_audio(wav_path, model=model, source="voice_mode")
     # Only chunk when the provider itself reports "File too large" — local
