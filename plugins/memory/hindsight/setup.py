@@ -52,8 +52,8 @@ def _select(title: str, items: list, values: list, current) -> str | None:
 
 
 def _write_env(env_path: Path, env_writes: dict) -> None:
-    """Update keys in place (BOM-tolerant read so a Notepad BOM can't glue
-    U+FEFF onto the first key and cause a duplicate line), append the rest."""
+    """Update keys in place (BOM-tolerant read: a Notepad BOM would glue U+FEFF onto
+    the first key and duplicate the line), append the rest."""
     env_path.parent.mkdir(parents=True, exist_ok=True)
     existing = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.exists() else []
     updated = set()
@@ -113,8 +113,7 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
         provider_config["llm_provider"] = llm_provider
 
     print("\n  Checking dependencies...")
-    # Environment-aware install: sealed hosted venvs redirect to the durable
-    # data-volume target instead of writing to /opt/hermes.
+    # Environment-aware install: sealed hosted venvs redirect to the durable data volume.
     from tools.lazy_deps import install_specs
 
     deps = ["hindsight-all"] if mode == "local_embedded" else [f"hindsight-client>={_MIN_CLIENT_VERSION}"]
@@ -130,11 +129,8 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     if mode == "cloud":
         print("\n  Get your API key at https://ui.hindsight.vectorize.io\n")
         existing_key = get_secret("HINDSIGHT_API_KEY", "") or ""
-        if existing_key:
-            masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else "set"
-            api_key = _secret_prompt(f"  API key (current: {masked}, blank to keep): ")
-        else:
-            api_key = _secret_prompt("  API key: ")
+        masked = f"...{existing_key[-4:]}" if len(existing_key) > 4 else "set"
+        api_key = _secret_prompt(f"  API key (current: {masked}, blank to keep): " if existing_key else "  API key: ")
         if api_key:
             env_writes["HINDSIGHT_API_KEY"] = api_key
         val = input(f"  API URL [{_DEFAULT_API_URL}]: ").strip()
@@ -151,9 +147,7 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     else:  # local_embedded
         if llm_provider == "openai_compatible":
             existing_base_url = provider_config.get("llm_base_url", "")
-            prompt = "  LLM endpoint URL (e.g. http://192.168.1.10:8080/v1)"
-            if existing_base_url:
-                prompt += f" [{existing_base_url}]"
+            prompt = "  LLM endpoint URL (e.g. http://192.168.1.10:8080/v1)" + (f" [{existing_base_url}]" if existing_base_url else "")
             val = input(prompt + ": ").strip()
             if val:
                 provider_config["llm_base_url"] = val
@@ -172,25 +166,20 @@ def run_setup(provider, hermes_home: str, config: dict) -> None:
     provider_config.setdefault("bank_id", "hermes")
     provider_config.setdefault("recall_budget", "mid")
     # Preserve explicit 0 timeouts instead of treating them as blank.
-    timeout_val = provider_config.get("timeout")
-    if timeout_val is None:
-        timeout_val = _DEFAULT_TIMEOUT
-    provider_config["timeout"] = timeout_val
-    env_writes["HINDSIGHT_TIMEOUT"] = str(timeout_val)
+    timeouts = [("timeout", "HINDSIGHT_TIMEOUT", _DEFAULT_TIMEOUT)]
     if mode == "local_embedded":
-        idle_timeout_val = provider_config.get("idle_timeout")
-        if idle_timeout_val is None:
-            idle_timeout_val = _DEFAULT_IDLE_TIMEOUT
-        provider_config["idle_timeout"] = idle_timeout_val
-        env_writes["HINDSIGHT_IDLE_TIMEOUT"] = str(idle_timeout_val)
+        timeouts.append(("idle_timeout", "HINDSIGHT_IDLE_TIMEOUT", _DEFAULT_IDLE_TIMEOUT))
+    for key, env_key, default in timeouts:
+        value = provider_config.get(key)
+        provider_config[key] = value = default if value is None else value
+        env_writes[env_key] = str(value)
     config["memory"]["provider"] = "hindsight"
     save_config(config)
     provider.save_config(provider_config, hermes_home)
     if env_writes:
         _write_env(Path(hermes_home) / ".env", env_writes)
 
-    # Starter template only for cloud / local_external — the API is reachable
-    # now; local_embedded's daemon isn't up during setup.
+    # Starter template only where the API is reachable now (local_embedded's daemon isn't up).
     if _hs_templates.supported_for_mode(mode):
         _offer_starter_template(mode, provider_config, env_writes)
 

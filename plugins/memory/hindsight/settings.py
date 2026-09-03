@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, List
 
 # Log under the plugin package's own logger name (loader-path independent).
@@ -15,15 +16,13 @@ _DEFAULT_LOCAL_URL = "http://localhost:8888"
 _MIN_CLIENT_VERSION = "0.6.1"
 _DEFAULT_TIMEOUT = 120  # seconds — cloud API can take 30-40s per request
 _DEFAULT_IDLE_TIMEOUT = 300  # seconds — Hindsight embedded daemon default
-# ``metadata.source`` stamped on retained memories — OPT-IN, empty by default:
-# AGENTS.md forbids on-by-default third-party attribution tags. Set via the
-# ``retain_source`` config key or HINDSIGHT_RETAIN_SOURCE.
+# ``metadata.source`` on retained memories is OPT-IN (AGENTS.md forbids
+# on-by-default attribution tags): ``retain_source`` / HINDSIGHT_RETAIN_SOURCE.
 _DEFAULT_RETAIN_SOURCE = ""
 # Hindsight brand mark (eye ringed by graph nodes) for the recall/retain indicators.
 _HINDSIGHT_GLYPH = "👁️"
-# Hindsight 0.5.0 added ``update_mode='append'`` on retain. Without it, reusing a
-# stable session-scoped document_id silently overwrites prior turns server-side,
-# so older APIs keep the per-process unique document_id fallback.
+# Hindsight 0.5.0 added ``update_mode='append'``; older APIs would silently
+# overwrite prior turns under a stable document_id, so they keep the per-process id.
 _MIN_VERSION_FOR_UPDATE_MODE_APPEND = "0.5.0"
 _VALID_BUDGETS = {"low", "mid", "high"}
 _PROVIDER_DEFAULT_MODELS = {
@@ -72,7 +71,7 @@ def _normalize_retain_tags(value: Any) -> List[str]:
             try:
                 parsed = json.loads(text)
             except Exception:
-                parsed = None
+                pass
         raw_items = parsed if isinstance(parsed, list) else text.split(",")
     else:
         raw_items = [value]
@@ -85,14 +84,10 @@ def _normalize_retain_tags(value: Any) -> List[str]:
 
 
 def _normalize_observation_scopes(value: Any) -> Any:
-    """Normalize an observation_scopes value to a Hindsight-accepted form.
-
-    Returns ``None`` (nothing configured; Hindsight applies its ``combined``
-    default), a keyword string, or ``list[list[str]]`` (one inner list per
-    consolidation pass). Accepts a keyword, a JSON-encoded list, a flat list of
-    tags (one scope), or a list of tag-lists. Anything unrecognized yields
-    ``None`` so we never send an invalid payload.
-    """
+    """Normalize observation_scopes to a keyword string, ``list[list[str]]`` (one inner
+    list per consolidation pass), or ``None`` (Hindsight's ``combined`` default).
+    Accepts a keyword, a JSON-encoded list, a flat tag list (one scope) or a list of
+    tag-lists; anything unrecognized -> ``None`` so we never send an invalid payload."""
     if isinstance(value, str):
         text = value.strip()
         if text in _OBSERVATION_SCOPE_KEYWORDS:
@@ -120,8 +115,8 @@ def _normalize_observation_scopes(value: Any) -> Any:
 
 
 def _sanitize_bank_segment(value: str) -> str:
-    """Make a bank_id placeholder URL/filesystem safe: non ``[A-Za-z0-9_-]``
-    runs become a single dash; leading/trailing dashes and underscores are stripped."""
+    """URL/filesystem-safe bank_id placeholder: runs outside ``[A-Za-z0-9_-]`` (per
+    ``str.isalnum``) become one dash; leading/trailing ``-``/``_`` are stripped."""
     if not value:
         return ""
     out = []
@@ -137,11 +132,9 @@ def _sanitize_bank_segment(value: str) -> str:
 
 
 def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str) -> str:
-    """Render a bank_id template ({profile}, {workspace}, {platform}, {user},
-    {session}); each placeholder is sanitized first. Empty placeholders render
-    as "" and the dash/underscore runs they leave are collapsed, e.g.
-    ``hermes-{user}`` with no user becomes ``hermes``. Empty template or an
-    invalid placeholder falls back to *fallback*."""
+    """Render a bank_id template ({profile}, {workspace}, {platform}, {user}, {session}),
+    sanitizing each placeholder; the ``-``/``_`` runs empty placeholders leave are
+    collapsed (``hermes-{user}`` -> ``hermes``). Empty/invalid template -> *fallback*."""
     if not template:
         return fallback
     sanitized = {k: _sanitize_bank_segment(v) for k, v in placeholders.items()}
@@ -151,8 +144,6 @@ def _resolve_bank_id_template(template: str, fallback: str, **placeholders: str)
         logger.warning("Invalid bank_id_template %r: %s — using fallback %r",
                        template, exc, fallback)
         return fallback
-    while "--" in rendered:
-        rendered = rendered.replace("--", "-")
-    while "__" in rendered:
-        rendered = rendered.replace("__", "_")
+    rendered = re.sub(r"-{2,}", "-", rendered)
+    rendered = re.sub(r"_{2,}", "_", rendered)
     return rendered.strip("-_") or fallback

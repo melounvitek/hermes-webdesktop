@@ -62,10 +62,10 @@ def _extract_response_text(response: Any) -> str:
         return ""
     if isinstance(content, str):
         return content
-    if isinstance(content, list):
-        texts = (part.get("text") if isinstance(part, dict) else getattr(part, "text", None) for part in content)
-        return "".join(t for t in texts if isinstance(t, str))
-    return ""
+    if not isinstance(content, list):
+        return ""
+    texts = (part.get("text") if isinstance(part, dict) else getattr(part, "text", None) for part in content)
+    return "".join(t for t in texts if isinstance(t, str))
 
 
 def _normalize_rewrite(text: str) -> str:
