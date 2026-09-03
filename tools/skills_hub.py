@@ -66,12 +66,12 @@ logger = logging.getLogger(__name__)
 INDEX_CACHE_TTL = 3600  # 1 hour
 
 
-def _path_resolver(name: str, default):
-    """Resolver for a hub path: a test-injected real module attribute
+def _path_resolver(name: str, parent: str, leaf: str):
+    """Resolver for hub path ``<parent>/<leaf>``: a test-injected real module attribute
     (patch.object/monkeypatch on SKILLS_DIR etc.) wins over live resolution."""
     def resolve() -> Path:
         forced = globals().get(name)
-        return Path(forced) if forced is not None else default()
+        return Path(forced) if forced is not None else _DYNAMIC_PATH_RESOLVERS[parent]() / leaf
     resolve.__name__ = f"_{name.lower()}"
     return resolve
 
@@ -80,24 +80,17 @@ def _hermes_home() -> Path:
     return get_hermes_home()
 
 
-_skills_dir = _path_resolver("SKILLS_DIR", lambda: _hermes_home() / "skills")
-_hub_dir = _path_resolver("HUB_DIR", lambda: _skills_dir() / ".hub")
-_lock_file = _path_resolver("LOCK_FILE", lambda: _hub_dir() / "lock.json")
-_quarantine_dir = _path_resolver("QUARANTINE_DIR", lambda: _hub_dir() / "quarantine")
-_audit_log = _path_resolver("AUDIT_LOG", lambda: _hub_dir() / "audit.log")
-_taps_file = _path_resolver("TAPS_FILE", lambda: _hub_dir() / "taps.json")
-_index_cache_dir = _path_resolver("INDEX_CACHE_DIR", lambda: _hub_dir() / "index-cache")
-
-_DYNAMIC_PATH_RESOLVERS = {
-    "HERMES_HOME": _hermes_home,
-    "SKILLS_DIR": _skills_dir,
-    "HUB_DIR": _hub_dir,
-    "LOCK_FILE": _lock_file,
-    "QUARANTINE_DIR": _quarantine_dir,
-    "AUDIT_LOG": _audit_log,
-    "TAPS_FILE": _taps_file,
-    "INDEX_CACHE_DIR": _index_cache_dir,
-}
+_DYNAMIC_PATH_RESOLVERS = {"HERMES_HOME": _hermes_home}
+for _name, _parent, _leaf in (
+    ("SKILLS_DIR", "HERMES_HOME", "skills"),
+    ("HUB_DIR", "SKILLS_DIR", ".hub"),
+    ("LOCK_FILE", "HUB_DIR", "lock.json"),
+    ("QUARANTINE_DIR", "HUB_DIR", "quarantine"),
+    ("AUDIT_LOG", "HUB_DIR", "audit.log"),
+    ("TAPS_FILE", "HUB_DIR", "taps.json"),
+    ("INDEX_CACHE_DIR", "HUB_DIR", "index-cache"),
+):
+    _DYNAMIC_PATH_RESOLVERS[_name] = globals()[f"_{_name.lower()}"] = _path_resolver(_name, _parent, _leaf)
 
 
 def __getattr__(name: str):
@@ -170,8 +163,6 @@ def _guarded_http_get(url: str, *, timeout: int = 20) -> Optional[httpx.Response
 
 def _read_json_if_fresh(path: Path, ttl: float) -> Optional[Any]:
     """Parsed JSON from ``path`` when it exists and is younger than ``ttl`` seconds."""
-    if not path.exists():
-        return None
     try:
         if time.time() - path.stat().st_mtime > ttl:
             return None

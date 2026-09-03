@@ -65,12 +65,7 @@ def _load_hermes_index() -> Optional[dict]:
             data = resp.json()
             break
         except httpx.DecodingError as e:
-            logger.debug(
-                "Hermes index decode failed (Accept-Encoding=%s): %s",
-                accept_encoding,
-                e,
-            )
-            continue
+            logger.debug("Hermes index decode failed (Accept-Encoding=%s): %s", accept_encoding, e)
         except (httpx.HTTPError, json.JSONDecodeError) as e:
             logger.debug("Hermes index fetch failed: %s", e)
             return _load_stale_index_cache()
@@ -192,23 +187,19 @@ def parallel_search_sources(
     }
 
     try:
-        try:
-            for fut in as_completed(futures, timeout=overall_timeout):
-                try:
-                    sid, results = fut.result(timeout=0)
-                    source_counts[sid] = len(results)
-                    all_results.extend(results)
-                    if on_source_done:
-                        on_source_done(sid, len(results))
-                except Exception:
-                    pass
-        except TimeoutError:
-            timed_out_ids = [futures[f] for f in futures if not f.done()]
-            if timed_out_ids:
-                logger.debug(
-                    "Skills browse timed out waiting for: %s",
-                    ", ".join(timed_out_ids),
-                )
+        for fut in as_completed(futures, timeout=overall_timeout):
+            try:
+                sid, results = fut.result(timeout=0)
+                source_counts[sid] = len(results)
+                all_results.extend(results)
+                if on_source_done:
+                    on_source_done(sid, len(results))
+            except Exception:
+                pass
+    except TimeoutError:
+        timed_out_ids = [futures[f] for f in futures if not f.done()]
+        if timed_out_ids:
+            logger.debug("Skills browse timed out waiting for: %s", ", ".join(timed_out_ids))
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 

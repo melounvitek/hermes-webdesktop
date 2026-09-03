@@ -155,18 +155,14 @@ class GitHubAuth:
             key_file = Path(key_path)
             if not key_file.exists():
                 return None
-            private_key = key_file.read_text(encoding="utf-8")
-
             now = int(time.time())
-            payload = {"iat": now - 60, "exp": now + (10 * 60), "iss": app_id}
-            encoded_jwt = jwt.encode(payload, private_key, algorithm="RS256")
-
+            encoded_jwt = jwt.encode(
+                {"iat": now - 60, "exp": now + (10 * 60), "iss": app_id},
+                key_file.read_text(encoding="utf-8"), algorithm="RS256",
+            )
             resp = httpx.post(
                 f"https://api.github.com/app/installations/{installation_id}/access_tokens",
-                headers={
-                    "Authorization": f"Bearer {encoded_jwt}",
-                    "Accept": "application/vnd.github.v3+json",
-                },
+                headers={"Authorization": f"Bearer {encoded_jwt}", "Accept": "application/vnd.github.v3+json"},
                 timeout=10,
             )
             if resp.status_code == 201:
