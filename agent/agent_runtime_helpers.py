@@ -1255,10 +1255,7 @@ def _direct_native_anthropic_tool_cache_capability(
     """Return whether this resolved destination accepts native tool markers."""
     eff_base_url = base_url if base_url is not None else (agent.base_url or "")
     eff_api_mode = api_mode if api_mode is not None else (agent.api_mode or "")
-    return (
-        eff_api_mode == "anthropic_messages"
-        and base_url_hostname(eff_base_url) == "api.anthropic.com"
-    )
+    return eff_api_mode == "anthropic_messages" and base_url_hostname(eff_base_url) == "api.anthropic.com"
 
 
 def cache_ttl_means_disabled(ttl: Any) -> bool:
@@ -1302,9 +1299,7 @@ def blank_cache_policy_stub(cache_disabled: Optional[bool] = None):
     from types import SimpleNamespace
     if cache_disabled is None:
         cache_disabled = prompt_caching_disabled_from_config()
-    return SimpleNamespace(
-        provider="", base_url="", api_mode="", model="", _cache_disabled=bool(cache_disabled)
-    )
+    return SimpleNamespace(provider="", base_url="", api_mode="", model="", _cache_disabled=bool(cache_disabled))
 
 
 def plan_cache_sections_for_destination(
@@ -1321,29 +1316,19 @@ def plan_cache_sections_for_destination(
         strip_anthropic_cache_control, strip_anthropic_tool_cache_control,
     )
     stub = blank_cache_policy_stub(cache_disabled)
-    should_cache, native_layout = anthropic_prompt_cache_policy(
-        stub, provider=provider, base_url=base_url, api_mode=api_mode, model=model
-    )
+    dest = dict(provider=provider, base_url=base_url, api_mode=api_mode, model=model)
+    should_cache, native_layout = anthropic_prompt_cache_policy(stub, **dest)
     if not should_cache:
         canonical_messages = copy.deepcopy(messages or [])
         strip_anthropic_cache_control(canonical_messages)
         return canonical_messages, strip_anthropic_tool_cache_control(tools)
     plan = build_prompt_cache_plan(
-        messages,
-        tools,
-        cache_ttl=effective_cache_ttl(
-            # effective_cache_ttl resolves None → "5m"; cache-disabled agents never reach here.
-            cache_ttl,
-            provider=provider,
-            model=model,
-        ),
+        messages, tools,
+        # effective_cache_ttl resolves None → "5m"; cache-disabled agents never reach here.
+        cache_ttl=effective_cache_ttl(cache_ttl, provider=provider, model=model),
         native_anthropic=native_layout,
-        static_system_prefix=(
-            static_system_prefix if isinstance(static_system_prefix, str) else None
-        ),
-        direct_native_tool_cache=_direct_native_anthropic_tool_cache_capability(
-            stub, provider=provider, base_url=base_url, api_mode=api_mode, model=model
-        ),
+        static_system_prefix=static_system_prefix if isinstance(static_system_prefix, str) else None,
+        direct_native_tool_cache=_direct_native_anthropic_tool_cache_capability(stub, **dest),
         # LiteLLM-style envelope routes forward part-level markers into tool_result.content[] →
         # non-retryable 400.
         tool_part_markers=envelope_tool_part_cache_markers_supported(provider, base_url),
@@ -1371,19 +1356,15 @@ def _moa_aggregator_cache_policy(agent, eff_model: str) -> tuple[bool, bool]:
         from hermes_cli.config import load_config as _load_moa_cfg
         from hermes_cli.moa_config import resolve_moa_preset
         from hermes_cli.runtime_provider import resolve_runtime_provider
-        preset = resolve_moa_preset(_load_moa_cfg().get("moa") or {}, eff_model or None)
-        agg = preset.get("aggregator") or {}
+        agg = resolve_moa_preset(_load_moa_cfg().get("moa") or {}, eff_model or None).get("aggregator") or {}
         agg_provider = str(agg.get("provider") or "").strip()
         agg_model = str(agg.get("model") or "").strip()
         if agg_provider and agg_model:
-            agg_base_url = ""
-            agg_api_mode = ""
-            try:
+            agg_base_url = agg_api_mode = ""
+            with contextlib.suppress(Exception):
                 rt = resolve_runtime_provider(requested=agg_provider, target_model=agg_model)
                 agg_base_url = rt.get("base_url") or ""
                 agg_api_mode = rt.get("api_mode") or ""
-            except Exception:
-                pass
             return anthropic_prompt_cache_policy(
                 agent, provider=agg_provider, base_url=agg_base_url, api_mode=agg_api_mode, model=agg_model
             )
@@ -1400,21 +1381,13 @@ def _route_may_be_custom(agent, eff_provider: str, provider_lower: str, eff_base
         # custom_provider_aliases) so spelling differences don't drop declarations.
         from hermes_cli.providers import custom_provider_aliases
         from hermes_cli.route_identity import normalize_route_base_url
-        provider_ids = {provider_lower}
-        if provider_lower.startswith("custom:"):
-            provider_ids.add(provider_lower.removeprefix("custom:"))
+        provider_ids = {provider_lower, provider_lower.removeprefix("custom:")}
         eff_url_normalized = normalize_route_base_url(eff_base_url)
-        for entry in custom_providers:
-            if not isinstance(entry, dict):
-                continue
-            entry_ids = custom_provider_aliases(
-                str(entry.get("name") or ""), str(entry.get("provider_key") or "")
-            )
-            if provider_ids & entry_ids or (
-                eff_url_normalized and normalize_route_base_url(entry.get("base_url")) == eff_url_normalized
-            ):
-                return True
-        return False
+        return any(
+            provider_ids & custom_provider_aliases(str(entry.get("name") or ""), str(entry.get("provider_key") or ""))
+            or (eff_url_normalized and normalize_route_base_url(entry.get("base_url")) == eff_url_normalized)
+            for entry in custom_providers if isinstance(entry, dict)
+        )
     if custom_providers is not None:
         return False  # attached empty list never matches
     # None = list not attached yet (early init or blank stub). Avoid rebuilding the list for
