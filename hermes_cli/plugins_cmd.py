@@ -1556,7 +1556,7 @@ def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]
 
 def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disabled, categories, console):
     """Custom curses screen with checkboxes + category action rows."""
-    from hermes_cli.curses_ui import flush_stdin
+    from hermes_cli.curses_ui import _addnstr, flush_stdin
     chosen = set(plugin_selected)
     n_plugins = len(plugin_keys)
     n_categories = len(categories)
@@ -1576,10 +1576,12 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
         return base | curses.color_pair(pair) if curses.has_colors() else base
 
     def _put(stdscr, y, x, text, max_x, attr):
-        try:
-            stdscr.addnstr(y, x, text, max_x - 1, attr)
-        except curses.error:
-            pass
+        _addnstr(stdscr, y, x, text, max_x - 1, attr)
+
+    def _row(text, idx, cursor, pair):
+        """One navigable body row: arrow marker + bold color when *idx* is the cursor."""
+        arrow = "\u2192" if idx == cursor else " "
+        return (f" {arrow} {text}", _attr(curses.A_BOLD, pair) if idx == cursor else curses.A_NORMAL)
 
     def _configure_category(ci):
         """Leave curses, run the category's picker, refresh its row, re-enter curses."""
@@ -1604,17 +1606,12 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected, disab
             lines.append(("  General Plugins", _attr(curses.A_BOLD, 2)))
             for i in range(scroll_offset, min(n_plugins, scroll_offset + max(visible_rows, 0))):
                 check = "\u2713" if i in chosen else " "
-                arrow = "\u2192" if i == cursor else " "
-                attr = _attr(curses.A_BOLD, 1) if i == cursor else curses.A_NORMAL
-                lines.append((f" {arrow} [{check}] {plugin_labels[i]}", attr))
+                lines.append(_row(f"[{check}] {plugin_labels[i]}", i, cursor, 1))
         lines.append(("", curses.A_NORMAL))
         if n_categories > 0:
             lines.append(("  Provider Plugins", _attr(curses.A_BOLD, 2)))
             for ci, (cat_name, cat_current, _cat_fn) in enumerate(categories):
-                cat_idx = n_plugins + ci
-                arrow = "\u2192" if cat_idx == cursor else " "
-                attr = _attr(curses.A_BOLD, 3) if cat_idx == cursor else curses.A_NORMAL
-                lines.append((f" {arrow}   {cat_name:<24} \u25b8 {cat_current}", attr))
+                lines.append(_row(f"  {cat_name:<24} \u25b8 {cat_current}", n_plugins + ci, cursor, 3))
         return lines
 
     def _draw(stdscr):
