@@ -3,6 +3,7 @@ file the standalone ``hindsight-embed`` daemon consumes, and the health-grace ex
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import logging
 import os
@@ -39,11 +40,9 @@ def _export_port_health_grace_timeout(config: dict[str, Any]) -> None:
     try:
         seconds = float(raw)
     except (TypeError, ValueError):
-        seconds = None
-    if seconds is None or seconds < 0:
-        logger.warning("%s Hindsight port_health_grace_timeout %r; ignoring.",
-                       "Invalid" if seconds is None else "Negative", raw)
-        return
+        return logger.warning("Invalid Hindsight port_health_grace_timeout %r; ignoring.", raw)
+    if seconds < 0:
+        return logger.warning("Negative Hindsight port_health_grace_timeout %r; ignoring.", raw)
     os.environ.setdefault(_PORT_HEALTH_GRACE_ENV, repr(seconds))
 
 
@@ -91,10 +90,14 @@ def _embedded_profile_env_path(config: dict[str, Any]) -> Path:
     return Path.home() / ".hindsight" / "profiles" / f"{profile}.env"
 
 
+def _embedded_llm_api_key(config: dict[str, Any]) -> str:
+    return config.get("llmApiKey") or config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", "")
+
+
 def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | None = None) -> dict[str, str]:
     """Build the profile-scoped env that standalone hindsight-embed consumes."""
     if llm_api_key is None:
-        llm_api_key = config.get("llmApiKey") or config.get("llm_api_key") or get_secret("HINDSIGHT_LLM_API_KEY", "")
+        llm_api_key = _embedded_llm_api_key(config)
     env_values = {
         "HINDSIGHT_API_LLM_PROVIDER": str(_daemon_llm_provider(config.get("llm_provider", ""))),
         "HINDSIGHT_API_LLM_API_KEY": str(llm_api_key or ""),
@@ -104,26 +107,19 @@ def _build_embedded_profile_env(config: dict[str, Any], *, llm_api_key: str | No
     base_url = config.get("llm_base_url") or os.environ.get("HINDSIGHT_API_LLM_BASE_URL", "")
     if base_url:
         env_values["HINDSIGHT_API_LLM_BASE_URL"] = str(base_url)
-    idle_timeout = config.get("idle_timeout")
-    if idle_timeout is None:
+    if (idle_timeout := config.get("idle_timeout")) is None:
         idle_timeout = os.environ.get("HINDSIGHT_IDLE_TIMEOUT")
     if idle_timeout is not None and idle_timeout != "":
         env_values["HINDSIGHT_EMBED_DAEMON_IDLE_TIMEOUT"] = str(_parse_int_setting(idle_timeout, _DEFAULT_IDLE_TIMEOUT))
     return env_values
 
 
-def _chmod_owner_only(path: Path) -> None:
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
-
 def _secure_write_profile_env(profile_env: Path, content: str) -> None:
     """Create/overwrite *profile_env* owner-only (0600); a pre-existing file is
     tightened BEFORE the plaintext LLM API key is written."""
     if profile_env.exists():
-        _chmod_owner_only(profile_env)
+        with contextlib.suppress(OSError):
+            os.chmod(profile_env, 0o600)
     fd = os.open(str(profile_env), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write(content)
@@ -136,7 +132,8 @@ def _validate_profile_env_permissions(profile_env: Path) -> None:
     import stat
 
     if stat.S_IMODE(profile_env.stat().st_mode) != 0o600:
-        _chmod_owner_only(profile_env)
+        with contextlib.suppress(OSError):
+            os.chmod(profile_env, 0o600)
         if stat.S_IMODE(profile_env.stat().st_mode) != 0o600:
             raise PermissionError(
                 f"Embedded Hindsight profile environment is not owner-only: {profile_env}"
@@ -154,9 +151,7 @@ def _materialize_embedded_profile_env(config: dict[str, Any], *, llm_api_key: st
         _secure_write_profile_env(profile_env, content)
         _validate_profile_env_permissions(profile_env)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             profile_env.unlink()
-        except OSError:
-            pass
         raise
     return profile_env
