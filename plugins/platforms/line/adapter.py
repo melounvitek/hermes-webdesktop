@@ -734,14 +734,15 @@ class LineAdapter(BasePlatformAdapter):
         """Shared preflight for send_image_file/send_voice/send_video → ``(path, error)``."""
         max_bytes, size_error, url_error = _OUTBOUND_MEDIA[kind]
         path = Path(file_path)
-        if not path.exists() or not path.is_file():
+        if not path.is_file():
             return None, SendResult(success=False, error=f"{kind} file not found: {file_path}")
-        if path.stat().st_size > max_bytes:
-            return None, SendResult(success=False, error=size_error)
-        if not self._client:
-            return None, SendResult(success=False, error="LINE adapter not connected")
-        if self._missing_public_url():
-            return None, SendResult(success=False, error=url_error)
+        for failed, error in (
+            (path.stat().st_size > max_bytes, size_error),
+            (not self._client, "LINE adapter not connected"),
+            (self._missing_public_url(), url_error),
+        ):
+            if failed:
+                return None, SendResult(success=False, error=error)
         return path, None
 
     async def _handle_media(self, request) -> Any:
@@ -763,9 +764,8 @@ class LineAdapter(BasePlatformAdapter):
             hermes_home = Path(get_hermes_home()).resolve()
         except Exception:
             hermes_home = Path.home().joinpath(".hermes").resolve()
-        allowed_roots = {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(), hermes_home}
         resolved = path.resolve()
-        if not any(resolved.is_relative_to(r) for r in allowed_roots):
+        if not any(resolved.is_relative_to(r) for r in (Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve(), hermes_home)):
             logger.warning("LINE: refusing to serve outside allowed roots: %s", resolved)
             return web.Response(status=403, text="forbidden")
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
