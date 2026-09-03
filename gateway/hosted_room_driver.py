@@ -232,8 +232,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             authority_epoch INTEGER NOT NULL CHECK (authority_epoch >= 1), process_generation TEXT NOT NULL,
             lease_generation INTEGER NOT NULL CHECK (lease_generation >= 1),
             expires_at REAL NOT NULL, acquired_at REAL NOT NULL, updated_at REAL NOT NULL, released_at REAL,
-            FOREIGN KEY (room_id) REFERENCES hosted_rooms(room_id))"""
-    )
+            FOREIGN KEY (room_id) REFERENCES hosted_rooms(room_id))""")
     _create_task_table(conn)
     _validate_schema(conn)
     conn.execute(_TASK_INDEX_SQL.format(if_not_exists="IF NOT EXISTS "))
@@ -254,8 +253,7 @@ def _validate_schema(conn: sqlite3.Connection) -> None:
 
 def _schema_objects_exist(conn: sqlite3.Connection) -> bool:
     rows = conn.execute("""SELECT name FROM sqlite_master WHERE type='table'
-           AND name IN ('hosted_room_driver_leases', 'hosted_room_driver_tasks')"""
-    ).fetchall()
+           AND name IN ('hosted_room_driver_leases', 'hosted_room_driver_tasks')""").fetchall()
     if {row[0] for row in rows} != {"hosted_room_driver_leases", "hosted_room_driver_tasks"}:
         return False
     index = conn.execute(

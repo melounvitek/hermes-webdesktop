@@ -396,8 +396,7 @@ def _migrate_legacy_columns(conn: sqlite3.Connection) -> None:
                       )
                       FROM hosted_room_events
                       WHERE hosted_room_events.room_id=hosted_rooms.room_id
-                  ), 0)"""
-        )
+                  ), 0)""")
 
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
@@ -636,8 +635,7 @@ def list_room_link_records(db_path: DbPath) -> list[dict[str, Any]]:
                       catalog_json, cancellation_scope_id, trace_id,
                       transport_security, status, updated_at
                  FROM hosted_room_links
-             ORDER BY room_id, member_id"""
-        ).fetchall()
+             ORDER BY room_id, member_id""").fetchall()
     return [dict(row) for row in rows]
 
 
