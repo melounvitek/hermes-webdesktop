@@ -6,10 +6,27 @@ Extracted from ``run_agent.py``; every method resolves through ``AIAgent``'s MRO
 import json
 import os
 import time
+from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
 from agent.usage_pricing import normalize_usage
+
+_SENSITIVE_HOOK_KEYS = {"api_key", "authorization", "proxy_authorization", "cookie", "set_cookie"}
+
+
+def _model_dump(value: Any) -> Any:
+    """``value.model_dump(mode="json")`` with graceful degradation for older pydantic signatures.
+
+    warnings=False: pydantic UserWarnings on generic-union SDK models would leak to the terminal.
+    """
+    try:
+        return value.model_dump(mode="json", warnings=False)
+    except TypeError:
+        try:
+            return value.model_dump(mode="json")
+        except TypeError:
+            return value.model_dump()
 
 
 class ApiRequestHooksMixin:
@@ -44,23 +61,11 @@ class ApiRequestHooksMixin:
         if not isinstance(key, str):
             return False
         lowered = key.lower().replace("-", "_")
-        exact = {
-            "api_key",
-            "authorization",
-            "proxy_authorization",
-            "cookie",
-            "set_cookie",
-        }
-        return lowered in exact or lowered.endswith("_api_key")
+        return lowered in _SENSITIVE_HOOK_KEYS or lowered.endswith("_api_key")
 
     @classmethod
     def _hook_jsonable(
-        cls,
-        value: Any,
-        *,
-        depth: int = 0,
-        max_depth: int = 8,
-        max_string: int = 8000,
+        cls, value: Any, *, depth: int = 0, max_depth: int = 8, max_string: int = 8000,
         max_sequence: int = 200,
     ) -> Any:
         if depth > max_depth:
@@ -73,6 +78,13 @@ class ApiRequestHooksMixin:
             return value
         if isinstance(value, (bytes, bytearray)):
             return f"<{len(value)} bytes>"
+
+        def recurse(item):
+            return cls._hook_jsonable(
+                item, depth=depth + 1, max_depth=max_depth, max_string=max_string,
+                max_sequence=max_sequence,
+            )
+
         if isinstance(value, dict):
             out: Dict[str, Any] = {}
             for idx, (key, item) in enumerate(value.items()):
@@ -80,111 +92,43 @@ class ApiRequestHooksMixin:
                     out["_truncated_items"] = len(value) - max_sequence
                     break
                 str_key = str(key)
-                if cls._is_sensitive_hook_key(str_key):
-                    out[str_key] = "<redacted>"
-                else:
-                    out[str_key] = cls._hook_jsonable(
-                        item,
-                        depth=depth + 1,
-                        max_depth=max_depth,
-                        max_string=max_string,
-                        max_sequence=max_sequence,
-                    )
+                out[str_key] = "<redacted>" if cls._is_sensitive_hook_key(str_key) else recurse(item)
             return out
         if isinstance(value, (list, tuple, set)):
             seq = list(value)
-            out = [
-                cls._hook_jsonable(
-                    item,
-                    depth=depth + 1,
-                    max_depth=max_depth,
-                    max_string=max_string,
-                    max_sequence=max_sequence,
-                )
-                for item in seq[:max_sequence]
-            ]
+            out = [recurse(item) for item in seq[:max_sequence]]
             if len(seq) > max_sequence:
                 out.append({"_truncated_items": len(seq) - max_sequence})
             return out
-        try:
+        with suppress(Exception):
             if hasattr(value, "model_dump"):
-                try:
-                    # warnings=False: pydantic UserWarnings on generic-union SDK models would leak to the
-                    # terminal.
-                    dumped = value.model_dump(mode="json", warnings=False)
-                except TypeError:
-                    try:
-                        dumped = value.model_dump(mode="json")
-                    except TypeError:
-                        dumped = value.model_dump()
-                return cls._hook_jsonable(
-                    dumped,
-                    depth=depth + 1,
-                    max_depth=max_depth,
-                    max_string=max_string,
-                    max_sequence=max_sequence,
-                )
-        except Exception:
-            pass
-        try:
+                return recurse(_model_dump(value))
+        with suppress(Exception):
             from dataclasses import asdict, is_dataclass
             if is_dataclass(value):
-                return cls._hook_jsonable(
-                    asdict(value),
-                    depth=depth + 1,
-                    max_depth=max_depth,
-                    max_string=max_string,
-                    max_sequence=max_sequence,
-                )
-        except Exception:
-            pass
+                return recurse(asdict(value))
         if isinstance(value, SimpleNamespace):
-            return cls._hook_jsonable(
-                vars(value),
-                depth=depth + 1,
-                max_depth=max_depth,
-                max_string=max_string,
-                max_sequence=max_sequence,
-            )
+            return recurse(vars(value))
         if hasattr(value, "__dict__"):
-            try:
-                public_attrs = {
-                    k: v
-                    for k, v in vars(value).items()
-                    if not str(k).startswith("_")
-                }
-                return cls._hook_jsonable(
-                    public_attrs,
-                    depth=depth + 1,
-                    max_depth=max_depth,
-                    max_string=max_string,
-                    max_sequence=max_sequence,
-                )
-            except Exception:
-                pass
+            with suppress(Exception):
+                return recurse({k: v for k, v in vars(value).items() if not str(k).startswith("_")})
         return str(value)[:max_string]
 
     @classmethod
     def _sanitize_hook_payload(cls, value: Any) -> Any:
-        payload = cls._hook_jsonable(value)
+        """JSON-able payload under the size cap: full → reduced caps → truncated preview."""
         limit = cls._hook_payload_max_chars()
-        try:
-            encoded = json.dumps(payload, ensure_ascii=False, default=str)
-        except Exception:
-            return str(payload)[:limit]
-        if len(encoded) <= limit:
-            return payload
-        payload = cls._hook_jsonable(value, max_string=1000, max_sequence=50)
-        try:
-            encoded = json.dumps(payload, ensure_ascii=False, default=str)
-        except Exception:
-            return str(payload)[:limit]
-        if len(encoded) <= limit:
-            return payload
+        encoded = ""
+        for caps in ({}, {"max_string": 1000, "max_sequence": 50}):
+            payload = cls._hook_jsonable(value, **caps)
+            try:
+                encoded = json.dumps(payload, ensure_ascii=False, default=str)
+            except Exception:
+                return str(payload)[:limit]
+            if len(encoded) <= limit:
+                return payload
         return {
-            "_truncated": True,
-            "original_type": type(value).__name__,
-            "preview": encoded[:limit],
+            "_truncated": True, "original_type": type(value).__name__, "preview": encoded[:limit]
         }
 
     def _api_request_payload_for_hook(self, api_kwargs: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -193,19 +137,10 @@ class ApiRequestHooksMixin:
             for key, value in (api_kwargs or {}).items()
             if key not in {"timeout", "http_client"}
         }
-        return self._sanitize_hook_payload(
-            {
-                "method": "POST",
-                "body": body,
-            }
-        )
+        return self._sanitize_hook_payload({"method": "POST", "body": body})
 
     def _api_response_payload_for_hook(
-        self,
-        response: Any,
-        assistant_message: Any,
-        *,
-        finish_reason: Optional[str],
+        self, response: Any, assistant_message: Any, *, finish_reason: Optional[str]
     ) -> Dict[str, Any]:
         # Raw provider SDK tool_call objects are handed to the sanitizer on purpose; `_hook_jsonable` must
         # keep normalising them (model_dump / __dict__ / dataclass) or subscribers get str() blobs.
@@ -224,26 +159,15 @@ class ApiRequestHooksMixin:
         )
 
     def _invoke_api_request_error_hook(
-        self,
-        *,
-        task_id: str,
-        turn_id: str,
-        api_request_id: str,
-        api_call_count: int,
-        api_start_time: float,
-        api_kwargs: Optional[Dict[str, Any]],
-        error_type: str,
-        error_message: str,
-        status_code: Optional[int] = None,
-        retry_count: Optional[int] = None,
-        max_retries: Optional[int] = None,
-        retryable: Optional[bool] = None,
+        self, *, task_id: str, turn_id: str, api_request_id: str, api_call_count: int,
+        api_start_time: float, api_kwargs: Optional[Dict[str, Any]], error_type: str,
+        error_message: str, status_code: Optional[int] = None, retry_count: Optional[int] = None,
+        max_retries: Optional[int] = None, retryable: Optional[bool] = None,
         reason: Optional[str] = None,
     ) -> None:
         # Lazy module import (not from-import) so tests can replace lifecycle dispatch at this call site.
-        try:
+        with suppress(Exception):
             from hermes_cli import lifecycle as _lifecycle
-
             if not _lifecycle.has_hook("api_request_error"):
                 return
             ended_at = time.time()
@@ -267,11 +191,6 @@ class ApiRequestHooksMixin:
                 max_retries=max_retries,
                 retryable=retryable,
                 reason=reason,
-                error={
-                    "type": error_type,
-                    "message": error_message,
-                },
+                error={"type": error_type, "message": error_message},
                 request=self._api_request_payload_for_hook(api_kwargs),
             )
-        except Exception:
-            pass

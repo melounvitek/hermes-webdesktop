@@ -282,13 +282,16 @@ class TestInlinedDisplayMasks:
         from pathlib import Path
         src = (Path(__file__).resolve().parent.parent.parent
                / "agent" / "agent_init.py").read_text()
-        assert src.count("is_token_provider(") >= 2, (
+        # Both banner paths route through the shared ``_print_key_banner`` helper,
+        # which owns the single ``is_token_provider`` guard.
+        assert src.count("_print_key_banner(") >= 3, (
             "agent/agent_init.py must guard BOTH masked-banner paths "
             "(chat_completions and anthropic_messages) with "
-            "is_token_provider()."
+            "is_token_provider() via _print_key_banner()."
         )
-        assert src.count('"🔑 Using credentials: Microsoft Entra ID"') >= 2, (
-            "agent/agent_init.py banner blocks should print a static "
+        assert "is_token_provider(" in src
+        assert '"🔑 Using credentials: Microsoft Entra ID"' in src, (
+            "agent/agent_init.py banner helper should print a static "
             "'Microsoft Entra ID' label for callable api_keys — no "
             "placeholder plumbing, no describe-mask fallback."
         )

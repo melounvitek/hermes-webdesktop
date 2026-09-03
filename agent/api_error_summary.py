@@ -10,14 +10,46 @@ from typing import Any, Dict, Optional
 
 from agent.redact import redact_sensitive_text
 
+# Offline DNS failures are wrapped in a generic "Connection error" by SDKs — inspect the chain.
+_NETWORK_RESOLUTION_MARKERS = (
+    "temporary failure in name resolution",
+    "name or service not known",
+    "nodename nor servname provided, or not known",
+    "getaddrinfo failed",
+    "no address associated with hostname",
+    "network is unreachable",
+)
+_XAI_ENTITLEMENT_HINT = (
+    " — xAI rejected this OAuth account. NOTE: X Premium+ does NOT "
+    "include xAI API access — only standalone SuperGrok subscribers "
+    "can use this provider. Other possible causes: no Grok "
+    "subscription, your tier doesn't include this model, or your "
+    "quota is exhausted. Check https://grok.com/?_s=usage to see "
+    "which, or run `/model` to switch providers."
+)
+_ERROR_DETAIL_KEYS = ("message", "detail", "error", "code", "type")
+
+
+def _is_xai_entitlement_text(lower: str) -> bool:
+    """xAI's permission-denied body text for an unsubscribed / under-tiered / exhausted account."""
+    return (
+        "do not have an active grok subscription" in lower
+        or ("out of available resources" in lower and "grok" in lower)
+        or ("does not have permission" in lower and "grok" in lower)
+    )
+
+
+def _http_prefix(error: Exception) -> str:
+    status_code = getattr(error, "status_code", None)
+    return f"HTTP {status_code}: " if status_code else ""
+
 
 class ApiErrorSummaryMixin:
     """Provider error -> user/log-safe summary (see module docstring)."""
 
     @staticmethod
     def _is_entitlement_failure(
-        error_context: Optional[Dict[str, Any]],
-        status_code: Optional[int],
+        error_context: Optional[Dict[str, Any]], status_code: Optional[int]
     ) -> bool:
         """Detect subscription/entitlement 401/403s that masquerade as auth failures.
 
@@ -31,26 +63,14 @@ class ApiErrorSummaryMixin:
         if not isinstance(error_context, dict):
             return False
         # Single lowercase haystack over every field shape (message/reason and raw code/error).
-        message = str(error_context.get("message") or "").lower()
-        reason = str(error_context.get("reason") or "").lower()
-        code = str(error_context.get("code") or "").lower()
-        err = str(error_context.get("error") or "").lower()
-        haystack = f"{message} {reason} {code} {err}"
+        haystack = " ".join(
+            str(error_context.get(k) or "").lower() for k in ("message", "reason", "code", "error")
+        )
         if not haystack.strip():
             return False
-        # xAI's disambiguator for stale-token vs unsubscribed: same permission-denied text, only one carries
-        # this suffix. Bail out so a stale OAuth token takes the credential-refresh path (#29344).
-        if "[wke=unauthenticated:" in haystack:
+        if "[wke=unauthenticated:" in haystack or "oauth2 access token could not be validated" in haystack:
             return False
-        if "oauth2 access token could not be validated" in haystack:
-            return False
-        if "do not have an active grok subscription" in haystack:
-            return True
-        if "out of available resources" in haystack and "grok" in haystack:
-            return True
-        if "does not have permission" in haystack and "grok" in haystack:
-            return True
-        return False
+        return _is_xai_entitlement_text(haystack)
 
     @staticmethod
     def _decorate_xai_entitlement_error(detail: str) -> str:
@@ -58,31 +78,14 @@ class ApiErrorSummaryMixin:
 
         xAI's ``/v1/responses`` uses one body for several causes (no subscription, tier lacks the model, quota
         exhausted). The least obvious: X Premium+ does NOT include API access — only SuperGrok does. Lead with
-        that, keep the raw text, point at https://grok.com/?_s=usage. Matched once per detail string.
+        that, keep the raw text, point at https://grok.com/?_s=usage. Idempotent: a substring unique to the
+        hint marks prior decoration.
         """
-        if not detail:
+        if not detail or not _is_xai_entitlement_text(detail.lower()):
             return detail
-        lower = detail.lower()
-        is_entitlement = (
-            "do not have an active grok subscription" in lower
-            or ("out of available resources" in lower and "grok" in lower)
-            or ("does not have permission" in lower and "grok" in lower)
-        )
-        if not is_entitlement:
-            return detail
-        hint = (
-            " — xAI rejected this OAuth account. NOTE: X Premium+ does NOT "
-            "include xAI API access — only standalone SuperGrok subscribers "
-            "can use this provider. Other possible causes: no Grok "
-            "subscription, your tier doesn't include this model, or your "
-            "quota is exhausted. Check https://grok.com/?_s=usage to see "
-            "which, or run `/model` to switch providers."
-        )
-        # Idempotency: detect prior decoration by a substring unique to the
-        # hint (not present in xAI's own body text).
         if "X Premium+ does NOT include" in detail:
             return detail
-        return f"{detail}{hint}"
+        return f"{detail}{_XAI_ENTITLEMENT_HINT}"
 
     @staticmethod
     def _coerce_api_error_detail(value: Any) -> str:
@@ -90,11 +93,11 @@ class ApiErrorSummaryMixin:
         if isinstance(value, str):
             return value
         if isinstance(value, dict):
-            for key in ("message", "detail", "error", "code", "type"):
+            for key in _ERROR_DETAIL_KEYS:
                 nested = value.get(key)
                 if isinstance(nested, str) and nested.strip():
                     return nested
-            for key in ("message", "detail", "error", "code", "type"):
+            for key in _ERROR_DETAIL_KEYS:
                 if key in value:
                     nested_detail = ApiErrorSummaryMixin._coerce_api_error_detail(value[key])
                     if nested_detail:
@@ -104,10 +107,7 @@ class ApiErrorSummaryMixin:
             except TypeError:
                 return str(value)
         if isinstance(value, (list, tuple)):
-            parts = [
-                ApiErrorSummaryMixin._coerce_api_error_detail(item)
-                for item in value
-            ]
+            parts = [ApiErrorSummaryMixin._coerce_api_error_detail(item) for item in value]
             return "; ".join(part for part in parts if part)
         if value is None:
             return ""
@@ -122,49 +122,30 @@ class ApiErrorSummaryMixin:
         """
         raw = str(error)
 
-        # Offline DNS failures are wrapped in a generic "Connection error" by SDKs — inspect the chain.
-        network_resolution_markers = (
-            "temporary failure in name resolution",
-            "name or service not known",
-            "nodename nor servname provided, or not known",
-            "getaddrinfo failed",
-            "no address associated with hostname",
-            "network is unreachable",
-        )
         current: Optional[BaseException] = error
         seen: set[int] = set()
         while current is not None and id(current) not in seen:
             seen.add(id(current))
-            if any(
-                marker in str(current).lower()
-                for marker in network_resolution_markers
-            ):
+            if any(marker in str(current).lower() for marker in _NETWORK_RESOLUTION_MARKERS):
                 return (
                     "Hermes can't reach the model provider. You may be offline. "
                     "Check your internet connection and try again."
                 )
             current = current.__cause__ or current.__context__
 
-        if (
-            isinstance(error, ValueError)
-            and "expected ident at line" in raw.lower()
-        ):
+        if isinstance(error, ValueError) and "expected ident at line" in raw.lower():
             return f"Malformed provider streaming response: {raw[:300]}"
 
-        # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
+        prefix = _http_prefix(error)
+        # Cloudflare / proxy HTML pages: grab the <title> (and Ray ID) for a clean summary
         if "<!DOCTYPE" in raw or "<html" in raw:
             m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.IGNORECASE)
             title = m.group(1).strip() if m else "HTML error page (title not found)"
-            # Also grab Cloudflare Ray ID if present
             ray = re.search(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>", raw)
-            ray_id = ray.group(1).strip() if ray else None
-            status_code = getattr(error, "status_code", None)
-            parts = []
-            if status_code:
-                parts.append(f"HTTP {status_code}")
+            parts = [prefix[:-2]] if prefix else []
             parts.append(title)
-            if ray_id:
-                parts.append(f"Ray {ray_id}")
+            if ray:
+                parts.append(f"Ray {ray.group(1).strip()}")
             return " — ".join(parts)
 
         # GeminiAPIError already composes a clean one-liner with guidance; don't re-extract the raw body.
@@ -176,13 +157,11 @@ class ApiErrorSummaryMixin:
         if isinstance(body, dict):
             msg = body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body.get("message")
             if msg:
-                status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
                 msg = ApiErrorSummaryMixin._coerce_api_error_detail(msg)
                 return ApiErrorSummaryMixin._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
-        # SDK may leave body empty while httpx has the payload (#36109). Redact: the body is
-        # attacker-influenced and may echo Authorization / x-api-key / request JSON.
+        # SDK may leave body empty while httpx has the payload. Redact: the body is attacker-influenced
+        # and may echo Authorization / x-api-key / request JSON.
         response = getattr(error, "response", None)
         if response is not None:
             try:
@@ -190,8 +169,6 @@ class ApiErrorSummaryMixin:
             except Exception:
                 snippet = ""
             if snippet:
-                status_code = getattr(error, "status_code", None)
-                prefix = f"HTTP {status_code}: " if status_code else ""
                 try:
                     payload = json.loads(snippet)
                 except (json.JSONDecodeError, TypeError):
@@ -205,13 +182,11 @@ class ApiErrorSummaryMixin:
                 return redact_sensitive_text(f"{prefix}{snippet[:300]}")
 
         # Fallback: truncate the raw string but give more room than 200 chars
-        status_code = getattr(error, "status_code", None)
-        prefix = f"HTTP {status_code}: " if status_code else ""
         return ApiErrorSummaryMixin._decorate_xai_entitlement_error(f"{prefix}{raw[:500]}")
 
     def _mask_api_key_for_logs(self, key: Any) -> Optional[str]:
-        # Azure Foundry Entra ID bearer providers are callables — never
-        # invoke them in log paths; identify the auth surface instead.
+        # Azure Foundry Entra ID bearer providers are callables — never invoke them in log
+        # paths; identify the auth surface instead.
         if callable(key) and not isinstance(key, str):
             return "<entra-id-bearer>"
         if not key:
@@ -224,16 +199,10 @@ class ApiErrorSummaryMixin:
         """Clean up error messages for user display, removing HTML content and truncating."""
         if not error_msg:
             return "Unknown error"
-
-        # Remove HTML content (common with CloudFlare and gateway error pages)
+        # HTML content is common with CloudFlare and gateway error pages
         if error_msg.strip().startswith('<!DOCTYPE html') or '<html' in error_msg:
             return "Service temporarily unavailable (HTML error page returned)"
-
-        # Remove newlines and excessive whitespace
         cleaned = ' '.join(error_msg.split())
-
-        # Truncate if too long
         if len(cleaned) > 150:
             cleaned = cleaned[:150] + "..."
-
         return cleaned
