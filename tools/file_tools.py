@@ -112,8 +112,7 @@ def _apply_char_budget(result_dict: dict, content: str, offset: int, total_lines
     if len(trimmed.split("\n", 1)[0]) >= max_chars:
         result_dict["hint"] += (
             " Note: the first line alone exceeded the budget and was "
-            "clamped mid-line; its remainder is not retrievable via "
-            "offset.")
+            "clamped mid-line; its remainder is not retrievable via offset.")
     return trimmed
 
 
