@@ -62,12 +62,11 @@ def _is_uv_macos_store(path: str) -> bool:
 
 def _venv_dir(project_root: Path | None = None) -> Path | None:
     root = Path(project_root) if project_root is not None else Path(__file__).resolve().parents[1]
-    for name in ("venv", ".venv"):
-        candidate = root / name
-        venv_py = venv_python_path(candidate)
-        if venv_py.is_file() or venv_py.is_symlink():
-            return candidate
-    return None
+    return next((root / n for n in ("venv", ".venv") if _present(venv_python_path(root / n))), None)
+
+
+def _present(path: Path) -> bool:
+    return path.is_file() or path.is_symlink()
 
 
 def _interpreter_file(src: str | Path) -> Path | None:
@@ -77,17 +76,13 @@ def _interpreter_file(src: str | Path) -> Path | None:
         return p
     if not p.is_dir():
         return None
-    for name in _STORE_BIN_NAMES:
-        candidate = p / name
-        if candidate.is_file():
-            return candidate
     try:
-        for candidate in sorted(p.glob("python3.*")):
-            if candidate.is_file() and not candidate.name.endswith((".dSYM", ".txt")):
-                return candidate
+        candidates = [p / n for n in _STORE_BIN_NAMES] + sorted(
+            c for c in p.glob("python3.*") if not c.name.endswith((".dSYM", ".txt"))
+        )
+        return next((c for c in candidates if c.is_file()), None)
     except OSError:
         return None
-    return None
 
 
 def _interpreter_source(venv_dir: Path) -> str | None:

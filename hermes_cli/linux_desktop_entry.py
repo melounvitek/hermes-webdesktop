@@ -31,9 +31,7 @@ def is_supported() -> bool:
 
 def _xdg_data_home() -> Path:
     raw = os.environ.get("XDG_DATA_HOME")
-    if raw and raw.strip():
-        return Path(raw).expanduser()
-    return Path.home() / ".local" / "share"
+    return Path(raw).expanduser() if raw and raw.strip() else Path.home() / ".local" / "share"
 
 
 def desktop_entry_path() -> Path:
@@ -41,7 +39,6 @@ def desktop_entry_path() -> Path:
 
 
 def icon_path(project_root: Path) -> Path:
-    """The app icon shipped in the desktop workspace."""
     return project_root / "apps" / "desktop" / "assets" / "icon.png"
 
 
@@ -72,9 +69,8 @@ def _can_import_hermes_cli(interpreter: Path) -> bool:
     transient hiccup doesn't freeze the assumption for the session.
     """
     key = str(interpreter)
-    cached = _probe_cache.get(key)
-    if cached is not None:
-        return cached
+    if key in _probe_cache:
+        return _probe_cache[key]
     ok = _run_quiet(
         [key, "-I", "-c", "import hermes_cli.main"],
         cwd=os.path.abspath(os.sep), timeout=15, on_error=None,
@@ -86,7 +82,7 @@ def _can_import_hermes_cli(interpreter: Path) -> bool:
 
 
 def _running_interpreter_fallback() -> str:
-    """The RUNNING interpreter: it has ``hermes_cli`` importable by definition."""
+    """The RUNNING interpreter — it has ``hermes_cli`` importable by definition."""
     return os.path.abspath(sys.executable)
 
 
@@ -103,30 +99,24 @@ def resolve_exec_command(project_root: Optional[Path] = None) -> str:
         # Persisting an interpreter that can't import the CLI writes a dead entry (the DE spawns
         # Exec in a cold environment where exactly this import must succeed).
         interpreter = _running_interpreter_fallback()
+    argv = [interpreter, "-m", "hermes_cli.main", "desktop"]
     if bin_path:
         resolved = Path(bin_path).resolve()
-        if _needs_interpreter(resolved):
-            # A Python launcher whose shebang points OUTSIDE the venv (e.g. the repo's `hermes`
-            # script with `#!/usr/bin/env python3`) would die silently on the first third-party
-            # import under Terminal=false — run it under the venv interpreter explicitly.
-            argv = [interpreter, str(resolved), "desktop"]
-        else:
-            argv = [str(resolved), "desktop"]
-    else:
-        argv = [interpreter, "-m", "hermes_cli.main", "desktop"]
+        # A Python launcher whose shebang points OUTSIDE the venv (e.g. the repo's `hermes` script
+        # with `#!/usr/bin/env python3`) would die silently on the first third-party import under
+        # Terminal=false — run it under the venv interpreter explicitly.
+        prefix = [interpreter] if _needs_interpreter(resolved) else []
+        argv = [*prefix, str(resolved), "desktop"]
     return " ".join(_quote_exec_arg(a) for a in argv)
 
 
 def _is_interpreter(candidate: Path) -> bool:
-    """A python interpreter binary (``bin/python*``), not a launcher.
-
-    Strict basename match — accepts ``python``, ``python3``, ``python3.11``; rejects lookalikes
-    such as ``python3-config`` and ``pythonw``. The parent-dir guard keeps a script named
-    ``python`` outside a bin/Scripts tree from being misclassified.
-    """
-    if not re.fullmatch(r"python[23]?(\d+)?(\.\d+)?", candidate.name.lower()):
-        return False
-    return candidate.parent.name in {"bin", "scripts"}
+    """A python interpreter binary (``bin/python*``), not a launcher: strict basename match
+    (rejects ``python3-config``, ``pythonw``) inside a bin/Scripts dir (rejects a stray script
+    named ``python`` elsewhere)."""
+    return bool(re.fullmatch(r"python[23]?(\d+)?(\.\d+)?", candidate.name.lower())) and (
+        candidate.parent.name in {"bin", "scripts"}
+    )
 
 
 def _inside_checkout(candidate: str, checkout_root: Path, original_argv0: str) -> bool:
@@ -391,11 +381,10 @@ def refresh_desktop_databases(applications_dir: Path) -> "list[str]":
     # Plasma 6 first, then Plasma 5. Only one of them is ever installed.
     for tool in ("kbuildsycoca6", "kbuildsycoca5"):
         resolved = shutil.which(tool)
-        if not resolved:
-            continue
-        if _run_quiet([resolved, "--noincremental"]):
-            ran.append(tool)
-        break
+        if resolved:
+            if _run_quiet([resolved, "--noincremental"]):
+                ran.append(tool)
+            break
 
     return ran
 
@@ -452,10 +441,10 @@ def _remove_stale_scalable_icon() -> bool:
     """Drop a leftover PNG from ``scalable/`` (the pre-fix install path); True if removed."""
     stale = _hicolor_icon_dest("scalable")
     try:
-        if not stale.is_file():
-            return False
-        stale.unlink()
-        return True
+        removed = stale.is_file()
+        if removed:
+            stale.unlink()
+        return removed
     except OSError:
         return False
 
