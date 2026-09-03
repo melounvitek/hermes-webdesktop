@@ -51,8 +51,7 @@ class MCPServerHealthMixin:
         return next((reason for deadline, reason in self._stdio_recycle_deadlines() if now >= deadline), None)
 
     def _next_stdio_recycle_deadline(self) -> Optional[float]:
-        deadlines = self._stdio_recycle_deadlines()
-        return min(d for d, _ in deadlines) if deadlines else None
+        return min((d for d, _ in self._stdio_recycle_deadlines()), default=None)
 
     def _mark_stdio_recycled(self, reason: str) -> None:
         """Mark a stdio session dormant before its transport finishes closing."""

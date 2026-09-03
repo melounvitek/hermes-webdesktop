@@ -36,8 +36,8 @@ _STDIO_DIED_AGAIN_MSG = (
 def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
     """Approval gate for write-capable tools on ``trust: untrusted`` servers. None to proceed,
     else a ``tool_error``. Fail-closed: approval-system errors block."""
-    trust = _core._server_trust_levels.get(server_name, _core._TRUST_FULL)
-    if trust != _core._TRUST_UNTRUSTED or _core._tool_read_only_hints.get(server_name, {}).get(tool_name) is True:
+    if (_core._server_trust_levels.get(server_name, _core._TRUST_FULL) != _core._TRUST_UNTRUSTED
+            or _core._tool_read_only_hints.get(server_name, {}).get(tool_name) is True):
         return None
     try:  # lazy: tools.approval routes the prompt to whichever surface owns the session
         from tools.approval import request_elicitation_consent
@@ -210,13 +210,18 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
             f"{type(retry_exc).__name__}: {_exc_str(retry_exc)}"))
 
 
-def _invoke_with_recovery(server_name: str, call_once: Callable[[], str], op: str,
-                          recoverers, on_final_failure: Callable[[BaseException], None],
-                          record_outcome: bool = False) -> str:
-    """Run ``call_once``, walking ``recoverers`` (``(server_name, exc, retry_call, op) ->
-    Optional[str]``, None = not its kind; order matters) on failure. Unrecovered exceptions go
-    through ``on_final_failure`` and become the generic call-failed error. ``record_outcome``
-    applies breaker bookkeeping to the FIRST attempt only; retries own theirs."""
+def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float, recoverers,
+              on_final_failure: Callable[[BaseException], None], record_outcome: bool = False) -> str:
+    """Mark the call started on *server* (doubles may lack ``mark_tool_call``), run coroutine function *call*
+    on the MCP loop and, on failure, walk ``recoverers`` (``(server_name, exc, retry_call, op) -> Optional[str]``,
+    None = not its kind; order matters). Unrecovered exceptions go through ``on_final_failure`` and become the
+    generic call-failed error. ``record_outcome`` applies breaker bookkeeping to the FIRST attempt only."""
+    if callable(getattr(server, "mark_tool_call", None)):
+        server.mark_tool_call()
+
+    def call_once():
+        return _core._run_on_mcp_loop(call, timeout=tool_timeout)
+
     try:
         result = call_once()
         return _record_call_outcome(server_name, result) if record_outcome else result
@@ -229,16 +234,6 @@ def _invoke_with_recovery(server_name: str, call_once: Callable[[], str], op: st
                 return recovered
         on_final_failure(exc)
         return tool_error(_sanitize_error(f"MCP call failed: {type(exc).__name__}: {_exc_str(exc)}"))
-
-
-def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float, recoverers,
-              on_final_failure: Callable[[BaseException], None], record_outcome: bool = False) -> str:
-    """Mark the call started on *server* (doubles may lack ``mark_tool_call``), run coroutine
-    function *call* on the MCP loop and walk the recovery ladder (:func:`_invoke_with_recovery`)."""
-    if callable(getattr(server, "mark_tool_call", None)):
-        server.mark_tool_call()
-    return _invoke_with_recovery(server_name, lambda: _core._run_on_mcp_loop(call, timeout=tool_timeout), op,
-                                 recoverers, on_final_failure, record_outcome=record_outcome)
 
 
 @asynccontextmanager
@@ -254,8 +249,8 @@ async def _track_inflight_rpc(server: Any, server_name: str, op: str):
         yield
     except asyncio.CancelledError:
         if getattr(server, "_reconnecting", False):
-            raise RuntimeError(f"MCP {op} on '{server_name}' was aborted by a reconnect "
-                               f"teardown; retry the request on the rebuilt session") from None
+            raise RuntimeError(f"MCP {op} on '{server_name}' was aborted by a reconnect teardown; retry the "
+                               f"request on the rebuilt session") from None
         raise
     finally:
         if tracked:
@@ -272,7 +267,7 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
         raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' had already exited when the call was dispatched")
     _call_coro = server.session.call_tool(tool_name, arguments=args)
     _watch_children = getattr(server, "_watch_stdio_children", None)
-    if not (_watch_children is not None and inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
+    if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
         return await _call_coro if asyncio.iscoroutine(_call_coro) else _call_coro
     rpc_task = asyncio.ensure_future(_call_coro)

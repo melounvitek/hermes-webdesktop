@@ -342,22 +342,21 @@ class MCPOAuthManager:
 
     async def _recover_401(self, server_name: str, entry: _ProviderEntry, key: str, pending: asyncio.Future) -> None:
         """Single recovery attempt behind *pending*; always clears the dedup slot."""
-        can_refresh = False
         try:
             # Disk changed (external refresh)? Else: if the SDK can refresh in place, let the caller retry.
-            if await self.invalidate_if_disk_changed(server_name):
-                can_refresh = True
-            else:
+            can_refresh = await self.invalidate_if_disk_changed(server_name)
+            if not can_refresh:
                 try:
                     can_refresh = bool(entry.provider.context.can_refresh_token())
                 except Exception:  # no context / not callable / probe failed
                     can_refresh = False
         except Exception as exc:  # pragma: no cover — defensive
             logger.warning("MCP OAuth '%s': 401 handler failed: %s", server_name, exc)
+            can_refresh = False
         finally:
-            if not pending.done():
-                pending.set_result(can_refresh)
             entry.pending_401.pop(key, None)
+        if not pending.done():
+            pending.set_result(can_refresh)
 
     async def handle_401(self, server_name: str, failed_access_token: Optional[str] = None) -> bool:
         """Handle a 401 from a tool call. True: a (possibly new) token is available — reconnect and retry. False: no

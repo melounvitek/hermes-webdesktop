@@ -307,6 +307,6 @@ def _is_session_expired_error(exc: BaseException) -> bool:
         # Messages vary across SDK versions/servers: a narrow allow-list of stable substrings avoids false positives.
         msg = str(current).lower()
         found = found or isinstance(current, transport_error_types) or any(m in msg for m in _SESSION_EXPIRED_MARKERS)
-        stack.extend(getattr(current, "exceptions", ()))
-        stack.extend((getattr(current, "__cause__", None), getattr(current, "__context__", None)))
+        stack.extend((*getattr(current, "exceptions", ()), getattr(current, "__cause__", None),
+                      getattr(current, "__context__", None)))
     return found
