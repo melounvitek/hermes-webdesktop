@@ -1,9 +1,8 @@
 """Helpers shared by the bundled dashboard-auth providers.
 
-Each provider module keeps its own ``logger`` / ``LAST_SKIP_REASON`` (the
-gate reads those by module) and its ``register(ctx)``; the config/env
-resolution, PKCE login start, token-endpoint exchange and JWT verification
-boilerplate lives here.
+Each provider module keeps its own ``logger`` / ``LAST_SKIP_REASON`` (the gate reads
+those by module) and its ``register(ctx)``; the config/env resolution, skip/register
+bookkeeping, PKCE login start, token-endpoint exchange and JWT verification live here.
 """
 
 from __future__ import annotations
@@ -14,17 +13,11 @@ import logging
 import os
 import secrets
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import (
-    InvalidCodeError,
-    LoginStart,
-    ProviderError,
-    Session,
-    classify_jwks_lookup_error,
-)
+from hermes_cli.dashboard_auth import InvalidCodeError, LoginStart, ProviderError, Session, classify_jwks_lookup_error
 
 # JWKS Cache-Control max-age (nous contract C7); self-hosted mirrors it.
 JWKS_CACHE_SECONDS = 300
@@ -35,11 +28,8 @@ JSON_HEADERS = {"Accept": "application/json"}
 # ---- Config / env resolution ----
 
 def load_config_section(logger: logging.Logger, tag: str, *path: str) -> dict:
-    """Return the ``config.yaml`` block at ``path`` as a dict, or ``{}``.
-
-    Robust to load_config() raising (fresh install, malformed YAML), keys
-    being absent, or the value not being a dict — every shape yields ``{}``.
-    """
+    """The ``config.yaml`` block at ``path`` as a dict, or ``{}`` — robust to load_config()
+    raising (fresh install, malformed YAML), absent keys, or a non-dict value."""
     try:
         from hermes_cli.config import cfg_get, load_config
 
@@ -57,6 +47,40 @@ def resolve_env_or_cfg(env_name: str, cfg_value: Any) -> str:
     return os.environ.get(env_name, "").strip() or str(cfg_value or "").strip()
 
 
+# ---- register() bookkeeping ----
+
+class SkipRegistration(Exception):
+    """Raised by a provider's settings resolver to decline registration; ``reason`` is
+    the operator-facing text stored in the module's ``LAST_SKIP_REASON``."""
+
+    def __init__(self, reason: str, level: str = "debug") -> None:
+        super().__init__(reason)
+        self.reason, self.level = reason, level
+
+
+def register_provider(
+    ctx, logger: logging.Logger, tag: str, provider_cls: type, settings: Callable[[], dict],
+) -> tuple[Optional[dict], str]:
+    """Build ``provider_cls(**settings())`` and register it on ``ctx``.
+
+    Returns ``(kwargs, "")`` on success, ``(None, skip_reason)`` when ``settings`` raised
+    ``SkipRegistration`` (logged at its level) or construction raised ``ValueError`` /
+    ``ProviderError`` (logged as a warning). Callers store the reason in ``LAST_SKIP_REASON``.
+    """
+    try:
+        kwargs = settings()
+        provider = provider_cls(**kwargs)
+    except SkipRegistration as skip:
+        getattr(logger, skip.level)("%s: %s", tag, skip.reason)
+        return None, skip.reason
+    except (ValueError, ProviderError) as exc:
+        reason = f"{provider_cls.__name__} construction failed: {exc}"
+        logger.warning("%s: %s", tag, reason)
+        return None, reason
+    ctx.register_dashboard_auth_provider(provider)
+    return kwargs, ""
+
+
 # ---- OAuth / PKCE ----
 
 def b64url_no_pad(raw: bytes) -> str:
@@ -65,11 +89,9 @@ def b64url_no_pad(raw: bytes) -> str:
 
 
 def validate_redirect_uri(redirect_uri: str) -> None:
-    """Fast-fail obviously-broken redirect_uris before bouncing to the IDP.
-
-    The IDP's allowlist is authoritative. Any ``http://`` host is allowed so
-    dashboards behind TLS-terminating proxies / on LAN IPs aren't rejected.
-    """
+    """Fast-fail obviously-broken redirect_uris before bouncing to the IDP (whose allowlist
+    is authoritative). Any ``http://`` host is allowed so dashboards behind TLS-terminating
+    proxies / on LAN IPs aren't rejected."""
     parsed = urllib.parse.urlparse(redirect_uri)
     if parsed.scheme not in ("https", "http"):
         raise ProviderError(f"redirect_uri must be http(s), got {redirect_uri!r}")
@@ -77,23 +99,15 @@ def validate_redirect_uri(redirect_uri: str) -> None:
         raise ProviderError(f"redirect_uri path must end with '/auth/callback', got {redirect_uri!r}")
 
 
-def pkce_login_start(
-    authorize_url: str, *, client_id: str, scope: str, redirect_uri: str
-) -> LoginStart:
-    """Build the authorization-code + PKCE (S256) redirect and cookie payload.
-
-    Callers validate ``redirect_uri`` first. The auth-route layer expects
-    ``cookie_payload["hermes_session_pkce"]`` as a flat ``state=…;verifier=…``
-    string (it prepends ``provider=``).
-    """
+def pkce_login_start(authorize_url: str, *, client_id: str, scope: str, redirect_uri: str) -> LoginStart:
+    """Build the authorization-code + PKCE (S256) redirect and cookie payload. Callers
+    validate ``redirect_uri`` first. The auth-route layer expects
+    ``cookie_payload["hermes_session_pkce"]`` as a flat ``state=…;verifier=…`` string
+    (it prepends ``provider=``)."""
     code_verifier = b64url_no_pad(secrets.token_bytes(64))  # ~86 chars
     state = b64url_no_pad(secrets.token_bytes(32))
     params = {
-        "response_type": "code",
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "scope": scope,
-        "state": state,
+        "response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "scope": scope, "state": state,
         "code_challenge": b64url_no_pad(hashlib.sha256(code_verifier.encode("ascii")).digest()),
         "code_challenge_method": "S256",
     }
@@ -115,38 +129,26 @@ def parse_json_body(response: httpx.Response) -> Dict[str, Any]:
 
 
 def exchange_token(
-    url: str,
-    data: Dict[str, str],
-    *,
-    headers: Optional[Dict[str, str]] = None,
-    bad_request_exc: type[Exception],
-    idp: str,
-    endpoint: str,
-    token_key: str,
-    missing_msg: str,
+    url: str, data: Dict[str, str], *, headers: Optional[Dict[str, str]] = None, bad_request_exc: type[Exception],
+    idp: str, endpoint: str, token_key: str, missing_msg: str,
 ) -> tuple[str, Dict[str, Any]]:
     """POST a token grant and return ``(token, payload)``.
 
-    A 400 (OAuth-shaped error envelope) raises ``bad_request_exc`` —
-    ``InvalidCodeError`` for the auth-code path, ``RefreshExpiredError`` for
-    refresh — so the middleware's distinct handling is preserved. Any other
-    non-200, transport failure, missing ``token_key`` or non-bearer
-    ``token_type`` raises ``ProviderError``. Redirects are deliberately NOT
-    followed: the body carries an auth code / refresh token.
+    A 400 (OAuth-shaped error envelope) raises ``bad_request_exc`` — ``InvalidCodeError``
+    for the auth-code path, ``RefreshExpiredError`` for refresh — so the middleware's
+    distinct handling is preserved. Any other non-200, transport failure, missing
+    ``token_key`` or non-bearer ``token_type`` raises ``ProviderError``. Redirects are
+    deliberately NOT followed: the body carries an auth code / refresh token.
     """
     try:
-        response = httpx.post(
-            url, data=data, headers={**JSON_HEADERS, **(headers or {})}, timeout=TOKEN_ENDPOINT_TIMEOUT_SEC
-        )
+        response = httpx.post(url, data=data, headers={**JSON_HEADERS, **(headers or {})}, timeout=TOKEN_ENDPOINT_TIMEOUT_SEC)
     except httpx.RequestError as exc:
         raise ProviderError(f"{endpoint} unreachable: {exc}") from exc
-
     if response.status_code == 400:
         error_code = parse_json_body(response).get("error", "invalid_request")
         raise bad_request_exc(f"{idp} rejected token request: {error_code}")
     if response.status_code != 200:
         raise ProviderError(f"{endpoint} returned {response.status_code}: {response.text[:200]!r}")
-
     payload = parse_json_body(response)
     token = payload.get(token_key)
     if not token or not isinstance(token, str):
@@ -165,37 +167,24 @@ def refresh_token_from(payload: Dict[str, Any], fallback: str = "") -> str:
 
 
 def session_from_claims(
-    provider: str,
-    claims: Dict[str, Any],
-    *,
-    access_token: str,
-    refresh_token: str,
-    label: str = "token",
-    email: str = "",
-    display_name: str = "",
-    org_id: str = "",
+    provider: str, claims: Dict[str, Any], *, access_token: str, refresh_token: str,
+    label: str = "token", email: str = "", display_name: str = "", org_id: str = "",
 ) -> Session:
     """Map verified JWT claims onto a Session; ``sub`` is mandatory."""
     user_id = str(claims.get("sub", ""))
     if not user_id:
         raise ProviderError(f"{label} missing 'sub' (user_id) claim")
     return Session(
-        user_id=user_id,
-        email=email,
-        display_name=display_name,
-        org_id=org_id,
-        provider=provider,
-        expires_at=int(claims["exp"]),
-        access_token=access_token,
-        refresh_token=refresh_token,
+        user_id=user_id, email=email, display_name=display_name, org_id=org_id, provider=provider,
+        expires_at=int(claims["exp"]), access_token=access_token, refresh_token=refresh_token,
     )
 
 
 # ---- JWT verification ----
 
 def make_jwks_client(jwks_url: str) -> Any:
-    """PyJWKClient with explicit Accept/User-Agent (some WAFs block the
-    library default). Imported lazily so plugin discovery stays cheap."""
+    """PyJWKClient with explicit Accept/User-Agent (some WAFs block the library default).
+    Imported lazily so plugin discovery stays cheap."""
     from jwt import PyJWKClient
 
     return PyJWKClient(
@@ -205,22 +194,15 @@ def make_jwks_client(jwks_url: str) -> Any:
 
 
 def verify_jwt(
-    token: str,
-    jwks_client: Any,
-    *,
-    algorithms: list[str],
-    audience: str,
-    issuer: str,
-    label: str,
+    token: str, jwks_client: Any, *, algorithms: list[str], audience: str, issuer: str, label: str,
 ) -> Dict[str, Any]:
     """Verify ``token`` against ``jwks_client`` with pinned ``aud``/``iss``.
 
-    Unreachable JWKS → ``ProviderError`` (503); a bearer that is not one of
-    our JWTs (opaque peer key, foreign kid) → ``InvalidCodeError`` (None /
-    next provider); folding both into 503 broke peer-key bearers. Expiry raises
-    ``InvalidCodeError`` (verify_session maps it to None); any other claim
-    failure raises ``ProviderError`` with the unverified iss/aud appended so
-    operators can spot config drift.
+    Unreachable JWKS → ``ProviderError`` (503); a bearer that is not one of our JWTs
+    (opaque peer key, foreign kid) → ``InvalidCodeError`` (None / next provider); folding
+    both into 503 broke peer-key bearers. Expiry raises ``InvalidCodeError`` (verify_session
+    maps it to None); any other claim failure raises ``ProviderError`` with the unverified
+    iss/aud appended so operators can spot config drift.
     """
     import jwt  # lazy — keeps startup fast for the ungated path
 
@@ -228,7 +210,6 @@ def verify_jwt(
         signing_key = jwks_client.get_signing_key_from_jwt(token)
     except Exception as exc:
         raise classify_jwks_lookup_error(exc) from exc
-
     try:
         return jwt.decode(
             token, signing_key.key, algorithms=algorithms, audience=audience, issuer=issuer,
@@ -237,8 +218,8 @@ def verify_jwt(
     except jwt.ExpiredSignatureError as exc:
         raise InvalidCodeError(f"{label} expired: {exc}") from exc
     except jwt.InvalidTokenError as exc:
-        # Decoding without verification is safe here: verification already
-        # failed and these values are surfaced for diagnostics only, never trusted.
+        # Decoding without verification is safe here: verification already failed and
+        # these values are surfaced for diagnostics only, never trusted.
         details = ""
         try:
             unverified = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
