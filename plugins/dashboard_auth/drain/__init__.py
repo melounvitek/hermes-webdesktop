@@ -1,16 +1,11 @@
 """DrainSecretProvider — shared-bearer-secret auth for the drain-control endpoint.
 
-Uses the non-interactive token capability of the ``DashboardAuthProvider`` ABC
-(``supports_token`` / ``verify_token`` + the route-agnostic ``token_auth`` middleware
-seam). ``nous-account-service`` (NAS) provisions a **per-agent unique** shared secret into
-each agent's environment; this provider verifies an inbound bearer against it with a
-constant-time compare and vouches for the caller as the ``drain-control`` principal. No
-login/cookie/session/refresh — the interactive ABC methods raise ``NotImplementedError``.
-Fail-CLOSED entropy gate at registration: a weak/short/low-entropy secret is never
-silently accepted (>= 43 url-safe-base64 chars ~= 256 bits, enough distinct characters,
-Shannon entropy floor). The secret is a CREDENTIAL, so it is env-only
-(``HERMES_DASHBOARD_DRAIN_SECRET``); knobs ``scope`` / ``min_secret_chars`` live under
-``dashboard.drain_auth`` in config.yaml. Unset env var → no-op (records a skip reason).
+Non-interactive token capability of the ``DashboardAuthProvider`` ABC (``verify_token`` +
+the ``token_auth`` middleware seam): ``nous-account-service`` provisions a per-agent unique
+secret (``HERMES_DASHBOARD_DRAIN_SECRET``, env-only — it is a credential); an inbound bearer
+is compared constant-time and vouched for as the ``drain-control`` principal. Fail-CLOSED
+entropy gate at registration (length, distinct chars, Shannon bits); interactive ABC methods
+raise. Knobs ``scope`` / ``min_secret_chars`` live under ``dashboard.drain_auth``.
 """
 from __future__ import annotations
 
@@ -60,8 +55,7 @@ def assess_secret_strength(secret: str, *, min_chars: int = _DEFAULT_MIN_SECRET_
         return (
             f"secret too short: {len(secret)} chars (need >= {min_chars}; "
             "use a >=256-bit value, e.g. `python -c \"import secrets; "
-            "print(secrets.token_urlsafe(32))\"`)"
-        )
+            "print(secrets.token_urlsafe(32))\"`)")
     distinct = len(set(secret))
     if distinct < _MIN_DISTINCT_CHARS:
         return f"secret has only {distinct} distinct characters (need >= {_MIN_DISTINCT_CHARS}); looks structured/low-entropy"
@@ -130,8 +124,7 @@ def _settings() -> dict:
         raise SkipRegistration(
             "HERMES_DASHBOARD_DRAIN_SECRET is not set. Set a per-agent >=256-bit secret "
             "(e.g. `python -c \"import secrets; print(secrets.token_urlsafe(32))\"`) to enable "
-            "NAS-driven drain coordination; leave it unset to disable the drain endpoint."
-        )
+            "NAS-driven drain coordination; leave it unset to disable the drain endpoint.")
     section = _load_config_drain_auth_section()
     scope = str(section.get("scope", "drain") or "drain").strip() or "drain"
     try:
@@ -142,8 +135,7 @@ def _settings() -> dict:
     if reason is not None:
         raise SkipRegistration(
             f"HERMES_DASHBOARD_DRAIN_SECRET rejected — {reason}. The drain endpoint stays disabled (fail-closed).",
-            level="warning",
-        )
+            level="warning")
     return {"secret": secret, "scope": scope}
 
 
@@ -166,5 +158,4 @@ def register(ctx) -> None:
         logger.warning("dashboard-auth-drain: could not register token route %s: %s", DRAIN_ROUTE_PATH, exc)
     logger.info(
         "dashboard-auth-drain: registered drain service-credential provider (scope=%s, route=%s)",
-        kwargs["scope"], DRAIN_ROUTE_PATH,
-    )
+        kwargs["scope"], DRAIN_ROUTE_PATH)

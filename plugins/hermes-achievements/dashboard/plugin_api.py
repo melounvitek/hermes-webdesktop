@@ -1,6 +1,8 @@
-"""Hermes Achievements dashboard plugin backend.
+"""Hermes Achievements dashboard plugin backend, mounted at /api/plugins/hermes-achievements/.
 
-Mounted at /api/plugins/hermes-achievements/ by Hermes dashboard.
+Scans the session history into per-session stats (checkpointed by fingerprint so warm
+scans are cheap), aggregates them, and evaluates the tiered / multi-condition catalog.
+Cold scans run on a background thread; ``/achievements`` serves the last snapshot.
 """
 from __future__ import annotations
 
@@ -12,22 +14,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-try:
-    from hermes_constants import get_hermes_home
-except ImportError:
-    import os as _os
-    def get_hermes_home() -> Path:  # type: ignore[misc]
-        val = (_os.environ.get("HERMES_HOME") or "").strip()
-        return Path(val) if val else Path.home() / ".hermes"
+from fastapi import APIRouter
 
-try:
-    from fastapi import APIRouter
-except Exception:  # Allows local unit tests without dashboard dependencies.
-    class APIRouter:  # type: ignore
-        def get(self, *_args, **_kwargs):
-            return lambda fn: fn
-        def post(self, *_args, **_kwargs):
-            return lambda fn: fn
+from hermes_constants import get_hermes_home
 
 router = APIRouter()
 
@@ -46,18 +35,13 @@ FILE_RE = re.compile(r"(?:/home/|~/?|\./|/mnt/)[\w./-]+\.(?:py|js|ts|tsx|jsx|css
 
 TIER_NAMES = ["Copper", "Silver", "Gold", "Diamond", "Olympian"]
 
-
 def _ach(
     id: str, name: str, description: str, category: str, icon: str, *,
     metric: Optional[str] = None, tiers: Optional[List[int]] = None,
-    requires: Optional[List[tuple]] = None, secret: bool = False,
-) -> Dict[str, Any]:
-    """Build one catalog entry.
-
-    ``kind`` is derived: ``requires`` -> multi_condition; a ``max_*`` metric is a
-    per-session best (best_session); any other metric accumulates over the whole
-    history (lifetime).
-    """
+    requires: Optional[List[tuple]] = None, secret: bool = False) -> Dict[str, Any]:
+    """Build one catalog entry. ``kind`` is derived: ``requires`` -> multi_condition; a
+    ``max_*`` metric is a per-session best (best_session); anything else accumulates over
+    the whole history (lifetime)."""
     kind = "multi_condition" if requires is not None else ("best_session" if metric.startswith("max_") else "lifetime")
     item: Dict[str, Any] = {"id": id, "name": name, "description": description, "category": category, "kind": kind, "icon": icon}
     if secret:
@@ -151,14 +135,16 @@ ACHIEVEMENTS: List[Dict[str, Any]] = [
 
 ]
 
+# ---- Durable state files ----
+
+SNAPSHOT_FILE = "scan_snapshot.json"
+CHECKPOINT_FILE = "scan_checkpoint.json"
+
 
 def _data_dir() -> Path:
-    """Durable data root (``<hermes home>/plugin-data/hermes-achievements/``).
-
-    Was the install tree (``plugins/hermes-achievements/``) before the plugin-data
-    convention existed — state parked there died on ``hermes plugins remove``/
-    ``update``. Legacy files migrate on first read (see ``_data_file``).
-    """
+    """Durable data root (``<hermes home>/plugin-data/hermes-achievements/``). State used to
+    live in the install tree and died on ``hermes plugins remove``/``update``; legacy files
+    migrate on first read (see ``_data_file``)."""
     try:
         from plugins.plugin_storage import plugin_data_dir
         return plugin_data_dir("hermes-achievements")
@@ -179,10 +165,6 @@ def _data_file(name: str) -> Path:
             except Exception:
                 pass
     return path
-
-
-SNAPSHOT_FILE = "scan_snapshot.json"
-CHECKPOINT_FILE = "scan_checkpoint.json"
 
 
 def _read_json(name: str) -> Any:
@@ -254,15 +236,15 @@ def _scan_status_payload(now: Optional[int] = None) -> Dict[str, Any]:
         "ttl_seconds": SNAPSHOT_TTL_SECONDS,
         "snapshot_generated_at": generated_at or None,
         "snapshot_age_seconds": (current - generated_at) if generated_at else None,
-        "snapshot_stale": _is_snapshot_stale(snap, current),
-    }
+        "snapshot_stale": _is_snapshot_stale(snap, current)}
 
+
+# ---- Per-session analysis ----
 
 def _tool_name_from_call(call: Any) -> Optional[str]:
     if not isinstance(call, dict):
         return None
-    fn = call.get("function") or {}
-    return call.get("name") or fn.get("name")
+    return call.get("name") or (call.get("function") or {}).get("name")
 
 
 def _content(msg: Dict[str, Any]) -> str:
@@ -282,13 +264,17 @@ def _count_tool(tool_names: List[str], *needles: str) -> int:
     return sum(1 for name in lowered if any(needle in name for needle in needles))
 
 
+_PROVIDER_MARKERS = ["openai", "anthropic", "google", "gemini", "mistral", "meta", "qwen", "deepseek", "xai", "nous", "ollama", "groq", "openrouter", "codex"]
+_LOCAL_MARKERS = ["ollama", "llama.cpp", "localhost", "127.0.0.1", "local/", "local:", "gguf", "vllm-local"]
+
+
 def model_provider(model_name: str) -> Optional[str]:
     name = (model_name or "").strip().lower()
     if not name or name == "none":
         return None
     if "/" in name:
         return name.split("/", 1)[0]
-    for provider in ["openai", "anthropic", "google", "gemini", "mistral", "meta", "qwen", "deepseek", "xai", "nous", "ollama", "groq", "openrouter", "codex"]:
+    for provider in _PROVIDER_MARKERS:
         if provider in name:
             return "google" if provider == "gemini" else provider
     return name.split(":", 1)[0].split("-", 1)[0]
@@ -296,10 +282,7 @@ def model_provider(model_name: str) -> Optional[str]:
 
 def is_local_model_name(model_name: str) -> bool:
     name = (model_name or "").strip().lower()
-    if not name or name == "none":
-        return False
-    local_markers = ["ollama", "llama.cpp", "localhost", "127.0.0.1", "local/", "local:", "gguf", "vllm-local"]
-    return any(marker in name for marker in local_markers)
+    return bool(name) and name != "none" and any(marker in name for marker in _LOCAL_MARKERS)
 
 
 def analyze_messages(session_id: str, title: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -308,15 +291,14 @@ def analyze_messages(session_id: str, title: str, messages: List[Dict[str, Any]]
     files_touched: Set[str] = set()
     full_text_parts: List[str] = []
     error_count = 0
-
     for msg in messages:
         text = _content(msg)
         full_text_parts.append(text)
         if msg.get("tool_name"):
             name = str(msg["tool_name"])
             tool_names.add(name)
-            # Tool result rows name the tool that already appeared in the assistant tool_calls.
-            # Keep it for distinct-tool detection, but do not double-count it as a new call.
+            # Tool result rows name the tool that already appeared in the assistant tool_calls:
+            # keep it for distinct-tool detection but don't double-count it as a new call.
             if msg.get("role") != "tool":
                 tool_sequence.append(name)
         for call in msg.get("tool_calls") or []:
@@ -398,32 +380,43 @@ def analyze_messages(session_id: str, title: str, messages: List[Dict[str, Any]]
         "screenshot_events": hits(r"screenshot|playwright|vision_analyze|browser_vision|\.png|image data"),
         "release_events": hits(r"\bgit\s+tag|release|version bump|changelog|publish|pushed? tag"),
         "cache_events": hits(r"cache hit|prompt caching|cache_read"),
-        "model_names": set(),
-    }
+        "model_names": set()}
+
+
+# ---- Evaluation ----
+
+def _result(*, unlocked: bool, discovered: bool, state: str, tier, progress: int, next_tier, next_threshold: int, progress_pct: int) -> Dict[str, Any]:
+    """Uniform evaluation result (key order is part of the wire shape)."""
+    return {"unlocked": unlocked, "discovered": discovered, "state": state, "tier": tier, "progress": progress, "next_tier": next_tier, "next_threshold": next_threshold, "progress_pct": progress_pct}
+
+
+def _state(definition: Dict[str, Any], unlocked: bool, any_progress: bool) -> tuple[str, bool]:
+    """``(state, discovered)``: secret badges stay hidden until the first matching signal."""
+    secret = bool(definition.get("secret"))
+    state = "unlocked" if unlocked else ("secret" if secret and not any_progress else "discovered")
+    return state, any_progress or not secret
 
 
 def evaluate_tiered(definition: Dict[str, Any], aggregate: Dict[str, Any]) -> Dict[str, Any]:
-    metric = definition["threshold_metric"]
-    progress = int(aggregate.get(metric, 0) or 0)
+    progress = int(aggregate.get(definition["threshold_metric"], 0) or 0)
     tiers_list = sorted(definition.get("tiers", []), key=lambda t: t["threshold"])
     achieved = [t for t in tiers_list if progress >= t["threshold"]]
     next_tiers = [t for t in tiers_list if progress < t["threshold"]]
-    tier = achieved[-1]["name"] if achieved else None
-    next_tier = next_tiers[0]["name"] if next_tiers else None
     next_threshold = next_tiers[0]["threshold"] if next_tiers else (tiers_list[-1]["threshold"] if tiers_list else 1)
     current_threshold = achieved[-1]["threshold"] if achieved else 0
     denom = max(1, next_threshold - current_threshold)
     pct = 100 if not next_tiers and achieved else max(0, min(99, math.floor(((progress - current_threshold) / denom) * 100)))
-    unlocked = bool(achieved)
-    discovered = bool(progress > 0)
-    state = "unlocked" if unlocked else ("secret" if definition.get("secret") and not discovered else "discovered")
-    return {"unlocked": unlocked, "discovered": discovered or not definition.get("secret"), "state": state, "tier": tier, "progress": progress, "next_tier": next_tier, "next_threshold": next_threshold, "progress_pct": pct}
+    state, discovered = _state(definition, bool(achieved), progress > 0)
+    return _result(
+        unlocked=bool(achieved), discovered=discovered, state=state, tier=achieved[-1]["name"] if achieved else None,
+        progress=progress, next_tier=next_tiers[0]["name"] if next_tiers else None, next_threshold=next_threshold, progress_pct=pct)
 
 
 def evaluate_requirements(definition: Dict[str, Any], aggregate: Dict[str, Any]) -> Dict[str, Any]:
     requirements = definition.get("requirements", [])
     if not requirements:
-        return {"unlocked": False, "discovered": not definition.get("secret"), "state": "secret" if definition.get("secret") else "discovered", "tier": None, "progress": 0, "next_tier": None, "next_threshold": 1, "progress_pct": 0}
+        state, discovered = _state(definition, False, False)
+        return _result(unlocked=False, discovered=discovered, state=state, tier=None, progress=0, next_tier=None, next_threshold=1, progress_pct=0)
     parts = []
     any_progress = False
     complete = True
@@ -434,14 +427,16 @@ def evaluate_requirements(definition: Dict[str, Any], aggregate: Dict[str, Any])
         complete = complete and value >= threshold
         parts.append(min(1.0, value / max(1, threshold)))
     pct = math.floor((sum(parts) / len(parts)) * 100)
-    state = "unlocked" if complete else ("secret" if definition.get("secret") and not any_progress else "discovered")
-    return {"unlocked": complete, "discovered": any_progress or not definition.get("secret"), "state": state, "tier": None, "progress": pct, "next_tier": None, "next_threshold": 100, "progress_pct": 100 if complete else min(99, pct)}
+    state, discovered = _state(definition, complete, any_progress)
+    return _result(
+        unlocked=complete, discovered=discovered, state=state, tier=None, progress=pct, next_tier=None,
+        next_threshold=100, progress_pct=100 if complete else min(99, pct))
 
 
-def evaluate_boolean(definition: Dict[str, Any], aggregate: Dict[str, Any]) -> Dict[str, Any]:
-    # Backward-compatible helper for old tests/definitions. New catalog avoids simple booleans.
-    unlocked = bool(aggregate.get(definition["metric"]))
-    return {"unlocked": unlocked, "discovered": True, "state": "unlocked" if unlocked else "discovered", "tier": None, "progress": 1 if unlocked else 0, "next_tier": None, "next_threshold": 1, "progress_pct": 100 if unlocked else 0}
+def evaluate_definition(definition: Dict[str, Any], aggregate: Dict[str, Any]) -> Dict[str, Any]:
+    if "threshold_metric" in definition:
+        return evaluate_tiered(definition, aggregate)
+    return evaluate_requirements(definition, aggregate)
 
 
 METRIC_LABELS = {
@@ -506,8 +501,7 @@ METRIC_LABELS = {
     "release_events": "release, version, publish, or git tag events",
     "session_count": "Hermes sessions",
     "weekend_sessions": "sessions started on weekends",
-    "night_sessions": "sessions started late night or before dawn",
-}
+    "night_sessions": "sessions started late night or before dawn"}
 
 
 def metric_label(metric: str) -> str:
@@ -521,13 +515,11 @@ def criteria_for(definition: Dict[str, Any]) -> str:
         tiers_list = sorted(definition.get("tiers", []), key=lambda t: t["threshold"])
         if not tiers_list:
             return "Requirement: use Hermes in the matching workflow."
-        metric = metric_label(definition["threshold_metric"])
         ladder = ", ".join(f"{t['name']} {t['threshold']}" for t in tiers_list)
-        return f"Requirement: {metric}. Tier ladder: {ladder}."
+        return f"Requirement: {metric_label(definition['threshold_metric'])}. Tier ladder: {ladder}."
     requirements = definition.get("requirements") or []
     if requirements:
-        parts = [f"{metric_label(r['metric'])} ≥ {int(r.get('gte', 1))}" for r in requirements]
-        return "Requirement: " + "; ".join(parts) + "."
+        return "Requirement: " + "; ".join(f"{metric_label(r['metric'])} ≥ {int(r.get('gte', 1))}" for r in requirements) + "."
     return "Requirement: complete the matching Hermes behavior."
 
 
@@ -539,36 +531,34 @@ def display_achievement(item: Dict[str, Any]) -> Dict[str, Any]:
     return clean
 
 
-def scan_sessions(
-    limit: Optional[int] = None,
-    progress_callback: Optional[Any] = None,
-    progress_every: int = 250,
-) -> Dict[str, Any]:
+# ---- Scanning + aggregation ----
+
+def _scan_meta(mode: str, total: int, *, rescanned: int = 0, reused: int = 0, scanned_so_far: Optional[int] = None, expected_total: Optional[int] = None) -> Dict[str, Any]:
+    meta = {"mode": mode, "sessions_total": total, "sessions_rescanned": rescanned, "sessions_reused": reused}
+    if scanned_so_far is not None:
+        meta.update(sessions_scanned_so_far=scanned_so_far, sessions_expected_total=expected_total)
+    return meta
+
+
+def scan_sessions(limit: Optional[int] = None, progress_callback: Optional[Any] = None, progress_every: int = 250) -> Dict[str, Any]:
     """Scan Hermes sessions and build per-session achievement stats.
 
-    ``limit=None`` (the default) scans the ENTIRE history: SQLite's ``LIMIT -1``
-    means unlimited, so ``None``/non-positive map to ``-1``. A former cap of 200
-    silently shrank lifetime totals to ~2% on long-running installs.
-
-    Warm scans stay cheap: the checkpoint stores per-session stats keyed by
-    ``(started_at, last_active)`` fingerprint and only re-analyzes changed
-    sessions. Cold scans over thousands of sessions take tens of seconds to
-    minutes, so ``evaluate_all`` runs them on a background thread.
-
-    ``progress_callback(partial_sessions, scanned_so_far, total)`` fires every
-    ``progress_every`` sessions so background scans can publish intermediate
-    snapshots and surface badges incrementally instead of all at the end.
+    ``limit=None`` (default) scans the ENTIRE history (SQLite ``LIMIT -1``); a former cap
+    of 200 silently shrank lifetime totals on long-running installs. The checkpoint stores
+    per-session stats keyed by ``(started_at, last_active)`` fingerprint so warm scans only
+    re-analyze changed sessions. ``progress_callback(partial_sessions, scanned_so_far,
+    total)`` fires every ``progress_every`` sessions so background scans can publish
+    intermediate snapshots.
     """
     try:
         from hermes_state import SessionDB
     except Exception as exc:
-        return {"sessions": [], "aggregate": {}, "error": f"Could not import SessionDB: {exc}", "scan_meta": {"mode": "failed", "sessions_total": 0, "sessions_rescanned": 0, "sessions_reused": 0}}
+        return {"sessions": [], "aggregate": {}, "error": f"Could not import SessionDB: {exc}", "scan_meta": _scan_meta("failed", 0)}
 
     checkpoint = load_checkpoint()
     previous_sessions = checkpoint.get("sessions") if isinstance(checkpoint.get("sessions"), dict) else {}
     reused = rescanned = 0
     db_limit = -1 if (limit is None or limit <= 0) else int(limit)
-
     db = SessionDB()
     try:
         sessions_meta = db.list_sessions_rich(limit=db_limit, include_children=True, project_compression_tips=False)
@@ -582,45 +572,41 @@ def scan_sessions(
             fp = session_fingerprint(meta)
             cached = previous_sessions.get(sid)
             cached = cached if isinstance(cached, dict) else {}
+            title = meta.get("title") or meta.get("preview")
             if isinstance(cached.get("stats"), dict) and cached.get("fingerprint") == fp:
                 stats = dict(cached["stats"])
                 reused += 1
             else:
-                messages = db.get_messages(sid)
-                stats = analyze_messages(sid, meta.get("title") or meta.get("preview") or "Untitled", messages)
+                stats = analyze_messages(sid, title or "Untitled", db.get_messages(sid))
                 rescanned += 1
-
-            stats.update(session_id=sid, title=meta.get("title") or meta.get("preview") or stats.get("title") or "Untitled", started_at=meta.get("started_at"), last_active=meta.get("last_active"), source=meta.get("source"))
+            stats.update(session_id=sid, title=title or stats.get("title") or "Untitled", started_at=meta.get("started_at"), last_active=meta.get("last_active"), source=meta.get("source"))
             if meta.get("model"):
                 # Checkpoint round-trips turn the set into a list; handle both.
                 model = str(meta.get("model"))
                 names = stats.setdefault("model_names", set())
                 if isinstance(names, set):
                     names.add(model)
-                elif isinstance(names, list) and model not in names:
-                    names.append(model)
-                elif not isinstance(names, list):
+                elif isinstance(names, list):
+                    if model not in names:
+                        names.append(model)
+                else:
                     stats["model_names"] = {model}
-
             sessions.append(stats)
             checkpoint_sessions[sid] = {"fingerprint": fp, "stats": _json_safe(stats)}
-
             if progress_callback is not None and progress_every > 0 and (idx % progress_every == 0) and idx < total_sessions:
                 try:
                     progress_callback(list(sessions), idx, total_sessions)
                 except Exception:
                     pass  # Advisory — a broken publisher must never abort the scan.
-
         _write_json(CHECKPOINT_FILE, {"schema_version": 1, "generated_at": int(time.time()), "sessions": checkpoint_sessions})
     finally:
-        close = getattr(db, "close", None)
-        if close:
-            close()
+        db.close()
     return {
         "sessions": sessions,
         "aggregate": aggregate_stats(sessions),
-        "scan_meta": {"mode": "incremental" if reused > 0 else "full", "sessions_total": len(sessions), "sessions_rescanned": rescanned, "sessions_reused": reused, "sessions_scanned_so_far": len(sessions), "sessions_expected_total": total_sessions},
-    }
+        "scan_meta": _scan_meta(
+            "incremental" if reused > 0 else "full", len(sessions), rescanned=rescanned, reused=reused,
+            scanned_so_far=len(sessions), expected_total=total_sessions)}
 
 
 # Per-session bests: aggregate metric -> session stat key (also drives evidence_for).
@@ -632,8 +618,7 @@ _SESSION_MAX_METRICS = {
     "max_file_tool_calls_in_session": "file_tool_calls",
     "max_web_calls_in_session": "web_calls",
     "max_web_browser_calls_in_session": "web_browser_calls",
-    "max_files_touched_in_session": "files_touched_count",
-}
+    "max_files_touched_in_session": "files_touched_count"}
 # Lifetime sums: aggregate metric -> session stat key.
 _SESSION_SUM_METRICS = {
     "total_errors": "error_count",
@@ -648,8 +633,7 @@ _SESSION_SUM_METRICS = {
     "total_cron_calls": "cron_calls",
     "browser_calls": "browser_calls",
     "image_vision_calls": "image_vision_calls",
-    "tts_calls": "tts_calls",
-}
+    "tts_calls": "tts_calls"}
 # ``*_events`` counters summed under their own name.
 _SESSION_EVENT_KEYS = [
     "traceback_events", "log_read_events", "port_conflict_events", "permission_denied_events", "install_error_events", "install_success_events", "restart_after_error_events", "env_var_error_events", "yaml_error_events", "docker_conflict_events", "frontend_activity_events", "css_activity_events", "git_events", "tiny_patch_after_errors_events", "skill_events", "skill_manage_events", "memory_events", "memory_write_events", "context_events", "gateway_events", "plugin_events", "rollback_events", "docs_activity_events", "model_events", "openrouter_events", "codex_events", "claude_events", "gemini_events", "local_model_events", "toolset_events", "config_events", "git_history_events", "test_events", "screenshot_events", "release_events", "cache_events",
@@ -661,7 +645,6 @@ def aggregate_stats(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     agg: Dict[str, Any] = {"session_count": len(sessions)}
     for key in (*_SESSION_MAX_METRICS, *_SESSION_SUM_METRICS, "distinct_model_count", "distinct_provider_count", "local_model_chat_sessions", "weekend_sessions", "night_sessions", *_SESSION_EVENT_KEYS):
         agg[key] = 0
-
     model_names: Set[str] = set()
     provider_names: Set[str] = set()
     for s in sessions:
@@ -673,11 +656,8 @@ def aggregate_stats(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
             agg[key] += s.get(key, 0)
         session_models = s.get("model_names") or set()
         model_names.update(session_models)
-        for model_name in session_models:
-            provider = model_provider(str(model_name))
-            if provider:
-                provider_names.add(provider)
-        if any(is_local_model_name(str(model_name)) for model_name in session_models):
+        provider_names.update(filter(None, (model_provider(str(m)) for m in session_models)))
+        if any(is_local_model_name(str(m)) for m in session_models):
             agg["local_model_chat_sessions"] += 1
         if s.get("started_at"):
             try:
@@ -693,14 +673,6 @@ def aggregate_stats(sessions: List[Dict[str, Any]]) -> Dict[str, Any]:
     return agg
 
 
-def evaluate_definition(definition: Dict[str, Any], aggregate: Dict[str, Any]) -> Dict[str, Any]:
-    if "threshold_metric" in definition:
-        return evaluate_tiered(definition, aggregate)
-    if "requirements" in definition:
-        return evaluate_requirements(definition, aggregate)
-    return evaluate_boolean(definition, aggregate)
-
-
 def evidence_for(definition: Dict[str, Any], sessions: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     key = _SESSION_MAX_METRICS.get(definition.get("threshold_metric"))
     if not sessions or key is None:
@@ -709,14 +681,28 @@ def evidence_for(definition: Dict[str, Any], sessions: List[Dict[str, Any]]) -> 
     return {"session_id": s.get("session_id"), "title": s.get("title"), "value": s.get(key, 0)}
 
 
-def _compute_from_scan(scan: Dict[str, Any], *, is_partial: bool = False) -> Dict[str, Any]:
-    """Evaluate every achievement definition against a scan result.
+# ---- Snapshot assembly ----
 
-    Used by ``compute_all`` for finished scans AND by the background progress
-    callback for in-flight snapshots. ``is_partial=True`` skips persisting
-    ``state.json`` unlocks — an "unlock time" from half a scan could be
-    invalidated by a later session.
-    """
+def _snapshot(evaluated: List[Dict[str, Any]], scan: Dict[str, Any], now: int) -> Dict[str, Any]:
+    """Wire payload shared by finished, partial and pending snapshots."""
+    return {
+        "achievements": evaluated,
+        "sessions": scan.get("sessions", []),
+        "aggregate": scan.get("aggregate", {}),
+        "scan_meta": scan.get("scan_meta", {}),
+        "error": scan.get("error"),
+        "unlocked_count": sum(1 for a in evaluated if a["unlocked"]),
+        "discovered_count": sum(1 for a in evaluated if a.get("state") == "discovered"),
+        "secret_count": sum(1 for a in evaluated if a.get("state") == "secret"),
+        "total_count": len(evaluated),
+        "generated_at": now}
+
+
+def _compute_from_scan(scan: Dict[str, Any], *, is_partial: bool = False) -> Dict[str, Any]:
+    """Evaluate every achievement definition against a scan result. Used by ``compute_all``
+    for finished scans AND by the background progress callback for in-flight snapshots;
+    ``is_partial=True`` skips persisting ``state.json`` unlocks — an "unlock time" from
+    half a scan could be invalidated by a later session."""
     aggregate = scan.get("aggregate", {})
     state = load_state() if not is_partial else {"unlocks": {}}
     unlocks = state.setdefault("unlocks", {})
@@ -734,18 +720,7 @@ def _compute_from_scan(scan: Dict[str, Any], *, is_partial: bool = False) -> Dic
         evaluated.append(display_achievement(item))
     if not is_partial:
         save_state(state)
-    return {
-        "achievements": evaluated,
-        "sessions": scan.get("sessions", []),
-        "aggregate": aggregate,
-        "scan_meta": scan.get("scan_meta", {}),
-        "error": scan.get("error"),
-        "unlocked_count": sum(1 for a in evaluated if a["unlocked"]),
-        "discovered_count": sum(1 for a in evaluated if a.get("state") == "discovered"),
-        "secret_count": sum(1 for a in evaluated if a.get("state") == "secret"),
-        "total_count": len(evaluated),
-        "generated_at": now,
-    }
+    return _snapshot(evaluated, scan, now)
 
 
 def compute_all(progress_callback: Optional[Any] = None, progress_every: int = 250) -> Dict[str, Any]:
@@ -758,77 +733,59 @@ _BACKGROUND_SCAN_LOCK = threading.Lock()
 
 
 def _build_pending_snapshot(now: int) -> Dict[str, Any]:
-    """Structurally-complete placeholder served while the first-ever scan runs,
-    so the UI renders an empty list + spinner without special-casing "no data"."""
-    evaluated = [display_achievement({**d, **{"unlocked": False, "discovered": False, "state": "secret" if d.get("secret") else "discovered", "progress": 0, "progress_pct": 0, "next_tier": (d.get("tiers") or [{}])[0].get("name"), "next_threshold": (d.get("tiers") or [{}])[0].get("threshold", 1), "tier": None}}) for d in ACHIEVEMENTS]
-    return {
-        "achievements": evaluated,
-        "sessions": [],
-        "aggregate": {},
-        "scan_meta": {"mode": "pending", "sessions_total": 0, "sessions_rescanned": 0, "sessions_reused": 0},
-        "error": None,
-        "unlocked_count": 0,
-        "discovered_count": sum(1 for a in evaluated if a.get("state") == "discovered"),
-        "secret_count": sum(1 for a in evaluated if a.get("state") == "secret"),
-        "total_count": len(evaluated),
-        "generated_at": now,
-    }
+    """Structurally-complete placeholder served while the first-ever scan runs, so the UI
+    renders an empty list + spinner without special-casing "no data"."""
+    evaluated = [
+        display_achievement({
+            **d, "unlocked": False, "discovered": False, "state": "secret" if d.get("secret") else "discovered", "progress": 0,
+            "progress_pct": 0, "next_tier": (d.get("tiers") or [{}])[0].get("name"),
+            "next_threshold": (d.get("tiers") or [{}])[0].get("threshold", 1), "tier": None})
+        for d in ACHIEVEMENTS]
+    return _snapshot(evaluated, {"scan_meta": _scan_meta("pending", 0), "error": None}, now)
+
+
+def _set_cache(snapshot: Dict[str, Any], at: int) -> None:
+    global _SNAPSHOT_CACHE, _SNAPSHOT_CACHE_AT
+    _SNAPSHOT_CACHE = _json_safe(snapshot)
+    _SNAPSHOT_CACHE_AT = at
 
 
 def _run_scan_and_update_cache(publish_partial_snapshots: bool = True) -> None:
-    """Execute a scan + snapshot update. Called synchronously or from a thread.
-
-    With ``publish_partial_snapshots`` (background scans) the scanner periodically
-    publishes in-progress snapshots to ``_SNAPSHOT_CACHE`` so a long cold scan
-    unlocks badges incrementally instead of jumping from zero to final.
-    Synchronous /rescan callers pass ``False`` since they block on the result.
-    """
-    global _SNAPSHOT_CACHE, _SNAPSHOT_CACHE_AT
+    """Execute a scan + snapshot update (synchronously or from a thread). With
+    ``publish_partial_snapshots`` (background scans) the scanner periodically publishes
+    in-progress snapshots to ``_SNAPSHOT_CACHE`` so a long cold scan unlocks badges
+    incrementally; synchronous /rescan callers pass ``False`` since they block on the result."""
     with _SCAN_LOCK:
         started = int(time.time())
-        _SCAN_STATUS["state"] = "running"
-        _SCAN_STATUS["started_at"] = started
-        _SCAN_STATUS["last_error"] = None
+        _SCAN_STATUS.update(state="running", started_at=started, last_error=None)
 
         def _publish_partial(partial_sessions, scanned_so_far, total):
-            global _SNAPSHOT_CACHE, _SNAPSHOT_CACHE_AT
             try:
                 partial_scan = {
                     "sessions": partial_sessions,
                     "aggregate": aggregate_stats(partial_sessions),
-                    "scan_meta": {"mode": "in_progress", "sessions_total": scanned_so_far, "sessions_rescanned": 0, "sessions_reused": 0, "sessions_scanned_so_far": scanned_so_far, "sessions_expected_total": total},
+                    "scan_meta": _scan_meta("in_progress", scanned_so_far, scanned_so_far=scanned_so_far, expected_total=total),
                 }
-                partial = _compute_from_scan(partial_scan, is_partial=True)
-                # _SNAPSHOT_CACHE_AT stays 0 so partials remain in the 'stale'
-                # regime: the UI keeps polling /scan-status and never mistakes
-                # an in-flight result for a finished one.
-                _SNAPSHOT_CACHE = _json_safe(partial)
-                _SNAPSHOT_CACHE_AT = 0
+                # _SNAPSHOT_CACHE_AT stays 0 so partials remain in the 'stale' regime: the UI
+                # keeps polling /scan-status and never mistakes an in-flight result for a finished one.
+                _set_cache(_compute_from_scan(partial_scan, is_partial=True), 0)
             except Exception:
                 pass  # Intermediate publication is best-effort; don't kill the scan.
 
-        callback = _publish_partial if publish_partial_snapshots else None
         try:
-            computed = compute_all(progress_callback=callback)
-            _SNAPSHOT_CACHE = _json_safe(computed)
-            _SNAPSHOT_CACHE_AT = int(_SNAPSHOT_CACHE.get("generated_at") or int(time.time()))
+            computed = _json_safe(compute_all(progress_callback=_publish_partial if publish_partial_snapshots else None))
+            _set_cache(computed, int(computed.get("generated_at") or int(time.time())))
             _write_json(SNAPSHOT_FILE, _SNAPSHOT_CACHE)
             _SCAN_STATUS["state"] = "idle"
         except Exception as exc:
-            _SCAN_STATUS["state"] = "failed"
-            _SCAN_STATUS["last_error"] = str(exc)
+            _SCAN_STATUS.update(state="failed", last_error=str(exc))
         finally:
-            _SCAN_STATUS["finished_at"] = int(time.time())
-            _SCAN_STATUS["last_duration_ms"] = int((_SCAN_STATUS["finished_at"] - started) * 1000)
-            _SCAN_STATUS["run_count"] = int(_SCAN_STATUS.get("run_count", 0)) + 1
+            finished = int(time.time())
+            _SCAN_STATUS.update(finished_at=finished, last_duration_ms=int((finished - started) * 1000), run_count=int(_SCAN_STATUS.get("run_count", 0)) + 1)
 
 
 def _start_background_scan() -> None:
-    """Kick off a daemon-thread scan unless one is already running (idempotent).
-
-    The thread updates ``_SNAPSHOT_CACHE`` on completion and publishes partial
-    snapshots every ~250 sessions while running.
-    """
+    """Kick off a daemon-thread scan unless one is already running (idempotent)."""
     global _BACKGROUND_SCAN_THREAD
     with _BACKGROUND_SCAN_LOCK:
         existing = _BACKGROUND_SCAN_THREAD
@@ -840,44 +797,32 @@ def _start_background_scan() -> None:
 
 
 def evaluate_all(force: bool = False) -> Dict[str, Any]:
-    """Return the current achievements payload.
-
-    * Fresh in-memory cache -> return it instantly.
-    * Stale on-disk snapshot -> load it, kick a background rescan, return the
-      stale data (UI decorates it with ``is_stale=True``).
-    * No snapshot yet (first-ever run) -> kick a background scan, return an
-      empty-but-valid "pending" payload so the UI can render a spinner.
-    * ``force=True`` (manual /rescan) -> run synchronously, replace the cache.
-
-    Cold scans on 8000+ session databases take minutes; the background thread
-    keeps them off the dashboard request path.
-    """
+    """Return the current achievements payload: a fresh in-memory cache is returned as is;
+    a stale on-disk snapshot is served while a background rescan runs (UI decorates it with
+    ``is_stale=True``); with no snapshot yet an empty-but-valid "pending" payload is served
+    while the first scan runs; ``force=True`` (manual /rescan) scans synchronously. Cold
+    scans on 8000+ session databases take minutes, hence the background thread."""
     global _SNAPSHOT_CACHE, _SNAPSHOT_CACHE_AT
     now = int(time.time())
-
     if not force and _cache_is_fresh(now):
         return _SNAPSHOT_CACHE or {}
-
     # Lazy-load the persisted snapshot so fresh process starts serve cached data.
     if _SNAPSHOT_CACHE is None:
         persisted = _read_json(SNAPSHOT_FILE)
         if isinstance(persisted, dict):
             _SNAPSHOT_CACHE = persisted
             _SNAPSHOT_CACHE_AT = int(persisted.get("generated_at") or 0) or now
-
     if force:
         # No partial publishing: the caller is blocking on the final result.
         _run_scan_and_update_cache(publish_partial_snapshots=False)
-        if _SNAPSHOT_CACHE is not None:
-            return _SNAPSHOT_CACHE
-        return _build_pending_snapshot(now)  # Scan failed with no prior cache.
-
-    # Serve what we have (stale is fine) and refresh in the background; on a
-    # first-ever run the UI polls /scan-status and re-fetches when the scan completes.
-    if not _cache_is_fresh(now):
+    elif not _cache_is_fresh(now):
+        # Serve what we have (stale is fine) and refresh in the background; on a first-ever
+        # run the UI polls /scan-status and re-fetches when the scan completes.
         _start_background_scan()
     return _SNAPSHOT_CACHE if _SNAPSHOT_CACHE is not None else _build_pending_snapshot(now)
 
+
+# ---- Routes ----
 
 @router.get("/achievements")
 async def achievements():

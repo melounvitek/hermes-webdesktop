@@ -1,32 +1,11 @@
 """SelfHostedOIDCProvider — generic self-hosted OpenID Connect dashboard auth.
 
-A standards-compliant OIDC Relying Party for the ``hermes dashboard`` gate (Authentik,
-Keycloak, Zitadel, Authelia, Auth0, Okta, Google, …). The HTTP round trip, cookies, CSRF
-``state`` check and ``redirect_uri`` reconstruction are owned by
-``hermes_cli/dashboard_auth/routes.py``; this provider discovers endpoints from
-``{issuer}/.well-known/openid-configuration``, builds the PKCE (S256) ``/authorize`` URL,
-exchanges the code at the discovered ``token_endpoint``, and verifies the **ID token**
-against the discovered ``jwks_uri`` with ``iss``/``aud`` pinned (the access token's format
-is opaque per spec; the ``nous`` provider verifies its access token only because Portal
-mints a custom JWT). Public (PKCE-only) and confidential (PKCE + ``client_secret`` via
-``client_secret_basic`` / ``client_secret_post``) clients are both supported — the secret is
-layered on top of PKCE, never a replacement (OAuth 2.1 / RFC 9700).
-
-Configuration (env wins over config.yaml when set non-empty)::
-
-    dashboard:
-      oauth:
-        provider: self-hosted
-        self_hosted:
-          issuer: https://auth.example.com/application/o/hermes/   # required
-          client_id: hermes-dashboard                              # required
-          scopes: "openid profile email"                           # optional
-          # client_secret: confidential clients only — prefer the env var.
-
-    HERMES_DASHBOARD_OIDC_ISSUER / _CLIENT_ID / _SCOPES (optional)
-    HERMES_DASHBOARD_OIDC_CLIENT_SECRET  # optional; .env is its canonical home
-
-On skip (missing issuer / client_id) ``LAST_SKIP_REASON`` carries the reason for the gate.
+A plain OIDC Relying Party (Authentik, Keycloak, Zitadel, Authelia, Auth0, Okta, …): discovers
+endpoints from ``{issuer}/.well-known/openid-configuration``, builds the PKCE (S256) authorize
+URL, exchanges the code, and verifies the **ID token** (the access token is opaque per spec)
+against the discovered ``jwks_uri`` with ``iss``/``aud`` pinned. Public and confidential
+(``client_secret`` layered on top of PKCE, never replacing it) clients both work. Config:
+``dashboard.oauth.self_hosted.{issuer,client_id,scopes,client_secret}`` or ``HERMES_DASHBOARD_OIDC_*``.
 """
 
 from __future__ import annotations
@@ -40,7 +19,8 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-from hermes_cli.dashboard_auth import DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session
+from hermes_cli.dashboard_auth import (
+    DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session)
 from plugins.dashboard_auth._shared import (
     JSON_HEADERS,
     TOKEN_ENDPOINT_TIMEOUT_SEC as _TOKEN_ENDPOINT_TIMEOUT_SEC,
@@ -55,8 +35,7 @@ from plugins.dashboard_auth._shared import (
     resolve_env_or_cfg,
     session_from_claims,
     validate_redirect_uri,
-    verify_jwt,
-)
+    verify_jwt)
 
 logger = logging.getLogger(__name__)
 _TAG = "dashboard-auth-self-hosted"
@@ -120,18 +99,15 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         validate_redirect_uri(redirect_uri)
         disco = self._get_discovery()
         return pkce_login_start(
-            disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes, redirect_uri=redirect_uri,
-        )
+            disco["authorization_endpoint"], client_id=self._client_id, scope=self._scopes, redirect_uri=redirect_uri)
 
     def complete_login(self, *, code: str, state: str, code_verifier: str, redirect_uri: str) -> Session:
         # ``state`` is verified by the auth-route layer before this call.
         return self._exchange(
             {
                 "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
-                "client_id": self._client_id, "code_verifier": code_verifier,
-            },
-            bad_request_exc=InvalidCodeError,
-        )
+                "client_id": self._client_id, "code_verifier": code_verifier},
+            bad_request_exc=InvalidCodeError)
 
     def refresh_session(self, *, refresh_token: str) -> Session:
         if not refresh_token:
@@ -141,11 +117,9 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
                 "grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token,
                 # Re-request the same scopes so the rotated ID token keeps its identity
                 # claims (some IDPs narrow scope on refresh otherwise).
-                "scope": self._scopes,
-            },
+                "scope": self._scopes},
             bad_request_exc=RefreshExpiredError,
-            previous_refresh_token=refresh_token,
-        )
+            previous_refresh_token=refresh_token)
 
     def verify_session(self, *, access_token: str) -> Optional[Session]:
         # The session cookie carries the ID token in the access-token slot (see _session)
@@ -207,9 +181,7 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
             missing_msg=(
                 "OIDC token response missing id_token — ensure the 'openid' "
                 "scope is configured and the client is allowed to receive an "
-                "ID token."
-            ),
-        )
+                "ID token."))
         claims = self._verify_id_token(id_token)
         # Prefer a freshly-issued RT, else keep the previous (some IDPs don't rotate).
         return self._session(id_token, refresh_token_from(payload, previous_refresh_token), claims)
@@ -261,7 +233,8 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         advertised_issuer = field("issuer")
         if advertised_issuer and advertised_issuer.rstrip("/") != self._issuer:
             raise ProviderError(
-                f"OIDC discovery issuer mismatch: document advertises {advertised_issuer!r} but configured issuer is {self._issuer!r}"
+                f"OIDC discovery issuer mismatch: document advertises {advertised_issuer!r} "
+                f"but configured issuer is {self._issuer!r}"
             )
         for key, url in endpoints.items():
             _require_https_or_loopback(url, field=key)
@@ -272,9 +245,7 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
             **endpoints,
             "revocation_endpoint": field("revocation_endpoint"),
             "token_endpoint_auth_methods_supported": (
-                [str(m) for m in auth_methods_raw] if isinstance(auth_methods_raw, list) else []
-            ),
-        }
+                [str(m) for m in auth_methods_raw] if isinstance(auth_methods_raw, list) else [])}
 
     # ---- internals: JWT verification + mapping ----------------------------
 
@@ -287,8 +258,7 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         issuer = self._get_discovery()["issuer"]
         return verify_jwt(
             id_token, self._get_jwks_client(), algorithms=list(_ALLOWED_ID_TOKEN_ALGS),
-            audience=self._client_id, issuer=issuer, label="ID token",
-        )
+            audience=self._client_id, issuer=issuer, label="ID token")
 
     def _session(self, id_token: str, refresh_token: str, claims: Dict[str, Any]) -> Session:
         """Map verified OIDC claims onto a Session. The verified ID token is stored in
@@ -304,8 +274,7 @@ class SelfHostedOIDCProvider(DashboardAuthProvider):
         return session_from_claims(
             self.name, claims, access_token=id_token, refresh_token=refresh_token, label="ID token", email=email,
             display_name=str(claims.get("name") or claims.get("preferred_username") or claims.get("nickname") or email or ""),
-            org_id=str(org_id or ""),
-        )
+            org_id=str(org_id or ""))
 
 
 # ---- Plugin entry point ----
@@ -330,14 +299,12 @@ def _settings() -> dict:
             "HERMES_DASHBOARD_OIDC_CLIENT_ID) or under "
             "dashboard.oauth.self_hosted.{issuer,client_id} in config.yaml — or pass "
             "--insecure to skip the OAuth gate entirely. (issuer set: %s; client_id set: %s)"
-            % (bool(issuer), bool(client_id))
-        )
+            % (bool(issuer), bool(client_id)))
     return {
         "issuer": issuer, "client_id": client_id,
         "scopes": setting("HERMES_DASHBOARD_OIDC_SCOPES", "scopes") or _DEFAULT_SCOPES,
         # Credential: canonical home is the env var / ~/.hermes/.env. Empty ⇒ public client.
-        "client_secret": setting("HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "client_secret"),
-    }
+        "client_secret": setting("HERMES_DASHBOARD_OIDC_CLIENT_SECRET", "client_secret")}
 
 
 def register(ctx) -> None:

@@ -109,12 +109,10 @@ def pkce_login_start(authorize_url: str, *, client_id: str, scope: str, redirect
     params = {
         "response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "scope": scope, "state": state,
         "code_challenge": b64url_no_pad(hashlib.sha256(code_verifier.encode("ascii")).digest()),
-        "code_challenge_method": "S256",
-    }
+        "code_challenge_method": "S256"}
     return LoginStart(
         redirect_url=f"{authorize_url}?{urllib.parse.urlencode(params)}",
-        cookie_payload={"hermes_session_pkce": f"state={state};verifier={code_verifier}"},
-    )
+        cookie_payload={"hermes_session_pkce": f"state={state};verifier={code_verifier}"})
 
 
 def parse_json_body(response: httpx.Response) -> Dict[str, Any]:
@@ -130,8 +128,7 @@ def parse_json_body(response: httpx.Response) -> Dict[str, Any]:
 
 def exchange_token(
     url: str, data: Dict[str, str], *, headers: Optional[Dict[str, str]] = None, bad_request_exc: type[Exception],
-    idp: str, endpoint: str, token_key: str, missing_msg: str,
-) -> tuple[str, Dict[str, Any]]:
+    idp: str, endpoint: str, token_key: str, missing_msg: str) -> tuple[str, Dict[str, Any]]:
     """POST a token grant and return ``(token, payload)``.
 
     A 400 (OAuth-shaped error envelope) raises ``bad_request_exc`` — ``InvalidCodeError``
@@ -168,16 +165,14 @@ def refresh_token_from(payload: Dict[str, Any], fallback: str = "") -> str:
 
 def session_from_claims(
     provider: str, claims: Dict[str, Any], *, access_token: str, refresh_token: str,
-    label: str = "token", email: str = "", display_name: str = "", org_id: str = "",
-) -> Session:
+    label: str = "token", email: str = "", display_name: str = "", org_id: str = "") -> Session:
     """Map verified JWT claims onto a Session; ``sub`` is mandatory."""
     user_id = str(claims.get("sub", ""))
     if not user_id:
         raise ProviderError(f"{label} missing 'sub' (user_id) claim")
     return Session(
         user_id=user_id, email=email, display_name=display_name, org_id=org_id, provider=provider,
-        expires_at=int(claims["exp"]), access_token=access_token, refresh_token=refresh_token,
-    )
+        expires_at=int(claims["exp"]), access_token=access_token, refresh_token=refresh_token)
 
 
 # ---- JWT verification ----
@@ -189,13 +184,11 @@ def make_jwks_client(jwks_url: str) -> Any:
 
     return PyJWKClient(
         jwks_url, cache_keys=True, lifespan=JWKS_CACHE_SECONDS,
-        headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0"},
-    )
+        headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0"})
 
 
 def verify_jwt(
-    token: str, jwks_client: Any, *, algorithms: list[str], audience: str, issuer: str, label: str,
-) -> Dict[str, Any]:
+    token: str, jwks_client: Any, *, algorithms: list[str], audience: str, issuer: str, label: str) -> Dict[str, Any]:
     """Verify ``token`` against ``jwks_client`` with pinned ``aud``/``iss``.
 
     Unreachable JWKS → ``ProviderError`` (503); a bearer that is not one of our JWTs
@@ -213,8 +206,7 @@ def verify_jwt(
     try:
         return jwt.decode(
             token, signing_key.key, algorithms=algorithms, audience=audience, issuer=issuer,
-            options={"require": ["exp", "iat", "aud", "iss", "sub"]},
-        )
+            options={"require": ["exp", "iat", "aud", "iss", "sub"]})
     except jwt.ExpiredSignatureError as exc:
         raise InvalidCodeError(f"{label} expired: {exc}") from exc
     except jwt.InvalidTokenError as exc:
@@ -225,8 +217,7 @@ def verify_jwt(
             unverified = jwt.decode(token, options={"verify_signature": False, "verify_exp": False})
             details = (
                 f" [token iss={unverified.get('iss')!r} aud={unverified.get('aud')!r}; "
-                f"expected iss={issuer!r} aud={audience!r}]"
-            )
+                f"expected iss={issuer!r} aud={audience!r}]")
         except Exception:
             pass
         raise ProviderError(f"{label} verification failed: {exc}{details}") from exc

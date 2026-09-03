@@ -1,18 +1,11 @@
 """NousDashboardAuthProvider — Nous Portal OAuth (authorization-code + PKCE).
 
-Implements ``nous-account-service/docs/agent-dashboard-oauth-contract.md``. Bundled and
-auto-loaded, but only registers when a client_id is configured (``dashboard.oauth.client_id``
-or ``HERMES_DASHBOARD_OAUTH_CLIENT_ID``, shape ``agent:{agent_instance_id}``; optional
-``portal_url`` / ``HERMES_DASHBOARD_PORTAL_URL``). Env wins over config when set non-empty.
-
-Contract points: the client_id suffix is cross-checked against the token's
-``agent_instance_id`` claim; scope is ``agent_dashboard:access`` only, audience is the bare
-client_id; access tokens are RS256 JWTs verified against ``/.well-known/jwks.json`` (cached
-5 min). Portal issues a 24h *rotating* refresh token with reuse detection: the middleware
-MUST persist ``Session.refresh_token`` back to the cookie on every refresh, or the next
-refresh replays a rotated token and (outside a 60s grace) revokes the whole session; a 400
-on refresh → ``RefreshExpiredError`` → re-login. ``oauth_contract_version``: missing →
-warn + proceed; ``!= 1`` → refuse. ``LAST_SKIP_REASON`` is read by the gate's fail-closed branch.
+Implements ``nous-account-service/docs/agent-dashboard-oauth-contract.md``; registers only
+when a client_id (``dashboard.oauth.client_id`` / ``HERMES_DASHBOARD_OAUTH_CLIENT_ID``, shape
+``agent:{instance_id}``) is configured. Access tokens are RS256 JWTs verified against the
+Portal JWKS with ``aud`` = bare client_id. Portal issues a 24h *rotating* refresh token with
+reuse detection: the middleware MUST persist ``Session.refresh_token`` back to the cookie on
+every refresh or the next refresh replays a rotated token and revokes the whole session.
 """
 
 from __future__ import annotations
@@ -20,7 +13,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from hermes_cli.dashboard_auth import DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session
+from hermes_cli.dashboard_auth import (
+    DashboardAuthProvider, InvalidCodeError, LoginStart, ProviderError, RefreshExpiredError, Session)
 from plugins.dashboard_auth._shared import (
     SkipRegistration,
     exchange_token,
@@ -32,8 +26,7 @@ from plugins.dashboard_auth._shared import (
     resolve_env_or_cfg,
     session_from_claims,
     validate_redirect_uri,
-    verify_jwt,
-)
+    verify_jwt)
 
 logger = logging.getLogger(__name__)
 _TAG = "dashboard-auth-nous"
@@ -74,10 +67,8 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         return self._token_grant(
             {
                 "grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri,
-                "client_id": self._client_id, "code_verifier": code_verifier,
-            },
-            bad_request_exc=InvalidCodeError,
-        )
+                "client_id": self._client_id, "code_verifier": code_verifier},
+            bad_request_exc=InvalidCodeError)
 
     def refresh_session(self, *, refresh_token: str) -> Session:
         if not refresh_token:
@@ -88,8 +79,7 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         return self._token_grant(
             {"grant_type": "refresh_token", "client_id": self._client_id, "refresh_token": refresh_token},
             headers={"x-nous-refresh-token": refresh_token},
-            bad_request_exc=RefreshExpiredError,
-        )
+            bad_request_exc=RefreshExpiredError)
 
     def verify_session(self, *, access_token: str) -> Optional[Session]:
         # None on expiry/invalidity (middleware then tries refresh); a ProviderError
@@ -113,8 +103,7 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         access_token, payload = exchange_token(
             self._token_url, data, headers=headers, bad_request_exc=bad_request_exc,
             idp="Portal", endpoint="Portal token endpoint", token_key="access_token",
-            missing_msg="Portal token response missing access_token",
-        )
+            missing_msg="Portal token response missing access_token")
         # Rotating RT the caller MUST persist back to the cookie.
         return self._session(access_token, refresh_token_from(payload), self._verify_jwt(access_token))
 
@@ -127,25 +116,21 @@ class NousDashboardAuthProvider(DashboardAuthProvider):
         claims = verify_jwt(
             access_token, self._get_jwks_client(), algorithms=["RS256"],
             audience=self._client_id,  # contract C2: bare client_id
-            issuer=self._portal_url, label="access token",
-        )
+            issuer=self._portal_url, label="access token")
         # Contract C9: agent_instance_id is "should" not "must" — tolerated when absent
         # (the aud check already binds the token to this instance).
         token_instance_id = claims.get("agent_instance_id")
         if token_instance_id is not None and token_instance_id != self._agent_instance_id:
             raise ProviderError(
-                f"agent_instance_id mismatch: token={token_instance_id!r} vs configured={self._agent_instance_id!r}"
-            )
+                f"agent_instance_id mismatch: token={token_instance_id!r} vs configured={self._agent_instance_id!r}")
         contract_version = claims.get("oauth_contract_version")
         if contract_version is None:
             logger.warning(
                 "Nous Portal token missing oauth_contract_version claim (contract says it should be %d); proceeding anyway.",
-                _EXPECTED_CONTRACT_VERSION,
-            )
+                _EXPECTED_CONTRACT_VERSION)
         elif contract_version != _EXPECTED_CONTRACT_VERSION:
             raise ProviderError(
-                f"unsupported oauth_contract_version={contract_version!r}, expected {_EXPECTED_CONTRACT_VERSION}"
-            )
+                f"unsupported oauth_contract_version={contract_version!r}, expected {_EXPECTED_CONTRACT_VERSION}")
         return claims
 
     def _session(self, access_token: str, refresh_token: str, claims: Dict[str, Any]) -> Session:
@@ -173,15 +158,13 @@ def _settings() -> dict:
             "'agent:{instance_id}') when it deploys a Hermes Agent instance — set it to "
             "your provisioned client id (either as an env var or under "
             "dashboard.oauth.client_id in config.yaml), or pass --insecure to skip the "
-            "OAuth gate entirely."
-        )
+            "OAuth gate entirely.")
     if not client_id.startswith("agent:"):
         raise SkipRegistration(
             f"HERMES_DASHBOARD_OAUTH_CLIENT_ID={client_id!r} doesn't match the contract "
             f"shape 'agent:{{instance_id}}'. The Nous Portal provisions this value at deploy "
             f"time; check your Fly app's secrets or override with the value from the Portal admin UI.",
-            level="warning",
-        )
+            level="warning")
     return {"client_id": client_id, "portal_url": portal_url}
 
 
@@ -191,4 +174,5 @@ def register(ctx) -> None:
     LAST_SKIP_REASON = ""
     kwargs, LAST_SKIP_REASON = register_provider(ctx, logger, _TAG, NousDashboardAuthProvider, _settings)
     if kwargs is not None:
-        logger.info("dashboard-auth-nous: registered provider (client_id=%s, portal=%s)", kwargs["client_id"], kwargs["portal_url"])
+        logger.info(
+            "dashboard-auth-nous: registered provider (client_id=%s, portal=%s)", kwargs["client_id"], kwargs["portal_url"])

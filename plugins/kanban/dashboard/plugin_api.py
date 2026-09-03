@@ -23,7 +23,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status
+from fastapi import (
+    APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -1264,7 +1265,8 @@ def model_options():
             load_picker_context(), explicit_only=True, canonical_order=True, probe_custom_providers=False)
         return {
             "providers": [
-                {"slug": row.get("slug", ""), "label": row.get("label") or row.get("slug", ""), "models": list(row.get("models") or [])}
+                {"slug": row.get("slug", ""), "label": row.get("label") or row.get("slug", ""),
+                 "models": list(row.get("models") or [])}
                 for row in payload.get("providers", [])
                 if row.get("models")]}
     except Exception:
