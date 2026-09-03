@@ -64,8 +64,7 @@ def _profile_mention_items(prefix: str) -> list[dict]:
         from hermes_cli.profiles import list_profiles
         seen: set[str] = set()
         for p in list_profiles():
-            name = (p.name or "").strip()
-            if not name:
+            if not (name := (p.name or "").strip()):
                 continue
             seen.add(name.lower())
             if name.lower().startswith(prefix.lower()):
@@ -82,10 +81,9 @@ def _plugin_reference_items(pfx: str, qval: str) -> list[dict] | None:
     no provider owns ``pfx`` or it fails."""
     try:
         from agent.context_references import get_context_reference_providers
-        prov = get_context_reference_providers().get(pfx)
-        if prov is None:
-            return None
         import asyncio
+        if (prov := get_context_reference_providers().get(pfx)) is None:
+            return None
         coro = prov.autocomplete(qval, limit=20)
         try:
             asyncio.get_running_loop()
@@ -110,8 +108,7 @@ def _fuzzy_basename_items(root: str, path_part: str, prefix_tag: str) -> list[di
     def _consider(rel: str, name: str, is_dir: bool) -> None:
         if rel in seen or (name.startswith(".") and not want_hidden):
             return
-        rank = _fuzzy_basename_rank(name, path_part)
-        if rank is not None:
+        if (rank := _fuzzy_basename_rank(name, path_part)) is not None:
             seen.add(rel)
             ranked.append((rank, rel, name, is_dir))
 
@@ -161,9 +158,8 @@ def _dir_listing_items(root: str, word: str, path_part: str, prefix_tag: str, is
     items: list[dict] = []
     if not os.path.isdir(search_dir):
         return items
-    match_lower = match.lower()
     for entry in sorted(os.listdir(search_dir)):
-        if match and not entry.lower().startswith(match_lower):
+        if match and not entry.lower().startswith(match.lower()):
             continue
         if is_context and (entry in _FUZZY_FALLBACK_EXCLUDES or (not prefix_tag and entry.startswith("."))):
             continue
@@ -269,8 +265,7 @@ def _(rid, params: dict) -> dict:
     for extra_text, extra_meta in _SLASH_EXTRAS:
         if extra_text.startswith(text_lower) and not any(item["text"] == extra_text for item in items):
             items.append({**_item(extra_text, extra_meta), "kind": "command"})
-    details_items = _details_completions(text)
-    if details_items is not None:
+    if (details_items := _details_completions(text)) is not None:
         return _ok(rid, {"items": details_items, "replace_from": text.rfind(" ") + 1 if " " in text else len(text)})
     return _ok(rid, {"items": items, "replace_from": text.rfind(" ") + 1 if " " in text else 1})
 
@@ -298,14 +293,12 @@ def _(rid, params: dict) -> dict:
     """Save an API key for ``slug``; return its refreshed provider row (model.options shape + ``authenticated``)."""
     from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.config import is_managed
-    from hermes_cli.inventory import build_models_payload
     slug, api_key = (params.get("slug") or "").strip(), (params.get("api_key") or "").strip()
     if not slug or not api_key:
         return _err(rid, 4001, "slug and api_key are required")
     if is_managed():
         return _err(rid, 4006, "managed install — credentials are read-only")
-    pconfig = PROVIDER_REGISTRY.get(slug)
-    if not pconfig:
+    if not (pconfig := PROVIDER_REGISTRY.get(slug)):
         return _err(rid, 4002, f"unknown provider: {slug}")
     if pconfig.auth_type != "api_key":
         return _err(rid, 4003, f"{pconfig.name} uses {pconfig.auth_type} auth — run `hermes model` to configure")
@@ -316,6 +309,7 @@ def _(rid, params: dict) -> dict:
     save_provider_env_credential(env_var, api_key)
     os.environ[env_var] = api_key  # so the refreshed inventory sees it
     # Shared inventory builder (lock-step with model.options / dashboard); picker_hints carries `authenticated`.
+    from hermes_cli.inventory import build_models_payload
     payload = build_models_payload(_model_picker_context(_session_agent(params)), picker_hints=True, max_models=50)
     provider_data = next((p for p in payload["providers"] if p["slug"] == slug), None)
     if provider_data is None:  # key saved but provider didn't appear — still success
@@ -330,8 +324,7 @@ def _(rid, params: dict) -> dict:
     """Remove all credentials (env keys AND OAuth/pool state) for provider ``slug``."""
     from hermes_cli.auth import PROVIDER_REGISTRY, clear_provider_auth
     from hermes_cli.credential_lifecycle import remove_provider_env_credential
-    slug = (params.get("slug") or "").strip()
-    if not slug:
+    if not (slug := (params.get("slug") or "").strip()):
         return _err(rid, 4001, "slug is required")
     pconfig = PROVIDER_REGISTRY.get(slug)
     # Remove EVERY env var plus its mirrors or the provider resurrects in the picker after restart.

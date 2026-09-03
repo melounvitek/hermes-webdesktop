@@ -30,8 +30,7 @@ def _format_live_review_output(sid: str, session: Optional[dict], arg: str) -> s
         return "Nothing to review yet — send a message first."
     if _session_uses_compute_host(session):
         return "/review runs on the local agent only for now — this session's agent lives on a remote compute host."
-    agent = session.get("agent")
-    if agent is None:
+    if (agent := session.get("agent")) is None:
         return "Nothing to review yet — send a message first."
     if session.get("running"):
         return "session busy — wait for the current turn to finish, then /review"

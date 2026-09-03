@@ -139,6 +139,17 @@ def _rewind_prelude(rid, session, cmd: str, empty_msg: str):
     return history, user_indices, None
 
 
+def _rewind_or_err(rid, session, keep: int, value_err: tuple, fail_prefix: str, **kw):
+    """``_rewind_active_session_history`` → (result, None); ValueError → ``value_err`` (code, prefix),
+    other exceptions → 5008 ``fail_prefix`` + message."""
+    try:
+        return _rewind_active_session_history(session, keep, **kw), None
+    except ValueError as exc:
+        return None, _err(rid, value_err[0], f"{value_err[1]}{exc}")
+    except Exception as exc:
+        return None, _err(rid, 5008, f"{fail_prefix}{exc}")
+
+
 def _clip(text: str, n: int = 120) -> str:
     return text[:n] + ("…" if len(text) > n else "")
 
@@ -202,11 +213,27 @@ def _(rid, params: dict) -> dict:
         return _ok(rid, {"available": False, "percent": None, "plugged": None, "category": "dim"})
 
 
-# Session-scoped view of the background process registry (desktop status stack).
+# One-expression handlers: name → (fail_code, payload builder(params)).
+_SIMPLE_RPCS = {
+    # Session-scoped view of the background process registry (desktop status stack).
+    "process.stop": (5010, lambda params: {"killed": _tools_mod("tools.process_registry").process_registry.kill_all()}),
+    # Re-read ``~/.hermes/.env`` (CLI ``/reload`` parity); built agents keep their pool, ``/new`` resolves fresh.
+    "reload.env": (5015, lambda params: {"updated": int(_tools_mod("hermes_cli.config").reload_env())}),
+    "plugins.list": (5032, lambda params: {"plugins": [
+        {"name": n, "version": getattr(i, "version", "?"), "enabled": getattr(i, "enabled", True)}
+        for n, i in _tools_mod("hermes_cli.plugins").get_plugin_manager()._plugins.items()]}),
+    "tools.list": (5031, lambda params: {"toolsets": _toolset_rows(params, with_tools=True)}),
+    "toolsets.list": (5032, lambda params: {"toolsets": _toolset_rows(params, with_tools=False)}),
+    "agents.list": (5033, lambda params: {"processes": [
+        {"session_id": p["session_id"], "command": p["command"][:80], "status": p["status"], "uptime": p["uptime_seconds"]}
+        for p in _tools_mod("tools.process_registry").process_registry.list_sessions()]}),
+}
+for _name, (_code, _build) in _SIMPLE_RPCS.items():
+    # Look the builder up at call time: bind_module rebinds the table's lambdas onto server globals.
+    _rpc(_name, _code)(lambda rid, params, _n=_name: _ok(rid, _SIMPLE_RPCS[_n][1](params)))
+del _name, _code, _build
 _rpc("process.list", 5010, live_session=True)(
     lambda rid, params, session: _ok(rid, {"processes": _session_processes(session)}))
-_rpc("process.stop", 5010)(
-    lambda rid, params: _ok(rid, {"killed": _tools_mod("tools.process_registry").process_registry.kill_all()}))
 
 
 @_rpc("process.kill", live_session=True, fail_code=5010)
@@ -301,10 +328,6 @@ def _(rid, params: dict) -> dict:
         coalesced = _mcp_reload_gen > gen_before and (not req_rev or req_rev == _mcp_reload_loaded_rev)
         _refresh_session_agent() if coalesced else _do_full_reload()
     return _finish_reload(rid, params, coalesced=coalesced)
-
-
-# Re-read ``~/.hermes/.env`` (CLI ``/reload`` parity); built agents keep their pool, ``/new`` resolves fresh.
-_rpc("reload.env", 5015)(lambda rid, params: _ok(rid, {"updated": int(_tools_mod("hermes_cli.config").reload_env())}))
 
 
 # ─── Command catalog / dispatch ──────────────────────────────────────────────
@@ -625,14 +648,11 @@ def _cmd_retry(rid, params, session, name, arg):
             content = cc.retryable_user_text(live_view.get("content"))
         except ValueError as exc:
             return _err(rid, 4018, str(exc))
-        try:
-            _active, durable_live_view, _rewound_count = _rewind_active_session_history(
-                session, len(user_indices) - 1, require_retryable=True)
-        except ValueError as exc:
-            return _err(rid, 4018, str(exc))
-        except Exception as exc:
-            return _err(rid, 5008, f"retry: failed to persist history: {exc}")
-        content = cc.retryable_user_text(durable_live_view.get("content"))
+        rewound, err = _rewind_or_err(
+            rid, session, len(user_indices) - 1, (4018, ""), "retry: failed to persist history: ", require_retryable=True)
+        if err:
+            return err
+        content = cc.retryable_user_text(rewound[1].get("content"))
     return _ok(rid, {"type": "send", "message": content})
 
 
@@ -720,12 +740,10 @@ def _cmd_undo(rid, params, session, name, arg):
         if err:
             return err
         turns_undone = min(n, len(user_indices))
-        try:
-            active, live_view, rewound_count = _rewind_active_session_history(session, len(user_indices) - turns_undone)
-        except ValueError as exc:
-            return _err(rid, 4004, f"undo: {exc}")
-        except Exception as exc:
-            return _err(rid, 5008, f"undo: {exc}")
+        rewound, err = _rewind_or_err(rid, session, len(user_indices) - turns_undone, (4004, "undo: "), "undo: ")
+        if err:
+            return err
+        active, live_view, rewound_count = rewound
         target_text = _tools_mod("agent.message_content").flatten_message_text(live_view.get("content"))
     # Notify memory providers (same hook /branch fires) with rewound=True so cached per-turn state invalidates.
     agent = session.get("agent")
@@ -874,17 +892,15 @@ def _(rid, params: dict, session) -> dict:
     def go(mgr, cwd):
         if not mgr.enabled:
             return _ok(rid, {"enabled": False, "checkpoints": []})
-        rows = [
-            {"hash": c.get("hash", ""), "timestamp": c.get("timestamp", ""), "message": c.get("message", "")}
-            for c in mgr.list_checkpoints(cwd)]
+        keys = ("hash", "timestamp", "message")
+        rows = [{k: c.get(k, "") for k in keys} for c in mgr.list_checkpoints(cwd)]
         return _ok(rid, {"enabled": True, "checkpoints": rows})
     return _with_checkpoints(session, go)
 
 
 @_rpc("rollback.restore", live_session=True, fail_code=5021)
 def _(rid, params: dict, session) -> dict:
-    target = params.get("hash", "")
-    file_path = params.get("file_path", "")
+    target, file_path = params.get("hash", ""), params.get("file_path", "")
     if not target:
         return _err(rid, 4014, "hash required")
     # Full-history rollback mutates session history → rejected mid-turn (prompt.submit
@@ -910,8 +926,7 @@ def _(rid, params: dict, session) -> dict:
 
 @_rpc("rollback.diff", live_session=True, fail_code=5022)
 def _(rid, params: dict, session) -> dict:
-    target = params.get("hash", "")
-    if not target:
+    if not (target := params.get("hash", "")):
         return _err(rid, 4014, "hash required")
     r = _with_checkpoints(session, lambda mgr, cwd: mgr.diff(cwd, _resolve_checkpoint_hash(mgr, cwd, target)))
     raw = r.get("diff", "")[:4000]
@@ -934,11 +949,6 @@ def _(rid, params: dict) -> dict:
     return _err(rid, 4015, f"unknown action: {action}")
 
 
-_rpc("plugins.list", 5032)(lambda rid, params: _ok(rid, {"plugins": [
-    {"name": n, "version": getattr(i, "version", "?"), "enabled": getattr(i, "enabled", True)}
-    for n, i in _tools_mod("hermes_cli.plugins").get_plugin_manager()._plugins.items()]}))
-
-
 @_rpc("config.show", 5030)
 def _(rid, params: dict) -> dict:
     cfg = _load_cfg()
@@ -958,12 +968,6 @@ def _(rid, params: dict) -> dict:
 
 
 # ─── Tools / toolsets / agents ───────────────────────────────────────────────
-for _name, _code, _with_tools in (("tools.list", 5031, True), ("toolsets.list", 5032, False)):
-    _rpc(_name, _code)(
-        lambda rid, params, _w=_with_tools: _ok(rid, {"toolsets": _toolset_rows(params, with_tools=_w)}))
-del _name, _code, _with_tools
-
-
 @_rpc("tools.show", 5034)
 def _(rid, params: dict) -> dict:
     mt = _tools_mod("model_tools")
@@ -1010,11 +1014,6 @@ def _(rid, params: dict) -> dict:
     return _ok(rid, {
         "changed": changed, "enabled_toolsets": enabled, "info": info,
         "missing_servers": sorted(missing_servers), "reset": bool(session), "unknown": unknown})
-
-
-_rpc("agents.list", 5033)(lambda rid, params: _ok(rid, {"processes": [
-    {"session_id": p["session_id"], "command": p["command"][:80], "status": p["status"], "uptime": p["uptime_seconds"]}
-    for p in _tools_mod("tools.process_registry").process_registry.list_sessions()]}))
 
 
 # ─── Cron / learning / skills ────────────────────────────────────────────────
