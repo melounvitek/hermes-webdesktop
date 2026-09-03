@@ -283,7 +283,6 @@ def check_teams_requirements() -> bool:
 
     def _import() -> dict:
         from aiohttp import web as _web
-
         bindings: dict = {"web": _web, "AIOHTTP_AVAILABLE": True}
         with _suppress_third_party_dotenv():
             for module_name, names in _SDK_IMPORTS.items():
@@ -365,7 +364,6 @@ class TeamsAdapter(BasePlatformAdapter):
             if failed:
                 self._set_fatal_error(code, message, retryable=False)
                 return False
-
         try:
             # aiohttp app first — the bridge adapter wires SDK routes into it.
             aiohttp_app = web.Application(client_max_size=_MAX_BODY_BYTES)
@@ -407,8 +405,7 @@ class TeamsAdapter(BasePlatformAdapter):
         self._running = False
         if self._runner:
             await self._runner.cleanup()
-            self._runner = None
-        self._app = None
+        self._runner = self._app = None
         self._mark_disconnected()
         logger.info("[teams] Disconnected")
 
@@ -418,7 +415,6 @@ class TeamsAdapter(BasePlatformAdapter):
         because ``asyncio.Lock()`` in __init__ may bind the wrong loop."""
         import time
         import httpx
-
         if self._bf_token_lock is None:
             self._bf_token_lock = asyncio.Lock()
         async with self._bf_token_lock:
@@ -432,17 +428,15 @@ class TeamsAdapter(BasePlatformAdapter):
                 resp = await client.post(token_url, data=token_form)
                 resp.raise_for_status()
                 payload = resp.json()
-            token = payload["access_token"]
             expires_in = float(payload.get("expires_in", 3600) or 3600)
-            self._bf_token_cache = (token, time.monotonic() + expires_in)
-            return token
+            self._bf_token_cache = (payload["access_token"], time.monotonic() + expires_in)
+            return self._bf_token_cache[0]
 
     async def _fetch_attachment_bytes(self, url: str, timeout: float = 30.0) -> bytes:
         """Download attachment bytes with SSRF protection. Connector URLs get the bot's bearer token;
         redirects and body size go through the shared guards (as the cache_*_from_url helpers)."""
         from tools.url_safety import create_ssrf_safe_async_client, is_safe_url
         from gateway.platforms.base import _ssrf_redirect_guard, _read_httpx_body_with_limit
-
         if not is_safe_url(url):
             raise ValueError("Blocked unsafe attachment URL (SSRF protection)")
         headers = {"User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)"}
@@ -452,8 +446,7 @@ class TeamsAdapter(BasePlatformAdapter):
             except Exception as e:
                 logger.warning("[teams] Could not acquire Bot Framework token for attachment: %s", e)
         async with create_ssrf_safe_async_client(
-            timeout=timeout, follow_redirects=True, event_hooks={"response": [_ssrf_redirect_guard]}
-        ) as client:
+            timeout=timeout, follow_redirects=True, event_hooks={"response": [_ssrf_redirect_guard]}) as client:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
                 # Never buffer .content — a lying Content-Length must not OOM the gateway.
@@ -702,7 +695,6 @@ class TeamsAdapter(BasePlatformAdapter):
                 mime_type = mimetypes.guess_type(path)[0] or default_mime
                 with open(path, "rb") as f:
                     content_url = f"data:{mime_type};base64,{base64.b64encode(f.read()).decode()}"
-
             activity = MessageActivityInput().add_attachments(Attachment(content_type=mime_type, content_url=content_url))
             if caption:
                 activity = activity.add_text(caption)
@@ -712,30 +704,24 @@ class TeamsAdapter(BasePlatformAdapter):
             logger.error("[teams] send_%s failed: %s", media_label, e, exc_info=True)
             return SendResult(success=False, error=str(e), retryable=True)
 
-    async def send_image(
-        self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+    async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         return await self._send_media_attachment(chat_id, image_url, "image/png", caption=caption, media_label="image")
 
-    async def send_image_file(
-        self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, **kwargs
-    ) -> SendResult:
+    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
+                              reply_to: Optional[str] = None, **kwargs) -> SendResult:
         return await self.send_image(chat_id=chat_id, image_url=image_path, caption=caption, reply_to=reply_to)
 
-    async def send_video(
-        self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
+    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._send_media_attachment(chat_id, video_path, "video/mp4", caption=caption, media_label="video")
 
-    async def send_voice(
-        self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
+    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._send_media_attachment(chat_id, audio_path, "audio/mpeg", caption=caption, media_label="voice")
 
-    async def send_document(
-        self, chat_id: str, file_path: str, caption: Optional[str] = None, file_name: Optional[str] = None,
-        reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs,
-    ) -> SendResult:
+    async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None, file_name: Optional[str] = None,
+                            reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
         return await self._send_media_attachment(
             chat_id, file_path, "application/octet-stream", caption=caption, media_label="document")
 
@@ -764,7 +750,6 @@ def interactive_setup() -> None:
     """Guide the user through Teams setup using the Teams CLI."""
     from hermes_cli.config import get_env_value, save_env_value
     from hermes_cli.cli_output import prompt, prompt_yes_no, print_info, print_success, print_warning
-
     existing_id = get_env_value("TEAMS_CLIENT_ID")
     if existing_id:
         print_info(f"Teams: already configured (app ID: {existing_id})")
