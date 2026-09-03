@@ -214,31 +214,30 @@ class MCPServerRunMixin:
             return True
         try:
             _core._validate_remote_mcp_url(self.name, config.get("url"))
-        except _core.InvalidMcpUrlError as exc:
+            # Content-type preflight (Streamable HTTP only; SSE legitimately
+            # serves text/event-stream): a URL at a web-app root returns HTML
+            # and would make the SDK hang for the full connect_timeout. Skipped
+            # once _ready was ever set (endpoint already validated) and for
+            # OAuth servers, where a token-less probe sees HTML/401 and would
+            # block the flow.
+            if (
+                config.get("transport") != "sse"
+                and not config.get("skip_preflight")
+                and not self._ready.is_set()
+                and self._auth_type != "oauth"
+            ):
+                await self._preflight_content_type(
+                    config["url"],
+                    headers=dict(config.get("headers") or {}),
+                    ssl_verify=config.get("ssl_verify", True),
+                    client_cert=_core._resolve_client_cert(self.name, config),
+                )
+        except (_core.InvalidMcpUrlError, _core.NonMcpEndpointError) as exc:
+            # Fail fast and non-retryably: publish the error to start().
             logger.warning("%s", exc)
             self._error = exc
             self._ready.set()
             return False
-
-        # Content-type preflight (Streamable HTTP only; SSE legitimately serves
-        # text/event-stream): a URL at a web-app root returns HTML and would
-        # make the SDK hang for the full connect_timeout. Skipped once _ready
-        # was ever set (endpoint already validated) and for OAuth servers,
-        # where a token-less probe sees HTML/401 and would block the flow.
-        if config.get("transport") != "sse" and not config.get("skip_preflight") and not self._ready.is_set() and self._auth_type != "oauth":
-            try:
-                _probe_headers = dict(config.get("headers") or {})
-                await self._preflight_content_type(
-                    config["url"],
-                    headers=_probe_headers,
-                    ssl_verify=config.get("ssl_verify", True),
-                    client_cert=_core._resolve_client_cert(self.name, config),
-                )
-            except _core.NonMcpEndpointError as exc:
-                logger.warning("%s", exc)
-                self._error = exc
-                self._ready.set()
-                return False
         return True
 
     async def run(self, config: dict):
