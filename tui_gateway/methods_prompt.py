@@ -24,7 +24,7 @@ def _history_user_indices(history: list) -> list:
 
 
 def _message_row_id(msg: dict):
-    """Parse durable SQLite row id from a history entry, or None."""
+    """Durable SQLite row id from a history entry (``_row_id`` else ``row_id``), or None."""
     raw = msg.get("_row_id")
     if raw is None:
         raw = msg.get("row_id")
@@ -37,10 +37,10 @@ def _message_row_id(msg: dict):
 def _mem_db_pair_agrees(mem, db_msg) -> bool:
     """True when a live-memory entry plausibly corresponds to a durable row.
 
-    Positional trust needs more than equal lengths: roles and display-marker
-    status must match (a marker on one side shifts every later position), and an
-    addressable user turn must show the same text.  Multimodal content can't be
-    compared cheaply — role/marker agreement suffices.
+    Positional trust needs more than equal lengths: roles and display-marker status
+    must match (a marker on one side shifts every later position), and an addressable
+    user turn must show the same text.  Multimodal content can't be compared cheaply —
+    role/marker agreement suffices.
     """
     if not isinstance(mem, dict) or not isinstance(db_msg, dict):
         return False
@@ -64,11 +64,10 @@ def _mem_db_pair_agrees(mem, db_msg) -> bool:
 
 
 def _find_user_turn_by_row_id(history: list, target_row_id: int):
-    """Return ``(user_ordinal, history_index)`` for ``target_row_id``, or None."""
-    for u_ord, h_idx in enumerate(_history_user_indices(history)):
-        if _message_row_id(history[h_idx]) == target_row_id:
-            return u_ord, h_idx
-    return None
+    """``(user_ordinal, history_index)`` for ``target_row_id``, or None."""
+    return next(
+        ((u_ord, h_idx) for u_ord, h_idx in enumerate(_history_user_indices(history))
+         if _message_row_id(history[h_idx]) == target_row_id), None)
 
 
 def _load_durable_truncation_history(
@@ -96,48 +95,42 @@ def _resolve_truncate_row_id(session: dict, history: list, target_row_id: int):
     """Resolve ``truncate_before_row_id`` to ``(user_ordinal, history_index)``.
 
     Prefer in-memory ``_row_id``/``row_id`` stamps; when a live turn rewrote
-    ``session["history"]`` without them, load the durable transcript and map the
-    matched user-turn ordinal onto the live list.  Never falls back to a
-    client-supplied ordinal — unknown row ids refuse.
+    ``session["history"]`` without them, load the durable transcript and map the matched
+    user-turn ordinal onto the live list.  Never falls back to a client-supplied
+    ordinal — unknown row ids refuse.
     """
-    hit = _find_user_turn_by_row_id(history, target_row_id)
-    if hit is not None:
+    if (hit := _find_user_turn_by_row_id(history, target_row_id)) is not None:
         return hit
     db_history = _load_durable_truncation_history(session)
     if db_history is None:
         return None
-    # Heal missing stamps only when EVERY pair agrees (all-or-nothing): the
-    # durable copy is alternation-repaired (may merge/drop rows) while the live
-    # list can carry optimistic/marker rows; a stamp on a misaligned pair is
-    # sticky and re-aims every later rewind at the wrong durable row.
+    # Heal missing stamps only when EVERY pair agrees (all-or-nothing): the durable copy
+    # is alternation-repaired (may merge/drop rows) while the live list can carry
+    # optimistic/marker rows; a stamp on a misaligned pair is sticky and re-aims every
+    # later rewind at the wrong durable row.
     if len(db_history) == len(history) and all(
-        _mem_db_pair_agrees(mem, db_msg) for mem, db_msg in zip(history, db_history)):
+            _mem_db_pair_agrees(mem, db_msg) for mem, db_msg in zip(history, db_history)):
         for mem, db_msg in zip(history, db_history):
-            db_rid = _message_row_id(db_msg) if isinstance(db_msg, dict) else None
-            if db_rid is not None and _message_row_id(mem) is None:
+            if (db_rid := _message_row_id(db_msg)) is not None and _message_row_id(mem) is None:
                 mem["_row_id"] = db_rid
-        hit = _find_user_turn_by_row_id(history, target_row_id)
-        if hit is not None:
+        if (hit := _find_user_turn_by_row_id(history, target_row_id)) is not None:
             return hit
-    db_hit = _find_user_turn_by_row_id(db_history, target_row_id)
-    if db_hit is None:
+    if (db_hit := _find_user_turn_by_row_id(db_history, target_row_id)) is None:
         return None
     db_ord, db_idx = db_hit
     mem_user_indices = _history_user_indices(history)
-    if db_ord < 0 or db_ord >= len(mem_user_indices):
+    # Same-ordinal mapping across lists that can diverge (repair may have merged a
+    # user;user pair): trust it only when the mapped live turn shows the same content as
+    # the durable target — else refuse (caller fails closed, 4018).
+    if db_ord >= len(mem_user_indices) or not _mem_db_pair_agrees(
+            history[mem_user_indices[db_ord]], db_history[db_idx]):
         return None
-    mem_idx = mem_user_indices[db_ord]
-    # Same-ordinal mapping across lists that can diverge (repair may have merged
-    # a user;user pair): trust it only when the mapped live turn shows the same
-    # content as the durable target — else refuse (caller fails closed, 4018).
-    if not _mem_db_pair_agrees(history[mem_idx], db_history[db_idx]):
-        return None
-    return db_ord, mem_idx
+    return db_ord, mem_user_indices[db_ord]
 
 
 def _coerce_truncate_int(rid, value, param_name="truncate_before_user_ordinal"):
-    """``(int_value, error_response)`` for a client integer param. bool is refused
-    like any non-integer: JSON ``true`` would int() to 1 and aim at the wrong turn."""
+    """``(int_value, error_response)`` for a client integer param.  bool is refused like
+    any non-integer: JSON ``true`` would int() to 1 and aim at the wrong turn."""
     if not isinstance(value, bool):
         with contextlib.suppress(TypeError, ValueError):
             return int(value), None
@@ -148,12 +141,12 @@ def _reconcile_client_ordinal(
     rid, sid, client_ordinal, msg_ordinal, param_name, target_repr, prefix_user_count=0):
     """Cross-check a client ordinal against a resolved durable target.
 
-    Returns ``(ordinal, error_response)``: the target's tip-relative ordinal when
-    the client sent none or agreed, else the 4004/4030 refusal — a stale ordinal
-    beside a *resolved* durable id is drift; never guess which the user meant.
-    Client ordinals count the full displayed lineage, so after compression
-    ``msg_ordinal + prefix_user_count`` is the SAME turn.  The cut is always aimed
-    by the durable target, so this can never re-aim a truncation.
+    Returns ``(ordinal, error_response)``: the target's tip-relative ordinal when the
+    client sent none or agreed, else the 4004/4030 refusal — a stale ordinal beside a
+    *resolved* durable id is drift; never guess which the user meant.  Client ordinals
+    count the full displayed lineage, so after compression ``msg_ordinal +
+    prefix_user_count`` is the SAME turn.  The cut is always aimed by the durable
+    target, so this can never re-aim a truncation.
     """
     if client_ordinal is None:
         return msg_ordinal, None
@@ -175,9 +168,9 @@ def _reconcile_client_ordinal(
 
 
 def _pending_reaction_notes(session: dict) -> str:
-    """Note block for reactions added since the last turn, or "". Applied to the
-    MODEL INPUT only, never the persisted prompt; each reaction is announced once
-    (rows are stamped ``seen`` on read). Feature-gated (display.message_reactions)."""
+    """Note block for reactions added since the last turn, or "".  Applied to the MODEL
+    INPUT only, never the persisted prompt; each reaction is announced once (rows are
+    stamped ``seen`` on read).  Feature-gated (display.message_reactions)."""
     session_key = str(session.get("session_key") or "")
     if not session_key:
         return ""
@@ -214,10 +207,9 @@ def _pending_reaction_notes(session: dict) -> str:
 
 
 def _typed_stop_phrase_response(rid, text):
-    """End the voice chat when a bare stop phrase is TYPED while backend voice mode
-    is on (typed twin of the spoken stop phrase). Returns the RPC reply, or None
-    for a normal message. The desktop's renderer-owned voice chat never flips the
-    backend flag and handles its own typed stop."""
+    """End the voice chat when a bare stop phrase is TYPED while backend voice mode is on
+    (typed twin of the spoken stop phrase).  Returns the RPC reply, or None for a normal
+    message.  The desktop's renderer-owned voice chat handles its own typed stop."""
     if not (isinstance(text, str) and _voice_mode_enabled()):
         return None
     try:
@@ -253,8 +245,8 @@ def _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback):
 
 def _legacy_group_fence_error(rid, session, params):
     """Older Desktop builds know the ``Group: <room-id>`` title but not the hosted
-    authority marker; once a gateway owns that room a direct prompt would start a
-    second renderer driver. Fence server-side instead of trusting the client."""
+    authority marker; once a gateway owns that room a direct prompt would start a second
+    renderer driver.  Fence server-side instead of trusting the client."""
     title = str(session.get("title") or "")
     if not title.startswith("Group: "):
         return None
@@ -279,8 +271,7 @@ def _legacy_group_fence_error(rid, session, params):
     except RoomProbeUnavailableError:
         return _err(rid, 5122, _GROUP_PROBE_FAILED_MSG)
     except HostedRoomError:
-        # Legacy Desktop sessions used the display name after "Group: "; those
-        # names are not hosted room ids.
+        # Legacy Desktop sessions used the display name after "Group: " — not a room id.
         return None
     except Exception:
         return _err(rid, 5122, _GROUP_PROBE_FAILED_MSG)
@@ -294,11 +285,10 @@ def _legacy_group_fence_error(rid, session, params):
 def _parse_truncation_params(rid, sid, session, params, history):
     """Coerce + admit the truncation params; ``(target_row_id, client_ordinal, err)``.
 
-    Precedence: malformed params (4004) -> unconfirmed (4029, checked BEFORE
-    target resolution so a leaked-state request never pays the durable read or
-    heal-stamps live dicts).  An ordinal/id alone is not consent: a leftover
-    ordinal on an ORDINARY submit is indistinguishable from a real rewind, and
-    the cut is a destructive replace_messages().
+    Precedence: malformed params (4004) -> unconfirmed (4029, checked BEFORE target
+    resolution so a leaked-state request never pays the durable read or heal-stamps live
+    dicts).  An ordinal/id alone is not consent: a leftover ordinal on an ORDINARY submit
+    is indistinguishable from a real rewind, and the cut is a destructive replace_messages().
     """
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
     truncate_row_id = params.get("truncate_before_row_id")
@@ -330,9 +320,9 @@ def _parse_truncation_params(rid, sid, session, params, history):
 def _ordinal_only_truncation_error(rid, sid, session, history, user_indices, client_ordinal):
     """4004 refusal when an ordinal-only cut targets a durable session, else None.
 
-    Durability is a state.db property, not an annotation on the live copy (resume
-    paths historically omitted _row_id stamps).  An unreadable durable state
-    fails closed too: absence of proof is not proof of an ephemeral conversation.
+    Durability is a state.db property, not an annotation on the live copy (resume paths
+    historically omitted _row_id stamps).  An unreadable durable state fails closed too:
+    absence of proof is not proof of an ephemeral conversation.
     """
     has_stamped_user = any(_message_row_id(history[h_idx]) is not None for h_idx in user_indices)
     durable_history = [] if has_stamped_user else _load_durable_truncation_history(session, sid)
@@ -351,18 +341,18 @@ def _ordinal_only_truncation_error(rid, sid, session, history, user_indices, cli
 def _resolve_truncation_ordinal(rid, sid, session, params, history):
     """Resolve the truncation target to ``(ordinal, cut_index, err)``.
 
-    After ``_parse_truncation_params``: unresolvable target (4018, fail closed —
-    never degrade a missing row_id/message_id into an ordinal cut) -> ordinal
-    drift (4030) -> ordinal-only on a durable session (4004).
+    After ``_parse_truncation_params``: unresolvable target (4018, fail closed — never
+    degrade a missing row_id/message_id into an ordinal cut) -> ordinal drift (4030) ->
+    ordinal-only on a durable session (4004).
     """
     target_row_id, client_ordinal, err = _parse_truncation_params(
         rid, sid, session, params, history)
     if err is not None:
         return None, None, err
     truncate_message_id = params.get("truncate_before_message_id")
-    # Client ordinals count the full displayed lineage; after compression the tip
-    # is session["history"] and ancestors live in display_history_prefix.  Count
-    # ancestor user turns once so client and tip-relative ordinals translate.
+    # Client ordinals count the full displayed lineage; after compression the tip is
+    # session["history"] and ancestors live in display_history_prefix.  Count ancestor
+    # user turns once so client and tip-relative ordinals translate.
     prefix_user_count = len(_history_user_indices(session.get("display_history_prefix") or []))
     user_indices = _history_user_indices(history)
 
@@ -384,11 +374,9 @@ def _resolve_truncation_ordinal(rid, sid, session, params, history):
             param_name = "truncate_before_message_id"
             target_repr = msg_id_str = str(truncate_message_id)
             found_match = next(
-                (
-                    (u_ord, h_idx) for u_ord, h_idx in enumerate(user_indices)
-                    if history[h_idx].get("id") == msg_id_str
-                    or history[h_idx].get("message_id") == msg_id_str),
-                None)
+                ((u_ord, h_idx) for u_ord, h_idx in enumerate(user_indices)
+                 if history[h_idx].get("id") == msg_id_str
+                 or history[h_idx].get("message_id") == msg_id_str), None)
             not_found = "target message_id %s not found in history for session %s"
         if found_match is None:
             logger.warning(
@@ -408,8 +396,8 @@ def _resolve_truncation_ordinal(rid, sid, session, params, history):
             rid, sid, session, history, user_indices, client_ordinal)
         if err is not None:
             return None, None, err
-    # Reject out-of-range on BOTH ends: a negative ordinal would hit Python's
-    # negative indexing (user_indices[-1] -> the LAST user turn) and persist the loss.
+    # Reject out-of-range on BOTH ends: a negative ordinal would hit Python's negative
+    # indexing (user_indices[-1] -> the LAST user turn) and persist the loss.
     if ordinal < 0 or ordinal >= len(user_indices):
         return _stale(resolved_ordinal=ordinal)
     return ordinal, user_indices[ordinal], None
@@ -422,14 +410,14 @@ def _row_ids_of(messages) -> set:
 def _persist_truncation(rid, sid, session, history, truncated, ordinal, requested_rebind_ids):
     """Write the truncated transcript BEFORE touching memory (fail closed).
 
-    If replace_messages failed after session["history"] was rewritten, the turn
-    would run against the short list while state.db kept the old tail, and the
-    append-only flush would stack the new exchange on the "undone" turns — zombie
-    history on resume.  Writes through ``_session_db`` (owner of this session's
-    row), never ``_get_db()``: a profile session's transcript lives in its own
-    profile's state.db.  Returns ``(err, survivor_user_row_ids, survivor_row_id_map)``.
+    If replace_messages failed after session["history"] was rewritten, the turn would run
+    against the short list while state.db kept the old tail, and the append-only flush
+    would stack the new exchange on the "undone" turns — zombie history on resume.
+    Writes through ``_session_db`` (owner of this session's row), never ``_get_db()``: a
+    profile session's transcript lives in its own profile's state.db.  Returns
+    ``(err, survivor_fields)``; the fields are the client rowId-rebind payload.
     """
-    survivor_user_row_ids = survivor_row_id_map = None
+    fields = {}
     with _session_db(session) as db:
         if db is not None:
             try:
@@ -438,21 +426,20 @@ def _persist_truncation(rid, sid, session, history, truncated, ordinal, requeste
                 truncation_key = session.get("session_key") or sid
                 old_active_row_ids = _row_ids_of(history)
                 if requested_rebind_ids is not None:
-                    # Row-id fallback can resolve a target the live list is too
-                    # misaligned to stamp, and repair can merge a user;user pair:
-                    # read the un-repaired pre-write active-id set so a rewritten
-                    # row is never mistaken for an untouched archived/ancestor row.
+                    # Row-id fallback can resolve a target the live list is too misaligned
+                    # to stamp, and repair can merge a user;user pair: read the un-repaired
+                    # pre-write active-id set so a rewritten row is never mistaken for an
+                    # untouched archived/ancestor row.
                     durable_rebind_history = _load_durable_truncation_history(
                         session, truncation_key, repair_alternation=False)
                     if durable_rebind_history is None:
                         raise RuntimeError("could not load durable row identities for truncation")
                     old_active_row_ids.update(_row_ids_of(durable_rebind_history))
                 old_survivor_row_ids = [_message_row_id(message) for message in truncated]
-                # active_only=True: compaction keeps the pre-compaction transcript
-                # as active=0 rows under this key; a bare replace would DELETE that
-                # archive on every edit.  archive_dropped=True: soft-archive the
-                # dropped turns (active=0, still in FTS) so a mis-aimed cut is
-                # recoverable.
+                # active_only=True: compaction keeps the pre-compaction transcript as
+                # active=0 rows under this key; a bare replace would DELETE that archive on
+                # every edit.  archive_dropped=True: soft-archive the dropped turns
+                # (active=0, still in FTS) so a mis-aimed cut is recoverable.
                 db.replace_messages(
                     truncation_key, truncated, active_only=True, archive_dropped=True,
                     reject_active_turn_lease=True)
@@ -462,39 +449,39 @@ def _persist_truncation(rid, sid, session, history, truncated, ordinal, requeste
                     "(ordinal=%d); refusing turn so memory and DB stay "
                     "aligned: %s",
                     sid, ordinal, exc, exc_info=True)
-                return _err(rid, 5008, f"failed to persist history truncation: {exc}"), None, None
-            # replace_messages re-inserted the survivors as NEW rows with fresh
-            # _row_id stamps.  Surface the surviving user-turn ids (visible-user-
-            # ordinal order) so the client rebinds its cached rowIds — else a
-            # second rewind sends the pre-rewind id and the resolver refuses with
-            # 4018.  None entries: the client must drop its cached id for that turn.
-            survivor_user_row_ids = [
-                _message_row_id(truncated[i]) for i in _history_user_indices(truncated)]
-            if requested_rebind_ids is not None:
-                survivor_row_id_map = {
+                return _err(rid, 5008, f"failed to persist history truncation: {exc}"), fields
+            # replace_messages re-inserted the survivors as NEW rows with fresh _row_id
+            # stamps.  Surface the surviving user-turn ids (visible-user-ordinal order) so
+            # the client rebinds its cached rowIds — else a second rewind sends the
+            # pre-rewind id and the resolver refuses with 4018.  None entries: the client
+            # must drop its cached id for that turn.
+            if requested_rebind_ids is None:
+                fields["survivor_user_row_ids"] = [
+                    _message_row_id(truncated[i]) for i in _history_user_indices(truncated)]
+            else:
+                fields["survivor_row_id_map"] = row_id_map = {
                     str(old_row_id): new_row_id
                     for old_row_id, new_row_id in zip(
                         old_survivor_row_ids, (_message_row_id(message) for message in truncated))
                     if isinstance(old_row_id, int) and isinstance(new_row_id, int)
                     and old_row_id in requested_rebind_ids}
                 for dropped_row_id in requested_rebind_ids.intersection(old_active_row_ids):
-                    survivor_row_id_map.setdefault(str(dropped_row_id), None)
-    return None, survivor_user_row_ids, survivor_row_id_map
+                    row_id_map.setdefault(str(dropped_row_id), None)
+    return None, fields
 
 
 def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids):
-    """Rewind/regenerate cut, under ``history_lock``. Returns
-    ``(err, survivor_user_row_ids, survivor_row_id_map)``; on success
-    ``session["history"]`` is replaced and ``history_version`` bumped."""
+    """Rewind/regenerate cut, under ``history_lock``.  Returns ``(err, survivor_fields)``;
+    on success ``session["history"]`` is replaced and ``history_version`` bumped."""
     history = _history_without_ephemeral_scaffolding(session.get("history", []))
     ordinal, cut_index, err = _resolve_truncation_ordinal(rid, sid, session, params, history)
     if err is not None:
-        return err, None, None
+        return err, {}
     from agent.context_compressor import history_before_user_originated_turn
     truncated, _live_view = history_before_user_originated_turn(history, cut_index)
     # Second gate on top of confirm_truncate: ordinal 0 -> history[:0] == [] and
-    # replace_messages() DELETEs every durable row. Wiping the whole transcript
-    # needs its own opt-in (legitimate restore/regenerate of the first turn).
+    # replace_messages() DELETEs every durable row.  Wiping the whole transcript needs
+    # its own opt-in (legitimate restore/regenerate of the first turn).
     if not truncated and history and not is_truthy_value(params.get("confirm_empty_truncate")):
         logger.warning(
             "prompt.submit: REFUSED empty truncation of session %s "
@@ -503,36 +490,25 @@ def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids
         return _err(
             rid, 4028,
             "truncation would erase the entire session transcript; "
-            "resubmit with confirm_empty_truncate=true if this is intended",
-        ), None, None
+            "resubmit with confirm_empty_truncate=true if this is intended"), {}
     log_fn = logger.warning if not truncated else logger.info
     log_fn(
         "prompt.submit: truncating session %s history %d -> %d messages (ordinal=%d)",
         sid, len(history), len(truncated), ordinal)
-    err, survivor_user_row_ids, survivor_row_id_map = _persist_truncation(
+    err, fields = _persist_truncation(
         rid, sid, session, history, truncated, ordinal, requested_rebind_ids)
     if err is not None:
-        return err, None, None
+        return err, {}
     session["history"] = truncated
     session["history_version"] = int(session.get("history_version", 0)) + 1
-    return None, survivor_user_row_ids, survivor_row_id_map
-
-
-def _survivor_fields(survivor_user_row_ids, survivor_row_id_map, requested_rebind_ids) -> dict:
-    """Client rowId-rebind payload for a submit that truncated a durable session."""
-    fields = {}
-    if survivor_user_row_ids is not None and requested_rebind_ids is None:
-        fields["survivor_user_row_ids"] = survivor_user_row_ids
-    if survivor_row_id_map is not None:
-        fields["survivor_row_id_map"] = survivor_row_id_map
-    return fields
+    return None, fields
 
 
 def _persist_session_row_for_submit(rid, session):
-    """Lazily persist the DB row now that the user actually sent a message; a
-    branch becomes real here (parent transcript copied as its seed). Returns an
-    error reply (the only user-visible signal; desktop maps it to a toast) or
-    None. On failure the in-flight turn is released."""
+    """Lazily persist the DB row now that the user actually sent a message; a branch
+    becomes real here (parent transcript copied as its seed).  Returns an error reply (the
+    only user-visible signal; desktop maps it to a toast) or None.  On failure the
+    in-flight turn is released."""
     try:
         if _ensure_session_db_row(session) is False:
             return _err(
@@ -558,15 +534,15 @@ def _persist_session_row_for_submit(rid, session):
 
 
 def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_terminal_callback):
-    """Turn thread body: patient wait for a deferred build (the message is already
-    the accepted in-flight turn, so a slow build must not eat it), then run."""
+    """Turn thread body: patient wait for a deferred build (the message is already the
+    accepted in-flight turn, so a slow build must not eat it), then run."""
     err = _wait_agent_for_prompt(session, rid, sid)
     if err:
-        # Terminal frame + retained snapshot (not a bare "error" event): if the
-        # client is disconnected, the snapshot is the only way resume shows this.
+        # Terminal frame + retained snapshot (not a bare "error" event): if the client is
+        # disconnected, the snapshot is the only way resume shows this.  Construction
+        # never reached the provider: local-runtime failure.
         _emit_terminal_turn_error(
             sid, session, (err.get("error") or {}).get("message", "agent initialization failed"),
-            # Construction never reached the provider: local-runtime failure.
             error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
         with session["history_lock"]:
             session["running"] = False
@@ -594,14 +570,14 @@ _TRUNCATION_PARAMS = (
 
 
 def _claim_submit_slot(rid, sid, session, text, params, transport, internal_hosted_submit):
-    """Claim the turn against a possibly-running session; returns an early RPC
-    reply (busy/queued) or None once ``running`` is observed False.
+    """Claim the turn against a possibly-running session; returns an early RPC reply
+    (busy/queued) or None once ``running`` is observed False.
 
     A mid-turn prompt is queued (by default interrupting the live turn) instead of
     rejected.  The provider interrupt happens after ``history_lock`` is released: a
-    non-interruptible tool may hold it.  If the old turn finished between the two
-    lock acquisitions, retry the claim rather than strand this prompt in a queue
-    whose drain already ran.
+    non-interruptible tool may hold it.  If the old turn finished between the two lock
+    acquisitions, retry the claim rather than strand this prompt in a queue whose drain
+    already ran.
     """
     while True:
         with session["history_lock"]:
@@ -618,33 +594,32 @@ def _claim_submit_slot(rid, sid, session, text, params, transport, internal_host
 
 def _lock_in_submit_turn(
     rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task):
-    """Under ``history_lock``: refuse watch-child races and malformed truncation,
-    apply the cut, then mark the turn running + in flight.
-    Returns ``(err, survivor_user_row_ids, survivor_row_id_map)``."""
-    survivor_user_row_ids = survivor_row_id_map = None
+    """Under ``history_lock``: refuse watch-child races and malformed truncation, apply
+    the cut, then mark the turn running + in flight.  Returns ``(err, survivor_fields)``."""
+    fields = {}
     with session["history_lock"]:
-        # A watch session's run lives in the PARENT turn, so its own running flag
-        # is False; typing mid-run would build a second agent racing the child
-        # on the same stored session. After the run completes, submitting is fine.
+        # A watch session's run lives in the PARENT turn, so its own running flag is
+        # False; typing mid-run would build a second agent racing the child on the same
+        # stored session.  After the run completes, submitting is fine.
         if session.get("lazy") and _child_run_active(str(session.get("session_key") or "")):
-            return _err(rid, 4009, "subagent still running — wait for it to finish"), None, None
+            return _err(rid, 4009, "subagent still running — wait for it to finish"), fields
         if is_truthy_value(params.get("confirm_truncate")) and not has_truncation:
             return _err(
                 rid, 4004,
                 "confirm_truncate requires truncate_before_user_ordinal, truncate_before_message_id, or truncate_before_row_id",
-            ), None, None
+            ), fields
         if has_truncation:
-            err, survivor_user_row_ids, survivor_row_id_map = _truncate_history_for_submit(
+            err, fields = _truncate_history_for_submit(
                 rid, sid, session, params, requested_rebind_ids)
             if err is not None:
-                return err, None, None
+                return err, {}
         session["running"] = True
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
         if hosted_task is not None:
             session["_hosted_room_task"] = dict(hosted_task)
         _start_inflight_turn(session, text)
-    return None, survivor_user_row_ids, survivor_row_id_map
+    return None, fields
 
 
 @method("prompt.submit")
@@ -706,12 +681,10 @@ def _(rid, params: dict) -> dict:
             row_id for row_id in raw_rebind_ids
             if isinstance(row_id, int) and not isinstance(row_id, bool)}
         if isinstance(raw_rebind_ids, list) else None)
-    err, survivor_user_row_ids, survivor_row_id_map = _lock_in_submit_turn(
+    err, survivor_fields = _lock_in_submit_turn(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task)
     if err is not None:
         return err
-    survivor_fields = _survivor_fields(
-        survivor_user_row_ids, survivor_row_id_map, requested_rebind_ids)
     if turn_isolation:
         isolated_response = _submit_prompt_to_compute_host(
             rid, sid, session, text, display_kind=display_kind)
@@ -806,7 +779,7 @@ def _(rid, params: dict) -> dict:
 @method("image.attach_bytes")
 def _(rid, params: dict) -> dict:
     """Attach an image from base64 bytes (remote client: its file isn't on our disk).
-    Reply shape mirrors ``image.attach``. ``content_base64``/``data`` accept a
+    Reply shape mirrors ``image.attach``.  ``content_base64``/``data`` accept a
     ``data:image/...;base64,`` prefix; ``filename``/``ext`` hint the extension, else
     magic bytes decide (PNG/JPEG/GIF/WebP/BMP, fallback ``.png``)."""
     session, err = _sess_building(params, rid)
@@ -887,8 +860,8 @@ def _pdf_page_range(rid, params):
 @method("pdf.attach")
 def _(rid, params: dict) -> dict:
     """Attach a PDF by rendering each page to PNG (``pdftoppm`` @150 DPI, poppler-utils;
-    5028 if missing) and queuing the pages as images. Accepts a host ``path`` or
-    base64 ``content_base64``. Caps: 50 MB / 25 pages per call."""
+    5028 if missing) and queuing the pages as images.  Accepts a host ``path`` or base64
+    ``content_base64``.  Caps: 50 MB / 25 pages per call."""
     import shutil
     import subprocess
     import tempfile
@@ -914,12 +887,11 @@ def _(rid, params: dict) -> dict:
             str(pdf_path), str(td_path / "page")]
         from hermes_cli._subprocess_compat import windows_hide_flags
         try:
+            # UTF-8 + lossy decode: non-UTF-8 child output must not crash the gateway
+            # thread on locale-mismatched Windows.
             res = subprocess.run(
                 argv, capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL,
-                # UTF-8 + lossy decode: non-UTF-8 child output must not crash the
-                # gateway thread on locale-mismatched Windows.
-                encoding="utf-8", errors="replace",
-                creationflags=windows_hide_flags())
+                encoding="utf-8", errors="replace", creationflags=windows_hide_flags())
         except subprocess.TimeoutExpired:
             return _err(rid, 5028, "pdftoppm timed out (>120s)")
         if res.returncode != 0:
@@ -946,10 +918,10 @@ def _(rid, params: dict) -> dict:
 
 @method("file.attach")
 def _(rid, params: dict) -> dict:
-    """Stage a non-image file into the session workspace and return a
-    workspace-relative ``@file:`` ref the agent's file tools can read. ``path`` is
-    the client/host path (naming + local resolution); ``data_url`` carries the bytes
-    when the path isn't visible to the gateway; ``name`` overrides the filename."""
+    """Stage a non-image file into the session workspace and return a workspace-relative
+    ``@file:`` ref the agent's file tools can read.  ``path`` is the client/host path
+    (naming + local resolution); ``data_url`` carries the bytes when the path isn't
+    visible to the gateway; ``name`` overrides the filename."""
     session, err = _sess_building(params, rid)
     if err:
         return err
@@ -1017,37 +989,30 @@ def _(rid, params: dict) -> dict:
 # ── side agents (background / btw / preview.restart) ────────────────────────
 
 
-@contextlib.contextmanager
-def _session_profile_home_scope(session):
-    """Bind the session's HERMES_HOME override for an ephemeral agent thread: the
-    ContextVar set on the session-create thread doesn't propagate, so a turn under
-    a non-default profile would otherwise run against the wrong home."""
-    profile_home = session.get("profile_home")
-    home_token = set_hermes_home_override(profile_home) if profile_home else None
-    try:
-        yield
-    finally:
-        if home_token is not None:
-            reset_hermes_home_override(home_token)
-
-
 def _final_response_text(result) -> str:
     return (result.get("final_response", str(result)) if isinstance(result, dict) else str(result))
 
 
 def _spawn_side_agent(
     rid, session, task_id, parent, event, body, *, cwd="", extra=None, cleanup=None):
-    """Run ``body()`` (an ephemeral agent call) on a daemon thread under the
-    session's profile home and cwd; its text — or ``error: <exc>`` — lands on
-    ``parent`` as ``event`` with ``task_id`` (+ ``extra``).  ``cleanup`` runs in
-    the finally before the session context is cleared.  Replies ``{task_id}``."""
+    """Run ``body()`` (an ephemeral agent call) on a daemon thread under the session's
+    profile home and cwd; its text — or ``error: <exc>`` — lands on ``parent`` as
+    ``event`` with ``task_id`` (+ ``extra``).  ``cleanup`` runs in the finally before the
+    session context is cleared.  Replies ``{task_id}``.  The HERMES_HOME ContextVar set
+    on the session-create thread doesn't propagate, so the profile home is re-bound here
+    or a non-default profile would run against the wrong home."""
     extra = extra or {}
 
     def run():
         session_tokens = _set_session_context(task_id, cwd=(cwd or _session_cwd(session)))
+        profile_home = session.get("profile_home")
+        home_token = set_hermes_home_override(profile_home) if profile_home else None
         try:
-            with _session_profile_home_scope(session):
+            try:
                 text = body()
+            finally:
+                if home_token is not None:
+                    reset_hermes_home_override(home_token)
             _emit(event, parent, {"task_id": task_id, **extra, "text": text})
         except Exception as e:
             _emit(event, parent, {"task_id": task_id, **extra, "text": f"error: {e}"})
@@ -1060,15 +1025,22 @@ def _spawn_side_agent(
     return _ok(rid, {"task_id": task_id})
 
 
-@method("prompt.background")
-def _(rid, params: dict) -> dict:
+def _side_agent_args(rid, params, prefix):
+    """Shared admission for the side-agent RPCs: ``(session, text, parent, task_id, err)``."""
     session, err = _sess(params, rid)
     if err:
-        return err
+        return None, None, None, None, err
     text, parent = params.get("text", ""), params.get("session_id", "")
     if not text:
-        return _err(rid, 4012, "text required")
-    task_id = f"bg_{uuid.uuid4().hex[:6]}"
+        return None, None, None, None, _err(rid, 4012, "text required")
+    return session, text, parent, f"{prefix}_{uuid.uuid4().hex[:6]}", None
+
+
+@method("prompt.background")
+def _(rid, params: dict) -> dict:
+    session, text, parent, task_id, err = _side_agent_args(rid, params, "bg")
+    if err:
+        return err
 
     def body():
         from run_agent import AIAgent
@@ -1082,16 +1054,12 @@ def _(rid, params: dict) -> dict:
 @method("prompt.btw")
 def _(rid, params: dict) -> dict:
     """Answer a side question without touching session history: snapshot the live
-    conversation (in-flight ``_session_messages`` else ``session["history"]``) and
-    run a one-shot auxiliary call (``agent/side_question.py``). History, role
-    alternation and prompt cache stay untouched; answer arrives as ``btw.complete``."""
-    session, err = _sess(params, rid)
+    conversation (in-flight ``_session_messages`` else ``session["history"]``) and run a
+    one-shot auxiliary call (``agent/side_question.py``).  History, role alternation and
+    prompt cache stay untouched; answer arrives as ``btw.complete``."""
+    session, text, parent, task_id, err = _side_agent_args(rid, params, "btw")
     if err:
         return err
-    text, parent = params.get("text", ""), params.get("session_id", "")
-    if not text:
-        return _err(rid, 4012, "text required")
-    task_id = f"btw_{uuid.uuid4().hex[:6]}"
     agent = session.get("agent")
     snapshot = list(getattr(agent, "_session_messages", None) or session.get("history") or [])
     main_runtime = {
@@ -1101,8 +1069,7 @@ def _(rid, params: dict) -> dict:
     def body():
         from agent.side_question import answer_side_question
         return answer_side_question(
-            text, snapshot, parent_agent=agent, main_runtime=main_runtime,
-        ) or ""
+            text, snapshot, parent_agent=agent, main_runtime=main_runtime) or ""
 
     return _spawn_side_agent(
         rid, session, task_id, parent, "btw.complete", body, extra={"question": text})
@@ -1173,9 +1140,9 @@ def _(rid, params: dict) -> dict:
         _emit(
             "preview.restart.progress", parent,
             {"task_id": task_id, "text": f"Starting hidden restart agent{history_note}"})
-        # Deliberately NOT closed through task-wide process cleanup: the whole
-        # point is to leave a background server running under this task_id,
-        # and AIAgent.close() would kill every process for it.
+        # Deliberately NOT closed through task-wide process cleanup: the whole point is
+        # to leave a background server running under this task_id, and AIAgent.close()
+        # would kill every process for it.
         result = AIAgent(
             **_ephemeral_preview_agent_kwargs(session["agent"], task_id),
             **_preview_restart_callbacks(parent, task_id),
@@ -1188,20 +1155,18 @@ def _(rid, params: dict) -> dict:
             from tools.terminal_tool import clear_task_env_overrides
             clear_task_env_overrides(task_id)
 
-    # Pin the validated preview cwd, else the parent workspace — never an
-    # invalid client path (which would silently fall back to the launch dir).
+    # Pin the validated preview cwd, else the parent workspace — never an invalid
+    # client path (which would silently fall back to the launch dir).
     return _spawn_side_agent(
         rid, session, task_id, parent, "preview.restart.complete", body,
         cwd=preview_cwd, cleanup=cleanup)
 
 
 # ── late-answer RPCs for tool-driven UI cards ───────────────────────────────
-
-
-# All use allow_expired=True: each tool's bounded wait (read_terminal 30s,
-# setup_mcp 10min, clarify ...) can expire — its _pending entry popped — while the
-# card is still visible (e.g. a WS reconnect dropped tool.complete). A late answer
-# must resolve gracefully instead of the raw 4009 "no pending answer request".
+# All use allow_expired=True: each tool's bounded wait (read_terminal 30s, setup_mcp
+# 10min, clarify ...) can expire — its _pending entry popped — while the card is still
+# visible (e.g. a WS reconnect dropped tool.complete).  A late answer must resolve
+# gracefully instead of the raw 4009 "no pending answer request".
 
 
 @method("clarify.respond")
@@ -1262,11 +1227,11 @@ def _(rid, params: dict) -> dict:
 
 
 def _approval_respond_session_fallback(params: dict):
-    """Durable-identity fallback for ``approval.respond``: the desktop can answer
-    with a stale live sid (runtime re-minted after a reconnect while the prompt
-    stayed on screen). Try (1) the approval ``request_id`` (unique across sessions)
-    against every live session's pending approvals, then (2) ``session_id`` as a
-    STORED id mapped to its live record. Returns the live session or None."""
+    """Durable-identity fallback for ``approval.respond``: the desktop can answer with a
+    stale live sid (runtime re-minted after a reconnect while the prompt stayed on
+    screen).  Try (1) the approval ``request_id`` (unique across sessions) against every
+    live session's pending approvals, then (2) ``session_id`` as a STORED id mapped to
+    its live record.  Returns the live session or None."""
     request_id = str(params.get("request_id") or "")
     if request_id:
         try:

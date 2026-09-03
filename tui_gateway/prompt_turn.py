@@ -21,7 +21,7 @@ def _hook_failure(what: str, exc: BaseException) -> None:
 
 
 def _is_successful_goal_turn(result: Any, status: str, raw: Any) -> bool:
-    """Return whether a turn produced a real response the goal judge can use."""
+    """Whether a turn produced a real response the goal judge can use."""
     return bool(
         status == "complete" and isinstance(raw, str) and raw.strip()
         and not (isinstance(result, dict) and result.get("failed"))
@@ -45,8 +45,7 @@ def _plan_goal_compression_recovery(
     spinning until a random user message wakes it.  Returns
     ``(continuation_prompt, status_notice)``; no active goal -> ``(None, None)``.
     """
-    compression_exhausted = bool(isinstance(result, dict) and result.get("compression_exhausted"))
-    if not compression_exhausted:
+    if not (isinstance(result, dict) and result.get("compression_exhausted")):
         if _is_successful_goal_turn(result, status, raw):
             session.pop(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS, None)
         return None, None
@@ -66,17 +65,15 @@ def _plan_goal_compression_recovery(
         isinstance(recovery_state, dict)
         and recovery_state.get("goal_created_at") == goal_created_at
         and recovery_state.get("goal") == goal_text):
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             attempts = int(recovery_state.get("attempts", 0) or 0)
-        except (TypeError, ValueError):
-            attempts = 0
     continuation_prompt = goal_mgr.next_continuation_prompt()
     if attempts < _GOAL_COMPRESSION_RECOVERY_LIMIT and continuation_prompt:
         session[_GOAL_COMPRESSION_RECOVERY_ATTEMPTS] = {
             "goal_created_at": goal_created_at, "goal": goal_text, "attempts": attempts + 1}
         return (
-            continuation_prompt, "Context compression was exhausted. Retrying the active goal once."
-        )
+            continuation_prompt,
+            "Context compression was exhausted. Retrying the active goal once.")
     goal_mgr.pause(reason="context compression exhausted twice consecutively")
     # A later explicit /goal resume gets a fresh bounded recovery cycle.
     session.pop(_GOAL_COMPRESSION_RECOVERY_ATTEMPTS, None)
@@ -84,9 +81,6 @@ def _plan_goal_compression_recovery(
         None,
         "Goal paused after context compression was exhausted twice. "
         "Run /compress, then /goal resume to continue.")
-
-
-# ── turn admission ───────────────────────────────────────────────────
 
 
 def _admit_prompt_turn(
@@ -156,9 +150,6 @@ def _record_turn_marker(session: dict, text: Any) -> str:
     return marker_key
 
 
-# ── per-turn scopes ──────────────────────────────────────────────────
-
-
 @dataclasses.dataclass(slots=True)
 class _TurnScopes:
     """Reset tokens for the thread/context scopes a turn binds (filled incrementally)."""
@@ -187,10 +178,9 @@ def _bind_turn_scopes(sid: str, session: dict, scopes: _TurnScopes) -> None:
         scopes.secret = set_secret_scope(build_profile_secret_scope(Path(profile_home)))
         from tools.terminal_scope import install_profile_terminal_scope
         scopes.terminal = install_profile_terminal_scope(Path(profile_home))
-    # The sudo password callback is thread-local, so the build thread's wiring
-    # doesn't reach this turn thread — sudo prompts would fall through to
-    # /dev/tty and hang the headless gateway.  Re-wire to the sudo.request
-    # overlay (secret capture is a module global; re-running is a no-op).
+    # The sudo password callback is thread-local: the build thread's wiring doesn't
+    # reach this turn thread and sudo prompts would fall through to /dev/tty and
+    # hang the headless gateway (secret capture is a module global; re-run is a no-op).
     _wire_callbacks(sid)
 
 
@@ -207,9 +197,6 @@ def _release_turn_scopes(scopes: _TurnScopes) -> None:
         from tools.terminal_scope import reset_terminal_scope
         reset_terminal_scope(scopes.terminal)
     _clear_session_context(scopes.session_tokens)
-
-
-# ── message resolution ───────────────────────────────────────────────
 
 
 def _expand_context_references(agent, prompt: str, cwd: str):
@@ -241,9 +228,8 @@ def _route_turn_images(agent, prompt: Any, images: list[str]) -> Any:
         if getattr(agent, "api_mode", "") == "codex_app_server":
             mode = "text"
     except Exception as _img_exc:
-        print(
-            f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
-            file=sys.stderr)
+        print(f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
+              file=sys.stderr)
         mode = "text"
     if mode != "native":
         return _build_image_ref_message(prompt, images)
@@ -256,10 +242,8 @@ def _route_turn_images(agent, prompt: Any, images: list[str]) -> Any:
         if any(p.get("type") == "image_url" for p in parts):
             return parts
     except Exception as _img_exc:
-        print(
-            f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
-            file=sys.stderr,
-        )
+        print(f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
+              file=sys.stderr)
     return _build_image_ref_message(prompt, images)
 
 
@@ -293,17 +277,10 @@ def _start_turn_voice() -> tuple[Any, bool]:
         return tts_queue, False
 
 
-def _stop_thinking_sound() -> None:
-    with contextlib.suppress(Exception):
-        from tools.voice_mode import stop_thinking_sound
-        stop_thinking_sound()
-
-
 def _apply_turn_notes(run_message: Any, session: dict) -> Any:
     """Prepend the per-turn API-message notes (same enrichment channel as images):
     barge mid-speech, reactions since the last turn, then which window the message
-    was typed into (HUD mode is per-turn state; it cannot live in the byte-stable
-    system prompt)."""
+    was typed into (HUD mode is per-turn state; not for the byte-stable system prompt)."""
     from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE, take_speech_interrupted
     if take_speech_interrupted():
         run_message = _prepend_note(run_message, SPEECH_INTERRUPTED_NOTE)
@@ -335,9 +312,6 @@ def _build_run_kwargs(
         run_kwargs["persist_user_display_kind"] = display_kind
         run_kwargs["persist_user_display_metadata"] = display_metadata
     return run_kwargs
-
-
-# ── post-run bookkeeping ─────────────────────────────────────────────
 
 
 def _stamp_synthetic_display_kind(
@@ -381,8 +355,7 @@ def _restore_moa_one_shot(sid: str, session: dict) -> None:
                 _apply_model_switch(
                     sid, session, _raw, confirm_expensive_model=False,
                     pin_session_override=bool(_prev_override),
-                    persist_override=False,  # session-internal restore, never config.yaml
-                )
+                    persist_override=False)  # session-internal restore, never config.yaml
             except Exception as _moa_restore_exc:
                 logger.warning("MoA one-shot model restore failed: %s", _moa_restore_exc)
     elif _restore is None:
@@ -411,9 +384,8 @@ def _commit_turn_history(
         current_history = list(session["history"])
         history_no_markers = [e for e in history if not _is_pivot_marker(e)]
         current_no_markers = [e for e in current_history if not _is_pivot_marker(e)]
-        pivot_only = current_no_markers == history_no_markers and any(
-            _is_pivot_marker(e) for e in current_history)
-        if pivot_only:
+        if current_no_markers == history_no_markers and any(
+                _is_pivot_marker(e) for e in current_history):
             # Auto-compression can make result["messages"] shorter than the
             # turn-start history; then the full result is the base.
             if len(result["messages"]) > len(history):
@@ -433,14 +405,18 @@ def _commit_turn_history(
             "but was not saved to session history.")
 
 
+def _result_status(result: dict) -> str:
+    return (
+        "interrupted" if result.get("interrupted")
+        else "error" if result.get("error") else "complete")
+
+
 def _turn_outcome(result: Any) -> tuple[Any, str, str | None]:
     """Reduce a run_conversation result to ``(raw_text, status, last_reasoning)``."""
     if not isinstance(result, dict):
         return str(result), "complete", None
     raw = result.get("final_response", "")
-    status = (
-        "interrupted" if result.get("interrupted")
-        else "error" if result.get("error") else "complete")
+    status = _result_status(result)
     # No visible response AND a real error (e.g. invalid model slug -> provider
     # 4xx): surface the error as the text (classic CLI parity) instead of an
     # empty turn.  An empty successful turn still renders as empty.
@@ -449,7 +425,7 @@ def _turn_outcome(result: Any) -> tuple[Any, str, str | None]:
     # "Operation interrupted: waiting for model response (…)" is cancellation
     # metadata, not assistant prose (gateway/run.py and ACP suppress it too).
     if status == "interrupted" and isinstance(raw, str) and raw.strip().startswith(
-        INTERRUPT_WAITING_FOR_MODEL_PREFIX):
+            INTERRUPT_WAITING_FOR_MODEL_PREFIX):
         raw = ""
     lr = result.get("last_reasoning")
     last_reasoning = lr.strip() if isinstance(lr, str) and lr.strip() else None
@@ -465,9 +441,6 @@ def _turn_error_surface(agent, result: Any) -> Any:
             model=str(getattr(agent, "model", "") or ""))
     except Exception:
         return None
-
-
-# ── post-turn hooks ──────────────────────────────────────────────────
 
 
 def _goal_followup_after_turn(
@@ -549,27 +522,6 @@ def _apply_pending_title(sid: str, session: dict) -> None:
         pass  # transient DB failure — keep pending_title for retry
 
 
-def _speak_turn_fallback(raw: str) -> None:
-    """Voice TTS fallback when the streaming pipeline couldn't start: speak the final text whole."""
-    try:
-        # Barge-aware: spoken interruptions must cut this playback too.
-        threading.Thread(target=_speak_text_with_barge, args=(raw,), daemon=True).start()
-    except ImportError:
-        logger.warning("voice TTS skipped: hermes_cli.voice unavailable")
-    except Exception as e:
-        logger.warning("voice TTS dispatch failed: %s", e)
-
-
-def _append_turn_crash_log(sid: str, trace: str) -> None:
-    with contextlib.suppress(Exception):
-        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
-        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
-            f.write(
-                f"\n=== turn-dispatcher exception · "
-                f"{time.strftime('%Y-%m-%d %H:%M:%S')} · sid={sid} ===\n")
-            f.write(trace)
-
-
 def _dispatch_followup_turn(rid, sid: str, session: dict, prompt: Any, what: str, *,
                             on_done=None, on_error=None) -> None:
     """Chain one follow-up turn (caller already set ``running``); a dispatch failure
@@ -610,7 +562,6 @@ def _run_post_turn_followups(
                 return  # user already sent something — their turn wins
             session["running"] = True
         _dispatch_followup_turn(rid, sid, session, goal_followup, "goal continuation dispatch")
-
     # Safety net for completion events that arrived mid-turn (the poller handles
     # between-turn delivery).  Ownership is positive-proof and compression-chain
     # aware (same fail-closed gate as the poller): session B must not consume
@@ -642,20 +593,17 @@ def _run_post_turn_followups(
         _hook_failure("completion queue drain", _drain_exc)
 
 
-# ── the turn ─────────────────────────────────────────────────────────
-
-
 @dataclasses.dataclass(slots=True)
 class _TurnRun:
     """Mutable state the phase helpers of one turn thread share.
 
     ``agent`` is bound eagerly so except/finally always have one even if setup
-    throws; re-read after ``_sync_bot_capabilities`` (may swap in a rebuilt Bot
-    Chat agent).  ``error_retained``: the finally skips the inflight clear (the
-    failed snapshot stays for resume replay).  ``error_detail``: cause for the
-    "tui turn finished" bookend, stashed by both failure paths because the finally
-    sees neither ``result`` nor the exception reliably; ``prompt_text`` is what was
-    submitted (post @-expansion) so the cause can be checked for quoting it back.
+    throws (re-read after ``_sync_bot_capabilities`` may swap in a rebuilt agent).
+    ``error_retained``: the finally skips the inflight clear (failed snapshot stays
+    for resume replay).  ``error_detail``: cause for the "tui turn finished" bookend,
+    stashed by both failure paths (the finally sees neither ``result`` nor the
+    exception reliably); ``prompt_text`` is the post-@-expansion prompt the cause
+    is checked against for quoting it back.
     """
 
     agent: Any
@@ -849,7 +797,13 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
 def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
     """Except-path of the turn: crash log, history restore, terminal error frame."""
     import traceback
-    _append_turn_crash_log(sid, traceback.format_exc())
+    with contextlib.suppress(Exception):
+        os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
+        with open(_CRASH_LOG, "a", encoding="utf-8") as f:
+            f.write(
+                f"\n=== turn-dispatcher exception · "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')} · sid={sid} ===\n")
+            f.write(traceback.format_exc())
     print(f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
     # An exception in the agent's finalizer can leave the gateway's in-memory
     # history at the turn-start snapshot; keep the partial turn available to
@@ -892,7 +846,9 @@ def _finish_turn(sid: str, session: dict, st: _TurnRun) -> None:
     except Exception:
         logger.debug("post-turn memory trim failed", exc_info=True)
     if st.thinking_started:
-        _stop_thinking_sound()
+        with contextlib.suppress(Exception):
+            from tools.voice_mode import stop_thinking_sound
+            stop_thinking_sound()
     if st.tts_queue is not None:
         st.tts_queue.put(None)  # end-of-text sentinel — flush + finish speaking
     if st.one_turn_restore:
@@ -914,10 +870,7 @@ def _log_turn_finished(sid: str, session: dict, st: _TurnRun, started_monotonic:
     the thread died before the finally."""
     result = st.result
     if isinstance(result, dict):
-        status = (
-            result.get("interrupted") and "interrupted"
-            or result.get("error") and "error" or "complete"
-        )
+        status = _result_status(result)
     else:
         status = "error" if st.error_retained else "complete"
     logger.info(
@@ -966,8 +919,7 @@ def _run_prompt_submit(
             prompt, run_message, cols, streamer = prepared
             _invoke_agent(
                 sid, session, st, prompt, run_message, streamer, images, display_kind,
-                display_metadata,
-            )
+                display_metadata)
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
@@ -976,11 +928,19 @@ def _run_prompt_submit(
             if status == "complete":
                 _complete_loop_tick(sid, session, raw)
                 _apply_pending_title(sid, session)
-                # The streaming path already spoke everything via tts_queue.
+                # Voice fallback when the streaming pipeline couldn't start (the
+                # streaming path already spoke everything via tts_queue); barge-aware
+                # so spoken interruptions cut this playback too.
                 if (
                     st.tts_queue is None and isinstance(raw, str) and raw.strip()
                     and _voice_tts_enabled()):
-                    _speak_turn_fallback(raw)
+                    try:
+                        threading.Thread(
+                            target=_speak_text_with_barge, args=(raw,), daemon=True).start()
+                    except ImportError:
+                        logger.warning("voice TTS skipped: hermes_cli.voice unavailable")
+                    except Exception as e:
+                        logger.warning("voice TTS dispatch failed: %s", e)
         except Exception as e:
             _recover_turn_exception(sid, session, st, e)
         finally:
@@ -1008,7 +968,7 @@ def _run_prompt_submit(
     run_thread = threading.Thread(target=run, daemon=True)
     with _sessions_lock:
         registered = _sessions.get(sid)
-        can_start = (not session.get("_closing") and (registered is None or registered is session))
+        can_start = not session.get("_closing") and (registered is None or registered is session)
         if can_start:
             session["_run_thread"] = run_thread
             run_thread.start()
