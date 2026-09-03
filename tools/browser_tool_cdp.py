@@ -88,10 +88,12 @@ def _get_dialog_policy_config() -> Tuple[str, float]:
         else:
             _bt.logger.debug("Invalid browser.dialog_policy=%r; using default", candidate)
         timeout_raw = browser_cfg.get("dialog_timeout_s")
-        with contextlib.suppress(TypeError, ValueError):
-            parsed = float(timeout_raw) if timeout_raw is not None else DEFAULT_DIALOG_TIMEOUT_S
-            if parsed > 0:
-                timeout_s = parsed
+        try:
+            timeout_s = float(timeout_raw) if timeout_raw is not None else DEFAULT_DIALOG_TIMEOUT_S
+            if timeout_s <= 0:
+                timeout_s = DEFAULT_DIALOG_TIMEOUT_S
+        except (TypeError, ValueError):
+            timeout_s = DEFAULT_DIALOG_TIMEOUT_S
         return policy, timeout_s
     except Exception:
         return DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S

@@ -1095,15 +1095,18 @@ class GatewayShutdownMixin:
         path = self._stuck_loop_counts_path()
         if not path.exists():
             return
-        counts = self._read_json_counts(path) or {}
-        if session_key not in counts:
-            return
-        del counts[session_key]
-        with suppress(Exception):
-            if counts:
-                await asyncio.to_thread(atomic_json_write, path, counts, indent=None)
-            else:
-                path.unlink(missing_ok=True)
+        # The whole read/mutate/write is guarded (as on main): a corrupt counters file
+        # (non-dict JSON) must never raise out of a session-completion path.
+        try:
+            counts = self._read_json_counts(path) or {}
+            if session_key in counts:
+                del counts[session_key]
+                if counts:
+                    await asyncio.to_thread(atomic_json_write, path, counts, indent=None)
+                else:
+                    path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     # Restart orchestration
     @staticmethod
