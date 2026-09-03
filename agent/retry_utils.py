@@ -16,37 +16,30 @@ from typing import Any, Optional
 _jitter_counter = 0
 _jitter_lock = threading.Lock()
 
-# Z.AI Coding Plan's GLM-5.2 endpoint often returns 429 code 1305 ("service
-# may be temporarily overloaded"). Short retries hammer the same window, so
-# after a few normal retries the wait widens progressively. Cap stays
-# interactive-friendly: a TUI message should fail visibly in minutes.
+# Z.AI Coding Plan's GLM-5.2 endpoint often returns 429 code 1305 ("service may be
+# temporarily overloaded"). Short retries hammer the same window, so after
+# ``_ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS`` normal retries the wait widens progressively;
+# the cap stays interactive-friendly (a TUI message should fail visibly in minutes).
+# The short count is shared by ``adaptive_rate_limit_backoff`` and
+# ``zai_coding_overload_retry_ceiling`` so the two cannot silently desync.
 _ZAI_CODING_OVERLOAD_LONG_BACKOFF = (30.0, 60.0, 90.0, 120.0)
-
-# Short retries before the long tier. Shared by ``adaptive_rate_limit_backoff``
-# (walks the long table from attempt ``short_attempts + 1``) and
-# ``zai_coding_overload_retry_ceiling`` (sizes the loop so every long entry is
-# reachable) so the two cannot silently desync.
 _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS = 3
 
 
 def parse_retry_after_seconds(value_or_headers: Any) -> Optional[float]:
-    """Parse a ``Retry-After`` value (numeric / HTTP-date / number) or a headers
-    mapping into seconds. Both casings are tried for plain dicts (real header
-    containers are already case-insensitive). Float clamped at 0.0, or None
-    when absent / unparseable.
-    """
+    """Parse a ``Retry-After`` value (numeric / HTTP-date) or a headers mapping (both casings tried) into
+    seconds, clamped at 0.0; None when absent / unparseable."""
     raw = value_or_headers
     if raw is not None and not isinstance(raw, (str, int, float)):
         getter = getattr(raw, "get", None)
         if not callable(getter):
             return None
         try:
-            value = getter("Retry-After")
-            if value is None:
-                value = getter("retry-after")
+            raw = getter("Retry-After")
+            if raw is None:
+                raw = getter("retry-after")
         except Exception:
             return None
-        raw = value
     if raw is None or isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
@@ -70,8 +63,7 @@ def parse_retry_after_seconds(value_or_headers: Any) -> Optional[float]:
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
-def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float = 120.0,
-                     jitter_ratio: float = 0.5) -> float:
+def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float = 120.0, jitter_ratio: float = 0.5) -> float:
     """min(base * 2^(attempt-1), max_delay) + uniform jitter in
     [0, jitter_ratio * delay]. ``attempt`` is 1-based."""
     global _jitter_counter
@@ -80,10 +72,7 @@ def jittered_backoff(attempt: int, *, base_delay: float = 5.0, max_delay: float 
         tick = _jitter_counter
 
     exponent = max(0, attempt - 1)
-    if exponent >= 63 or base_delay <= 0:
-        delay = max_delay
-    else:
-        delay = min(base_delay * (2 ** exponent), max_delay)
+    delay = max_delay if (exponent >= 63 or base_delay <= 0) else min(base_delay * (2 ** exponent), max_delay)
 
     # Seed from time + counter so coarse clocks still decorrelate.
     seed = (time.time_ns() ^ (tick * 0x9E3779B9)) & 0xFFFFFFFF
@@ -109,38 +98,22 @@ def is_zai_coding_overload_error(*, base_url: str | None, model: str | None, err
 
 
 def adaptive_rate_limit_backoff(
-    attempt: int,
-    *,
-    base_url: str | None,
-    model: str | None,
-    error: Any,
-    default_wait: float,
+    attempt: int, *, base_url: str | None, model: str | None, error: Any, default_wait: float,
     short_attempts: int = _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS,
 ) -> tuple[float, str | None]:
-    """Provider-aware rate-limit backoff → ``(wait_seconds, reason_label)``.
-
-    Most providers get ``default_wait`` unchanged. Z.AI Coding GLM-5.2
-    overloads keep ``short_attempts`` short retries, then 30→60→90→120s
-    (capped) with light jitter. ``attempt`` is 1-based like the loop's log.
-    """
+    """``(wait_seconds, reason_label)``: ``default_wait`` for most providers; Z.AI Coding GLM-5.2 overloads keep
+    ``short_attempts`` short retries, then 30→60→90→120s with light jitter. ``attempt`` is 1-based."""
     if not is_zai_coding_overload_error(base_url=base_url, model=model, error=error):
         return default_wait, None
     if attempt <= short_attempts:
         return default_wait, "zai_coding_overload_short"
-
     idx = min(attempt - short_attempts - 1, len(_ZAI_CODING_OVERLOAD_LONG_BACKOFF) - 1)
     base_delay = _ZAI_CODING_OVERLOAD_LONG_BACKOFF[idx]
-    # Smaller jitter keeps long waits readable while still de-synchronizing.
-    wait = jittered_backoff(1, base_delay=base_delay, max_delay=base_delay, jitter_ratio=0.2)
-    return wait, "zai_coding_overload_long"
+    return jittered_backoff(1, base_delay=base_delay, max_delay=base_delay, jitter_ratio=0.2), "zai_coding_overload_long"
 
 
 def zai_coding_overload_retry_ceiling(short_attempts: int = _ZAI_CODING_OVERLOAD_SHORT_ATTEMPTS) -> int:
-    """Retry-loop ceiling for the full Z.AI overload schedule.
-
-    The loop gives up when ``retry_count >= ceiling`` *before* computing the
-    attempt's backoff, so the ceiling must sit one past the last long entry
-    or the long tier never runs (the default ``api_max_retries`` of 3 equals
-    ``short_attempts``).
-    """
+    """Retry-loop ceiling for the full Z.AI overload schedule: one past the last long entry,
+    because the loop gives up when ``retry_count >= ceiling`` BEFORE computing the attempt's
+    backoff (the default ``api_max_retries`` of 3 equals ``short_attempts``)."""
     return short_attempts + len(_ZAI_CODING_OVERLOAD_LONG_BACKOFF) + 1
