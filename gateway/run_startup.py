@@ -7,11 +7,10 @@ so ``patch("gateway.run.X")`` keeps intercepting them at call time.
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
 import asyncio
 import dataclasses
 import faulthandler
+import logging
 import os
 import signal
 import time
@@ -35,9 +34,6 @@ from gateway.shutdown_watchdog import (
 )
 from typing import Any, Dict, Optional, Tuple
 
-if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
-    from gateway.run import GatewayRunner, TurnRunner  # noqa: F401
-
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
@@ -46,10 +42,7 @@ class GatewayStartupMixin:
     """Startup sequence, resume/restore and handoff methods for GatewayRunner."""
 
     async def _run_startup_resume_event(
-        self,
-        adapter: BasePlatformAdapter,
-        event: MessageEvent,
-        session_key: str,
+        self, adapter: BasePlatformAdapter, event: MessageEvent, session_key: str,
     ) -> None:
         """Dispatch one synthetic startup resume and wait for its agent turn.
 
@@ -114,13 +107,10 @@ class GatewayStartupMixin:
         the network-bound platform connects; ``_finish_startup_restore`` awaits it (bounded).
         """
         from gateway.run import _startup_warmup_timeout_secs
-        timeout = _startup_warmup_timeout_secs()
-        if timeout <= 0:
+        if _startup_warmup_timeout_secs() <= 0:
             self._startup_warmup_task = None
             return
-        self._startup_warmup_task = asyncio.ensure_future(
-            self._warm_turn_prerequisites()
-        )
+        self._startup_warmup_task = asyncio.ensure_future(self._warm_turn_prerequisites())
 
     async def _warm_turn_prerequisites(self) -> None:
         """Initialize turn machinery on an executor thread before the gate opens.
@@ -139,9 +129,7 @@ class GatewayStartupMixin:
             )
         except Exception:
             logger.warning(
-                "Turn-machinery warm-up failed; first inbound turn will "
-                "initialize lazily",
-                exc_info=True,
+                "Turn-machinery warm-up failed; first inbound turn will initialize lazily", exc_info=True,
             )
 
     async def _await_startup_warmup(self) -> None:
@@ -1209,48 +1197,40 @@ class GatewayStartupMixin:
                 return (p, adp, p_cfg, "exception", _exc)
             return (p, adp, p_cfg, "ok" if ok else "failed", None)
 
-        if _pending_connects:
-            # Abort-aware concurrent wait (parity with the serial loop's between-platforms check): a
-            # restart/shutdown requested mid-connect must cancel still-pending connects, clean up the
-            # ones already completed, and abort startup.
-            _task_map: dict = {}
-            for (p, c, a) in _pending_connects:
-                _t = asyncio.ensure_future(_connect_one_startup(p, c, a))
-                _task_map[_t] = (p, c, a)
-            _pending_tasks = set(_task_map)
-            _abort_mid_connect = False
-            while _pending_tasks:
-                _done, _pending_tasks = await asyncio.wait(
-                    _pending_tasks, timeout=0.05
-                )
-                if _pending_tasks and self._startup_should_abort():
-                    _abort_mid_connect = True
-                    break
-            if _abort_mid_connect:
-                # Cancel and fully settle the in-flight connects FIRST, so a completed adapter's
-                # disconnect cannot unblock a sibling's connect() before the sibling is cancelled.
-                for _t in _pending_tasks:
-                    _t.cancel()
-                await asyncio.gather(*_pending_tasks, return_exceptions=True)
-                for _t in _pending_tasks:
-                    _p, _c, _a = _task_map[_t]
-                    await self._startup_teardown_adapter(_a, _p)
-                # Tear down adapters whose connect already succeeded — they
-                # were never registered, so stop() won't reach them.
-                for _t, (_p, _c, _a) in _task_map.items():
-                    if _t in _pending_tasks or _t.cancelled():
-                        continue
-                    _res = _t.exception() is None and _t.result() or None
-                    if _res and _res[3] == "ok":
-                        await self._startup_teardown_adapter(_a, _p)
-                await self._abort_startup_if_shutdown_requested()
-                return None
-            _raw = [
-                _t.exception() or _t.result() for _t in _task_map
-            ]
+        if not _pending_connects:
+            return []
+        # Abort-aware concurrent wait (parity with the serial loop's between-platforms check): a
+        # restart/shutdown requested mid-connect must cancel still-pending connects, clean up the
+        # ones already completed, and abort startup.
+        _task_map = {
+            asyncio.ensure_future(_connect_one_startup(p, c, a)): (p, c, a)
+            for (p, c, a) in _pending_connects
+        }
+        _pending_tasks = set(_task_map)
+        while _pending_tasks:
+            _done, _pending_tasks = await asyncio.wait(_pending_tasks, timeout=0.05)
+            if _pending_tasks and self._startup_should_abort():
+                break
         else:
-            _raw = []
-        return _raw
+            return [_t.exception() or _t.result() for _t in _task_map]
+        # Cancel and fully settle the in-flight connects FIRST, so a completed adapter's
+        # disconnect cannot unblock a sibling's connect() before the sibling is cancelled.
+        for _t in _pending_tasks:
+            _t.cancel()
+        await asyncio.gather(*_pending_tasks, return_exceptions=True)
+        for _t in _pending_tasks:
+            _p, _c, _a = _task_map[_t]
+            await self._startup_teardown_adapter(_a, _p)
+        # Tear down adapters whose connect already succeeded — they were never registered, so
+        # stop() won't reach them.
+        for _t, (_p, _c, _a) in _task_map.items():
+            if _t in _pending_tasks or _t.cancelled():
+                continue
+            _res = _t.exception() is None and _t.result() or None
+            if _res and _res[3] == "ok":
+                await self._startup_teardown_adapter(_a, _p)
+        await self._abort_startup_if_shutdown_requested()
+        return None
 
     async def _start_aggregate_connect_results(
         self,
