@@ -9,9 +9,7 @@ from hermes_cli.colors import Colors, color
 
 
 def _mark(glyph: str, col: str):
-    def check(text: str, detail: str = ""):
-        print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
-    return check
+    return lambda text, detail="": print(f"  {color(glyph, col)} {text}" + (f" {color(detail, Colors.DIM)}" if detail else ""))
 
 
 check_ok, check_warn, check_fail = _mark("✓", Colors.GREEN), _mark("⚠", Colors.YELLOW), _mark("✗", Colors.RED)
@@ -57,8 +55,11 @@ class Finding:
 
 def doctor_check(on_error: str | None = None, detail: str = ""):
     """Turn ``fn(should_fix, f: Finding)`` into a ``(should_fix) -> Finding`` doctor check.
-    If *fn* raises, prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing when *on_error*
-    is None); the partial Finding is still returned, so issues recorded before the crash survive."""
+
+    *on_error* None: exceptions propagate (as they always did for that check). Otherwise the check is
+    best-effort: a crash prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing for
+    ``""``) and the partial Finding is still returned, so issues recorded before the crash survive.
+    """
     def deco(fn):
         @functools.wraps(fn)
         def check(should_fix: bool) -> Finding:
@@ -66,7 +67,9 @@ def doctor_check(on_error: str | None = None, detail: str = ""):
             try:
                 fn(should_fix, f)
             except Exception as e:
-                if on_error is not None:
+                if on_error is None:
+                    raise
+                if on_error:
                     check_warn(on_error.format(e=e), detail.format(e=e))
             return f
         return check

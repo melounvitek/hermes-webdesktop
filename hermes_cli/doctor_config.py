@@ -137,10 +137,10 @@ def _check_mcp_security(should_fix: bool, f: Finding) -> None:
         check_ok("No suspicious MCP stdio commands")
 
 
-def _check_env_file(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_env_file(should_fix: bool, f: Finding) -> None:
     """Managed scope plus ~/.hermes/.env presence and provider credentials."""
     from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
-    f = Finding()
     managed_scope_check()
     env_path = HERMES_HOME / '.env'
     if env_path.exists():
@@ -170,7 +170,6 @@ def _check_env_file(should_fix: bool) -> Finding:
         else:
             check_info("Run 'hermes setup' to create one")
             f.issues.append("Run 'hermes setup' to create .env")
-    return f
 
 
 def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
@@ -186,11 +185,7 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
         pass
     try:
         from hermes_cli.config import get_compatible_custom_providers
-        from hermes_cli.providers import (
-            custom_provider_aliases as aliases,
-            normalize_provider as normalize,
-            resolve_provider_full as resolve_full,
-        )
+        from hermes_cli.providers import custom_provider_aliases as aliases, normalize_provider as normalize, resolve_provider_full as resolve_full
         try:
             custom_providers = get_compatible_custom_providers(cfg)
         except Exception:
@@ -258,16 +253,12 @@ def _validate_model_config(config_path, issues: list) -> None:
         if resolve_full is not None:
             provider_def = resolve_full(provider, cfg.get("providers"), custom_providers)
             catalog_provider = provider_def.id if provider_def is not None else None
-            if catalog_provider is not None:
-                accept.add(catalog_provider)
+            accept.update({catalog_provider} - {None})
     if provider and provider != "auto" and (catalog_provider is None or (known_providers and not (accept & valid_provider_ids))):
         known_list = ", ".join(sorted(known_providers)) if known_providers else "(unavailable)"
-        _fail_and_issue(
-            f"model.provider '{provider_raw}' is not a recognised provider", f"(known: {known_list})",
-            f"model.provider '{provider_raw}' is unknown. Valid providers: {known_list}. "
-            f"Fix: run 'hermes config set model.provider <valid_provider>'",
-            issues,
-        )
+        _fail_and_issue(f"model.provider '{provider_raw}' is not a recognised provider", f"(known: {known_list})",
+                        f"model.provider '{provider_raw}' is unknown. Valid providers: {known_list}. "
+                        f"Fix: run 'hermes config set model.provider <valid_provider>'", issues)
     policy_id = str(runtime_provider or catalog_provider or "").strip().lower()
     accepts_vendor_slug = policy_id in _VENDOR_SLUG_PROVIDERS or policy_id == "custom" or policy_id.startswith("custom:")
     if default_model and "/" in default_model and policy_id and not accepts_vendor_slug:
@@ -279,22 +270,18 @@ def _validate_model_config(config_path, issues: list) -> None:
         from hermes_cli.doctor import _DHH
         try:
             if not _provider_has_credentials(runtime_provider):
-                _fail_and_issue(
-                    f"model.provider '{runtime_provider}' is set but no API key is configured",
-                    "(check ~/.hermes/.env or run 'hermes setup')",
-                    f"No credentials found for provider '{runtime_provider}'. "
-                    f"Run 'hermes setup' or set the provider's API key in {_DHH}/.env, "
-                    f"or switch providers with 'hermes config set model.provider <name>'",
-                    issues,
-                )
+                _fail_and_issue(f"model.provider '{runtime_provider}' is set but no API key is configured",
+                                "(check ~/.hermes/.env or run 'hermes setup')",
+                                f"No credentials found for provider '{runtime_provider}'. Run 'hermes setup' or set the provider's "
+                                f"API key in {_DHH}/.env, or switch providers with 'hermes config set model.provider <name>'", issues)
         except Exception:
             pass
 
 
-def _check_config_file(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_config_file(should_fix: bool, f: Finding) -> None:
     """config.yaml presence (project cli-config.yaml as fallback); model/provider validation."""
     from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
-    f = Finding()
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
         check_ok(f"{_DHH}/config.yaml exists")
@@ -316,7 +303,6 @@ def _check_config_file(should_fix: bool) -> Finding:
         f.fixed += 1
     else:
         check_warn("config.yaml not found", "(using defaults)")
-    return f
 
 
 def _drift_config_version(f: Finding, should_fix: bool, config_path) -> None:
@@ -350,15 +336,12 @@ def _drift_stale_root_keys(f: Finding, should_fix: bool, config_path) -> None:
         return
     # Coerce scalar/None ``model:`` into a dict before mutation (setdefault would hand back a scalar).
     raw_model = raw_config.get("model")
-    if isinstance(raw_model, dict):
-        model_section = raw_model
-    else:
-        model_section = {"default": raw_model.strip()} if isinstance(raw_model, str) and raw_model.strip() else {}
-        raw_config["model"] = model_section
+    if not isinstance(raw_model, dict):
+        raw_model = raw_config["model"] = {"default": raw_model.strip()} if isinstance(raw_model, str) and raw_model.strip() else {}
     for k in stale_root_keys:
         value = raw_config.pop(k)
-        if not model_section.get(k):
-            model_section[k] = value
+        if not raw_model.get(k):
+            raw_model[k] = value
     atomic_config_write(config_path, raw_config)
     check_ok("Migrated stale root-level keys into model section")
     f.fixed += 1
@@ -376,8 +359,8 @@ def _drift_max_iterations_ghost(f: Finding, should_fix: bool, config_path) -> No
     raw_config = read_user_config_raw(config_path)
     agent_cfg = raw_config.get("agent")
     cfg_max_turns = agent_cfg.get("max_turns") if isinstance(agent_cfg, dict) else None
-    if cfg_max_turns is None:  # legacy root-level key counts too
-        cfg_max_turns = raw_config.get("max_turns")
+    if cfg_max_turns is None:
+        cfg_max_turns = raw_config.get("max_turns")  # legacy root-level key counts too
     env_ghost = load_env().get("HERMES_MAX_ITERATIONS")
     if cfg_max_turns is None or env_ghost is None or str(cfg_max_turns).strip() == str(env_ghost).strip():
         return
@@ -427,13 +410,13 @@ _CONFIG_DRIFT_STEPS = (
 )
 
 
-def _check_config_drift(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_config_drift(should_fix: bool, f: Finding) -> None:
     """Config version, stale root keys, HERMES_MAX_ITERATIONS ghost, deprecations, structure.
 
     Each step is independent and best-effort: a failure in one never hides the next.
     """
     from hermes_cli.doctor import HERMES_HOME
-    f = Finding()
     config_path = HERMES_HOME / 'config.yaml'
     if not config_path.exists():
         config_path = None
@@ -442,7 +425,6 @@ def _check_config_drift(should_fix: bool) -> Finding:
             step(f, should_fix, config_path)
         except Exception:
             pass
-    return f
 
 
 @doctor_check("xAI retirement check skipped", "({e})")

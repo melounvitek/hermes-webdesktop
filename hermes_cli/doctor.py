@@ -51,7 +51,7 @@ from hermes_cli.doctor_state import (  # noqa: F401  (re-exported; tests use her
     _check_skills_hub, _check_state_db, _honcho_is_configured_for_doctor, _render_state_db_stats,
 )
 from hermes_cli.doctor_report import (  # noqa: F401  (re-exported for doctor_live and tests)
-    Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn,
+    Finding, _fail_and_issue, _section, check_bool, check_fail, check_info, check_ok, check_warn, doctor_check,
 )
 from hermes_cli.doctor_connectivity import (  # noqa: F401  (re-exported; tests import from hermes_cli.doctor)
     _build_apikey_providers_list, _has_healthy_oauth_fallback_for_apikey_provider, build_probes,
@@ -72,9 +72,9 @@ _PROVIDER_ENV_HINTS = (
 from hermes_cli.sizefmt import format_bytes as _human_bytes  # noqa: F401  (tests import doctor._human_bytes)
 
 
-def _check_auth_providers(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_auth_providers(should_fix: bool, f: Finding) -> None:
     """Refresh-free OAuth status snapshot (doctor must never trigger a token refresh)."""
-    f = Finding()
     try:
         from hermes_cli.auth import get_nous_auth_status_local, get_codex_auth_status, get_minimax_oauth_auth_status
         # Read-only display: refresh-free snapshot — doctor must never trigger an OAuth refresh.
@@ -93,7 +93,6 @@ def _check_auth_providers(should_fix: bool) -> Finding:
         _login_row("xAI OAuth", get_xai_oauth_auth_status() or {}, show_error=True)
     except Exception:
         pass
-    return f
 
 
 def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_error: bool = False) -> bool:
@@ -104,9 +103,9 @@ def _login_row(label: str, status: dict, ok_detail: str = "(logged in)", show_er
     return logged_in
 
 
-def _check_api_connectivity(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_api_connectivity(should_fix: bool, f: Finding) -> None:
     """Parallel HTTP/SDK probes for every configured provider; results printed in submission order."""
-    f = Finding()
     probes = build_probes()
     # Single status line so users see something happening; ``\r`` clears it once results land.
     print(f"  {color(f'Running {len(probes)} connectivity checks in parallel…', Colors.DIM)}", end="", flush=True)
@@ -117,7 +116,6 @@ def _check_api_connectivity(should_fix: bool) -> Finding:
             print(f"  {glyph} {label}" + (f" {detail}" if detail else ""))
         if r.issues and not _has_healthy_oauth_fallback_for_apikey_provider(r.label):
             f.issues.extend(r.issues)
-    return f
 
 
 # Ordered (section title, check). None title = check prints its own header (or none); order is user-visible.

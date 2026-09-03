@@ -83,9 +83,7 @@ def _gateway_status() -> str:
 def _count_skills(hermes_home: Path) -> int:
     """Count installed skills."""
     skills_dir = hermes_home / "skills"
-    if not skills_dir.is_dir():
-        return 0
-    return sum(1 for item in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(item))
+    return sum(1 for item in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(item)) if skills_dir.is_dir() else 0
 
 
 def _cron_summary(hermes_home: Path) -> str:
@@ -117,8 +115,7 @@ def _get_model_and_provider(config: dict) -> tuple[str, str]:
     """Extract model and provider from config."""
     model_cfg = config.get("model", "")
     if isinstance(model_cfg, dict):
-        model = model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "(not set)"
-        return model, model_cfg.get("provider") or "(auto)"
+        return (model_cfg.get("default") or model_cfg.get("model") or model_cfg.get("name") or "(not set)", model_cfg.get("provider") or "(auto)")
     return (model_cfg if isinstance(model_cfg, str) else "") or "(not set)", "(auto)"
 
 
@@ -227,8 +224,7 @@ def run_dump(args):
     show_keys = getattr(args, "show_keys", False)
     # Load env from .env file so key checks work
     load_hermes_dotenv(hermes_home=get_env_path().parent, project_env=get_project_root() / ".env")
-    project_root = get_project_root()
-    hermes_home = get_hermes_home()
+    project_root, hermes_home = get_project_root(), get_hermes_home()
     try:
         config = load_config()
     except Exception:
@@ -239,27 +235,21 @@ def run_dump(args):
         profile = get_active_profile_name() or "(default)"
     except Exception:
         profile = "(default)"
-    openai_ver = _openai_version()
+    toolsets = config.get("toolsets", ["hermes-cli"])
+    platforms = [name for name, env in _PLATFORM_ENV_VARS.items() if os.getenv(env)]
     lines = [
         "--- hermes dump ---",
         f"version:          {_version_line(project_root)}",
         f"os:               {platform.system()} {platform.release()} {platform.machine()}",
         f"python:           {sys.version.split()[0]}",
-        f"openai_sdk:       {openai_ver}",
+        f"openai_sdk:       {_openai_version()}",
         f"profile:          {profile}",
         f"hermes_home:      {display_hermes_home()}",
         f"model:            {model}",
         f"provider:         {provider}",
         f"terminal:         {_effective_terminal_backend(config)}",
-        "",
-        "api_keys:",
-        *_api_key_lines(show_keys),
-    ]
-    toolsets = config.get("toolsets", ["hermes-cli"])
-    platforms = [name for name, env in _PLATFORM_ENV_VARS.items() if os.getenv(env)]
-    lines += [
-        "",
-        "features:",
+        "", "api_keys:", *_api_key_lines(show_keys),
+        "", "features:",
         f"  toolsets:           {', '.join(toolsets) if toolsets else '(default)'}",
         f"  mcp_servers:        {len(config.get('mcp', {}).get('servers', {}))}",
         f"  memory_provider:    {config.get('memory', {}).get('provider', '') or 'built-in'}",
@@ -271,5 +261,4 @@ def run_dump(args):
     overrides = _config_overrides(config)
     if overrides:
         lines += ["", "config_overrides:"] + [f"  {key}: {val}" for key, val in overrides.items()]
-    lines.append("--- end dump ---")
-    print("\n".join(lines))
+    print("\n".join(lines + ["--- end dump ---"]))

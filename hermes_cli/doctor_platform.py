@@ -130,12 +130,10 @@ def _read_pyproject_version() -> str | None:
     except OSError:
         return None
     in_project = False
-    for raw in text.splitlines():
-        line = raw.strip()
+    for line in map(str.strip, text.splitlines()):
         if line.startswith("[") and line.endswith("]"):
             in_project = line == "[project]"
-            continue
-        if in_project and line.startswith("version") and "=" in line:
+        elif in_project and line.startswith("version") and "=" in line:
             return line.split("=", 1)[1].split("#", 1)[0].strip().strip("\"'") or None
     return None
 
@@ -151,12 +149,9 @@ def _check_version_consistency(issues: list[str]) -> None:
     if pyproject_version is None:
         return
     if pyproject_version == init_version:
-        check_ok("Version files consistent", f"({init_version})")
-    else:
-        _fail_and_issue("Version mismatch between source files",
-                        f"(pyproject.toml {pyproject_version} != hermes_cli/__init__.py {init_version})",
-                        "Re-sync version files (e.g. run 'hermes update', or set "
-                        "hermes_cli/__init__.py __version__ to match pyproject.toml)", issues)
+        return check_ok("Version files consistent", f"({init_version})")
+    _fail_and_issue("Version mismatch between source files", f"(pyproject.toml {pyproject_version} != hermes_cli/__init__.py {init_version})",
+                    "Re-sync version files (e.g. run 'hermes update', or set hermes_cli/__init__.py __version__ to match pyproject.toml)", issues)
 
 
 def _check_s6_supervision(issues: list[str]) -> None:
@@ -246,14 +241,11 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         return
     _section("Gateway Service")
     linger_enabled, linger_detail = get_systemd_linger_status()
-    if linger_enabled is True:
-        check_ok("Systemd linger enabled", "(gateway service survives logout)")
-    elif linger_enabled is False:
-        check_warn("Systemd linger disabled", "(gateway may stop after logout)")
+    if linger_enabled is None:
+        return check_warn("Could not verify systemd linger", f"({linger_detail})")
+    if not check_bool(linger_enabled, ("Systemd linger enabled", "(gateway service survives logout)"), ("Systemd linger disabled", "(gateway may stop after logout)")):
         check_info("Run: sudo loginctl enable-linger $USER")
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
-    else:
-        check_warn("Could not verify systemd linger", f"({linger_detail})")
 
 
 def check_macos_tcc_grants() -> None:
@@ -339,17 +331,12 @@ def check_macos_full_disk_access() -> None:
     except OSError as e:
         if not isinstance(e, PermissionError):
             return
-        check_info(
-            "One switch silences all macOS folder prompts: grant your terminal "
-            "app Full Disk Access and Hermes will never trip per-folder dialogs "
-            "(Desktop/Downloads/Documents/...) again. Open: System Settings → "
-            "Privacy & Security → Full Disk Access — or run:\n"
-            "      open \"x-apple.systempreferences:com.apple.preference"
-            ".security?Privacy_AllFiles\"\n"
-            "    then enable your terminal (and Hermes.app if you use Desktop), "
-            "and restart them once. With Hermes' stable signing identities the "
-            "grant survives every update."
-        )
+        check_info("One switch silences all macOS folder prompts: grant your terminal app Full Disk Access and Hermes "
+                   "will never trip per-folder dialogs (Desktop/Downloads/Documents/...) again. Open: System Settings → "
+                   "Privacy & Security → Full Disk Access — or run:\n"
+                   "      open \"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles\"\n"
+                   "    then enable your terminal (and Hermes.app if you use Desktop), and restart them once. "
+                   "With Hermes' stable signing identities the grant survives every update.")
     else:
         check_ok("macOS Full Disk Access granted", "(no per-folder permission prompts will occur)")
 
@@ -361,8 +348,7 @@ def _check_security_advisories(should_fix: bool, f: Finding) -> None:
     all_hits = detect_compromised()
     fresh_hits = filter_unacked(all_hits)
     if not fresh_hits:
-        check_ok("No active security advisories")
-        return
+        return check_ok("No active security advisories")
     for hit in fresh_hits:
         check_fail(f"{hit.advisory.title}", f"({hit.package}=={hit.installed_version})")
         for line in full_remediation_text(hit):  # indented under the header as one section
@@ -376,11 +362,10 @@ def _check_security_advisories(should_fix: bool, f: Finding) -> None:
             check_warn(f"{h.package}=={h.installed_version} still installed (advisory {h.advisory.id} acknowledged)")
 
 
-def _check_python_environment(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_python_environment(should_fix: bool, f: Finding) -> None:
     """Interpreter, linked SQLite, venv, macOS TCC anchors/FDA/grants, version-file drift."""
-    f = Finding()
-    v = sys.version_info
-    label = f"Python {v.major}.{v.minor}.{v.micro}"
+    v, label = sys.version_info, f"Python {'.'.join(map(str, sys.version_info[:3]))}"
     if v >= (3, 10):
         check_ok(label)
         if v < (3, 11):
@@ -410,7 +395,6 @@ def _check_python_environment(should_fix: bool) -> Finding:
     check_macos_full_disk_access()
     _check_version_consistency(f.issues)
     check_macos_tcc_grants()
-    return f
 
 
 @doctor_check()
@@ -426,8 +410,8 @@ _PACKAGES = (
 )
 
 
-def _check_required_packages(should_fix: bool) -> Finding:
-    f = Finding()
+@doctor_check()
+def _check_required_packages(should_fix: bool, f: Finding) -> None:
     for module, name, optional in _PACKAGES:
         try:
             __import__(module)
@@ -437,7 +421,6 @@ def _check_required_packages(should_fix: bool) -> Finding:
                 check_warn(name, "(optional, not installed)")
             else:
                 _fail_and_issue(name, "(missing)", f"Install {name}: {_python_install_cmd()} {module}", f.issues)
-    return f
 
 
 @doctor_check()
@@ -446,14 +429,18 @@ def _check_gateway_supervision(should_fix: bool, f: Finding) -> None:
     _check_s6_supervision(f.issues)
 
 
-def _check_command_installation(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_command_installation(should_fix: bool, f: Finding) -> None:
     """Venv entry point and the ~/.local/bin (or $PREFIX/bin) symlink; skipped on Windows."""
     from hermes_cli.doctor import PROJECT_ROOT
-    f = Finding()
     if sys.platform == "win32":
-        return f
+        return
     _section("Command Installation")
     venv_bin = next((c for c in (PROJECT_ROOT / n / "bin" / "hermes" for n in ("venv", ".venv")) if c.exists()), None)
+    if venv_bin is None:
+        check_warn("Venv entry point not found", "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')")
+        return f.manual_issues.append(f"Reinstall entry point: cd {PROJECT_ROOT} && source venv/bin/activate && pip install -e '.[all]'")
+    check_ok(f"Venv entry point exists ({venv_bin.relative_to(PROJECT_ROOT)})")
     # Expected command link directory (mirrors install.sh logic).
     prefix = os.environ.get("PREFIX", "")
     if prefix and (os.environ.get("TERMUX_VERSION") or "com.termux/files/usr" in prefix):
@@ -461,38 +448,26 @@ def _check_command_installation(should_fix: bool) -> Finding:
     else:
         link_dir, display = Path.home() / ".local" / "bin", "~/.local/bin"
     link = link_dir / "hermes"
-    if venv_bin is None:
-        check_warn("Venv entry point not found", "(hermes not in venv/bin/ or .venv/bin/ — reinstall with pip install -e '.[all]')")
-        f.manual_issues.append(f"Reinstall entry point: cd {PROJECT_ROOT} && source venv/bin/activate && pip install -e '.[all]'")
-        return f
-    check_ok(f"Venv entry point exists ({venv_bin.relative_to(PROJECT_ROOT)})")
     if link.is_symlink():
         target, expected = link.resolve(), venv_bin.resolve()
         if target == expected:
-            check_ok(f"{display}/hermes → correct target")
-            return f
+            return check_ok(f"{display}/hermes → correct target")
         check_warn(f"{display}/hermes points to wrong target", f"(→ {target}, expected → {expected})")
         if not should_fix:
-            f.issues.append(f"Broken symlink at {display}/hermes — run 'hermes doctor --fix'")
-            return f
+            return f.issues.append(f"Broken symlink at {display}/hermes — run 'hermes doctor --fix'")
         link.unlink()
-        _link_venv(f, link, venv_bin, f"Fixed symlink: {display}/hermes → {venv_bin}")
+        verb = "Fixed"
     elif link.exists():  # regular file (wrapper script), not a symlink
-        check_ok(f"{display}/hermes exists (non-symlink)")
+        return check_ok(f"{display}/hermes exists (non-symlink)")
     else:
         check_fail(f"{display}/hermes not found", "(hermes command may not work outside the venv)")
         if not should_fix:
-            f.issues.append(f"Missing {display}/hermes symlink — run 'hermes doctor --fix'")
-            return f
+            return f.issues.append(f"Missing {display}/hermes symlink — run 'hermes doctor --fix'")
         link_dir.mkdir(parents=True, exist_ok=True)
-        _link_venv(f, link, venv_bin, f"Created symlink: {display}/hermes → {venv_bin}")
-        if str(link_dir) not in os.environ.get("PATH", "").split(os.pathsep):
-            check_warn(f"{display} is not on your PATH", "(add it to your shell config: export PATH=\"$HOME/.local/bin:$PATH\")")
-            f.manual_issues.append(f"Add {display} to your PATH")
-    return f
-
-
-def _link_venv(f: Finding, link: Path, venv_bin: Path, msg: str) -> None:
+        verb = "Created"
     link.symlink_to(venv_bin)
-    check_ok(msg)
+    check_ok(f"{verb} symlink: {display}/hermes → {venv_bin}")
     f.fixed += 1
+    if verb == "Created" and str(link_dir) not in os.environ.get("PATH", "").split(os.pathsep):
+        check_warn(f"{display} is not on your PATH", "(add it to your shell config: export PATH=\"$HOME/.local/bin:$PATH\")")
+        f.manual_issues.append(f"Add {display} to your PATH")

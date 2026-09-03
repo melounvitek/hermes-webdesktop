@@ -100,14 +100,14 @@ def _memory_store_flags(hermes_home: Path) -> tuple:
     return get_builtin_memory_store_flags({"memory": _doctor_memory_config(hermes_home)})
 
 
-def _check_directory_structure(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     """HERMES_HOME, expected subdirs, SOUL.md, and the enabled built-in memory files."""
     from hermes_cli.doctor import HERMES_HOME, _DHH
-    f = Finding()
     hermes_home = HERMES_HOME
     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
-    memory_on = _memory_enabled or _user_profile_enabled
+    memory_on = bool(_memory_enabled or _user_profile_enabled)
     # The built-in file store neither creates nor consumes memories/ when both targets are disabled.
     for subdir_name in ["cron", "sessions", "logs", "skills"] + (["memories"] if memory_on else []):
         ensure_dir(f, should_fix, hermes_home / subdir_name, f"{_DHH}/{subdir_name}/ exists",
@@ -115,9 +115,9 @@ def _check_directory_structure(should_fix: bool) -> Finding:
     # SOUL.md persona file
     soul_path = hermes_home / "SOUL.md"
     if soul_path.exists():
-        content = soul_path.read_text(encoding="utf-8").strip()
         # Template comments only (no real content)?
-        if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in content.splitlines()):
+        lines = soul_path.read_text(encoding="utf-8").strip().splitlines()
+        if any(l.strip() and not l.strip().startswith(("<!--", "-->", "#")) for l in lines):
             check_ok(f"{_DHH}/SOUL.md exists (persona configured)")
         else:
             check_info(f"{_DHH}/SOUL.md exists but is empty — edit it to customize personality")
@@ -142,13 +142,11 @@ def _check_directory_structure(should_fix: bool) -> Finding:
             f.fixed += 1
     else:
         check_ok(f"{_DHH}/memories/ directory exists")
-        for enabled, fname in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")):
-            mem_file = memories_dir / fname
-            if enabled and mem_file.exists():
-                check_ok(f"{fname} exists ({len(mem_file.read_text(encoding='utf-8').strip())} chars)")
-            elif enabled:
+        for fname in [n for on, n in ((_memory_enabled, "MEMORY.md"), (_user_profile_enabled, "USER.md")) if on]:
+            if (memories_dir / fname).exists():
+                check_ok(f"{fname} exists ({len((memories_dir / fname).read_text(encoding='utf-8').strip())} chars)")
+            else:
                 check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
-    return f
 
 
 def _session_count(state_db_path: Path):
@@ -183,8 +181,7 @@ def _repair_state_db(f: Finding, should_fix: bool, state_db_path: Path, kind: st
     report = repair_state_db_schema(state_db_path)
     if not report.get("repaired"):
         check_warn(not_fixed_label, f"({report.get('error')}; backup: {report.get('backup_path')})")
-        f.issues.append(failed_issue)
-        return
+        return f.issues.append(failed_issue)
     if "{count}" in ok_label:
         try:
             ok_label = ok_label.format(count=_session_count(state_db_path))
@@ -258,10 +255,10 @@ def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
         pass
 
 
-def _check_state_db(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_state_db(should_fix: bool, f: Finding) -> None:
     """state.db session count, FTS write health, schema repair, stats snapshot, WAL size."""
     from hermes_cli.doctor import HERMES_HOME, _DHH
-    f = Finding()
     state_db_path = HERMES_HOME / "state.db"
     if state_db_path.exists():
         _state_db_health(f, should_fix, state_db_path, _DHH)
@@ -269,7 +266,6 @@ def _check_state_db(should_fix: bool) -> Finding:
     else:
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
     _state_db_wal(f, should_fix, state_db_path)
-    return f
 
 
 def _gh_authenticated() -> bool:
@@ -281,14 +277,11 @@ def _gh_authenticated() -> bool:
         return False
 
 
-def _check_skills_hub(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_skills_hub(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import HERMES_HOME, _DHH
-    f = Finding()
     hub_dir = HERMES_HOME / "skills" / ".hub"
-    if not hub_dir.exists():
-        check_warn("Skills Hub directory not initialized", "(run: hermes skills list)")
-    else:
-        check_ok("Skills Hub directory exists")
+    if check_bool(hub_dir.exists(), "Skills Hub directory exists", ("Skills Hub directory not initialized", "(run: hermes skills list)")):
         lock_file = hub_dir / "lock.json"
         if lock_file.exists():
             try:
@@ -307,7 +300,6 @@ def _check_skills_hub(should_fix: bool) -> Finding:
     else:
         check_bool(_gh_authenticated(), ("GitHub authenticated via gh CLI", "(full API access — no GITHUB_TOKEN needed)"),
                    ("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)"))
-    return f
 
 
 def _memory_provider_honcho(issues: list) -> None:
@@ -367,13 +359,13 @@ def _memory_provider_generic(name: str) -> None:
         check_warn(f"{name} plugin not found", "run: hermes memory setup")
 
 
-def _check_memory_provider(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_memory_provider(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import HERMES_HOME
-    f = Finding()
     name = _doctor_memory_config(HERMES_HOME).get("provider", "")
     if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
-        return f
+        return
     checker, missing_row, missing_issue, label = _MEMORY_PROVIDER_CHECKS.get(name, (None, None, None, name))
     try:
         checker(f.issues) if checker else _memory_provider_generic(name)
@@ -384,10 +376,9 @@ def _check_memory_provider(should_fix: bool) -> Finding:
             _fail_and_issue(*missing_row, missing_issue, f.issues)
     except Exception as _e:
         check_warn(f"{label} check failed", str(_e))
-    return f
 
 
-@doctor_check()
+@doctor_check("")  # best-effort: profile enumeration must never break doctor
 def _check_profiles(should_fix: bool, f: Finding) -> None:
     from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
     import re as _re

@@ -42,8 +42,7 @@ def _skip(name: str) -> ProbeResult:
 def _has_healthy_oauth_fallback_for_apikey_provider(provider_label: str) -> bool:
     """True when a failed direct API-key probe is non-blocking because the same provider family's OAuth
     runtime path is already healthy: the failed row is still shown, but not promoted into the summary."""
-    normalized = (provider_label or "").strip().lower()
-    getter = {"minimax": "get_minimax_oauth_auth_status", "xai": "get_xai_oauth_auth_status"}.get(normalized)
+    getter = {"minimax": "get_minimax_oauth_auth_status", "xai": "get_xai_oauth_auth_status"}.get((provider_label or "").strip().lower())
     if not getter:
         return False
     try:
@@ -156,13 +155,9 @@ def _probe_anthropic() -> ProbeResult:
     try:
         import httpx
         from agent.anthropic_adapter import _is_oauth_token, _COMMON_BETAS, _OAUTH_ONLY_BETAS, _CONTEXT_1M_BETA
-        headers = {"anthropic-version": "2023-06-01"}
         is_oauth = _is_oauth_token(key)
-        if is_oauth:
-            headers["Authorization"] = f"Bearer {key}"
-            headers["anthropic-beta"] = ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)
-        else:
-            headers["x-api-key"] = key
+        headers = {"anthropic-version": "2023-06-01", **({"Authorization": f"Bearer {key}", "anthropic-beta": ",".join(_COMMON_BETAS + _OAUTH_ONLY_BETAS)}
+                                                         if is_oauth else {"x-api-key": key})}
         url = "https://api.anthropic.com/v1/models"
         r = httpx.get(url, headers=headers, timeout=10)
         # OAuth subscriptions without 1M context reject with 400 "long context beta is not yet available";
@@ -172,9 +167,7 @@ def _probe_anthropic() -> ProbeResult:
             r = httpx.get(url, headers=headers, timeout=10)
     except Exception as e:
         return _row(name, "warn", f"({e})")
-    if r.status_code == 200:
-        return _row(name, "ok")
-    return _row(name, "fail", "(invalid API key)") if r.status_code == 401 else _row(name, "warn", "(couldn't verify)")
+    return _row(name, *{200: ("ok",), 401: ("fail", "(invalid API key)")}.get(r.status_code, ("warn", "(couldn't verify)")))
 
 
 def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_health_check) -> ProbeResult:
@@ -192,11 +185,9 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
             r = httpx.get("https://dashscope.aliyuncs.com/compatible-mode/v1/models", headers=headers, timeout=10)
     except Exception as e:
         return _row(pname, "warn", f"({e})", label=label)
-    if r.status_code == 200:
-        return _row(pname, "ok", label=label)
     if r.status_code == 401:
         return _row(pname, "fail", "(invalid API key)", [f"Check {env_vars[0]} in .env"], label=label)
-    return _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
+    return _row(pname, "ok", label=label) if r.status_code == 200 else _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
 
 
 def _apikey_request(key: str, base_env, default_url) -> tuple:
@@ -231,17 +222,13 @@ def _probe_bedrock() -> ProbeResult:
         return _skip(name)
     if not has_aws_credentials():
         return _skip(name)
-    auth_var = resolve_aws_auth_env_var()
-    region = resolve_bedrock_region()
-    label = name.ljust(20)
+    auth_var, region, label = resolve_aws_auth_env_var(), resolve_bedrock_region(), name.ljust(20)
     try:
         import boto3
         from botocore.config import Config as _BotoConfig
         # Trim retries so a transient failure doesn't pad the doctor run by 30+ seconds.
-        cfg = _BotoConfig(connect_timeout=5, read_timeout=10, retries={"max_attempts": 1})
-        client = boto3.client("bedrock", region_name=region, config=cfg)
-        resp = client.list_foundation_models()
-        n = len(resp.get("modelSummaries", []))
+        client = boto3.client("bedrock", region_name=region, config=_BotoConfig(connect_timeout=5, read_timeout=10, retries={"max_attempts": 1}))
+        n = len(client.list_foundation_models().get("modelSummaries", []))
         return _row(name, "ok", f"({auth_var}, {region}, {n} models)", label=label)
     except ImportError:
         pip = f"{sys.executable} -m pip install boto3"
@@ -265,8 +252,7 @@ def _probe_azure_entra() -> ProbeResult:
         model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
         if not isinstance(model_cfg, dict):
             return _skip(name)
-        cfg_provider, auth_mode = (str(model_cfg.get(k) or "").strip().lower() for k in ("provider", "auth_mode"))
-        if cfg_provider != "azure-foundry" or auth_mode != "entra_id":
+        if [str(model_cfg.get(k) or "").strip().lower() for k in ("provider", "auth_mode")] != ["azure-foundry", "entra_id"]:
             return _skip(name)
     except Exception:
         return _skip(name)
@@ -282,8 +268,7 @@ def _probe_azure_entra() -> ProbeResult:
     scope = (str(entra_cfg.get("scope") or "").strip() if isinstance(entra_cfg, dict) else "") or SCOPE_AI_AZURE_DEFAULT
     info = describe_active_credential(config=EntraIdentityConfig(scope=scope), timeout_seconds=10.0)
     if info.get("ok"):
-        env_sources = info.get("env_sources") or []
-        tag = ", ".join(env_sources) if env_sources else "default credential chain"
+        tag = ", ".join(info.get("env_sources") or []) or "default credential chain"
         return _row(name, "ok", f"({tag}, scope={scope})", label=label)
     err = info.get("error") or "credential chain exhausted"
     hint = info.get("hint") or "Run `az login`, set AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET, or attach a managed identity to this VM."
