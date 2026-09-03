@@ -448,10 +448,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
                 with current.runtime_lock:
                     if current.is_running:
                         return
-                    if (
-                        int(getattr(agent, "_user_turn_count", 0) or 0) > 0
-                        or int(getattr(agent, "_api_call_count", 0) or 0) > 0
-                    ):
+                    if any(int(getattr(agent, k, 0) or 0) > 0 for k in ("_user_turn_count", "_api_call_count")):
                         return
 
                     from tools.mcp_tool import refresh_agent_mcp_tools
@@ -603,9 +600,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         return {
             "models": self._build_model_state(state),
             "modes": self._session_modes(state),
-            "field_meta": self._provenance_meta(
-                state.session_id, getattr(state.agent, "session_id", state.session_id)
-            ),
+            "field_meta": self._provenance_meta(state.session_id, getattr(state.agent, "session_id", state.session_id)),
         }
 
     async def new_session(self, cwd: str, mcp_servers: list | None = None, **kwargs: Any) -> NewSessionResponse:
@@ -740,11 +735,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         queued_depth: int | None = None
         with state.runtime_lock:
             if state.is_running:
-                if (
-                    text_only
-                    and isinstance(user_content, str)
-                    and getattr(state.agent, "_supports_active_turn_redirect", False) is True
-                    and hasattr(state.agent, "redirect")
+                if text_only and isinstance(user_content, str) and hasattr(state.agent, "redirect") and (
+                    getattr(state.agent, "_supports_active_turn_redirect", False) is True
                 ):
                     try:
                         redirected = bool(state.agent.redirect(user_content))
@@ -943,12 +935,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
         # Head rotated (compression split): emit provenance so clients can render the boundary.
         post_turn_hermes_id = getattr(state.agent, "session_id", None)
-        if (
-            conn
-            and post_turn_hermes_id
-            and pre_turn_hermes_id
-            and post_turn_hermes_id != pre_turn_hermes_id
-        ):
+        if conn and post_turn_hermes_id and pre_turn_hermes_id and post_turn_hermes_id != pre_turn_hermes_id:
             try:
                 await self._send_session_info_update(
                     session_id, current_hermes_session_id=post_turn_hermes_id,
@@ -965,11 +952,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
         suppress_interrupt_response = interrupted and final_response.startswith(INTERRUPT_WAITING_FOR_MODEL_PREFIX)
         # Send the final text unless already streamed — or if a plugin hook transformed it after.
-        if (
-            final_response
-            and conn
-            and not suppress_interrupt_response
-            and (not streamed_message or result.get("response_transformed"))
+        if final_response and conn and not suppress_interrupt_response and (
+            not streamed_message or result.get("response_transformed")
         ):
             await conn.session_update(session_id, acp.update_agent_message_text(final_response))
 
