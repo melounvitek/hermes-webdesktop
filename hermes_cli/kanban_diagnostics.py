@@ -415,8 +415,7 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
         title = f"Agent {outcome_label} x{failures}: {err_snippet.splitlines()[0][:160]}"
         detail = (
             f"This task has failed {failures} times in a row "
-            f"(most recent: {outcome_label}). Full last error:\n\n"
-            f"{err_snippet}\n\n"
+            f"(most recent: {outcome_label}). Full last error:\n\n{err_snippet}\n\n"
             f"The dispatcher circuit breaker is configured for "
             f"{failure_limit} consecutive non-success attempts. Fix the "
             f"root cause and reclaim or unblock the task to retry."

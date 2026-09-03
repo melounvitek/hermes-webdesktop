@@ -179,14 +179,12 @@ _SPECS = [
                   "circuit breaker. Trip on the Nth failure — "
                   "e.g. --max-retries 1 blocks on the first "
                   "failure (no retries), --max-retries 3 allows "
-                  "two retries. Omit to use the dispatcher's "
-                  "kanban.failure_limit config "
+                  "two retries. Omit to use the dispatcher's kanban.failure_limit config "
                   f"(default {kb.DEFAULT_FAILURE_LIMIT})."),
         _arg("--model", default=None, dest="model_override",
              help="Pin the worker to this model (passed as -m <model>) without "
                   "changing the profile's configured model. Combine with --provider "
-                  "when the model belongs to a different backend than the profile's "
-                  "default."),
+                  "when the model belongs to a different backend than the profile's default."),
         _arg("--provider", default=None, dest="provider_override",
              help="Provider the --model belongs to (passed as --provider <name> to "
                   "the worker). Requires --model."),
@@ -318,8 +316,7 @@ _SPECS = [
         _arg("--metadata", default=None, help="JSON object with structured reviewer handoff facts."),
         _arg("--force", action="store_true",
              help="Override the live-claim guard: move a running, claimed "
-                  "task to review even without owning its run (clears the "
-                  "worker's claim)."),
+                  "task to review even without owning its run (clears the worker's claim)."),
     ], help="Move a task to 'review' (implementation done, awaiting review) — NOT a block"),
     _cmd("request-changes", [_TASK_ID, _arg("reason", nargs="+", help="Concrete changes required before re-review")],
          help="Reviewer verdict: return the active review run to its implementer"),
@@ -410,8 +407,7 @@ _SPECS = [
          help="Decompose a triage-column task into a graph of child tasks "
               "routed to specialist profiles by description. Falls back "
               "to specify-style single-task promotion when the task "
-              "doesn't benefit from fan-out. Uses "
-              "auxiliary.kanban_decomposer."),
+              "doesn't benefit from fan-out. Uses auxiliary.kanban_decomposer."),
     _cmd("gc", [
         _arg("--event-retention-days", type=int, default=30,
              help="Delete task_events older than N days for terminal tasks (default: 30)"),

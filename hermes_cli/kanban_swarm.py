@@ -60,8 +60,7 @@ def _require_text(value: str, field_name: str) -> str:
 
 def _swarm_context(root_id: str, goal: str) -> str:
     return (
-        "\n\n## Swarm protocol\n"
-        f"- Swarm root / shared blackboard: `{root_id}`.\n"
+        f"\n\n## Swarm protocol\n- Swarm root / shared blackboard: `{root_id}`.\n"
         "- Read sibling/parent handoffs from Kanban context before working.\n"
         "- Put machine-readable facts in completion metadata.\n"
         "- Put cross-worker notes on the root task using structured comments.\n"
@@ -213,8 +212,7 @@ def _create_swarm_uncommitted(
         body=(
             "Kanban Swarm v1 planning/root card. This card is completed "
             "immediately so parallel workers can start while it remains the "
-            "shared blackboard and audit anchor.\n\n"
-            f"Goal:\n{goal}"
+            f"shared blackboard and audit anchor.\n\nGoal:\n{goal}"
         ),
         assignee=created_by,
         priority=priority,

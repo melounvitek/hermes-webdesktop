@@ -181,8 +181,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         f"Kanban dispatcher running STANDALONE via --force "
         f"(interval={args.interval}s, pid={os.getpid()}). "
         f"Ctrl-C to stop. NOTE: if a gateway is also running with "
-        f"dispatch_in_gateway=true (default), you have two dispatchers "
-        f"racing for claims.",
+        f"dispatch_in_gateway=true (default), you have two dispatchers racing for claims.",
         file=sys.stderr,
     )
 
@@ -214,8 +213,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                     f"consecutive ticks but 0 workers spawned successfully. "
                     f"Check profile health (venv, PATH, credentials) and "
                     f"`hermes kanban list --status ready` / "
-                    f"`hermes kanban list --status blocked` for recent "
-                    f"spawn_failed tasks.",
+                    f"`hermes kanban list --status blocked` for recent spawn_failed tasks.",
                     file=sys.stderr, flush=True,
                 )
                 health_state["last_warn_at"] = now
