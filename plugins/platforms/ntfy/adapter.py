@@ -1,18 +1,12 @@
-"""ntfy platform adapter (Hermes plugin).
+"""ntfy platform adapter: HTTP-streaming subscription (``/json``, ``poll=false``) in, POST out.
 
-Subscribes to a topic on ntfy.sh or a self-hosted server via HTTP streaming
-(``/json`` with ``poll=false``) and publishes replies via HTTP POST (httpx only).
-
-config.yaml ``platforms.ntfy.extra``: ``server`` (default https://ntfy.sh), ``topic``
-(subscribe, required), ``publish_topic`` (defaults to topic), ``token`` (Bearer or
-``user:pass`` Basic), ``markdown`` (default false). Env (read at construct time; env
-wins over ``extra``): NTFY_TOPIC, NTFY_SERVER_URL, NTFY_TOKEN, NTFY_PUBLISH_TOPIC,
-NTFY_MARKDOWN ("true"/"1"/"yes"), NTFY_ALLOWED_USERS (topic names), NTFY_ALLOW_ALL_USERS
-(dev only), NTFY_HOME_CHANNEL, NTFY_HOME_CHANNEL_NAME.
-
-Identity model: ntfy has no authenticated user identity; ``title`` is publisher-controlled
-and NOT used for authorization. Each topic is a single trusted channel (``user_id`` ==
-topic name). Protect the topic with a read token for any real trust boundary.
+config.yaml ``platforms.ntfy.extra``: ``server`` (default https://ntfy.sh), ``topic`` (required),
+``publish_topic`` (defaults to topic), ``token`` (Bearer or ``user:pass`` Basic), ``markdown``
+(default false). Env (read at construct time; ``extra`` wins over env): NTFY_TOPIC, NTFY_SERVER_URL,
+NTFY_TOKEN, NTFY_PUBLISH_TOPIC, NTFY_MARKDOWN ("true"/"1"/"yes"), NTFY_ALLOWED_USERS (topic names),
+NTFY_ALLOW_ALL_USERS (dev only), NTFY_HOME_CHANNEL, NTFY_HOME_CHANNEL_NAME.
+Identity: ntfy has no authenticated user; ``title`` is publisher-controlled and NOT used for
+authorization. Each topic is one trusted channel (``user_id`` == topic). Protect it with a read token.
 """
 
 import asyncio
@@ -38,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class _FatalStreamError(Exception):
-    """Raised when a stream error is unrecoverable (e.g. 401, 404)."""
+    """Unrecoverable stream error (401, 404)."""
 
 
 DEFAULT_SERVER = "https://ntfy.sh"
@@ -96,6 +90,15 @@ def _response_message_id(resp) -> str:
         return uuid.uuid4().hex[:12]
 
 
+def _setting(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
+    """config.yaml ``extra[key]`` wins over the env var ``env``."""
+    return extra.get(key) or _get_scoped_secret(env, default)
+
+
+def _server_url(extra: Dict[str, Any]) -> str:
+    return _setting(extra, "server", "NTFY_SERVER_URL", DEFAULT_SERVER).rstrip("/")
+
+
 def check_requirements() -> bool:
     """Installable and minimally configured (reads NTFY_TOPIC directly — no full config load)."""
     return HTTPX_AVAILABLE and bool(_get_scoped_secret("NTFY_TOPIC", "").strip())
@@ -103,14 +106,12 @@ def check_requirements() -> bool:
 
 def validate_config(config) -> bool:
     """True when a topic is configured (config.yaml ``extra`` or env)."""
-    extra = getattr(config, "extra", {}) or {}
-    return bool(extra.get("topic") or _get_scoped_secret("NTFY_TOPIC", ""))
+    return bool(_setting(getattr(config, "extra", {}) or {}, "topic", "NTFY_TOPIC"))
 
 
 def is_connected(config) -> bool:
     """Check whether ntfy is configured (env or config.yaml)."""
-    extra = getattr(config, "extra", {}) or {}
-    return bool(_get_scoped_secret("NTFY_TOPIC") or extra.get("topic", ""))
+    return bool(_get_scoped_secret("NTFY_TOPIC") or (getattr(config, "extra", {}) or {}).get("topic", ""))
 
 
 class NtfyAdapter(BasePlatformAdapter):
@@ -121,14 +122,10 @@ class NtfyAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform("ntfy"))
         extra = config.extra or {}
-        self._server: str = (
-            extra.get("server") or _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER)
-        ).rstrip("/")
-        self._topic: str = extra.get("topic") or _get_scoped_secret("NTFY_TOPIC", "")
-        self._publish_topic: str = (
-            extra.get("publish_topic") or _get_scoped_secret("NTFY_PUBLISH_TOPIC", "") or self._topic
-        )
-        self._token: str = extra.get("token") or _get_scoped_secret("NTFY_TOKEN", "")
+        self._server: str = _server_url(extra)
+        self._topic: str = _setting(extra, "topic", "NTFY_TOPIC")
+        self._publish_topic: str = _setting(extra, "publish_topic", "NTFY_PUBLISH_TOPIC") or self._topic
+        self._token: str = _setting(extra, "token", "NTFY_TOKEN")
         self._stream_task: Optional[asyncio.Task] = None
         self._http_client: Optional["httpx.AsyncClient"] = None
         self._seen_messages: Dict[str, float] = {}  # msg_id -> timestamp (dedup)
@@ -188,19 +185,17 @@ class NtfyAdapter(BasePlatformAdapter):
         """401/404 are unrecoverable: log, set the fatal state and raise ``_FatalStreamError``."""
         if status_code == 401:
             logger.error(
-                "[%s] Authentication failed (401) — stopping reconnect loop. Check NTFY_TOKEN.", self.name,
-            )
-            self._set_fatal_error(
-                "ntfy_unauthorized", "ntfy server rejected auth (401). Check NTFY_TOKEN.", retryable=False,
-            )
-            raise _FatalStreamError("401 Unauthorized")
-        if status_code == 404:
+                "[%s] Authentication failed (401) — stopping reconnect loop. Check NTFY_TOKEN.", self.name)
+            code, detail = "ntfy_unauthorized", "ntfy server rejected auth (401). Check NTFY_TOKEN."
+            reason = "401 Unauthorized"
+        elif status_code == 404:
             logger.error("[%s] Topic not found (404): %s — stopping reconnect loop.", self.name, self._topic)
-            self._set_fatal_error(
-                "ntfy_topic_not_found",
-                f"ntfy topic '{self._topic}' returned 404. Check NTFY_TOPIC.",
-                retryable=False)
-            raise _FatalStreamError("404 Not Found")
+            code, detail = "ntfy_topic_not_found", f"ntfy topic '{self._topic}' returned 404. Check NTFY_TOPIC."
+            reason = "404 Not Found"
+        else:
+            return
+        self._set_fatal_error(code, detail, retryable=False)
+        raise _FatalStreamError(reason)
 
     async def _consume_stream(self, url: str, headers: Dict[str, str]) -> None:
         """Open an HTTP streaming connection and dispatch events."""
@@ -261,13 +256,11 @@ class NtfyAdapter(BasePlatformAdapter):
         topic = event.get("topic") or self._topic
         source = self.build_source(
             chat_id=topic, chat_name=topic, chat_type="dm", user_id=topic, user_name=topic)
-        unix_ts = event.get("time")
+        unix_ts, timestamp = event.get("time"), datetime.now(tz=timezone.utc)
         try:
-            timestamp = (
-                datetime.fromtimestamp(int(unix_ts), tz=timezone.utc)
-                if unix_ts else datetime.now(tz=timezone.utc))
+            timestamp = datetime.fromtimestamp(int(unix_ts), tz=timezone.utc) if unix_ts else timestamp
         except (ValueError, OSError, TypeError):
-            timestamp = datetime.now(tz=timezone.utc)
+            pass
         message_event = MessageEvent(
             text=text, message_type=MessageType.TEXT, source=source, message_id=msg_id,
             raw_message=event, timestamp=timestamp)
@@ -291,20 +284,18 @@ class NtfyAdapter(BasePlatformAdapter):
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
         """Publish a message to the configured publish topic."""
-        metadata = metadata or {}
-        publish_topic = metadata.get("publish_topic") or self._publish_topic or chat_id
+        publish_topic = (metadata or {}).get("publish_topic") or self._publish_topic or chat_id
         if not self._http_client:
             return SendResult(success=False, error="HTTP client not initialized")
-        url = f"{self._server}/{publish_topic}"
         headers = _publish_headers(self._token, bool((self.config.extra or {}).get("markdown", False)))
         if len(content) > self.MAX_MESSAGE_LENGTH:
             logger.warning(
                 "[%s] Message truncated from %d to %d chars (ntfy limit)",
                 self.name, len(content), self.MAX_MESSAGE_LENGTH)
-        body = content[:self.MAX_MESSAGE_LENGTH]
+        body = content[:self.MAX_MESSAGE_LENGTH].encode("utf-8")
         try:
             resp = await self._http_client.post(
-                url, content=body.encode("utf-8"), headers=headers, timeout=15.0)
+                f"{self._server}/{publish_topic}", content=body, headers=headers, timeout=15.0)
             if resp.status_code < 300:
                 return SendResult(success=True, message_id=_response_message_id(resp))
             body_text = resp.text
@@ -365,28 +356,23 @@ async def _standalone_send(
     if not HTTPX_AVAILABLE:
         return {"error": "ntfy standalone send: httpx not installed"}
     extra = getattr(pconfig, "extra", {}) or {}
-    server = (extra.get("server") or _get_scoped_secret("NTFY_SERVER_URL", DEFAULT_SERVER)).rstrip("/")
+    server = _server_url(extra)
     publish_topic = (
-        chat_id
-        or extra.get("publish_topic")
-        or _get_scoped_secret("NTFY_PUBLISH_TOPIC", "").strip()
-        or extra.get("topic")
-        or _get_scoped_secret("NTFY_TOPIC", "").strip())
+        chat_id or extra.get("publish_topic") or _get_scoped_secret("NTFY_PUBLISH_TOPIC", "").strip()
+        or extra.get("topic") or _get_scoped_secret("NTFY_TOPIC", "").strip())
     if not publish_topic:
         return {"error": "ntfy standalone send: NTFY_TOPIC not configured"}
-    token = extra.get("token") or _get_scoped_secret("NTFY_TOKEN", "")
+    token = _setting(extra, "token", "NTFY_TOKEN")
     markdown_env = _get_scoped_secret("NTFY_MARKDOWN", "").strip().lower()
-    headers = _publish_headers(
-        token, bool(extra.get("markdown")) or markdown_env in _MARKDOWN_TRUTHY, auth_first=False)
+    markdown = bool(extra.get("markdown")) or markdown_env in _MARKDOWN_TRUTHY
+    headers = _publish_headers(token, markdown, auth_first=False)
     body = _truncate_body(message, context="ntfy standalone")
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(f"{server}/{publish_topic}", content=body, headers=headers)
         if resp.status_code >= 300:
             return {"error": f"ntfy HTTP {resp.status_code}: {resp.text[:200]}"}
-        return {
-            "success": True, "platform": "ntfy", "chat_id": publish_topic, "message_id": _response_message_id(resp),
-        }
+        return {"success": True, "platform": "ntfy", "chat_id": publish_topic, "message_id": _response_message_id(resp)}
     except Exception as e:
         return {"error": f"ntfy standalone send failed: {e}"}
 
@@ -394,21 +380,14 @@ async def _standalone_send(
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system at startup."""
     ctx.register_platform(
-        name="ntfy",
-        label="ntfy",
-        adapter_factory=lambda cfg: NtfyAdapter(cfg),
-        check_fn=check_requirements,
-        validate_config=validate_config,
-        is_connected=is_connected,
-        required_env=["NTFY_TOPIC"],
-        install_hint="pip install httpx   # already a Hermes dependency",
+        name="ntfy", label="ntfy", adapter_factory=lambda cfg: NtfyAdapter(cfg),
+        check_fn=check_requirements, validate_config=validate_config, is_connected=is_connected,
+        required_env=["NTFY_TOPIC"], install_hint="pip install httpx   # already a Hermes dependency",
         env_enablement_fn=_env_enablement,  # env-only setups show in `gateway status`
         cron_deliver_env_var="NTFY_HOME_CHANNEL",
         standalone_sender_fn=_standalone_send,  # out-of-process cron delivery
-        allowed_users_env="NTFY_ALLOWED_USERS",
-        allow_all_env="NTFY_ALLOW_ALL_USERS",
-        max_message_length=MAX_MESSAGE_LENGTH,
-        emoji="🔔",
+        allowed_users_env="NTFY_ALLOWED_USERS", allow_all_env="NTFY_ALLOW_ALL_USERS",
+        max_message_length=MAX_MESSAGE_LENGTH, emoji="🔔",
         pii_safe=True,  # topic names only — no phone numbers / emails to redact
         allow_update_command=True,
         platform_hint=(
