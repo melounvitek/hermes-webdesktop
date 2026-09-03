@@ -133,7 +133,11 @@ def _desktop_packaged_executable(desktop_dir: Path) -> Optional[Path]:
 
 
 def _desktop_packaged_executable_in(release_dir: Path) -> Optional[Path]:
-    """The unpacked Electron app executable under *release_dir* (live ``release`` or a staging dir)."""
+    """The unpacked Electron app executable under *release_dir* (live ``release`` or a staging dir).
+
+    *release_dir* is electron-builder's ``directories.output`` — the live ``apps/desktop/release`` or a
+    stage-and-swap staging dir (#86443).
+    """
     if sys.platform == "darwin":
         candidates = list(release_dir.glob("mac*/Hermes.app/Contents/MacOS/Hermes"))
     elif sys.platform == "win32":
@@ -152,6 +156,10 @@ def _desktop_packaged_executable_in(release_dir: Path) -> Optional[Path]:
         # A stale win-arm64-unpacked next to the real win-unpacked: picking by
         # mtime can hand a wrong-architecture Hermes.exe to the launcher. Prefer
         # candidates whose PE machine matches the host; mtime when none parse.
+        # Multiple unpacked trees can coexist (e.g. a stale win-arm64-unpacked left behind by a cross-arch
+        # experiment next to the real win-unpacked). Picking purely by mtime can then hand a
+        # wrong-architecture Hermes.exe to the launcher, which Windows rejects with "This app can't run on
+        # your computer" (#69179).
         expected = _expected_windows_pe_machines()
         matching = [p for p in existing if _pe_machine_or_none(p) in expected]
         if matching:
@@ -159,6 +167,13 @@ def _desktop_packaged_executable_in(release_dir: Path) -> Optional[Path]:
     return max(existing, key=lambda p: p.stat().st_mtime)
 
 
+# ─── Desktop stage-and-swap pack (#86443) ─────────────────────────────────── electron-builder packs IN
+# PLACE: before-pack.mjs wipes ``release/<platform>- unpacked`` (or the mac ``Hermes.app``) and the Electron
+# unpack + asar + rename then rebuild it. Any failure after that wipe — corrupt cached zip, blocked
+# download, missing dep, disk full — leaves the user with NO app, and ``hermes update`` used to report
+# "partially complete" over an empty release/. Fix the class, not the predicate: build into a STAGING output
+# dir next to release/, verify the staged result, and only then swap it over the live tree with renames. On
+# any failure the live app is untouched.
 _DESKTOP_STAGING_PREFIX = ".staging-"
 
 _DESKTOP_PREVIOUS_SUFFIX = ".previous"
@@ -219,6 +234,15 @@ def _discard_desktop_staging(staging_dir: Path) -> None:
     shutil.rmtree(staging_dir, ignore_errors=True)
 
 
+# ─── Desktop exe integrity gate (#69179) ──────────────────────────────────── The desktop self-update chain
+# (Desktop → hermes-setup --update → `hermes update` → `hermes desktop --build-only` → relaunch) rebuilds
+# Hermes.exe on the end user's machine and used to verify only that the file EXISTS before declaring
+# success. A corrupt cached Electron zip whose extraction produced a truncated electron.exe, an interrupted
+# rcedit resource rewrite, a disk-full pack, or a wrong-arch unpacked tree therefore shipped a broken binary
+# that Windows refuses to load ("This app can't run on your computer" / 此应用无法在你的电脑上运行). These helpers parse
+# the PE header — no signature infrastructure required — so a structurally broken or wrong-architecture
+# Hermes.exe is caught BEFORE the updater replaces the working app, and the previous build can be restored
+# from the .bak tree that apps/desktop/scripts/before-pack.mjs now preserves.
 _PE_MACHINE_I386 = 0x014C
 _PE_MACHINE_AMD64 = 0x8664
 _PE_MACHINE_ARM64 = 0xAA64
@@ -241,7 +265,15 @@ def _kernel32():
 
 def _windows_native_machine_from_iswow64() -> Optional[str]:
     """IsWow64Process2's OS-native machine, or None. HANDLE types are bound explicitly: ctypes'
-    default ``c_int`` truncates the ``(HANDLE)-1`` pseudo-handle → ``ERROR_INVALID_HANDLE`` on Win64."""
+    default ``c_int`` truncates the ``(HANDLE)-1`` pseudo-handle → ``ERROR_INVALID_HANDLE`` on Win64.
+
+    ctypes defaults ``GetCurrentProcess``'s restype to ``c_int``, so the current-process pseudo-handle
+    ``(HANDLE)-1`` is truncated to ``0xFFFFFFFF`` and zero-extended into a 64-bit invalid handle. On Win64
+    that makes ``IsWow64Process2`` fail with ``ERROR_INVALID_HANDLE`` (6), which is exactly the residual
+    Windows-on-ARM failure after #71218: the gate fell through to ``PROCESSOR_ARCHITECTURE=AMD64`` (the
+    emulated process arch) and rejected a correctly-built ARM64 ``Hermes.exe``. Binding
+    ``restype``/``argtypes`` to ``wintypes.HANDLE`` keeps the full ``0xFFFFFFFFFFFFFFFF`` pseudo-handle.
+    """
     import ctypes
     from ctypes import wintypes
     kernel32 = _kernel32()
@@ -283,7 +315,15 @@ def _windows_native_machine() -> str:
     """The Windows host's NATIVE machine, upper-cased: ``IsWow64Process2`` (the only API that tells
     the truth from an emulated x64 process on ARM64), then ``PROCESSOR_ARCHITEW6432`` /
     ``PROCESSOR_ARCHITECTURE``, then ``platform.machine()`` (which lies under emulation).
-    ``GetNativeSystemInfo`` is NOT used: it also returns emulated details."""
+    ``GetNativeSystemInfo`` is NOT used: it also returns emulated details.
+
+    ``platform.machine()`` reports the PROCESS architecture, which lies under emulation: the desktop update
+    chain runs an x64 hermes-setup.exe (and thus x64 Python) on Windows-on-ARM devices, where
+    ``platform.machine()`` returns ``AMD64`` even though the OS is ARM64. The #71119 integrity gate then
+    rejected the CORRECT ARM64 rebuild as an "architecture mismatch" (#69179 follow-up report). Probe order:
+    1. ``IsWow64Process2`` with a correctly-typed current-process HANDLE (#71218 + HANDLE-truncation fix).
+    2. 3.
+    """
     if sys.platform == "win32":
         try:
             name = _windows_native_machine_from_iswow64()
@@ -417,7 +457,10 @@ def _rollback_desktop_from_backup(packaged_executable: Path) -> Optional[Path]:
 def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optional[Path]) -> tuple:
     """Windows post-build integrity gate → ``(verified_exe_or_None, rolled_back)``: pass →
     ``(exe, False)``; corrupt with backup restored → ``(old_exe, True)``; nothing restorable →
-    ``(None, False)``. Failure purges the cached zip + stamp so the retry re-downloads."""
+    ``(None, False)``. Failure purges the cached zip + stamp so the retry re-downloads.
+
+    See #69179.
+    """
     from hermes_cli.main import _desktop_stamp_path, _purge_electron_build_cache
     if packaged_executable is None or sys.platform != "win32":
         return packaged_executable, False
@@ -430,6 +473,9 @@ def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optio
 
     # Only the exe's OWN output dir is purged (a staging dir), never the live
     # release/ tree that still holds the last working app.
+    # Self-heal setup for the retry: drop the (likely corrupt) cached Electron zip and the content stamp so
+    # the next rebuild is a genuine re-download + re-stage rather than a replay of the same broken
+    # extraction. See #86443.
     _purge_electron_build_cache(desktop_dir, release_dir=packaged_executable.parent.parent)
     with contextlib.suppress(OSError):
         _desktop_stamp_path().unlink()
@@ -489,6 +535,11 @@ def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] =
                 zip_path.unlink()
                 removed.append(zip_path)
 
+    # Drop the half-written unpacked dir too: an interrupted prior pack leaves a partial tree that poisons
+    # the rename even after the zip is fixed. (before-pack.cjs also handles this, but clearing it here makes
+    # the retry robust even if the hook is somehow skipped.) ``release_dir`` lets a stage-and-swap caller
+    # point this at its STAGING output so a mid-retry purge never touches the live app under ``release/``
+    # (#86443).
     if release_dir is None:
         release_dir = desktop_dir / "release"
     if release_dir.is_dir():
@@ -502,6 +553,7 @@ def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] =
 
 # Last-resort Electron mirror after GitHub download fails. Only used when the
 # user hasn't pinned ELECTRON_MIRROR.
+# See #47266.
 _ELECTRON_FALLBACK_MIRROR = "https://npmmirror.com/mirrors/electron/"
 
 
@@ -515,7 +567,12 @@ def _electron_dir(project_root: Path) -> Path:
 
 
 def _electron_dist_binary(project_root: Path) -> Path:
-    """The Electron main binary inside the installed package — the exact file ``electronDist`` needs."""
+    """The Electron main binary inside the installed package — the exact file ``electronDist`` needs.
+
+    electron-builder reads the binary from ``build.electronDist`` since #38673, so this is the exact file
+    whose absence makes a pack fail with "The specified electronDist does not exist". The basename differs
+    per OS (the platform Electron is named for the host the build runs on).
+    """
     dist = _electron_dir(project_root) / "dist"
     if sys.platform == "darwin":
         return dist / "Electron.app" / "Contents" / "MacOS" / "Electron"
@@ -810,6 +867,8 @@ def _desktop_macos_relaunchable_fixup(
             os.environ.get("CSC_LINK") or os.environ.get("APPLE_SIGNING_IDENTITY"))
     if publisher_signing_configured:
         return True
+    # ``release_dir`` (stage-and-swap, #86443): sign the STAGED bundle before it is promoted, so the live
+    # app is never touched mid-sign.
     exe = _desktop_packaged_executable_in(release_dir or (desktop_dir / "release"))
     if exe is None:
         return True
@@ -876,6 +935,7 @@ def _macos_create_signing_identity(
         # with "MAC verification failed". `-legacy` restores the accepted
         # RC2/SHA-1 format but only exists on OpenSSL 3 — so try plain first and
         # fall back to `-legacy` when the IMPORT fails with that signature.
+        # (Verified E2E on macOS 26.3.1 / OpenSSL 3.6.3 by @ctaylor86 on PR #77189.)
         def _export_p12(extra_args: list) -> None:
             subprocess.run(
                 [
@@ -1235,6 +1295,12 @@ def _run_desktop_pack_with_recovery(
 
     build_result = _pack(npm_build_env)
     if build_result.returncode != 0 and staging_dir is not None and _staged_exe() is None:
+        # Corrupt cached Electron zip → partial unpack → ENOENT on rename. stdlib zipfile won't catch the
+        # common concat-junk case, so purge and retry once; @electron/get SHASUM is the real gate. Gate on a
+        # MISSING packaged executable: that is the signature of the corrupt-download class this recovery
+        # exists for. A late failure such as macOS code signing leaves the executable in place —
+        # redownloading Electron can't repair it, so the purge + retry would only add another slow,
+        # identical failure (#40187).
         purged: list[Path] = []
         restored = False
         if not _electron_dist_ok(PROJECT_ROOT):
@@ -1308,6 +1374,7 @@ def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: d
     # release/<unpacked> first, so a pack that fails afterwards used to leave
     # the user with NO app. Build into a staging dir; the live release/ tree is
     # only replaced — by rename — after the staged result verifies.
+    # See #86443.
     staging_dir: Optional[Path] = None
     build_cmd = [npm, "run", build_script]
     if not source_mode:

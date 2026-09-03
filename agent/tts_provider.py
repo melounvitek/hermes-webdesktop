@@ -86,7 +86,10 @@ class TTSProvider(CatalogProviderBase):
         """Whether output suits voice-bubble delivery (mirrors
         ``tts.providers.<name>.voice_compatible``): True → the gateway converts
         to Opus via ffmpeg if needed; False → regular audio attachment. Default
-        False (opt in)."""
+        False (opt in).
+
+        See #17843.
+        """
         return False
 
 

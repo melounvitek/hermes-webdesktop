@@ -36,6 +36,10 @@ def _claim_active_session_slot(
     except Exception as exc:
         logger.warning("Failed to claim active session slot: %s", exc)
         # Fail CLOSED: an errored claim has NOT proven the session unowned; lease-less = silent double-writer hole.
+        # Fail CLOSED regardless of surface: per-session exclusivity is a correctness guarantee (see
+        # PER_SESSION_EXCLUSIVE_SUBMIT), and a claim that errors out has NOT proven the session is unowned.
+        # Proceeding without a lease here is the silent double-writer hole flagged in the #94595 review
+        # (blocker 2).
         return (None, _SESSION_OWNERSHIP_UNAVAILABLE)
 
 
@@ -142,6 +146,7 @@ def _transfer_active_session_slot(sid: str, session: dict, *, new_session_id: st
         return False
     # Fallback (entry pruned / pid-check transiently failed): reserve the new slot BEFORE releasing the old one so
     # a gateway at the cap can't grab the freed slot and leave this session lease-less; on failure KEEP the old lease.
+    # See #49041.
     new_lease, limit_message = _claim_active_session_slot(
         new_session_id, live_session_id=sid, surface=_session_source(session), profile_home=session.get("profile_home"))
     if new_lease is None:
@@ -157,6 +162,8 @@ def _transfer_active_session_slot(sid: str, session: dict, *, new_session_id: st
 
 # Sources this backend must never end in state.db: the messaging gateway owns those sessions and the TUI is only
 # a viewer (ending one causes the Groundhog Day loop, see _finalize_session). Self-created/CLI sources are NOT gateway-owned.
+# Sources the TUI backend itself creates ("tui", plus whatever a client passes as its own ``source``) and
+# the CLI's own sessions are NOT gateway-owned. See #60609.
 _NON_GATEWAY_SOURCES = frozenset({
     "", "tui", "cli", "webui", "desktop", "cron", "kanban", "subagent", "test",
     "local", "acp", "webhook", "api_server", "msgraph_webhook"})
@@ -227,6 +234,7 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     _notify_session_boundary("on_session_finalize", session_id, _session_source(session))
     # End the state.db row so it doesn't linger as a ghost in /resume. Use session_id (agent.session_id), not
     # session_key: after compression the key may be the stale ended parent while session_id is the live continuation.
+    # Fix for #20001.
     if _desktop_automatic_cleanup and not session_id:
         _release_active_session_slot(session)
     _lifecycle_guard = (_other_runtime_lease_guard(session_id, session)
@@ -391,7 +399,10 @@ def _interrupt_session_turn(sid: str, session: dict, *, request_id: str | None =
 
 def _session_has_active_delegations(sid: str, session: dict | None = None) -> bool:
     """True when UI session ``sid`` still owns live background work — by live UI sid AND, when the TUI owns the durable
-    lifecycle (never for gateway-viewer tabs), by session_key so a delegation from an earlier tab keeps it alive."""
+    lifecycle (never for gateway-viewer tabs), by session_key so a delegation from an earlier tab keeps it alive.
+
+    See #60609.
+    """
     if session is None:
         with _sessions_lock:
             session = _sessions.get(sid)
@@ -435,7 +446,12 @@ def _cancel_ws_orphan_reap(sid: str) -> None:
 def _ws_orphan_turn_activity_is_fresh(session: dict) -> bool:
     """Whether a detached RUNNING turn's activity clock (``_touch_activity``) is still fresh — the reaper must NOT
     interrupt healthy detached work (closed laptop). Conservative: disabled threshold, missing/opaque agent, unreadable
-    summary or never-stamped clock all report NOT fresh (eligible for interrupt-at-grace) to keep the wedged-turn net."""
+    summary or never-stamped clock all report NOT fresh (eligible for interrupt-at-grace) to keep the wedged-turn net.
+
+    Reuses the agent's existing activity summary (``_touch_activity`` is stamped by API waits, stream
+    tokens, and tool heartbeats — the same clock the turn-liveness watchdog samples; see
+    agent/turn_liveness.py). See #100325, #98028.
+    """
     if _WS_ORPHAN_ACTIVITY_STALE_S <= 0:
         return False
     if not callable(summary_fn := getattr(session.get("agent"), "get_activity_summary", None)):
@@ -478,6 +494,7 @@ def _schedule_ws_orphan_reap(sid: str, *, delay_s: float | None = None) -> None:
                 # Mid-turn detached sessions must never drop the single Timer: interrupt once after grace, then poll
                 # until turn-finalization settles.
                 polls = current["_client_gone_interrupt_polls"] = int(current.get("_client_gone_interrupt_polls") or 0) + 1
+                # See #85578.
                 if polls > _WS_ORPHAN_INTERRUPT_REAP_MAX_POLLS:
                     # Never settled inside the budget — force-reap rather than park forever.
                     logger.error(
@@ -543,6 +560,7 @@ def _close_sessions_for_transport(transport, *, end_reason: str = "ws_disconnect
                 # `hermes --tui` keeps real _stdio. UNLESS another window (pop-out viewer) still shows the session:
                 # re-bind to the most recent surviving viewer instead.
                 viewers = current.get("viewers") or {}
+                # See #83716.
                 viewers.pop(transport, None)
                 live = [vt for vt, ts in sorted(viewers.items(), key=lambda kv: kv[1]) if not _transport_is_dead(vt)]
                 if live:

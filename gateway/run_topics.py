@@ -44,7 +44,10 @@ class GatewayTopicThreadsMixin:
     @staticmethod
     def _telegram_topic_profile_name(source: SessionSource) -> str:
         """Profile namespace for topic-mode rows: the profile stamped on the routed event, never the
-        process-global one (under multiplex that mis-attributes state across bots sharing state.db)."""
+        process-global one (under multiplex that mis-attributes state across bots sharing state.db).
+
+        See #76423.
+        """
         return str(getattr(source, "profile", None) or "").strip() or "default"
 
     def _sync_session_db(self):
@@ -90,7 +93,10 @@ class GatewayTopicThreadsMixin:
 
     def _telegram_topic_cooldown_key(self, source: SessionSource) -> Optional[str]:
         """Cooldown key (profile, chat_id): profiles sharing a Telegram private chat_id under
-        multiplex must not suppress each other's lobby reminders / capability hints."""
+        multiplex must not suppress each other's lobby reminders / capability hints.
+
+        See #76423.
+        """
         chat_id = str(source.chat_id or "")
         return f"{self._telegram_topic_profile_name(source)}:{chat_id}" if chat_id else None
 
@@ -180,7 +186,11 @@ class GatewayTopicThreadsMixin:
 
     def _sync_telegram_topic_binding(self, source: SessionSource, session_entry, *, reason: str) -> None:
         """Update the topic binding to ``session_entry.session_id``: a stale binding after a mid-turn
-        compression rotation reloads the oversized parent next message, retriggering compression."""
+        compression rotation reloads the oversized parent next message, retriggering compression.
+
+        Telegram topic lanes persist a (chat_id, thread_id) -> session_id row so reopening a topic in a
+        fresh process resumes the right Hermes session. See #20470, #29712, #33414.
+        """
         if not self._is_telegram_topic_lane(source):
             return
         try:
@@ -551,6 +561,7 @@ class GatewayTopicThreadsMixin:
             logger.exception("Failed to disable Telegram topic mode")
             return f"Failed to disable topic mode: {exc}"
         # Reset per-profile+chat debounce state so the next activation doesn't see a stale cooldown.
+        # See #76423.
         cooldown_key = self._telegram_topic_cooldown_key(source)
         for attr in ("_telegram_lobby_reminder_ts", "_telegram_capability_hint_ts") if cooldown_key else ():
             store = getattr(self, attr, None)

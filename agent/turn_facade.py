@@ -31,6 +31,8 @@ class TurnFacadeMixin:
         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
         # A review shares this session_id for cache parity: fence review startup or interrupt
         # an admitted request and await its exit before opening live-turn instrumentation.
+        # Foreground priority is retained if the review does not acknowledge within the bounded deadline
+        # (#84423).
         from agent.background_review import cancel_background_review_for_live_turn
 
         cancel_background_review_for_live_turn(self)
@@ -106,6 +108,9 @@ class TurnFacadeMixin:
             # affinity scope falls back to it; accounting handles route aux usage to the session.
             token = set_conversation_context(self._conversation_root_id())
             affinity_token = set_affinity_scope(declared_conversation_scope_safe(self))
+            # Publish the session accounting handles the same way so auxiliary calls record their token
+            # usage into session_model_usage (task dimension) — the fix for aux spend being invisible in
+            # analytics (issue #23270).
             acct_token = set_accounting_context(
                 getattr(self, "_session_db", None), getattr(self, "session_id", None)
             )

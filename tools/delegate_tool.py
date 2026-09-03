@@ -84,6 +84,15 @@ def _open_child_session_db(parent_agent) -> Any:
     a background child still flushes (transcript silently dropped). It MUST open the same db FILE as the parent's
     handle (non-launch profiles), else lineage / session_search break; released by the child's close() via
     _owns_session_db."""
+    # Each child gets a DEDICATED SessionDB connection instead of the parent's live object. The parent's
+    # handle is owned by the parent's lifecycle (cron run_job's finally block, gateway session end, /new)
+    # and can be closed while a fire-and-forget background child is still flushing on a daemon thread —
+    # every subsequent flush then hits the closed handle and the child's transcript is silently dropped
+    # (#81267). It MUST point at the same database FILE as the parent's handle: parents can hold non-default
+    # per-profile handles (tui_gateway opens SessionDB(db_path=<profile>/ state.db) for non-launch
+    # profiles), and a bare SessionDB() would write the child's transcript into the launch profile's db,
+    # breaking parent_session_id lineage and session_search. AsyncSessionDB wrappers (gateway) forward
+    # .db_path via __getattr__, so this works through them.
     parent_session_db = getattr(parent_agent, "_session_db", None)
     if parent_session_db is None:
         return None
@@ -188,6 +197,8 @@ def _build_child_agent(
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     if child_session_db is not None:
         child._owns_session_db = True  # released by the child's close(), never by the parent
+    # Ownership transfer for the dedicated handle: the child's close() must release it (nothing else holds a
+    # reference), and no parent teardown can close it out from under a background child (#81267).
     child_session_ref["session_id"] = getattr(child, "session_id", "") or ""
     child._progress_identity_ref = child_session_ref
     child._delegate_depth, child._delegate_role = child_depth, effective_role  # post-degrade role
@@ -235,6 +246,8 @@ def _run_single_child(
                     "max_iterations" only for genuine budget exhaustion
                     (completed=False with no failure fields), never for errors.
       truncated   == (exit_reason == "max_iterations").
+
+    * ``"completed"``       — normal finish. See #97655.
     """
     child_progress_cb = getattr(child, "tool_progress_callback", None)
     child_pool, leased_cred_id = _lease_child_credential(child)
@@ -386,6 +399,8 @@ def delegate_task(
     try:
         creds = _resolve_delegation_credentials(credentials_cfg if credentials_cfg else cfg, parent_agent)
     except ValueError as exc:
+        # Explicit-pin preflight failures (e.g. pinned delegation.command missing from PATH) refuse the
+        # spawn loudly (#80450).
         return tool_error(str(exc))
     max_children = _get_max_concurrent_children()
     task_list, err = _normalize_task_list(goal, context, tasks, output_schema, top_role, max_children)

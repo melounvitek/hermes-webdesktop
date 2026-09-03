@@ -110,6 +110,8 @@ def mark_worktree_payload_unproven(payload: Dict[str, Any], reason: str, *,
     The parent only sees this dict, so the uncertainty must travel in it or "0 commits, clean"
     reads as "the child produced nothing". *unmeasured* names only the fields actually left
     unproven (one probe can succeed while the other fails).
+
+    See #88113.
     """
     path, branch = payload.get("path", ""), payload.get("branch", "")
     payload["inspection_failed"] = True
@@ -140,6 +142,7 @@ def finalize_subagent_worktree(info: Dict[str, str], *, prune: bool = True) -> D
         return payload
     # Without a base commit the count is an unproven default, and the prune
     # condition reads payload["commits"] — so it must not prune either.
+    # See #88113.
     if not base_commit:
         return mark_worktree_payload_unproven(
             payload, "no base_commit recorded — commit count unmeasurable", unmeasured="commits")

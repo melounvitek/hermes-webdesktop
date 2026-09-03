@@ -103,6 +103,9 @@ def _decode_text_bytes(data: bytes, mime_type: str | None) -> str | None:
             return data.decode(encoding)
         except UnicodeDecodeError:
             continue
+    # Binary (ELF/Mach-O/PE), not a shell script: feeding its decoded bytes back into the guard tokenizes
+    # machine code into bogus NUL-bearing paths and crashes the scanner (#77703). Mirror
+    # lifecycle_guard._read_referenced_script and treat it as nothing to scan.
     return data.decode("utf-8", errors="replace")
 
 

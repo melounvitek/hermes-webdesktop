@@ -35,6 +35,8 @@ def _memory_provider_options() -> List[str]:
     (built-in only) is always first; discovery failures degrade to the bundled defaults.
     The literal ``builtin`` alias is deliberately NOT offered — built-in memory is not a
     provider plugin; ``_normalize_memory_provider_name`` maps legacy aliases back to ``""``.
+
+    See #49513.
     """
     options = [""]
     try:
@@ -189,6 +191,8 @@ _CATEGORY_MERGE: Dict[str, str] = {
     "telemetry": "security",
     "plugins": "agent",
     "doctor": "general",
+    # `runtime.nofile_soft_limit` (#78873) is the only schema-surfaced runtime field — fold it into the
+    # agent tab rather than spawning a one-field orphan category.
     "runtime": "agent",
     "session": "general",
     "nous": "agent",
@@ -512,6 +516,9 @@ def _dashboard_code_skew_guard() -> Optional[str]:
     resolve a fresh consumer module against a stale cached dependency -> ImportError.
     Mirrors the gateway's ``_model_switch_skew_guard``: refuse the risky call with an
     actionable message. Never a false positive (non-git installs return None).
+
+    ``/api/model/options`` 500 after the update added ``agent.model_metadata.is_grok_46_family`` while the
+    running process kept serving the pre-update module (#86207).
     """
     from gateway.code_skew import detect_code_skew
 
@@ -529,7 +536,10 @@ def _dashboard_code_skew_guard() -> Optional[str]:
 def _dashboard_skew_restart_hint() -> str:
     """Restart advice matching how this process is owned — the same app backs the browser
     dashboard and Desktop-owned ``hermes serve``; naming a systemd unit would mislead
-    macOS/launchd hosts and Desktop SSH backends."""
+    macOS/launchd hosts and Desktop SSH backends.
+
+    See #97046.
+    """
     if os.environ.get("HERMES_SERVE_HEADLESS") == "1":
         return (
             "restart the Desktop-owned backend to load the new code "
@@ -558,6 +568,7 @@ def _resolve_assignment_credentials(model_cfg: dict, provider: str, provider_ent
     key_env = str(raw_entry.get("key_env") or "").strip()
     if key_env:
         model_cfg["key_env"] = key_env
+        # #88990: carry the credential POINTER, never a resolved secret.
         model_cfg.pop("api_key", None)
     elif isinstance(provider_entry, dict) and provider_entry.get("api_key"):
         raw_key = str(raw_entry.get("api_key") or "").strip()
@@ -701,6 +712,9 @@ def _apply_aux_assignment_sync(cfg: dict, provider: str, model: str, task: str, 
             # endpoint must carry its own base_url/api_key (the auxiliary resolver reads
             # auxiliary.<task>.base_url/api_key), or it silently rebinds to model.base_url and
             # breaks once the main slot switches away.
+            # The auxiliary resolver already reads auxiliary.<task>.base_url/api_key
+            # (_resolve_task_provider_model), so persisting them here is what actually wires the endpoint
+            # in. See #65254.
             slot_cfg["base_url"] = base_url
             if api_key:
                 slot_cfg["api_key"] = api_key

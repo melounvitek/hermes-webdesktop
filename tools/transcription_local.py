@@ -63,6 +63,7 @@ def _try_lazy_install_stt() -> bool:
         from tools.lazy_deps import ensure
         # prompt=False: a bare input() deadlocks under the interactive CLI where prompt_toolkit
         # owns stdin; the install is already gated by security.allow_lazy_installs.
+        # prompt=False: never raise a blocking input() prompt mid-session. See #40490.
         ensure("stt.faster_whisper", prompt=False)
         if _ilu.find_spec("faster_whisper"):
             return True
@@ -125,7 +126,11 @@ def _load_local_whisper_model(model_name: str, device: str = "auto", compute_typ
     """Load faster-whisper with graceful CUDA → CPU fallback. ``device="auto"`` picks CUDA
     whenever the ctranslate2 wheel ships CUDA libs, even on hosts without the NVIDIA runtime (WSL2,
     headless servers): try the requested config first; on a CUDA library load failure fall back to
-    CPU + int8. Pass ``stt.local.device`` / ``compute_type`` to pin."""
+    CPU + int8. Pass ``stt.local.device`` / ``compute_type`` to pin.
+
+    ``device`` / ``compute_type`` default to ``"auto"`` so the historical behaviour is unchanged; pass
+    explicit values from ``stt.local.device`` / ``stt.local.compute_type`` to pin a configuration (#9088).
+    """
     force_cpu = _should_force_faster_whisper_cpu()
     if force_cpu:
         # Importing ctranslate2 can itself abort on Apple Silicon/Rosetta when
@@ -238,6 +243,8 @@ def _transcribe_local_command(
                 input_path=shlex.quote(prepared_input), output_dir=shlex.quote(output_dir),
                 language=shlex.quote(language), model=shlex.quote(normalized_model))
             # Scrub Hermes secrets from the child env (same policy as _run_command_stt).
+            # Scrub Hermes secrets from the child env (sibling path to #56332 / _run_command_stt — this
+            # local-whisper path previously inherited the full process environment).
             from tools.environments.local import hermes_subprocess_env
             _run_quiet(shlex.split(command), timeout=300, env=hermes_subprocess_env(inherit_credentials=False))
             txt_files = sorted(Path(output_dir).glob("*.txt"))

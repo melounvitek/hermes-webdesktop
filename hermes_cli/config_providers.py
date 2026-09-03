@@ -38,6 +38,7 @@ def _warn_once_per_provider(provider_key: str, signature: str, msg: str, *args: 
 # fell through to hostname-based guessing, so ``api_mode: openai`` could flip to
 # ``codex_responses`` after an update and break the provider.
 _API_MODE_ALIASES = {
+    # See #66543.
     "openai": "chat_completions",
     "openai_chat": "chat_completions",
     "openai-chat": "chat_completions",
@@ -130,6 +131,10 @@ def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
         if not (isinstance(raw_url, str) and raw_url.strip()):
             continue
         candidate = raw_url.strip()
+        # Accept URLs containing unresolved placeholder tokens — both ``${ENV_VAR}`` env-refs and bare
+        # ``{region}``-style templates — without URL validation. They are expanded at runtime, so a caller
+        # reaching this normalizer with raw (un-expanded) config would otherwise see the provider silently
+        # dropped (#14457).
         if re.search(r"\{[^}]+\}", candidate):
             return candidate
         parsed = urlparse(candidate)
@@ -477,7 +482,11 @@ def get_custom_provider_context_length(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
     config: Optional[Dict[str, Any]] = None) -> Optional[int]:
-    """Per-model ``context_length`` override from a route-matching entry, or ``None``."""
+    """Per-model ``context_length`` override from a route-matching entry, or ``None``.
+
+    Before this helper existed, the lookup was duplicated in ``run_agent.py``'s startup path only; every
+    other path (notably ``/model`` switch) fell back to the 128K default. See #15779.
+    """
     from hermes_cli.config import get_compatible_custom_providers
     if not model or not base_url:
         return None

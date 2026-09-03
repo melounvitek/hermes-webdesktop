@@ -289,6 +289,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
 
     # TTS is API-billed: a subscription OAuth bearer can authorize chat while
     # returning 403 for /v1/tts, so prefer an explicit XAI_API_KEY over OAuth.
+    # See #87045, #88040.
     creds = resolve_xai_http_credentials(prefer_api_key=True)
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:

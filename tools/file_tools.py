@@ -78,6 +78,12 @@ def _truncate_to_char_budget(content: str, max_chars: int) -> tuple[str, int, bo
     Returns ``(kept_text, lines_kept, truncated)`` so the caller can offer a
     ``next_offset`` instead of rejecting the read. If not even the first line
     fits it is clamped mid-line so the read is never empty and the cursor advances.
+
+    Ported in spirit from nearai/ironclaw#5029 (dual line/byte cap on ``read_file``). Where hermes
+    previously hard-rejected an oversized read (forcing the model to guess a smaller ``limit`` and burn a
+    round-trip returning nothing), this trims the content to the last *complete line* that fits within
+    ``max_chars`` and reports how many lines were kept so the caller can offer a ``next_offset``
+    continuation.
     """
     if len(content) <= max_chars:
         return content, (content.count("\n") + 1 if content else 0), False
@@ -274,6 +280,12 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str):
     # Re-apply the container cwd guard: a gateway/TUI/ACP override is a raw HOST
     # path and ``docker run -w <host-path>`` makes search_files & co silently
     # return nothing. Valid in-container overrides (/workspace, /root) pass.
+    # Re-apply the container cwd guard that _get_env_config() already ran on config["cwd"] (see #50636). A
+    # per-task cwd override registered by the gateway/TUI/ACP for workspace tracking is a raw host path
+    # (e.g. a Desktop session's /Users/<me>/workspace or C:\\Users\\<me>). On a container backend that
+    # reaches ``docker run -w <host-path>`` and the container starts in a directory that doesn't exist
+    # inside the sandbox, so search_files and friends silently return empty results (#54447). Sanitize it
+    # back to the already-validated config["cwd"] so the override can't bypass the guard.
     if env_type in _CONTAINER_BACKENDS and _is_unusable_container_cwd(cwd):
         if cwd != config["cwd"]:
             logger.info(
@@ -317,6 +329,12 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                 return cached
             # Env was cleaned up: rescue its cwd into the session record FILL-ONLY
             # (``cached.cwd`` is the SHARED env's cwd, not this session's own).
+            # Environment was cleaned up -- preserve the old cwd in the session record before invalidating
+            # the stale cache entry (fixes #26211: silent file-creation failures in long-running
+            # conversations). Usually a no-op: every completed command already recorded its cwd. Fill-only:
+            # ``cached.cwd`` is a snapshot of the SHARED env's cwd at cache-build time, so it is not
+            # attributable to this session (same class as the interrupted-command bug, #85658). Rescue a
+            # session that has no record, but never overwrite a record the session wrote for itself.
             old_cwd = getattr(cached, "cwd", None)
             if old_cwd:
                 try:
@@ -515,6 +533,12 @@ def _record_successful_read(task_data: dict, task_id: str, path: str, resolved_s
 
     if not partial:
         try:
+            # Background-review read-before-write guard integration (#61521): when the self-improvement
+            # review fork reads a skill file with read_file (now whitelisted dispatch-side), register the
+            # read the same way skill_view does, so a follow-up skill_manage(action='patch') on the loaded
+            # file is accepted. A partial read doesn't count — the guard requires the CURRENT full content
+            # to have been seen. No-op outside review forks (mark_background_review_skill_read gates on
+            # is_background_review).
             from tools.skill_manager_tool import mark_background_review_skill_read
             mark_background_review_skill_read(Path(resolved_str))
         except Exception:

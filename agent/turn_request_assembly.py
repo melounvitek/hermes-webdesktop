@@ -234,6 +234,10 @@ def assemble_api_request(
         approx_tokens = estimate_messages_tokens_rough(api_messages, charge_stale_thinking=False)
     # Route-aware: native Responses compaction prunes the wire payload, so the raw
     # history figure overstates it and fires needless local compression.
+    # Route-aware pressure: when the upcoming request is eligible for native Responses compaction the
+    # transport will checkpoint-prune the payload before sending — the generic durable-history figure
+    # overstates the wire by orders of magnitude on a compacted session and fires a 600s local compression
+    # the main request never needed (#96995, mirroring the turn-prologue preflight #96644/#96155).
     request_pressure_tokens = _midturn_request_pressure_tokens(
         agent, api_messages, effective_system or "", approx_tokens
     )

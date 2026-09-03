@@ -207,7 +207,14 @@ def _scan_discovered_repos_remote(conn, policy: dict) -> bool:
     """Backend-side disk scan of the policy roots into the discovery cache. Best-effort:
     failures log and leave the cache untouched. True only when the scan is authoritative
     (every root walked to completion, cap not hit) — only then is the cache write
-    ``replace=True``; a partial/errored scan must MERGE, or a failed refresh blanks the sidebar."""
+    ``replace=True``; a partial/errored scan must MERGE, or a failed refresh blanks the sidebar.
+
+    The desktop's native repo scan only runs on the local filesystem. On a remote gateway connection the
+    host must scan its own disk so repos with zero Hermes sessions still appear in the sidebar (#81723).
+    Mirrors the desktop's behavior: walk each root (bounded depth), find `.git` directories, record (root,
+    label) pairs into the discovery cache.
+    See #81723.
+    """
     from hermes_cli import projects_db as pdb
     roots = policy.get("roots") or []
     excludes = policy.get("exclude_paths") or []

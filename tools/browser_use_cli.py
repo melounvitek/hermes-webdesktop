@@ -140,6 +140,11 @@ def _base_subprocess_env() -> dict:
     env = _build_browser_env()
     # The CLI runs under its own Python (uv tool / uvx); an inherited PYTHONPATH/PYTHONHOME
     # (Hermes's venv) wins over its site-packages → wrong-ABI C-extensions and a crash.
+    # PYTHONPATH/PYTHONHOME inherited from the agent process point at Hermes's venv site-packages, and a
+    # child interpreter honors them ahead of its own site-packages — so the CLI imports compiled
+    # C-extensions (e.g. pydantic_core) built for the wrong interpreter and crashes on ABI mismatch (#83427,
+    # #84841, #86006, #86104). Strip both — the CLI manages its own environment and never needs Hermes's
+    # import path.
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
     env["PATH"] = _floor_subprocess_path(env.get("PATH", ""))

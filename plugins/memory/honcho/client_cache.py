@@ -103,7 +103,11 @@ def _slot_identity(key: tuple) -> tuple:
 def _slot_for(key: tuple) -> SingletonSlot:
     """Slot for ``key``, evicting stale same-identity slots: a same (kind, host, paths) identity
     with a different credential/timeout drops the old slot so the replaced client stops being
-    served; otherwise credential churn leaks one pinned client per change."""
+    served; otherwise credential churn leaks one pinned client per change.
+
+    Without eviction, credential churn leaks one pinned client per change — the gap that made #81401's
+    retirement machinery inert.
+    """
     identity = _slot_identity(key)
     with _client_slots_lock:
         slot = _client_slots.get(key)

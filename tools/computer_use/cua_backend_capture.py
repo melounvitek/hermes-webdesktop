@@ -60,7 +60,11 @@ def _select_capture_target(windows: List[Dict[str, Any]], *, app_requested: bool
     """Best window from z-sorted (frontmost-first) list_windows output. Unqualified default captures on
     Linux (no app filter, no exact target) skip desktop/shell helper windows first — targetable but capture
     as empty — and when every remaining candidate shares one ``z_index`` (the common X11 case)
-    ``_NET_ACTIVE_WINDOW`` beats list order. Exact-target captures never pay for the ``xprop`` probe."""
+    ``_NET_ACTIVE_WINDOW`` beats list order. Exact-target captures never pay for the ``xprop`` probe.
+
+    Callers pass windows already sorted by ``z_index`` descending (higher = frontmost). When ordering is
+    informative, keep that frontmost contract. See #58026.
+    """
     pool = [w for w in windows if not w["off_screen"]]
     if not exact_target and not app_requested and sys.platform == "linux":
         pool = [w for w in pool if _is_real_app_window(w)] or pool
@@ -260,6 +264,10 @@ class _CaptureMixin:
         tree, window_title = _tree_and_title(gws_out)
         # Prefer the canonical structuredContent.elements (real frames); the markdown regex fallback yields
         # (0,0,0,0) bounds.
+        # Surface 2 of NousResearch/hermes-agent#47072: prefer the canonical structuredContent.elements
+        # array (trycua/cua#1961). Falls back to markdown regex parsing for cua-driver builds that didn't
+        # carry the structured shape — those bounds come back (0,0,0,0); the structured path preserves real
+        # frames.
         sc_elements = (gws_out.get("structuredContent") or {}).get("elements")
         elements = (_parse_elements_from_structured(sc_elements) if isinstance(sc_elements, list) and sc_elements
                     else _parse_elements_from_tree(tree) if tree else [])
@@ -297,7 +305,11 @@ class _CaptureMixin:
     def _capture_full_screen(self, mode: str) -> CaptureResult:
         """Composited PrtScn-style grab via `get_desktop_state` (the shell window would only show wallpaper + icons).
         Never enumerates, so it also works when Windows UIA hangs. Pixels only — `elements` is empty and `note` points
-        the model at the interactive lanes. ``capture_scope`` is switched to desktop for the call and restored afterwards."""
+        the model at the interactive lanes. ``capture_scope`` is switched to desktop for the call and restored afterwards.
+
+        Bonus resilience (2ndNatureAI, #60081): this lane works even when Windows UIA enumeration
+        (`list_windows` / `list_apps`) hangs (trycua/cua#2110/#2113), because it never enumerates.
+        """
         self._clear_active_target()
         previous_scope: Optional[str] = None
         try:

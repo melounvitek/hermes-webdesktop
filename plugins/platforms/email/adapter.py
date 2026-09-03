@@ -54,6 +54,7 @@ _AUTH_METHOD_RE = re.compile(r"\b(dmarc|dkim|spf)\s*=\s*([a-z]+)", re.IGNORECASE
 _AUTH_PROP_RE = re.compile(r"\b(header\.from|header\.d|smtp\.mailfrom|smtp\.from|envelope-from)\s*=\s*([^\s;]+)", re.IGNORECASE)
 
 
+# Backwards-compatible alias for the name used by the original #59076 hunks.
 def _esecret_int(name: str, default: int) -> int:
     """Scope-aware integer read."""
     return coerce_port(str(_get_secret(name, "")).strip() or default, default)
@@ -83,7 +84,14 @@ def _tls_context(verify: bool, host: str) -> ssl.SSLContext:
 
 def _close_imap(imap: "imaplib.IMAP4") -> None:
     """Teardown that guarantees the socket closes: ``logout()`` only guards ``OSError``, so ``IMAP4.abort`` on a
-    broken connection skipped ``shutdown()`` and leaked one fd per failed poll (fatal on macOS's 256 soft limit)."""
+    broken connection skipped ``shutdown()`` and leaked one fd per failed poll (fatal on macOS's 256 soft limit).
+
+    ``IMAP4.logout()`` only guards against ``OSError`` internally: a broken connection makes
+    ``_simple_command('LOGOUT')`` raise ``IMAP4.abort`` (which is *not* an ``OSError``), so ``logout()``
+    propagates before its own ``shutdown()`` call and the TCP socket stays open. On macOS, where the default
+    soft fd limit is 256 and pollers may run through a local proxy, these abandoned sockets accumulate one
+    per failed poll until the gateway hits ``[Errno 24] Too many open files`` (#79889).
+    """
     try:
         imap.logout()
     except Exception:
@@ -154,12 +162,23 @@ def _is_automated_sender(address: str, headers: dict) -> bool:
 
 
 def check_email_requirements() -> bool:
-    """True when all email settings are present and non-blank (blank keys left by an abandoned setup must not enable the platform)."""
+    """True when all email settings are present and non-blank (blank keys left by an abandoned setup must not enable the platform).
+
+    Treats blank/whitespace-only values as missing so an abandoned setup that left empty ``EMAIL_*`` keys in
+    ``.env`` does not enable the platform (#40715).
+    """
     return all(_get_secret(name, "").strip() for name in ("EMAIL_ADDRESS", "EMAIL_PASSWORD", "EMAIL_IMAP_HOST", "EMAIL_SMTP_HOST"))
 
 
 def _safe_decode(payload: bytes, charset: "Optional[str]") -> str:
-    """Decode without ever raising: ``errors="replace"`` does not guard a missing codec (``LookupError``), so fall back alias → UTF-8 → latin-1."""
+    """Decode without ever raising: ``errors="replace"`` does not guard a missing codec (``LookupError``), so fall back alias → UTF-8 → latin-1.
+
+    Unknown or malformed charset labels (``unknown-8bit``, misspelled names, attacker-controlled garbage)
+    previously raised ``LookupError`` from ``bytes.decode`` — ``errors="replace"`` only guards decode
+    errors, not a missing codec — which aborted the whole IMAP fetch and dropped every message in the batch
+    (#35901, #55381, #55383). Fall back through a small alias table, then UTF-8, then latin-1 (which never
+    fails).
+    """
     label = (charset or "utf-8").strip().strip("\"'").lower() or "utf-8"
     for candidate in (_CHARSET_ALIASES.get(label, label), "utf-8"):
         try:
@@ -170,7 +189,11 @@ def _safe_decode(payload: bytes, charset: "Optional[str]") -> str:
 
 
 def _decode_header_value(raw: str) -> str:
-    """Decode an RFC 2047 header into a plain string; never raises."""
+    """Decode an RFC 2047 header into a plain string; never raises.
+
+    Never raises: malformed encoded-words or unknown charsets degrade to replacement characters instead of
+    crashing the fetch loop (#55381).
+    """
     try:
         parts = decode_header(raw)
     except Exception:  # malformed RFC 2047 structure
@@ -329,6 +352,8 @@ class EmailAdapter(BasePlatformAdapter):
         self._poll_task: Optional[asyncio.Task] = None
         self._last_fetch_failed, self._last_fetch_error = False, ""  # "checked, nothing new" vs "the check itself failed"
         # chat_id (sender email) -> last subject + message-id for threading
+        # Track the last IMAP fetch attempt so the poll loop can distinguish "checked, nothing new" from
+        # "the check itself failed" (#80016).
         self._thread_context: Dict[str, Dict[str, str]] = {}
         logger.info("[Email] Adapter initialized for %s", self._address)
 
@@ -359,6 +384,11 @@ class EmailAdapter(BasePlatformAdapter):
     @contextmanager
     def _inbox(self):
         """Logged-in IMAP handle on INBOX; always ``_close_imap``-ed on exit (a login/select failure used to leak one fd per reconnect)."""
+        # Test IMAP connection. The handle is closed in ``finally`` — before this, a failure in
+        # login/select/search left the TCP socket open with no owner, leaking one fd per connect attempt.
+        # Under the gateway's reconnect watcher (fresh adapter instance per retry) against an
+        # unreachable/proxied host this grew monotonically until fd exhaustion on macOS's 256 soft limit
+        # (#79889).
         imap = self._connect_imap()
         try:
             imap.login(self._address, self._password)
@@ -476,6 +506,8 @@ class EmailAdapter(BasePlatformAdapter):
         if self._last_fetch_failed:
             # The IMAP check itself failed (not an empty inbox): route through the fatal-error hook so the gateway's
             # reconnect/backoff re-establishes the mailbox. The handler runs detached (gateway/run.py), so awaiting it is safe.
+            # The handler runs in a detached task (gateway/run.py), so awaiting it from our own poll task is
+            # safe even though teardown cancels this task. See #80016.
             self._last_fetch_failed = False
             self._set_fatal_error("email_imap_fetch_failed", self._last_fetch_error or "IMAP fetch failed", retryable=True)
             await self._notify_fatal_error()
@@ -494,6 +526,8 @@ class EmailAdapter(BasePlatformAdapter):
                         continue  # transient per-UID refusal: leave unseen so the next poll retries
                     # Mark seen once a response arrived (even malformed) so garbage is skipped once, not retried forever —
                     # but NOT before the fetch: a connection failure must leave the rest of the batch eligible for the next poll.
+                    # IMAP fetch can return unexpected structures (e.g. a single bytes item instead of a
+                    # list of tuples). See #80032.
                     self._seen_uids.add(uid)
                     self._trim_seen_uids()
                     try:
@@ -506,6 +540,7 @@ class EmailAdapter(BasePlatformAdapter):
                         continue
                     # One poison message (unparseable headers, pathological attachment, DNS hiccup) must not abort the batch or force a reconnect.
                     try:
+                        # See #80032.
                         parsed = self._parse_fetched_message(uid, raw_email)
                     except Exception as parse_exc:
                         logger.error("[Email] Failed to process message UID %s, skipping: %s", uid, parse_exc)
@@ -513,6 +548,8 @@ class EmailAdapter(BasePlatformAdapter):
                     if parsed is not None:
                         results.append(parsed)
         except Exception as e:
+            # _close_imap guarantees the socket dies even when logout() raises IMAP4.abort on a broken
+            # connection (#79889).
             logger.error("[Email] IMAP fetch error: %s", e)
             self._last_fetch_failed, self._last_fetch_error = True, str(e)
         # Keep the reconnect snapshot current so a mid-outage adapter recreation does not re-dispatch messages already processed.

@@ -27,6 +27,15 @@ from plugins.image_gen._common import (
 
 logger = logging.getLogger(__name__)
 
+# NOTE: do NOT reintroduce an "account capability" classifier keyed on ``Tool choice 'image_generation' not
+# found in 'tools' parameter``. That HTTP 400 is a *request-shape* rejection (the Codex backend resolves
+# tool_choice as a function-tool name and never recognizes hosted-tool entries) — it is emitted for every
+# account, including accounts where image generation works. A previous version of this file translated that
+# 400 into "Image generation is not enabled for the current Codex account. Switch the image provider to
+# OpenAI API key, FAL, or xAI.", which reported a universal bug in our own payload as the user's entitlement
+# problem and sent people away from a provider that was never actually tried. The request-shape bug is fixed
+# by omitting tool_choice (see ``_build_responses_payload``); any remaining HTTP error must surface verbatim
+# so it stays diagnosable. See issues #19505, #49008 and #31335.
 _MAX_ERROR_BODY_CHARS = 500
 
 # Hosts the ``image_generation`` tool call; ``API_MODEL`` does the image work.
@@ -185,6 +194,13 @@ def _build_responses_payload(
             "background": "opaque",
             "partial_images": _PARTIAL_IMAGES_REQUESTED,
         }],
+        # No ``tool_choice`` is sent: the chatgpt.com/backend-api/codex backend rejects every shape we have
+        # for forcing the hosted ``image_generation`` tool. ``{"type": "allowed_tools", "mode": "required",
+        # "tools": [{"type": "image_generation"}]}`` (and the simpler ``{"type": "image_generation"}`` form)
+        # both 400 with ``Tool choice 'image_generation' not found in 'tools' parameter`` — the backend
+        # looks up tool_choice as a *function* name and never recognizes hosted-tool entries. Letting the
+        # host model decide is the only shape Codex currently accepts; the ``instructions`` above are what
+        # nudge it toward the tool. See issue #19505.
         "stream": True,
     }
 

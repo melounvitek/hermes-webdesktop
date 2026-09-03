@@ -183,6 +183,10 @@ def _skill_manage_batch(operations, default_name: str = None, task_id: str = Non
             logger.warning("skill_manage batch rollback failed, snapshots kept at %s", snap_root)
         else:
             shutil.rmtree(snap_root, ignore_errors=True)
+    # utf-8-sig + errors="replace": SKILL.md files are user-authored and sometimes carry a Notepad BOM or
+    # stray non-UTF-8 bytes. Pinning UTF-8 with replacement keeps skill_view deterministic across platforms
+    # — falling back to the machine locale (cp1252/GBK) would make the same skill render differently per
+    # host (see PR #51701).
     return json.dumps(
         {"success": True, "operations_applied": len(results), "results": results},
         ensure_ascii=False)

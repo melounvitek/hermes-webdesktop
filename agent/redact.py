@@ -19,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Sensitive query-string param names (case-insensitive): opaque tokens / OAuth
 # codes / pre-signed signatures with no vendor prefix.
+# Ported from nearai/ironclaw#2529 — catches tokens whose values don't match any known vendor prefix regex
+# (e.g. opaque tokens, short OAuth codes).
 _SENSITIVE_QUERY_PARAMS = frozenset({
     "access_token", "refresh_token", "id_token", "token", "api_key", "apikey",
     "client_secret", "password", "auth", "jwt", "session", "secret", "key",
@@ -28,6 +30,11 @@ _SENSITIVE_QUERY_PARAMS = frozenset({
 # Snapshot at import time so runtime env mutations (e.g. an LLM-generated
 # `export HERMES_REDACT_SECRETS=false`) cannot disable redaction mid-session.
 # ON by default; `security.redact_secrets: false` bridges to this env var.
+# ON by default — secure default per issue #17691. Users who need raw credential values in tool output (e.g.
+# working on the redactor itself) can opt out via `security.redact_secrets: false` in config.yaml (bridged
+# to this env var in hermes_cli/main.py, gateway/run.py, and cli.py) or `HERMES_REDACT_SECRETS=false` in
+# ~/.hermes/.env. An opt-out warning is logged at gateway and CLI startup so operators see the downgrade —
+# see `_log_redaction_status()` in gateway/run.py and cli.py.
 _REDACT_ENABLED = os.getenv("HERMES_REDACT_SECRETS", "true").lower() in {"1", "true", "yes", "on"}
 
 # Known API key prefixes -- match the prefix + contiguous token chars.
@@ -76,6 +83,7 @@ _PREFIX_PATTERNS = [
     r"fw_[A-Za-z0-9]{30,}",             # Fireworks AI API key
     r"fpk_[A-Za-z0-9]{30,}",            # Fireworks AI project key
     # GitLab token families (each keeps a full literal prefix for the pre-screen).
+    # Ported from openclaw/openclaw#112954; follow-up invited in #4541.
     r"glpat-[A-Za-z0-9_\-]{10,}",       # GitLab personal access token
     r"gloas-[A-Za-z0-9_\-]{10,}",       # GitLab OAuth application secret
     r"gldt-[A-Za-z0-9_\-]{10,}",        # GitLab deploy token
@@ -97,12 +105,17 @@ _PREFIX_PATTERNS = [
 # tolerate spaces around "=" and allow the keyword embedded anywhere
 # (``MYTOKEN=…``) — an all-caps key is almost never prose. Bare ``KEY``/``PASS``/
 # ``PW`` suffixes are included; _key_has_secret_keyword rejects ``KEYBOARD=``.
+# The regex is IGNORECASE so lowercase env names (``openai_key=…``) are caught here too. The secret name
+# must sit at a word boundary (``_``-delimited or whole-word) so generic prose words (``password=``,
+# ``token=``, ``KEYBOARD=``, ``PASSAGE=``) do not match — those are handled by the config/form/URL paths,
+# and a bare ``password=…`` in a form body must not be swallowed greedily by ``\S+``. See #77484.
 _SECRET_ENV_NAMES = r"(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|PASS|PW|CREDENTIAL|AUTH)"
 _ENV_ASSIGN_RE = re.compile(rf"([A-Z0-9_]{{0,50}}{_SECRET_ENV_NAMES}[A-Z0-9_]{{0,50}})\s*=\s*(['\"]?)(\S+)\2")
 # Lowercase env names: only underscore-boundary forms (``openai_key=``) — NOT
 # bare ``password=``/``token=``, which appear in prose, URLs, and form bodies.
 # The lookbehind anchors each attempt to the start of an identifier run; without
 # it re.sub retries the greedy prefix at every byte of a long opaque payload.
+# See #77484.
 _ENV_ASSIGN_LOWER_RE = re.compile(
     rf"(?<![a-z0-9_])([a-z0-9_]+(?:_|^)(?:key|pass|pw|token|secret|password|passwd|credential|auth)(?=[^a-z0-9_]|$))\s*=\s*(['\"]?)(\S+)\2",
     re.IGNORECASE,
@@ -113,6 +126,14 @@ _ENV_ASSIGN_LOWER_RE = re.compile(
 # whitespace AND ``&`` (form bodies go pair-by-pair via _redact_form_body);
 # _CFG_DOTTED_RE needs a NAMESPACED key; _CFG_ANCHORED_RE needs line start
 # (optionally after ``export``). The ``://`` URL guard lives at the call site.
+# The uppercase _ENV_ASSIGN_RE above never matched these, so config-file passwords leaked verbatim (issue
+# #16413). These run only in a config-file context, NOT in prose, code, or URLs — three carve-outs preserved
+# from the original design (#4367 + the documented web-URL passthrough below): 1. The value is bounded by
+# ``[^\s&]`` (stops at whitespace AND ``&``) so form-urlencoded bodies are handled pair-by-pair (by
+# _redact_form_body), not greedily swallowed. 2. _CFG_DOTTED_RE only matches when the key is NAMESPACED
+# (contains a dot), which is unambiguously a config key — never a prose word. 3. _CFG_ANCHORED_RE matches a
+# bare secret-word key only at line start (optionally after ``export``), so conversational ``I have
+# password=foo`` mid-sentence is left alone.
 _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|auth)"
 _CFG_VALUE = r"(['\"]?)([^\s&]+?)\2(?=[\s&]|$)"
 # Linear pre-gate for the _CFG_*_RE subs: no secret keyword => neither can match.
@@ -158,6 +179,16 @@ _YAML_ASSIGN_RE = re.compile(
 # only at a word boundary: key edge, next to a non-letter, or a camelCase
 # transition (``clientSecret``, ``APIToken``); trailing plural ``s`` is part of
 # it. Concatenations match via explicit alternatives (``authtoken``, ``apikey``).
+# The side effect: ordinary prose/document words that merely CONTAIN a keyword also matched — ``Secretary:
+# J.Smith`` (secret), ``tokenizer: cl100k_base`` (token), ``author=Smith`` (auth) — mangling legitimate
+# content on the surfaces that run these passes (browser snapshots, log lines, kanban summaries, CLI-echoed
+# command output). Ported from nearai/ironclaw#6129, where the same substring false positive ("Secretary of
+# the Treasury" matching the ``secret`` marker) scrubbed legitimate tool results from the replayed
+# transcript and sent the model into a re-fetch loop. Common concatenated compounds keep matching via
+# explicit alternatives (``authtoken`` ngrok, ``authkey`` tailscale, ``secretkey`` minio, ``apikey``).
+# Embedded occurrences inside a larger word (``secretary``, ``tokenizer``, ``authored``, ``credentialing``)
+# no longer match. ALL-CAPS keys keep the legacy embedded matching (``MYTOKEN=…``) — an all-caps key is
+# almost never prose, the same rationale as _ENV_ASSIGN_RE.
 _KEY_KEYWORD_RE = re.compile(
     r"(?:api|auth|access|refresh|session|secret)[ _.\\-]?(?:key|token)"
     r"|token|secret|passwd|password|pass|pw|credential|auth|key",
@@ -223,6 +254,12 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
     """Shared gate for the ENV / JSON / YAML assignment passes: skip programmatic env
     lookups used as values, optionally require a word-bounded keyword in the key,
     then redact when the key is unambiguously credential-bearing or the value looks opaque."""
+    # Programmatic env lookups reference variable *names*, not secret values — masking them corrupts code
+    # snippets in prose/log contexts (issue #2852): ``KEY=os.getenv('X')``.
+    # Same programmatic-env-lookup exception as _redact_env above (issue #2852): "apiKey": "os.getenv('X')"
+    # is a code snippet, not a leaked secret value.
+    # Same programmatic-env-lookup exception as _redact_env above (issue #2852): api_key: os.getenv('X') is
+    # a code snippet, not a leaked secret value.
     if _ENV_LOOKUP_VALUE_RE.match(value):
         return False
     if check_keyword and not _key_has_secret_keyword(key):
@@ -254,6 +291,11 @@ _PRIVATE_KEY_RE = re.compile(r"-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END
 # Database connection strings: protocol://user:PASSWORD@host. The userinfo and
 # password groups forbid whitespace so a match can never span a line break (a
 # greedy ``[^@]+`` once ran to a decorator's ``@`` on the next code line).
+# Database connection strings: protocol://user:PASSWORD@host Catches postgres, mysql, mongodb, redis, amqp
+# URLs and redacts the password. A real DSN password never contains whitespace; without this bound the
+# greedy [^@]+ would scan past the end of a code line to the next stray "@" (e.g. a Python decorator),
+# swallowing intervening lines and corrupting tool OUTPUT for any source containing a postgresql:// f-string
+# template. See issue #33801.
 _DB_CONNSTR_RE = re.compile(
     r"((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp)://[^:\s]+:)([^@\s]+)(@)",
     re.IGNORECASE,
@@ -265,6 +307,11 @@ _DB_CONNSTR_RE = re.compile(
 # bare userinfo. ``user:pass@`` passes through (class forbids ``:``); DB schemes
 # belong to _DB_CONNSTR_RE. 8+ char floor skips short usernames; the class
 # forbids ``/`` so an ``@`` in a path/query (``?q=user@example.com``) never counts.
+# This is the ``git remote set-url origin https://PASSWORD@github.com/...`` shape from issue #6396 — a
+# single opaque credential in the userinfo position with NO ``user:pass`` colon. The colon form
+# ``user:pass@`` is deliberately left to pass through (commit "pass web URLs through unchanged", #34029) and
+# is NOT matched here — the token class forbids ``:``. DB schemes are handled by _DB_CONNSTR_RE above and
+# excluded here. Guards against false positives:
 _URL_BARE_TOKEN_RE = re.compile(
     r"((?:https?|wss?|git|ssh|ftp|ftps|sftp)://)"  # scheme
     r"([^\s:@/]{8,})"                               # bare token (no colon/slash/@), 8+ chars
@@ -320,6 +367,10 @@ def _mask_control_split_tokens(text: str, mask_fn) -> str:
     Match on a control-stripped copy, then mask the corresponding span in the
     ORIGINAL — only when that span holds solely token-body and control chars, so
     a match can never cross into another line's unrelated text.
+
+    A credential like ``sk-abc\\x1bdef456…`` or ``ghp_abc\\n123def…`` has its token body interrupted, so the
+    contiguous _PREFIX_RE cannot match it and the secret leaks verbatim (issue #77484). ``EXA_API_KEY=*** is
+    rejected).
     """
     stripped = _CONTROL_CHARS_RE.sub("", text)
     if stripped == text:
@@ -428,7 +479,12 @@ def _redact_form_body(text: str) -> str:
 def _mask_token_nonreusable(token: str) -> str:
     """Redact a prefix-matched credential to a NON-REUSABLE sentinel: no head/tail
     chars (an agent once wrote a truncated-looking mask back into a config file),
-    only the vendor prefix label so the credential KIND stays visible."""
+    only the vendor prefix label so the credential KIND stays visible.
+
+    * cannot be mistaken for a usable-but-truncated key, so an agent that reads it from a config file and
+    writes it back does NOT corrupt the stored credential into a dead 13-char string (issue #35519); and *
+    still does not leak the secret material (no head/tail chars).
+    """
     label = next((sub for sub in _PREFIX_SUBSTRINGS if token.startswith(sub)), "") if token else ""
     return f"«redacted:{label}…»" if label else "«redacted-secret»"
 
@@ -451,9 +507,20 @@ def _redact_assignments(text: str) -> str:
         _redact_env = _assignment_sub(lambda g: f"{g[0]}={g[1]}{_mask_token(g[2])}{g[1]}", check_keyword=True)
         text = _ENV_ASSIGN_RE.sub(_redact_env, text)
         if "://" not in text:  # lowercase names would match URL params
+            # Skip URLs — the query string may contain ``token=``/``key=`` params that are intentionally
+            # passed through (see note near the bottom of this function; _redact_strict_url_credentials
+            # handles the opt-in case). The uppercase regex above is all-caps-only, so it never matches URL
+            # params; the lowercase one would (issue #77484).
             text = _ENV_ASSIGN_LOWER_RE.sub(_redact_env, text)
         # The keyword pre-gate is exact and matters: _CFG_DOTTED_RE backtracks
         # quadratically on long unbroken [A-Za-z0-9_.\-] runs.
+        # Lowercase/dotted config keys (issue #16413). Skip URLs entirely — web-URL query params are
+        # intentionally passed through (see note near the bottom of this function); _DB_CONNSTR_RE still
+        # guards connection-string passwords. Extra gate: every _CFG_*_RE match requires a secret keyword in
+        # the key, so a text without any secret keyword cannot match — skipping is exact. This matters
+        # because _CFG_DOTTED_RE backtracks quadratically on long unbroken [A-Za-z0-9_.\-] runs (e.g.
+        # base64/hex blobs in compaction payloads); the linear keyword scan prevents that pathological path
+        # on secret-free text.
         if "://" not in text and _CFG_SECRET_WORD_RE.search(text):
             text = _CFG_DOTTED_RE.sub(_redact_env, text)
             text = _CFG_ANCHORED_RE.sub(_redact_env, text)
@@ -507,6 +574,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 
     Every regex sits behind a cheap substring gate that its pattern requires,
     so the gates are never false-negative.
+
+    Set file_read=True for file *content* returned to the agent (read_file / search_files / cat). The old
+    mask looked like a real-but-truncated key, so an agent reading it from config.yaml and writing it back
+    silently corrupted the stored credential into a dead 13-char value → 401 (issue #35519). The sentinel is
+    syntactically invalid as a token, so it can't be mistaken for a usable key or written back as one.
     """
     if text is None:
         return None
@@ -518,6 +590,10 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     # Control/zero-width chars can split a token body so _PREFIX_RE alone misses it.
     if _has_known_prefix_substring(text):
         _prefix_sub = _mask_token_nonreusable if file_read else _mask_token
+        # Control/zero-width chars (\\n, \\r, ESC, U+200B, …) split a token body so _PREFIX_RE cannot match
+        # across them — a secret smuggled as ``sk-abc\\x1bdef…`` leaks verbatim (issue #77484). Mask such
+        # runs by first matching on a control-stripped copy, then re-masking the corresponding span in the
+        # original (the stripped copy and the original are aligned 1:1 for non-control chars).
         text = _mask_control_split_tokens(text, _prefix_sub)
         text = _PREFIX_RE.sub(lambda m: _prefix_sub(m.group(1)), text)
 
@@ -534,6 +610,11 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     if "BEGIN" in text and "-----" in text:
         text = _PRIVATE_KEY_RE.sub("[REDACTED PRIVATE KEY]", text)
 
+    # Database connection string passwords. With code_file=True, a password group that is a pure ``{...}``
+    # brace expression is an f-string template reference (e.g. f"postgresql://{user}:{pass}@{host}"), not a
+    # literal credential — preserve it. Literal passwords are still redacted. The regex forbids whitespace
+    # in the password group, so a single-line template's group(2) is exactly the brace expression. See issue
+    # #33801.
     if "://" in text:
         text = _redact_url_credentials(text, code_file)
 
@@ -541,6 +622,15 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
         text = _JWT_RE.sub(lambda m: _mask_token(m.group(0)), text)
 
     if redact_url_credentials:  # opt-in; known credential shapes in URLs are caught above
+        # NOTE: Web-URL redaction (query params + userinfo + HTTP access-log request targets) is
+        # intentionally OFF. Many legitimate workflows pass opaque tokens through query strings — magic-link
+        # checkouts, OAuth callbacks the agent is meant to follow, pre-signed share URLs — and
+        # blanket-redacting param values by name breaks those skills mid-flow. DB connection-string
+        # passwords are still caught by _DB_CONNSTR_RE. The ONE userinfo case still redacted is the
+        # colon-less bare-token form ``scheme://TOKEN@host`` (#6396, handled by _URL_BARE_TOKEN_RE in the
+        # ``://`` block above): a bare credential in userinfo is never a round-trip workflow token (those
+        # live in the query string), so masking it can't break a skill. The ``user:pass@`` form is left to
+        # pass through per #34029.
         text = _redact_strict_url_credentials(text)
 
     if "&" in text and "=" in text:
@@ -555,6 +645,10 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
 # Commands whose stdout is an env-var dump: terminal redaction runs the
 # ENV-assignment pass (code_file=False) for these so opaque tokens with no vendor
 # prefix are masked; everything else uses code_file=True (``MAX_TOKENS=100``).
+# Commands whose stdout is an environment-variable dump (KEY=value lines), NOT source code.
+# ``MY_SERVICE_TOKEN=abc123randomstring``) are still masked. For all other commands, code_file=True is used
+# to avoid mangling legitimate source/config dumps (``MAX_TOKENS=100``, ``"apiKey": "x"`` fixtures,
+# ``postgresql://{user}`` f-string templates). See issue #43025.
 _ENV_DUMP_COMMANDS = frozenset({"env", "printenv", "set", "export", "declare"})
 
 # Commands that read file contents to stdout. A ``.env`` target is a credential
@@ -702,6 +796,8 @@ def _has_known_prefix_substring(text: str) -> bool:
 # ADDITIVE-ONLY: a plugin can extend what gets masked but cannot weaken a
 # built-in, so it can only over-redact. Keyed by registration source so plugin
 # unload has a clean seam to drop ONE plugin's patterns.
+# There is deliberately no public removal API — additive-only stands; unload is a host-owned lifecycle
+# concern. See #64229.
 _PLUGIN_PREFIX_PATTERNS: dict = {}
 _registry_lock = threading.Lock()
 

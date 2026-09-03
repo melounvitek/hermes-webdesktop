@@ -21,7 +21,11 @@ _ENV_CLASS_NAME_HINTS = ("local", "ssh", "docker", "singularity", "modal", "dayt
 
 def _expand_tilde(path: str) -> str:
     """Expand ``~`` using the effective profile home (``get_subprocess_home``) so
-    gateway/cron runs, whose process HOME may differ, agree with interactive CLI sessions."""
+    gateway/cron runs, whose process HOME may differ, agree with interactive CLI sessions.
+
+    This mirrors ``hermes_constants.get_subprocess_home()`` so that ``~`` resolves consistently regardless
+    of whether the tool runs interactively or inside a gateway-driven cron job (#48552).
+    """
     if not path or "~" not in path:
         return path
     try:
@@ -87,6 +91,7 @@ def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
 def _configured_terminal_cwd() -> str | None:
     """Return ``$TERMINAL_CWD`` only when it names a real (absolute, non-sentinel) anchor.
     Scope-aware: under gateway multiplexing the routed profile's cwd lives in the per-turn scope."""
+    # See #68559.
     from agent.runtime_cwd import scope_terminal_cwd
 
     return _sentinel_free_abs_cwd(scope_terminal_cwd() or None)

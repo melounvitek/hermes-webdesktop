@@ -49,6 +49,10 @@ def _builtin_gateway_liveness() -> Optional[bool]:
 
     The builtin ticker only runs inside the gateway process, so a scheduled job with no live
     gateway can never fire; non-builtin providers fire jobs without the gateway.
+
+    Chronos) fire through their own machinery and are deliberately exempt — a missing gateway process means
+    nothing for them, so they report active. ``None`` = probe failed; callers must not claim either way. See
+    #87033.
     """
     try:
         if _active_cron_provider_name() != "builtin":
@@ -72,6 +76,11 @@ def _warn_if_gateway_not_running() -> None:
     """Warn that scheduled jobs won't fire unless the gateway is running (the #1 cron report).
 
     False is the only warn-worthy liveness state (None = unknown).
+
+    The cron ticker only runs inside the gateway (``_start_cron_ticker`` in gateway/run.py); there is no
+    standalone cron daemon. Without a running gateway, ``next_run_at`` passes but jobs never fire and
+    ``last_run_at`` stays null — the most common cron support report (#51038). Surfacing this at create/list
+    time, when the user is right there, prevents it.
     """
     if _builtin_gateway_liveness() is not False:
         return
@@ -101,6 +110,8 @@ def _dispatch_display(dispatch: dict) -> Optional[str]:
 
     On-time dispatches render dim; late/catch-up dispatches render loudly so a run fired long
     after gateway downtime doesn't look like an ordinary success.
+
+    See #99879.
     """
     if not isinstance(dispatch, dict):
         return None
@@ -176,6 +187,9 @@ def _job_rows(job: Dict[str, Any]) -> List[tuple[str, str]]:
     # `repeat` / `deliver` may be present-but-null (dict-default only covers a missing key).
     repeat_info = job.get("repeat") or {}
     repeat_times = repeat_info.get("times")
+    # `deliver` may be present-but-null in the job record (same pitfall as `repeat` above), so coalesce to
+    # the default rather than relying on the dict-default, which only applies to a missing key. A null value
+    # would otherwise reach `", ".join(None)` and crash the whole listing (#32896).
     deliver = job.get("deliver") or ["local"]
     skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
     monitor_source = job.get("monitor_script") or job.get("monitor_url")
@@ -234,6 +248,8 @@ def cron_tick():
         return 1
     except OSError as exc:
         # Real lock-acquisition failures (EMFILE, EACCES) propagate; they are not contention.
+        # For the one-shot CLI surface, report cleanly instead of dumping a traceback; the gateway ticker
+        # loop handles its own retry. See #87644.
         print(color(f"✗ Cron tick failed: {exc}", Colors.RED))
         print("  Check `hermes cron status` and the gateway log for details.")
         return 1
@@ -318,6 +334,7 @@ def _print_ticker_health(pids: list) -> None:
     The ticker THREAD can die silently or stay alive while every tick fails, so check both
     the liveness heartbeat and the last-successful-tick marker before saying "will fire".
     """
+    # See #32612, #32895.
     from cron.jobs import (
         get_ticker_heartbeat_age, get_ticker_last_error, get_ticker_success_age,
         TICKER_INTERVAL_SECONDS)
@@ -348,6 +365,9 @@ def _print_ticker_health(pids: list) -> None:
         last_error = get_ticker_last_error()
         if last_error:
             # WHY ticks fail: root-rewritten jobs.json (PermissionError) or fd exhaustion.
+            # Show WHY ticks fail — e.g. a root-rewritten jobs.json (PermissionError) that silently locked
+            # out the ticker's uid for ~14h in the field (#68483), or fd exhaustion (EMFILE) that used to
+            # stall the scheduler invisibly (#87644).
             print(color(f"  Last tick error: {last_error}", Colors.RED))
             if "Permission denied" in last_error:
                 print(color(_PERMISSION_HINT, Colors.YELLOW))
@@ -383,6 +403,9 @@ def cron_status():
             # The pid scan transiently misses a live gateway right after a restart; the runtime
             # lock proves the process is alive. Declare "not running" only when both agree.
             with contextlib.suppress(Exception):
+                # Same false-alarm class the cronjob tool fixed (#95947): the pid scan can transiently miss
+                # a live gateway (just after a restart) while the runtime lock — held for exactly the
+                # gateway's lifetime — proves the ticker's process is alive.
                 from gateway.status import get_running_pid, is_gateway_runtime_lock_active
                 gateway_alive_via_lock = is_gateway_runtime_lock_active()
                 lock_pid = get_running_pid() if gateway_alive_via_lock else None
@@ -616,6 +639,10 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
         # stuck 'claimed'. Declaring the channel stateless forces a synchronous run; scoped to
         # this call so in-process callers (tests, embedding apps) are not tainted.
         with contextlib.suppress(Exception):
+            # The background path in ``_try_dispatch_background_run`` triggers when the CLI inherits a
+            # gateway/desktop session env (HERMES_SESSION_KEY); declare the channel stateless so
+            # ``async_delivery_supported()`` gates it off and the run executes synchronously to completion
+            # instead. See #86721.
             from gateway.session_context import _SESSION_ASYNC_DELIVERY
             _stateless_token = _SESSION_ASYNC_DELIVERY.set(False)
     try:

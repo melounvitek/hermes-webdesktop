@@ -169,7 +169,10 @@ def _launch_elevated_gateway_command(command: str, extra_args: list[str] | None 
     """Launch an elevated gateway subcommand via UAC and return True on handoff. The child is console
     ``python.exe`` with ``SW_HIDE``: it owns one hidden console its subprocesses (schtasks, taskkill)
     inherit — no visible window and no per-descendant conhost flashes (the console-less pythonw.exe
-    alternative re-created #54220/#56747 for every descendant)."""
+    alternative re-created #54220/#56747 for every descendant).
+
+    All operator decisions are already collected in the parent shell before this point. See #54220, #56747.
+    """
     _assert_windows()
     args = ["-m", "hermes_cli.main", *_current_profile_cli_args(), "gateway", command, *(extra_args or [])]
     params = subprocess.list2cmdline(args)
@@ -328,6 +331,15 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
     groups, killing a cmd-hosted gateway with STATUS_CONTROL_C_EXIT, which Task Scheduler treats as a
     user cancel (``RestartOnFailure`` never fires). wscript has no console; python.exe runs with window
     style 0 so descendants inherit one hidden console instead of flashing their own (#54220/#56747).
+
+    Why: issue #45599 root cause #1.
+    ``wscript.exe`` is a GUI-subsystem executable with no console, so this launcher receives no console
+    control events. It ``Run``s the console ``python.exe`` with window style 0 (hidden): the gateway owns a
+    single hidden console — never shown, never CTRL_CLOSE'd at logon, and inherited by every
+    console-subsystem descendant (git, gh, node, …) so none of them allocate a visible flashing conhost
+    (#54220/#56747; the previous console-less pythonw.exe gateway forced exactly that per-descendant flash).
+    No cmd.exe anywhere in the chain. Mirrors ``_build_gateway_cmd_script`` (same env + argv via
+    ``_resolve_detached_python``).
     """
     python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
     # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
@@ -382,6 +394,8 @@ def _write_task_script() -> Path:
     settings = _launcher_settings()
     script_path = get_task_script_path()
     _atomic_write(script_path, _build_gateway_cmd_script(*settings), script_path.with_suffix(".tmp"))
+    # Also render the console-less .vbs launcher used by Scheduled Task and the Startup-folder fallback via
+    # wscript.exe (issue #45599 fix A). The .cmd wrapper stays as a generated helper/compatibility artifact.
     vbs_path = script_path.with_suffix(".vbs")
     _atomic_write(vbs_path, _build_gateway_vbs_script(*settings), vbs_path.with_name(vbs_path.name + ".tmp"))
     return script_path
@@ -408,7 +422,10 @@ def _resolve_task_user() -> str | None:
 
 def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | None) -> str:
     """Task Scheduler XML with safe long-running defaults. ``launcher_path`` is the console-less
-    ``.vbs`` run via ``wscript.exe`` (see ``_build_gateway_vbs_script`` for why not cmd.exe)."""
+    ``.vbs`` run via ``wscript.exe`` (see ``_build_gateway_vbs_script`` for why not cmd.exe).
+
+    See #45599.
+    """
     user_principal = f"\n      <UserId>{escape(user)}</UserId>" if user else ""
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -474,6 +491,7 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     launcher_path = script_path.with_suffix(".vbs")   # the task launches the console-less .vbs
     xml_path = launcher_path.with_suffix(".task.xml")
     xml_path.write_text(_build_scheduled_task_xml(task_name, launcher_path, user), encoding="utf-16", newline="")
+    # Immediate manual starts use _spawn_detached(). See #45599.
     base = ["/Create", "/F", "/TN", task_name, "/XML", str(xml_path)]
     variants = [[*base, "/RU", user, "/NP", "/IT"], base] if user else [base]
     last_code, last_err = 1, ""
@@ -509,7 +527,27 @@ def _install_startup_entry(script_path: Path) -> Path:
 
 def _resolve_detached_python(python_exe: str) -> tuple[str, Path, list[str]]:
     """Return (hidden_console_python, venv_dir, extra_pythonpath) for detached runs. ``extra_pythonpath``
-    is always empty now; the tuple shape is kept so every call site stays unchanged."""
+    is always empty now; the tuple shape is kept so every call site stays unchanged.
+
+    Returns the venv's **console** ``python.exe`` — deliberately NOT ``pythonw.exe``. Every detached launch
+    path pairs this interpreter with a hidden-console mechanism (``CREATE_NO_WINDOW`` creationflags, or
+    ``WScript.Shell.Run`` window style 0), so the daemon owns a single hidden console that all of its
+    console-subsystem descendants (git, gh, cmd, node, wmic, powershell, …) inherit instead of each
+    allocating a visible flashing one. A GUI-subsystem ``pythonw.exe`` daemon has NO console, which is what
+    made every descendant spawn flash (#54220/#56747) and forced the endless per-call-site CREATE_NO_WINDOW
+    sweep. Root cause isolated + A/B verified on Windows 11 by the desktop backend fix (commit aa2ae36c3f).
+    - uv venv launcher: ``venv\\Scripts\\python.exe`` under ``CREATE_NO_WINDOW`` re-execs the base
+    interpreter *windowless* — the child inherits the shim's hidden console, so no conhost flashes (the
+    #52239 concern). The historical "CREATE_NO_WINDOW cannot suppress the second window" observations were
+    made while ``DETACHED_PROCESS`` was in the flag bundle, where MSDN specifies CREATE_NO_WINDOW is IGNORED
+    — the hide bit was dead, not ineffective. The base-interpreter + PYTHONPATH-overlay detour is therefore
+    unnecessary; the venv shim resolves imports itself. - Console python restores stdout/stderr, so daemon
+    logs flow normally.
+    Legacy normalization: launchers and argv snapshots from pre-aa2ae36c3f installs lead with
+    ``pythonw.exe``. When the sibling console ``python.exe`` exists, swap to it so respawns and regenerated
+    launchers get the hidden-console design instead of resurrecting the console-less daemon (the
+    #54220/#56747 flash class, plus the ``sys.stderr is None`` startup-crash class from #71671).
+    """
     p = Path(python_exe)
     if p.name.lower() in ("pythonw.exe", "pythonw"):
         sibling = p.with_name("python.exe" if p.suffix else "python")
@@ -549,7 +587,16 @@ def _build_gateway_argv() -> tuple[list[str], str, dict[str, str]]:
 
 def windowless_gateway_restart_spec(run_argv: list[str]) -> tuple[list[str], str, dict[str, str]]:
     """(argv, cwd, env overlay) for a hidden-console gateway respawn; arguments after the interpreter
-    are preserved verbatim. Non-Windows or a non-python argv[0] → argv unchanged, empty overlay."""
+    are preserved verbatim. Non-Windows or a non-python argv[0] → argv unchanged, empty overlay.
+
+    The post-update restart paths build their respawn command from ``get_python_path()`` (the venv's console
+    ``python.exe``). That is the right interpreter: the watcher launches it with ``CREATE_NO_WINDOW`` detach
+    flags, so the respawned gateway owns a single hidden console that all of its descendants inherit —
+    nothing flashes (#54220/#56747; the old pythonw.exe rewrite here produced a console-less gateway whose
+    every console-subsystem child allocated a visible conhost). This helper now only normalizes the
+    interpreter via ``_resolve_detached_python`` and supplies the stable cwd + env overlay (HERMES_HOME,
+    VIRTUAL_ENV, PYTHONPATH) so the respawn doesn't depend on the watcher's transient working directory.
+    """
     if not run_argv or sys.platform != "win32":
         return run_argv, "", {}
     from hermes_cli.gateway import PROJECT_ROOT
@@ -576,7 +623,14 @@ def _spawn_detached(script_path: Path | None = None) -> int:
     gets reaped when the shell exits. Flags: CREATE_NEW_PROCESS_GROUP (no Ctrl+C from our group),
     CREATE_NO_WINDOW (hidden console descendants inherit, so nothing flashes — #54220/#56747; the old
     DETACHED_PROCESS made every descendant spawn flash), CREATE_BREAKAWAY_FROM_JOB
-    (escape a parent Job Object — some Windows Terminal versions wrap children in one)."""
+    (escape a parent Job Object — some Windows Terminal versions wrap children in one).
+
+    With ``CREATE_NO_WINDOW`` the gateway gets its OWN hidden console instead of inheriting ours, so it
+    survives our shell closing, and every console-subsystem descendant it spawns inherits that hidden
+    console instead of flashing a visible one (#54220/#56747 — this is why we don't use console-less
+    pythonw.exe here). Combined with CREATE_NEW_PROCESS_GROUP + DEVNULL stdin + a fresh env, the resulting
+    process is independent of whichever shell started it.
+    """
     _assert_windows()
     argv, working_dir, env_overlay = _build_gateway_argv()
     env = {**os.environ, **env_overlay}
@@ -758,7 +812,14 @@ def install(
 
 def _confirm_gateway_stable(initial_pids: list[int], confirm_s: float, interval_s: float, all_profiles: bool = False) -> list[int]:
     """Re-check a freshly detected gateway for ``confirm_s`` seconds: one process-table hit proves
-    the child was *created*, not that it survived startup (or a parent Job Object teardown)."""
+    the child was *created*, not that it survived startup (or a parent Job Object teardown).
+
+    A single process-table hit only proves the child was *created*, not that it survived startup — a gateway
+    that crashes moments after spawn (or is reaped by the parent shell's Job Object, #91675/#84185) passes a
+    first-hit poll and then dies. Require the gateway to stay visible for the whole confirmation window
+    before we vouch for it. Returns the last observed PID list, or ``[]`` if the gateway vanished
+    mid-window.
+    """
     if confirm_s <= 0:
         return initial_pids
     from hermes_cli.gateway import find_gateway_pids

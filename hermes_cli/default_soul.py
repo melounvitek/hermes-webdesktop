@@ -4,6 +4,8 @@
 # seeds this into SOUL.md on first run, so it is the text virtually every real user gets. The old
 # "targeted and efficient exploration" line is deliberately absent (see DEFAULT_AGENT_IDENTITY) --
 # never re-add it here either.
+# DEFAULT_AGENT_IDENTITY only serves sessions with no SOUL.md at all (e.g. skip_context_files), which is not
+# the common case. See #95681.
 DEFAULT_SOUL_MD = (
     "You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of "
     "the ask — a one-line question gets a one-line answer, and finished work gets a short report of what "
@@ -58,6 +60,13 @@ def _normalize_soul(text: str) -> str:
 
 
 def is_legacy_template_soul(text: str) -> bool:
-    """True if ``text`` is a non-customized, auto-seeded SOUL.md (see ``_LEGACY_TEMPLATE_SOULS``)."""
+    """True if ``text`` is a non-customized, auto-seeded SOUL.md (see ``_LEGACY_TEMPLATE_SOULS``).
+
+    Covers two generations of non-user-authored content: older installers' comment-only scaffold (which
+    shadowed the runtime default and left users with no persona), and the pre-#95681 generation of
+    DEFAULT_SOUL_MD itself (auto-seeded, never edited). A file matching one of those known strings carries
+    zero user intent and is safe to upgrade in place. Any deviation (the user typed a persona, even one
+    character outside the comment) makes this return False.
+    """
     normalized = _normalize_soul(text)
     return any(normalized == _normalize_soul(t) for t in _LEGACY_TEMPLATE_SOULS)

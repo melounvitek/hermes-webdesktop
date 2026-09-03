@@ -132,7 +132,14 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 @contextmanager
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, and ALWAYS close it (``with conn:``
-    alone leaks the connection and WAL/SHM fds until GC)."""
+    alone leaks the connection and WAL/SHM fds until GC).
+
+    ``sqlite3.Connection.__enter__``/``__exit__`` only commit or roll back the transaction; they do not
+    close the connection. Using ``with _connect()`` alone therefore leaks a connection — and its WAL/SHM
+    file descriptors — on every durable dispatch, completion, and delivery-claim, deferring the close to the
+    garbage collector. On a long-running gateway that exhausts ``RLIMIT_NOFILE`` (the cron-ledger sibling of
+    this bug was #69567 / PR #69594).
+    """
     conn = _connect()
     try:
         with conn:
@@ -251,7 +258,15 @@ def restore_undelivered_completions(target_queue) -> int:
     Restored events are stamped ``restored=True`` in memory only: they came from a PREVIOUS
     process, so drains without an ownership filter must leave them for a consumer that can
     prove ownership. Rows older than ``_MAX_COMPLETION_REPLAY_AGE_S`` are terminally dropped
-    instead of replaying a turn nobody is waiting on."""
+    instead of replaying a turn nobody is waiting on.
+
+    Every restored event is stamped ``restored=True`` (in-memory only — the stamp is added after the durable
+    payload is deserialized and is never persisted). Restored events originate from a *previous* process, so
+    no consumer in THIS process implicitly owns them: drain paths that run without an ownership filter (the
+    legacy single-session behavior) must leave them queued for a consumer that can positively prove
+    ownership, otherwise a brand-new session adopts a dead session's delegation results seconds after boot
+    (#64484).
+    """
     recover_abandoned_delegations()
     now, restored = time.time(), 0
     with _DB_LOCK, _transaction() as conn:
@@ -795,7 +810,10 @@ def _children_activity_from_token(token: Any, now: float) -> Optional[List]:
 def list_async_delegations() -> List[Dict[str, Any]]:
     """Snapshot of async delegations (running + recently completed) without callables or private
     monitor bookkeeping; adds computed live fields for UIs (``seconds_since_progress``,
-    ``children_activity``/``in_tool`` sampled from ``progress_fn``) and stall context once tripped."""
+    ``children_activity``/``in_tool`` sampled from ``progress_fn``) and stall context once tripped.
+
+    Safe to call from any thread. See #51690.
+    """
     now = time.time()
     samplers: Dict[str, Callable] = {}
     with _records_lock:

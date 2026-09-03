@@ -30,6 +30,19 @@ logger = logging.getLogger(__name__)
 # Privacy filter (moa.privacy_filter: '' | display | full): PII classes agent.redact
 # leaves alone. The phone pattern requires explicit delimiters so line numbers,
 # dates, times, SHAs, IPs and versions never match.
+# Advisor (reference) outputs can echo PII from the conversation — emails, phone numbers, credentials pasted
+# by the user — into surfaces the user may not expect: the labelled reference blocks rendered in the UI,
+# saved MoA trace files, and (in `full` mode) the guidance block injected into the aggregator prompt (issue
+# #59959). Secret/credential shapes (API-key prefixes, JWTs, private keys, DB connection strings, E.164
+# phone numbers) are handled by the repo's central redactor, ``agent.redact .redact_sensitive_text`` — the
+# MoA filter never re-implements those. The two patterns below cover the PII classes the central redactor
+# deliberately leaves alone for log/tool output (emails and formatted phone numbers). Pattern safety:
+# advisory text is frequently code-review-shaped — line numbers, timestamps, git SHAs, IDs, IP addresses. A
+# bare 10-digit match would mangle all of those, so the phone pattern requires clearly delimited formatting:
+# a parenthesized area code and/or explicit `-`/`.` separators between groups ((555) 123-4567, 555-123-4567,
+# 555.123.4567, +1 555-123-4567). Undelimited digit runs (5551234567), dates (2026-07-12), times (12:34:56),
+# hex IDs, and dotted quads never match. International numbers in E.164 form (+14155551234) are already
+# masked by the central redactor.
 _MOA_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _MOA_PHONE_RE = re.compile(
     r"(?<![\w.+-])"                    # no leading word char / dot / + / - (kills IPs, IDs, versions)
@@ -99,6 +112,9 @@ def _redact_trace_accounting(acct: Any) -> Any:
 
 
 # Cold-start caches: preset and per-(provider, model) runtime are immutable for a turn.
+# A MoA preset switch used to re-resolve the full config + preset + every slot's provider runtime on EACH
+# create() call (once per tool-loop iteration), serially before the parallel fan-out could start — adding
+# 5-30s of "frozen" latency on complex presets (#66793).
 _preset_cache_lock = threading.Lock()
 _preset_cache: dict[tuple, Any] = {}
 
@@ -286,6 +302,9 @@ def _maybe_apply_moa_cache_control(
     legacy system-and-3 fallback is used. ``cache_disabled`` is stamped onto the
     stub so ``cache_ttl: off`` is honored; ``cache_ttl`` is clamped per destination.
     Returns the messages unchanged on any error.
+
+    ``cache_disabled`` (or the live config when omitted) is stamped onto the policy stub so
+    ``prompt_caching.cache_ttl: off`` is not bypassed by the blank-agent pattern (#76085).
     """
     try:
         from agent.agent_runtime_helpers import anthropic_prompt_cache_policy, blank_cache_policy_stub
@@ -353,6 +372,10 @@ def _run_reference(
         # Trim to THIS model's window (advisors may be smaller than the aggregator); the
         # advisory view is append-only across iterations, so cache_control lets
         # iteration N+1 replay N's cached prefix.
+        # Reference models may have a smaller window than the aggregator (e.g. kimi-k2.7-code @ 262K
+        # advising a glm-5.2 @ 1M conversation); without this trim the provider returns a hard HTTP 400
+        # which the except below silently converts to a [failed: …] note (issue #60345). Estimated AFTER the
+        # advisory system prompt is prepended so its tokens count against the budget too.
         trimmed = _trim_messages_for_reference(
             messages, slot, runtime, reserve_output_tokens=max_tokens, context_length_cache=context_length_cache,
         )
@@ -421,6 +444,11 @@ def _trim_messages_for_reference(
     body and the trailing user turn plus one preceding turn (even if still over
     budget). ``context_length_cache`` memoizes the window per (provider, model);
     unresolvable windows leave messages unchanged.
+
+    Reference models may have a smaller context window than the aggregator or the main conversation. Without
+    this trim, a reference whose window is exceeded gets a hard HTTP 400 from the provider, which
+    ``_run_reference``'s try/except silently converts to a ``[failed: …]`` note — the MoA turn silently
+    degrades to fewer references (issue #60345).
     """
     if not messages or not slot.get("model"):
         return messages
@@ -480,6 +508,13 @@ def _settle_interrupted(
     for future, idx in futures.items():
         if results[idx] is not None:
             continue
+        # #38922: a slow confirmation does NOT necessarily mean the send failed — but we must distinguish
+        # two cases via future.cancel()'s return value: cancel() == False -> the coroutine was already
+        # running on the gateway loop when the timeout fired; the request is in flight on the wire and
+        # cannot be un-sent. Re-sending via standalone would be a guaranteed DUPLICATE, so treat it as
+        # delivered (assume-delivered). cancel() == True -> the scheduled callback never started executing
+        # (loop wedged/backlogged for the full 60s), so nothing was sent. We MUST fall through to the
+        # standalone path or the message is silently dropped (worse than a duplicate).
         cancelled = future.cancel()
         if not cancelled and future.done():
             results[idx] = future.result()
@@ -753,6 +788,12 @@ def aggregate_moa_context(
     Failures become model-specific notes instead of aborting the loop.
     ``reference_max_tokens`` caps ONLY the fan-out (capping the aggregator truncated
     long syntheses). ``agent`` makes the fan-out interruptible.
+
+    ``reference_max_tokens`` applies ONLY to the reference fan-out — the aggregator's own synthesis call is
+    never capped, so it always uses its model's own maximum. ``call_llm`` omits the parameter entirely when
+    it is ``None`` (see its docstring), which also sidesteps providers that reject ``max_tokens`` outright.
+    A hardcoded cap on the aggregator call previously truncated long aggregator syntheses (#53580) — passing
+    ``reference_max_tokens`` to both calls here would silently reintroduce that regression.
     """
     reference_models = [slot for slot in reference_models if slot.get("enabled", True)]
     reference_outputs = _run_references_parallel(
@@ -1015,6 +1056,9 @@ class MoAChatCompletions:
             planning_messages = peel_reference_guidance(agg_messages, str(guidance)) if guidance else agg_messages
             # Tri-state cache_disabled: facades built via __new__ have no _agent; forcing
             # False would suppress the planner's config fallback.
+            # plan_cache_sections_for_destination never mutates its inputs and always returns request-local
+            # copies, so the prepared state stays canonical. Tri-state: only pass a bool when a live agent
+            # snapshot exists. See #76085.
             _agent = getattr(self, "_agent", None)
             cache_disabled, cache_ttl = _agent_cache_opts(_agent)
             # Agent TTL + stable system prefix so MoA does not regress 1h → 5m.
@@ -1090,6 +1134,19 @@ class MoAChatCompletions:
         view changes. "every_n:<N>": iteration 1 of a turn, then every Nth; in-between
         iterations return the pinned last on-cadence key (HIT: no calls, no re-emit).
         """
+        # "user_turn" (default — cheapest cadence, #67199): advisors run ONCE per user turn; subsequent tool
+        # iterations reuse that turn's advice and the aggregator acts alone (the original MoA shape:
+        # synthesize at the start, then let the acting model work). Implemented by hashing only the prefix
+        # up to the LAST USER message so mid-turn growth doesn't change the signature — iteration 2+ becomes
+        # a cache HIT. "per_iteration": advisors re-run whenever the advisory view changes — i.e. every tool
+        # iteration, since the view grows with each tool result; advice tracks live task state at the cost
+        # of multiplying advisor latency/spend by tool-loop depth. "every_n:<N>" (N >= 2): the middle ground
+        # (issue #63393 — advisor fan-out multiplies latency/cost by the tool-iteration count). Advisors run
+        # on iteration 1 of a user turn and then every Nth tool iteration; the iterations in between REUSE
+        # the cached guidance from the last on-cadence run (same mechanism as user_turn's cache HIT — the
+        # aggregator still gets advice every iteration, it's just not refreshed against the very latest tool
+        # results). The iteration counter is scoped per user turn and resets on a new user message, so every
+        # turn starts with fresh advice.
         fanout_mode = str(preset.get("fanout") or "user_turn").strip().lower()
         every_n = 0
         if fanout_mode.startswith("every_n:"):

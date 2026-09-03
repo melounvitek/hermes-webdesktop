@@ -148,7 +148,16 @@ DEFAULT_OUTPUT_DIR = _DEFAULT_OUTPUT_DIR_AT_IMPORT = _get_default_output_dir()
 
 def _default_output_dir() -> str:
     """The active profile's audio output dir at call time (long-lived runtimes switch profiles
-    after import); a monkeypatched ``DEFAULT_OUTPUT_DIR`` wins."""
+    after import); a monkeypatched ``DEFAULT_OUTPUT_DIR`` wins.
+
+    Same bug class as skills_tool (f8723c478) and skills_sync (#65828): long-lived multi-profile runtimes
+    (dashboard console, TUI/Desktop backend, cron, kanban workers) import this module once under the launch
+    HERMES_HOME and later scope requests to a different profile via
+    ``hermes_constants.set_hermes_home_override()`` — a frozen module constant keeps writing synthesized
+    audio into the launch profile's cache instead of the active profile's (#98749). Keep the legacy
+    ``DEFAULT_OUTPUT_DIR`` module attribute for tests and external patchers; when it has not been patched,
+    re-resolve from the live profile-scoped HERMES_HOME on every call.
+    """
     if DEFAULT_OUTPUT_DIR != _DEFAULT_OUTPUT_DIR_AT_IMPORT:
         return DEFAULT_OUTPUT_DIR
     return _get_default_output_dir()
@@ -273,6 +282,9 @@ def _finalize_voice_delivery(
         return file_str, native and want_opus and file_str.endswith(".ogg")
     if not opted_in:
         return file_str, False
+    # Plugin-registered provider (issue #30398). Voice-bubble delivery opts in via
+    # ``TTSProvider.voice_compatible`` (mirrors the command-provider opt-in). Plugins that already write
+    # Opus skip the ffmpeg conversion.
     if not file_str.endswith(".ogg"):
         file_str = _convert_to_opus(file_str) or file_str
     return file_str, file_str.endswith(".ogg")
@@ -354,6 +366,12 @@ def _text_to_speech_single(
             logger.info("Generating speech with command TTS provider '%s'...", provider)
             file_str = _generate_command_tts(
                 text, file_str, provider, command_provider_config, tts_config)
+        # Plugin-registered TTS backend (issue #30398). Fires when the configured provider is neither a
+        # built-in nor a command-type entry, AND a plugin is registered under that name. The walrus binds
+        # `_plugin_path` only when the dispatcher returns a path (i.e. a plugin was actually found); a None
+        # return falls through to the built-in elif chain so unknown names hit the Edge TTS default at the
+        # bottom. The dispatcher itself enforces built-ins-always-win + command-wins-over-plugin
+        # defensively.
         elif provider not in BUILTIN_TTS_PROVIDERS and (
             _plugin_path := _dispatch_to_plugin_provider(text, file_str, provider, tts_config)
         ) is not None:

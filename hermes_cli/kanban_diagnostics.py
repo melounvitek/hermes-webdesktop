@@ -566,7 +566,12 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
     """>= cfg["block_cycle_threshold"] (default 3) blocked-after-unblocked
     cycles within cfg["block_cycle_window_seconds"] (default 24h). Complements
     ``_rule_stuck_in_blocked``, whose timer any unblock resets, so fast cyclers
-    are invisible to it."""
+    are invisible to it.
+
+    ``_rule_stuck_in_blocked`` resets its timer on any ``commented`` / ``unblocked`` event, so a task that
+    cycles every few minutes is invisible to it regardless of how many times it cycles (#29747 gap 1). This
+    rule complements that one by counting block→unblock cycles in a sliding window.
+    """
     threshold = _positive_int(cfg.get("block_cycle_threshold"), 3)
     window_seconds = float(cfg.get("block_cycle_window_seconds", 24 * 3600))
     cycle_cutoff = now - window_seconds

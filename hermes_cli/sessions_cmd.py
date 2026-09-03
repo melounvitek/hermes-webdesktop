@@ -551,7 +551,11 @@ _NEVER_ACTIVE_DEFAULT_DAYS = 30.0
 def _prune_never_active_keyed(db, args):
     """`prune --never-active`: drop keyed gateway rows opened and never used (mostly escaped test
     fixtures). Separate from the shared prune/archive selector, which is pinned to `ended_at IS NOT
-    NULL` — never-closed rows sit outside it by construction."""
+    NULL` — never-closed rows sit outside it by construction.
+
+    The population is dominated by escaped test fixtures (#82770), which the hermetic-isolation guard can
+    only stop from being *created* — rows already written to a developer's state.db need a sweep to leave.
+    """
     from hermes_cli.session_filters import format_epoch, parse_duration_seconds
     older_than = getattr(args, "older_than", None)
     days = _NEVER_ACTIVE_DEFAULT_DAYS
@@ -695,6 +699,11 @@ def _cmd_rename(db, args):
 def _cmd_pin(db, args, pinning):
     """Durable "keep" flag (exempt from sessions.auto_archive, always listed); every surface shares the store."""
     failures = 0
+    # Pinned sessions are exempt from the sessions.auto_archive stale sweep and always surface in listings;
+    # until now only the Desktop sidebar could write the flag. Inspired by Perplexity Computer's
+    # conversational session management (pin/archive from any surface): pin state is operational
+    # infrastructure, so every surface — GUI, TUI, CLI, scripts — needs read/write access to the same store.
+    # See #52955.
     for raw_id in args.session_ids:
         resolved = db.resolve_session_id(raw_id)
         if resolved and db.set_session_pinned(resolved, pinning):

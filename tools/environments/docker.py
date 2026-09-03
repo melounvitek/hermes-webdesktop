@@ -252,6 +252,12 @@ _DEFAULT_PIDS_LIMIT = "256"  # applied only when the pids cgroup controller is a
 # Docker's 64 MB /dev/shm default crashes Chromium/Playwright tabs and PyTorch
 # DataLoader workers. tmpfs is lazily allocated so a 1g ceiling costs nothing
 # until used (and still counts against --memory). Empty/"0" config omits the flag.
+# Docker's built-in default is a tiny 64 MB, which silently breaks shared-memory-hungry workloads inside the
+# sandbox: Chromium / Playwright renderers crash tabs, and PyTorch DataLoader workers die with "bus error" /
+# "insufficient shared memory" once they exceed it. tmpfs is lazily allocated, so a 1g ceiling costs nothing
+# until actually used (and usage still counts against the container's --memory cgroup limit). Configurable
+# via ``terminal.docker_shm_size`` in config.yaml; an empty value (or "0") omits the flag and falls back to
+# Docker's 64 MB default. Ported from nanocoai/nanoclaw#2748.
 _DEFAULT_SHM_SIZE = "1g"
 
 
@@ -516,6 +522,11 @@ class DockerEnvironment(BaseEnvironment):
         # Resolved once so it works when /usr/local/bin is not in PATH (macOS services).
         self._docker_exe = find_docker() or "docker"
 
+        # s6-overlay images (e.g. hermes-agent:latest) already use /init as PID 1 and exec
+        # /run/s6/basedir/bin/init during startup. For those images we must (a) skip Docker's --init (two
+        # competing PID-1 inits) and (b) mount /run with exec instead of noexec, or s6 stage0 dies with exit
+        # 126 "Permission denied". Detected once here; defaults are kept on any inspection failure. See
+        # issue #34628.
         image_uses_s6_init = _image_uses_init_entrypoint(self._docker_exe, image)
         if image_uses_s6_init:
             logger.info(
@@ -711,6 +722,9 @@ class DockerEnvironment(BaseEnvironment):
         lifetime). s6-overlay images already provide PID 1, so ``--init`` is skipped for them."""
         label_args = [arg for k, v in self._labels.items() for arg in ("--label", f"{k}={v}")]
         return [
+            # tini/catatonit as PID 1 reaps zombie children — but s6-overlay images already provide their
+            # own /init PID 1, so adding --init there creates two competing inits and breaks startup
+            # (#34628).
             self._docker_exe, "run", "-d",
             *([] if self._image_uses_s6_init else ["--init"]),
             "--name", name,
@@ -744,12 +758,22 @@ class DockerEnvironment(BaseEnvironment):
     # --- Env forwarding ---
     def _docker_client_env(self, values: dict[str, str]) -> dict[str, str] | None:
         """Env for the docker-client subprocess carrying forwarded values (pairs with name-only
-        ``-e KEY`` flags to keep secrets out of cmdline); ``None`` = inherit when empty."""
+        ``-e KEY`` flags to keep secrets out of cmdline); ``None`` = inherit when empty.
+
+        Name-only ``-e KEY`` flags make the docker CLI read each value from its own process environment,
+        keeping secrets out of the client's world-readable ``/proc/<pid>/cmdline`` (issue #96268). Values
+        live in ``/proc/<pid>/environ`` instead, which is owner/root-only. Returns ``None`` (inherit as
+        before) when there is nothing to add.
+        """
         return {**os.environ, **values} if values else None
 
     def _build_init_env_args(self) -> list[str]:
         """Name-only ``-e`` args for init_session so ``export -p`` captures docker_env
-        plus the current profile's forwarded values (values travel via the client env)."""
+        plus the current profile's forwarded values (values travel via the client env).
+
+        The VALUES intentionally do not appear in the argv — they are passed via the docker client
+        subprocess env (see _docker_client_env and issue #96268); the flags here are name-only ``-e KEY``.
+        """
         passthrough_env, unset_names = self._resolve_passthrough_env()
         exec_env = {**self._env, **passthrough_env}
         for name in unset_names:
@@ -790,7 +814,10 @@ class DockerEnvironment(BaseEnvironment):
 
     def _build_runtime_env_args_with_unsets(self) -> tuple[list[str], tuple[str, ...], dict[str, str]]:
         """Runtime name-only forwarding args, names absent from scope, and the values
-        to inject into the docker client subprocess env."""
+        to inject into the docker client subprocess env.
+
+        See #96268.
+        """
         passthrough_env, unset_names = self._resolve_passthrough_env()
         return _name_only_env_args(passthrough_env), tuple(sorted(unset_names)), dict(passthrough_env)
 
@@ -805,6 +832,10 @@ class DockerEnvironment(BaseEnvironment):
         if stdin_data is not None:
             cmd.append("-i")
 
+        # Init seeds the snapshot. Profile-scoped passthrough values are also injected on every later
+        # command because this container can be shared by multiple routed profiles in one gateway process.
+        # Env flags are name-only; values travel via the client subprocess env so they never hit
+        # world-readable /proc/*/cmdline (#96268).
         unset_names: tuple[str, ...] = ()
         env_values: dict[str, str] = {}
         if login:
@@ -971,7 +1002,13 @@ class DockerEnvironment(BaseEnvironment):
         delay per session; reclamation is ``reap_orphan_containers()`` at next startup.
         ``persist_across_processes=False`` or ``force_remove=True`` (explicit-teardown hook,
         unused so far) does ``docker stop`` + ``docker rm -f`` on a daemon thread that the
-        atexit hook joins via ``wait_for_cleanup`` so the work completes before exit."""
+        atexit hook joins via ``wait_for_cleanup`` so the work completes before exit.
+
+        Cleanup runs on a daemon thread with bounded ``subprocess.run`` calls (not the racy ``Popen(... &)``
+        pattern from before PR #33645). The atexit hook in ``tools/terminal_tool.py`` waits up to 15s for
+        the thread to finish before the interpreter exits, so ``docker stop`` / ``docker rm`` actually
+        completes when we do trigger it.
+        """
         container_id = self._container_id
         if not container_id:
             # Bind-mount dirs are still dropped in non-persistent mode.

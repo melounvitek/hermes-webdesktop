@@ -100,6 +100,7 @@ def _clone_all_copytree_ignore(source_dir: Path):
 # infrastructure (``state.db``, ``logs/``, ``auth.*``, other profiles) is deliberately
 # absent so the export stays a portable, credential-free snapshot. Add new artifacts here
 # when introduced in ``hermes_constants``.
+# See #58394.
 _DEFAULT_EXPORT_INCLUDE_ROOT = frozenset({
     # Configuration / persona
     "config.yaml", "SOUL.md", "MEMORY.md", "USER.md", "todo.json",
@@ -168,7 +169,10 @@ def _missing_profile_error(canon: str) -> FileNotFoundError:
 def normalize_profile_name(name: str) -> str:
     """Canonical profile id used on disk and in ``-p`` argv: lowercase, ``default`` matched
     case-insensitively. Dashboards/tools may pass title-cased labels — normalize before
-    validation, assignment, and subprocess spawn."""
+    validation, assignment, and subprocess spawn.
+
+    Named profiles are stored lowercase under ``profiles/<id>/``. See #18498.
+    """
     if not isinstance(name, str):
         name = str(name)
     stripped = name.strip()
@@ -181,7 +185,12 @@ def normalize_profile_name(name: str) -> str:
 
 def validate_profile_name(name: str) -> None:
     """Raise ``ValueError`` unless *name* is a valid profile id (strict as-given lowercase —
-    normalize mixed-case input first) and not in ``_RESERVED_NAMES``; ``default`` passes."""
+    normalize mixed-case input first) and not in ``_RESERVED_NAMES``; ``default`` passes.
+
+    Callers that accept mixed-case or title-cased input from users (dashboard UI, CLI args) should call
+    :func:`normalize_profile_name` first. This separation keeps validate honest about what the on-disk
+    directory name must look like, while ingress-point normalization handles UX flexibility (see #18498).
+    """
     if name == "default":
         return  # special alias for ~/.hermes
     if not _PROFILE_ID_RE.match(name):
@@ -535,7 +544,10 @@ def _check_gateway_running(profile_dir: Path) -> bool:
 
 def _served_by_running_multiplexer(profile_name: str) -> bool:
     """True when the live default gateway multiplexes ``profile_name`` (such a profile has no
-    gateway.pid of its own, so ``_check_gateway_running`` alone reports it stopped)."""
+    gateway.pid of its own, so ``_check_gateway_running`` alone reports it stopped).
+
+    Single shared lookup with the named-profile start guard and cron liveness (#97120).
+    """
     try:
         from hermes_cli.gateway import named_profile_served_by_running_multiplexer
         return named_profile_served_by_running_multiplexer(profile_name)
@@ -628,6 +640,7 @@ def write_profile_meta(
             existing.pop("display_name", None)
     # Atomic write: bare open("w") truncates before the dump, and the read path swallows
     # parse errors as {}, so a crashed write would silently drop unspecified fields.
+    # See #51356.
     from utils import atomic_yaml_write
     atomic_yaml_write(path, existing, sort_keys=False)
 
@@ -904,7 +917,15 @@ def seed_profile_skills(profile_dir: Path, quiet: bool = False) -> Optional[dict
 
 def backfill_profile_envs(quiet: bool = False) -> List[str]:
     """Give every named profile predating per-profile ``.env`` one (copy of the default's, or
-    the placeholder header). Never overwrites an existing profile ``.env``."""
+    the placeholder header). Never overwrites an existing profile ``.env``.
+
+    Profiles created before the dashboard/CLI started seeding a ``.env`` (PR #44792) have none, so once the
+    Channels/Keys endpoints became profile-scoped those profiles stopped inheriting the root install's
+    credentials and showed everything as unconfigured. To avoid breaking anyone on update, copy the DEFAULT
+    install's ``.env`` into each named profile that lacks one — that preserves the effective credentials
+    those profiles were already running with (they previously read the root ``.env`` via the process
+    environment). Users can then diverge per profile from there.
+    """
     backfilled: List[str] = []
     default_env = _get_default_hermes_home() / ".env"
     for entry in _iter_named_profile_dirs():
@@ -1151,6 +1172,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     # deliberately not stopped above; on Windows its handles fail rmtree with WinError 32.
     # Inside serve (DELETE /api/profiles/<name>) the handles live here; from the CLI no-op.
     with contextlib.suppress(Exception):  # best-effort: never block the delete on the release path
+        # 2c. See #88347.
         from plugins.memory.holographic.store import MemoryStore as _MemoryStore
         _released = _MemoryStore.release_all_under(profile_dir)
         if _released:
@@ -1192,7 +1214,15 @@ def _s6_runtime_manager():
 
 def _maybe_register_gateway_service(profile_name: str) -> None:
     """Register a profile's gateway with s6 inside the container. Best-effort: profile
-    creation must not fail over a supervision-tree hiccup; `gateway start` re-registers."""
+    creation must not fail over a supervision-tree hiccup; `gateway start` re-registers.
+
+    Port selection: each supervised profile gateway loads its own ``HERMES_HOME`` and binds the port
+    resolved by ``gateway/config.py`` from that profile's environment — ``API_SERVER_PORT`` (or
+    ``platforms.api_server.extra.port`` in the profile's ``config.yaml``), defaulting to 8642. There is no
+    ``[gateway] port`` key and no Python-side allocator (PR #30136 review item I5 retired the
+    SHA-256-derived range [9200, 9800) as dead code), so two profiles that both leave the port at its
+    default will both try to bind 8642 — give each profile a distinct ``API_SERVER_PORT`` in its ``.env``.
+    """
     mgr = _s6_runtime_manager()
     if mgr is None:
         return
@@ -1373,6 +1403,7 @@ def _profile_export_directory() -> Path:
     # Fail closed: writing a secret-bearing archive into a source tree is the incident this
     # helper prevents; a stderr warning would not stop a scripted export.
     raise ValueError(
+        # See #92457.
         "No safe automatic export destination: every candidate directory is "
         "inside a Git checkout. Provide an explicit output path outside the "
         "checkout (CLI: -o /path/outside/repo/profile.tar.gz)."
@@ -1404,7 +1435,14 @@ def get_profile_export_path(name: str, *, timestamp: Optional[str] = None) -> Pa
 def _default_export_ignore(root_dir: Path):
     """copytree ignore for the default-profile export: root-level allow-list
     (``_DEFAULT_EXPORT_INCLUDE_ROOT``) plus universal exclusions. Surviving text files are
-    then force-redacted by :func:`_scrub_export_secrets`."""
+    then force-redacted by :func:`_scrub_export_secrets`.
+
+    * **Root-level allow-list** — only entries whose name appears in ``_DEFAULT_EXPORT_INCLUDE_ROOT``
+    survive. Everything else (such as an unrelated ``x11-dev/`` directory in a Docker deployment where
+    HERMES_HOME equals the cwd) is excluded. Blacklisting was tried first and proved unable to anticipate
+    every non-Hermes file the user may have lying alongside HERMES_HOME (#58394). * **Universal exclusions
+    at any depth** — ``__pycache__``, sockets, temp files; plus npm lockfiles, which may appear at the root.
+    """
 
     def _ignore(directory: str, contents: list) -> set:
         # Universal exclusions (any depth) plus npm lockfiles that can appear at root.
@@ -1641,7 +1679,14 @@ def rename_profile(old_name: str, new_name: str) -> Path:
 
 def resolve_profile_env(profile_name: str) -> str:
     """Resolve a profile name to a HERMES_HOME path string. Called early in the CLI entry
-    point, before hermes modules are imported, to set HERMES_HOME."""
+    point, before hermes modules are imported, to set HERMES_HOME.
+
+    When HERMES_HOME is already set, the configured spelling IS the launch root (it may be a
+    junction/symlink alias of the platform default). Keep that spelling so profile re-home does not destroy
+    the launcher's lexical provenance -- the subprocess sanitizer needs it to match Hermes-owned PYTHONPATH
+    entries written in the same spelling (#82581 junction follow-up). Physically the paths are identical
+    (junction-transparent); only the spelling is preserved.
+    """
     canon = _canon_valid(profile_name)
     env_home = os.environ.get("HERMES_HOME", "").strip()
     if env_home:

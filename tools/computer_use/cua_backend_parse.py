@@ -40,7 +40,10 @@ def _action_result_from(name: str, ok: bool, message: str, meta: Dict[str, Any],
                         structured: Dict[str, Any], *, requested_delivery: Optional[str] = None) -> ActionResult:
     """Build an ActionResult, lifting cua-driver's structured verdict. structuredContent is canonical, the flattened
     ``meta`` copy the fallback. Every structured field is additive: a driver that omits one leaves the attribute
-    ``None`` so old drivers see unchanged behavior."""
+    ``None`` so old drivers see unchanged behavior.
+
+    See the action response shape in cua-driver's mcp-tool-notes and NousResearch/hermes-agent#67052.
+    """
     sc = structured if isinstance(structured, dict) else {}
 
     def _raw(key: str) -> Any:
@@ -79,7 +82,11 @@ def _is_real_app_window(w: Dict[str, Any]) -> bool:
 def _parse_elements_from_tree(markdown: str) -> List[UIElement]:
     """Parse UIElements from get_window_state AX-tree markdown — last-resort fallback for drivers without
     ``structuredContent.elements``. Bounds are always ``(0, 0, 0, 0)`` (the markdown carries none), fine for
-    element-index clicks since the driver resolves the frame."""
+    element-index clicks since the driver resolves the frame.
+
+    Last-resort fallback for cua-driver builds that don't carry the canonical ``structuredContent.elements``
+    array (see ``_parse_elements_from_structured`` — Surface 2 of #47072 prefers that path).
+    """
     return [
         # groups 3-6: value / quoted / paren / id= label (first non-None wins)
         UIElement(index=int(m.group(1)), role=m.group(2),
@@ -90,7 +97,11 @@ def _parse_elements_from_tree(markdown: str) -> List[UIElement]:
 def _parse_elements_from_structured(raw_elements: List[Dict[str, Any]]) -> List[UIElement]:
     """Read the canonical ``structuredContent.elements`` array: ``element_index``, ``role``, ``label`` and, when
     AT-SPI / AXFrame returned usable bounds, ``frame`` ``{x, y, w, h}`` — so real pixel bounds survive (the
-    markdown path loses them). Malformed entries are skipped."""
+    markdown path loses them). Malformed entries are skipped.
+
+    Surface 2 of NousResearch/hermes-agent#47072: read the canonical ``structuredContent.elements`` array
+    cua-driver-rs emits on every ``get_window_state`` response (trycua/cua#1961).
+    """
     elements: List[UIElement] = []
     for raw in raw_elements:
         idx = raw.get("element_index") if isinstance(raw, dict) else None
@@ -147,7 +158,13 @@ def _tool_envelope(data: Any, images: List[str], structured: Any, is_error: bool
 def _extract_tool_result(mcp_result: Any) -> Dict[str, Any]:
     """Flatten an mcp CallToolResult into ``{data, images, image_mime_types, structuredContent, isError}``. ``data``
     is the joined text parts (parsed as JSON when it looks like JSON); ``image_mime_types`` is parallel to
-    ``images`` with ``""`` where the part carried no mimeType (older drivers — callers then sniff the base64 prefix)."""
+    ``images`` with ``""`` where the part carried no mimeType (older drivers — callers then sniff the base64 prefix).
+
+    `image_mime_types` is the explicit `mimeType` cua-driver emits on every image part as of trycua/cua#1961
+    (Surface 7 of NousResearch/hermes-agent#47072). Each entry corresponds index-for-index with `images`; an
+    empty string entry signals the part carried no mimeType (older cua-driver build), and the caller should
+    fall back to base64-prefix sniffing.
+    """
     data: Any = None
     images: List[str] = []
     image_mime_types: List[str] = []

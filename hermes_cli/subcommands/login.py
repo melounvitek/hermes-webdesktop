@@ -12,6 +12,9 @@ def build_login_parser(subparsers, *, cmd_login: Callable) -> None:
     ``invalid choice``. Registered WITHOUT ``help=`` so it is omitted from ``hermes --help``
     (``help=SUPPRESS`` leaks ``==SUPPRESS==`` for top-level subparsers on 3.12+). ``--provider``
     takes ANY value (no ``choices=``) so the handler is reached rather than argparse erroring.
+
+    This hides a command that no longer works (#24756) without the ``help=argparse.SUPPRESS``
+    ``==SUPPRESS==`` leak that argparse emits for a top-level subparser on Python 3.12+.
     """
     login_parser = subparsers.add_parser(
         "login",

@@ -331,7 +331,13 @@ _TOOLS: dict[str, tuple[Any, str, dict, list[str]]] = {
 
 def _a2a_tools_available() -> bool:
     """check_fn: serve the client tools ONLY when the operator opted into A2A (peers under
-    ``a2a_agents``, inbound platform enabled, or A2A_PORT set). Fail closed."""
+    ``a2a_agents``, inbound platform enabled, or A2A_PORT set). Fail closed.
+
+    Maintainer-directed (#95681): these registered unconditionally, so every session on every install paid
+    ~561 tok/call for tools whose only possible output without config is 'no peers configured'. A2A is
+    unrelated to Bot Mode (bots talk over gateway RPCs) — for most installs this toolset is foreign-agent
+    plumbing they never enabled. Config adds mid-session surface at the next compaction (#97073).
+    """
     cfg = {}
     with contextlib.suppress(Exception):
         cfg = _load_config()

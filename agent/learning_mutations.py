@@ -111,6 +111,11 @@ def delete_node(node_id: str) -> dict[str, Any]:
 
 def _delete_skill(name: str) -> dict[str, Any]:
     from tools import skill_usage
+    # Pin must be respected by autonomous maintenance. The curator already skips pinned skills from every
+    # auto-transition; the background review fork is the same kind of autonomous, no-user-present actor, so
+    # it must not write to a pinned skill either (issue #25839). This is stricter than the foreground
+    # ``_pinned_guard`` (which only blocks deletion) precisely because there is no user in the loop to
+    # consent to an edit here.
     if skill_usage.get_record(name).get("pinned"):
         return {"ok": False, "message": f"'{name}' is pinned — unpin it first (hermes curator unpin {name})"}
     ok, message = skill_usage.archive_skill(name)

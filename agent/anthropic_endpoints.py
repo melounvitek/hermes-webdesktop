@@ -76,7 +76,12 @@ def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
     """DeepSeek's ``/anthropic`` route. In thinking mode DeepSeek requires prior-turn ``thinking``
     blocks to round-trip while the generic third-party path strips them; its blocks are unsigned,
     so it gets the same strip-signed / keep-unsigned policy as Kimi. Pinned to the ``/anthropic``
-    path so the OpenAI-compatible base URL is not misclassified."""
+    path so the OpenAI-compatible base URL is not misclassified.
+
+    Per DeepSeek's published compatibility matrix the blocks are unsigned (no Anthropic-proprietary
+    signature, no ``redacted_thinking`` support), so this endpoint is handled with the same strip-signed /
+    keep-unsigned policy used for Kimi's ``/coding`` endpoint. See hermes-agent#16748.
+    """
     return base_url_host_matches(base_url or "", "api.deepseek.com") and "/anthropic" in _normalized_lower(base_url)
 
 

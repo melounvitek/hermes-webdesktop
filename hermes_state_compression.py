@@ -137,6 +137,16 @@ class SessionCompressionMixin:
                 if deleted.rowcount != 1:
                     return False
             updated = conn.execute(
+                # A parent stamped ended by AUTOMATIC cleanup (tui_shutdown, ws_disconnect, orphan reap,
+                # idle/LRU evict) while a live agent is publishing its rotation is stale by construction —
+                # this writer holds the compression lease and is actively continuing the conversation the
+                # stamp claims is over. Left in place it wedges rotation forever: every attempt aborts here,
+                # nothing clears the stamp, and each attempt's pre-publish flush re-grows the parent until
+                # the provider rejects the request (#88197: 303 unique messages → 2,611 rows → HTTP 400).
+                # Clear it in this same transaction and proceed; the closure UPDATE below re-stamps the
+                # parent with its true boundary (end_reason='compression'). Deliberate boundaries
+                # (compression, session_reset, explicit close) still fail closed — those mean another path
+                # owns lineage.
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL "
                 "WHERE id = ? AND ended_at IS NOT NULL AND end_reason = 'compression'",
                 (session_id,))
@@ -183,7 +193,11 @@ class SessionCompressionMixin:
         parent just before publishing and those rows are already in the handoff, so only ``(watermark,
         watermark_ceiling]`` is foreign tail (``None`` = unbounded). *require_lease_refresh* +
         *compression_lock_holder* refreshes the lease on the same ``conn`` before the expiry check (no
-        TOCTOU window), so a refresher that died on transient DB errors gets one last chance."""
+        TOCTOU window), so a refresher that died on transient DB errors gets one last chance.
+
+        See #75316.
+        ``None`` = unbounded (no internal flush happened). See #47202.
+        """
         from hermes_state import CompressionSessionBusyError
         def _do(conn):
             if require_lease_refresh and compression_lock_holder:
@@ -262,6 +276,8 @@ class SessionCompressionMixin:
             return
         self._write_sql_logged(
             "record_compression_failure_cooldown", session_id,
+            # Merge-max with any longer live deadline so a later shorter write cannot reopen the thrash
+            # window (#96775). The error column always takes the latest diagnostic.
             "UPDATE sessions SET compression_failure_cooldown_until = CASE "
             "WHEN compression_failure_cooldown_until IS NOT NULL  AND compression_failure_cooldown_until > ? "
             "THEN compression_failure_cooldown_until ELSE ? END, compression_failure_error = ? WHERE id = ?",
@@ -347,7 +363,12 @@ class SessionCompressionMixin:
 
     def get_compression_recovery_deadline(self, session_id: str) -> float:
         """Persisted anti-thrash recovery deadline (epoch; ``0.0`` = not armed). Durable
-        because the gateway rebuilds the compressor every turn / cache eviction."""
+        because the gateway rebuilds the compressor every turn / cache eviction.
+
+        The deadline is the durable half of the 14694 recovery clock: the gateway rebuilds the compressor on
+        every turn / cache eviction, so a process-local deadline restarted the wait on each rebuild and a
+        tripped session never earned its probe (#100185).
+        """
         return self._read_session_number("compression_recovery_deadline", session_id, float, 0.0)
 
     def set_compression_recovery_deadline(self, session_id: str, deadline: float) -> None:
@@ -545,7 +566,10 @@ class SessionCompressionMixin:
     def finalize_orphaned_compression_sessions(self) -> int:
         """Mark orphaned compression continuations (parent ended by compression; child has
         messages, no end_reason/ended_at, api_call_count=0, older than 7 days) as
-        ``orphaned_compression``. Non-destructive."""
+        ``orphaned_compression``. Non-destructive.
+
+        Fix for #20001.
+        """
         cutoff = time.time() - 604800  # 7 days
         return self._write_rowcount(
                 """

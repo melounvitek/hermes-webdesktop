@@ -37,6 +37,7 @@ _RESPAWN_WINDOW_SECS = 300.0
 _SHUTDOWN_TIMEOUT_SECS = 10.0
 # Late control-ack handlers: a compress that outlives its RPC waiter can run for the full
 # compression ceiling plus a stall-fallback retry, so keep registrations past that — bounded.
+# See #97948.
 _LATE_CONTROL_TTL_SECS = 1800.0
 _LATE_CONTROL_MAX = 64
 # Host frames whose ``request_id`` resolves a pending/late control waiter.
@@ -150,6 +151,8 @@ class HostSupervisor:
         self._pending_controls: dict[str, queue.Queue[dict]] = {}
         # request_id -> (registered_at, handler) for control waiters that timed out while their
         # host work still runs, so the eventual control.ack is not silently dropped.
+        # The host emits its control.ack whenever it finishes; without this the ack matched no queue and was
+        # silently dropped. See #97948.
         self._late_control_handlers: dict[str, tuple[float, Callable[[dict], None]]] = {}
         self._stderr_tail: list[str] = []
         self._last_progress_counter = 0

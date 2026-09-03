@@ -317,6 +317,10 @@ def is_zeroed_sqlite_file(path: Path, *, probe_bytes: int = 100, force: bool = F
     """True when *path* looks like the #68474 zeroed-state.db signature.
 
     Only regular files qualify: probing a FIFO/device/socket could block indefinitely.
+
+    Signature: no ``SQLite format 3`` header and no data — either empty (size 0, the total-loss case,
+    #97568) or first *probe_bytes* all NUL. Used at SessionDB open and for snapshot diagnostics so a silent
+    all-zero file becomes a guided recovery instead of a generic failure.
     """
     try:
         if not path.is_file():
@@ -338,6 +342,9 @@ _SQLITE_HEADER = b"SQLite format 3\0"
 
 # Above this size ``PRAGMA integrity_check`` (walks every b-tree page — minutes of pegged CPU on a
 # 30 GB state.db, reading as a hung ``hermes update``) is replaced by the O(1) header+schema probe.
+# Default ceiling above which ``PRAGMA integrity_check`` is skipped in favour of the (O(1)) header +
+# structural probe. Sessions databases in the tens of GB are normal for heavy users, so the size-unbounded
+# check is never an acceptable default on the update path. See #70553.
 DEFAULT_INTEGRITY_CHECK_MAX_BYTES = 2 << 30  # 2 GiB
 
 
@@ -1281,6 +1288,10 @@ def restore_cron_jobs_if_emptied(snapshot_id: str, hermes_home: Optional[Path] =
 
     Conservative: restores only when the snapshot had MORE jobs than the live file (a user who
     deleted jobs is never second-guessed); an unreadable live file is left so corruption surfaces.
+
+    Config-version migrations have been observed to leave ``cron/jobs.json`` valid-but-empty after an
+    update, silently dropping every scheduled job (issue #34600). The desktop scheduler can also overwrite
+    the file with its own small set of internally-tracked crons, causing partial loss (issue 52144).
     """
     if not snapshot_id:
         return None

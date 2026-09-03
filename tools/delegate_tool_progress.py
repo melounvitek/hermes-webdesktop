@@ -169,6 +169,7 @@ def _build_child_system_prompt(
         # install-tree-fallback leak doesn't apply. Best-effort.
         _ctx_files = ""
         with _quiet("subagent: workspace context-files load failed", exc_info=True):
+            # See #64590.
             from agent.prompt_builder import build_context_files_prompt
             _ctx_files = build_context_files_prompt(cwd=str(workspace_path), skip_soul=True)
         if _ctx_files.strip():

@@ -122,6 +122,12 @@ def build_api_request(
         api_kwargs = agent._build_api_kwargs(api_messages, tools_for_api=tools_for_api)
     # Surrogate chokepoint: tool descriptions, extra_body and kwargs strings can carry
     # invalid code points (HTTP 400). One walk makes the payload json.dumps()-safe.
+    # Outbound-request surrogate chokepoint (#50959): the messages were scrubbed above, but the rest of the
+    # request body — tool/function descriptions (session_search's ±-heavy text is the recorded repro),
+    # extra_body, system strings routed via kwargs — can still carry invalid code points that providers
+    # reject with a non-retryable HTTP 400 ("invalid unicode code point"). One in-place walk here guarantees
+    # the entire payload json.dumps()-safe regardless of which leaf produced the string. Fast no-op when the
+    # payload is clean.
     _sanitize_structure_surrogates(api_kwargs)
     if agent._force_ascii_payload:
         _sanitize_structure_non_ascii(api_kwargs)

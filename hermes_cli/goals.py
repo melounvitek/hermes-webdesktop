@@ -637,7 +637,14 @@ def clear_goal(session_id: str) -> None:
 
 def migrate_goal_to_session(old_session_id: str, new_session_id: str, *, reason: str = "") -> bool:
     """Carry a persistent /goal from a parent session to its continuation. Best-effort, never raises
-    (a failure here must not block compression). Returns True when a goal was migrated."""
+    (a failure here must not block compression). Returns True when a goal was migrated.
+
+    Context compression rotates ``session_id`` to a fresh child session, but ``load_goal`` does a flat
+    ``goal:<session_id>`` lookup with no parent-lineage walk — so an active goal silently dies at the
+    compaction boundary (#33618). Copy the goal onto the new session and archive the old row as ``cleared``
+    so exactly one active goal row exists per logical conversation (avoids the "two active goals" hazard of
+    a pure copy).
+    """
     if not old_session_id or not new_session_id or old_session_id == new_session_id:
         return False
     try:
@@ -829,6 +836,8 @@ def _render_background_block(background_processes: Optional[List[Dict[str, Any]]
 def _call_goal_judge_llm(call_llm, system_prompt: str, user_prompt: str, timeout: Optional[float]) -> str:
     """Route through call_llm so auxiliary.goal_judge.* config (provider/model, extra_body,
     reasoning_effort, retries) all apply. Returns the raw reply text."""
+    # See #35566.
+    # Route through call_llm — same #35566 fix as the judge call above.
     resp = call_llm(
         task="goal_judge",
         messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
@@ -920,6 +929,9 @@ def draft_contract(objective: str, *, timeout: Optional[float] = None) -> Option
     if not objective:
         return None
     if timeout is None:
+        # The declared default for this path is the config key, not the module constant — see
+        # _goal_judge_timeout (#91022).
+        # Same config-backed default as judge_goal (#91022).
         timeout = _goal_judge_timeout()
 
     try:
@@ -1360,6 +1372,8 @@ class GoalManager:
 
         # BLOCKED is NOT done: pause so the user sees the judge's reason and can re-scope or override,
         # instead of burning turns on an unachievable goal or waving it through as complete.
+        # BLOCKED verdict: the judge ruled the goal genuinely cannot be satisfied as stated (impossible, out
+        # of scope, needs user input). See #100954.
         if verdict == "blocked":
             return self._pause_decision(
                 f"judged unachievable: {reason}", "blocked", reason,
@@ -1525,6 +1539,7 @@ def run_kanban_goal_loop(
         if verdict == "blocked":
             # Unachievable is NOT done: block the card with the judge's reason now instead of
             # re-poking an impossible goal, and never let it land in done.
+            # The judge ruled the goal cannot be satisfied at all — this is NOT done (#100954).
             _log(f"kanban goal loop: task {task_id} judged unachievable; blocking")
             _block(f"Goal-mode judge ruled the goal unachievable: {reason}")
             return _result("blocked_unachievable", f"judge verdict blocked: {reason}")

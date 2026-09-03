@@ -154,6 +154,7 @@ class GatewayInboundMixin:
         # and session setup — so an ignored channel can never reach pairing/auth/session state.
         _chat_id = getattr(source, "chat_id", None)
         if (
+            # See #51899.
             not is_internal
             and getattr(source, "platform", None) == Platform.SLACK
             and _is_slack_ignored_channel(_config, _chat_id)
@@ -455,6 +456,10 @@ class GatewayInboundMixin:
         lived (``ws_orphan_reap`` / ``agent_close``): otherwise the fast-path queues every next
         message into the dead runtime. The cold path re-attaches via ``get_or_create_session``."""
         try:
+            # #99106: durable-reaped guard. This is the live-gateway variant of #54878 and the #632
+            # detached/ 405 suppressions in production. Evict the stale slot so the next message falls
+            # through to the cold path and re-attaches or creates a fresh session; /status then correctly
+            # shows 代理运行中: 否 before the heal and a live turn after.
             _reap_store = getattr(self, "session_store", None)
             # Public, lock-held accessors: peek_session_id returns a non-str on stubbed stores in
             # bare test runners — the isinstance() / ``is True`` gates keep this inert unless a
@@ -950,6 +955,8 @@ class GatewayInboundMixin:
             # Quick commands are slash capabilities too — and type:exec ones run a shell command in
             # the gateway process. They are never in the registry, so the early gate never fires for
             # them; apply the same admin/user policy to the raw typed name here.
+            # The early gate above only fires for registry-known commands, so quick commands (never in the
+            # registry) would otherwise reach this dispatch sink unchecked. (#44727)
             _denied = self._check_slash_access(source, command)
             if _denied is not None:
                 return True, _denied, command
@@ -996,6 +1003,7 @@ class GatewayInboundMixin:
             # Pass the platform explicitly: bundle skill loading bypasses get_skill_commands()'
             # scan-time disabled filter, and one gateway process serves several platforms, so
             # env-var platform resolution can't be trusted here.
+            # Mirrors the stacked-skill gate (#58888).
             bundle_result = build_bundle_invocation_message(
                 bundle_key, event.get_command_args().strip(), task_id=_quick_key,
                 platform=source.platform.value if source.platform else None,
@@ -1139,6 +1147,13 @@ class GatewayInboundMixin:
         oldest orphan runs as THIS turn and the incoming event is parked behind the chain. Skipped
         for control commands and internal events."""
         try:
+            # ── FIFO orphan rescue (#99882) ──────────────────────────────── If this session went idle with
+            # a populated overflow (queued during a busy window whose post-turn drain never promoted — e.g.
+            # a compression-demoted follow-up after the compression window ended through an exit that
+            # skipped the promotion site), those events were silently orphaned. We are starting the next
+            # turn for this session NOW: re-stage the orphans in FIFO order and enqueue the incoming event
+            # behind them, so arrival order (#28503) holds: oldest orphan runs as this turn, the rest drain
+            # in order, the new message last.
             _orphan_adapter = self._adapter_for_source(source)
             if _orphan_adapter is None or getattr(event, "internal", False) or event.get_command():
                 return event, source, is_internal
@@ -1261,6 +1276,12 @@ class GatewayInboundMixin:
             self._release_running_agent_state(_quick_key)
             # Turn lease is keyed by (routing key, run generation) so this unwind can only free
             # the lease its own turn acquired, never a newer turn's.
+            # Unconditional release covers every exit path. _release_running_agent_state is idempotent
+            # (pop-on-absent is harmless) and, called without a run_generation guard, always clears the slot
+            # regardless of which generation it holds. This evicts the zombie left when session_reset bumps
+            # the generation (N -> N+1) mid-flight: gen-N's guarded release inside _run_agent returns False,
+            # and the old sentinel-only check here missed the leftover real agent — locking the session out
+            # forever (#28686).
             self._release_turn_lease(_quick_key, _run_generation)
 
     def _restore_moa_one_shot(self, event: "MessageEvent", quick_key: str) -> None:
@@ -1299,6 +1320,7 @@ class GatewayInboundMixin:
             _safe_user_name = neutralize_untrusted_inline_text(source.user_name)
             # Slack: expose the CURRENT speaker's verifiable `<@U...>` id so "mention me again" has a
             # trusted target (display names are ambiguous). user_id comes from the envelope, not user-editable.
+            # See #17916.
             if source.platform == Platform.SLACK and source.user_id:
                 _safe_user_name = f"{_safe_user_name} | Slack user <@{source.user_id}>"
             message_text = f"[{_safe_user_name}] {message_text}"
@@ -1900,6 +1922,7 @@ class GatewayInboundMixin:
         transcript = result["transcript"]
         # STT may return success=True with an empty/whitespace transcript (silence, cut-off);
         # empty quotes make the agent reply to nothing and can loop, so emit a sentinel note.
+        # See #41603.
         if not (transcript or "").strip():
             return None, (
                 "[The user sent a voice message but it came through "

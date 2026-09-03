@@ -253,6 +253,7 @@ _IMAGE_REJECTION_PHRASES = (
     "does not support images", "does not support image input", "does not support multimodal",
     "does not support vision", "model does not support image",
     # DashScope-style gateways reject non-text blocks with this generic body.
+    # Some OpenAI-compatible endpoints (e.g. (issue #57948)
     "unexpected item type in content",
     # ChatGPT-account Codex backend rejects data:image URLs in input_image; keyed on the
     # field-path apostrophe so other URL errors don't false-trip. Second: its wording for
@@ -262,8 +263,17 @@ _IMAGE_REJECTION_PHRASES = (
     "unknown variant `image_url`, expected `text`", "unknown variant image_url, expected text",
     # OpenRouter HTTP 404 when no upstream endpoint accepts image input (passes the 4xx
     # gate; without this the gateway queue wedges behind the stuck turn).
+    # Without this phrase the agent never strips the images, the retry loop re-sends the same rejected
+    # request until exhaustion, and the gateway leaves every subsequent message queued behind the stuck turn
+    # — the P1 in issue #21160.
     "no endpoints found that support image input",
     # Kimi/Moonshot et al. reject truncated/corrupt image bytes baked into history.
+    # Kimi / Moonshot / other OpenAI-compatible Chinese providers reject truncated or corrupt image bytes
+    # with HTTP 400 "Invalid request: prepare image failed ... failed to decode image: invalid or
+    # unsupported image format". Like the Codex case above, the bad bytes are baked into immutable
+    # conversation history and re-sent on every retry, wedging the session. Strip the images so the turn
+    # recovers instead of exhausting retries. (issue #76884; complements the proactive full-decode
+    # validation in tools/vision_tools._normalize_to_supported_image)
     "failed to decode image",
 )
 
@@ -305,6 +315,17 @@ def _tc_set(tc: Any, key: str, value: Any) -> None:
     tc.__setitem__(key, value) if isinstance(tc, dict) else setattr(tc, key, value)
 
 
+# --------------------------------------------------------------------------- call_id policy — single owner
+# (audit F4, incident chain I4) ---------------------------------------------------------------------------
+# Three forked policy sites converged here: * agent/codex_responses_adapter.py `_deterministic_call_id` —
+# hash synthesis when a provider omits call_id (fa3ab2ffd0 → e45f2b39e2). *
+# run_agent.AIAgent._get_tool_call_id_static — `call_id or id` coalescing for dicts and SDK objects. *
+# run_agent.AIAgent._uniquify_tool_call_ids — duplicate-id repair with deterministic `_d<n>` suffixes
+# (#58327 loss class). NOT consolidated (different scheme on purpose):
+# agent/transports/codex_event_projector._deterministic_call_id maps codex app-server ITEM ids
+# (`codex_<type>_<item_id>`), not chat tool-call content; merging the two would change ids and invalidate
+# prompt caches. HARD INVARIANT: everything here must stay deterministic (never uuid4) and byte-identical
+# for existing inputs — these ids feed prompt-cache prefixes.
 def deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
     """Deterministic call_id fallback when the API omits one (random ids would break caching)."""
     seed = f"{fn_name}:{arguments}:{index}"
@@ -392,6 +413,19 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
 # empty-string pads → " ". Strict side (400/422 "Extra inputs are not permitted"): everyone
 # else — Mistral, Cerebras, Groq, SambaNova, … Strip the key entirely, even a one-space pad.
 
+# --------------------------------------------------------------------------- reasoning_content policy —
+# single owner (audit F4) --------------------------------------------------------------------------- The
+# strip-vs-repad decision was previously forked across the wire files in separate incident commits
+# (2b3a4f0af8 strip for strict providers, b5495db701 re-pad for require-side, 94b3131be7/9a9f8a6d99 kimi
+# pad). The POLICY — which provider direction gets which treatment — lives here as one rule table + apply
+# functions; adapters keep only SYNTAX mapping (e.g. anthropic_adapter turning reasoning_content into a
+# thinking block). Direction table: require-side (echo-back enforced; replays 400 without the field): kimi
+# — provider kimi-coding/kimi-coding-cn, or host api.kimi.com / moonshot.ai / moonshot.cn. Host-driven on
+# purpose: aggregators re-exporting kimi models reject the echo. deepseek — provider "deepseek", model
+# contains "deepseek", or host api.deepseek.com (#15250; V4 rejects empty-string pads, hence the " "
+# single-space pad, #17341). mimo     — provider "xiaomi", model contains "mimo", or host *.xiaomimimo.com.
+# strict side (field rejected with 400/422 "Extra inputs are not permitted"): everyone else — Mistral,
+# Cerebras, Groq, SambaNova, … (#45655). Strip the key entirely, even a single-space pad.
 _REASONING_ECHO_RULES: tuple = (
     # (family, exact providers (raw), exact providers (lowered), model substrings (lowered), hosts)
     ("kimi", frozenset({"kimi-coding", "kimi-coding-cn"}), frozenset(), (), ("api.kimi.com", "moonshot.ai", "moonshot.cn")),
@@ -449,6 +483,15 @@ def apply_reasoning_content_policy(source_msg: dict, api_msg: dict, needs_thinki
         api_msg.pop("reasoning_content", None)
         return
     existing, reasoning = source_msg.get("reasoning_content"), source_msg.get("reasoning")
+    # 1. Explicit reasoning_content already set. When the active provider enforces the thinking-mode
+    #   echo-back (DeepSeek / Kimi / MiMo), preserve it verbatim — that includes their own space-placeholder
+    #   written at creation time and any valid reasoning from the same provider. Sessions persisted BEFORE
+    #   #17341 have empty-string placeholders pinned at creation time; DeepSeek V4 Pro rejects those with
+    #   HTTP 400, so upgrade "" → " " on replay. When the active provider does NOT enforce echo-back, strip
+    #   the field entirely. Strict OpenAI-compatible providers (Mistral, Cerebras, Groq, SambaNova, …)
+    #   reject ANY reasoning_content key in input messages with HTTP 400/422 ("Extra inputs are not
+    #   permitted"), even an empty string or a single-space pad. Stripping here covers the rebuild path;
+    #   ``reapply_reasoning_echo`` covers the already-built api_messages path. Refs #45655.
     if isinstance(existing, str):
         # Explicit value: preserve verbatim, upgrading legacy "" to " " (DeepSeek V4 400s on "").
         api_msg["reasoning_content"] = existing or " "
@@ -475,6 +518,16 @@ def reapply_reasoning_echo(api_messages: list, needs_thinking_pad: bool) -> int:
     for api_msg in api_messages:
         if api_msg.get("role") != "assistant":
             continue
+        # 3. Healthy session: promote 'reasoning' field to 'reasoning_content' for providers that use the
+        #   internal 'reasoning' key. This must happen before the unconditional empty-string fallback so
+        #   genuine reasoning content is not overwritten (#15812 regression in PR #15478). Only promote for
+        #   providers that enforce echo-back — strict providers reject the field (refs #45655).
+        # 4. DeepSeek / Kimi thinking mode: all assistant messages need reasoning_content. Inject a single
+        #   space to satisfy the provider's requirement when no explicit reasoning content is present.
+        #   Covers both tool-call turns (already-poisoned history with no reasoning at all) and plain text
+        #   turns. Space (not "") because DeepSeek V4 Pro tightened validation and rejects empty string with
+        #   HTTP 400 ("The reasoning content in the thinking mode must be passed back to the API"). Refs
+        #   #17341.
         if needs_thinking_pad:
             if not api_msg.get("reasoning_content"):
                 apply_reasoning_content_policy(api_msg, api_msg, needs_thinking_pad)

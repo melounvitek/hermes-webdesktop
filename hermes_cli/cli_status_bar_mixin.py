@@ -481,7 +481,15 @@ class CLIStatusBarMixin:
         """Full viewport width for printed scrollback box rules, floored at 32 cols so tiny
         terminals never hit negative ``'─' * (w - 2)`` math. (The old 56-col clamp against
         reflow-on-shrink is gone: the ``_output_screen_diff`` patch keeps chrome out of
-        scrollback, and reflow of already-printed borders is a cosmetic artifact.)"""
+        scrollback, and reflow of already-printed borders is a cosmetic artifact.)
+
+        Previously this clamped to ``max(32, min(width, 56))`` as a defense against terminal-emulator reflow
+        on column-shrink (#25975, salvaging 24403). That clamp made response/reasoning borders look stubby
+        on any modern wide terminal. We now trust the prompt_toolkit ``_output_screen_diff`` monkey-patch
+        landed in #26137 (salvaging 25981) to keep chrome out of scrollback in the first place, and accept
+        that an aggressive column-shrink may visually reflow already printed Panel borders — that's a
+        cosmetic artifact of stamped scrollback history, not a live-render bug.
+        """
         if width is None:
             try:
                 width = shutil.get_terminal_size((80, 24)).columns
@@ -891,7 +899,10 @@ class CLIStatusBarMixin:
         """The push-to-talk key label every voice-facing hint advertises. Cached at startup
         (``set_voice_record_key_cache``) because the prompt_toolkit binding is registered once —
         re-reading config per render could advertise a chord that isn't bound — and this sits on
-        the hot render path."""
+        the hot render path.
+
+        Two reasons (Copilot round-13 on 19835): See #19835.
+        """
         return getattr(self, "_voice_record_key_display_cache", None) or "Ctrl+B"
 
     def set_voice_record_key_cache(self, raw_key: object) -> None:

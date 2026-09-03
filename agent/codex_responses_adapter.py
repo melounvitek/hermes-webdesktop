@@ -426,10 +426,38 @@ def _chat_messages_to_responses_input(
     ``native_compaction_eligible``: THIS request carries ``context_management``; gates both replaying ``compaction``
     checkpoints and ``prune_pre_checkpoint_items``. Checkpoints persist across model swaps / compression flips / resume,
     so without the gate one checkpoint would erase pre-checkpoint history on a model that cannot decrypt it (lossless:
-    local history is never truncated)."""
+    local history is never truncated).
+
+    Earlier (PR #26644, May 2026) we believed xAI's OAuth/SuperGrok ``/v1/responses`` surface rejected
+    replayed ``encrypted_content`` reasoning items minted by prior turns, and we stripped them. That
+    decision was wrong — xAI explicitly relies on Hermes threading encrypted reasoning back across turns for
+    cross-turn coherence (the whole point of their partnership integration). We now replay encrypted
+    reasoning on every Responses transport (xAI, native Codex, custom relays) and let xAI tell us explicitly
+    if a specific surface ever rejects a payload.
+    The Copilot backend (api.githubcopilot.com/responses) binds these ids to a specific backend "connection"
+    — credential-pool rotation, a gateway restart, or routine load-balancer churn between turns all
+    invalidate it — and rejects a stale id with HTTP 401 "input item ID does not belong to this connection"
+    even for short ids (see #32716). ``phase``/ ``status``/``content`` are still replayed; only ``id`` is
+    unsafe to reuse across a Copilot connection.
+    ``native_compaction_eligible`` mirrors, for THIS request, the decision made by
+    ``native_compaction.native_compaction_context_management`` — it is True only when that gate returned a
+    payload, i.e. when the request actually carries ``context_management``. It controls two things that must
+    never outlive the gate: replaying ``type: "compaction"`` checkpoint items, and restructuring the wire
+    around them (``prune_pre_checkpoint_items``). Checkpoints are persisted in the ``codex_reasoning_items``
+    sidecar and survive a mid-session model swap, a ``compression.enabled: false`` flip, the rejection kill
+    switch and a resumed session; without this flag a single captured checkpoint would keep deleting every
+    pre-checkpoint item from every later request, on a model that cannot decrypt the blob (#85914). Default
+    False = pre-feature wire, which is also correct for every caller that never sends ``context_management``
+    (auxiliary/compression client, ad-hoc ``convert_messages``). Dropping the checkpoint costs nothing:
+    Hermes' local history is never truncated by native compaction, so the full conversation is still on the
+    wire.
+    """
     items: List[Dict[str, Any]] = []
     # Parallel to ``items``: source chat message per item. Pruning reads a summary
     # carrier's provenance from the source; the converted item may be a lossy shape.
+    # Pruning needs this to read a canonical summary carrier's up-to-date, provenance-tagged content
+    # directly — the converted `item` can be a lossy shape (stale exact-replay, or a typed
+    # `function_call_output` wrapper) that no longer carries it (#90976).
     item_sources: List[Optional[Dict[str, Any]]] = []
     seen_item_ids: set = set()
     def emit(new_items: List[Dict[str, Any]], msg: Dict[str, Any]) -> None:
@@ -470,6 +498,17 @@ def _chat_messages_to_responses_input(
     # The server renders nothing placed before a compaction item, so pre-checkpoint history is
     # dead weight and plaintext asks / merged summaries silently vanish. Keep the newest checkpoint
     # first, retain pre-checkpoint USER and SUMMARY messages within a token budget, leave the tail.
+    # Native server-side compaction: when a replayed checkpoint is present, restructure the wire around it.
+    # Gated on the CURRENT request's native eligibility, not merely on the presence of a checkpoint: a
+    # persisted checkpoint outlives the gate, and pruning for a request that carries no
+    # ``context_management`` deletes history the server never compacted. ``item_sources`` (parallel to
+    # ``items``) carries the raw chat message each converted item came from. A canonical summary carrier's
+    # content can be lost or gone stale by the time it becomes a Responses item — a merge-into-tail
+    # tool-result carrier becomes a typed ``function_call_output`` (no ``content``/``role`` at all), and a
+    # merge-into-tail assistant carrier can be shadowed by a stale exact ``codex_message_items`` replay from
+    # before the merge rewrote its content. Pruning reads the source message's own up-to-date,
+    # provenance-tagged content directly instead of trying to recover it from whatever shape the conversion
+    # produced (#90976).
     if not native_compaction_eligible:
         return items
     from agent.native_compaction import prune_pre_checkpoint_items
@@ -478,7 +517,12 @@ def _chat_messages_to_responses_input(
 
 class ResponsesRouteFlags(NamedTuple):
     """Which special Responses-API route an agent is talking to. Single owner of the
-    codex/xai/github predicates — every site must call :func:`classify_responses_route`."""
+    codex/xai/github predicates — every site must call :func:`classify_responses_route`.
+
+    Every site that needs these flags (request kwargs build, preflight estimation, silent- reject hints)
+    must call :func:`classify_responses_route` instead of re-implementing the string comparisons inline —
+    inline copies drift (backend-identity class: #22548/#70893/#59561/#72468).
+    """
     is_codex_backend: bool
     is_xai_responses: bool
     is_github_responses: bool
@@ -505,7 +549,12 @@ def estimate_native_responses_preflight_tokens(
     agent: Any, messages: List[Dict[str, Any]], *, system_prompt: str = "", tools: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[int]:
     """Estimate tokens for the checkpoint-pruned Responses payload (the full transcript overstates a natively compacted
-    session and fires local compression needlessly). None when native compaction is not proven eligible or conversion fails."""
+    session and fires local compression needlessly). None when native compaction is not proven eligible or conversion fails.
+
+    Automatic preflight previously counted the full durable transcript. On a natively compacted Codex
+    session that overstates the wire by several times and fires local compression against history the main
+    request will never send (#96155).
+    """
     if getattr(agent, "api_mode", None) != "codex_responses" or not isinstance(messages, list):
         return None
     route = classify_responses_route(agent)._asdict()

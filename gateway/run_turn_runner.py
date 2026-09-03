@@ -119,6 +119,11 @@ class TurnRunner:
         if (
             not ctx.tool_progress_enabled
             or event_type != "tool.started"
+            # The adapter's send_clarify IS the user-facing rendering (interactive buttons or the
+            # numbered-text fallback), so a progress bubble is pure duplication — and in verbose mode it
+            # dumps the raw tool-call args JSON ({"question": ..., "choices": [...]}) into the chat. Because
+            # the progress queue drains on a background task, that raw JSON typically lands right underneath
+            # the rendered prompt (#52374).
             or tool_name == "clarify"
             or self._agent_interrupted()
         ):
@@ -365,7 +370,10 @@ class TurnRunner:
 
     async def _send_native_task_card_progress(self, adapter) -> None:
         """Drain the progress queue into Slack-native plan/task cards; on any native failure, fall
-        back to an editable in-thread message so progress stays live."""
+        back to an editable in-thread message so progress stays live.
+
+        See #29483.
+        """
         ctx = self._ctx
         st = self._TaskCardState(adapter)
         try:
@@ -651,6 +659,10 @@ class TurnRunner:
         ctx = self._ctx
         return bool(ctx.progress_queue) and ctx._run_still_current() and not self._agent_interrupted()
 
+    # ── Slack-native task cards: ID-bearing lifecycle callbacks (#29483) ── These ride
+    # agent.tool_start_callback / agent.tool_complete_callback so start/completion events correlate by the
+    # REAL tool-call id — the name-correlated text events in progress_callback would duplicate cards and
+    # mispair concurrent calls to the same tool.
     def native_tool_start_callback(self, call_id, tool_name, args):
         """Queue an ID-correlated native progress start from the agent thread."""
         if not self._native_card_gate():
@@ -953,6 +965,7 @@ class TurnRunner:
             gateway_session_key=ctx.session_key,
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
+            # See #60955.
             fallback_model=self._runner._refresh_fallback_model(),
             skip_context_files=skip_context_files,
             # Keep the persona even with minimal context: soul identity is one small file.
@@ -1287,6 +1300,8 @@ class TurnRunner:
         # FTS write-corruption guard: if persistence failed silently the reloaded transcript is stale
         # while the SAME cached agent still holds the live conversation (same-session amnesia). Only
         # for a reused agent bound to this exact session_id.
+        # Replacing the live transcript with that shorter copy causes immediate same-session amnesia. See
+        # #50502.
         if reused_cached_agent and getattr(agent, "session_id", None) == ctx.session_id:
             selected = _select_cached_agent_history(agent_history, getattr(agent, "_session_messages", None))
             if selected is not agent_history:
@@ -1556,6 +1571,19 @@ class TurnRunner:
         from gateway.run import _collect_auto_append_media_tags
         if "MEDIA:" in final_response:
             return final_response
+        # Scan tool results for MEDIA:<path> tags that need to be delivered as native audio/file
+        # attachments. The TTS tool embeds MEDIA: tags in its JSON response, but the model's final text
+        # reply usually doesn't include them. We collect unique tags from tool results and append any that
+        # aren't already present in the final response, so the adapter's extract_media() can find and
+        # deliver the files exactly once. Scope the scan to THIS turn's tool results only. ``agent_history``
+        # was passed into run_conversation as ``conversation_history``, so the agent's returned ``messages``
+        # list is ``agent_history`` followed by the messages produced this turn. Slicing at
+        # ``len(agent_history)`` isolates the current turn precisely, so a stale MEDIA: path emitted by a
+        # tool several turns earlier (still present in the full message list) can never leak onto a later
+        # text-only reply. (Fixes #34608) Path-based deduplication against _history_media_paths (collected
+        # before run_conversation) is retained as a secondary guard. It is also the sole guard on the
+        # fallback branch taken when mid-run context compression shrinks the message list below the original
+        # history length, preserving the compression-safe behaviour of #160.
         media_tags, has_voice_directive = _collect_auto_append_media_tags(
             result.get("messages", []), history_offset=len(agent_history), history_media_paths=history_media_paths,
         )
@@ -1575,6 +1603,16 @@ class TurnRunner:
         ctx = self._ctx
         runner = self._runner
         # Platform.LOCAL ("local") maps to the "cli" hint key the agent understands.
+        # session_key is propagated via contextvars in _set_session_env() (_SESSION_KEY) and via
+        # set_current_session_key() (_approval_session_key) below — both concurrency-safe and inherited by
+        # tool worker threads. We deliberately do NOT write os.environ["HERMES_SESSION_KEY"] here:
+        # os.environ is process-global, so concurrent gateway sessions (e.g. two Discord threads) would
+        # clobber each other's value, and a tool thread whose contextvar is unset would fall back to
+        # os.environ and read the wrong session key — misrouting command-approval prompts to the wrong
+        # thread (#24100). The non-gateway surfaces don't depend on this write: CLI and cron bind the
+        # session via contextvars (set_current_session_key / session context), and only the TUI slash-worker
+        # *subprocess* exports HERMES_SESSION_KEY (from its own --session-key argv, a separate process) — so
+        # removing this in-process gateway write does not affect any of them.
         platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
         combined_ephemeral = self._combined_ephemeral_prompt()
         max_iterations = _current_max_iterations()
@@ -1604,6 +1642,7 @@ class TurnRunner:
         self._finish_stream_consumer(result, agent_history, stream_consumer)
         # The streaming-TTS consumer's finish() runs on the outer loop thread after the executor
         # returns, so early run_sync returns are also finalised.
+        # See the outer finally/completion section below. See #60671.
         final_response = result.get("final_response")
         # Actual token counts from the agent instance used for this run.
         agent = ctx.agent_holder[0]

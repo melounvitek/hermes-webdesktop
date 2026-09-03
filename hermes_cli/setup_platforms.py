@@ -180,6 +180,9 @@ def _setup_telegram():
         _save_prompted("TELEGRAM_HOME_CHANNEL", "Home channel ID (or leave empty to set later with /set-home in Telegram)")
 
 
+# _setup_slack and _write_slack_manifest_and_instruct moved to the slack plugin:
+# plugins/platforms/slack/adapter.py::interactive_setup (registered via setup_fn and dispatched through the
+# plugin path). #41112 / #3823.
 def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
     from hermes_cli.setup import _info, print_header, print_success, prompt, prompt_yes_no

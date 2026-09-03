@@ -20,11 +20,26 @@ logger = logging.getLogger(__name__.rpartition(".")[0])
 # Read by hindsight_embed.daemon_embed_manager AT IMPORT TIME: how long to wait
 # for a slow /health before killing the daemon as stale. Busy hosts exceed the
 # upstream 2s check and get needlessly restarted, so it's plugin config.
+# Env var the embedded daemon manager reads (at import time, as a module-level constant) to size the grace
+# window it waits for a slow /health before declaring a daemon stale and killing it. We surface it as plugin
+# config so users can raise it without hand-setting an env var, consistent with "config.json, not raw env
+# vars". See #13125.
 _PORT_HEALTH_GRACE_ENV = "HINDSIGHT_EMBED_PORT_HEALTH_GRACE_TIMEOUT"
 
 # Stale embedded-daemon connection markers (client recreated, operation retried once).
 _RETRIABLE_CONNECTION_MARKERS = (
     "cannot connect to host",
+    # Connection-establishment / DNS failure message patterns. These surface when the exception TYPE is
+    # generic (RuntimeError/Exception from a local shim, MCP bridge, subprocess wrapper, or an SDK that
+    # re-raises without chaining) so the _TRANSPORT_ERROR_TYPES check never fires, and the error carries no
+    # HTTP status. Without message-level matching they fall through to FailoverReason.unknown, which misses
+    # the transport eager-fallback path in the retry loop (unknown retries the same dead endpoint for the
+    # full budget before fallback). Ported from anomalyco/opencode#40707, which hit the same bug shape:
+    # serialized midstream errors matched by type only. Deliberately EXCLUDES mid-stream disconnect strings
+    # ("connection reset by peer", "peer closed connection", "unexpected eof", "socket hang up") — those
+    # belong to _SERVER_DISCONNECT_PATTERNS, whose classification step runs later and routes large sessions
+    # to context-overflow compression. A connection that was never established cannot be a server-side
+    # overflow rejection, so these are safe to classify as plain retryable transport.
     "connection refused",
     "connect call failed",
     "clientconnectorerror",
@@ -62,7 +77,12 @@ def _check_local_runtime() -> tuple[bool, str | None]:
 def _local_runtime_hint(reason: str | None) -> str:
     """Install guidance when the local_embedded runtime is missing: ``plugin.yaml``
     declares only ``hindsight-client``, so a hand-written config, the legacy
-    ``"mode": "local"`` alias or a restored backup hits ``No module named 'hindsight'``."""
+    ``"mode": "local"`` alias or a restored backup hits ``No module named 'hindsight'``.
+
+    ``local_embedded`` imports ``from hindsight import HindsightEmbedded``, which is provided only by the
+    ``hindsight-all`` package (its wheel ships the top-level ``hindsight`` module).
+    NousResearch/hermes-agent#7718.
+    """
     text = (reason or "").lower()
     if "no module named" in text and any(m in text for m in ("hindsight'", 'hindsight"', "hindsight_embed")):
         return (

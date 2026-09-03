@@ -659,7 +659,13 @@ class CheckpointManager:
         return results
 
     def list_all_checkpoints(self) -> List[Dict]:
-        """Checkpoints across every registered project (most recent first), each tagged ``workdir``."""
+        """Checkpoints across every registered project (most recent first), each tagged ``workdir``.
+
+        Surgical reapply of PR #10633 by @nightq (#10505) onto the v2 single-store layout: iterate
+        ``projects/<hash>.json`` metadata via ``_list_projects`` instead of the pre-v2 per-shadow-dir scan.
+        Each entry carries the extra ``workdir`` key so callers can label which project a checkpoint belongs
+        to.
+        """
         store = _store_path(CHECKPOINT_BASE)
         if not _store_has_head(store):
             return []

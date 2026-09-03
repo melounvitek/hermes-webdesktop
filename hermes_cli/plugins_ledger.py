@@ -30,6 +30,7 @@ class PluginRegistration:
     # Process-global host infrastructure (e.g. dashboard-auth providers): kept out of ``_registration_order``
     # so unload-all cannot dispose it, but still disposed by a *targeted* unload and evicted on force
     # re-discovery when the plugin no longer re-registers it.
+    # See #91701.
     persistent: bool = False
     _disposed: bool = field(default=False, init=False, repr=False)
     _on_dispose: Optional[Callable[["PluginRegistration"], None]] = field(default=None, init=False, repr=False)
@@ -58,7 +59,10 @@ class PluginLedgerMixin:
     ) -> PluginRegistration:
         """Record one registration under its canonical plugin key. ``persistent`` ones (process-global host
         infrastructure) stay in the ownership ledger for attribution but NOT in ``_registration_order``, so a
-        routine unload cannot dispose them; the handle still releases on explicit ``dispose()``."""
+        routine unload cannot dispose them; the handle still releases on explicit ``dispose()``.
+
+        See #91701.
+        """
         registration = PluginRegistration(
             kind=kind, key=key, release=release, plugin_key=manifest_key(manifest), persistent=persistent)
         registration._on_dispose = lambda disposed: self._forget_registrations([disposed])
@@ -89,7 +93,12 @@ class PluginLedgerMixin:
     def _evict_stale_persistent_registrations(self) -> None:
         """After re-discovery, dispose parked persistent handles whose plugin did not re-register the same
         ``(kind, key)``. Re-registered ones are dropped WITHOUT disposing — the same object re-registered would
-        pass the identity check and evict the live entry."""
+        pass the identity check and evict the live entry.
+
+        Persistent registrations (process-global host infrastructure such as dashboard-auth providers)
+        survive an unload-all by design (#91701); ``_unload_scoped`` parks their handles in
+        ``_persistent_carryover``. After a re-discovery pass, three cases exist for each parked handle:
+        """
         if not self._persistent_carryover:
             return
         parked, self._persistent_carryover = self._persistent_carryover, []
@@ -197,6 +206,7 @@ class PluginLedgerMixin:
             # Persistent registrations are absent from _registration_order (unload-all keeps them), but a
             # *targeted* unload is the disable/uninstall path: a disabled auth plugin's provider must NOT stay
             # live process-wide.
+            # See #91701.
             registrations.extend(
                 r for key in target_keys for r in self._ownership_ledger.get(key, []) if r.persistent and r.active
             )

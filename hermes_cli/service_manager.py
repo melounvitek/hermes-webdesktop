@@ -83,6 +83,12 @@ def _s6_running() -> bool:
     (``resolve()`` silently yields the literal ``exe``), which made runtime registration inert in
     production. Probe the world-readable ``/proc/1/comm`` AND ``/run/s6/basedir`` — either alone
     can false-positive.
+
+    The obvious probe — ``Path('/proc/1/exe').resolve()`` — only works as root: for any other UID, the
+    symlink at ``/proc/1/exe`` is unreadable and ``resolve()`` silently returns the path unchanged, so the
+    resolved name is the literal ``"exe"`` and detection always fails. Since every Hermes runtime call
+    inside the container drops to hermes via ``s6-setuidgid``, that silent failure made the entire
+    service-manager runtime-registration path inert in production (PR #30136 review).
     """
     try:
         comm = Path("/proc/1/comm").read_text(encoding="utf-8").strip()
@@ -303,6 +309,15 @@ def _seed_supervise_skeleton(svc_dir: Path) -> None:
     its chown/chmod fix-up, so seeding before ``s6-svscanctl -a`` makes s6-supervise inherit our
     ownership. ``log/`` gets the same skeleton (its own supervise instance) or unregister teardown
     EACCESes on the logger. Idempotent: existing entries (possibly live FIFOs) are left untouched.
+
+    The PR #30136 review surfaced this as a real product gap: the entire S6ServiceManager lifecycle
+    (``register/start/stop/unregister _profile_gateway``) was inert in production because every operation is
+    dispatched as the hermes user.
+    Reference --------- Discussed at length on the skarnet `skaware` mailing list in 2020
+    (`<http://skarnet.org/lists/skaware/1424.html>`_); see also just-containers/s6-overlay#130. The
+    pre-creation pattern was historically called out as forward-compatibility-fragile, but the EEXIST
+    handling in s6-supervise has been stable since 2015 — it's the same pattern ``s6-svperms`` and
+    ``fix-attrs.d`` rely on.
     """
 
     def _mkdir_owned(path: Path, mode: int) -> None:
@@ -393,6 +408,17 @@ class S6ServiceManager:
         profile and ``-p default`` would look up ``profiles/default/``. Port comes from the
         profile's own env (``API_SERVER_PORT``, default 8642); two profiles that both leave it
         unset collide.
+
+        Port selection: the gateway binds the port resolved by ``gateway/config.py`` from the profile's own
+        environment — ``API_SERVER_PORT`` (or ``platforms.api_server.extra.port`` in that profile's
+        ``config.yaml``), defaulting to 8642. There is no ``[gateway] port`` key and no Python-side
+        allocator: because each supervised profile gateway loads its own ``HERMES_HOME``, two profiles that
+        both leave the port unset will both try to bind 8642 — give each profile a distinct
+        ``API_SERVER_PORT`` in its ``.env``. Previously this method took a ``port`` parameter that was
+        passed in but never substituted into the rendered script (carried for "API parity" with a
+        deterministic SHA-256 allocator in ``hermes_cli.profiles._allocate_gateway_port``). PR #30136 review
+        item I5 retired both the allocator and the parameter because they were dead code through the entire
+        stack.
         """
         lines = [
             "#!/command/with-contenv sh",
@@ -432,7 +458,14 @@ class S6ServiceManager:
     def _render_finish_script() -> str:
         """Finish script: exit 78 (EX_CONFIG, fatal config) and clean exit 0 (intentional stop —
         restarting would turn every normal exit into a reconnect storm) both map to 125 so s6 stops
-        restarting; only other non-zero exits let s6 restart normally."""
+        restarting; only other non-zero exits let s6 restart normally.
+
+        When the gateway exits with EX_CONFIG (78) — a fatal configuration error such as a token collision
+        or no messaging platforms — we tell s6-supervise to stop restarting by exiting 125 (permanent
+        failure). A clean exit 0 is an intentional stop, not a crash: restarting after it turns any normal
+        gateway exit into a reconnect loop (the ashriel-discord storm in #76435 — 1,000+ connections and a
+        provider token reset). See #51228, #76435.
+        """
         from gateway.restart import GATEWAY_FATAL_CONFIG_EXIT_CODE
         code = GATEWAY_FATAL_CONFIG_EXIT_CODE
         return (
@@ -465,6 +498,7 @@ class S6ServiceManager:
             # chown/unlink hermes-writable volume paths from this restartable root-context script:
             # an unprivileged user can race a pathname op through a symlink swap (CWE-59/CWE-367).
             # Parent logs/gateways is seeded hermes-owned at stage2 boot (test_log_dir_seed.py).
+            # See #45258.
             f'if [ "$(id -u)" = 0 ]; then\n'
             f'  s6-setuidgid hermes mkdir -p "$log_dir"\n'
             f'  s6-setuidgid hermes rm -f "$log_dir/lock"\n'

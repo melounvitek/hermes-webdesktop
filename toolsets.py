@@ -262,6 +262,11 @@ def get_toolset(name: str, *, include_registry: bool = True) -> Optional[Dict[st
     and resolves registry-only (plugin/MCP) toolsets and aliases; False returns a
     copy of the static TOOLSETS entry only, so platform reverse-mapping is
     unaffected by registry additions.
+
+    Args: name (str): Name of the toolset include_registry (bool): When True (default), merge in tools that
+    plugins/overlays registered into this toolset via the registry. Platform reverse-mapping in
+    ``_get_platform_tools`` uses False so that a tool registered into a toolset but absent from a platform's
+    static composite does not drop the whole toolset from inference. See issue #49622.
     """
     toolset = TOOLSETS.get(name)
     if not include_registry:
@@ -333,7 +338,13 @@ def _plugin_platform_bundle(name: str) -> List[str]:
 
 def resolve_toolset(name: str, visited: Set[str] = None, *, include_registry: bool = True) -> List[str]:
     """Recursively resolve a toolset (and its includes) to a sorted tool-name list.
-    include_registry=False resolves the static TOOLSETS view only."""
+    include_registry=False resolves the static TOOLSETS view only.
+
+    Args: name (str): Name of the toolset to resolve visited (Set[str]): Set of already visited toolsets
+    (for cycle detection) include_registry (bool): When True (default), include tools that plugins/overlays
+    registered into a toolset. Platform reverse-mapping uses False so a registry-added tool cannot drop the
+    whole toolset from inference (see #49622 and ``_get_platform_tools``).
+    """
     external_call = visited is None
     if external_call:
         memo_key = (name, include_registry, *_registry_generation())

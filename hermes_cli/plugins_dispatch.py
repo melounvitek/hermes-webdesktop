@@ -27,6 +27,17 @@ logger = logging.getLogger("hermes_cli.plugins")
 # Intentionally unbounded: on_session_finalize/reset (last-chance flush — abandon can lose state);
 # subagent_start (observer); pre_gateway_dispatch (policy gate — neither fail mode is acceptable);
 # pre/post_approval_* (approval UX has its own timeout); kanban_* (own heartbeat/stale reclaim).
+# The goal is to stop a hung Python plugin callback from wedging the conversation loop (#76821) without
+# joining the worker (avoids the #6622 ThreadPoolExecutor shutdown hang). Hooks not listed below run
+# synchronously to completion. (on_session_start/end stay bounded — they sit on the common session-boundary
+# path.) - subagent_start — observer only; blocking delegation belongs in pre_tool_call. Lower frequency
+# than tool/LLM hooks. Abandoning is unsafe either way (fail-open skips auth-like checks; fail-closed can
+# drop legitimate messages). Prefer finish-or-exception fallthrough. - pre_approval_request /
+# post_approval_response — observers only (cannot veto); the approval UX already has its own timeout; not on
+# the tool loop hot path. - kanban_task_* — fire after the board DB commit, observers only, in
+# dispatcher/worker processes; kanban has its own heartbeat/stale reclaim. Abandon-without-join also leaves
+# a daemon thread that may still mutate shared state — safer for value-returning observers than for
+# gates/flushes.
 _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     "post_tool_call", "transform_terminal_output", "transform_tool_result", "transform_llm_output",
     "pre_llm_call", "post_llm_call", "pre_api_request", "post_api_request", "api_request_error",
@@ -228,6 +239,7 @@ class PluginDispatchMixin:
         thread.start()
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
+                # See #6622.
                 self._hook_timeout_suppressed_until[callback_key] = (
                     time.monotonic() + self._hook_timeout_suppression_seconds)
             logger.warning(
@@ -246,7 +258,12 @@ class PluginDispatchMixin:
 
     def _remove_plugin_subscriptions(self, owner: str) -> int:
         """Remove every subscription owned by *owner*; return the count. Queued envelopes re-check
-        membership per callback, so this also cancels already-snapshotted deliveries."""
+        membership per callback, so this also cancels already-snapshotted deliveries.
+
+        TODO(#64229): when the central plugin ownership ledger / registration handles land, route this
+        owner-tagged bookkeeping through that ledger so per-plugin unload cancels event subscriptions
+        alongside every other registration surface. This method is the integration seam.
+        """
         removed = 0
         with self._event_lock:
             for event in list(self._subscriptions):

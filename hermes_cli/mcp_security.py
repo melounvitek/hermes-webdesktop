@@ -92,6 +92,9 @@ def validate_mcp_server_entry(name: str, entry: dict[str, Any]) -> list[str]:
     Intentionally not a whitelist — custom commands, Python scripts, npx, uvx stay legal. Only three
     narrow shapes are blocked: (1) a known IOC anywhere in command/args/env, (2) a shell interpreter
     with network egress in its inline script, (3) a shell interpreter writing an OS persistence surface.
+
+    * a shell interpreter whose inline script writes to an OS persistence surface (June 2026 hermes-0day
+    SSH/PAM/sudoers/cron shape). See #45620.
     """
     if not isinstance(entry, dict):
         return []

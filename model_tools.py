@@ -153,6 +153,12 @@ discover_builtin_tools()
 # gateway lazy-imports this module inside its event loop; each entry point
 # (gateway/run.py, cli.py, tui_gateway, acp_adapter) runs it at startup.
 try:  # plugin tool discovery (user/project/pip plugins)
+    # MCP tool discovery (external MCP servers from config) used to run here as a module-level side effect.
+    # It was removed because discover_mcp_tools() internally uses a blocking future.result(timeout=120)
+    # wait, and the gateway lazy-imports this module from inside the asyncio event loop on the first user
+    # message — freezing Discord/Telegram heartbeats for up to 120s whenever any configured MCP server was
+    # slow or unreachable (#16856). - gateway/run.py            -> start_gateway() uses run_in_executor -
+    # acp_adapter/server.py     -> asyncio.to_thread on session init
     from hermes_cli.plugins import discover_plugins
     discover_plugins()
 except Exception as e:
@@ -192,6 +198,11 @@ _LEGACY_TOOLSET_MAP = {
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 _tool_defs_cache_lock = threading.Lock()
 # FIFO cap: 8 covers a long-lived gateway's warm set of platform/toolset combos.
+# Hard cap on memoized get_tool_definitions() results. A long-lived Gateway process sees many distinct
+# toolset/config fingerprints over its lifetime (per-session toolset sets, config edits, kanban-task
+# toggles); without a bound the cache grows unboundedly. 8 comfortably covers the warm working set (the
+# handful of distinct platform/toolset combos a gateway actually serves) while keeping the cap small.
+# (#19251)
 _TOOL_DEFS_CACHE_MAX = 8
 
 
@@ -216,6 +227,13 @@ def get_tool_definitions(enabled_toolsets: Optional[List[str]] = None, disabled_
     if not quiet_mode:
         return compute()
     cache_key = _tool_defs_cache_key(enabled_toolsets, disabled_toolsets, skip_tool_search_assembly)
+    # Cache the freshly-computed list, but hand callers a shallow copy so downstream mutations (e.g.
+    # run_agent appending memory/LCM tool schemas to self.tools) don't poison the cache. Without this, a
+    # long-lived Gateway process accumulates duplicate tool names across agent inits and providers that
+    # enforce unique tool names (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with HTTP 400.
+    # Mirrors the cache-hit path above. (issue #17335) Bound the cache with LRU eviction so a long-lived
+    # Gateway process doesn't accumulate entries unboundedly across the many distinct toolset/config
+    # fingerprints it sees over its lifetime (#19251).
     with _tool_defs_cache_lock:
         cached = _tool_defs_cache.get(cache_key) if cache_key is not None else None
     if cached is None:
@@ -312,6 +330,8 @@ def _select_tool_names(enabled_toolsets: Optional[List[str]], disabled_toolsets:
             tools.update(resolve_toolset(ts_name))
     # Disabled toolsets are always subtracted LAST, so a tool in a disabled
     # toolset is stripped even when a composite (hermes-cli) re-enables it.
+    # This ensures that even if a composite toolset (like hermes-cli) is enabled, any tools belonging to a
+    # disabled toolset are strictly stripped out. See issue #17309.
     if disabled_toolsets:
         _apply_toolset_selection(tools, disabled_toolsets, quiet_mode, disable=True)
     return tools
@@ -331,6 +351,8 @@ def _fn_def(schema: Dict[str, Any]) -> Dict[str, Any]:
 
 def _rewrite_execute_code(td: Dict[str, Any], available: set) -> Optional[Dict[str, Any]]:
     """List only sandbox tools that are actually available."""
+    # Without this, the model sees "web_search is available in execute_code" even when the API key isn't
+    # configured or the toolset is disabled (#560-discord).
     from tools.code_execution_tool import SANDBOX_ALLOWED_TOOLS, build_execute_code_schema, _get_execution_mode
     return _fn_def(build_execute_code_schema(SANDBOX_ALLOWED_TOOLS & available, mode=_get_execution_mode()))
 
@@ -488,6 +510,9 @@ def _resolve_active_context_length() -> int:
         if not model_id:
             return 0
         from agent.model_metadata import get_cached_context_length, get_model_context_length
+        # Honor explicit `model.context_length` in config.yaml — short-circuits the OpenRouter /models probe
+        # at get_model_context_length step 0, so non-OpenRouter providers don't pay the ~2-3s OpenRouter
+        # fetch at every CLI startup. See issue #46620.
         raw_ctx = model_cfg.get("context_length")
         config_ctx = raw_ctx if isinstance(raw_ctx, int) and raw_ctx > 0 else None
         provider = str(model_cfg.get("provider") or "").strip()

@@ -215,7 +215,12 @@ def terminate_pid(
 ) -> None:
     """Terminate a PID; POSIX SIGTERM/SIGKILL, Windows taskkill /T /F for force. Identity guard:
     Windows ``force`` REQUIRES a matching ``expected_start_time`` (taskkill on a recycled PID has
-    killed svchost.exe); POSIX optional, but a provided mismatch refuses the kill everywhere."""
+    killed svchost.exe); POSIX optional, but a provided mismatch refuses the kill everywhere.
+
+    On POSIX an expectation is optional, but when the caller provides one and it no longer matches the live
+    process, the kill is refused on every platform — a mismatched fingerprint always means the PID was
+    recycled. See #89614.
+    """
     if force and (_IS_WINDOWS or expected_start_time is not None):
         if expected_start_time is None:
             raise OSError(f"refusing to force-kill PID {pid} without a process start-time guard")
@@ -421,7 +426,13 @@ def _build_pid_record() -> dict:
 
 def _get_code_identity_fields() -> dict[str, Any]:
     """Code identity of THIS process for ``gateway_state.json`` (restart picked up new code?).
-    Lazy import keeps ``gateway.status`` free of ``hermes_cli`` at import time. Never raises."""
+    Lazy import keeps ``gateway.status`` free of ``hermes_cli`` at import time. Never raises.
+
+    A gateway keeps serving the module versions it imported at startup, so stamping the identity into
+    ``gateway_state.json`` lets `hermes update` (and the dashboard) prove whether a running gateway actually
+    picked up new code after the restart phase — instead of assuming it did (#88654, #69754). Never raises;
+    degrades to absent fields.
+    """
     try:
         from hermes_cli.build_info import get_code_identity
         identity = get_code_identity()
@@ -557,6 +568,14 @@ def _pid_exists(pid: int) -> bool:
         import psutil  # type: ignore
         # Best-effort zombie check: status-read failures fall through to pid_exists().
         try:
+            # A zombie (defunct) process is still in the process table, so ``psutil.pid_exists()`` returns
+            # True for it — but it is already dead: SIGKILL has no effect and it cannot be a running
+            # gateway. Treating a zombie as alive makes ``--replace`` wait for the old PID to die (it never
+            # does, until its parent reaps it), then abort with exit 1 — a silent crash loop under systemd
+            # ``Restart=always``, which respawns the gateway before reaping the previous process (issue
+            # #42126). Report zombies as dead so the takeover proceeds. Best-effort: any failure to read
+            # status (partial/stub psutil, access denied, transient race) falls through to the authoritative
+            # ``pid_exists()`` below rather than raising.
             if psutil.Process(pid).status() == psutil.STATUS_ZOMBIE:
                 return False
         except getattr(psutil, "NoSuchProcess", ()):
@@ -586,6 +605,13 @@ def _posix_is_zombie(pid: int) -> bool:
         return len(stat_fields) > 2 and stat_fields[2] == "Z"
     except FileNotFoundError:
         with contextlib.suppress(Exception):
+            # --compile-bytecode: uv does NOT write __pycache__ by default (pip does), so without it the
+            # first `import <backend>` in the foreground of a user request recompiles every module of the
+            # backend *and* its transitive deps (#100461). This covers the whole install;
+            # _warm_installed_bytecode below is the belt-and-braces pass for the spec's own roots on any
+            # tier.
+            # CREATE_NO_WINDOW on Windows — under the desktop GUI's windowless parent, this spawn otherwise
+            # flashes a console (#56747).
             r = subprocess.run(
                 ["ps", "-o", "state=", "-p", str(pid)],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
@@ -892,7 +918,15 @@ def resolve_gateway_liveness(
     in another container); (3) LOCAL runtime status PID validated against the live process table
     with ``expected_home`` (a recycled PID of another profile never counts; pass ``runtime`` if
     already read). ``*_probe``/``runtime_reader`` are the dashboard's injection/test seam. A rung
-    that raises degrades to the next (never 500 a status endpoint) and sets ``probe_error``."""
+    that raises degrades to the next (never 500 a status endpoint) and sets ``probe_error``.
+
+    Before this existed, ``/api/status`` and ``/api/messaging/platforms`` each open-coded their own ladder
+    and disagreed on the same page load — the sidebar read "running" while the Channels page rendered "The
+    gateway is not running."  Three deployments hit it: a cross-container gateway (only ``/api/status`` ran
+    the HTTP health probe), a profile-scoped dashboard (only ``/api/status`` passed the profile's paths, so
+    messaging borrowed another profile's runtime state — issue #71211), and a launch-service-managed gateway
+    with no PID file (only some callers used the runtime-status fallback).
+    """
     _pid_probe = pid_probe or (get_running_pid_cached if use_cache else get_running_pid)
     _runtime_reader = runtime_reader or read_runtime_status
     _runtime_pid_probe = runtime_pid_probe or get_runtime_status_running_pid
@@ -1024,6 +1058,12 @@ def acquire_scoped_lock(
         existing_pid = _pid_from_record(existing)
         # Our own PID: always self-reacquire. start_time guards reuse of OTHER PIDs; requiring
         # equality here rejects reconnects when the on-disk record has start_time null.
+        # Same live PID as this process: always self-reacquire. ``start_time`` is a PID-reuse guard for
+        # *other* PIDs; it cannot distinguish two processes that share the caller's own PID (impossible
+        # while we are alive). Requiring start_time equality here falsely rejects reconnects when the
+        # on-disk record has ``start_time: null`` (older writers / psutil failure at first write) while the
+        # freshly built record has a real value — the gateway then reports itself as the foreign squatter of
+        # its own token (#81468).
         if existing_pid == os.getpid():
             _write_json_file(lock_path, record)
             return True, existing
@@ -1080,6 +1120,8 @@ def release_all_scoped_locks(
 # SIGTERM; the target's shutdown handler treats a matching marker as a planned takeover and
 # exits 0. Unlinked once consumed, so a stale one can grief at most one future shutdown on
 # the same PID, within _TAKEOVER_MARKER_TTL_S.
+# When a new gateway starts with ``--replace``, it SIGTERMs the existing gateway so it can take over the bot
+# token. ``hermes.service`` + ``hermes- gateway.service``). See #5646.
 _TAKEOVER_MARKER_FILENAME = ".gateway-takeover.json"
 _TAKEOVER_MARKER_TTL_S = 60  # Marker older than this is treated as stale
 _PLANNED_STOP_MARKER_FILENAME = ".gateway-planned-stop.json"
@@ -1137,6 +1179,7 @@ def _consume_pid_marker_for_self(path: Path, *, ttl_s: int) -> bool:
     # Cross-profile guard: new markers name the verified TARGET home, which permits a deliberate
     # cross-HERMES_HOME --replace while ignoring a marker accidentally written into another
     # profile's directory. Legacy markers have no target field: keep the same-replacer-home rule.
+    # See #29092.
     our_home = _get_process_hermes_home()
     target_home = record.get("target_hermes_home")
     if target_home is not None:

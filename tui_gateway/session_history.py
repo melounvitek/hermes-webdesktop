@@ -14,7 +14,15 @@ def _active_image_routing_identity(agent: Any) -> tuple[str, str]:
 
 def _build_image_ref_message(user_text: str, image_paths: list[str]) -> str:
     """Reference attached images by path so the agent analyzes them in-loop with ``vision_analyze``: pre-
-    analyzing with the auxiliary vision model blocked submit 60-90s/photo and poisoned auto-titles."""
+    analyzing with the auxiliary vision model blocked submit 60-90s/photo and poisoned auto-titles.
+
+    This used to pre-analyze every image with the auxiliary vision model *before* the turn was dispatched
+    (``_enrich_with_attached_images``): serial blocking calls on the submit path — 60-90s per large photo —
+    with failures silently swallowed and an interrupt during the window killing the turn with zero API calls
+    (#83291). It also prepended the vision description to the first user message, poisoning session
+    auto-titles (#82339). The CLI never gates turn dispatch on vision like this, which is why the same
+    message was seconds there and minutes on desktop.
+    """
     prefix = "\n\n".join(
         f"[The user attached an image: {p.name}]\n[Examine it with the vision_analyze tool using image_url: {p}]"
         for p in map(Path, image_paths) if p.exists()
@@ -120,7 +128,11 @@ def _is_text_only_busy_payload(content: Any) -> bool:
 def _is_display_hidden_marker(role: str | None, text: str) -> bool:
     """Gateway notices (model-switch, personality) persist as role=user ``[System: …]`` rows so strict providers
     accept them mid-history; they must never render as a user bubble. Filtering in this one projection hides
-    them everywhere (raw marker stays in ``session["history"]``) and keeps the desktop's user ordinals stable."""
+    them everywhere (raw marker stays in ``session["history"]``) and keeps the desktop's user ordinals stable.
+
+    It also removes the stored marker from the payload the desktop reconciles against, so it can no longer
+    shift user-message ordinals and duplicate the optimistic prompt (#67603).
+    """
     return role == "user" and text.lstrip().startswith("[System:")
 
 
@@ -199,6 +211,7 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
             continue
         msg = {"role": role, "text": content_text}
         # Authoring time (Unix seconds) for display.timestamps; display-only.
+        # Display-only: never fed back into model context. See #41531.
         ts = m.get("timestamp")
         if isinstance(ts, (int, float)) and ts > 0:
             msg["timestamp"] = float(ts)
@@ -333,7 +346,19 @@ def _strip_prompt_echo(message: str, prompt: Any) -> str:
 def _turn_failure_detail(error: Any, reason: Any = None, prompt: Any = None) -> str:
     """Why a turn failed, for the ``tui turn finished`` bookend: ``""`` when nothing to say, else a fragment with
     its own leading space. ``redact_sensitive_text`` removes credentials; ``_strip_prompt_echo`` removes a 4xx
-    body quoting ``prompt`` back. This record may gain failure detail, never the user's own content."""
+    body quoting ``prompt`` back. This record may gain failure detail, never the user's own content.
+
+    86865 added the bookend to trace compression rotations, so it logs identities and a coarse ``status``
+    and deliberately logs no content. 89117 is what the missing cause costs: a report consisting of two
+    lines reading ``status=error error_retained=True duration=0.9s`` with no way to tell a provider 4xx from
+    a budget wall from a crashed finalizer. The returned-error path -- the one a 0.9 s failure almost always
+    takes -- emits no other log line at all; only the exception path prints to stderr, which is why the
+    quiet failures are the ones that get filed. See #86865, #89117.
+    Content discipline follows #86865's, and it takes two separate steps because it is two separate
+    contracts. It does nothing about a 4xx body that quotes the request back, because ordinary private prose
+    is not pattern-shaped -- so ``_strip_prompt_echo`` removes that separately, using the submitted
+    ``prompt`` itself as the thing to look for.
+    """
     reason_text = str(reason or "").strip()
     message = str(error or "").strip()
     if isinstance(error, BaseException):

@@ -172,6 +172,7 @@ def _maybe_title_session_at_turn_start(agent: Any, messages: List[Any]) -> None:
         main_runtime = {
             k: getattr(agent, k, None) for k in ("model", "provider", "base_url", "api_key", "api_mode")
         }
+        # See #19027.
         maybe_auto_title(
             session_db,
             session_id,
@@ -197,7 +198,17 @@ def reanchor_current_turn_user_idx(messages: List[Any], user_message: Any) -> in
 
     Prefers the LAST user message whose content exactly matches this turn's text, else
     the last user-originated turn; compaction handoffs are never the fallback.
-    Returns -1 when there is no user-originated message."""
+    Returns -1 when there is no user-originated message.
+
+    Compression replaces list entries with fresh copies (and may append a todo-snapshot user message or a
+    restored user turn AFTER the surviving copy of the current turn's message), so a pre-compression index
+    is meaningless. Prefer the LAST user message whose content exactly matches this turn's text — the
+    surviving copy in the common case — so the injection stamp and the #48677 persist override can't land on
+    a todo-snapshot or historical row. Fall back to the last *user-originated* turn when no exact match
+    survives (merge-summary-into-tail rewrites the content but the trackers still need a live anchor).
+    Compaction handoffs must never become the fallback anchor (#80622) — they are reference-only
+    scaffolding, not the active ask.
+    """
     from agent.context_compressor import user_originated_turn_view
 
     fallback = -1
@@ -225,11 +236,24 @@ def compression_made_progress(
     orig_len: int, new_len: int, orig_tokens: int, new_tokens: int
 ) -> bool:
     """``True`` if a compression pass materially reduced the request: fewer rows, or a
-    >5% token cut with the same rows (same floor as the overflow-handler retry)."""
+    >5% token cut with the same rows (same floor as the overflow-handler retry).
+
+    Compression can succeed by summarising message contents — reducing the estimated request token count —
+    without reducing the message row count. Treating row count as the sole progress signal false-positives
+    on size-only wins and surfaces a misleading "Cannot compress further" failure even when post-compression
+    tokens are well below the model context window. See issue #39548 for an observed case: 220 → 220
+    messages, ~288k → ~183k tokens on a 1M-context model still triggered auto-reset.
+    The token reduction must be *material* (>5%) to count as progress — the same floor the overflow-handler
+    retry path uses (conversation_loop.py, 39550) — so a sub-5% wobble doesn't keep the multi-pass loop
+    spinning. See #39550.
+    """
     return new_len < orig_len or (orig_tokens > 0 and new_tokens < orig_tokens * 0.95)
 
 
 # Back-compat alias: gateway callers and tests patch ``_compression_made_progress``.
+# Back-compat alias: this predicate was module-private until the gateway's session-hygiene recovery gate
+# needed the same semantics (#79624). Keeping the old name bound means existing callers and any test that
+# patches ``_compression_made_progress`` continue to work unchanged.
 _compression_made_progress = compression_made_progress
 
 
@@ -296,7 +320,12 @@ def _should_idle_compact(
     produced (``ContextCompressor.last_compression_rough_tokens``, same rough shape as
     ``tokens``) — raises the floor to ``last + floor_tokens`` so the transcript must gain a
     floor's worth of NEW content first. ``0`` (nothing compacted yet / counter reset) keeps
-    the original semantics exactly."""
+    the original semantics exactly.
+
+    A session that compacted to well above that target therefore stays above it forever, so every later idle
+    resume re-runs a full summarisation over a transcript that has not grown — minutes of silently blocked
+    prompt on a slow route, reclaiming nothing (#97239).
+    """
     if not enabled or idle_after_seconds <= 0 or idle_gap_seconds < idle_after_seconds or cooldown_active:
         return False
     effective_floor = floor_tokens
@@ -350,6 +379,12 @@ def _publish_runtime_main(agent: Any) -> None:
         from agent.prompt_cache_scope import resolve_prompt_cache_scope_safe
         # Rotation-stable prompt-cache scope (lineage root), memoized per segment; a new
         # session uses the physical id until build_api_kwargs re-resolves.
+        # Memoized per segment on the agent, so this is a DB walk at most once per segment — except a
+        # brand-new session whose row lands later in turn setup (_ensure_db_session); that first turn falls
+        # back to the physical id here and the first build_api_kwargs re-resolves. Stays valid through a
+        # mid-turn compression rotation because the lineage root is by definition rotation-invariant
+        # (#79017). Resolved with the never-raising variant OUTSIDE the argument list, so a resolution
+        # failure can only lose the scope — never the whole runtime binding.
         _cache_scope = resolve_prompt_cache_scope_safe(agent) or ""
         set_runtime_main(
             _str_attr(agent, "provider"), _str_attr(agent, "model"),
@@ -569,6 +604,8 @@ def _collect_pre_llm_call_context(
             sender_id=getattr(agent, "_user_id", None) or "",
         )
         try:
+            # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
+            # turn's prompt. Ported from openai/codex PR #21069 ("Spill large hook outputs from context").
             from tools.hook_output_spill import (
                 get_spill_config as _spill_cfg, spill_if_oversized as _spill_if_oversized
             )
@@ -738,6 +775,11 @@ def build_turn_context(
 
     # Tag log records on this thread with the session ID for ``hermes logs``; bind the
     # skill write-origin ContextVar; restore the primary runtime after a fallback turn.
+    # NOTE: the DB session row is created later, AFTER the system prompt is restored/built (see
+    # _ensure_db_session() below the system-prompt block). Creating it here — before _cached_system_prompt
+    # is populated — inserts a row with system_prompt=NULL on a fresh API/gateway agent that carries
+    # client-managed history, which then trips the "stored system prompt is null; rebuilding from scratch"
+    # warning and a needless first-turn prefix cache miss. (Issue #45499.)
     set_session_context(agent.session_id)
     set_current_write_origin(getattr(agent, "_memory_write_origin", "assistant_tool"))
     agent._restore_primary_runtime()

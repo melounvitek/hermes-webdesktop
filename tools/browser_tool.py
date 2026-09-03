@@ -49,6 +49,7 @@ def __getattr__(name: str):
 # Env keys re-added to the agent-browser subprocess AFTER credential stripping.
 # agent-browser is a Node process loading npm deps: a compromised transitive
 # dependency could read every Hermes secret from process.env.
+# Strip by default, then re-add only the browser-backend keys the worker legitimately needs. See #29157.
 _BROWSER_PASSTHROUGH_KEYS: tuple[str, ...] = (
     "BROWSERBASE_API_KEY", "BROWSERBASE_PROJECT_ID", "BROWSER_USE_API_KEY",
     "FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "FIRECRAWL_BROWSER_TTL",
@@ -84,6 +85,8 @@ except Exception:
     _sensitive_query_param_name = lambda url: None  # noqa: E731 — best-effort fallback
 # Browser-provider ABC + registry; per-vendor providers live under
 # ``plugins/browser/<vendor>/``. Legacy class names are re-exported as shims.
+# The dispatcher consults the registry; the legacy class names are re-exported below as backward-compat
+# shims for callers that import them from this module. See #25214.
 from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
 from agent.browser_registry import get_provider as _registry_get_browser_provider  # noqa: F401  (test-patchable)
 try:
@@ -161,6 +164,8 @@ AGENT_BROWSER_NPX_SPEC = "agent-browser@^0.26.0"
 # Process caches (``_cached_X`` + ``_X_resolved`` pairs) for config-derived lookups;
 # reset by ``cleanup_all_browsers``. Written/read by the sibling modules via the origin.
 _cached_command_timeout: Optional[int] = None
+# Flip the resolved flag BEFORE nulling the cache so a concurrent reader never sees ``resolved=True`` with
+# ``cache=None`` (#14331).
 _command_timeout_resolved = False
 _cached_snapshot_threshold: Optional[int] = None
 _snapshot_threshold_resolved = False
@@ -440,13 +445,16 @@ _session_last_activity: Dict[str, float] = {}
 # Owner Hermes home per session: the janitor is one process-global thread, so each
 # teardown must re-enter the OWNING profile's scope (copy_context at spawn would
 # pin the first profile's secrets onto every other profile's teardown).
+# See #86402.
 _session_owner_homes: Dict[str, str] = {}
 # Consecutive janitor failures per session; force-reaped after MAX_INACTIVITY_CLEANUP_FAILURES.
+# See #100738.
 _cleanup_failures: Dict[str, int] = {}
 MAX_INACTIVITY_CLEANUP_FAILURES = 3
 
 # Session keys flagged suspect after a command timeout (written lock-free by
 # mark_suspect; consumed by ensure_healthy() at next use, which recycles).
+# See #72205.
 _suspect_browser_sessions: Dict[str, str] = {}
 
 
@@ -689,6 +697,12 @@ def _url_policy_error(url: str, *, auto_local: bool = False) -> Optional[dict]:
             f"({sensitive_query_key}). Cloud browser backends are third-party "
             "readers; use a local browser/CDP session or remove the sensitive "
             "query parameter before navigating.")
+    # Always-blocked floor: cloud metadata / IMDS endpoints are denied regardless of backend, hybrid
+    # routing, or allow_private_urls. There's no legitimate agent use case for navigating to 169.254.169.254
+    # / metadata.google.internal / ECS task metadata via a browser, and routing those to a local Chromium
+    # sidecar on an EC2/GCP/Azure host exfiltrates IAM credentials (#16234). The floor is UNCONDITIONAL — it
+    # must fire for every backend, including the pure-local headless Chromium and off-host CDP cases (a
+    # local Chromium on a cloud VM still reaches the host IMDS).
     if _is_always_blocked_url(url):
         return _err("Blocked: URL targets a cloud metadata endpoint")
     if not local and not auto_local and not _allow_private_urls() and not _is_safe_url(url):

@@ -22,6 +22,7 @@ from hermes_time import now as _hermes_now
 # Optional test override. Production resolves the path at transaction time so multiplexed profile
 # ticks (set_hermes_home_override) cannot leak one profile's notepad rows into the import-time home
 # — and remove_job's clear_notepad cannot wipe the wrong profile's DB.
+# Same pattern as cron/executions.py. See #86519.
 NOTEPAD_FILE: Optional[Path] = None
 MAX_VALUE_BYTES = 16 * 1024
 MAX_KEY_CHARS = 128

@@ -138,6 +138,8 @@ def upgrade_managed_npm(npm: str, npm_range: str, *, prefix: Path, quiet: bool =
         print(f"→ Upgrading Hermes-managed npm to satisfy {npm_range}…", flush=True)
     # The desktop app's Node processes execute from this tree; an in-place upgrade while in use
     # fails with PermissionError on npm.cmd. Defer — the upgrade re-triggers on the next resolution.
+    # Defer instead of forcing the write — the upgrade re-triggers on the next resolution (e.g. the next
+    # update once the app is closed). See #80926.
     if managed_node_tree_in_use():
         if not quiet:
             print(

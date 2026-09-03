@@ -146,6 +146,14 @@ FAILURE_REASON_BILLING_UNVERIFIED = "billing_unverified"
 # every model call; on Windows several processes share one rotating log behind
 # a cross-process lock, and per-selection logging stormed that lock, pegged a
 # core, and stalled the event loop (Desktop backend readiness timeouts).
+# Credential selection runs on a hot path (every model call, plus auxiliary tasks like
+# compression/moa/titles), so when a pool is empty or fully exhausted the un-throttled log fires on *every*
+# selection. On Windows several Hermes processes share one rotating log guarded by concurrent-log-handler's
+# cross-process lock; that per-selection volume storms the lock (``RuntimeError: Cannot acquire lock after
+# 20 attempts``), pegs a core, and stalls the asyncio event loop long enough to fail the Desktop backend
+# readiness handshake ("Timed out connecting to Hermes backend after 15000ms"). Logging the condition at
+# most once per window preserves the signal while removing the storm — same class of fix as the warn-once
+# dedup in #58265.
 NO_AVAILABLE_ENTRIES_LOG_THROTTLE_SECONDS = 60.0
 
 # Pool key prefix for custom OpenAI-compatible endpoints: all share
@@ -731,6 +739,8 @@ def _write_through_provider_state_to_global_root(
     a failed write-through degrades to root-stale and must never break the
     profile's own successful save. Mirrors
     ``hermes_cli.auth._write_through_xai_oauth_to_global_root``.
+
+    See #48415.
     """
     try:
         global_path = _guarded_global_root(auth_mod._global_auth_file_path())
@@ -2717,6 +2727,7 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
                 # The pool may be keyed under the durable ``providers.<key>``
                 # slug or legacy ``custom:<name>``; accept any candidate, or
                 # seeding is skipped when the pool holds the other identity.
+                # Check if this model's base_url matches our custom provider. See #100413.
                 matched_keys = {
                     str(key).strip().lower() for key in custom_provider_pool_key_candidates(model_base_url)
                 }

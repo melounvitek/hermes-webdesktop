@@ -185,7 +185,10 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     CLI approval callback (``tools.terminal_tool.set_approval_callback``) directly, not
     ``prompt_dangerous_approval``: that wrapper falls back to ``input()`` (deadlock-prone under
     prompt_toolkit; silent deny in gateway sessions) and turns callback errors into a deny, whereas
-    here a missing channel or failed prompt must stage instead."""
+    here a missing channel or failed prompt must stage instead.
+
+    See #15216.
+    """
     try:
         from tools.terminal_tool import _get_approval_callback
     except Exception:

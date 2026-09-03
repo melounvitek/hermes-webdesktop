@@ -297,6 +297,13 @@ class HomeAssistantAdapter(BasePlatformAdapter):
 # -- Standalone (out-of-process) sender — cron deliver=homeassistant ---------
 
 
+# ────────────────────────────────────────────────────────────────────────── Plugin migration glue (#41112 /
+# #3823) Added when the Email adapter moved from gateway/platforms/email.py into this bundled plugin.
+# register() exposes the platform via the registry, replacing the Platform.EMAIL elif in gateway/run.py, the
+# _PLATFORM_CONNECTED_CHECKERS entry in gateway/config.py, the _PLATFORMS["email"] static dict in
+# hermes_cli/gateway.py, and the _send_email dispatch in tools/send_message_tool.py. EMAIL_*
+# env→PlatformConfig seeding stays in core.
+# ──────────────────────────────────────────────────────────────────────────
 async def _standalone_send(
     pconfig, chat_id: str, message: str, *,
     thread_id: Optional[str] = None, media_files: Optional[list] = None, force_document: bool = False,

@@ -35,6 +35,10 @@ logger = logging.getLogger("tools.transcription_tools")
 # (always wins) > stt.providers.<name> command > plugin TranscriptionProvider >
 # "No STT provider available". The single-env-var HERMES_LOCAL_STT_COMMAND escape
 # hatch stays untouched via the built-in ``local_command`` path.
+# Lets any whisper CLI / ASR CLI / curl pipeline become an STT backend with zero Python. 1. Built-in
+# (``local``, ``local_command``, ``groq``, ``openai``, ``mistral``, ``xai``)              → native handler.
+# **Always wins.** 2. 3. 4. Use the command-provider registry when you want MULTIPLE shell-driven STT
+# engines, or you want a named provider you can pick via ``stt.provider`` in config.yaml. See #17843.
 DEFAULT_COMMAND_STT_TIMEOUT_SECONDS = 300
 DEFAULT_COMMAND_STT_LANGUAGE = "en"
 DEFAULT_COMMAND_STT_OUTPUT_FORMAT = "txt"
@@ -121,6 +125,9 @@ def _unregistered_stt_provider_error(provider: str) -> Dict[str, Any]:
         error_type="provider_not_registered")
 
 
+# --------------------------------------------------------------------------- Plugin provider dispatch
+# (issue follow-up to #30398 — STT pluggability)
+# ---------------------------------------------------------------------------
 def _dispatch_to_plugin_provider(
     file_path: str, provider: str, stt_config: Optional[Dict[str, Any]] = None, *,
     model: Optional[str] = None, language: Optional[str] = None, prompt: Optional[str] = None,
@@ -180,6 +187,9 @@ def _dispatch_to_plugin_provider(
 
 
 # Fields a pre_transcription hook may mutate; ``file_path`` is read-only (logged and dropped).
+# --------------------------------------------------------------------------- pre_transcription plugin hook
+# (issue #64168 — STT prompt/vocab threading)
+# ---------------------------------------------------------------------------
 _PRE_TRANSCRIPTION_MUTABLE_FIELDS = ("prompt", "language", "model")
 
 # Whisper-family models only use the final ~224 tokens of the prompt; longer values

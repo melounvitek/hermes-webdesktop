@@ -258,6 +258,10 @@ class PassthroughForward:
     # None keeps the legacy ``agent:main`` namespace. Without it a relayed Discord
     # slash-command/button/modal fell back to agent:main even when the equivalent
     # plain message routed to the right profile.
+    # Mirrors the ``profile`` field _event_from_wire already carries on the ``inbound`` frame's
+    # SessionSource (#60586) — the connector stamps it when NAS resolves the target profile for a
+    # Team-Gateway interaction; absent for a single-profile gateway, where it stays None and session keys
+    # keep the legacy ``agent:main`` namespace.
     profile: Optional[str] = None
 
 

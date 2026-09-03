@@ -54,6 +54,14 @@ from hermes_logging import set_session_context
 # patch them here, so they must stay bound in this namespace.
 from agent.conversation_compression import conversation_history_after_compression  # noqa: F401
 from agent.model_metadata import (  # noqa: F401
+    # ----------------------------------------------------------------- Session hygiene: auto-compress
+    # pathologically large transcripts Long-lived gateway sessions can accumulate enough history that every
+    # new message rehydrates an oversized transcript, causing repeated truncation/context failures. Detect
+    # this early and compress proactively — before the agent even starts. (#628) Token source priority: 1.
+    # Actual API-reported prompt_tokens from the last turn (stored in session_entry.last_prompt_tokens) 2.
+    # Rough char-based estimate (str(msg)//4). Overestimates by 30-50% on code/JSON-heavy sessions, but that
+    # just means hygiene fires a bit early — safe and harmless.
+    # -----------------------------------------------------------------
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
     save_context_length,
@@ -91,7 +99,13 @@ def _midturn_request_pressure_tokens(
     """Token figure the mid-turn pre-API compression guard compares: the pruned
     native-Responses estimate when native compaction eligibility is proven (the generic
     estimate overstates the wire on compacted sessions, #96995), else messages+tools.
-    The system prompt is counted exactly once."""
+    The system prompt is counted exactly once.
+
+    When the upcoming request is eligible for native Responses compaction the transport will
+    checkpoint-prune the payload before sending, so the generic durable-history estimate overstates the wire
+    by orders of magnitude on a compacted session and fires a 600s local compression the main request never
+    needed (#96995).
+    """
     try:
         from agent.codex_responses_adapter import estimate_native_responses_preflight_tokens
         native = estimate_native_responses_preflight_tokens(
@@ -182,11 +196,18 @@ def _should_skip_model_call_for_reference_handoff(
 
 # Fallback final_response for the sole-handoff skip (#80622); finalize_turn appends it as a
 # fresh assistant row, so it must not replay the last assistant text.
+# Deliberately NOT a replay of the last assistant text: finalize_turn's non-assistant-tail chokepoint
+# (#43849) appends final_response as a fresh assistant row, so recovering the previous turn's prose here
+# would duplicate it in the durable transcript AND re-deliver it to the user as if it were this turn's
+# answer. A short status is honest and idempotent.
 _HANDOFF_SKIP_FINAL_RESPONSE = (
     "Context was compacted. The previous response is complete — awaiting your next message."
 )
 
 # Terminal final_response when compression timed out while the request was still oversized (#98722).
+# Terminal final_response for a turn ended because context compression hit its host progress-aware timeout
+# while the request was still oversized (#98722, salvaged from #98741). Sending the unchanged request would
+# only bounce off the provider's overflow error and re-enter compression in the same turn.
 _COMPRESSION_TIMEOUT_FINAL_RESPONSE = (
     "Context compression timed out without reducing this conversation. No messages were "
     "dropped. Start a fresh session with /new, or check auxiliary.compression before retrying /compress."
@@ -228,6 +249,12 @@ def _is_interpreter_shutdown_error(exc: Exception) -> bool:
     """True for a fatal interpreter-shutdown RuntimeError. The RuntimeError type gate
     stays here: a ValueError carrying similar text must not match (#93269)."""
     if isinstance(exc, RuntimeError):
+        # ── Interpreter finalization: abandon immediately ── The process is exiting (TUI quit, SIGTERM,
+        # one-shot done) while this turn — typically the post-turn review fork's daemon thread — is
+        # mid-flight. Retries, credential rotation, and fallbacks are all futile ("cannot schedule new
+        # futures..."), and the buffered ⚠️/❌ retry trace spams the shell after the TUI already exited. End
+        # the turn with a single log line: no print, no traceback, no debug dump, no retry. Same class as
+        # cron delivery (#55924/#58720) and concurrent tool submission — shared predicate.
         from tools.interpreter_shutdown import interpreter_shutting_down
         return interpreter_shutting_down(exc)
     return False
@@ -296,6 +323,12 @@ def _apply_active_turn_redirect(agent: Any, messages: List[Dict[str, Any]], text
     # Transcript shows the user's own words; the provider replays the scaffolded form.
     append_message(messages, {"role": "user", "content": text, "api_content": correction})
 
+    # Stateful scrubber for <memory-context> spans split across stream deltas (#5719).  sanitize_context()
+    # alone can't survive chunk boundaries because the block regex needs both tags in one string.
+    # Stateful scrubber for reasoning/thinking tags in streamed deltas (#17924). Replaces the per-delta
+    # _strip_think_blocks regex that destroyed downstream state (e.g. MiniMax-M2.7 streaming '<think>' as
+    # delta1 and 'Let me check' as delta2 — the regex erased delta1, so downstream state machines never
+    # learned a block was open and leaked delta2 as content).
     agent._current_streamed_assistant_text = ""
     agent._stream_needs_break = True
 
@@ -991,6 +1024,14 @@ def _provider_overflow_exhausted_result(
         "remains over threshold at ~%s tokens.",
         agent.log_prefix, max_compression_attempts, f"{request_pressure_tokens:,}",
     )
+    # Host progress-aware timeout (#98722, salvaged from #98741): the provider proved the request does not
+    # fit, but this recovery pass spent the full wait budget without a committed summary. Re-sending the
+    # unchanged request would bounce off the same overflow error and re-enter compression in the same turn.
+    # End the turn with the typed recovery contract instead — transcript intact, no further doomed provider
+    # sends.
+    # Prior <3 retries (or an earlier successful tool batch) leave a tool-result tail. Closing it here
+    # matches interrupt aborts (#48879 / #52592) so the next user turn is not tool→user for strict
+    # providers.
     agent._persist_session(messages, conversation_history)
     return _partial_turn_result(
         "Context length exceeded: compression could not reduce the rebuilt request below the safe threshold.",

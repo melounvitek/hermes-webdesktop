@@ -334,7 +334,11 @@ class _VikingClient:
     def health_payload(self) -> dict:
         """``GET /health``, anonymous first so credentials never reach an unknown host.
         Hosted OpenViking requires auth on /health: when an API key is configured and the
-        anonymous call gets 401/403, retry once with the key (no tenant headers)."""
+        anonymous call gets 401/403, retry once with the key (no tenant headers).
+
+        Prefer an anonymous probe so credentials are never sent to an unknown host during identity checks.
+        See #78410.
+        """
         try:
             return self._anonymous_json("/health")
         except _OpenVikingHTTPError as exc:
@@ -969,6 +973,10 @@ def _start_local_openviking_server(endpoint: str) -> tuple[str, str]:
         # Strip PYTHONPATH: the Desktop backend puts the Hermes venv on it, which
         # would shadow openviking-server's own site-packages (and on Windows lock
         # the Hermes venv's .pyd files, breaking `hermes update`).
+        # Do not let the server child inherit this process's PYTHONPATH. If inherited, openviking-server
+        # would import aiohttp and friends from the Hermes venv instead of its own (its venv's site-packages
+        # are shadowed because PYTHONPATH precedes them) — and on Windows the loaded DLLs then lock the
+        # Hermes venv, aborting `hermes update` with access-denied on .pyd files. (#78153)
         child_env = os.environ.copy()
         child_env.pop("PYTHONPATH", None)
         with log_path.open("ab") as log_file:
@@ -1206,11 +1214,16 @@ class OpenVikingMemoryProvider(MemoryProvider):
         self._session_id, self._turn_count, self._hermes_home = "", 0, ""
         # (conn snapshot, user): keyed on the snapshot so every client built from it
         # shares the resolved user and a /reload invalidates it.
+        # Server-asserted user space for explicit-uid URIs (#91995). Key the cache on the connection
+        # snapshot so all clients built from the same snapshot share the resolved user. /reload can swap
+        # endpoint, credentials, and identity on this provider instance — a different snapshot invalidates
+        # the cache automatically.
         self._user_space_cache: Optional[tuple[Any, str]] = None
         self._run_id = uuid.uuid4().hex
         self._run_lock_file = self._run_lock_path = None
         # Until initialize() resolves the baseline, _ensure_client() must not
         # re-resolve from the environment (a hand-wired test client would be discarded).
+        # Set once initialize() has resolved the connection baseline. See #21130.
         self._env_refresh_enabled = False
         # _session_state_lock guards (_session_id, _turn_count): sync_turn increments on the
         # sync executor while on_session_end/_switch snapshot+reset on the caller thread.
@@ -1221,6 +1234,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
         (self._session_state_lock, self._inflight_lock, self._deferred_commit_lock, self._committed_session_lock,
          self._client_refresh_lock, self._runtime_start_lock, self._memory_write_lock) = (threading.Lock() for _ in range(7))
         # Writers keyed by the sid they POST under so a commit can drain all of them.
+        # Guards the (_session_id, _turn_count) pair. sync_turn runs on the MemoryManager's background sync
+        # executor while on_session_end / on_session_switch run on the caller's thread, so the
+        # snapshot+reset of the turn counter and the session-id rotation must be atomic against a concurrent
+        # increment. See hermes-agent#28296 review.
         self._inflight_writers: Dict[str, Set[threading.Thread]] = {}
         self._deferred_commit_sids: Set[str] = set()
         self._deferred_commit_threads: Set[threading.Thread] = set()
@@ -1388,6 +1405,7 @@ class OpenVikingMemoryProvider(MemoryProvider):
         # Baseline established — set here, not at the end, so an exception in the
         # connection attempt (swallowed by MemoryManager) can't leave the provider
         # stuck in never-refresh mode.
+        # See #21130.
         self._env_refresh_enabled = True
         self._session_id = session_id
         self._turn_count = 0
@@ -1425,6 +1443,10 @@ class OpenVikingMemoryProvider(MemoryProvider):
         ``/reload`` only refreshes ``os.environ``; the provider instance is not
         re-initialized, so re-resolve settings on every access and rebuild +
         health-check only when a value changed (hot path: one tuple compare).
+
+        ``/reload`` only refreshes ``os.environ`` — the existing provider instance is not re-initialized —
+        so OPENVIKING_* values added to ``~/.hermes/.env`` after startup never reach the live client and
+        tools keep running against stale auth until the user restarts hermes (#21130).
         """
         if not self._env_refresh_enabled:
             return self._client  # no baseline yet: keep whatever the caller wired up
@@ -2349,6 +2371,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         ``_session_id`` stays stuck at the initialize() value, later sync_turn writes
         land in the closed session and the new one never gets extracted. The old
         session's drain+commit is offloaded so command threads never block.
+
+        The new session never accumulates messages, and memory extraction never fires for it. See
+        hermes-agent#28296.
         """
         new_id = str(new_session_id or "").strip()
         if not new_id or not self._ensure_client():
@@ -2358,6 +2383,12 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
         # Rotate under the lock so a concurrent sync_turn lands fully under old or new.
         with self._session_state_lock:
+            # Rotate cached session state synchronously (cheap, in-memory) and snapshot the old session
+            # under the lock so a concurrent sync_turn either lands fully before the rotation (counted under
+            # old) or fully after (counted under new) — never split. The OLD session's commit (drain +
+            # pending-token GET + commit POST, potentially many seconds) is then offloaded so /new, /branch,
+            # /resume, /undo never block the caller's command thread (cf. the end-of-turn-sync offload in
+            # #41945).
             old_session_id = self._session_id
             old_turn_count = self._turn_count
             rotate = not (rewound or new_id == old_session_id)
@@ -2395,6 +2426,9 @@ class OpenVikingMemoryProvider(MemoryProvider):
         reload mid-write can't borrow a later peer; an empty peer there is intentional.
         getattr(): hand-wired providers (``__new__``) may lack ``_client`` / ``_agent``.
         """
+        # Explicit-uid URIs are canonical under every auth mode; the uid-less `viking://user/peers/...`
+        # shorthand was removed upstream (#4196) and `viking://~/...` only expands for USER/ADMIN roles, not
+        # dev/ROOT.
         active_client = client if client is not None else getattr(self, "_client", None)
         agent = str(getattr(active_client, "_agent", getattr(self, "_agent", "")) or "").strip()
         peer_prefix = f"peers/{agent}/" if agent else ""

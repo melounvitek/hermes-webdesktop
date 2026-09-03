@@ -112,7 +112,10 @@ class SessionTelegramTopicsMixin:
         part of startup reconciliation: operators can upgrade and keep the old bot
         behavior until a user runs /topic. Schema versions: v1 initial; v2 session_id FK
         ON DELETE CASCADE (pruning clears bindings); v3 ``profile_name`` on both tables so
-        multiplexed gateways sharing one state.db isolate topic state per profile."""
+        multiplexed gateways sharing one state.db isolate topic state per profile.
+
+        See #76423.
+        """
         def _do(conn):
             for table, columns, ddl in _TOPIC_TABLES:
                 conn.execute(f"CREATE TABLE IF NOT EXISTS {table} ({ddl})")
@@ -149,7 +152,12 @@ class SessionTelegramTopicsMixin:
         allows_users_to_create_topics: Optional[bool]=None,
     ) -> None:
         """Enable Telegram DM topic mode for one private chat/user. Owns the explicit topic
-        migration; SessionDB startup must not create these tables."""
+        migration; SessionDB startup must not create these tables.
+
+        ``profile_name`` namespaces rows under a shared multiplex ``state.db`` (issue #76423). Callers
+        handling a multiplexed event must pass the routed profile from ``source.profile``, not the
+        process-global active profile.
+        """
         self.apply_telegram_topic_migration()
         now = time.time()
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
@@ -245,7 +253,13 @@ class SessionTelegramTopicsMixin:
         binding, ``telegram_dm_topic_mode`` is flipped to ``enabled = 0`` in the same
         transaction, or a user who disabled topics in the Telegram client (not via
         ``/topic off``) stays stuck. Returns the number of rows deleted; absent binding or
-        unmigrated tables are silent no-ops (never raise from a cleanup hot path)."""
+        unmigrated tables are silent no-ops (never raise from a cleanup hot path).
+
+        Without this prune, the stale row keeps living in ``telegram_dm_topic_bindings`` and the recovery
+        logic in ``gateway.run._recover_telegram_topic_thread_id`` cheerfully redirects future inbound
+        messages to the deleted topic, causing tool progress, approvals, and replies to land in the wrong
+        place. Issue #31501.
+        """
         chat_id, thread_id = str(chat_id), str(thread_id)
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
 
@@ -327,7 +341,10 @@ class SessionTelegramTopicsMixin:
     ) -> List[Dict[str, Any]]:
         """This user's Telegram sessions not bound to a topic. Read-only: if the bindings table
         is absent, every session is unlinked and the profile-unscoped query is used.
-        Scoped by ``profile_name`` so multiplexed profiles do not surface each other."""
+        Scoped by ``profile_name`` so multiplexed profiles do not surface each other.
+
+        See #76423.
+        """
         profile_name = _normalize_telegram_topic_profile_name(profile_name)
         with self._read_ctx() as conn:
             try:

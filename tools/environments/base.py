@@ -44,6 +44,8 @@ _DEBUG_INTERRUPT = bool(os.getenv("HERMES_DEBUG_INTERRUPT"))
 # Extra seconds the ``run_bounded_sync`` backstop waits past the inner ``_wait_for_process``
 # deadline: the inner loop returns partial output + 124; the outer bound only fires when that
 # loop never returns. Keep small so a healthy timeout still comes from the inner path.
+# The inner poll loop is what returns partial output + returncode 124; this outer bound only exists for when
+# that loop itself never returns (family A of #94285: a blocked wait that silently disables asyncio timers).
 _EXECUTE_WAIT_BOUND_GRACE_S = 2.0
 
 if _DEBUG_INTERRUPT:
@@ -79,7 +81,12 @@ def set_activity_callback(cb: Callable[[str], None] | None) -> None:
 
 
 def get_activity_callback() -> Callable[[str], None] | None:
-    """Thread-local activity callback; capture it before handing work to another thread."""
+    """Thread-local activity callback; capture it before handing work to another thread.
+
+    Public accessor for callers outside this module that need to capture the calling thread's callback
+    before handing work to another thread (the callback is thread-local, so a freshly spawned thread cannot
+    read it back) — e.g. the manual cron-run heartbeat (#76502).
+    """
     return getattr(_activity_callback_local, "callback", None)
 
 
@@ -300,7 +307,12 @@ class BaseEnvironment(ABC):
         may move the wait onto a ``run_bounded_sync`` worker while ``/stop`` still interrupts the
         original tid, so both bits are honored. ``KeyboardInterrupt``/``SystemExit`` mid-poll
         kills the process first — the local backend spawns into its own process group, so an
-        unkilled child would be orphaned."""
+        unkilled child would be orphaned.
+
+        The default (False) preserves full-fidelity capture for internal consumers — file-operation ``cat``
+        reads feeding the patch engine, code-execution RPC reads, log reads — where truncation would corrupt
+        data. See #64435.
+        """
         output = _new_output_collector(proc, bounded_capture)
         drain_thread = _start_drain_thread(proc, output)
         _now = time.monotonic()
@@ -416,7 +428,12 @@ class BaseEnvironment(ABC):
         tool may set it — internal full-fidelity consumers (file-op ``cat`` reads feeding the
         patch engine, RPC reads, log reads) MUST leave it False or data is corrupted. The wait is
         bounded by ``agent.deadline.run_bounded_sync`` so a wedged poll loop cannot hang past
-        ``timeout`` and silently disable every asyncio timer in the process."""
+        ``timeout`` and silently disable every asyncio timer in the process.
+
+        ``bounded_capture=True`` caps stdout/stderr retention at ``tool_output.max_bytes`` WHILE the stream
+        is drained (head/tail window) instead of holding the full output in memory (#64435).
+        See #94285.
+        """
         self._before_execute()
 
         exec_command, sudo_stdin = self._prepare_command(command)
@@ -463,6 +480,7 @@ class BaseEnvironment(ABC):
         # pipe/poll hang), every asyncio timer is silently disabled. ``run_bounded_sync`` drives
         # expiry from a daemon worker + ``Event.wait`` so a blocked loop cannot disable it; the
         # grace lets the inner loop return the partial-output 124 path.
+        # See #94285.
         from agent.deadline import run_bounded_sync
 
         try:

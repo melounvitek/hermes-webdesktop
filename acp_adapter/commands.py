@@ -236,6 +236,8 @@ class SlashCommandsMixin:
 
             original_count = len(state.history)
             # Include system prompt + tool schemas so the figure reflects real request pressure.
+            # See #6217.
+            # See #6217.
             _sys_prompt = getattr(agent, "_cached_system_prompt", "") or ""
             _tools = getattr(agent, "tools", None) or None
             approx_tokens = _estimate_tokens(state.history, agent, _sys_prompt, _tools)

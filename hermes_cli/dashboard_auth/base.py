@@ -63,7 +63,14 @@ def classify_jwks_lookup_error(exc: BaseException) -> Exception:
     :class:`ProviderError` (503, never forces logout). A non-JWT bearer (``DecodeError``), a JWKS
     with no key for this ``kid`` (``PyJWKSetError``) or any other invalid token is simply not
     verifiable by this provider -> :class:`InvalidCodeError` (``verify_session`` returns ``None``).
-    Folding "cannot parse" into "cannot reach" once made every opaque bearer a fast 503."""
+    Folding "cannot parse" into "cannot reach" once made every opaque bearer a fast 503.
+
+    * ``jwt.DecodeError`` — the bearer is not a JWT at all (an opaque peer key, a legacy session token,
+    garbage). #94558: hosted agents answered every non-JWT bearer with a fast 503 ``Auth provider 'nous'
+    unreachable`` even though Portal was healthy, because "cannot parse" and "cannot reach" were folded into
+    one branch. * ``jwt.PyJWKSetError`` — the JWKS was fetched fine but holds no key for this token's
+    ``kid`` (rotated/foreign key).
+    """
     try:
         import jwt
     except Exception:  # pragma: no cover - jwt is a hard dep of these providers

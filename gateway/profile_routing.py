@@ -93,6 +93,10 @@ def _coerce_route_id(value: Any) -> Optional[str]:
     PyYAML loads unquoted numeric IDs as ``int`` while ``SessionSource`` fields are ``str``. Only
     ``int`` (not ``bool``) is coerced; floats stringify to something (``"123.0"``) that can never
     match, so they get a load-time warning instead.
+
+    ``bool`` is an ``int`` subclass but never a valid id; floats and other types stringify to something
+    (``"123.0"``) that can never equal an inbound id — recreating the silent no-match this exists to fix —
+    so they are passed through with a load-time warning instead of being silently "fixed" (#86470).
     """
     if value is None or isinstance(value, str):
         return value

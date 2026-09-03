@@ -304,6 +304,11 @@ def _query_codex_plugins(
         for plugin in plugins if isinstance(plugins, list) else ():
             if not isinstance(plugin, dict) or not plugin.get("installed", False):
                 continue
+            # Skip plugins codex itself reports as unavailable (broken install, missing OAuth, removed from
+            # marketplace, etc.). Cf. openclaw/openclaw#80815 — OpenClaw learned to gate migration on app
+            # readiness to avoid writing config that would fail at activation time. Our migration writes to
+            # codex's config.toml directly, so a broken plugin would surface as a codex error on first use.
+            # Skipping it here keeps the migrated config clean and the user's first codex turn from failing.
             availability = str(plugin.get("availability") or "").upper()
             if availability and availability != "AVAILABLE":
                 logger.debug("skipping plugin %s: availability=%s", plugin.get("name"),
@@ -343,6 +348,14 @@ def _build_hermes_tools_mcp_entry() -> dict:
     """
     import sys
     env: dict[str, str] = {}
+    # HERMES_HOME passes through IF SET so the MCP subprocess sees the same config / auth / sessions DB as
+    # the parent CLI. Read from os.environ (not get_hermes_home()) on purpose: when the env var is unset we
+    # want codex's subprocess to inherit whatever HERMES_HOME its launcher sets at runtime (systemd unit,
+    # gateway, kanban dispatcher, custom shell), rather than burning the migrate-time resolved default into
+    # config.toml — that would override the launcher's HERMES_HOME and pin the subprocess to the wrong
+    # profile. The pytest-tempdir guard below catches the issue #26250 Bug C scenario: a sibling test's
+    # monkeypatch.setenv("HERMES_HOME", tmp_path) would otherwise leak a transient pytest tempdir into the
+    # user's real ~/.codex/config.toml and silently brick codex once the tempdir is GC'd.
     hermes_home = os.environ.get("HERMES_HOME") or ""
     if hermes_home and not _looks_like_test_tempdir(hermes_home):
         env["HERMES_HOME"] = hermes_home

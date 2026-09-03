@@ -54,7 +54,13 @@ def _import_audio():
 
 def _sounddevice_output_allowed() -> bool:
     """False on macOS: PortAudio/CoreAudio OUTPUT init triggers a kTCCServiceMediaLibrary
-    prompt, so output goes through ``afplay`` there. Input (recording) is unaffected."""
+    prompt, so output goes through ``afplay`` there. Input (recording) is unaffected.
+
+    Returns False on macOS: importing/initializing sounddevice (PortAudio/CoreAudio) for output triggers a
+    kTCCServiceMediaLibrary permission prompt, even though playback needs no media-library access. This does
+    NOT affect audio *input* (recording), which legitimately needs microphone permission. See PR #62601 /
+    #13291.
+    """
     return platform.system() != "Darwin"
 
 
@@ -112,6 +118,8 @@ def _default_input_samplerate(sd) -> int:
 
 # ── Environment detection ──
 def _voice_capture_install_hint() -> str:
+    # sounddevice imports but PortAudio's shared library is missing — a pip install can't fix that; point at
+    # the system package instead of misreporting missing Python packages (#18432).
     if _is_termux_environment():
         return "pkg install python-numpy portaudio && python -m pip install sounddevice"
     # Inside a venv a bare `pip install` may hit whichever Python the shell
@@ -205,7 +213,13 @@ def _pulse_socket_candidates() -> List[str]:
 
 def _pulse_socket_reachable() -> bool:
     """True if a PulseAudio/PipeWire socket on disk accepts a connection (a stale socket of
-    a dead server does not count). Covers a local sound server without PULSE_SERVER set."""
+    a dead server does not count). Covers a local sound server without PULSE_SERVER set.
+
+    Covers the common case where a sound server runs locally (e.g. on a remote SSH host) without
+    ``PULSE_SERVER``/``PIPEWIRE_REMOTE`` being set -- the client just connects to the default socket under
+    the runtime dir. We look at ``PULSE_SERVER`` unix paths, ``PULSE_RUNTIME_PATH``, and ``XDG_RUNTIME_DIR``
+    for a ``pulse/native`` or ``pipewire-0`` socket (issue #35622).
+    """
     import socket
     import stat
     for path in _pulse_socket_candidates():
@@ -275,6 +289,8 @@ def detect_audio_environment() -> dict:
     def report(notice: str, warning: str) -> None:
         (notices if has_forwarded_audio else warnings).append(notice if has_forwarded_audio else warning)
 
+    # SSH detection -- normally no audio devices, but honor a reachable sound server (PulseAudio/PipeWire
+    # socket or forwarding env vars), which works fine over SSH (issue #35622).
     if any(os.environ.get(v) for v in ('SSH_CLIENT', 'SSH_TTY', 'SSH_CONNECTION')):
         report("Running over SSH with a reachable PulseAudio/PipeWire sound server",
                "Running over SSH -- no audio devices available.\n"
@@ -283,6 +299,9 @@ def detect_audio_environment() -> dict:
                "    export XDG_RUNTIME_DIR=/run/user/$(id -u)\n"
                "    # or: export PULSE_SERVER=unix:$XDG_RUNTIME_DIR/pulse/native")
 
+    # Docker/Podman container detection — honor host audio forwarding. When the user mounts a
+    # PulseAudio/PipeWire socket into the container and points PULSE_SERVER / PIPEWIRE_REMOTE at it, audio
+    # works fine (issue #21203). Only block when no forwarding is configured.
     from hermes_constants import is_container
     if is_container():
         report("Running inside container (Docker/Podman/LXC) with host audio forwarding",
@@ -1044,6 +1063,7 @@ def _run_system_player(cmd: List[str]) -> bool:
     proc = None
     try:
         # Sibling of the TTS/STT credential scrub: players must not inherit tokens/keys.
+        # See #56332, #70342.
         from tools.environments.local import hermes_subprocess_env
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                                 env=hermes_subprocess_env(inherit_credentials=False))

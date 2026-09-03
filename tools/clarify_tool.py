@@ -101,6 +101,8 @@ def _is_timeout(raw) -> bool:
     return raw is None or (isinstance(raw, str) and raw.strip() == TIMEOUT_RESPONSE)
 
 
+# ============================================================================= Batch (multi-question)
+# support — issue #18450 =============================================================================
 def _normalize_questions(questions) -> tuple:
     """Validate the ``questions`` batch param -> ``(normalized, error)``; an empty list gives
     ``(None, None)`` (fall back to the single-question path). Entries carry ``qid`` (stable
@@ -181,7 +183,19 @@ def clarify_tool(question: str, choices: Optional[List[str]] = None, multi_selec
                  questions: Optional[List[dict]] = None, callback: Optional[Callable] = None) -> str:
     """Ask one question (``question``/``choices``/``multi_select``) or a batch (``questions``
     wins when non-empty). ``callback(question, choices, multi_select=False) -> str`` is
-    platform injected (batch-capable ones also take ``questions=``). Returns result JSON."""
+    platform injected (batch-capable ones also take ``questions=``). Returns result JSON.
+
+    Args: question:     The question text to present. choices:      Up to 4 predefined answer choices. When
+    omitted the question is purely open-ended. multi_select: When True, the user can select multiple choices
+    (checkboxes). The ``user_response`` in the output JSON will be a list of strings instead of a single
+    string. Has no effect when ``choices`` is omitted. questions:    Up to 5 independent questions asked as
+    one batch (issue #18450). When present (non-empty), the single ``question``/``choices``/``multi_select``
+    parameters are ignored and the result JSON is ``{"responses": [...]}`` (plus ``"timed_out": true`` when
+    the user stopped answering partway). callback:     Platform-provided function that handles the actual UI
+    interaction. Batch-capable platforms additionally accept a ``questions`` keyword and receive the
+    normalized list in one call; platforms without it are looped one question at a time. Injected by the
+    agent runner (cli.py / gateway).
+    """
     if questions is not None:
         normalized, error = _normalize_questions(questions)
         if error:

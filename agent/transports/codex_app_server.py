@@ -48,6 +48,14 @@ class CodexAppServerClient:
     ) -> None:
         self._codex_bin = codex_bin
         # codex needs LLM provider creds but must not receive Tier-1 Hermes secrets (gateway/GitHub/infra tokens).
+        # codex app-server is a model-driving CLI executor: it runs a model-chosen agentic loop that
+        # executes shell commands, so it legitimately needs LLM provider credentials
+        # (inherit_credentials=True) to authenticate against the model endpoint. But the previous
+        # `os.environ.copy()` also handed it every Tier-1 Hermes secret — gateway bot tokens, GitHub auth,
+        # Modal/Daytona infra tokens, the dashboard session token, AUXILIARY_* side-LLM keys,
+        # GATEWAY_RELAY_* auth — none of which a coding subprocess has any use for. Route through the
+        # centralized helper so Tier-1 + dynamic-internal secrets are always stripped while provider creds
+        # still flow, matching copilot_acp_client (#29157 sibling spawn-site gap).
         spawn_env = hermes_subprocess_env(inherit_credentials=True)
         if env:
             spawn_env.update(env)
@@ -71,6 +79,7 @@ class CodexAppServerClient:
 
         # Hide the console the codex child would otherwise flash on Windows (#56747).
         # Hide-only — stdio pipes stay intact for the app-server wire.
+        # See #56747.
         from hermes_cli._subprocess_compat import windows_hide_flags
 
         self._proc = subprocess.Popen(

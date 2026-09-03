@@ -133,7 +133,12 @@ def flush(timeout: float = 5.0) -> bool:
 def re_register_config_hooks() -> None:
     """Re-register outbound webhooks after a plugin force-reload cleared ``_hooks``.  Only the
     current home's idempotence keys are cleared so a force-reload in one profile cannot
-    invalidate another profile's still-live registration."""
+    invalidate another profile's still-live registration.
+
+    Mirrors ``agent.shell_hooks.re_register_config_hooks``: config-owned outbound-webhook callbacks live in
+    the same ``_hooks`` dict that ``PluginManager.discover_and_load(force=True)`` clears via ``unload()``,
+    so without this the force-reloaded profile's outbound webhooks go silently inert (#92682 review).
+    """
     from hermes_cli.config import load_config
     _forget_home_registrations(_registered, _registered_lock)
     register_from_config(load_config())
@@ -235,6 +240,7 @@ def _serialize_payload(event: str, kwargs: Dict[str, Any], delivery_id: str) -> 
     (also the ``X-Hermes-Delivery`` header) and ``timestamp`` live inside the HMAC-signed
     body, so they double as replay protection."""
     # Profile resolved at fire time so a multiplexed gateway's receivers can tell which profile emitted.
+    # See #92674.
     from hermes_cli.profiles import get_active_profile_name
     payload = {
         "hook_event_name": event, "profile": get_active_profile_name(), **_payload_fields(kwargs),

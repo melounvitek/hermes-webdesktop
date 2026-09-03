@@ -498,7 +498,10 @@ def lookup_models_dev_context(provider: str, model: str, *, allow_network: bool 
     """Context window in tokens for provider+model, or None if not found. An EXPLICIT ``model_overrides``
     entry wins over the catalog; ``_default`` fills the gap only when the catalog has no answer (the
     self-unblock path for wrong/missing context in models.dev). Catalog entries with context=0 are
-    skipped in favour of later candidates. ``allow_network`` defaults to False — runs every turn."""
+    skipped in favour of later candidates. ``allow_network`` defaults to False — runs every turn.
+
+    See #84482.
+    """
     override_ctx = _override_context_window(provider, model)
     if override_ctx is not None:
         return override_ctx
@@ -513,6 +516,7 @@ def lookup_models_dev_context(provider: str, model: str, *, allow_network: bool 
 # catalog. ``<provider>._default`` / top-level ``_default`` are FILL-GAP defaults: they apply ONLY to
 # models the catalog does not know and never displace catalog data. Provider keys accept the Hermes
 # or models.dev id; model ids match exactly, then case-insensitively (mirroring catalog lookup).
+# Resolution semantics: 1. 2. See #84482, #8731.
 _OVERRIDE_WARNED_KEYS: set = set()
 # Safe defaults for models absent from the catalog (tools on, vision/reasoning off, 200K context);
 # shared by get_model_capabilities and get_model_info so the two unknown-model paths agree.
@@ -589,6 +593,7 @@ def _override_context_window(provider: str, model: str) -> Optional[int]:
     return _override_int(ov, "context_window") if ov is not None else None
 
 
+# Catalog miss — a _default override may fill the gap (#84482).
 def _default_override_context(provider: str) -> Optional[int]:
     """Fill-gap context from a ``_default`` override, for catalog misses."""
     default = _default_model_override(provider)
@@ -655,7 +660,13 @@ def _entry_supports_vision(entry: Dict[str, Any]) -> bool:
 def get_model_capabilities(provider: str, model: str, *, allow_network: bool = False) -> Optional[ModelCapabilities]:
     """Capability metadata from the models.dev cache, or None if unresolvable. EXPLICIT ``model_overrides``
     patch catalog fields; ``_default`` fills the gap only for models the catalog does not know. Unspecified
-    fields fall through to the catalog, or to safe defaults. ``allow_network`` defaults to False (hot path)."""
+    fields fall through to the catalog, or to safe defaults. ``allow_network`` defaults to False (hot path).
+
+    EXPLICIT ``model_overrides`` entries (per-provider+model) win over catalog values for the fields they
+    set. ``_default`` entries fill the gap only for models the catalog does not know — the supported
+    self-unblock path for custom/local models (#8731) and for models with wrong metadata in models.dev
+    (#84482).
+    """
     models = _get_provider_models(provider, allow_network=allow_network)
     entry = _find_model_entry(models, model) if models is not None else None
     raw = _apply_overrides(provider, model, entry)
@@ -751,7 +762,13 @@ def get_provider_info(provider_id: str, *, allow_network: bool = True) -> Option
 def get_model_info(provider_id: str, model_id: str, *, allow_network: bool = False) -> Optional[ModelInfo]:
     """Full model metadata by Hermes or models.dev provider ID (exact match, then case-insensitive), or
     None if not found. EXPLICIT ``model_overrides`` patch known catalog models; ``_default`` fills the gap
-    only for unknown ones. ``allow_network`` defaults to False — cost guard and inventory are hot paths."""
+    only for unknown ones. ``allow_network`` defaults to False — cost guard and inventory are hot paths.
+
+    ``model_overrides`` entries use the SAME canonical schema as every other consumer (``context_window``,
+    ``max_output_tokens``, ``supports_*``, ``model_family``) — they are translated into the catalog shape at
+    this boundary, and sub-dicts (``limit``, ``modalities``) are merged rather than clobbered. See #84482,
+    #8731.
+    """
     mdev_id = PROVIDER_TO_MODELS_DEV.get(provider_id, provider_id)
     models = _registry_models(mdev_id, allow_network=allow_network)
     mid, entry = next(_iter_model_entries(models, model_id, suffix_fallback=False), (model_id, None)) if models is not None else (model_id, None)

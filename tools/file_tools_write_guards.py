@@ -99,6 +99,13 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
 # vector (AGENTS.md / CLAUDE.md / SOUL.md / .cursorrules / project .hermes tree).
 # Writes ALWAYS require human approval — even under --yolo — and fail closed
 # without a human channel. Basenames match in ANY directory, case-insensitively.
+# Ported from: RooCodeInc/Roo-Code RooProtectedController (Apache-2.0). Companion: the terminal-tool vector
+# is covered separately (#58631); this gate covers the write_file/patch vector. Symlink lesson from #41351:
+# always realpath before matching. Scope decision (documented): basenames match in ANY directory, because
+# project-context instruction files are loaded from cwd trees — an AGENTS.md anywhere the agent might later
+# run from is a live target. Basenames match case-insensitively so case-variant spellings on
+# case-insensitive filesystems (macOS/Windows) cannot slip past; on case-sensitive filesystems most loaders
+# probe common case variants too, so the stricter behavior is kept uniform.
 _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
     "agents.md", "claude.md", "soul.md", ".cursorrules"})
 
@@ -125,7 +132,12 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
                                   *, enabled: bool | None = None,
                                   extra_patterns: list[str] | None = None) -> str | None:
     """Return a short label when ``filepath`` targets a protected instruction file, else ``None``.
-    Matches BOTH the normalized input and its realpath so no symlink direction escapes."""
+    Matches BOTH the normalized input and its realpath so no symlink direction escapes.
+
+    Matching runs on BOTH the normalized input path and its realpath so neither a symlink pointing AT a
+    protected file (#41351) nor a protected name that is itself a symlink escapes the gate. ``..`` traversal
+    is neutralized by normpath/realpath before the basename compare.
+    """
     if enabled is None or extra_patterns is None:
         enabled, extra_patterns = _protected_instruction_config()
     if not enabled:
@@ -327,7 +339,13 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
 def _check_binary_document_write(filepath: str, task_id: str = "default") -> str | None:
     """Reject text-tool writes that would corrupt a binary document (read_file showed
     EXTRACTED text, so the model may write it back). Opaque formats are always rejected;
-    .pdf only when OVERWRITING an existing file (raw PDF syntax is text-authorable)."""
+    .pdf only when OVERWRITING an existing file (raw PDF syntax is text-authorable).
+
+    ``read_file`` auto-extracts .docx/.xlsx/.pptx (and PDF, via anydoc) to readable text, so the model
+    plausibly believes it holds the file's contents and tries to write the edited text back with
+    write_file/patch. A plain-text write can never produce a valid OOXML/OLE/ODF container, so that write
+    silently destroys the document (port of nearai/ironclaw#7109).
+    """
     if has_opaque_document_extension(filepath):
         ext = filepath[filepath.rfind("."):].lower()
         return (

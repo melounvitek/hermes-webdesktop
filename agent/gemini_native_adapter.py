@@ -84,7 +84,13 @@ def bare_gemini_model_id(model: str) -> str:
 
 def gemini_requires_tool_call_ids(model: str) -> bool:
     """Gemini 3+ needs explicit functionCall/functionResponse ids so replayed parallel tool calls
-    pair with their responses; 2.x rejects the field."""
+    pair with their responses; 2.x rejects the field.
+
+    Gemini 3+ models require explicit tool call IDs in replayed history — without them, multi-tool turns can
+    be rejected or mismatched. Older Gemini models (2.x) reject unexpected ``id`` fields, so this is gated
+    on the major version. Mirrors earendil-works/pi#7494 (their fix for the same class of bug in the
+    google-shared converter).
+    """
     match = re.match(r"gemini-(\d+)", bare_gemini_model_id(model).lower())
     return match is not None and int(match.group(1)) >= 3
 
@@ -242,6 +248,10 @@ def _translate_tool_result_to_gemini(
         parsed = json.loads(content) if content.strip().startswith(("{", "[")) else None
     except json.JSONDecodeError:
         parsed = None
+    # Gemini 3 resolves JSON-Schema ``$ref`` pointers inside a functionResponse.response payload and rejects
+    # unknown references with HTTP 400 INVALID_ARGUMENT ("referenced name '#/$defs/...' does not match a
+    # display_name"; see vercel/ai#14369). A tool result that is itself a JSON Schema (e.g. tool_describe
+    # output for an MCP tool) must therefore be forwarded as opaque text, not as a structured response.
     structured = isinstance(parsed, dict) and not _looks_like_json_schema(parsed)
     function_response: Dict[str, Any] = {"name": name, "response": parsed if structured else {"output": content}}
     if include_ids and tool_call_id:
@@ -264,6 +274,17 @@ def _merge_alternating(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     functionResponse + functionResponse still merge); 3) the split pair stays API-valid via an interposed
     placeholder model turn."""
     merged: List[Dict[str, Any]] = []
+    # Compatibility contract for native Gemini generateContent: 1) Same-role adjacent contents still merge
+    # in general (strict user/model alternation for ordinary text turns and parallel tool-result grouping;
+    # consecutive same-role contents are rejected with HTTP 400 "Please ensure that multiturn requests
+    # alternate between user and model"). 2) Exception: do NOT fuse a human user text turn into a preceding
+    # user content that only carries functionResponse parts (or vice versa). Gemini 3 accepts that fold with
+    # HTTP 200 but then reads the trailing text as a continuation of the tool result — it returns an empty
+    # candidate or "finishes the user's sentence" instead of answering (same defect gemini-cli fixed in
+    # google-gemini/gemini-cli#28700). 3) Because rule 1's HTTP 400 makes two consecutive user contents
+    # unsafe to emit (#55125 — the reason this merge exists), the split pair is kept API-valid by
+    # interposing a placeholder model turn between the functionResponse content and the human text content,
+    # mirroring gemini-cli's INTERRUPTED_RESPONSE_PLACEHOLDER repair.
     for content in contents:
         prev = merged[-1] if merged else None
         same_role = prev is not None and prev["role"] == content["role"]
@@ -677,6 +698,10 @@ class AsyncGeminiNativeClient:
         self.api_key, self.base_url = sync_client.api_key, sync_client.base_url
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
 
+    # Expose the underlying sync client as _real_client so the auxiliary cache's eviction-by-leaf-client
+    # helper (#23482) can find and drop this async entry when the sync GeminiNativeClient is poisoned.
+    # GeminiNativeClient is itself the leaf (no OpenAI client beneath it), so we point at the sync_client
+    # directly.
     async def _create_chat_completion(self, **kwargs: Any) -> Any:
         result = await asyncio.to_thread(self._sync.chat.completions.create, **kwargs)
         return self._async_stream(result) if kwargs.get("stream") else result

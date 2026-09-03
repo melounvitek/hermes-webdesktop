@@ -171,7 +171,10 @@ def is_zeroed_state_db(path: Path, *, probe_bytes: int = 100, force: bool = Fals
     lock, even a running VACUUM's EXCLUSIVE); ``read_header_bytes_preopen`` refuses (-> False)
     once a connection is live.  Pass ``force=True`` only for offline files (quarantined copies,
     snapshots).  Prefers ``hermes_cli.backup.is_zeroed_sqlite_file``; this copy keeps SessionDB
-    openable without the CLI package in constrained embed paths."""
+    openable without the CLI package in constrained embed paths.
+
+    See #97568.
+    """
     with contextlib.suppress(Exception):
         from hermes_cli.backup import is_zeroed_sqlite_file
         return is_zeroed_sqlite_file(path, probe_bytes=probe_bytes, force=force)

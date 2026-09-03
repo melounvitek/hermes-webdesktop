@@ -276,6 +276,9 @@ def _launchservices_https_handler(dump: str) -> str | None:
         # Strip the nested LSHandlerPreferredVersions block first: on macOS 26 it carries
         # a VERSION NUMBER (LSHandlerRoleAll = "7559.97";), not the "-" placeholder older
         # releases used, and the role regex below would return it instead of the bundle id.
+        # Left in, the role regex below would match that version before the real bundle id sitting at the
+        # entry's own level and return "7559.97" — which maps to no browser, so detection fails on a machine
+        # whose default IS Chrome (PR #95620 review).
         low = re.sub(r"lshandlerpreferredversions\s*=\s*\{[^}]*\}\s*;", "", low)
         # The real bundle id is the first non-"-" role value at this level.
         roles = re.findall(r'lshandlerrole(?:all|viewer)\s*=\s*"?([a-z0-9.\-]+)"?\s*;', low)

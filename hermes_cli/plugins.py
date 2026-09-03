@@ -162,11 +162,28 @@ VALID_HOOKS: Set[str] = {
     # gateway_platform_event: normalized envelopes only, never raw SDK objects or adapter handles.
     # Kwargs: platform, event_type, payload (event_type-local; see hooks.md). New event types land
     # only together with real fire-sites.
+    # on_kanban_dispatch_tick fires once per dispatcher tick in dispatch_once, strictly AFTER the board's
+    # single-writer dispatch lock has been released (the #56066 original fired inside the lock — the #64231
+    # disposition mandates the post-lock re-port), so a slow subscriber can never extend the writer critical
+    # section. Kwargs: board: str | None, profile_name: str, dry_run: bool, outcome: "ok" | "skipped_locked"
+    # | "idle", result: hermes_cli.kanban_db.DispatchResult (spawned, reclaimed, promoted,
+    # reconciled_orphans, crashed, stale, timed_out, auto_blocked, rate_limited, auto_assigned_default,
+    # respawn_guarded, skipped_per_profile_capped, skipped_unassigned, skipped_nonspawnable,
+    # skipped_locked). Privacy: result carries task ids, assignees, and workspace paths.
+    # Gateway platform-boundary observer hooks (#64176). Observer-only; each callback isolated by
+    # invoke_hook. This surface grants no adapter handles or platform actions. Fired today: Telegram
+    # "reaction" + "message_edited"; Discord "message_edited", "message_deleted", "thread_created",
+    # "thread_renamed". Each event type carries its own event-local additive payload contract (see
+    # hooks.md). Other event types and hook names land here only together with real fire-sites and payload
+    # contracts; no inert VALID_HOOKS surface is registered ahead of implementation.
     "gateway_platform_event",
     # pre_command: BEFORE a recognized slash command's handler on CLI and gateway canonical dispatch;
     # returns IGNORED in v1. Deliberately NOT fired for the gateway's running-agent intercept path
     # (/stop, /approve, busy_policy) — a slow/hostile plugin must not touch the operator's escape
     # hatches. Kwargs: surface, command (canonical), alias_used, args_raw, session_key, platform.
+    # Slash-command dispatch observer (#64204, observer-first per #64182 ground rule 3). Return values are
+    # IGNORED in v1 — a plugin returning a directive-shaped dict gets a debug log so future block/rewrite
+    # adopters are discoverable once the middleware variant ships against the #64231 taxonomy.
     "pre_command",
 }
 
@@ -209,7 +226,10 @@ class PluginContext:
 
     def has_plugin(self, plugin_id: str) -> bool:
         """Return True when another plugin is loaded and enabled (runtime probe for advisory
-        ``requires_plugins``). Matches on registry key or manifest name."""
+        ``requires_plugins``). Matches on registry key or manifest name.
+
+        See #64165.
+        """
         return any(
             loaded.enabled and (key == plugin_id or loaded.manifest.name == plugin_id)
             for key, loaded in self._manager._plugins.items()
@@ -434,7 +454,12 @@ class PluginContext:
         """Register a tool in the global registry and track it as plugin-provided. ``override=True``
         replaces a same-named built-in (without it a name claimed by another toolset is rejected) and
         needs operator opt-in via ``plugins.entries.<plugin_id>.allow_tool_override: true`` — otherwise
-        any enabled plugin could silently replace a privileged built-in like ``write_file``."""
+        any enabled plugin could silently replace a privileged built-in like ``write_file``.
+
+        ``override=True`` against a built-in tool requires the operator to opt in via
+        ``plugins.entries.<plugin_id>.allow_tool_override: true`` in config.yaml — mirrors the trust gate
+        pattern used for ``ctx.llm`` provider/model overrides (#23194).
+        """
         if override and not self._tool_override_allowed(name):
             raise PluginToolOverrideError(
                 f"Plugin {self.manifest.name!r} cannot override built-in tool {name!r}. Set "
@@ -465,6 +490,7 @@ class PluginContext:
                      " (override)" if override else "")
         return handle
 
+    # -- capability probing (#64228) -----------------------------------------
     def has_capability(self, capability: str) -> bool:
         """True when *capability* is live for this plugin (probe, then degrade gracefully). Bundled
         plugins are trusted for ``tools.override``; otherwise granted_capabilities or the legacy
@@ -480,7 +506,12 @@ class PluginContext:
         """Call ``tool`` on MCP ``server`` synchronously through :mod:`tools.mcp_tool`'s native client
         (same trust gates, breaker, reconnect — never a parallel connection). Servers not in
         ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError`` (default-deny). ``timeout``
-        clamps to 1–600s; results over ~64KB are truncated with a marker."""
+        clamps to 1–600s; results over ~64KB are truncated with a marker.
+
+        This is a per-server grant, deliberately not ambient authority over every configured server.
+        TODO(#64228): swap the per-server allowlist for the declared capability model once it lands
+        (per-tool grants, expiry, ro/rw).
+        """
         if server not in self._mcp_allowlist(self.plugin_id):
             raise PermissionError(
                 f"Plugin {self.manifest.name!r} is not allowed to call MCP "
@@ -537,7 +568,16 @@ class PluginContext:
     def _tool_override_allowed(self, tool_name: str) -> bool:
         """Whether this plugin may override built-in tools: bundled plugins are trusted (a maintainer
         choice, not privilege escalation); others need ``tools.override`` via
-        :func:`plugin_capability_granted` (granted_capabilities OR legacy ``allow_tool_override: true``)."""
+        :func:`plugin_capability_granted` (granted_capabilities OR legacy ``allow_tool_override: true``).
+
+        Bundled plugins (shipped with Hermes core) are trusted by default — an override there is a
+        deliberate maintainer choice, not a third-party plugin trying to elevate privilege. For every other
+        source, the canonical check is :func:`plugin_capability_granted` with the ``tools.override``
+        capability — satisfied by EITHER the consent-flow grant
+        (``plugins.entries.<plugin_id>.granted_capabilities``) OR the deprecated legacy key
+        ``allow_tool_override: true`` (still honored for backward compatibility; #64228 reference
+        migration).
+        """
         if self.manifest.source == "bundled":
             return True
         try:
@@ -550,6 +590,9 @@ class PluginContext:
         # active profile's consent state instead.
         return plugin_capability_granted(self.plugin_id, "tools.override", config=cfg)
 
+    # Fail-closed by construction: any failure to read consent state inside plugin_capability_granted
+    # returns False. The profile-scoped config is passed through so a multi-profile process consults THIS
+    # manager's home, never the active profile's (#65593 constraint).
     def inject_message(
         self, content: str, role: str = "user", *, session_key: str | None = None,
     ) -> bool:
@@ -707,6 +750,11 @@ class PluginContext:
         # per-home manager teardown emptied it for the WHOLE process and disabled sign-in until
         # restart — so upsert and keep it out of reverse-order teardown (``persistent=True``).
         try:
+            # A per-home manager is torn down routinely (profile-scoped dashboard activity, force
+            # re-discovery), and disposing this registration on that teardown emptied the auth registry for
+            # the WHOLE process, permanently disabling sign-in until restart (#91701). The handle still
+            # disposes explicitly (identity- conditional), and a forced re-discovery rotates the provider in
+            # place via the upsert.
             register_global_provider(provider)
         except (TypeError, ValueError) as e:
             logger.warning("Plugin '%s' failed to register dashboard-auth provider %r: %s",
@@ -1112,8 +1160,17 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         # is keyed per (hermes_home, plugin_id) and every inverse is identity-conditional — one
         # profile's unload can never clear another's. Persistent registrations that survived an
         # unload-all park in ``_persistent_carryover`` until force re-discovery evicts the stale ones.
+        # Registration handles are kept both per plugin (ownership lookup) and globally (reverse-order
+        # teardown for overrides spanning plugins). Registry overlays keyed by scope_key (see
+        # tools/registry.py and gateway/platform_registry.py) carry the profile dimension; anything still
+        # process-global is guarded by the identity checks. TODO(#64178): extend explicit profile keying to
+        # any remaining process-global slots when the symmetric force-reload lands.
         self._ownership_ledger: Dict[str, List[PluginRegistration]] = {}
         self._registration_order: List[PluginRegistration] = []
+        # Force re-discovery drains this via _evict_stale_persistent_registrations(): entries whose plugin
+        # re-registered the same (kind, key) are kept (the upsert rotated them in place), the rest are
+        # disposed so a disabled/removed auth plugin's provider does not outlive its plugin (#91701
+        # follow-up).
         self._persistent_carryover: List[PluginRegistration] = []
         # Deferred platforms whose client tools registered at discovery (see
         # _register_deferred_platform_tools): imported package (don't re-execute on materialize)
@@ -1160,12 +1217,19 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
                 self._discover_and_load_inner()
                 # Persistent registrations survived the unload-all; now that plugins re-registered,
                 # dispose the ones whose plugin did not come back.
+                # Now that plugins have had their chance to re-register, dispose the ones whose plugin did
+                # not come back (disabled, removed, or omitted from this discovery pass) so e.g. a disabled
+                # auth plugin's provider does not stay live process-wide until restart. See #91701.
                 self._evict_stale_persistent_registrations()
                 # load_hermes_dotenv() ran at import, before plugin secret sources existed: re-pull.
+                # Plugin secret sources register during discover; the initial load_hermes_dotenv() already
+                # ran at import time. Re-pull so the first process sees plugin backends (tracking #64177).
                 self._refresh_secret_sources_after_discovery()
                 if force:
                     # config.yaml shell hooks / outbound webhooks live in ``_hooks`` but are
                     # config-owned; unload() wiped them and cannot restore them.
+                    # Re-register so force-reload is symmetric (#60036; tracking #64178 — salvaged from PR
+                    # #64188; outbound webhooks added per #92682 review).
                     self._re_register_config_hooks_after_force()
             except BaseException:
                 self._discovered = False
@@ -1573,7 +1637,13 @@ def get_portable_mcp_server_names_nowait() -> "set[str]":
 def _delivery_manager() -> PluginManager:
     """Active manager, lazily discovering if it never ran — delivery must not depend on WHICH
     surface imported us (dashboards/TUI/cron never import model_tools). ``getattr`` default
-    ``True`` leaves test doubles untouched."""
+    ``True`` leaves test doubles untouched.
+
+    Hook/middleware delivery must not depend on WHICH surface imported us: dashboards, TUI slash workers,
+    query mode, and cron delivery paths never import ``model_tools`` (whose import side-effect is the
+    discovery trigger on the interactive CLI path), so hooks registered by user plugins were silently dead
+    on those surfaces (#50776, #67597, #67890, #50937; tracking #64178 — salvaged from PR #64188).
+    """
     manager = get_plugin_manager()
     if not getattr(manager, "_discovered", True):
         _join_background_discovery()
@@ -1582,7 +1652,16 @@ def _delivery_manager() -> PluginManager:
 
 
 def invoke_hook(hook_name: str, **kwargs: Any) -> List[Any]:
-    """Invoke a lifecycle hook (lazy-discovers first); return non-``None`` callback results."""
+    """Invoke a lifecycle hook (lazy-discovers first); return non-``None`` callback results.
+
+    Hot-path / observer hooks in ``_HOOK_TIMEOUT_BOUNDED_HOOKS`` and the policy hook ``pre_tool_call`` are
+    bounded by ``plugins.hook_callback_timeout`` (default 30s). On timeout the worker is abandoned (not
+    joined) so we do not reintroduce the #6622 hang. Timed-out or still-running ``pre_tool_call`` callbacks
+    fail closed with a block directive; other bounded hooks fail open (skip).
+    Ensures plugins are discovered on first invocation so callers in processes that never explicitly call
+    ``discover_plugins()`` (gateway platform events, TUI slash workers, query mode, cron) still fire
+    callbacks registered by user plugins (tracking #64178).
+    """
     return _delivery_manager().invoke_hook(hook_name, **kwargs)
 
 
@@ -1592,13 +1671,21 @@ def render_system_prompt_sections(session_info: Mapping[str, Any]) -> List[Rende
 
 
 def invoke_middleware(kind: str, **kwargs: Any) -> List[Any]:
-    """Invoke registered middleware callbacks (lazy-discovers like :func:`invoke_hook`)."""
+    """Invoke registered middleware callbacks (lazy-discovers like :func:`invoke_hook`).
+
+    Lazy-discovers plugins on first use — same delivery-parity guarantee as :func:`invoke_hook` (tracking
+    #64178).
+    """
     return _delivery_manager().invoke_middleware(kind, **kwargs)
 
 
 def has_middleware(kind: str) -> bool:
     """True when middleware is registered for ``kind``; lazy-discovers first since callers gate
-    :func:`invoke_middleware` on it."""
+    :func:`invoke_middleware` on it.
+
+    Lazy-discovers first: callers use this as a gate before :func:`invoke_middleware`, so a pre-discovery
+    ``False`` here would silently skip delivery on surfaces that never ran discovery (#64178).
+    """
     manager = _delivery_manager()
     method = getattr(manager, "has_middleware", None)
     if callable(method):
@@ -1607,7 +1694,10 @@ def has_middleware(kind: str) -> bool:
 
 
 def has_hook(hook_name: str) -> bool:
-    """True when a loaded plugin handles a hook (lazy-discovers first, like :func:`has_middleware`)."""
+    """True when a loaded plugin handles a hook (lazy-discovers first, like :func:`has_middleware`).
+
+    Lazy-discovers first — same gate-before-invoke rationale as :func:`has_middleware` (tracking #64178).
+    """
     return _delivery_manager().has_hook(hook_name)
 
 
@@ -1807,7 +1897,17 @@ def get_plugin_error_classification(
     """Consult ``transform_api_error_classification`` hooks BEFORE the built-in classifier.
     Run-all-then-pick-first: the first valid result in registration order wins, losing valid results
     warn (conflicts visible, not shadowed). Returns a sanitized dict (``reason`` -> ``FailoverReason``,
-    hint flags -> bool, ``message`` capped at 500) or ``None``. Privacy: inputs may be unredacted."""
+    hint flags -> bool, ``message`` capped at 500) or ``None``. Privacy: inputs may be unredacted.
+
+    A callback returns ``None`` to decline, or a dict with a required ``"reason"`` (a
+    :class:`agent.error_classifier.FailoverReason` member or its string name) plus optional recovery-hint
+    overrides. Dispatch is run-all-then-pick-first: ``invoke_hook`` runs every registered callback with
+    failures isolated, then the first result carrying a valid reason wins in registration order — mirroring
+    :func:`get_pre_tool_call_block_message`, invalid or irrelevant returns are silently ignored so a
+    misbehaving plugin degrades to a no-op. When more than one callback returns a valid classification, the
+    losing results are skipped with a runtime warning (the #64714 skipped-transform rule) so conflicting
+    provider plugins are visible in logs instead of silently shadowed.
+    """
     from agent.error_classifier import FailoverReason
     hook_results = invoke_hook(
         "transform_api_error_classification", provider=provider, model=model,

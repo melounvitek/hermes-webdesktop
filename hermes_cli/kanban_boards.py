@@ -93,6 +93,7 @@ def _cmd_boards_create(args: argparse.Namespace) -> int:
 def _cmd_boards_rm(args: argparse.Namespace) -> int:
     # `boards delete <slug>` (alias) never sets args.delete because --delete belongs to the 'rm'
     # subparser only; treat the alias as `rm --delete`.
+    # See #23139.
     force_delete = getattr(args, "delete", False) or getattr(args, "boards_action", "") == "delete"
     try:
         res = kb.remove_board(args.slug, archive=not force_delete)

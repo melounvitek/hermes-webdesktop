@@ -44,6 +44,11 @@ def _normalize_cwd_for_compare(cwd: str | None) -> str:
     # ``/private/tmp``) that otherwise drop a workspace's own sessions; it is lexical
     # for missing paths (e.g. WSL-translated drives).
     try:
+        # Resolve symlink aliases so equivalent spellings of the same directory compare equal — macOS
+        # reports editor workspaces as ``/var/...`` while sessions get stored under ``/private/var/...``
+        # (and ``/tmp`` vs ``/private/tmp``), which made ACP history filters silently drop a workspace's own
+        # sessions. WSL-translated Windows drives — keep the previous normpath behavior. Ported from
+        # PrimeIntellect-ai/prime-agent#628.
         return os.path.realpath(expanded)
     except OSError:
         return os.path.normpath(expanded)
@@ -340,6 +345,14 @@ class SessionManager:
             # incrementally (append_message) and keeps pre-compaction turns as archived
             # active=0 rows; replace_messages() would DELETE those (and, after a compression
             # id rotation, clobber the ended parent transcript). Skip it in that case.
+            # Calling replace_messages() here would then be a redundant double-write that DELETEs exactly
+            # those archived rows (and, after a compression-driven id rotation where agent.session_id no
+            # longer equals state.session_id, clobbers the ended parent transcript) — silent data loss for
+            # any ACP conversation long enough to compress. Only fall back to the destructive atomic replace
+            # when the agent is NOT persisting itself to this DB (e.g. a test agent factory, or a fresh
+            # create/fork whose copied history the agent has not flushed yet). That path still rolls back on
+            # a mid-rewrite failure so the previously persisted conversation survives (salvaged from
+            # #13675).
             agent = state.agent
             if getattr(agent, "_session_db", None) is db and getattr(agent, "_session_db_created", False):
                 return

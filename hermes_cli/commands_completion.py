@@ -131,6 +131,10 @@ def _tools_completions(sub_text: str, sub_lower: str):
     from hermes_cli.tools_config import (
         CONFIGURABLE_TOOLSETS, _get_platform_tools, _get_plugin_toolset_keys)
     # Readonly loader: per keystroke and never mutates, so skip load_config()'s deepcopy.
+    # Read-only path: the completer only inspects the config (toolset enable state + MCP server names) — it
+    # never mutates it. Use the readonly loader so the per-keystroke completion doesn't pay the defensive
+    # deepcopy (perf(agent) #74322 converted 29 call sites to the readonly loader; this per-keystroke site
+    # was missed).
     config = load_config_readonly()
     enabled = _get_platform_tools(config, "cli", include_default_mcp_servers=False)
     mcp_servers = config.get("mcp_servers") or {}

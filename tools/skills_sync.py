@@ -36,6 +36,10 @@ MANIFEST_FILE = SKILLS_DIR / ".bundled_manifest"
 # retarget HERMES_HOME after import, and frozen constants would resolve (and for
 # reset_bundled_skill() DELETE) against the wrong profile. Accessors honor an explicitly
 # patched module global and otherwise re-resolve on every call.
+# Same bug class and same fix as skills_tool (f8723c478) and skill_manager_tool (c6a3d412d): long-lived
+# multi-profile runtimes (Dashboard console, TUI/Desktop backend, cron, kanban workers) import this module
+# once under the launch HERMES_HOME and later scope requests to a different profile via
+# set_hermes_home_override(). See #65828.
 _HERMES_HOME_AT_IMPORT = HERMES_HOME
 _SKILLS_DIR_AT_IMPORT = SKILLS_DIR
 _MANIFEST_FILE_AT_IMPORT = MANIFEST_FILE
@@ -394,7 +398,13 @@ def sync_skills(quiet: bool = False) -> dict:
 def _rmtree_writable(path: Path) -> None:
     """rmtree that first makes read-only entries writable (Nix/deb/rpm keep r-x dirs; unlinking
     a child needs a writable parent, so chmod both). Scope guard: refuses anything not a STRICT
-    child of the active skills root (bad join / missing HERMES_HOME / malicious manifest entry)."""
+    child of the active skills root (bad join / missing HERMES_HOME / malicious manifest entry).
+
+    Handles immutable package sources (Nix store, deb/rpm installs) that preserve read-only permissions on
+    copied files *and* directories (``r-xr-xr-x``). Removing a child requires write permission on its parent
+    directory, so the retry handler makes the failing path **and its parent** writable before re-attempting.
+    See #34860, #34972.
+    """
     target = Path(path).resolve()
     skills_root = _skills_dir().resolve()
     if skills_root not in target.parents:

@@ -76,7 +76,11 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
     downstream failure makes cheap models loop. Required-field probe first, then the same
     schema-guided coercion normal dispatch applies, then jsonschema on the repaired copy.
     Missing/malformed schemas, no validator, and external refs all fail OPEN. Returns a JSON
-    error string when invalid, ``None`` when the call should dispatch."""
+    error string when invalid, ``None`` when the call should dispatch.
+
+    This restores the concrete-schema checks that the provider cannot perform through the generic
+    ``arguments: object`` bridge. See #5149.
+    """
     try:
         from tools.registry import registry as _registry
         schema = _registry.get_schema(name)

@@ -265,6 +265,14 @@ def purge_stale_done_notify_subs(conn: sqlite3.Connection, *, max_age_days: int 
     abandoned (unlike ``backlog``/``ready``) so it reaps on the same clock. Age
     = latest event, else ``completed_at``, else ``created_at`` — any activity,
     including a reopen, exempts the sub.
+
+    The notifier keeps subscriptions alive through ``done`` because a completed task can be reopened (review
+    corrections, continuation) and the reopened cycle must still notify its origin session. On boards that
+    never archive, that retention would otherwise accumulate subscription rows forever — each one scanned
+    every notifier tick. This GC bounds that: a task that has been ``done`` with no new events for the
+    retention window is treated as settled and its subscriptions are purged. ``blocked`` tasks
+    (circuit-breaker trips, dead workers) are reaped on the same clock — they are abandoned, not idle,
+    unlike a ``backlog``/``ready`` card that is merely waiting for pickup (#100955).
     """
     try:
         days = int(max_age_days)

@@ -262,9 +262,17 @@ def compress_after_tool_results(
         )
 
     _compressor = agent.context_compressor
+    # Use real token counts from the API response to decide compression.  prompt_tokens + completion_tokens
+    # is the actual context size the provider reported plus the assistant turn — a tight lower bound for the
+    # next prompt. Tool results appended above aren't counted yet, but the threshold (default 50%) leaves
+    # ample headroom; if tool results push past it, the next API call will report the real total and trigger
+    # compression then. If last_prompt_tokens is 0 (stale after API disconnect or provider returned no usage
+    # data), fall back to rough estimate to avoid missing compression. Without this, a session can grow
+    # unbounded after disconnects because should_compress(0) never fires. (#2153)
     if _compressor.last_prompt_tokens > 0:
         # Only prompt_tokens: thinking models inflate completion_tokens with
         # reasoning that uses no context → premature compression.
+        # Only use prompt_tokens — completion/reasoning tokens don't consume context window space. (#12026)
         _real_tokens = _compressor.last_prompt_tokens
     elif _compressor.last_prompt_tokens == -1:
         # Compression just ran, no API prompt count yet: don't treat a rough
@@ -274,6 +282,12 @@ def compress_after_tool_results(
         # Include tool schemas (20-30K tokens the messages-only estimate misses) and
         # stay route-aware: on a compacted native-Codex session the generic
         # durable-history figure would false-trigger.
+        # Include tool schemas — with 50+ tools enabled these add 20-30K tokens the messages-only estimate
+        # misses, which can skip compression past the configured threshold (#14695). Route-aware
+        # (#96995/#97602 class): on a compacted native-Codex session the generic durable-history figure
+        # overstates the wire and would false-trigger compression here exactly like the pre-API guard — this
+        # fallback runs precisely when no provider usage is available (post-disconnect / gateway restart),
+        # the unanchored case from #97602's repro.
         _real_tokens = _midturn_request_pressure_tokens(
             agent, messages, active_system_prompt or "",
             estimate_request_tokens_rough(messages, tools=agent.tools or None),
@@ -298,6 +312,30 @@ def compress_after_tool_results(
         if messages is _post_tool_input and compression_skipped_due_to_lock(agent):
             # Lock-skip no-op is a temporary defer, not evidence about compressibility:
             # refund so a lock-loser loop doesn't burn the budget toward exhausted.
+            # #69870 lock-skip / #97488 transient-block: this pass no-oped for a TEMPORARY reason (another
+            # path holds the compression lock, or a timed cooldown/backoff guard is active). That is a
+            # temporary DEFER, not evidence about compressibility — refund the attempt (it must not burn the
+            # shared overflow-recovery budget toward compression_exhausted → gateway auto-reset,
+            # #9893/#35809) and leave the insufficient-progress blocker unarmed. Proceed with the current
+            # request: if it truly does not fit, the provider's 413/overflow handler returns the soft
+            # compression_deferred result with that stronger signal.
+            # #69870 lock-skip: the provider proved the request does not fit, but this compression pass
+            # no-oped only because another path holds the session's compression lock. Temporary defer, not
+            # exhaustion — refund the attempt and end the turn softly so the gateway does NOT auto-reset the
+            # session (#9893/#35809).
+            # #97488 transient-block: compression no-oped because a timed guard (host-timeout cooldown /
+            # structural backoff) is active — a temporary defer, not evidence of incompressibility. Never
+            # classify it as compression_exhausted (gateway auto-reset).
+            # bypass_cooldown=True,  # #100661 provider-proven overflow
+            # #97488: timed transient guard — defer, never exhaustion (gateway auto-reset).
+            # #69870 lock-skip: the provider proved the request does not fit, but this compression pass
+            # no-oped only because another path holds the session's compression lock. Temporary defer, not
+            # exhaustion — refund the attempt and end the turn softly so the gateway does NOT auto-reset the
+            # session (#9893/#35809).
+            # #97488 transient-block: a timed guard (host-timeout cooldown / structural backoff) no-oped
+            # this pass — defer softly, never compression_exhausted (which would auto-reset the session).
+            # #69870 lock-skip: this pass no-oped because another path holds the session's compression lock
+            # — a temporary defer, not evidence about compressibility.
             compression_attempts -= 1
         else:
             conversation_history = conversation_history_after_compression(

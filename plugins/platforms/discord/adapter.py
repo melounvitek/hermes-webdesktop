@@ -216,7 +216,13 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
 def _is_discord_transport_error(exc: BaseException) -> bool:
     """True for connection-shaped send failures (dead/dropping WS) that never reached Discord, so
-    the delivery ledger can replay them; timeouts excluded (a timed-out send may have landed)."""
+    the delivery ledger can replay them; timeouts excluded (a timed-out send may have landed).
+
+    These are the failures where the message demonstrably did NOT reach Discord because the transport itself
+    was down — the delivery-obligation ledger can safely replay them after reconnect (#95382). HTTP-level
+    rejections (permissions, formatting, 4xx) are NOT transport errors and must keep their original error
+    string.
+    """
     if isinstance(exc, asyncio.TimeoutError):
         return False
     if isinstance(exc, (ConnectionError, OSError)):
@@ -526,6 +532,12 @@ def _clean_discord_id(entry: str) -> str:
 # secret scope (contextvar propagates into connect()) and falls back to os.getenv outside multiplex.
 
 # Authorization/gate env vars snapshotted per-adapter at connect() time.
+# ── per-profile gate env reads (issue #72348) ──────────────────────────── Under
+# gateway.multiplex_profiles, os.environ is process-global and the YAML→env bridge in _apply_yaml_config is
+# first-writer-wins, so a raw os.getenv() on an allow/deny gate can return ANOTHER profile's value.
+# _scoped_gate_env reads the active profile's secret scope when one is installed (secondary adapters connect
+# — and their discord.py event tasks are created — inside _profile_runtime_scope, so the contextvar
+# propagates) and falls back to os.getenv only outside multiplex.
 _GATE_ENV_KEYS = (
     "DISCORD_ALLOWED_USERS", "DISCORD_ALLOWED_ROLES", "DISCORD_ALLOWED_CHANNELS",
     "DISCORD_IGNORED_CHANNELS", "DISCORD_NO_THREAD_CHANNELS", "DISCORD_FREE_RESPONSE_CHANNELS",
@@ -554,7 +566,12 @@ def _multiplex_active() -> bool:
 
 def discord_deps_present() -> bool:
     """PASSIVE probe: is discord.py importable? Registry ``check_fn`` — must never install
-    (the ACTIVE installer ``check_discord_requirements`` runs as ``ensure_deps_fn``)."""
+    (the ACTIVE installer ``check_discord_requirements`` runs as ``ensure_deps_fn``).
+
+    Registry ``check_fn`` — called from status displays and config loading, so it must never install
+    anything. The ACTIVE lazy-installer (``check_discord_requirements``) is registered as ``ensure_deps_fn``
+    and runs from ``create_adapter()`` when this returns False (#79812).
+    """
     return DISCORD_AVAILABLE
 
 
@@ -973,6 +990,9 @@ class DiscordAdapter(BasePlatformAdapter):
     supports_code_blocks = True  # Discord markdown renders fenced code blocks natively
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
     # Safety ceiling on split deliveries: chunks beyond the cap become a notice (degenerate turns).
+    # Safety ceiling on split deliveries (#86581): a degenerate turn can produce tens of thousands of
+    # characters — without a cap the adapter posts every 2000-char chunk back-to-back and floods the channel
+    # (the incident delivered 60,698 chars as 31 messages).
     MAX_SPLIT_MESSAGES = 8
 
     # Voice auto-disconnect after N idle seconds (discord.voice_channel_inactivity_timeout_seconds; 0 off).
@@ -994,6 +1014,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._allowed_user_ids: set = set()  # For button approval authorization
         self._allowed_role_ids: set = set()  # For DISCORD_ALLOWED_ROLES filtering
         # Gate env snapshot captured in connect() inside the owning profile's scope; None until then.
+        # None until then; accessors fall back to live scope-aware reads (issue #72348).
         self._gate_env_snapshot: Optional[Dict[str, str]] = None
         self.gateway_runner = None  # Set by gateway/run.py for cross-platform delivery
         self._voice_clients: Dict[int, Any] = {}  # guild_id -> VoiceClient
@@ -1024,6 +1045,9 @@ class DiscordAdapter(BasePlatformAdapter):
         # Persistent typing loops per channel (DMs don't reliably show bot typing events).
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
+        # Background task that runs post-connect housekeeping (command-menu registration + DM-topic setup)
+        # off the connect path so a slow Bot API call (e.g. a set_my_commands stall for certain tokens)
+        # cannot blow the gateway's connect timeout (#46298).
         self._post_connect_task: Optional[asyncio.Task] = None
         # WS liveness probe: REST 200 can't prove Gateway events still arrive, so sample WS
         # ready/open/ACK + heartbeat latency; consecutive failures -> retryable-fatal. 0 disables.
@@ -1060,6 +1084,10 @@ class DiscordAdapter(BasePlatformAdapter):
         self._nonconversational_messages = _DiscordNonConversationalMessageTracker()
         # Last truncated mid-stream preview per (chat_id, message_id): past the 2000 cap every edit
         # truncates to the SAME text, and re-sending only burns edit rate limit. Dropped on finalize.
+        # Once an oversized streaming edit saturates at the 2000-char preview cap, every subsequent
+        # progressive edit truncates to the SAME text; re-sending it is a no-op that still counts against
+        # Discord's edit rate limit (~1 edit per stream tick for the rest of a long reply). Mirrors the
+        # Telegram #58563 fix.
         self._last_overflow_preview: Dict[tuple, str] = {}
         self._warned_fail_closed_default = False
 
@@ -1148,6 +1176,9 @@ class DiscordAdapter(BasePlatformAdapter):
             if not self._acquire_platform_lock('discord-bot-token', self.config.token, 'Discord bot token'):
                 return False
             # Snapshot gate env inside the owning profile's scope (immune to the first-writer-wins bridge).
+            # Snapshot this profile's gate env vars (issue #72348): connect() runs inside the owning
+            # profile's runtime scope under multiplex, so the snapshot holds THIS adapter's values, immune
+            # to the first-writer-wins process-global env bridge.
             self._snapshot_gate_env()
             self._allowed_user_ids = self._get_allowed_users()
             # DISCORD_ALLOWED_ROLES: comma-separated role IDs; ANY match grants access.
@@ -1169,6 +1200,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 logger.info("[%s] Using proxy for Discord: %s", self.name, proxy_url)
             # proxy= for HTTP, connector= for SOCKS; allowed_mentions per _build_allowed_mentions.
             # Close any existing client first: a zombie client also fires on_message -> double responses.
+            # Without this, the old client remains connected to Discord gateway and both fire on_message,
+            # causing double responses. See #18187.
             if self._client is not None:
                 try:
                     if not self._client.is_closed():
@@ -1308,6 +1341,7 @@ class DiscordAdapter(BasePlatformAdapter):
             )
         if _is("PrivilegedIntentsRequired"):
             # Name the exact intents requested (Server Members only when allowlists need lookups).
+            # See #79430.
             guidance = _format_privileged_intents_guidance(
                 needs_members=_needs_server_members_intent(
                     getattr(self, "_allowed_user_ids", None),
@@ -2752,7 +2786,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def _cap_split_chunks(self, chunks: List[str]) -> List[str]:
         """Cap chunks at ``MAX_SPLIT_MESSAGES``: keep the first N-1 and replace the rest with a
-        notice so a degenerate turn can't flood the channel (full text stays in session history)."""
+        notice so a degenerate turn can't flood the channel (full text stays in session history).
+
+        Cap the number of chunks sent for one logical response (#86581).
+        A degenerate turn can produce tens of thousands of characters; the 86581 incident delivered 60,698
+        chars as 31 back-to-back Discord messages. The full response remains available in the gateway
+        session history / logs. See #86581.
+        """
         if len(chunks) <= self.MAX_SPLIT_MESSAGES:
             return chunks
         kept = chunks[: self.MAX_SPLIT_MESSAGES - 1]
@@ -2836,6 +2876,9 @@ class DiscordAdapter(BasePlatformAdapter):
                     await self._nonconversational_messages.mark_many(message_ids)
                 elif not _looks_like_nonconversational_history_message(content):
                     self._last_self_message_id[_target_id] = message_ids[-1]
+            # Connection-shaped failure (WS drop / closed session): use the ledger's runtime-retryable
+            # marker so the reconnect sweep can replay this final response instead of stranding it until a
+            # process restart (#95382 silent partial loss).
             result = SendResult(
                 success=True,
                 message_id=message_ids[0] if message_ids else None,
@@ -2949,7 +2992,12 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Edit a sent Discord message. Oversized text (>2,000) must neither truncate silently nor
         fail (consumer re-sends -> dupe): mid-stream keep a truncated preview (splitting would move
-        the edit target every tick); ``finalize=True`` delivers all via ``_edit_overflow_split``."""
+        the edit target every tick); ``finalize=True`` delivers all via ``_edit_overflow_split``.
+
+        Mid-stream (``finalize=False``) we keep editing the original message with a truncated preview —
+        splitting mid-stream would move the edit target to a continuation and the next accumulated-token
+        tick would re-split, looping forever (the Telegram #48648 lesson).
+        """
         if not self._client:
             return SendResult(success=False, error="Not connected")
         try:
@@ -2968,6 +3016,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 formatted = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)[0]
                 _saturated_preview = True
                 # Saturated-preview dedup: past the cap every edit is the same text; skip until finalize.
+                # Re-sending it is a visual no-op that still counts against Discord's edit rate limit — skip
+                # silently until finalize (mirrors the Telegram #58563 fix).
                 if self._last_overflow_preview.get(_preview_key) == formatted:
                     return SendResult(success=True, message_id=message_id)
             elif not finalize:
@@ -3095,7 +3145,10 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a local file as a Discord attachment (forum channels get a new thread). Path-based
         ``discord.File`` only: the open-handle form can race the multipart encoder after an image
-        batch and yield zero attachments — a silent drop for video/document MEDIA tags."""
+        batch and yield zero attachments — a silent drop for video/document MEDIA tags.
+
+        See #66797.
+        """
         if not self._client:
             return SendResult(success=False, error="Not connected")
         if not os.path.isfile(file_path):
@@ -3119,6 +3172,8 @@ class DiscordAdapter(BasePlatformAdapter):
         attachments = getattr(msg, "attachments", None) or []
         if not attachments:
             # Discord accepted the message but attached nothing: fail loud instead of a silent drop.
+            # Discord accepted the message but attached nothing — the failure mode reported in #66797 (MEDIA
+            # video stripped from text, no attachment, no prior log line).
             logger.warning(
                 "[%s] Discord returned message %s with no attachments for %s", self.name,
                 getattr(msg, "id", "?"), filename,
@@ -3878,6 +3933,11 @@ class DiscordAdapter(BasePlatformAdapter):
             if self._gateway_allow_all_users():
                 return True
             # Channel-scoped access needs validated channel context; not a user-wide bypass.
+            # In shared channels, respond only when addressed — unless require_mention is disabled, in which
+            # case respond to every message. A NIP-10 thread reply whose direct parent is one of our
+            # messages is treated as addressed (parity with Signal/WhatsApp; fixes #75826 — e.g. Desktop
+            # "/approve session" replies that never type @name). Explicit addressing is a text @mention OR a
+            # signed recipient p-tag (#92781). DMs always dispatch.
             if (
                 not is_dm
                 and channel_ids is not None
@@ -4003,6 +4063,7 @@ class DiscordAdapter(BasePlatformAdapter):
             return (False, "missing interaction.user")
         user_id = str(user.id)
         # guild + is_dm scope the role check so the cross-guild DM bypass can't land via slash.
+        # See #12136.
         interaction_guild = getattr(interaction, "guild", None)
         if not self._is_allowed_user(
             user_id, author=user, guild=interaction_guild, is_dm=in_dm,
@@ -4319,6 +4380,10 @@ class DiscordAdapter(BasePlatformAdapter):
         if to_resolve:
             print(f"[{self.name}] Could not resolve usernames: {', '.join(to_resolve)}")
         # Adapter-local: under multiplex_profiles os.environ writes would clobber other profiles.
+        # Update the internal set. Keep the resolved IDs adapter-local first: under multiplex_profiles,
+        # writing os.environ here would clobber every OTHER profile's DISCORD_ALLOWED_USERS after this
+        # adapter's on_ready — an unguarded runtime mutation of process-global state (issue #72348). Refresh
+        # this adapter's own snapshot instead.
         self._allowed_user_ids = numeric_ids
         snap = getattr(self, "_gate_env_snapshot", None)
         if snap is not None:
@@ -4525,7 +4590,13 @@ class DiscordAdapter(BasePlatformAdapter):
     def _register_skill_group(self, tree) -> None:
         """Register one flat ``/skill`` command with autocomplete on ``name``.
         A nested ``/skill <category> <name>`` layout blew Discord's ~8000-byte payload cap and broke
-        ``tree.sync()``; autocomplete options are fetched dynamically. Entries live on ``self``."""
+        ``tree.sync()``; autocomplete options are fetched dynamically. Entries live on ``self``.
+
+        The older nested layout (``/skill <category> <name>``) registered one giant command whose serialized
+        payload grew linearly with the skill catalog — with the default ~75 skills the payload was ~14 KB
+        and ``tree.sync()`` rejected the entire slash-command batch (issues 11321, #10259, #11385, #10261,
+        #10214).
+        """
         try:
             existing_names = set()
             try:
@@ -4658,6 +4729,9 @@ class DiscordAdapter(BasePlatformAdapter):
         # Forum threads inherit the parent forum's topic.
         chat_topic = self._get_effective_topic(interaction.channel, is_thread=is_thread)
         # guild_id/parent_chat_id feed profile_routes matching, as on_message does.
+        # guild_id/parent_chat_id feed profile_routes matching in build_source, exactly as on_message passes
+        # them — without them a guild- or channel-routed profile never matches a native slash command
+        # (#69178).
         parent_id = (self._get_parent_channel_id(interaction.channel) if is_thread else None) or ""
         source = self.build_source(
             chat_id=str(interaction.channel_id), chat_name=chat_name, chat_type=chat_type,
@@ -4803,6 +4877,13 @@ class DiscordAdapter(BasePlatformAdapter):
     # Under multiplex_profiles os.environ is process-global (first-writer-wins), so raw os.getenv
     # would leak profile A into B. Order: connect()-time env snapshot, config.extra, scoped env read.
 
+    # ── per-adapter authorization gates (issue #72348) ─────────────────── Under gateway.multiplex_profiles
+    # every Discord adapter must enforce ITS OWN profile's allow/deny lists. os.environ is process-global
+    # and the YAML→env bridge is first-writer-wins, so raw os.getenv reads here would leak profile A's gates
+    # into profile B. Each accessor reads, in order: the per-adapter env snapshot taken inside the owning
+    # profile's runtime scope at connect() (authoritative under multiplex), then this adapter's
+    # PlatformConfig.extra (per-profile YAML), with the live scope-aware env read as the pre-connect
+    # fallback. Single-profile deployments resolve to plain os.getenv, unchanged.
     def _snapshot_gate_env(self) -> None:
         """Snapshot gate env vars; must run inside the owning profile's runtime scope
         (connect() does under multiplex) to capture that profile's values."""
@@ -5210,7 +5291,13 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def _derive_auto_thread_name(self, content: str) -> str:
         """Fast placeholder thread name with mentions stripped (raw <@id> tokens mean nothing to humans).
-        Semantic renaming happens after the first agent turn, once an LLM session title exists."""
+        Semantic renaming happens after the first agent turn, once an LLM session title exists.
+
+        Strip Discord mention syntax (users / roles / channels) so thread titles don't show raw <@id>,
+        <@&id>, or <#id> markers — the ID isn't meaningful to humans glancing at the thread list (#6336).
+        Real semantic naming is done after the first agent turn, when Hermes has an LLM-generated session
+        title and can safely rename only this newly-created thread.
+        """
         content = (content or "").strip()
         # <@123>, <@!123>, <@&123>, <#123> — collapse to empty; normalize spaces.
         content = re.sub(r"<@[!&]?\d+>", "", content)
@@ -5232,7 +5319,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def _auto_create_thread(self, message: 'DiscordMessage') -> Optional[Any]:
         """Create an auto-thread from a user message; returns the thread or ``None``.
-        Primary path and seed-message fallback each retry once after a short backoff (transient errors)."""
+        Primary path and seed-message fallback each retry once after a short backoff (transient errors).
+
+        ``Cannot connect to host discord.com:443``) don't immediately burn through to the caller's failure
+        path (#20243).
+        """
         thread_name = self._derive_auto_thread_name(message.content or "")
         display_name = getattr(getattr(message, "author", None), "display_name", None) or "unknown user"
         reason = f"Auto-threaded from mention by {display_name}"
@@ -5703,7 +5794,12 @@ class DiscordAdapter(BasePlatformAdapter):
 
     async def _cache_discord_document(self, att, ext: str) -> bytes:
         """Download a document attachment: ``att.read()`` first, SSRF-gated aiohttp fallback.
-        Caller passes the bytes to ``cache_document_from_bytes`` (and injects text if applicable)."""
+        Caller passes the bytes to ``cache_document_from_bytes`` (and injects text if applicable).
+
+        This closes the gap where the old document path made raw ``aiohttp.ClientSession`` requests with no
+        safety check (#11345). The caller is responsible for passing the returned bytes to
+        ``cache_document_from_bytes`` (and, where applicable, for injecting text content).
+        """
         raw_bytes = await self._read_attachment_bytes(att, media_type="document")
         if raw_bytes is not None:
             return raw_bytes
@@ -5919,6 +6015,9 @@ class DiscordAdapter(BasePlatformAdapter):
                     # Auto-threading is the routing target; do NOT fall back to an inline parent-channel
                     # reply (dumps the task into a shared channel). Surface an error and skip the run.
                     try:
+                        # That breaks thread-first Discord workflows by dumping a new task into a shared
+                        # channel. Surface a short visible error so the user can retry once Discord
+                        # recovers, and skip agent invocation for this message. See #20243.
                         await message.channel.send(
                             "⚠️ Hermes could not create a Discord thread for "
                             "this message, so the request was not processed. Please retry."
@@ -6084,6 +6183,9 @@ def _component_check_auth(
         return False
     # Scope-aware reads: interaction tasks inherit the owning profile's secret-scope contextvar;
     # under multiplex a raw os.getenv could return ANOTHER profile's allow-all flag.
+    # Scope-aware reads (issue #72348): component interactions are dispatched from discord.py tasks
+    # descended from the task created inside the owning profile's runtime scope, so the profile's
+    # secret-scope contextvar is inherited here.
     if _scoped_gate_env("DISCORD_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
         return True
     if _scoped_gate_env("GATEWAY_ALLOW_ALL_USERS").strip().lower() in {"true", "1", "yes"}:
@@ -7119,7 +7221,11 @@ _YAML_WEBSOCKET_LIVENESS_KEYS = (
 def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     """Translate ``config.yaml`` ``discord:`` keys into env vars (``apply_yaml_config_fn``).
     The adapter reads ``DISCORD_*`` via ``os.getenv()`` at ~50 sites, so this hook owns YAML→env;
-    ``extra`` stays the per-adapter truth for liveness (multiplex isolation). Returns liveness settings."""
+    ``extra`` stays the per-adapter truth for liveness (multiplex isolation). Returns liveness settings.
+
+    Implements the ``apply_yaml_config_fn`` contract (#24836). Mirrors the legacy ``discord_cfg`` block that
+    used to live in ``gateway/config.py::load_gateway_config()`` before this migration.
+    """
     def _env_default(env_key: str, value) -> None:
         # First-writer-wins: an explicit env var always beats the YAML value.
         if not os.getenv(env_key):
@@ -7142,6 +7248,9 @@ def _apply_yaml_config(yaml_cfg: dict, discord_cfg: dict) -> dict | None:
     seeded_extra = {}
     # Gate keys are ALWAYS seeded into PlatformConfig.extra (per-profile lists); the os.environ writes
     # below are first-writer-wins for legacy consumers and skipped for profile-scoped multiplex loads.
+    # The os.environ writes below remain first-writer-wins for legacy env-only consumers, but are skipped
+    # for profile-scoped loads under multiplex — a secondary profile's gates must never land in
+    # process-global env where they'd become another profile's policy. See #72348.
     _skip_env_bridge = _profile_scoped_config_load()
 
     def _gate(key: str, env_key: str, *, from_platform_extra: bool, lower: bool = False) -> None:
@@ -7228,6 +7337,11 @@ def register(ctx) -> None:
         install_hint="Run `hermes setup` to install Discord support.",
         setup_fn=interactive_setup,
         # YAML→env bridge: ``discord:`` config keys → ``DISCORD_*`` env vars read via os.getenv().
+        # YAML→env config bridge — owns the translation of ``config.yaml`` ``discord:`` keys
+        # (require_mention, free_response_channels, auto_thread, reactions, ignored_channels,
+        # allowed_channels, no_thread_channels, allow_mentions.*, reply_to_mode, thread_require_mention)
+        # into ``DISCORD_*`` env vars that the adapter reads via ``os.getenv()``. Replaces the hardcoded
+        # block that used to live in ``gateway/config.py``. Hook contract: #24836.
         apply_yaml_config_fn=_apply_yaml_config,
         allowed_users_env="DISCORD_ALLOWED_USERS",
         allow_all_env="DISCORD_ALLOW_ALL_USERS",

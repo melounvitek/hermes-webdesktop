@@ -43,7 +43,14 @@ _REMOTE_IDE_ENV_VARS = (
 
 
 def _is_remote_session() -> bool:
-    """Detect environments where loopback OAuth can't reach the local browser."""
+    """Detect environments where loopback OAuth can't reach the local browser.
+
+    Historically only SSH was checked, but #26923 surfaced that **browser-only remote consoles** (GCP Cloud
+    Shell, GitHub Codespaces, AWS EC2 Instance Connect, Gitpod, Replit, etc.) hit the exact same problem —
+    the user has a browser on their laptop but the loopback listener is bound on the remote VM that the
+    laptop's browser can't reach. These environments typically don't set ``SSH_CLIENT`` / ``SSH_TTY``, so
+    the SSH-only check left them with no guidance and no fallback.
+    """
     return bool(
         os.getenv("SSH_CLIENT") or os.getenv("SSH_TTY")
         or any(os.getenv(var) for var in _REMOTE_IDE_ENV_VARS))
@@ -176,7 +183,12 @@ def _request_device_code(
 
 
 def _nous_device_auth_timeout_message(portal_base_url: str) -> str:
-    """Actionable timeout text: the usual cause is Portal sign-in failing in the browser tab."""
+    """Actionable timeout text: the usual cause is Portal sign-in failing in the browser tab.
+
+    A bare "Timed out waiting for device authorization" gives the user nothing to act on. The most common
+    cause is Portal sign-in failing in the opened browser tab (including the server-side CAPTCHA loop from
+    20605), so point at the Portal login page and the retry command. See #20605.
+    """
     portal = (portal_base_url or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
     return (
         "Timed out waiting for device authorization.\n"

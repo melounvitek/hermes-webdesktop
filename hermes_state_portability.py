@@ -220,7 +220,12 @@ class SessionPortabilityMixin:
         a complete adoption, donor rows are ARCHIVED (never deleted) with
         ``end_reason='adopted_by_profile'`` — deliberately NOT in the recoverable set, so
         resurrection cannot undo an adoption. Returns the ``import_sessions`` dict plus
-        ``adopted`` and ``donor_retired`` (True only when EVERY segment retired)."""
+        ``adopted`` and ``donor_retired`` (True only when EVERY segment retired).
+
+        Once routing was fixed, the profile backend correctly received the RPCs but had no such session, so
+        the same chat 4001'd for the opposite reason. This method moves the conversation to where routing
+        now looks for it. See #93091, #93296.
+        """
         payload = donor_db.export_session_lineage(session_id)
         if not payload:
             return {"ok": False, "adopted": False, "donor_retired": False,
@@ -458,7 +463,14 @@ class SessionPortabilityMixin:
         Gateway routing, handoff, rewind and other live runtime state are reset: this
         restores history, not ownership of a live channel or process. Export INCLUDES
         ``last_activity_*`` but import RESETS them to NULL — resurrecting a stale
-        "working ..." label would fabricate activity the watchdog acts on (pinned)."""
+        "working ..." label would fabricate activity the watchdog acts on (pinned).
+
+        Activity contract (#76354 review S4): export INCLUDES the live activity fields (``last_activity_at``
+        / ``last_activity_description`` / ``last_activity_provenance``) because they are part of the durable
+        row, but import deliberately RESETS them to NULL. This asymmetry is intentional and covered by
+        regression
+        (tests/gateway/test_watchdog_review_76354.py::test_s4_export_includes_activity_import_resets_it).
+        """
         if not isinstance(sessions, list):
             raise ValueError("sessions must be a list")
         if len(sessions) > self._IMPORT_MAX_SESSIONS:

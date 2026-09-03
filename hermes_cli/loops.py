@@ -242,7 +242,11 @@ def _meta_key(session_id: str) -> str:
 
 def _get_session_db() -> Optional[Any]:
     """The goals module's cached SessionDB, so goals/loops/heartbeats share one connection and
-    its off-loop bootstrap (a cold cache on the loop thread never runs ``SessionDB()`` inline)."""
+    its off-loop bootstrap (a cold cache on the loop thread never runs ``SessionDB()`` inline).
+
+    The previous copy here did, which froze the loop for the init duration and dropped the first ``loop:*``
+    write (the /goal bug class, #88965).
+    """
     try:
         from hermes_cli.goals import _get_session_db as _goals_db
     except Exception as exc:  # pragma: no cover
@@ -322,6 +326,9 @@ def migrate_loop_to_session(old_session_id: str, new_session_id: str, *, reason:
 
     Context compression rotates ``session_id`` to a fresh child; without this the loop silently
     dies at the compaction boundary.
+
+    Copies the loop onto the new session and archives the old row as ``cleared`` so exactly one active loop
+    row exists per logical conversation. See #33618.
     """
     if not old_session_id or not new_session_id or old_session_id == new_session_id:
         return False

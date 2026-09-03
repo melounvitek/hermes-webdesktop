@@ -211,7 +211,11 @@ def _check_task(policy: _TrustPolicy, *, plugin_id: str, requested_task: Optiona
     registered itself → allowed; a built-in key → only with ``allow_task_override``;
     anything else raises + logs. Never silently downgraded to ``auto``: that would
     mask the misconfiguration and could route to a main model the user steered
-    elsewhere on purpose."""
+    elsewhere on purpose.
+
+    A foreign/unknown key raises :class:`PluginLlmTrustError` and logs a warning naming the offending plugin
+    and key. See #64174, #64182.
+    """
     task = (requested_task or "").strip()
     if not task or task.lower() == "auto":
         return None

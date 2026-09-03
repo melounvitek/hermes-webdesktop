@@ -62,6 +62,8 @@ class ContextEngine(ABC):
     # Compaction parameters (read by run_agent.py for preflight). protect_first_n counts
     # non-system head messages kept verbatim IN ADDITION to the always-protected system
     # prompt (3 keeps the historical head shape).
+    # These control the preflight compression check. Subclasses may override via __init__ or property;
+    # defaults are sensible for most engines. See #13754.
     threshold_percent: float = 0.75
     protect_first_n: int = 3
     protect_last_n: int = 6
@@ -183,6 +185,16 @@ class ContextEngine(ABC):
 
     def on_session_reset(self) -> None:
         """/new or /reset: reset per-session state (default: counters and token tracking)."""
+        # Reset cross-call calibration state captured under the PREVIOUS model. These fields encode "the
+        # provider proved this prompt fit" / "preflight can be deferred" decisions that are only valid for
+        # the model that produced them. Carrying them across a switch to a smaller-context model would let
+        # should_defer_preflight_to_real_usage() suppress a preflight compression the new model actually
+        # needs — the exact oversized-send-after-switch failure in #23767. The new model's first response
+        # repopulates them via update_from_response(). Setting last_prompt_tokens to 0 (NOT -1) is
+        # deliberate: 0 is the documented "no real usage yet -> use the rough estimate" state, so the post-
+        # response should_compress path falls back to estimate_request_tokens_rough rather than skipping
+        # compression. -1 is a different sentinel (#36718, "compression just ran, await real usage") and
+        # must not be set here.
         self.last_prompt_tokens = 0
         self.last_completion_tokens = 0
         self.last_total_tokens = 0

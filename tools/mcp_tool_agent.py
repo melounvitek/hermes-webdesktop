@@ -224,6 +224,7 @@ def _reinject_post_build_tools(agent, tools_list: list, name_set: set) -> set:
     # The `context_engine` toolset is intentionally empty, so lcm_* tools exist only via this
     # append. Honor the enabled_toolsets gate agent_init uses, or a restricted-toolset platform
     # would re-leak tools the build excluded.
+    # See #5544.
     staged_engine_names: set = set()
     try:
         get_schemas = _schema_getter("context_compressor", "get_tool_schemas")

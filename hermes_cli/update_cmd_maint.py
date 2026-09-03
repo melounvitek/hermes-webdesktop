@@ -291,7 +291,14 @@ def _reload_process_scan_modules() -> None:
     """Reload the process-scan modules, dependency-first, so ``dashboard_procs`` binds against a
     fresh ``_subprocess_compat``: cleanup runs in the PRE-update process and a symbol the update
     added would otherwise ImportError after the code update succeeded. Called from the cleanup
-    entry point so every caller (git path, ZIP fallback) is covered."""
+    entry point so every caller (git path, ZIP fallback) is covered.
+
+    ``_finish_dashboard_update_cleanup`` runs in the PRE-update Python process, but
+    ``_scan_dashboard_processes`` does a function-level ``from hermes_cli._subprocess_compat import
+    bounded_probe_run``. If the update added a new symbol to ``_subprocess_compat`` (as #87134 did with
+    ``bounded_probe_run``), the cached OLD module object doesn't have it and the cleanup step crashes with
+    ImportError — after the code update itself already succeeded.
+    """
     _reload_modules(
         ("hermes_cli._subprocess_compat", "hermes_cli.dashboard_procs"),
         modules=sys.modules,
@@ -309,6 +316,8 @@ def _finish_dashboard_update_cleanup(
 
     *already_restarted_units*: systemd unit names (no ``.service``) the fleet-restart loop
     already restarted, so a Serve-only install isn't restarted a second time here.
+
+    See #83595.
     """
     from hermes_cli.update_cmd import _m, _reload_process_scan_modules
     if node_failures:
@@ -333,7 +342,10 @@ def _finish_dashboard_update_cleanup(
 
 def _print_update_completion(message: str) -> None:
     """Print the outcome (with branch @ sha so drift is visible) plus, when launched by the
-    dashboard with an action id, a receipt line the Desktop matches after restart."""
+    dashboard with an action id, a receipt line the Desktop matches after restart.
+
+    See #47359, #58764.
+    """
     from hermes_cli.update_cmd import _branch_head_suffix
     print(f"{message}{_branch_head_suffix()}")
     action_id = os.environ.get("HERMES_ACTION_ID", "")
@@ -356,7 +368,12 @@ def _read_project_version() -> str | None:
 
 def _update_complete_message(pre_version: str | None) -> str:
     """Completion line with ``vA → vB`` when known; plain when either side is unknown or
-    the version did not change."""
+    the version did not change.
+
+    Ported from PrimeIntellect-ai/prime-agent#630: after a successful self-update, show both versions
+    (``v0.19.4 → v0.20.0``) so the user can see what they actually got. Falls back to the plain message when
+    either side is unknown or the version did not change (e.g. several commits landed within one release).
+    """
     post_version = _read_project_version()
     if pre_version and post_version and pre_version != post_version:
         return f"✓ Update complete! (v{pre_version} → v{post_version})"
@@ -410,7 +427,10 @@ def _clear_stale_sqlite_sidecars(db_path: Path) -> None:
 
 
 def _print_update_summary(*, node_failures: list, desktop_build_ok: bool, pre_update_version: str | None) -> bool:
-    """Final banner. A failed Desktop rebuild is non-fatal but must not print ``✓ Update complete!``."""
+    """Final banner. A failed Desktop rebuild is non-fatal but must not print ``✓ Update complete!``.
+
+    See #88251.
+    """
     from hermes_cli.update_cmd import _post_update_sqlite_runtime_status, _update_complete_message
     sqlite_runtime_ok, sqlite_info = _post_update_sqlite_runtime_status()
     if sqlite_info is None:
@@ -518,7 +538,10 @@ def _verify_and_restore_one_state_db(home: Path, *, label: str) -> None:
 
 def _verify_and_restore_state_dbs_post_update() -> None:
     """Integrity guard for the ROOT state.db AND every sibling profile's (the snapshot covers
-    siblings, so the guard must too or a corrupt profile DB goes undetected)."""
+    siblings, so the guard must too or a corrupt profile DB goes undetected).
+
+    See #97994.
+    """
     from hermes_cli.update_cmd import get_hermes_home
     home = get_hermes_home()
     _verify_and_restore_one_state_db(home, label="default home")
@@ -579,6 +602,13 @@ def _ensure_fhs_path_guard() -> None:
                 "-c",
                 "command -v hermes",
             ],
+            # Fallback: blunt systemctl restart. This is what the old code always did; we get here only when
+            # the graceful path failed (unit missing SIGUSR1 wiring, drain exceeded the budget,
+            # restart-policy mismatch). Always `reset-failed` first. If systemd's own auto-restart attempts
+            # already parked the unit in a failed state (transient CHDIR / OOM / filesystem race after our
+            # drain + exit-75), a plain `systemctl restart` can wedge against the RestartSec backoff and
+            # leave the unit dead. Clearing the failed state first makes the restart idempotent. Mirrors the
+            # recovery path in `hermes gateway restart` (`systemd_restart()`) as of PR #20949.
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
             timeout=10,
@@ -625,6 +655,8 @@ def _ensure_acp_launcher() -> None:
     No-op on Windows (install.ps1 stages launchers into ``$HermesHome\bin``, never
     ``venv\Scripts`` which would shadow the user's python; launcher repair lives in
     _install_repair) and where it already exists. Unwritable dirs are skipped. Idempotent.
+
+    ``/usr/local/bin`` as non-root) are skipped silently. See #83797.
     """
     from hermes_cli.update_cmd import _m
     if _m().sys.platform == "win32":
@@ -636,6 +668,9 @@ def _ensure_acp_launcher() -> None:
             if not (hermes_cmd.is_file() or hermes_cmd.is_symlink()):
                 continue
             # is_symlink() catches broken symlinks exists() misses; never follow-and-overwrite.
+            # Already present — a console script (pip/pipx install), an earlier shim, or a symlink.
+            # is_symlink() catches broken symlinks that exists() would miss; never follow-and-overwrite (the
+            # #21454 failure mode).
             if acp_cmd.exists() or acp_cmd.is_symlink():
                 continue
             shim = (
@@ -796,6 +831,8 @@ def _run_pre_update_backup(args) -> Optional[str]:
     ``off`` — nothing. ``quick`` (default) — snapshot of critical small files under
     ``state-snapshots/``, files over 1 GiB skipped so a bloated state.db can't stall the update.
     ``full`` — quick snapshot PLUS a zip of HERMES_HOME under ``backups/`` (``hermes import``).
+
+    Explicit user opt-out is honored fully. See #34600.
     """
     mode = _resolve_pre_update_backup_mode(args)
 
@@ -823,6 +860,10 @@ def _sweep_bytecode_after_update(branch: str) -> None:
     """Clear stale ``__pycache__`` (else gateway restart ImportErrors on names absent from old
     bytecode), re-stamp the fingerprint, refresh the bootstrap cache scripts."""
     from hermes_cli.update_cmd import _m
+    # The update process is still the old Python interpreter process. Run one final cache/module refresh
+    # immediately before lazy backend refresh, which imports newly-pulled modules that may depend on fresh
+    # symbols in hermes_constants or lazy_deps. The dependency install above may also have regenerated
+    # bytecode from build-cache copies — this second sweep catches those stragglers (#60242, #65240).
     removed = _m()._clear_bytecode_cache(_m().PROJECT_ROOT)
     if removed:
         print(f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}")
@@ -862,6 +903,7 @@ def _sync_profiles_after_update() -> None:
     # Backfill .env for profiles created before .env seeding (copy the default's) so they
     # keep the credentials they were effectively using.
     with suppress(Exception):
+        # See #44792.
         from hermes_cli.profiles import backfill_profile_envs
         backfilled = backfill_profile_envs(quiet=True)
         if backfilled:
@@ -929,6 +971,10 @@ def _run_post_update_maintenance(
     from hermes_cli.update_cmd import _check_and_apply_config_migration, _m
     # macOS TCC: Desktop bundles are re-signed each update, so old grants can go stale
     # (toggle ON, yet macOS re-prompts with no Allow button). Tell users how to re-grant.
+    # With the post-#73681 identifier-pinned DR, new grants survive rebuilds — but a grant made to a pre-fix
+    # binary stays stale: the System Settings toggle shows ON while macOS re-prompts on every capture, and
+    # the modern prompt has no Allow button, so users loop. One line of guidance after update tells affected
+    # users how to complete the one-time re-grant.
     if sys.platform == "darwin" and had_desktop_app_before_update:
         print()
         print(
@@ -941,6 +987,7 @@ def _run_post_update_maintenance(
 
     # macOS TCC interpreter anchor; boot-gated — a failed probe leaves the venv untouched.
     try:
+        # See #95596.
         from hermes_cli.macos_tcc_anchor import ensure_tcc_anchor
         ensure_tcc_anchor()
     except Exception:

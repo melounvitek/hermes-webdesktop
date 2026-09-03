@@ -41,6 +41,12 @@ def _real_platform_state_root() -> Optional[Path]:
 #: Exported by the hermetic conftest alongside the HERMES_HOME redirect. Unlike
 #: PYTEST_* it is OURS and inherits by default, so a child carrying it that
 #: resolves a production DB is by definition an isolation escape.
+# : Env marker exported by the hermetic test conftest at the same moment it : redirects ``HERMES_HOME`` to
+# the per-session tmp isolation root. Unlike ``PYTEST_*`` (owned by pytest, and : routinely scrubbed by
+# tests that rebuild a child environment), this marker : is OURS: it declares "this process tree is running
+# under Hermes test : isolation", and it inherits into subprocess children by default — so a : child that
+# received the patched ``HERMES_HOME`` also received the marker, : and a child that resolves a production DB
+# while carrying it is, by : definition, an isolation escape (#82770).
 _TEST_ISOLATION_MARKER_ENV = "HERMES_TEST_ISOLATION"
 
 
@@ -82,7 +88,13 @@ def _process_looks_like_pytest(proc: Any) -> bool:
 def _has_pytest_ancestor() -> bool:
     """True when an ancestor process is a pytest run: a child spawned with a
     rebuilt env loses PYTEST_* and the HERMES_HOME redirect together, ancestry
-    survives that. Fails open without psutil / on walk errors."""
+    survives that. Fails open without psutil / on walk errors.
+
+    ``_running_under_pytest`` reads ``PYTEST_*`` env vars, which a child spawned with a rebuilt environment
+    loses at the same moment it loses the ``HERMES_HOME`` redirect: that child aims at the production DB
+    *and* disarms the guard in one step (#82770). Ancestry is the one test-context signal that survives an
+    env rebuild, so it backs the env check up.
+    """
     global _PYTEST_ANCESTOR
     if _PYTEST_ANCESTOR is not None:
         return _PYTEST_ANCESTOR

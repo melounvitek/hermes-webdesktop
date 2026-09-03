@@ -273,6 +273,11 @@ def begin_iteration(
     # Grace call: budget exhausted but the model gets one more call. Consume the
     # flag so the loop exits after this iteration regardless of outcome.
     if agent._budget_grace_call:
+        # Iteration budget: the LLM is only notified when it actually exhausts the iteration budget
+        # (api_call_count >= max_iterations). At that point we inject ONE message, allow one final API call,
+        # and if the model doesn't produce a text response, force a user-message asking it to summarise. No
+        # intermediate pressure warnings — they caused models to "give up" prematurely on complex tasks
+        # (#7915).
         agent._budget_grace_call = False
     elif not agent.iteration_budget.consume():
         _turn_exit_reason = "budget_exhausted"
@@ -340,6 +345,11 @@ def apply_retry_restarts(
         retry_count += 1
         _retry.restart_with_compressed_messages = False
         if _should_skip_model_call_for_reference_handoff(
+            # Compression rebuilt the list (tail messages are fresh compaction copies), so the
+            # pre-compression index of this turn's user message is stale. Re-anchor both index trackers: the
+            # api_content stamp below, the loop's injection site, and the flush's persist-override row
+            # (#48677) must all target the surviving dict, not a stale position. Exact-content match first
+            # so a todo-snapshot user message appended after the tail can't steal the anchor.
             messages, user_message
         ):
             logger.info(

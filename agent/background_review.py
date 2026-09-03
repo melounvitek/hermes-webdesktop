@@ -119,11 +119,18 @@ def _interrupt_background_review(review_agent: Any) -> None:
 def cancel_background_review_for_live_turn(agent: Any) -> None:
     """Cancel the current review and await its request-phase acknowledgement. Foreground priority:
     past the bounded deadline, warn and let the live turn proceed — self-improvement work must
-    never block a user-facing turn."""
+    never block a user-facing turn.
+
+    Foreground priority is preserved: if the review does not acknowledge within the bounded deadline, a
+    warning is logged and the live turn proceeds anyway. See #84423.
+    """
     with _optional_lock(agent, "_background_review_lock"):
         run = getattr(agent, "_background_review_run", None)
         legacy_agent = getattr(agent, "_background_review_agent", None)
     review_agent = legacy_agent if run is None else run.cancel()
+    # Attribute the review fork's usage to the PARENT session. Snapshot BEFORE unregister/close so counters
+    # survive teardown. Placed in this finally so a fork that consumed tokens and THEN raised is still
+    # attributed (issue #87250). Best-effort: the recorder never raises into the review thread.
     if review_agent is not None:
         _interrupt_background_review(review_agent)
     if run is None:
@@ -594,7 +601,10 @@ def summarize_background_review_actions(
     skill-management tool results from the review agent's messages, skipping tool messages already
     present in ``prior_snapshot`` so inherited results are not re-surfaced as fresh work.
     ``notification_mode``: ``off`` -> no actions; ``on`` -> generic "Memory updated"/tool messages;
-    ``verbose`` -> content previews from the tool-call arguments."""
+    ``verbose`` -> content previews from the tool-call arguments.
+
+    See #14944.
+    """
     mode = str(notification_mode or "on").lower()
     if mode == "off":
         return []
@@ -814,6 +824,13 @@ def build_cache_parity_fork(
     # Same model only: share the warm cached system prompt (~26% cost cut; a rebuilt prompt misses
     # the byte-exact prefix key) and pin session_start so any re-render (compression, plugin
     # hooks) stays byte-identical.
+    # Inherit the parent's cached system prompt verbatim so the review fork's outbound HTTP request hits the
+    # same Anthropic/OpenRouter prefix cache the parent warmed. Without this, the fork rebuilds the system
+    # prompt from scratch (fresh _hermes_now() timestamp, fresh session_id, narrower toolset → different
+    # skills_prompt) and the byte-exact prefix-cache key misses. See issue #25322 and PR #17276 for the full
+    # analysis + measured impact (~26% end-to-end cost reduction on Sonnet 4.5). When routed to a different
+    # model the parent's cached prompt is for the wrong model/cache key and would miss anyway, so let the
+    # routed fork build its own.
     if not _routed:
         review_agent._cached_system_prompt = agent._cached_system_prompt
         review_agent.session_start = agent.session_start
@@ -824,6 +841,9 @@ def build_cache_parity_fork(
     return review_agent, _rt, _routed
 
 
+# Install a non-interactive approval callback on this worker thread so any dangerous-command guard the
+# review agent trips resolves to "deny" instead of falling back to input() -- which deadlocks against the
+# parent's prompt_toolkit TUI (#15216). Same pattern as _subagent_auto_deny in tools/delegate_tool.py.
 def _bg_review_auto_deny(command, description, **kwargs):
     """Non-interactive approval: dangerous-command guards resolve to "deny" instead of input(),
     which would deadlock against the parent's TUI."""
@@ -876,6 +896,21 @@ def _review_tool_whitelist(review_agent: Any, task_cfg: Optional[Dict[str, Any]]
     whitelist |= {"read_file", "search_files"}
     # ``extra_tools`` admits named parent tools (e.g. a human-gated proposal tool). The whitelist
     # can only admit, never advertise: a listed tool must already exist in the inherited schema.
+    # Read-only file tools are whitelisted too (#61521, #39996): the model naturally reaches for
+    # read_file/search_files to inspect a skill before patching it. Denying them caused a per-review denial
+    # storm (~142 denials + ~204 read-before-write refusals over 2 days on one deployment) that starved the
+    # self-improvement loop — the model never loaded SKILL.md the way the read-before-write guard requires,
+    # so almost no patch landed. This is a DISPATCH-side change only: the advertised ``tools[]`` stays
+    # byte-identical to the parent's, so prompt-cache parity is untouched. read_file registers the read with
+    # the read-before-write guard (tools/file_tools.py), so a read_file → skill_manage(patch) sequence now
+    # succeeds. Write tools (write_file/patch/terminal) stay denied — autonomous maintenance must go through
+    # skill_manage's validation, and the deny message below names that substitute so one denial redirects
+    # the model instead of a storm.
+    # Profile-configured opt-in tools (#44672, salvage #82146 by @BrinShadewater):
+    # ``auxiliary.background_review.extra_tools`` admits named parent tools to the review whitelist — e.g. a
+    # human-gated proposal tool or a memory-provider write surface. Read from task_cfg (the
+    # auxiliary.background_review block already loaded for this spawn) so no extra config I/O happens per
+    # review.
     configured_extra_tools: set = set()
     try:
         extra_raw = _background_review_task_config(task_cfg).get("extra_tools", [])
@@ -972,7 +1007,10 @@ def _run_review_in_thread(
     """Daemon-thread worker: build the fork, run the prompt, surface the action summary via
     ``agent._safe_print`` / ``background_review_callback``. ``review_run`` (from
     :func:`prepare_background_review_run`) cancelled before the first provider call aborts
-    without entering ``run_conversation()``."""
+    without entering ``run_conversation()``.
+
+    See #84423.
+    """
     if review_run is not None and review_run.cancel_requested.is_set():
         finish_background_review_run(agent, review_run)
         return
@@ -993,11 +1031,25 @@ def _run_review_in_thread(
     try:
         # Silence stdout/stderr for THIS thread only: a process-global redirect would blank every
         # other thread's console for the whole review.
+        # A process-global ``contextlib.redirect_stdout(devnull)`` here would also blank
+        # ``sys.stdout``/``sys.stderr`` for every other thread — including a gateway event-loop thread
+        # driving a Telegram long-poll — for the full duration of the review (tens of seconds), swallowing
+        # their console output (#55769 / #55925). ``thread_scoped_silence`` routes only this thread's writes
+        # to devnull and leaves all other threads on the real streams.
         with thread_scoped_silence():
             _run_review_fork(agent, messages_snapshot, prompt, task_cfg, review_run, st)
         # A buggy/legacy tool response shape must NOT take down the whole review (the outer
         # except would discard every action the fork DID complete), so coerce to an empty list.
         try:
+            # Scan the review agent's messages for successful tool actions and surface a compact summary to
+            # the user. Tool messages already present in messages_snapshot must be skipped, since the review
+            # agent inherits that history and would otherwise re-surface stale "created"/"updated" messages
+            # from the prior conversation as if they just happened (issue #14944). ``_change`` returned as a
+            # list instead of a dict, #59437) must NOT take down the whole review with an AttributeError,
+            # since the caller's outer except logs only "Background memory/skill review failed" and discards
+            # every successful action the fork DID complete before the crash. Coerce an exception into an
+            # empty actions list so the partial valid actions from earlier in the messages are returned
+            # instead.
             actions = summarize_background_review_actions(
                 st.review_messages, messages_snapshot,
                 notification_mode=getattr(agent, "memory_notifications", "on"),

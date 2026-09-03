@@ -29,6 +29,8 @@ _log = logging.getLogger(__name__)
 _DRAIN_REQUEST_FILENAME = ".drain_request.json"
 # Drain-gated lifecycle actions complete in minutes; an hour bounds the wedge a leaked
 # marker can cause. Long drains refresh the marker instead of raising this.
+# Max-age fallback for a same-epoch orphaned marker (#85433). Long-running drains refresh the marker via
+# write_drain_request() (idempotent re-write bumps ``requested_at``) rather than raising this bound.
 DRAIN_REQUEST_MAX_AGE_SECONDS = 3600.0
 # Dedup for the expired-marker warning (the watcher re-reads every second); keyed by
 # ``requested_at`` so a keep-alive re-write that later expires logs again.
@@ -95,6 +97,8 @@ def _marker_is_expired(body: dict[str, Any]) -> bool:
 
     Missing/unparseable and future-dated (clock skew) timestamps are honoured.
     Logged once per marker, not per poll — the operator's breadcrumb for a leak.
+
+    See #85433.
     """
     global _expiry_logged_for
     raw = body.get("requested_at")
@@ -126,7 +130,17 @@ def _active_drain_body(home: Optional[Path]) -> Optional[dict[str, Any]]:
 
 
 def drain_requested(*, home: Optional[Path] = None) -> bool:
-    """True iff an active (present, same-epoch, unexpired) begin-drain marker exists."""
+    """True iff an active (present, same-epoch, unexpired) begin-drain marker exists.
+
+    A marker whose ``epoch`` does not match the current instantiation epoch is treated as absent: it
+    survived a container/VM restart (HERMES_HOME is a durable Fly volume on Hermes Cloud) and the lifecycle
+    action that triggered the drain has already completed — honouring it would wedge the freshly-restarted
+    gateway in ``draining`` (NS-570). A marker whose ``requested_at`` is older than
+    :data:`DRAIN_REQUEST_MAX_AGE_SECONDS` is likewise treated as absent: it is a same-epoch orphan whose
+    drain-gated action completed without a restart and was never cancelled (#85433). Both staleness checks
+    are lenient (see :func:`_marker_epoch_is_stale` / :func:`_marker_is_expired`): a legacy/corrupt marker
+    with no epoch and no timestamp, or an environment without ``/proc``, still reads as drain-active.
+    """
     return _active_drain_body(home) is not None
 
 
@@ -135,6 +149,12 @@ def drain_notification_suppressed(*, home: Optional[Path] = None) -> bool:
 
     Same activeness rule as :func:`drain_requested`, so an orphan can never silence
     a fresh gateway; a marker without the field reads False (fail toward louder).
+
+    "Active" means exactly what :func:`drain_requested` means — a marker present AND stamped with the
+    current instantiation epoch AND not past its max-age. A stale (other-epoch) marker that survived a
+    machine restart on the durable HERMES_HOME volume, or an expired same-epoch orphan (#85433), is ignored
+    here just as it is for drain state (NS-570): we must never let an orphaned marker's flag silence a
+    *fresh* gateway's legitimate shutdown broadcast.
     """
     body = _active_drain_body(home)
     return bool(body and body.get("suppress_notification"))

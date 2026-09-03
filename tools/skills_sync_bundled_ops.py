@@ -36,6 +36,8 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     if not in_manifest and not is_bundled:
         return _fail("not_in_manifest", f"'{name}' is not a tracked bundled skill. Nothing to reset. "
                      f"(Hub-installed skills use `hermes skills uninstall`.)")
+    # Step 1 (optional): delete the user's copy so next sync re-copies bundled. Must happen BEFORE manifest
+    # deletion so that a failed rmtree does not leave the skill in a manifest-less limbo state (see #34972).
     deleted_user_copy = False
     if restore:  # delete the user's copy BEFORE the manifest so a failed rmtree can't strand it
         if not is_bundled:

@@ -78,6 +78,7 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
         # fenced out by the single-owner lease and the payload dropped. Land the DM in the live
         # session via prompt.submit — the composer's choke point, so role alternation, persistence
         # and streaming behave as a typed message would.
+        # (Nested per method_ctx rebinding.) See #100523.
         from tools.bot_mode_probe import BOT_CHAT_TITLE
         live_home = _profile_home(resolved)
         want_home = str(live_home) if live_home is not None else None
@@ -105,12 +106,16 @@ def _(rid, params: dict, _root=_relay_root, _run=_run_delivery) -> dict:
             # Per-profile turn lock serializes with any other delivery turn into this profile and
             # covers only the turn window. Worst-case hold is lock wait (bot_mode.turn_wait_seconds,
             # default 120s) + the 600s turn timeout, doubled on one retry — callers tolerate ~1320s.
+            # Worst-case handler hold is lock wait (bot_mode.turn_wait_seconds, default 120s) + the 600s
+            # turn timeout below — doubled when the retry policy grants one bounded re-run — so clients
+            # calling bot_relay.deliver must tolerate ~1320s before assuming failure. See #93091.
             with acquire_turn_lock(root, resolved):
                 proc = _run(resolved, tmp)
                 if proc.returncode != 0:
                     # Retry policy: transient classes re-run the SAME session once; context_overflow
                     # too — the retried turn's pre-API compaction pass compacts the over-threshold
                     # transcript first (no fresh session is minted). Auth/quota/config never retry.
+                    # See #93091.
                     from tools.bot_failure_reasons import (
                         RETRY_NONE, classify_agent_error, retry_action)
                     if retry_action(classify_agent_error(_detail(proc))) != RETRY_NONE:

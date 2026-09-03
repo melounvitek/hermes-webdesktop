@@ -269,6 +269,10 @@ def _process_single_prompt(
             "tool_stats": tool_stats,
             "reasoning_stats": reasoning_stats,
             "completed": result["completed"],
+            # Sibling of the non-empty-response return below (#64686): the classifier's failure_reason must
+            # survive the empty-response normalization path too, or downstream consumers (TUI billing
+            # surface, transient-failure persistence) lose the structured reason exactly when the run
+            # produced no text.
             "partial": result.get("partial", False),
             "api_calls": result["api_calls"],
             "toolsets_used": selected_toolsets,
@@ -814,6 +818,12 @@ class BatchRunner:
             "total_prompts": len(self.dataset),
             "total_batches": len(self.batches),
             "batch_size": self.batch_size,
+            # Snapshot the CLI-level credential/runtime fields BEFORE mutating them so a failed in-place
+            # agent swap can roll the whole CLI back to the old working model. Otherwise the broken
+            # credentials staged below leak into the next turn's resolution even though the agent itself
+            # rolled back (#50163).
+            # Snapshot CLI-level fields before mutation so a failed in-place swap rolls the whole CLI back
+            # to the old working model (#50163).
             "model": self.model,
             "completed_at": datetime.now().isoformat(),
             "duration_seconds": round(time.time() - start_time, 2),

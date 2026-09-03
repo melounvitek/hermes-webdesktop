@@ -68,6 +68,12 @@ def _resolve_auto_decompose_settings(load_config: Callable[[], Any]) -> "tuple[b
 
     Fails safe: a config read error returns ``(False, 3)`` rather than
     re-enabling a feature the user turned off. ``per_tick`` is clamped to ``>= 1``.
+
+    Read fresh from config on every dispatcher tick (#49638) so that flipping ``kanban.auto_decompose:
+    false`` to STOP runaway fan-out takes effect on the next tick instead of requiring a gateway restart.
+    Auto-decompose is a safety toggle — a user who sees it create and launch tasks they didn't intend
+    reaches for this flag to halt it, and a stale boot-captured value silently ignoring that change is the
+    bug reported in #49638.
     """
     try:
         cfg = load_config()

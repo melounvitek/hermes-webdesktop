@@ -77,7 +77,12 @@ def resolve_client_socket_path(home: Path) -> Optional[Path]:
 
 
 def _detect_supervisor() -> str:
-    """Supervisor kind for THIS process from its own launch env (not inferred outside-in)."""
+    """Supervisor kind for THIS process from its own launch env (not inferred outside-in).
+
+    Unlike the outside-in `_detect_supervisor_for_pid` scan, this answers from the process's own launch
+    context — which is exactly the provenance the 92091 design wants declared rather than inferred. See
+    #92091.
+    """
     env = os.environ
     if env.get("INVOCATION_ID"):
         return "systemd"
@@ -330,5 +335,8 @@ def identify_gateway(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) ->
 def pause_gateway_for_update(home: Path, *, timeout: float = _DEFAULT_CLIENT_TIMEOUT) -> Optional[dict[str, Any]]:
     """Ask the gateway serving ``home`` to drain and exit for an update. Returns the ACK ``{"pausing",
     "already_stopping", "pid", "drain_timeout"}`` or None when no gateway answers (old gateway without
-    the verb, no/dead socket) — the caller then uses the legacy signal/tree-kill pause path."""
+    the verb, no/dead socket) — the caller then uses the legacy signal/tree-kill pause path.
+
+    Step 2 of the socket migration (#92091).
+    """
     return query_gateway_control(home, "pause-for-update", timeout=timeout)

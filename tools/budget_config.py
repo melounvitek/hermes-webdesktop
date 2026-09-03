@@ -23,7 +23,11 @@ MCP_TOOL_PREFIX: str = "mcp_"
 def _configured_mcp_result_size() -> int:
     """Read ``tool_budget.mcp_result_size_chars`` via ``load_config_readonly`` (the
     sanctioned path; raw config.yaml parsing outside owner modules is test-guarded).
-    Any error, missing key or non-positive value returns the built-in default."""
+    Any error, missing key or non-positive value returns the built-in default.
+
+    The ``tool_budget:`` block name is shared with the wider configurable-caps proposal (#80508) so the two
+    can merge without a key rename.
+    """
     try:
         from hermes_cli.config import load_config_readonly
         data = load_config_readonly()
@@ -51,7 +55,11 @@ class BudgetConfig:
         """Priority: pinned -> tool_overrides -> mcp_ prefix -> registry per-tool -> default.
         MCP tools get ``mcp_result_size`` (no registry entry). MCP and registry values
         are capped at ``default_result_size`` so a context-scaled budget for a small
-        model still constrains tools registering a fixed 100K ``max_result_size_chars``."""
+        model still constrains tools registering a fixed 100K ``max_result_size_chars``.
+
+        For the default budget this is a no-op because both equal 100K; for a scaled-down budget it prevents
+        a per-tool registry value from re-inflating the cap past the model's window (#23767).
+        """
         if tool_name in PINNED_THRESHOLDS:
             return PINNED_THRESHOLDS[tool_name]
         if tool_name in self.tool_overrides:
@@ -84,7 +92,13 @@ def budget_for_context_window(context_length: int | None) -> BudgetConfig:
     """Return a BudgetConfig scaled to the model's context window: the fixed
     defaults suit 200K+ models but on 65K one result/turn can fill the window.
     The proportional value is clamped to the defaults as a CAP (large models
-    stay byte-identical) and floored so a usable preview always survives."""
+    stay byte-identical) and floored so a usable preview always survives.
+
+    The fixed defaults (100K result / 200K turn chars) are correct for large (200K+ token) models but blind
+    to small ones: on a 65K-token model a single tool result persisted at the 100K-char threshold, or a
+    200K-char turn budget (~50K tokens), can by itself approach or exceed the whole window and force an
+    oversized request (#23767).
+    """
     mcp_result_size = _configured_mcp_result_size()
     if not context_length or context_length <= 0:
         if mcp_result_size == DEFAULT_MCP_RESULT_SIZE_CHARS:

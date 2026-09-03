@@ -92,7 +92,12 @@ def set_session_cookies(
     use_https: bool, prefix: str = "", provider: str = "") -> None:
     """``access_token_expires_in`` is seconds (the provider's reported TTL). An empty
     ``refresh_token`` means "don't persist the RT cookie" — a literal empty cookie would be dead
-    state at best, attack surface at worst."""
+    state at best, attack surface at worst.
+
+    Nous Portal issues a 24h rotating refresh token (hermes #37247); a provider that omits it returns
+    ``Session.refresh_token == ""`` and we simply don't persist the RT cookie — the session then behaves as
+    access-token-only until the AT expires. No other branch changes between the two cases.
+    """
     _set(response, SESSION_AT_COOKIE, access_token, max_age=access_token_expires_in,
          use_https=use_https, prefix=prefix)
     if refresh_token:
@@ -174,7 +179,14 @@ def parse_pkce_payload(raw: str) -> dict[str, str]:
     CSRF state, broker binding). Compatibility ladder for cookies minted by an older server
     mid-upgrade: 1. base64url(JSON); 2. flat form with raw ``;`` delimiters, split WITHOUT
     unquoting (the ``next`` segment carries its own URL-encoding); 3. URL-encoded flat form,
-    unquote once then split. A NEW cookie hitting an OLD server fails the state check."""
+    unquote once then split. A NEW cookie hitting an OLD server fails the state check.
+
+    1. **base64url(JSON)** (current): the wire value is pure urlsafe base64 that decodes to a JSON object.
+    Legacy forms can never match — they always contain ``%`` (URL-encoded, #99176) or a raw ``;`` (oldest
+    flat form), both outside the base64url alphabet. Split as-is WITHOUT unquoting the payload — the
+    ``next`` segment carries its own single URL-encoding, and unquoting here would turn a ``%3B`` inside it
+    into a bogus delimiter and truncate the post-login target. Neither newer format can contain a raw ``;``.
+    """
     if _B64URL_RE.match(raw):
         try:
             padded = raw + "=" * (-len(raw) % 4)

@@ -115,6 +115,14 @@ def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     return max(0.0, default)
 
 
+# When a WebSocket client (the dashboard's embedded-chat tab / desktop app) disconnects, ``tui_gateway.ws``
+# detaches the transport but intentionally leaves the session parked so a quick reconnect can reattach it
+# (see ws.py). That park is unbounded, though: a browser refresh spins up a brand-new ``session.create``
+# (new sid + a fresh _SlashWorker via _deferred_build) and never reattaches the OLD sid, so the old
+# session's slash-worker subprocess lingers forever — one leaked python process per refresh (#38591
+# fallout). After this grace window, an orphaned WS session is interrupted if it is still running, then
+# reaped once the normal turn-finalization path settles. Set to 0 to disable (park forever, pre-fix
+# behaviour).
 def _resolve_ws_orphan_reap_grace() -> float:
     """Grace before an orphaned WS session is interrupted/reaped (0 = park forever): ws.py parks a
     disconnected session for a quick reattach, but a browser refresh mints a NEW sid and never
@@ -129,6 +137,10 @@ _WS_ORPHAN_ACTIVITY_STALE_S = _ws_orphan_setting("HERMES_TUI_WS_ORPHAN_ACTIVITY_
 _WS_ORPHAN_INTERRUPT_REAP_POLL_S = 1.0
 # Interrupt-then-reap poll budget: a turn that never settles (thread hung in a syscall) would
 # reschedule the 1s poll forever; after this many polls, log loudly and force-reap.
+# If an interrupted turn never settles (agent thread hung in a syscall, supervisor lost), each 1s poll would
+# otherwise reschedule forever — trading the old leak-one-worker bug for leak-one-session-plus-timer-chain
+# (review finding, PR #90373). After this many polls we log loudly and force-reap, mirroring the
+# pre-existing stuck-`running` safety net's role of breaking the deadlock.
 _WS_ORPHAN_INTERRUPT_REAP_MAX_POLLS = 60
 _TURN_SETTLE_BEFORE_CLOSE_SECONDS = 5.0
 _DETAIL_SECTION_NAMES = ("thinking", "tools", "subagents", "activity")
@@ -220,6 +232,11 @@ class _SlashWorker:
         argv = [sys.executable, "-m", "tui_gateway.slash_worker", "--session-key", session_key] + (["--model", model] if model else [])
         self._closed = False
         from hermes_cli._subprocess_compat import windows_hide_flags
+        # slash_worker runs the Hermes agent → needs provider credentials. Tier-1 secrets
+        # (gateway/GitHub/infra) are still stripped (#29157). Global-remote / multi-profile sessions: the
+        # worker must resolve config/skills/state against the session's profile home, not the gateway's
+        # launch HERMES_HOME (#40677). The override goes through the build_subprocess_env factory's `extra`
+        # (applied last, always wins) instead of a hand-rolled env["HERMES_HOME"] assignment.
         from tools.environments.local import build_subprocess_env
 
         # The worker runs the agent → needs provider credentials; tier-1 secrets (gateway/GitHub/
@@ -231,6 +248,9 @@ class _SlashWorker:
         # start_new_session: otherwise the worker inherits the gateway's pgid and mcp_tool's orphan
         # sweep, racing the spawn, killpg()s the TUI parent itself. errors="replace": bytes invalid
         # in the system locale (GBK Windows) must not raise UnicodeDecodeError in the drain threads.
+        # Prepend the Hermes venv bin dir and the user-local bin dir to PATH so slash_worker child processes
+        # can resolve Hermes-managed CLIs (browser-use, uvx) even when the parent gateway was launched with
+        # a minimal PATH (e.g. by the Desktop/Dashboard app). See #83845.
         self.proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace", bufsize=1, cwd=os.getcwd(), env=env,
@@ -372,6 +392,10 @@ def _transfer_db_to_agent(agent, db) -> bool:
     with contextlib.suppress(Exception):
         if agent is None or db is None or getattr(agent, "_session_db", None) is not db:
             return False
+        # Defense in depth (#91610): the shared launch handle must never transfer. Identity alone passes for
+        # it — a launch-profile agent IS holding that handle — and ownership would make session.close() tear
+        # down the process-wide database every other session shares. Refuse it explicitly even if a caller
+        # invokes the transfer incorrectly; the caller's own `owns_db` gate is the first line of defense.
         if db is _get_db():
             logger.warning("Refused transfer of the shared launch SessionDB to a session "
                            "agent — the caller's owns_db gate should have prevented this.")
@@ -452,7 +476,24 @@ _served_profile_homes: set[Path] = set()
 
 def _profile_scoped(handler):
     """Bind ``params['profile']``'s HERMES_HOME around a handler (pets/projects resolve via
-    ``get_hermes_home``, so app-global remote mode still hits the focused profile). No-op for launch."""
+    ``get_hermes_home``, so app-global remote mode still hits the focused profile). No-op for launch.
+
+    Secondary-profile adapters are constructed inside ``_profile_runtime_scope`` (secret scope installed +
+    multiplex active) — the same discriminator the Buzz/SimpleX adapters use for this bug class (#98738).
+    The DEFAULT profile under multiplexing runs unscoped: ``os.environ`` holds its own bridge output there
+    and keeps its legacy precedence.
+    Same discriminator as the Buzz/SimpleX/Raft adapters (#98738): secret scope installed + multiplex
+    active. The DEFAULT profile under multiplexing (and every single-profile process) runs unscoped and
+    keeps its legacy ``os.environ`` precedence.
+    Secondary-profile adapters are constructed, connected, and reloaded inside ``_profile_runtime_scope``
+    (secret scope installed + multiplex active) — the same discriminator as the Discord adapter's
+    ``_profile_scoped_config_load`` (#72348). The DEFAULT profile under multiplexing runs unscoped:
+    ``os.environ`` holds its own bridge output there and keeps its legacy precedence.
+    Secondary-profile adapters are constructed, connected, and reloaded inside ``_profile_runtime_scope``
+    (secret scope installed + multiplex active) — the same discriminator the Buzz/SimpleX adapters use for
+    this bug class (#98738). The DEFAULT profile under multiplexing runs unscoped: ``os.environ`` holds its
+    own bridge output there and keeps its legacy precedence.
+    """
     def wrapper(rid, params):
         home = _profile_home(params.get("profile") if isinstance(params, dict) else None)
         if home is None:
@@ -483,7 +524,12 @@ def _configured_cwd_from_cfg(cfg: dict | None) -> str | None:
 def _profile_configured_cwd(profile_home: Path | None) -> str | None:
     """A non-launch profile's ``terminal.cwd`` from ITS config.yaml (fail-open → None): the process-global
     ``TERMINAL_CWD`` belongs to the *launch* profile, and load_config() resolves the ACTIVE profile, so
-    read the file directly through the _load_cfg pipeline."""
+    read the file directly through the _load_cfg pipeline.
+
+    A new session bound to another profile must take its workspace from THAT profile's config, not the stale
+    env var (issue #40334). Returns an absolute, existing directory, or None for placeholders / missing /
+    invalid paths.
+    """
     if profile_home is None:
         return None
     with contextlib.suppress(Exception):
@@ -615,7 +661,10 @@ def _pending_approval_request_payload(session_key: str) -> dict | None:
 
 def _emit_approval_request(sid: str, data: dict | None) -> None:
     """Emit ``approval.request`` with the command redacted: a credential-shaped value Tirith flagged would
-    otherwise echo verbatim to the TUI (third egress alongside chat platforms and the SSE/API stream)."""
+    otherwise echo verbatim to the TUI (third egress alongside chat platforms and the SSE/API stream).
+
+    Reuse the shared gateway See #48456, #50767.
+    """
     _emit("approval.request", sid, _approval_request_payload(data))
 
 
@@ -625,6 +674,7 @@ def _status_update(sid: str, kind: str, text: str | None = None):
     out_kind = kind if text is not None else "status"
     # Auto-compaction arrives as a generic "lifecycle" status; re-tag so drivers can show a
     # summarizing indicator — otherwise idle/preflight compaction looks like a hung turn.
+    # See #97239.
     if out_kind == "lifecycle":
         from agent.conversation_compression import is_compaction_progress_status
         if is_compaction_progress_status(body):
@@ -760,7 +810,15 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
     first message IS the turn, while a cold build routinely outlives the flat 30s ceiling (timing out
     silently discarded it). Waits in short slices (cancel honored promptly), notifies once (keyed) past
     ``_AGENT_BUILD_SLOW_NOTICE_AFTER``, fails only on a dead build thread or the bounded cap.
-    Returns None on success OR cancel mid-wait (the caller's cancel branch owns that messaging)."""
+    Returns None on success OR cancel mid-wait (the caller's cancel branch owns that messaging).
+
+    The flat 30s ``_wait_agent`` ceiling was a message-eating cliff (#63078): ``prompt.submit`` has already
+    returned ``{"status": "streaming"}``, the user's first message IS the turn in flight, and the deferred
+    agent build (MCP discovery with per-server retry backoff, synchronous model-metadata HTTP, skills
+    scanning) routinely outlives 30 seconds on cold starts. On timeout the old path emitted an error EVENT
+    and returned without ever calling ``_run_prompt_submit`` — the first message was permanently discarded
+    while the build finished successfully in the background, leaving the blank first session.
+    """
     ready = session.get("agent_ready")
     if ready is None:
         return None
@@ -992,6 +1050,12 @@ def _sess_nowait(params, rid):
     # Stale runtime id (reaped/evicted/TTL): the client should session.resume the STORED id. Logged so
     # "message vanished" reads as "arrived and was rejected".
     logger.warning("session-scoped RPC rejected: method=%s session_id=%r not in memory "
+                   # A session-scoped RPC hit a runtime id the gateway no longer holds (detached on WS
+                   # disconnect and orphan-reaped, LRU-evicted, or torn down after an idle TTL). The client
+                   # is expected to recover via session.resume on the STORED session id, but a plain
+                   # stale-id send leaves no trace anywhere when the resume never fires — every RPC in this
+                   # class returned a silent 4001. Log it so a "message vanished" report is diagnosable as
+                   # "request arrived and was rejected" instead of "request never arrived" (see #90428).
                    "(detached/reaped runtime; client should resume the stored session), rid=%r",
                    _current_rpc_method.get() or "?", sid, rid)
     return (None, _err(rid, 4001, "session not found"))
@@ -1250,7 +1314,13 @@ def _tour_request(sid: str, payload: dict) -> str:
     """Bridge the tour tool callback onto _block without paying for a client that cannot answer: against
     an older app nobody calls ``tour.respond`` and each action would block the full deadline, stacking per
     turn. First action per session gets the short probe deadline; unanswered → bridge marked unavailable
-    for that session; once answered, the full deadline. Verdict lives on the record, so a new session re-probes."""
+    for that session; once answered, the full deadline. Verdict lives on the record, so a new session re-probes.
+
+    The renderer's ``tour.request`` handler ships in the desktop bundle, but the tool is offered by this
+    backend — and the two update on different clocks. The model then does what the schema tells it to and
+    tries the next action, so a single "give me a tour" turn stacks those waits (the timeouts reported
+    against #89620).
+    """
     session = _sessions.get(sid)
     if session is None:  # detached caller: throwaway record, plain bridge, unprobed ({} is falsy but a REAL record)
         session = {}
@@ -1346,6 +1416,11 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
 
 # Bare billing buckets are not routable provider identities; restoring one as a session provider override
 # breaks resume. ``openrouter`` is deliberately NOT in this set (fully routable; agent_init's gate is a different set).
+# (agent_init's fail-fast gate is a DIFFERENT set that also skips "openrouter" — there it means "default
+# route, don't fail fast", not "unroutable".) ``openrouter`` is deliberately excluded here — it is a fully
+# routable provider with its own API key and base_url. Sessions that used OpenRouter store
+# ``billing_provider="openrouter"``; dropping it forces resume to the current global model (e.g. a custom
+# endpoint), which is the wrong provider for the stored model. See #57588.
 from hermes_state import _BARE_BILLING_PROVIDERS
 
 
@@ -1502,6 +1577,8 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
     agent, session_key, db = live
     # Re-bind the session's profile HERMES_HOME (the build's finally reset it → root profile's SOUL.md/skills)
     # and session context (on the RPC thread _SESSION_CWD is unset → the process TERMINAL_CWD would persist).
+    # Without this, _start_agent_build's finally block has already reset the override and the rebuilt prompt
+    # silently uses the root profile's SOUL.md and skills. See issue #50233.
     profile_home = session.get("profile_home")
     home_token = set_hermes_home_override(profile_home) if profile_home else None
     session_tokens = _set_session_context(session_key, cwd=_session_cwd(session))
@@ -1517,6 +1594,8 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
 
 
 # Stable leading text of the model-switch marker (builder + dedup); only the newest marker is meaningful.
+# Only the newest marker is meaningful (it names the *currently* active model); older ones are stale and
+# would otherwise be re-sent to the provider on every turn (#65891).
 _MODEL_SWITCH_MARKER_PREFIX = "[System: The active model for this chat has changed to "
 
 
@@ -1537,7 +1616,10 @@ def _is_pivot_marker(entry: Any) -> bool:
 def _append_model_switch_marker(session: dict | None, *, model: str, provider: str) -> None:
     """Record a real system-history pivot after a live model switch. Only the newest marker is kept (each
     switch strips prior ones, so N switches leave one marker, not N re-sent every API call; self-healing
-    across resumes because the next switch collapses whatever a reload brought back)."""
+    across resumes because the next switch collapses whatever a reload brought back).
+
+    See #65891.
+    """
     session_key = str((session or {}).get("session_key") or "").strip()
     if not session_key:
         return
@@ -1546,6 +1628,7 @@ def _append_model_switch_marker(session: dict | None, *, model: str, provider: s
         f"{_MODEL_SWITCH_MARKER_PREFIX}{model}{provider_part}. From this point forward, use this runtime "
         "metadata when answering questions about what model/provider is active.]")
     # A user message, not system: strict OpenAI-compatible providers (vLLM, Qwen) reject non-leading system messages.
+    # See #48338.
     entry = {"role": "user", "content": marker, "display_kind": "model_switch"}
     with session.get("history_lock") or contextlib.nullcontext():
         history = session.setdefault("history", [])
@@ -1621,7 +1704,10 @@ def _display_mouse_tracking(display: dict) -> str:
 
 def _load_reasoning_config(model: str = "") -> dict | None:
     """Via the shared chokepoint :func:`hermes_constants.resolve_reasoning_config` (per-model override >
-    global ``agent.reasoning_effort``; YAML False = disabled)."""
+    global ``agent.reasoning_effort``; YAML False = disabled).
+
+    Closes #21256.
+    """
     from hermes_constants import resolve_reasoning_config
     return resolve_reasoning_config(_load_cfg(), model)
 
@@ -1750,6 +1836,9 @@ def _load_enabled_toolsets(platform: str | None = None) -> list[str] | None:
         cfg = load_config()
         # include_default_mcp_servers=True is the runtime variant (the agent must be able to call
         # default MCP servers); the config-editing variant would silently drop MCP tools from the TUI.
+        # Passing ``False`` here is the config-editing variant — used when we need to persist a toolset list
+        # without baking in implicit MCP defaults. Using the wrong variant at agent creation time makes MCP
+        # tools silently missing from the TUI. See PR #3252 for the original design split.
         enabled = _get_platform_tools(cfg, "cli", include_default_mcp_servers=True)
         if fallback_notice is not None:
             _tui_notice(fallback_notice)
@@ -1778,6 +1867,12 @@ def _tool_lifecycle_required_for_ui(name: str) -> bool:
 
 
 def _restart_slash_worker(sid: str, session: dict):
+    # Close the slash-worker subprocess as part of finalize itself, not just in the callers.
+    # Defense-in-depth: every session-end path goes through _finalize_session (it's the single
+    # ``_finalized``-guarded chokepoint), so folding worker cleanup in here means a future code path that
+    # calls _finalize_session directly — without the surrounding _teardown_session / _shutdown_sessions
+    # worker.close() — can't reintroduce the #38095 leak. Idempotent: _SlashWorker.close() is
+    # poll()-guarded, so the explicit close() still in those callers is harmless.
     worker = session.get("slash_worker")
     if worker is None:
         return  # never spawned one; spawning here would fork the per-worker MCP fleet for nothing
@@ -1808,6 +1903,16 @@ def _get_usage(agent) -> dict:
         # context_used is *current-window* occupancy — never usage["total"] (cumulative: an external engine
         # showed 1.9m/120k clamped to 100%). Falsy last_prompt_tokens emits NO gauge; the -1 "compression
         # just ran" sentinel clamps to 0 (matches cli.py _get_status_bar_snapshot).
+        # Do NOT fall back to usage["total"] (cumulative lifetime session_total_tokens): for an external
+        # context engine that doesn't report last_prompt_tokens that substitution showed lifetime totals as
+        # the live context fill, yielding impossible readings such as 1.9m/120k clamped to 100% (#50421).
+        # Per the issue, populate context_used/percent only from a *real* current-occupancy value and "leave
+        # it unknown otherwise" — so a falsy last_prompt_tokens (0 or missing, i.e. an engine that doesn't
+        # track per-window occupancy) intentionally emits no gauge rather than a fabricated 0% or the old
+        # cumulative reading. The built-in compressor always reports a real last_prompt_tokens once a turn
+        # runs, so it is unaffected. Clamp the -1 "compression just ran, awaiting real usage" sentinel
+        # (conversation_compression.py) to 0 so the transitional turn reads as unknown (no gauge) instead of
+        # leaking context_used=-1.
         last_prompt = max(0, getattr(comp, "last_prompt_tokens", 0) or 0)
         ctx_max = getattr(comp, "context_length", 0) or 0
         if ctx_max and last_prompt:
@@ -1818,6 +1923,10 @@ def _get_usage(agent) -> dict:
     # Cache-hit ratio + rolling latency/tps (CLI status-bar parity). Omitted, not fabricated, when there is no
     # data (Codex reports no latency; zero cache reads shows no hit% rather than an alarming 0).
     with contextlib.suppress(Exception):
+        # Mirrors the classic CLI bar (cli.py _get_status_bar_snapshot / PR #98250): hit =
+        # session_cache_read_tokens / session_prompt_tokens (CanonicalUsage.prompt_tokens = input +
+        # cache_read + cache_write) latency/tps read the deque(maxlen=10) history maintained per API call in
+        # agent/conversation_loop.py.
         _prompt_total = int(getattr(agent, "session_prompt_tokens", 0) or 0)
         _cache_read = int(getattr(agent, "session_cache_read_tokens", 0) or 0)
         if _prompt_total > 0 and _cache_read > 0:
@@ -2325,6 +2434,7 @@ def _claim_or_reuse_live(sid: str, session_key: str, record: dict, lease) -> tup
     """Register ``record`` as the live session for ``session_key`` under the resume lock, or — if a
     concurrent resume already won — release ``lease`` and return the winner for the caller to reuse."""
     # A live runtime of the same stored id under ANOTHER profile is not a winner to reuse.
+    # See #100029.
     profile_home = record.get("profile_home")
     with _session_resume_lock:
         live = _find_live_session_by_key(session_key, profile_home)
@@ -2416,6 +2526,9 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             _emit("session.resume_progress", sid, {"phase": "history", "status": "loading"})
             db.reopen_session(stored_id)
             raw_history, display_history, prefix = _load_resume_transcript(db, stored_id)
+            # Display keeps the full transcript; the model-fed history drops a dangling/interrupted
+            # tool-call tail so a session killed mid-loop does not replay the unanswered call forever
+            # (#29086).
             history = sanitize_replay_history(raw_history)
             if _sessions.get(sid) is not session:
                 return
@@ -2506,6 +2619,8 @@ def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
 def _find_live_session_by_key(session_key: str, profile_home=_ANY_PROFILE) -> tuple[str, dict] | None:
     # Timestamp-based stored ids can exist in several profiles' stores; a bare-id match would hand
     # profile B's resume profile A's runtime, so profile-aware callers match on (profile_home, key).
+    # Profile-aware callers pass the home they resolved; the match must then be on (profile_home,
+    # session_key). See #100029.
     for sid, session in list(_sessions.items()):
         if (not session.get("_finalized") and _session_lookup_key(session, fallback=sid) == session_key
                 and _live_profile_matches(session, profile_home)):
@@ -2519,6 +2634,11 @@ def _fallback_session_info(session: dict) -> dict:
         return _session_info(agent)
     # The SESSION's own workspace, not the launch dir (wrong project in the desktop Files pane). `branch` is
     # always emitted ("" outside git) so a stale label clears; `desktop_contract` missing reads as "out of date".
+    # Reporting `_default_session_cwd()` here told a lazily-resumed session's client that its workspace was
+    # wherever the gateway process happened to start, so the desktop Files pane painted the wrong project
+    # even after the renderer rebound correctly (#71254). `branch` is always emitted ("" outside a git repo)
+    # so a client can clear a stale label instead of retaining it — the same contract `_lazy_session_info`
+    # above already follows.
     cwd = _session_cwd(session)
     return {
         "cwd": cwd, "branch": _git_branch_for_cwd(cwd), "project": _project_info_for_cwd(cwd), "lazy": True,
@@ -2556,6 +2676,7 @@ def _live_visible_history(session: dict, db, in_memory_fallback: list[dict]) -> 
             # conversation; without them a warm switch repainted the chat as summary + tail only.
             display = db.get_messages_as_conversation(
                 key, include_ancestors=True, include_row_ids=True, include_compacted=True)
+            # See #92080.
             return _reconcile_display_with_live(display, in_memory_fallback)
         except Exception:
             logger.debug("live display projection read failed", exc_info=True)
@@ -2573,9 +2694,12 @@ def _live_session_payload(
             # Every transport that showed this session (pop-outs resume the same sid); on disconnect the last
             # viewer becomes the transport instead of the drop sentinel.
             session.setdefault("viewers", {})[transport] = time.time()
+            # See #83716.
             if transport is not _detached_ws_transport:
                 _cancel_ws_orphan_reap(sid)  # the client is back — a pending ws-orphan reap must not fire
         if touch:
+            # #84417: do not re-fire the live turn's original user text from a stale server-queue
+            # self-duplicate after settle.
             session["last_active"] = time.time()
         in_memory_history = list(session.get("display_history_prefix") or []) + list(session.get("history") or [])
         inflight, queued = _inflight_snapshot(session), _queued_prompt_snapshot(session)
@@ -2836,6 +2960,8 @@ def _spawn_tree_session_dir(session_id: str):
 
 # Per-session append-only JSONL index so `spawn_tree.list` needn't read every snapshot; a cache — a lost
 # line just means list() falls back to a directory scan.
+# Read by `spawn_tree.list` so scanning doesn't require reading every full snapshot file (Copilot review on
+# #14045). One JSON object per line.
 _SPAWN_TREE_INDEX = "_index.jsonl"
 
 
@@ -2927,6 +3053,11 @@ def _respond(rid, params, key, *, allow_expired=False):
 
 def _session_processes(session: dict) -> list:
     """Background processes owned by this session (registry session_key match)."""
+    # Drain completion notifications that arrived during this turn. The background poller handles
+    # between-turn delivery; this is the safety net for events that arrived mid-turn. Ownership filter
+    # (#42674, #35652): a turn finishing in session B must not consume an event that belongs to session A.
+    # The registry requeues every addressed event this session cannot positively claim; the poller then
+    # delivers it to a live owner or drops an orphan.
     from tools.process_registry import process_registry
     key = str(session.get("session_key") or "")
     owned = []

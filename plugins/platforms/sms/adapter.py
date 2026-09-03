@@ -127,6 +127,7 @@ class SmsAdapter(BasePlatformAdapter):
                 self._webhook_port)
         # client_max_size bounds every read path (incl. chunked bodies with no
         # Content-Length) before the handler's own 413 checks run.
+        # See #58536, #58902, #59180.
         app = web.Application(client_max_size=_TWILIO_WEBHOOK_MAX_BODY_BYTES)
         app.router.add_post("/webhooks/twilio", self._handle_webhook)
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
@@ -280,6 +281,13 @@ _SMS_MARKDOWN_SUBS = (
     (re.compile(r"\n{3,}"), "\n\n"))
 
 
+# ────────────────────────────────────────────────────────────────────────── Plugin migration glue (#41112 /
+# #3823) Added when the SMS (Twilio) adapter moved from gateway/platforms/sms.py into this bundled plugin.
+# register() exposes the platform via the registry, replacing the Platform.SMS elif in gateway/run.py, the
+# _PLATFORM_CONNECTED_CHECKERS entry in gateway/config.py, the _PLATFORMS["sms"] static dict in
+# hermes_cli/gateway.py, and the _send_sms dispatch in tools/send_message_tool.py. TWILIO_*
+# env→PlatformConfig seeding stays in core.
+# ──────────────────────────────────────────────────────────────────────────
 def _strip_markdown_for_sms(message: str) -> str:
     """Strip markdown — SMS renders it as literal characters."""
     for pattern, repl in _SMS_MARKDOWN_SUBS:

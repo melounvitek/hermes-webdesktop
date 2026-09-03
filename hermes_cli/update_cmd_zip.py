@@ -41,7 +41,15 @@ def _remove_path(path: str, *, ignore_errors: bool = False) -> None:
 def _atomic_replace_dir(src: str, dst: str) -> None:
     """Replace *dst* with *src* without a half-deleted window (naive ``rmtree; copytree`` loses the old
     tree when the copy fails partway — likely here, since the ZIP path only runs when file I/O is flaky).
-    Thin alias over the two-phase helpers; retained for the ``hermes_cli.main`` re-export surface."""
+    Thin alias over the two-phase helpers; retained for the ``hermes_cli.main`` re-export surface.
+
+    The naive ``rmtree(dst); copytree(src, dst)`` has a destructive window: if the copy fails partway
+    (common on the Windows ZIP-update path, which only runs because file I/O is already flaky on that
+    machine), the old directory is already gone and nothing replaced it — the install is left with a deleted
+    tree (issue #49145, where ``ui-tui/`` vanished and broke the TUI).
+    Now a thin single-entry alias over the two-phase helpers below, which generalise the same
+    stage-then-swap discipline across every entry the ZIP update touches (#76104).
+    """
     _commit_staged_replacements([(_stage_replacement(src, dst), dst)])
 
 
@@ -78,6 +86,9 @@ def _commit_staged_replacements(staged) -> None:
     Each swap is an ``os.rename`` onto a just-moved-aside path — atomic on POSIX and NTFS, unlike
     ``copy2`` onto a live path. Stage-all-then-swap-all shrinks the failure window to N renames and a
     failed swap restores every entry already swapped, so the tree lands wholly new or wholly old.
+
+    ``_atomic_replace_dir`` makes each *individual* directory swap safe, but the ZIP update replaces ~90
+    top-level entries in a loop, and nothing made the loop atomic *as a whole*. See #63717, #76091, #76104.
     """
     swapped: list[tuple[str, str]] = []  # (dst, backup) in swap order; "" = absent
     try:
@@ -111,6 +122,8 @@ def _zip_overlay_block_reason(root: Path, *, ignore_staging_artifacts: bool = Fa
     edits and untracked files are gone. Fails closed when git status cannot run. ``ignore_staging_artifacts``
     is for the pre-swap re-check: phase 1 leaves our own ``*.hermes-update-staging`` siblings that git
     reports as untracked; without the filter the re-check always refuses.
+
+    Fail closed when git status cannot run: unknown dirtiness is not a license to clobber the tree (#87304).
     """
     if not (root / ".git").exists():
         return None
@@ -119,6 +132,8 @@ def _zip_overlay_block_reason(root: Path, *, ignore_staging_artifacts: bool = Fa
         # -uall: a user-level ``status.showUntrackedFiles = no`` must not blind this guard. --ignored=matching:
         # gitignored files are still USER DATA the overlay would delete; ``matching`` reports an ignored dir
         # as one ``dir/`` line. ``--ignored=all`` is NOT a valid git mode (exits 128, would fail-close every update).
+        # ``matching`` reports an ignored directory as one ``dir/`` line instead of enumerating its contents
+        # (cheaper, same verdict for the top-level filter below). See #87392.
         git_cmd + ["status", "--porcelain", "--untracked-files=all", "--ignored=matching"],
         cwd=root, capture_output=True, text=True, encoding="utf-8", errors="replace",
     )
@@ -158,7 +173,10 @@ def _is_zip_staging_artifact_status_line(line: str) -> bool:
 
 
 def _abort_zip_update_if_dirty_tree() -> None:
-    """Refuse to overlay a ZIP onto a dirty git checkout."""
+    """Refuse to overlay a ZIP onto a dirty git checkout.
+
+    See #87304.
+    """
     from hermes_cli.update_cmd import _m
     reason = _zip_overlay_block_reason(_m().PROJECT_ROOT)
     if reason is None:
@@ -202,6 +220,13 @@ def _require_staging_space(extracted: str, entries: list[str], project_root: str
     """Staging costs one extra tree copy; swaps are renames, so require the copy plus 20% headroom — not 2x,
     which would block updates on exactly the space-constrained machines that hit this path."""
     need = sum(
+        # Two-phase replace (#76104). Phase 1 copies every entry — directories AND top-level files — to a
+        # sibling staging path without touching anything live; phase 2 swaps them all in with
+        # same-filesystem renames and rolls back every swap if any one fails. Replacing entries
+        # one-at-a-time (the previous shape) meant an interruption partway left `agent/` new and `tools/`
+        # stale — all files valid, the tree unbootable. Files matter as much as directories here: the repo
+        # root holds 20 first-party modules (run_agent.py, cli.py, hermes_constants.py, ...). Check up front
+        # so we fail with a clear message instead of running out mid-copy.
         os.path.getsize(os.path.join(dirpath, f))
         for entry in entries
         for dirpath, _dirs, files in os.walk(os.path.join(extracted, entry))
@@ -226,6 +251,9 @@ def _stage_entries(extracted: str, entries: list[str], project_root: str) -> lis
             staged.append((_stage_replacement(os.path.join(extracted, item), dst), dst))
             # The source ZIP lacks apps/desktop/release/ (the BUILT desktop app); swapping `apps` without
             # it deletes the build and breaks the shortcut. Graft the live release dir in BEFORE the swap.
+            # #70337/#87331: the GitHub source ZIP contains only source — apps/desktop/release/ (the BUILT
+            # desktop app, win-unpacked/ Hermes.exe) exists only in the LIVE tree. Graft the live release
+            # dir into the staged copy BEFORE the swap so the commit preserves it atomically.
             if item == "apps":
                 live_release = os.path.join(dst, "desktop", "release")
                 staged_release = os.path.join(staged[-1][0], "desktop", "release")
@@ -314,6 +342,7 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
         except _shim_quarantine_error_type() as _sqe:
             # Runs inside the ZIP-fallback error handler, so cmd_update's boundary except cannot catch
             # it — refuse here with the same defer-via-marker contract.
+            # See #87331.
             _refuse_update_for_contended_shims(_sqe)
         install_prefix, install_env = [uv_bin, "pip"], uv_env
     else:
@@ -354,6 +383,9 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     _sweep_bytecode_after_update(branch)
     # Self-lock deferral: the code swap is committed; defer only the dependency sync when this process
     # holds a native extension the sync must rewrite.
+    # Reinstall Python dependencies. Prefer .[all], but if one optional extra breaks on this machine, keep
+    # base deps and reinstall the remaining extras individually so update does not silently strip working
+    # capabilities. See #86735.
     _m()._abort_dependency_sync_if_self_locked()
     print("→ Updating Python dependencies...")
     _reinstall_python_deps_after_zip(active_tool_dependencies)
@@ -384,6 +416,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
             print("  ✓ Model catalog cache refreshed from checkout")
     # state.db integrity guard: root home AND every sibling profile, each auto-restored from its own snapshot.
     with _best_effort('Post-update state.db integrity check (zip path) failed: %s'):
+        # See #97994.
         _verify_and_restore_state_dbs_post_update()
     update_complete = _print_update_summary(
         node_failures=node_failures, desktop_build_ok=desktop_build_ok, pre_update_version=pre_update_version,
@@ -393,6 +426,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     with _best_effort('Curator recent-run notice failed: %s'):
         _print_curator_recent_run_notice()
     # Don't stop a working dashboard when the Node refresh failed — see the git-update path for rationale.
+    # See #30271.
     _finish_dashboard_update_cleanup(node_failures)
     with _best_effort('Update receipt finalize (zip path) failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt

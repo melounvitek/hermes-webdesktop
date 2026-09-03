@@ -261,7 +261,13 @@ def is_official_openai_host(base_url: str) -> bool:
     """True when *base_url* points at OpenAI's official API host family. Hostname-parsed matching
     only — never substring — so lookalike hosts (``api.openai.com.attacker.test``) and path-segment
     spoofs (``proxy.test/api.openai.com/v1``) are rejected; a genuine ``*.api.openai.com``
-    subdomain requires control of openai.com DNS."""
+    subdomain requires control of openai.com DNS.
+
+    A genuine ``*.api.openai.com`` subdomain requires control of openai.com DNS, so the dot-suffix match
+    does not reopen the #32243 spoofing hole. Delegates to ``utils.base_url_host_matches``, which owns the
+    exact-or-dot-suffix hostname contract (userinfo/port stripped, lowercased, trailing dot removed) — one
+    implementation, not two.
+    """
     return base_url_host_matches(base_url, "api.openai.com")
 
 
@@ -283,6 +289,9 @@ def host_mandated_api_mode(base_url: str = "") -> Optional[str]:
         return None
     url_lower = base_url.rstrip("/").lower()
     hostname = base_url_hostname(base_url)
+    # Exact-hostname matching only — never bare substring — so lookalike hosts
+    # (api.openai.com.attacker.test) and path-segment spoofs (proxy.test/api.openai.com/v1) are NOT treated
+    # as the real endpoint. (#32243)
     if hostname == "api.kimi.com" and "/coding" in url_lower:
         return "anthropic_messages"
     if hostname == "api.anthropic.com" or url_lower.endswith("/anthropic"):
@@ -290,6 +299,9 @@ def host_mandated_api_mode(base_url: str = "") -> Optional[str]:
     # Official OpenAI host family (canonical + us./eu. data-residency hosts) mandates Responses;
     # the shared predicate keeps this in lockstep with catalog filtering and listing authority.
     if is_official_openai_host(base_url) or hostname in _RESPONSES_NATIVE_HOSTS:
+        # Ramp Router (api.router.com) is Responses-native: reasoning-effort validation, reasoning
+        # summaries, and prompt caching live on /v1/responses, and /v1/chat/completions is only a minimal
+        # compatibility shim (docs.router.com/api/endpoint). Exact-hostname match per #32243.
         return "codex_responses"
     if hostname.startswith("bedrock-runtime.") and base_url_host_matches(base_url, "amazonaws.com"):
         return "bedrock_converse"
@@ -374,6 +386,8 @@ def resolve_custom_provider(name: str, custom_providers: Optional[List[Dict[str,
     if not requested or not custom_providers or not isinstance(custom_providers, list):
         return None
     first_valid: Optional[ProviderDef] = None
+    # If the stored provider is the bare string "custom" (corrupt state from a prior model-switch bug), fall
+    # back to the first custom provider entry so existing configs self-heal. (GH #17478)
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue

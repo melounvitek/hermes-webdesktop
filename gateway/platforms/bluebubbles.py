@@ -199,6 +199,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             return False
         from aiohttp import web
         # Tighter keepalive so idle CLOSE_WAIT drains promptly.
+        # See #18451.
         from gateway.platforms._http_client_limits import platform_httpx_limits
         self.client = httpx.AsyncClient(timeout=30.0, limits=platform_httpx_limits())
         try:
@@ -215,6 +216,9 @@ class BlueBubblesAdapter(BasePlatformAdapter):
             return False
         # client_max_size makes aiohttp enforce the cap on every read path, incl. chunked requests
         # with no Content-Length.
+        # Explicit body cap: BlueBubbles webhook events are small JSON (or form-encoded) payloads.
+        # client_max_size makes aiohttp enforce the cap on every read path — including chunked requests that
+        # carry no Content-Length (same pattern as webhook.py / raft, #58536/#58902).
         app = web.Application(client_max_size=_WEBHOOK_MAX_BODY_BYTES)
         app.router.add_get("/health", lambda _: web.Response(text="ok"))
         app.router.add_post(self.webhook_path, self._handle_webhook)
@@ -317,7 +321,10 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         """Resolve an email/phone to a chat GUID (raw ``a;-;b`` GUIDs pass through). Matches strictly on
         ``chatIdentifier`` / ``identifier``; participant membership is intentionally NOT a fallback —
         the same contact appears in a 1:1 DM and any number of groups, so a participant match could
-        leak a DM reply into a group thread. ``None`` lets the caller create a fresh DM."""
+        leak a DM reply into a group thread. ``None`` lets the caller create a fresh DM.
+
+        See #24157.
+        """
         target = (target or "").strip()
         if not target or ";" in target:
             return target or None

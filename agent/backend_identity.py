@@ -78,6 +78,9 @@ def same_credential_surface(a: BackendIdentity, b: BackendIdentity) -> bool:
     (stranded failover). Same label = same configured credential; custom entries can each carry
     their own api_key, so a shared URL alone is only a weak signal when a label is missing."""
     if a.provider and b.provider:
+        # Different labels = different credential config (first-class registry providers explicitly so —
+        # #70893; custom entries can each carry their own api_key, so sameness is unprovable and we must not
+        # skip).
         return a.provider == b.provider
     return bool(a.base_url and a.base_url == b.base_url)
 
@@ -100,6 +103,8 @@ def same_deployment(a: BackendIdentity, b: BackendIdentity) -> bool:
     if not (a.provider and b.provider and a.provider == b.provider):
         return bool(
             a.base_url
+            # Same-host different-label shims: same URL + same model IS the same deployment even when the
+            # alias labels differ (#22548) — unless both labels are first-class registry providers (#70893).
             and a.base_url == b.base_url
             and a.model
             and a.model == b.model

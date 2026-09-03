@@ -103,7 +103,18 @@ class GatewayAgentCacheMixin:
     ) -> str:
         """Stable key from agent config: change → cached AIAgent rebuilt; unchanged → reused (frozen
         prompt + schemas for cache hits). ``user_id`` / ``user_id_alt`` participate because Honcho
-        freezes them at init; omitting them in shared-thread keys would cross-attribute messages."""
+        freezes them at init; omitting them in shared-thread keys would cross-attribute messages.
+
+        ``user_id`` and ``user_id_alt`` are the runtime user identities carried by the current message's
+        gateway source. They participate in the cache key because the Honcho memory provider freezes them
+        into ``HonchoSessionManager`` at first-message init (see
+        ``plugins/memory/honcho/__init__.py::_do_session_init``). Without them in the signature, a
+        shared-thread session_key (one in which ``build_session_key`` intentionally omits the participant
+        ID, e.g. ``thread_sessions_per_user=False``) would reuse the cached AIAgent across distinct users,
+        causing the second user's messages to be attributed to the first user's resolved Honcho peer. This
+        broke #27371's per-user-peer contract in multi-user gateways. Per-user agent rebuilds in shared
+        threads trade prompt-cache warmth for correct memory attribution.
+        """
         import hashlib, json as _j
         # Fingerprint the FULL credential, not a short prefix: OAuth/JWT-style tokens often share a
         # common prefix (e.g. "eyJhbGci"), so a prefix would give false cache hits across auth switches.
@@ -287,7 +298,14 @@ class GatewayAgentCacheMixin:
         compression-exhausted reset). New conversation-scoped dicts go in _CONVERSATION_SCOPED_STATE
         so every boundary picks them up. Turn-scoped state (_running_agents/_ts, slot leases, turn-
         lease tokens) is owned by _release_running_agent_state and NOT cleared. Idle agent-cache
-        eviction is NOT a boundary (a resumed turn rebuilds from these). getattr-guarded."""
+        eviction is NOT a boundary (a resumed turn rebuilds from these). getattr-guarded.
+
+        Why a funnel: these boundaries used to each carry a hand-copied pop-list of the per-session dicts,
+        and the lists drifted every time a new dict was added (#48031, #58403, #10702, #35809 were all
+        "boundary X forgot dict Y" bugs — e.g. /new cleared the /model override but not the /model --once
+        restore snapshot). Adding a new conversation-scoped dict now means adding its attribute name to
+        _CONVERSATION_SCOPED_STATE below; every boundary picks it up automatically.
+        """
         from gateway.run import _CONVERSATION_SCOPED_STATE
         if not session_key:
             return
@@ -333,6 +351,7 @@ class GatewayAgentCacheMixin:
         if not session_key:
             return 0
         persistent = self._session_state(session_key).persistent
+        # Monotonic by design (#28686): incremented here, NEVER reset.
         persistent.run_generation = int(persistent.run_generation) + 1
         return persistent.run_generation
 
@@ -409,13 +428,18 @@ class GatewayAgentCacheMixin:
             # so on a hung/still-draining run the flag survives and silently kills the session's NEXT
             # message (interrupted=True, api_calls=0, empty response). Like /new and /model, the next
             # message rebuilds from history; the old agent keeps its flag so a hung drain still dies.
+            # See #44212.
             self._evict_cached_agent(session_key)
 
     async def _refresh_agent_cache_message_count(self, session_key: str, session_id: Optional[str]) -> None:
         """Re-baseline a cached agent's stored message_count after THIS turn — the coherence guard
         rebuilds on mismatch, so without this every turn would rebuild and destroy prompt caching.
         Only the count is refreshed, only if the same agent is still cached. DB errors leave the
-        snapshot as-is (one spare rebuild)."""
+        snapshot as-is (one spare rebuild).
+
+        But the snapshot is taken at agent-BUILD time — before this turn writes its own user + assistant (+
+        tool) rows — and the cache entry is never rewritten on a reuse. See #45966.
+        """
         from gateway.run import _AGENT_PENDING_SENTINEL
         _cache_lock = getattr(self, "_agent_cache_lock", None)
         _cache = getattr(self, "_agent_cache", None)
@@ -542,7 +566,14 @@ class GatewayAgentCacheMixin:
         holds reference cycles; without it RSS grows across /new). Soft = frees clients and child
         subagents but PRESERVES terminal sandbox / browser / bg processes since the session may
         resume; true boundaries call ``_cleanup_agent_resources`` first. Cleanup runs on a daemon
-        thread so ``_agent_cache_lock`` never spans slow socket teardown."""
+        thread so ``_agent_cache_lock`` never spans slow socket teardown.
+
+        Pops the entry AND soft-releases the evicted agent's LLM client pool so the httpx connection
+        (sockets + held buffers) is freed promptly rather than waiting on CPython GC — AIAgent holds
+        reference cycles (callbacks, tool state) that delay refcount collection, so a manual release is
+        required to keep gateway RSS flat across many /new, /model, undo and reset operations (#29298, same
+        leak class as #25315).
+        """
         from gateway.run import _AGENT_PENDING_SENTINEL
         # Prompt-stability state rides the agent-cache lifecycle: a fresh agent must re-render its
         # session-context bytes (the pin) and re-see the current voice-channel state once.
@@ -671,6 +702,11 @@ class GatewayAgentCacheMixin:
         throttles. Above the anonymous-RSS budget this soft-evicts LRU agents (transcript rebuilt
         from the persisted session next turn). Never touched: agents mid-turn, the most recently
         used sessions, and transcripts not yet on disk.
+
+        A gateway serving many chats therefore holds every warm transcript indefinitely: agents that took a
+        turn within the TTL are never idle-swept, and the sweep additionally defers finalizable sessions
+        until they expire. RSS climbs until the cgroup throttles and SIGTERM can no longer flush inside
+        systemd's stop timeout (#80764).
         """
         from gateway.run import _AGENT_PENDING_SENTINEL
         from gateway.agent_cache_pressure import (

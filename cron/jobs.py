@@ -59,6 +59,11 @@ def _ensure_croniter() -> bool:
 # Cron is per-profile by design: anchor at get_hermes_home() (active profile home), NOT
 # get_default_hermes_root() — the shared root would funnel every profile's jobs into one jobs.json
 # and run them under the ticker's HERMES_HOME, leaking config/credentials/skills across profiles.
+# Each profile owns its own cron store under its own HERMES_HOME, and a profile-scoped gateway runs that
+# profile's jobs under that same HERMES_HOME — so a job authored in profile `coder` lives in
+# `~/.hermes/profiles/coder/cron/jobs.json` and executes with `coder`'s `.env`, `config.yaml`, and skills.
+# Do NOT change this to the default root: that re-breaks per-profile isolation. See also the dynamic
+# `_get_hermes_home()` / `_get_lock_paths()` resolution in cron/scheduler.py. See #4707.
 HERMES_DIR = get_hermes_home().resolve()
 # Default-profile fallback and compatibility surface for callers/tests. Cross-profile callers must
 # scope paths with use_cron_store() instead of mutating these process-wide.
@@ -66,6 +71,9 @@ CRON_DIR = HERMES_DIR / "cron"
 JOBS_FILE = CRON_DIR / "jobs.json"
 # Heartbeat: touched every ticker loop so `hermes cron status` can tell the ticker THREAD is alive,
 # not just the gateway PROCESS; success = last tick that completed WITHOUT raising.
+# The gateway process and the (separate) ``hermes cron status`` process share it so status can tell whether
+# the ticker THREAD is alive, not just whether the gateway PROCESS exists — a ticker that dies silently
+# inside a live gateway would otherwise report healthy (#32612, #32895).
 TICKER_HEARTBEAT_FILE = CRON_DIR / "ticker_heartbeat"
 TICKER_SUCCESS_FILE = CRON_DIR / "ticker_last_success"
 # Single source of truth for the ticker interval (scheduler_provider.py) and the staleness
@@ -169,7 +177,13 @@ def _oneshot_run_claim_ttl_seconds() -> float:
 def _job_running_in_this_process(job_id: str) -> bool:
     """True when the scheduler in THIS process is still running ``job_id``: the run_claim TTL alone
     cannot distinguish "claiming tick died" from "alive but slow". Lazy import: scheduler imports
-    us."""
+    us.
+
+    Direct liveness signal for stale-entry recovery (#62002): the run_claim TTL alone cannot distinguish
+    "the claiming tick died" from "the run is alive but slow" — a run stalled on network I/O (or a laptop
+    that slept mid-run) legitimately outlives the TTL. The in-process ticker and the run share this process,
+    so the scheduler's running set settles the common single-gateway case without any claim-age guesswork.
+    """
     try:
         from cron.scheduler import get_running_job_ids
         return job_id in get_running_job_ids()
@@ -242,6 +256,7 @@ def _jobs_lock():
         # jobs.json stamp as of this section's load_jobs(): lets _save_jobs_unlocked skip the
         # shrink-merge parse when the file provably hasn't changed. Reset on entry/exit so stale
         # stamps from unlocked loads or prior sections can never suppress a needed merge.
+        # See #80703.
         _jobs_lock_state.load_stamp = None
         lock_fd = None
         try:
@@ -495,7 +510,12 @@ def _is_recoverable_error_job(job: Dict[str, Any]) -> bool:
     """True for a recurring job stuck in ``state=error`` (set ONLY when ``compute_next_run()`` fails
     for a cron/interval job: croniter missing, malformed schedule). Such a job still has future
     occurrences once the issue resolves, so treating it as terminal would block due-scan self-heal,
-    pre-advance, dispatch claim and ``resume_job`` — wedging it forever."""
+    pre-advance, dispatch claim and ``resume_job`` — wedging it forever.
+
+    Unlike ``state=completed`` (a one-shot that genuinely has no more occurrences, ever), an error-state
+    recurring job still has a schedule with future occurrences once the underlying issue resolves — it is
+    stuck pending a ``next_run_at`` recompute, not truly done. See #16265.
+    """
     return (
         job.get("state") == "error"
         and (job.get("schedule") or {}).get("kind") in {"cron", "interval"}
@@ -571,7 +591,14 @@ def ensure_dirs():
 def normalize_repeat_value(repeat: Any) -> Optional[int]:
     """Coerce a repeat value (int or user-facing string) into ``Optional[int]``:
     ``'forever'``-family -> None, ``'once'``-family -> 1, numeric -> int, 0/negative -> None,
-    else ValueError."""
+    else ValueError.
+
+    The tool schema exposes ``repeat`` as an integer, but agents and users legitimately pass the user-facing
+    strings ``'forever'``/``'once'`` or numeric strings (``'3'``). Uncoerced strings previously died with
+    ``'<=' not supported between instances of 'str' and 'int'`` at create
+    (#66824/#64520/#7142/#71987/#95706) and were stored raw by update paths, breaking ``mark_job_run``
+    later.
+    """
     if repeat is None:
         return None
     if isinstance(repeat, str):
@@ -716,6 +743,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
     is_every = schedule_lower.startswith("every ")
     rest = schedule[6:].strip() if is_every else schedule_lower
     cron_expr = _natural_every_to_cron(rest)
+    # Reuse the same helper — the phrase shape is identical without the "every " prefix. See #51975.
     if cron_expr is not None:
         example = "every monday 9am" if is_every else "weekdays at 9am"
         return _cron_schedule(
@@ -737,6 +765,11 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
             dt = datetime.fromisoformat(schedule.replace('Z', '+00:00'))
             # Naive timestamps become aware in the CONFIGURED Hermes timezone (not server-local):
             # the due-check compares against hermes_time.now().
+            # Make naive timestamps timezone-aware at parse time so the stored value doesn't depend on the
+            # system timezone matching at check time. UTC) while now() runs in Asia/Kolkata, the stored
+            # instant would land hours off from the user's wall-clock intent — far enough that one-shots
+            # never become due and recurring jobs fire at the wrong time. Using the configured zone makes
+            # "20:07" mean 20:07 on the same clock the scheduler checks against (#51021).
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=_hermes_now().tzinfo)
             return {
@@ -834,6 +867,7 @@ def _compute_grace_seconds(schedule: dict) -> int:
 
 # A recurring dispatch within this many seconds of schedule renders "on time": a busy once-a-minute
 # ticker can slip a couple of minutes — normal cadence, not gateway downtime.
+# See #99879.
 _LATE_DISPATCH_TOLERANCE_SECONDS = 300
 
 
@@ -861,7 +895,13 @@ def _job_is_stale_error_recurring(
     """True when a recurring job (caller-checked) is wedged in a stale persisted error state:
     ``last_status == "error"``, not running in this process (never re-arm a live run underneath
     itself), and ``last_run_at`` older than ``cadence + grace`` (a job merely erroring-and-retrying
-    on schedule stays fresh and is not flagged)."""
+    on schedule stays fresh and is not flagged).
+
+    Condition (all must hold): * it has NOT successfully re-fired within its natural cadence — its
+    ``last_run_at`` is older than ``cadence + grace``, so this is not a normal transient-error retry that
+    will fire on its own soon, it is a job that has been sitting errored for a full period with no recovery;
+    See #62002.
+    """
     if job.get("last_status") != "error":
         return False
     if _job_running_in_this_process(str(job.get("id") or "")):
@@ -960,7 +1000,14 @@ def _cron_next_run_matches_expr(schedule: Dict[str, Any], next_run_dt: datetime)
     """Whether ``next_run_dt`` is an occurrence of the schedule's current expr (detects a
     hand-edited ``schedule.expr`` whose stored ``next_run_at`` came from the old one).
     Best-effort: anything uncheckable (non-cron, no expr, no croniter, malformed) reports a
-    match."""
+    match.
+
+    A direct ``jobs.json`` edit can change ``schedule.expr`` while leaving the stored ``next_run_at``
+    computed under the *old* expression (#93049). The stored instant is stale exactly when it is not an
+    occurrence of the current expression. Validation is best-effort: anything that cannot be checked
+    (non-cron kind, missing expr, croniter unavailable, malformed input) reports a match so the fire path
+    keeps its existing semantics.
+    """
     if schedule.get("kind") != "cron":
         return True
     expr = schedule.get("expr")
@@ -991,7 +1038,14 @@ def _classify_stale_cron_next_run(
     normalized into the profile tz); treating it as an edit would skip a due, never-fired
     occurrence. Discriminator: normalization moved the wall clock AND the stored instant's OWN
     wall clock is a legal occurrence (when offsets agree a genuine expr edit can never be misread
-    as a migration)."""
+    as a migration).
+
+    * ``expr_edit`` — a direct ``jobs.json`` edit changed ``schedule.expr`` while leaving ``next_run_at``
+    computed under the old one (#93049). Upgrading from a UTC-scheduling build to one that honours the
+    profile timezone leaves legacy rows like ``2026-09-02T04:00:00+00:00`` for ``0 4 * * *``; normalizing to
+    Europe/Brussels turns that into ``06:00+02``, which the expression excludes. Treating it as a stale edit
+    re-anchored to tomorrow and silently skipped a due occurrence that had never fired.
+    """
     if _cron_next_run_matches_expr(schedule, next_run_dt):
         return STALE_CRON_MATCH
     wall_clock_shifted = raw_next_run_dt.replace(tzinfo=None) != next_run_dt.replace(tzinfo=None)
@@ -1076,7 +1130,16 @@ def _write_marker(name: str, text: str, tmp_prefix: str) -> None:
 
 def record_ticker_heartbeat(success: bool = False) -> None:
     """Record ticker liveness (+ last-success marker when ``success``) so `cron status` can tell
-    "alive but failing" from "firing"; scoped per profile store."""
+    "alive but failing" from "firing"; scoped per profile store.
+
+    The ticker calls this once per loop iteration. ``success=True`` additionally bumps the *last successful
+    tick* marker. We track two distinct signals so `hermes cron status` can tell a thread that is merely
+    *alive and looping* (heartbeat fresh, success stale) from one that is actually *firing jobs* (both
+    fresh) — a ticker stuck failing every tick would otherwise keep the plain heartbeat fresh and falsely
+    report healthy (#32612, #32895).
+    Resolution uses ``_current_cron_store()`` so the heartbeat is correctly scoped to the active profile's
+    store — critical under multiplex_profiles where each profile needs its own liveness signal (#69377).
+    """
     _write_marker("ticker_heartbeat", str(time.time()), ".hb_")
     if success:
         _write_marker("ticker_last_success", str(time.time()), ".hb_")
@@ -1093,12 +1156,22 @@ def _epoch_file_age(name: str) -> Optional[float]:
 
 def get_ticker_heartbeat_age() -> Optional[float]:
     """Seconds since the ticker loop last iterated; None = missing/unreadable ("cannot determine",
-    not "dead")."""
+    not "dead").
+
+    Resolution uses ``_current_cron_store()`` so the heartbeat is correctly scoped to the active profile —
+    critical under multiplex_profiles where ``hermes cron status`` must report per-profile liveness
+    (#69377).
+    """
     return _epoch_file_age("ticker_heartbeat")
 
 
 def get_ticker_success_age() -> Optional[float]:
-    """Seconds since the ticker last completed a tick WITHOUT raising, or None."""
+    """Seconds since the ticker last completed a tick WITHOUT raising, or None.
+
+    Resolution uses ``_current_cron_store()`` so the heartbeat is correctly scoped to the active profile —
+    critical under multiplex_profiles where ``hermes cron status`` must report per-profile liveness
+    (#69377).
+    """
     return _epoch_file_age("ticker_last_success")
 
 
@@ -1234,7 +1307,11 @@ def _record_load_stamp(stamp: Optional[Tuple[int, int, int]]) -> None:
     """Remember jobs.json's stamp for the enclosing _jobs_lock() section (no-op outside one) so the
     save path can skip the shrink-merge when disk provably hasn't changed. Capture it BEFORE
     reading: a mid-read sibling then mismatches (fail-safe); stamping after would certify an
-    unseen write."""
+    unseen write.
+
+    Stamping after the read would let that sibling's write be certified as "seen" without being in the
+    loaded payload, wrongly suppressing the recovery. See #80703.
+    """
     if getattr(_jobs_lock_state, "depth", 0):
         _jobs_lock_state.load_stamp = stamp
 
@@ -1530,6 +1607,10 @@ def _compute_provider_model_snapshots(
             from hermes_cli.runtime_provider import resolve_runtime_provider
 
             runtime_kwargs = {"requested": None}
+            # Delegate all rate-limit / 5xx retry to hermes's outer conversation loop, which honors
+            # Retry-After. The SDK default (max_retries=2) uses its own 1-2s backoff that ignores
+            # Retry-After and double-retries inside our loop — burning request slots against a bucket that
+            # won't refill for minutes. (#26293)
             if normalized_base_url:
                 runtime_kwargs["explicit_base_url"] = normalized_base_url
             snap = resolve_runtime_provider(**runtime_kwargs)
@@ -1625,6 +1706,9 @@ def create_job(
     source run FIRST each tick; unchanged output suppresses the agent run (mutually exclusive,
     incompatible with ``no_agent``). reasoning_effort: per-job pin; capability NOT validated."""
     parsed_schedule = parse_schedule(schedule)
+    # Normalize repeat: treat 0 or negative values as None (infinite). String forms
+    # ('forever'/'once'/numeric) coerce via normalize_repeat_value — the shared chokepoint with update paths
+    # (#66824/#64520/#7142/#71987/#95706).
     repeat = normalize_repeat_value(repeat)
     if parsed_schedule["kind"] == "once" and repeat is None:
         repeat = 1
@@ -2010,7 +2094,13 @@ def remove_job(job_id: str) -> bool:
 def _set_alert_flag(job_id: str, field: str, value: bool) -> bool:
     """Set/clear a persisted alert-dedup marker (alert exactly once until the condition heals;
     survives restarts) and return the PRIOR value. Fields: ``preflight_alerted``,
-    ``drift_alerted``."""
+    ``drift_alerted``.
+
+    The marker records that the operator was already alerted about this job's condition, so the scheduler
+    alerts exactly once and stays silent on subsequent ticks until the condition heals (same alert-once
+    shape as the dead-pin auto-pause in #73506). Fields: ``preflight_alerted`` (blocked config, T1-26) and
+    ``drift_alerted`` (#44585 drift-guard skip).
+    """
     def apply(jobs, _i, job):
         prior = bool(job.get(field))
         if value:
@@ -2087,7 +2177,14 @@ def _record_run_outcome(
 def _advance_after_run(job: Dict[str, Any], now: str) -> None:
     """Bump ``repeat.completed`` and recompute ``next_run_at``; retire the record as a terminal
     completion when the repeat limit is reached or a one-shot has no further run."""
+    # If no next run, decide whether this is terminal completion (one-shot) or a transient failure
+    # (recurring schedule couldn't compute — e.g. 'croniter' missing from the runtime env). Recurring jobs
+    # must NEVER be silently disabled: that turns a missing runtime dep into "job completed" and the user's
+    # schedule quietly goes off. See issue #16265.
     kind = job.get("schedule", {}).get("kind")
+    # One-shot dispatch-limit guard (issue #38758): a finite one-shot claimed via claim_dispatch() but whose
+    # tick died before mark_job_run could remove it will have completed >= times while still looking due
+    # (last_run_at was never written, so the recovery helper re-armed it). Remove it instead of re-firing.
     repeat = job.get("repeat")
     if repeat:
         times = repeat.get("times")
@@ -2177,7 +2274,14 @@ def _write_oneshot_diagnostic(job: Dict[str, Any], text: str, what: str) -> bool
 
 def _write_wedged_oneshot_diagnostic(job: Dict[str, Any]) -> None:
     """Trace for a wedged one-shot removal: dispatch was claimed but mark_job_run never ran
-    (interrupted mid-run); removing it silently would leave no output, error, or record."""
+    (interrupted mid-run); removing it silently would leave no output, error, or record.
+
+    A finite one-shot whose dispatch was claimed (``repeat.completed`` >= ``repeat.times``) but which never
+    reached ``mark_job_run`` (``last_run_at`` is null) was interrupted mid-run — scheduler restart, gateway
+    kill, or a non-Exception escape (#73973). The recovery guards remove such jobs so they stop appearing
+    due, but a silent removal leaves the user with no output, no error, and no job record. Write a small
+    diagnostic file into the job's output directory so the removal is observable and debuggable.
+    """
     if job.get("last_run_at") is not None:
         return  # a prior run was recorded — normal completion race, not a wedge
     repeat = job.get("repeat") or {}
@@ -2227,7 +2331,13 @@ def claim_dispatch(job_id: str) -> bool:
     """Atomically claim a finite one-shot dispatch BEFORE execution: ``repeat.completed`` is bumped
     and persisted under the jobs lock so a tick dying mid-execution cannot lose the dispatch
     (*at-most-times* instead of *at-least-once*). True if the caller may run the job; False when
-    the limit is already reached. Only ``kind == "once"`` with ``repeat.times > 0`` is claimed."""
+    the limit is already reached. Only ``kind == "once"`` with ``repeat.times > 0`` is claimed.
+
+    Increments ``repeat.completed`` under the cross-process jobs lock and persists the claim immediately, so
+    that if the tick dies mid-execution (gateway kill, OOM, segfault, hard-timeout) the dispatch is not
+    lost. This converts finite one-shot jobs from *at-least-once* to *at-most-times* semantics — a job that
+    self-destructs fires at most ``repeat.times`` times instead of infinitely (issue #38758).
+    """
     def apply(jobs, i, job):
         repeat = job.get("repeat") or {}
         times = repeat.get("times")
@@ -2250,6 +2360,7 @@ def claim_dispatch(job_id: str) -> bool:
             # A prior tick claimed the dispatch then died — a genuinely wedged claim. Remove it so
             # it stops appearing due, leaving an operator-visible diagnostic.
             jobs.pop(i)
+            # See #73973.
             save_jobs(jobs, removed_ids={job_id})
             _write_wedged_oneshot_diagnostic(job)
             logger.info(
@@ -2283,7 +2394,13 @@ def _refresh_claim(jobs: List[Dict[str, Any]], claim: Any, expected_owner: str) 
 def heartbeat_run_claim(job_id: str, *, expected_owner: str) -> bool:
     """Refresh a one-shot's ``run_claim`` timestamp while its run is alive, so an expired claim
     really means the claiming process died. Compare-and-refresh on ``expected_owner`` stops a stale
-    runner from extending a claim another process has since taken over."""
+    runner from extending a claim another process has since taken over.
+
+    Called periodically from the scheduler's run monitor (#62002) so a legitimately long run keeps its claim
+    fresh: an expired claim then really does mean "the claiming process died", and neither another process's
+    tick nor this process's own next tick will re-dispatch or stale-remove the job while the run is in
+    flight. mark_job_run() clears the claim on completion.
+    """
     def apply(jobs, _i, job):
         if job.get("schedule", {}).get("kind") != "once":
             return False
@@ -2294,7 +2411,11 @@ def heartbeat_run_claim(job_id: str, *, expected_owner: str) -> bool:
 
 def clear_run_claim(job_id: str) -> bool:
     """Clear a one-shot's ``run_claim`` when dispatch itself fails: such a job never reaches
-    mark_job_run, so the stale claim would block re-dispatch until the TTL expires."""
+    mark_job_run, so the stale claim would block re-dispatch until the TTL expires.
+
+    Calling this on every early-exit path restores the "the job stays due and will fire on the next healthy
+    tick" invariant that the scheduler comment promises (#86522).
+    """
     def apply(jobs, _i, job):
         if job.get("schedule", {}).get("kind") != "once" or job.get("run_claim") is None:
             return False  # recurring, or already cleared
@@ -2463,7 +2584,11 @@ def get_due_jobs() -> List[Dict[str, Any]]:
     """Return all jobs due now. A recurring job more than one period stale (gateway down, or a run
     overran the interval) has its backlog collapsed — next_run_at fast-forwards so nothing
     burst-fires — but still fires ONCE now (via mark_job_run, consuming one ``repeat.times`` run),
-    avoiding the perpetual-defer loop for runs longer than interval + grace."""
+    avoiding the perpetual-defer loop for runs longer than interval + grace.
+
+    This prevents the perpetual-defer loop (#33315) where a job whose runtime exceeds ``interval + grace``
+    would be skipped forever.
+    """
     with _jobs_lock():
         return _get_due_jobs_locked()
 
@@ -2726,6 +2851,11 @@ def _oneshot_dispatch_limit_reached(job: Dict[str, Any], scan: _DueScan) -> bool
     if times is None or times <= 0 or completed < times:
         return False
     name = job.get("name", job.get("id", "?"))
+    # A live run must never have its job record deleted underneath it (#62002): a run that outlives the
+    # run_claim TTL (stream stall, laptop asleep mid-run) satisfies the same completed >= times +
+    # expired-claim condition as a dead tick, but mark_job_run() still needs the record to land last_run_at
+    # / last_status / last_delivery_error. If this process is still running the job, it is slow, not stale —
+    # keep the entry and skip.
     if _job_running_in_this_process(job.get("id", "")):
         logger.info(
             "Job '%s': dispatch limit reached (%d/%d) but its run is still in flight in this "
@@ -2804,6 +2934,7 @@ def _evaluate_due_job(job: Dict[str, Any], scan: _DueScan, run_claim_ttl: float)
     # late.
     if not manual_run and recurring:
         lateness = max(0.0, (now - d.next_run_dt).total_seconds())
+        # See #99879.
         dispatch_stamp = {
             "scheduled_at": next_run,
             "dispatched_at": now.isoformat(),
@@ -2858,6 +2989,9 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
 
 # Per-run output files (`cron/output/<job>/<timestamp>.md`) are capped so a frequent job can't fill
 # the disk.
+# Unlike the quick-snapshot store (`hermes_cli.backup`, capped at 20) it had no retention, so a
+# frequently-scheduled job on a long-running deploy accumulated one file per run forever and could fill the
+# disk (#52383). Keep the most recent N files per job; a non-positive value disables pruning (opt-out).
 _CRON_OUTPUT_DEFAULT_KEEP = 50
 
 
@@ -2897,6 +3031,7 @@ def save_job_output(job_id: str, output: str):
     output_file = job_output_dir / f"{_hermes_now().strftime('%Y-%m-%d_%H-%M-%S')}.md"
     atomic_write_text(output_file, output, tmp_prefix=".output_")
     _secure_file(output_file)
+    # Bound per-job output growth so long-running deploys don't fill the disk (#52383).
     _prune_job_output(job_output_dir, _cron_output_keep())
     return output_file
 

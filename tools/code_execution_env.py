@@ -127,6 +127,10 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
     # mode changes CWD. Hermes's root is added ONLY when the child runs in Hermes's Python env —
     # exposing Hermes's site-packages to an external interpreter can mix incompatible compiled
     # extensions (3.12 NumPy under a 3.9 venv). Inherited Hermes-owned entries are stripped first.
+    # Before re-injecting PYTHONPATH, strip Hermes-owned entries that leaked through _scrub_child_env
+    # (PYTHONPATH is in _SAFE_ENV_PREFIXES so it passes the scrub). They are redundant for same-Hermes-
+    # environment children and may be incompatible with external interpreters (project mode can select a
+    # different venv), so they must not shadow or poison the child's sys.path (#74817).
     from tools.environments.local import _strip_hermes_owned_pythonpath
     _strip_hermes_owned_pythonpath(child_env)
     _existing_pp = child_env.get("PYTHONPATH", "")
@@ -232,7 +236,10 @@ def _resolve_child_python(mode: str) -> str:
 def _resolve_child_cwd(mode: str, staging_dir: str, task_id: str = "") -> str:
     """Child cwd. Strict: the staging dir. Project mirrors the terminal/file-tool ladder so every
     file-writing path agrees: session cwd record (`cd` state) → registered ``session.cwd.set``
-    override → TERMINAL_CWD → os.getcwd() → staging dir (never Popen on a missing cwd)."""
+    override → TERMINAL_CWD → os.getcwd() → staging dir (never Popen on a missing cwd).
+
+    (#56047)
+    """
     if mode != "project":
         return staging_dir
     if task_id:

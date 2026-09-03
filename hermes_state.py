@@ -26,6 +26,11 @@ from pathlib import Path
 from agent.message_sanitization import _sanitize_surrogates
 # Known-durable message marker (run_agent keeps a copy: circular import; a test pins them in sync).
 from agent.context_compressor import (  # noqa: F401  (re-exported; tests import it from here)
+    # Intrinsic persistence marker stamped on message dicts that are known-durable (#92231). One shared
+    # constant with agent.context_compressor (this module already imports agent.* at module level, and
+    # context_compressor is a transitive dependency via hermes_state_common). run_agent keeps its own
+    # predating copy — hermes_state cannot import run_agent (circular) — guarded by
+    # test_marker_constant_in_sync.
     _DB_PERSISTED_MARKER as _DB_PERSISTED_MARKER_KEY,
 )
 from hermes_constants import get_hermes_home
@@ -216,7 +221,11 @@ _STATE_DB_GUARD_EXTRA_DENY_ROOTS: Tuple[Path, ...] = ()
 
 def _ensure_test_isolation(db_path: Path) -> None:
     """Raise before any connection/mkdir/pragma/byte probe when a pytest-context process
-    (env OR ancestry) resolves a production DB."""
+    (env OR ancestry) resolves a production DB.
+
+    Env alone is not enough: a child spawned with a rebuilt environment loses ``PYTEST_*`` and
+    ``HERMES_HOME`` together, which is precisely the state in which it writes to production (#82770).
+    """
     if _STATE_DB_GUARD_BYPASS or os.environ.get(_STATE_DB_GUARD_BYPASS_ENV) or not _in_test_context():
         return
     try:
@@ -347,6 +356,14 @@ def _foreign_state_db_holders(db_path: Path) -> List[Tuple[int, str]]:
     return _state_holders.foreign_state_db_holders(db_path)
 
 
+# ── Process-wide shared SessionDB registry (#90837) ── The registry itself lives in
+# hermes_state_registry.py — a bounded module owning acquisition, generation identity, refcounting,
+# retirement, and teardown. These re-exports keep the historical import path (``from hermes_state import
+# get_shared_session_db``) working for every call site and test that imports from here. Routing rules (see
+# hermes_state_registry for the full lifecycle): - Long-lived in-process callers (gateway, tui_gateway,
+# cron, in-process tools) share ONE writer connection per resolved path via get_shared_session_db(). - CLI
+# one-shots, recovery flows, and read-only cross-profile opens keep using SessionDB() directly with their
+# own close().
 from hermes_state_registry import (  # noqa: F401  (re-export)
     close_shared_session_dbs, get_shared_session_db, release_or_close,
 )
@@ -362,6 +379,7 @@ class SessionDB(
 
     # Only these state-owned producers join automatic stale-open reconciliation; messaging/UI
     # sources have their own lifecycle owners; unknown sources fail closed.
+    # See #60609.
     _AUTO_PRUNE_STALE_OPEN_SOURCES: Tuple[str, ...] = (
         "cli", "cron", "kanban", "acp", "api_server", "subagent", "tool",
     )
@@ -376,6 +394,15 @@ class SessionDB(
     _WRITE_PATIENCE_S, _TRANSCRIPT_WRITE_PATIENCE_S, _ACTIVITY_WRITE_PATIENCE_S = 20.0, 60.0, 0.5
     # A live compression lock gets a short wait (compression publishes in seconds), but the lease
     # is a correctness boundary: a writer still locked out afterwards is refused.
+    # Observation-only activity heartbeat/label writes (#76354 review S1): these run on (or adjacent to) the
+    # response-critical path and must never wait out the full routine patience under contention. Sub-second
+    # budget; a skipped write is retried naturally at the next heartbeat window.
+    # A live compression lock gets its own, much shorter budget than the write lock. Compression publishes
+    # in a couple of seconds, so a brief wait saves the overwhelming majority of concurrent turns (#75083).
+    # It deliberately stays short: the lease is a correctness boundary, not just a busy signal (see
+    # test_compression_lease_blocks_non_owner_but_allows_owner_flush), so a writer that is still locked out
+    # after this budget must still be refused rather than allowed to land a stale turn in a session whose
+    # compression is genuinely long-running or wedged.
     _COMPRESSION_BUSY_WAIT_S = 5.0
     _WRITE_RETRY_MIN_S, _WRITE_RETRY_MAX_S = 0.020, 0.150  # fast jitter for the first _SLOW_AFTER_S
     _WRITE_RETRY_SLOW_AFTER_S = 2.0
@@ -446,6 +473,12 @@ class SessionDB(
         self._read_pool: "queue.LifoQueue[sqlite3.Connection]" = queue.LifoQueue(maxsize=_READ_POOL_MAX)
         # Permits bound PEAK descriptors (the pool bounds only the idle set), shared per
         # DATABASE PATH; acquired non-blocking so a permitless reader degrades to the writer lock.
+        # One permit per live read connection, held from before the open in _get_read_conn() until after the
+        # close in _close_read_conn(). See _READ_POOL_MAX. Acquired non-blocking on purpose: a reader that
+        # cannot get a permit must degrade to the writer lock, not queue here — blocking would convert fd
+        # exhaustion into a stall, which is the same outage with a different stack trace. Permits are shared
+        # per DATABASE PATH, not per instance: the descriptors they ration belong to the file, and one
+        # process holds several SessionDB objects on the same state.db (#98573). See _PathReadBudget.
         self._read_budget = _read_budget_for(self.db_path)
         self._read_budget.register(self)
         self._read_permits = self._read_budget.permits
@@ -477,6 +510,8 @@ class SessionDB(
         self._token_writer_stop = self._token_writer_busy = False
         self._token_atexit_hook: Optional[Callable[[], None]] = None
         # Opened via get_shared_session_db(): close() releases a refcount instead.
+        # Set True when this instance is opened via get_shared_session_db(). Makes close() a no-op so the
+        # registry (not individual callers) controls the connection lifecycle (#90837).
         self._shared_registry_owned = False
         initialization_complete = False
         try:
@@ -627,6 +662,12 @@ class SessionDB(
         _init_schema's DDL runs on a 1s-timeout connection, so a sibling's VACUUM
         or checkpoint used to fail the ENTIRE open and callers disabled
         persistence for the whole run. Non-lock errors propagate immediately."""
+        # Lock contention during open: _init_schema's DDL/reconcile statements run on a 1s-timeout
+        # connection with no retry, so a sibling process holding the write lock (VACUUM, TRUNCATE checkpoint
+        # at close, a long FTS pass from an older still-running install) used to fail the ENTIRE open —
+        # callers then disable persistence for the whole run ("Failed to initialize SessionDB ... database
+        # is locked", #74478). The store is healthy; wait it out with the same jittered patience the write
+        # path uses.
         deadline = time.monotonic() + self._WRITE_PATIENCE_S
         while True:
             try:
@@ -788,6 +829,10 @@ class SessionDB(
         compression_deadline: Optional[float] = None  # set on the first compression-busy collision
         # One retry for SQLITE_IOERR raised by BEGIN IMMEDIATE itself (callback not run: nothing
         # replayed). Once fn has started, an IOERR leaves settlement unknown and must propagate.
+        # The callback has not run at that point, so there is no durable effect to replay and the retry is
+        # exactly-once safe (#99502's contract). Once the callback starts, an IOERR leaves the write's
+        # settlement unknown and must propagate — this helper owns non-idempotent transcript/counter
+        # mutations, not just idempotent UPSERTs.
         ioerr_begin_retried = False
         while True:
             self._raise_if_db_corrupt()
@@ -817,6 +862,13 @@ class SessionDB(
                 return result
             except SessionCompressionInProgressError:
                 # Transient (see _COMPRESSION_BUSY_WAIT_S): a steer landing mid-compression must not abort.
+                # A live foreign compression lock is transient: the compressor publishes in a couple of
+                # seconds. Without any wait, a steer that lands mid-compression aborts the user's turn as
+                # session_persistence_failed and sends the operator hunting disk space that was never the
+                # problem (#75083). The budget is _COMPRESSION_BUSY_WAIT_S, not the write-lock patience: the
+                # lease is a correctness boundary, so a writer still locked out after a short wait must be
+                # refused rather than left to land a stale turn once a long-running or wedged compression
+                # finally lets go.
                 if compression_deadline is None:
                     compression_deadline = min(time.monotonic() + self._COMPRESSION_BUSY_WAIT_S, deadline)
                 if self._sleep_before_write_retry(
@@ -898,7 +950,10 @@ class SessionDB(
 
     def _ensure_db_file_generation(self) -> None:
         """Mint a once-per-file generation stamp (state_meta + application_id). First opener wins (INSERT
-        OR IGNORE); application_id is written only while 0 so racers converge. PASSIVE checkpoint only."""
+        OR IGNORE); application_id is written only while 0 so racers converge. PASSIVE checkpoint only.
+
+        See #45383.
+        """
         if self.read_only or self._conn is None:
             return
         token = uuid.uuid4().hex
@@ -984,6 +1039,9 @@ class SessionDB(
         """Stop writes (logging once) when the file was replaced or its WAL/SHM generation
         is gone: never run in-file repair on a new generation, never keep committing on a
         split WAL. Both flags are sticky."""
+        # A reopen resolves the PATH again — if the file at that path is no longer the one this instance
+        # originally opened (out-of-band restore/cp/mv), reconnecting would write into the new generation
+        # through stale WAL/shm assumptions (#89332). Refuse instead.
         if self._db_replaced or self._db_file_was_replaced():
             self._db_replaced = True
             logger.error(_STATE_DB_REPLACED_MSG)
@@ -1077,7 +1135,11 @@ class SessionDB(
 
     def _try_wal_checkpoint(self) -> None:
         """Best-effort PASSIVE WAL checkpoint; never raises. PASSIVE never blocks writers;
-        TRUNCATE corrupted B-trees on 65K+ page databases under exclusive-lock I/O pressure."""
+        TRUNCATE corrupted B-trees on 65K+ page databases under exclusive-lock I/O pressure.
+
+        Previous TRUNCATE strategy caused B-tree corruption on large databases (65K+ pages) due to the
+        exclusive-lock I/O pressure from checkpointing thousands of frames at once (issue #45383).
+        """
         if self._db_corrupt:
             return  # quarantined: never checkpoint over a damaged image
         try:
@@ -1089,7 +1151,16 @@ class SessionDB(
             logger.warning("WAL checkpoint (PASSIVE) failed: %s", exc)
 
     def __enter__(self) -> "SessionDB":
-        """``with SessionDB(path) as db:`` closes on exit; owners must release deterministically."""
+        """``with SessionDB(path) as db:`` closes on exit; owners must release deterministically.
+
+        Ownership of a SessionDB should be released explicitly. Historically an instance with a started
+        token writer pinned ITSELF (bound-method writer target plus a strong ``atexit`` drain hook), so
+        ``__del__`` never ran for exactly the instances that leaked descriptors (#88033). The writer now
+        retires after an idle window and the atexit hook holds only a weak reference, so abandoned handles
+        are eventually collectible — but "eventually, after the idle window and a GC cycle" is not a release
+        policy. Call sites owning a handle are still expected to close it deterministically (see the
+        ownership comments in ``run_agent.py`` and ``tui_gateway/methods_session.py``).
+        """
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -1099,7 +1170,16 @@ class SessionDB(
     def close(self):
         """Drain queued token deltas, then a PASSIVE checkpoint on writable handles
         (NOT TRUNCATE: a full WAL reset races the gateway's live writer, tearing
-        B-tree pages). A registry-shared instance RELEASES one refcount instead."""
+        B-tree pages). A registry-shared instance RELEASES one refcount instead.
+
+        Drains queued token deltas first (the background writer needs the connection). Read-only connections
+        never request a checkpoint. See #45383.
+        When this instance is shared (opened via ``get_shared_session_db``), ``close()`` RELEASES one
+        refcount instead of tearing down the connection: the registry owns the lifecycle and only closes on
+        the final release (#90837). This prevents one caller's close from tearing down the writer connection
+        that other callers in the same process are still using — while still letting legacy ``close()`` call
+        sites return their reference instead of leaking it.
+        """
         if self._shared_registry_owned:
             from hermes_state_registry import release
             release(self)
@@ -1125,6 +1205,11 @@ class SessionDB(
                     )
                 elif not self.read_only:  # PASSIVE, not TRUNCATE (see docstring)
                     try:
+                        # Every cron run_agent opens+closes a transient SessionDB, so a TRUNCATE here fires
+                        # a full WAL reset many times/hour, racing the gateway's long-lived writer on large
+                        # WAL databases and tearing hot B-tree pages -- the #45383 corruption this class's
+                        # own periodic checkpoint was already made PASSIVE to avoid. TRUNCATE belongs only
+                        # on a sole-opener/quiescent connection.
                         self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                     except Exception as exc:
                         logger.debug("WAL checkpoint (PASSIVE) at close failed: %s", exc)
@@ -1166,6 +1251,9 @@ class SessionDB(
 
     # Bot Mode's canonical chat is resolved by exact-title lookup: the title IS the identity,
     # so _set_session_title refuses renames of a hidden row holding it.
+    # Bot Mode's forever-chat registry: the session titled exactly this, on a bot's profile, IS the bot's
+    # canonical chat — resolved by exact-title lookup on every open (no session-id pointer exists). See
+    # #92473.
     CANONICAL_BOT_CHAT_TITLE = "Bot Chat"
 
     # ── Message storage constants (SessionMessagesMixin) ──

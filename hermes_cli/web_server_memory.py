@@ -129,6 +129,9 @@ def _run_setup_command(
         capture_output=True,
         text=True,
         # Lossy UTF-8 decode — setup tools emit UTF-8; a locale-mismatched byte must never raise.
+        # Force UTF-8 with lossy decoding so child output containing bytes that are invalid in the system
+        # locale (e.g. GBK on Chinese Windows) can't raise UnicodeDecodeError inside the drain threads and
+        # crash the gateway. See #53137.
         encoding="utf-8",
         errors="replace",
         timeout=timeout,

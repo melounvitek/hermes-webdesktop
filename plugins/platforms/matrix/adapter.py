@@ -327,6 +327,9 @@ _MatrixModelPickerPrompt = _MatrixChoicePickerPrompt = _MatrixPickerPrompt
 
 
 # Spec allows ~65 KB events; 4000 was too small (split Markdown tables mid-row).
+# Matrix message size limit. The spec allows large events (~65 KB), but very large bodies can render poorly
+# in some clients. The previous 4,000-char default was overly conservative and split Markdown tables mid-row
+# (#53026).
 DEFAULT_MAX_MESSAGE_LENGTH = 16000
 MATRIX_MAX_MESSAGE_LENGTH_CEILING = 65535
 
@@ -354,6 +357,7 @@ MAX_MESSAGE_LENGTH = DEFAULT_MAX_MESSAGE_LENGTH  # back-compat alias for importe
 # E2EE store dir is resolved per adapter in connect() (``_resolve_store_dir``), NOT at module scope:
 # the multiplex gateway imports this once and a module constant would collide every profile's Olm
 # identity in one crypto.db.
+# Store directory for E2EE keys and sync state. Mirrors the pairing-store fix (a6397c379). See #89168.
 from hermes_constants import get_hermes_dir as _get_hermes_dir
 
 _STARTUP_GRACE_SECONDS = 5  # ignore messages older than this many seconds before startup
@@ -434,7 +438,14 @@ def _create_matrix_session(proxy_url: str | None):
 
 def _check_e2ee_deps() -> bool:
     """True if all four E2EE deps import: olm, PgCryptoStore (also drives sqlite), asyncpg, aiosqlite.
-    Without all four, encrypted rooms fail at connect with ``No module named 'asyncpg'``."""
+    Without all four, encrypted rooms fail at connect with ``No module named 'asyncpg'``.
+
+    Verifies python-olm (via mautrix.crypto.OlmMachine), the SQLite crypto store backend
+    (mautrix.crypto.store.asyncpg.PgCryptoStore — yes, the PgCryptoStore class also drives the sqlite
+    backend in mautrix 0.21), and the database drivers actually used at connect time (``asyncpg`` for the
+    underlying upgrade_table machinery, ``aiosqlite`` for the ``sqlite:///`` URL we pass to
+    ``Database.create``). See #31116.
+    """
     try:
         from mautrix.crypto import OlmMachine  # noqa: F401
         from mautrix.crypto.store.asyncpg import PgCryptoStore  # noqa: F401
@@ -561,7 +572,12 @@ def _handle_generated_matrix_recovery_key(mxid: str, recovery_key: str) -> None:
 def _scoped_recovery_key() -> str:
     """MATRIX_RECOVERY_KEY via the profile-scoped secret store (see _startup_env_secret): a bare
     os.getenv under multiplex resolves the default profile's key and verification fails with
-    "Key MAC does not match"."""
+    "Key MAC does not match".
+
+    We read through :func:`get_secret`, which is scope-aware. An *unscoped* read under multiplex (e.g. the
+    default-profile startup loop) raises ``UnscopedSecretError``; in that context ``os.environ`` is that
+    profile's own value, so we fall back to it — mirroring the established Slack app-token pattern (#59739).
+    """
     return _startup_env_secret("MATRIX_RECOVERY_KEY")
 
 
@@ -597,7 +613,10 @@ def _pre_sanitize_matrix_markdown(text: str) -> str:
 
 def _startup_env_secret(name: str) -> str:
     """Scope-aware credential read: a scoped miss is empty (never borrow the process env);
-    only an UNSCOPED read (default-profile startup loop) falls back to os.environ."""
+    only an UNSCOPED read (default-profile startup loop) falls back to os.environ.
+
+    See #59739.
+    """
     try:
         return (get_secret(name) or "").strip()
     except UnscopedSecretError:
@@ -605,7 +624,12 @@ def _startup_env_secret(name: str) -> str:
 
 
 def matrix_deps_present() -> bool:
-    """PASSIVE registry ``check_fn`` — must never install; ``ensure_matrix_deps`` is the installer."""
+    """PASSIVE registry ``check_fn`` — must never install; ``ensure_matrix_deps`` is the installer.
+
+    Registry ``check_fn`` — called from status displays and config loading, so it must never install
+    anything. The ACTIVE lazy-installer (``check_matrix_requirements``) is registered as ``ensure_deps_fn``
+    and runs from ``create_adapter()`` when this returns False (#79812).
+    """
     try:
         from tools.lazy_deps import is_available
         return is_available("platform.matrix")
@@ -630,7 +654,13 @@ def check_matrix_requirements() -> bool:
 def ensure_matrix_deps() -> bool:
     """ACTIVE deps-only installer (registry ``ensure_deps_fn``); rebinds the type globals. Installs the
     whole ``platform.matrix`` group when ANY declared package is missing — short-circuiting on
-    ``import mautrix`` left asyncpg/aiosqlite uninstalled forever."""
+    ``import mautrix`` left asyncpg/aiosqlite uninstalled forever.
+
+    Lazy-installs the full ``platform.matrix`` feature group via ``tools.lazy_deps.ensure_and_bind``
+    whenever any of the declared packages (mautrix, Markdown, aiosqlite, asyncpg, aiohttp-socks) is missing
+    — not just mautrix itself. Previously this short-circuited on ``import mautrix``, which left the other
+    four packages uninstalled forever and broke E2EE connect with ``No module named 'asyncpg'`` (#31116).
+    """
     try:
         from tools.lazy_deps import feature_missing, ensure_and_bind
         missing = feature_missing("platform.matrix")
@@ -1154,6 +1184,9 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _verify_or_bootstrap_cross_signing(self, olm: Any, client: Any) -> None:
         """Verify cross-signing via MATRIX_RECOVERY_KEY, or bootstrap a new key (non-fatal)."""
+        # Honor the active profile's secret scope so a secondary profile under gateway.multiplex_profiles
+        # resolves its own recovery key instead of the default profile's (which fails E2EE verification with
+        # "Key MAC does not match", #69090).
         recovery_key = _scoped_recovery_key()
         if recovery_key:
             try:
@@ -1771,7 +1804,13 @@ class MatrixAdapter(BasePlatformAdapter):
     def _is_self_sender(self, sender: str) -> bool:
         """True if *sender* is the bot itself (case-insensitive: homeservers vary localpart case). With
         no resolved user_id we can't prove a sender is NOT us, so return True — dropping our own
-        events beats an echo loop ("hall of mirrors")."""
+        events beats an echo loop ("hall of mirrors").
+
+        Matrix user IDs are byte-compared after trimming whitespace and lowercasing — some homeservers
+        normalize the localpart case differently at different API surfaces, and the reply-loop tail of the
+        "hall of mirrors" bug (#15763) has been observed with the bot's own account bypassing a
+        case-sensitive equality check.
+        """
         own = (self._user_id or "").strip().lower()
         return not own or sender.strip().lower() == own
 
@@ -1779,7 +1818,13 @@ class MatrixAdapter(BasePlatformAdapter):
     def _is_system_or_bridge_sender(sender: str) -> bool:
         """True for appservice/bridge/system identities (``@_telegram_123:server``) or malformed IDs.
         Never offer these a pairing code: an approved bridge would relay every outbound message
-        back as an "authorized user message" (echo loop)."""
+        back as an "authorized user message" (echo loop).
+
+        We treat these as system identities for pairing purposes: they should never be offered a pairing
+        code, because an operator approving the code would hand the bridge itself permanent authorization —
+        and every outbound message relayed by the bridge would then loop back into the agent as an
+        "authorized user message", which is the root of issue #15763.
+        """
         localpart = (sender or "").strip().lstrip("@").partition(":")[0]
         return not localpart or localpart.startswith("_")
 
@@ -1795,6 +1840,11 @@ class MatrixAdapter(BasePlatformAdapter):
 
     def _reset_clock_skew_detector(self) -> None:
         """State for _note_late_grace_drop: consecutive-drop count, their skew, and the once-only warning."""
+        # Clock-skew detection: count grace-check drops that happen well after startup (i.e. not
+        # initial-sync backfill). If the host's system clock is set ahead of real time, the startup grace
+        # check `event_ts < startup_ts - 5` silently drops every live message. See #12614 — the symptom is
+        # "bot joins rooms but never replies". Drops only count when their skew matches the first sampled
+        # drop (within 60s), so varied-age backfill from freshly-invited rooms doesn't trip the heuristic.
         self._late_grace_drops: int = 0
         self._late_grace_skew: float = 0.0
         self._clock_skew_warned: bool = False
@@ -1831,6 +1881,10 @@ class MatrixAdapter(BasePlatformAdapter):
         if self._is_self_sender(sender):
             return
         # Bridge/system identities must never reach the pairing flow (echo loop once paired).
+        # Ignore own messages (case-insensitive; also drops when our own user_id hasn't been resolved yet —
+        # see _is_self_sender docstring and issue #15763).
+        # Once a bridge user is paired, every outbound message it relays would loop back as an authorized
+        # user message (the "hall of mirrors" in #15763).
         if self._is_system_or_bridge_sender(sender):
             logger.debug("Matrix: ignoring system/bridge sender %s in %s", sender, room_id)
             return
@@ -2913,7 +2967,12 @@ _YAML_LIST_KEYS = (
 
 def _apply_yaml_config(yaml_cfg: dict, matrix_cfg: dict) -> dict | None:
     """apply_yaml_config_fn: config.yaml matrix: keys → MATRIX_* env (env wins). Returns None. Lowercased
-    flags apply whenever the key is present (None still writes "none"); list-valued keys skip None."""
+    flags apply whenever the key is present (None still writes "none"); list-valued keys skip None.
+
+    Implements the apply_yaml_config_fn contract (#24849). Mirrors the legacy matrix_cfg block from
+    gateway/config.py::load_gateway_config(). Env vars take precedence over YAML. Returns None — everything
+    flows through env.
+    """
     for key, env_name in _YAML_LOWER_KEYS:
         if key in matrix_cfg and not os.getenv(env_name):
             os.environ[env_name] = str(matrix_cfg[key]).lower()

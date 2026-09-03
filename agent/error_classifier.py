@@ -140,6 +140,9 @@ _USAGE_LIMIT_TRANSIENT_SIGNALS = (
 # Anthropic's "request_too_large" type without one).
 _PAYLOAD_TOO_LARGE_PATTERNS = (
     "request entity too large", "payload too large", "error code: 413", "request_too_large",
+    # Normally arrives with an HTTP 413 status (handled by the status path), but aggregators/proxies can
+    # re-wrap it into a plain message with no status attribute — route it to the same compression recovery.
+    # (port of anomalyco/opencode#37848)
     "request exceeds the maximum size",
 )
 
@@ -181,6 +184,8 @@ _CONTEXT_OVERFLOW_PATTERNS = (
     "超过最大长度", "上下文长度",
     "tokens in request more than max tokens allowed",
     "input is too long", "max input token", "input token", "exceeds the maximum number of input tokens",
+    # Together/Fireworks-style: "Input length 131393 exceeds the maximum allowed input length of 131040
+    # tokens."  No other pattern in this list matches that wording. (port of anomalyco/opencode#37848)
     "maximum allowed input length",
 )
 
@@ -548,6 +553,16 @@ def _by_transport(c: _Ctx) -> Optional[Verdict]:
     if any(p in msg for p in _SERVER_DISCONNECT_PATTERNS) and not c.status_code:
         # Reasoning models: far more likely the gateway idle-killed a long
         # thinking stream — never compress on a phantom overflow (#52310).
+        # Reasoning-model override: a transport disconnect on a reasoning model is much more likely the
+        # upstream proxy idle-killing a long thinking stream than a true context overflow — even on large
+        # sessions. The default disconnect+large-session routing below would otherwise send the user into
+        # the compression branch (should_compress=True) and silently delete conversation history on a
+        # phantom context-length error. Reasoning models have multi-minute thinking phases that routinely
+        # exceed the cloud gateway's idle window (NVIDIA NIM ~120s — first-party repro at
+        # NVIDIA/NemoClaw#4846; OpenAI worker / Anthropic stream-idle similar). The per-reasoning-model
+        # stale-timeout floor in agent/reasoning_timeouts.py raises the stale-detector threshold to tolerate
+        # long thinking, so a true transport-layer failure here is recoverable via the retry path — not via
+        # context compression. Reclassify as timeout. (Part 1 of Fixes #52310.)
         from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
         if get_reasoning_stale_timeout_floor(c.model) is not None:
             return _V_TIMEOUT

@@ -98,7 +98,10 @@ def register_global_provider(provider: DashboardAuthProvider) -> None:
     across every profile one dashboard process serves, so these outlive any per-home plugin
     manager: always targets ``_providers`` (never a per-home overlay) and *replaces* a same-name
     entry instead of raising, so a forced plugin re-discovery (e.g. after a password change)
-    rotates the provider in place. Pairs with ``unregister_global_provider``."""
+    rotates the provider in place. Pairs with ``unregister_global_provider``.
+
+    Pairs with ``unregister_global_provider`` for teardown of the exact object still current (#91701).
+    """
     assert_protocol_compliance(type(provider))
     with _lock:
         _providers[provider.name] = provider

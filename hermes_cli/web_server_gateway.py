@@ -309,6 +309,10 @@ def _dashboard_spawn_executable() -> str:
     case this fixes), and pyvenv.cfg discovery keys off argv0's unresolved location. On Windows
     the console python plus ``windows_detach_flags()`` keeps the action invisible without
     pythonw.exe (which makes every console descendant flash its own conhost).
+
+    See #90026.
+    Falls back to ``sys.executable`` when no venv interpreter exists next to the install (in-process dev
+    runs, exotic layouts). See #54220, #56747.
     """
     from hermes_cli.web_server import PROJECT_ROOT
     exe = Path(sys.executable)
@@ -340,6 +344,7 @@ def _spawn_hermes_action(
     # The dashboard runs inside the gateway process, so os.environ carries _HERMES_GATEWAY=1;
     # inheriting it trips the child's in-process restart-loop guard (exit 1). Drop it, like
     # the gateway's own restart watcher does.
+    # The gateway's own restart watcher already drops it (gateway/run.py); mirror that here (#52470).
     action_env = {**os.environ, "HERMES_NONINTERACTIVE": "1"}
     action_env.pop("_HERMES_GATEWAY", None)
     detach = {"creationflags": windows_detach_flags()} if sys.platform == "win32" else {"start_new_session": True}

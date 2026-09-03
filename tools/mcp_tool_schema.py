@@ -91,13 +91,21 @@ def _repair_object_shape(node):
     return repaired
 
 
+# Lazy (schema-cache registered) servers are available: the first real call spawns/connects them (#56832).
 def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     """Normalize MCP input schemas so one form is valid on OpenAI, Anthropic, Gemini and
     Moonshot. Order matters: ``definitions`` -> ``$defs``; nullable ``anyOf`` unions collapsed
     to the non-null branch (Anthropic rejects nullable branches; optionality lives in the
     parent's ``required``; the ``nullable: true`` hint is kept so runtime coercion can map a
     model-emitted ``"null"`` string to ``None``); same-typed const unions -> enum (AFTER the
-    nullable strip); then object-shape repair."""
+    nullable strip); then object-shape repair.
+
+    * Missing or ``null`` ``type`` on an object-shaped node is coerced to ``"object"`` (some servers omit
+    it). See PR #4897. * When an ``object`` node lacks ``properties``, an empty ``properties`` dict is added
+    so ``required`` entries don't dangle. * ``required`` arrays are pruned to only names that exist in
+    ``properties``; otherwise Google AI Studio / Gemini 400s with ``property is not defined``. See PR #4651.
+    * MCP/Pydantic optional fields commonly arrive as ``anyOf: [{...}, {"type": "null"}], default: null``.
+    """
     if not schema:
         return dict(_EMPTY_OBJECT_SCHEMA)
     from tools.schema_sanitizer import collapse_const_unions, strip_nullable_unions
@@ -121,6 +129,9 @@ def sanitize_mcp_name_component(value: str) -> str:
 # ``mcp__<server>__<tool>``: the convention shared by Claude Code, Codex and OpenCode. The
 # double underscore disambiguates the server/tool boundary even when either contains
 # underscores, and matches the Anthropic-OAuth wire form.
+# Native MCP tool-name prefix. It also aligns native registration with the Anthropic-OAuth wire form
+# (``_MCP_TOOL_PREFIX`` in anthropic_adapter.py), removing the single->double rewrite that path previously
+# had to perform. See #33533.
 MCP_TOOL_NAME_PREFIX = "mcp__"
 
 
@@ -201,6 +212,11 @@ def matches_name_filter(tool_name: str, patterns: set[str]) -> bool:
 # response for the handler to be registered. Without this gate a tools-only server got all
 # four stubs and every call returned JSON-RPC -32601, making the model conclude the server
 # was broken.
+# Source of truth: MCP spec — capabilities.resources / capabilities.prompts are present on the response only
+# when the server actually implements those request families. Context7 @upstash/context7-mcp, which
+# advertises only ``tools``) had all four utility stubs registered and every model call to them came back
+# with JSON-RPC ``-32601 Method not found``, which made the model conclude the server was broken even when
+# the real tools worked. See #18051.
 _UTILITY_CAPABILITY_ATTRS = {
     "list_resources": "resources", "read_resource": "resources",
     "list_prompts": "prompts", "get_prompt": "prompts"}

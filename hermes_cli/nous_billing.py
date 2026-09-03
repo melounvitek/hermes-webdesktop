@@ -208,7 +208,15 @@ _ERRORS_BY_STATUS: dict[int, tuple[type[BillingError], str]] = {
 
 
 def _raise_for_error(status: int, payload: dict[str, Any], headers: Any = None) -> None:
-    """Map an HTTP error response to the right typed :class:`BillingError` (see tables above)."""
+    """Map an HTTP error response to the right typed :class:`BillingError` (see tables above).
+
+    Recognizes the Remote-Spending gate contract (NAS PR #481): 403 ``remote_spending_revoked`` (this
+    terminal's spend revoked → reconnect), 401 ``session_revoked`` (full logout → re-login), 503
+    ``temporarily_unavailable`` (gate fail-closed → back off, NOT revoked). The business-denial codes
+    (``cli_billing_disabled`` + dual ``code:remote_spending_disabled``, ``role_required``,
+    ``idempotency_conflict``, …) flow through as a generic BillingError carrying
+    ``error``/``code``/``recovery`` for the surface to map.
+    """
     p = payload if isinstance(payload, dict) else {}
     error = p.get("error")
     common = {

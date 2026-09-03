@@ -17,7 +17,11 @@ def _single_query_clarify_callback(question: str, choices=None, multi_select=Fal
     A -q turn never builds the prompt_toolkit app, so the interactive clarify modal
     can never be painted or answered — the CLI callback would poll until
     ``agent.clarify_timeout`` while the caller sees a silent hang. Mirror the oneshot
-    path and answer immediately instead."""
+    path and answer immediately instead.
+
+    The oneshot path answers immediately via ``_oneshot_clarify_callback``; single-query turns need the same
+    headless behavior (#94943).
+    """
     prefix = f"[single-query mode: no user available to answer {question!r}. "
     if choices:
         what = "subset" if multi_select else "option"
@@ -249,6 +253,7 @@ class CLIAgentSetupMixin:
                 pass
 
         # Normalize model for the resolved provider (e.g. swap non-Codex models on openai-codex).
+        # Fixes #651.
         model_changed = self._normalize_model_for_provider(resolved_provider)
 
         # AIAgent/OpenAI client holds auth at init, so rebuild on key/routing/model change.
@@ -296,7 +301,10 @@ class CLIAgentSetupMixin:
         """Silently probe whether any inference provider can be resolved.
 
         Never prints or mutates CLI state, so the interactive first-run path can route a
-        keyless install into onboarding before the user types into a chat that can't work."""
+        keyless install into onboarding before the user types into a chat that can't work.
+
+        See #62935.
+        """
         from hermes_cli.runtime_provider import resolve_runtime_provider
         try:
             runtime = resolve_runtime_provider(
@@ -409,6 +417,7 @@ class CLIAgentSetupMixin:
         session_meta = self._session_db.get_session(self.session_id)
         # Quiet mode (tool_progress_mode == "off") routes resume status lines to
         # stderr so stdout stays machine-readable for `$(hermes chat -Q --resume ...)`.
+        # Without this, the resume banner pollutes captured stdout. See #11793.
         _quiet_mode = getattr(self, "tool_progress_mode", "full") == "off"
 
         def _say(plain: str, rich: str) -> None:
@@ -496,6 +505,7 @@ class CLIAgentSetupMixin:
             # -q never builds the prompt_toolkit app, so the clarify modal can't be
             # answered — answer headless instead of polling until clarify_timeout.
             clarify_callback = (
+                # See #94943.
                 _single_query_clarify_callback
                 if getattr(self, "_single_query_mode", False)
                 else self._clarify_callback)
@@ -538,10 +548,14 @@ class CLIAgentSetupMixin:
             # Reference for atexit memory-provider shutdown: ``_run_cleanup`` in cli.py
             # reads ``cli._active_agent_ref``, so this MUST write the ``cli`` module's
             # global — a ``global`` statement here would bind this module's namespace.
+            # When this code lived in cli.py a bare ``global _active_agent_ref`` worked; after the god-file
+            # extraction into this mixin a ``global`` here would bind *this module's* namespace, leaving
+            # ``cli._active_agent_ref`` None forever — so memory shutdown never ran on /exit (#49287).
             import cli as _cli
             _cli._active_agent_ref = self.agent
             # Route agent status output through prompt_toolkit so ANSI escapes
             # aren't garbled by patch_stdout's StdoutProxy.
+            # See #2262.
             self.agent._print_fn = _cprint
             # Hydrate credits notices at session OPEN (parity with the TUI) so a depletion
             # warning shows before the first message. Idempotent + fail-open in the helper.

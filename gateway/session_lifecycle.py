@@ -70,6 +70,9 @@ class SessionLifecycleMixin:
                 entry.model_override = None
             self._save()
         # Background caller never entered ``_profile_runtime_scope``: resolve the store by key.
+        # The expiry watcher calls this from a background task that never entered
+        # ``_profile_runtime_scope``, so resolve the store from the key rather than from the ambient scope
+        # (#66887).
         _db = self._db_for_key(entry.session_key)
         if not _db:
             return
@@ -123,7 +126,17 @@ class SessionLifecycleMixin:
     def _is_session_ended_in_db(self, session_id: str) -> bool:
         """True iff state.db has this session with a non-null end_reason (same staleness test as
         ``_prune_stale_sessions_locked``; no DB/row or DB error -> False). Lets routing self-heal a
-        session ended while the gateway stays alive. Store resolved from the owning profile."""
+        session ended while the gateway stays alive. Store resolved from the owning profile.
+
+        Used by ``get_or_create_session`` to self-heal at routing time: ``_prune_stale_sessions_locked``
+        only runs at startup, so a session ended in the DB while the gateway stays alive (any path that
+        finalizes the row without clearing sessions.json) would otherwise be reused as a live routing key
+        and silently swallow every subsequent message until the next restart (#54878 — the live-gateway
+        variant of #52804/FM9). DB errors are non-fatal — never block routing on a failed lookup.
+        The store is resolved from the row's owning profile rather than the ambient scope: an unscoped
+        background writer keeps its own copy of the same session, and comparing against that copy reports a
+        live session as ended (#66887).
+        """
         db = self._db_for_session_id(session_id)
         if not db or not session_id:
             return False
@@ -186,7 +199,10 @@ class SessionLifecycleMixin:
         return changed
 
     def suspend_session(self, session_key: str) -> bool:
-        """Mark a session suspended so it auto-resets on next access (/stop). True if it existed."""
+        """Mark a session suspended so it auto-resets on next access (/stop). True if it existed.
+
+        Used by ``/stop`` to prevent stuck sessions from being resumed after a gateway restart (#7536).
+        """
         return self._update_entry(session_key, lambda e: setattr(e, "suspended", True))
 
     def _set_turn_marker_locked(self, session_key: str, entry: SessionEntry, token, started_at) -> None:
@@ -322,7 +338,13 @@ class SessionLifecycleMixin:
 
     def suspend_recently_active(self, max_age_seconds: int = 120) -> int:
         """Mark sessions active within *max_age_seconds* as ``resume_pending`` after a crash/fast
-        restart (already-pending and suspended entries are skipped). Returns the number marked."""
+        restart (already-pending and suspended entries are skipped). Returns the number marked.
+
+        Called on gateway startup after a crash or fast restart to preserve in-flight sessions instead of
+        destroying their conversation history (#7536). Only marks sessions updated within *max_age_seconds*
+        to avoid touching long-idle sessions. Sets ``resume_pending=True`` so the next incoming message on
+        the same session_key auto-resumes from the existing transcript.
+        """
         cutoff = _now() - timedelta(seconds=max_age_seconds)
 
         def _mark(entry: SessionEntry) -> bool:

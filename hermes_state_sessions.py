@@ -100,6 +100,14 @@ def _session_filter_where(
     params: List[Any] = []
     if exclude_children:
         where += [_LISTABLE_CHILD_SQL, f"{_delegate_from_json('s.model_config')} IS NULL"]
+    # Show roots and user-visible branch/reset sessions, while still hiding sub-agent runs and compression
+    # continuations. All four carry parent_session_id, so the shared predicate classifies the edge from
+    # stable markers plus legacy-compatible parent metadata. Branch sessions are identified two ways, OR'd
+    # for robustness: 1. A stable ``_branched_from`` marker in model_config, written by /branch at creation
+    # time. This survives the parent being reopened and re-ended with a different end_reason (e.g.
+    # tui_shutdown overwriting 'branched'), which otherwise hides the branch — see issue #20856. 2. The
+    # legacy heuristic (parent ended with 'branched' before the child started), covering branch sessions
+    # created before the marker existed.
     include_sources = [source] if source else list(sources or [])
     for clause, values in (
         (f"s.source IN ({_session_ids_placeholders(include_sources)})", include_sources),
@@ -125,6 +133,11 @@ def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
     seeds = {sid for sid in parent_ids if sid}
     # Seed visited with the parents: a marker chain can loop back onto a parent,
     # which would then be collected as its own descendant. Never return parents.
+    # A delegation marker chain can loop back onto a parent — a cycle, or a parent that is also another
+    # parent's delegate child when several ids are deleted at once — and without this guard that parent
+    # would be collected as one of its own descendants and cascade-deleted along with all of its messages.
+    # Callers delete the parents separately, so parents must never appear in the returned child set.
+    # (#49148)
     found: set[str] = set(seeds)
     frontier = list(seeds)
     while frontier:
@@ -173,6 +186,10 @@ def classify_session_status(role: Optional[str], has_tool_calls: bool, finish_re
 
 # Parent→child profile_name inheritance fence: keyless rows inherit freely; two
 # ``agent:<ns>:...`` keyed rows must agree on the namespace.
+# ``agent:<ns>:...`` gateway keys encode the profile namespace; a keyless row (CLI / subagent lineage)
+# carries none and inherits freely. Two keyed rows must agree on ``agent:<ns>:`` — a default child
+# (``agent:main:``) forked from a sibling profile's row must not be durably mislabelled as that profile's.
+# See #88381.
 _SAME_KEY_NAMESPACE_SQL = (
     "p.session_key IS NULL OR sessions.session_key IS NULL"
     " OR substr(p.session_key, 1, instr(substr(p.session_key, 7), ':') + 6)"
@@ -261,7 +278,29 @@ class SessionSessionsMixin:
         """Upsert a session row, never overwriting what an earlier writer set (the gateway creates a
         bare row before create_session carries the real model/prompt). chat_id/thread_id scope gateway
         /resume (IDOR). Children backfill from the parent; a missing profile_name is stamped with THIS
-        store's own (NULL reads as unowned)."""
+        store's own (NULL reads as unowned).
+
+        When ``parent_session_id`` is set (compression fork, delegate/subagent spawn, branch continuation)
+        and this row's own ``cwd``/``git_repo_root``/ ``git_branch``/``profile_name`` are still NULL after
+        the insert, they are backfilled from the parent row. Callers of ``create_session`` for a child
+        session historically didn't propagate these fields themselves (e.g. the compression-fork path), so a
+        lineage could silently lose its working directory and drop out of the project sidebar every time it
+        forked (#64709), or lose its owning profile and be aggregated as "default" every time it rotated or
+        branched (the cross-profile session-jump bug). This only fills NULLs — an explicit value on the
+        child is never overwritten. For compression forks specifically (parent ended with
+        ``end_reason='compression'``), the gateway origin columns
+        (``user_id``/``session_key``/``chat_id``/``chat_type``/
+        ``thread_id``/``display_name``/``origin_json``) are inherited too, so a crash before the gateway
+        re-records the peer can't strand the child without a recoverable routing mapping (#59527).
+        When the caller passes no ``profile_name`` at all, the row is stamped with THIS store's own profile
+        (:meth:`_own_profile_name`) instead of NULL. Every ``state.db`` belongs to exactly one profile — the
+        same single-match contract :meth:`backfill_null_session_profiles` relies on — so the stamp is
+        derivation, not a guess. Rows minted NULL after that one-shot #94724 backfill ran stayed NULL
+        forever, and profile-keyed consumers (desktop sidebar scope matching, ``@session:<profile>/<id>``
+        deep links, the fail-closed owner ladder) treat NULL as unowned: the session vanishes from the
+        sidebar even though its transcript is intact (#99222). Stores outside the profile tree (explicit
+        ``db_path`` in tests, ad-hoc copies) derive nothing and keep NULL — never guess.
+        """
         if not (profile_name or "").strip():
             profile_name = self._own_profile_name()
         def _do(conn):
@@ -331,7 +370,10 @@ class SessionSessionsMixin:
         return session_id
 
     def set_expiry_finalized(self, session_id: str, finalized: bool = True) -> None:
-        """Mirror ``SessionEntry.expiry_finalized`` so it survives a lost sessions.json."""
+        """Mirror ``SessionEntry.expiry_finalized`` so it survives a lost sessions.json.
+
+        See #9006.
+        """
         if not session_id:
             return
         self._write_sql(
@@ -421,7 +463,12 @@ class SessionSessionsMixin:
     def promote_to_session_reset(self, session_id: str, reason: str = "session_reset") -> bool:
         """Durably mark an intentional reset boundary on live rows or rows with a *recoverable* accidental
         end_reason (explicit boundaries are preserved): an ``agent_close`` row left recoverable would be
-        resurrected by stale-route recovery. Keep in sync with find_latest_gateway_session_for_peer."""
+        resurrected by stale-route recovery. Keep in sync with find_latest_gateway_session_for_peer.
+
+        Plain ``end_session()`` is NOT sufficient for reset boundaries: it no-ops on an already-ended row,
+        so a row that agent cleanup already closed as ``agent_close`` would stay recoverable and stale-route
+        recovery would resurrect the reset session with its full history (#61220, #61993, #63539).
+        """
         if not session_id:
             return False
         now = time.time()
@@ -504,7 +551,12 @@ class SessionSessionsMixin:
         provenance: Optional[ActivityProvenance] = None,
     ) -> None:
         """Stamp durable mid-turn activity (observation-only; rate-limited by the caller) so surfaces see
-        activity before any message row lands. Never moves ``last_activity_at`` backwards."""
+        activity before any message row lands. Never moves ``last_activity_at`` backwards.
+
+        Called (rate-limited) from ``AIAgent._touch_activity`` so gateway/CLI surfaces and stall consumers
+        observe API/tool/compaction activity even when no new message row has been written yet (#72016 /
+        #72039).
+        """
         if not session_id:
             return
         when = float(ts if ts is not None else time.time())
@@ -519,9 +571,20 @@ class SessionSessionsMixin:
             patience_s=self._ACTIVITY_WRITE_PATIENCE_S,
         )
 
+    # Observation-only write: never let it ride the full routine write-patience budget (#76354 review S1).
+    # Under contention a heartbeat that waits ~20s would delay the response-critical path it is merely
+    # observing; give up after a sub-second budget instead (the next due window retries naturally).
     def clear_session_activity_labels(self, session_id: str) -> None:
         """Clear activity labels after a turn (``last_activity_at`` is kept so idle / watchdog clocks stay
-        continuous). A no-op clear skips the write transaction."""
+        continuous). A no-op clear skips the write transaction.
+
+        Description and provenance are observation labels for *what was happening at* that timestamp during
+        an active turn; once the turn is idle they must not keep advertising "compressing" / "executing
+        tool" (#72039).
+        Response-critical-path contract (#76354 review S1): runs in the turn's ``finally``; a no-op clear
+        (labels already empty) skips the write transaction entirely, and a real clear uses the same short
+        sub-second busy budget as :meth:`touch_session_activity` instead of the full routine write patience.
+        """
         if not session_id:
             return
         try:
@@ -582,7 +645,13 @@ class SessionSessionsMixin:
     def update_session_model(self, session_id: str, model: str, provider: Optional[str] = None) -> None:
         """Set the model after a mid-session /model switch (unconditionally), null system_prompt so
         stale Model:/Provider: footers rebuild, and drop any Browser runtime lock (lineage markers
-        survive). *provider* is merged into model_config so resume recombines model and provider."""
+        survive). *provider* is merged into model_config so resume recombines model and provider.
+
+        When *provider* is given, it is merged into ``model_config`` alongside the model (``$.model`` /
+        ``$.provider``) so a later resume recombines the persisted model with the provider that actually
+        serves it instead of the config.yaml primary provider (#79536). Callers without provider knowledge
+        leave any stored provider untouched.
+        """
         # Flush first: a still-queued pre-switch delta applied after this UPDATE would trip the
         # first_accounted_route overwrite and resurrect the old route.
         self.flush_token_counts()
@@ -721,7 +790,13 @@ class SessionSessionsMixin:
 
     def backfill_null_session_profiles(self, profile_name: str) -> int:
         """Stamp this store's own profile onto legacy ``profile_name IS NULL`` rows, which the fail-closed
-        owner ladder cannot route. Never overwrites a non-NULL owner. Returns rows stamped."""
+        owner ladder cannot route. Never overwrites a non-NULL owner. Returns rows stamped.
+
+        Sessions created before the durable-ownership work (#95407 lineage) carry ``profile_name = NULL``.
+        On single-backend installs that was harmless, but once a Desktop registers a second connection the
+        fail-closed owner ladder (which is correct for new sessions) can no longer route those rows anywhere
+        — every pre-campaign session becomes unresumable after upgrade (#94724, field report).
+        """
         stamp = (profile_name or "").strip()
         if not stamp:
             return 0
@@ -778,7 +853,16 @@ class SessionSessionsMixin:
 
     def unarchive_recoverable_session(self, session_id: str) -> bool:
         """Un-archive a session archived by a recoverable accident (ws_orphan_reap, agent_close);
-        deliberate archives are left alone. True when un-archived."""
+        deliberate archives are left alone. True when un-archived.
+
+        Registry-style lookups (Bot Mode's canonical "Bot Chat") use this to resurrect a row the ws-orphan
+        reaper (``ws_orphan_reap``) or older agent cleanup (``agent_close``) archived: those ends are
+        accidents, not user intent, so the identity-scoped canonical chat must survive them (#92687).
+        Sessions archived with no end_reason or an explicit boundary reason (user archived deliberately,
+        ``session_reset``, …) are left untouched — returns ``False`` for those, ``True`` only when the row
+        was archived for a recoverable reason and is now un-archived (whole compression lineage, via
+        :meth:`set_session_archived`).
+        """
         if not session_id:
             return False
         try:
@@ -1332,7 +1416,13 @@ class SessionSessionsMixin:
 
     def declared_scope_identity(self, session_id: str) -> Tuple[bool, str]:
         """(is_fork_child, source) in ONE read (prompt_cache_scope needs both from the same row).
-        Missing row → (False, ""); DB errors propagate (fail closed)."""
+        Missing row → (False, ""); DB errors propagate (fail closed).
+
+        ``agent/prompt_cache_scope.py`` needs both to resolve a host-declared conversation scope, and both
+        live on the same ``sessions`` row; asking for them separately read that row twice per resolution
+        (@teknium1 on 98811). The marker rules stay here, beside :meth:`is_explicit_fork_child`, instead of
+        being re-implemented by the caller. See #98811.
+        """
         session = self.get_session(session_id)
         if not session:
             return False, ""
@@ -1361,6 +1451,9 @@ class SessionSessionsMixin:
         with self._read_ctx() as conn:
             if not conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone():
                 return []
+            # Use the borrowed read connection, never self._conn: handing the shared writer connection to a
+            # helper here executes on it without self._lock — the same unsynchronized-read class as
+            # #99349/#90734.
             delegate_ids = _collect_delegate_child_ids(conn, [session_id])
         return [session_id, *sorted(delegate_ids)]
 
@@ -1452,6 +1545,8 @@ class SessionSessionsMixin:
 
     # Shared by count_empty_sessions / delete_empty_sessions so badge and sweep agree. message_count
     # counts live rows only (rewind/compaction keep dropped turns as active = 0): NOT EXISTS is authority.
+    # The ``NOT EXISTS`` probe is the authority; : ``message_count = 0`` stays as a cheap prefilter. Same
+    # shape as every : other emptiness guard in this module. (#95868)
     _EMPTY_SESSION_WHERE = (
         "message_count = 0 AND ended_at IS NOT NULL AND archived = 0 AND NOT EXISTS ("
         "SELECT 1 FROM messages WHERE messages.session_id = sessions.id)"

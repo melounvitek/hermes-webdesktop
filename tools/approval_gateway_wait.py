@@ -54,6 +54,9 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
+            # The poll loop below is verifiably blocked on a human answer (the user tapping approve/deny on
+            # the gateway surface), bounded by the approval timeout. Record it as human-wait time so the
+            # concurrent batch deadline excludes it (#79719).
             if is_interrupted():
                 logger.info(interrupt_log, session_key)
                 return "interrupted"

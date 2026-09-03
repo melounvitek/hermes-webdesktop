@@ -82,6 +82,8 @@ PERSISTENCE_ERROR_CAUSES = (
 # "Database FILE structurally damaged" substrings. "database disk image is
 # malformed" contains "disk", so this check MUST run before the disk bucket in
 # classify_persistence_error or B-tree corruption reads as "free some disk space".
+# Kept as plain substrings so sqlite3.DatabaseError, wrapped RPC strings, and logged message text all match
+# the same helper. See #77386.
 _DB_CORRUPTION_MARKERS = (
     "malformed", "file is not a database", "not a database", "database corruption",
 )
@@ -155,7 +157,15 @@ class StateDbCorruptError(sqlite3.DatabaseError):
     checkpointed 15 pages under wrong page numbers and turned a readable file
     into "file is not a database"; SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE on 3.12+
     also stops SQLite's own). Subclasses sqlite3.DatabaseError so every degrade
-    path keeps working. Recovery boundary: restart on a repaired/restored file."""
+    path keeps working. Recovery boundary: restart on a repaired/restored file.
+
+    Stopping the writes is what prevents that; skipping the explicit checkpoint is the second line of
+    defence. SQLite still runs its own last-connection checkpoint inside ``close()`` (and deletes the
+    ``-wal`` sidecar) unless ``SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`` is set — Python exposes it via
+    ``Connection.setconfig()`` on 3.12+, so quarantine disables the close-time checkpoint there and the WAL
+    survives on disk for forensics; on 3.11 the internal checkpoint is unavoidable (post-quarantine it can
+    only carry pre-corruption committed frames, since no further writes are accepted). See #90837.
+    """
 
 
 _STATE_DB_CORRUPT_MSG = (

@@ -293,7 +293,11 @@ except Exception:
 def get_anthropic_key() -> str:
     """First usable Anthropic credential (``.env`` preferred over a stale shell export), or ``""``.
 
-    Order mirrors ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars``."""
+    Order mirrors ``PROVIDER_REGISTRY["anthropic"].api_key_env_vars``.
+
+    Checks both the ``.env`` file and the process environment, preferring ``~/.hermes/.env`` so a deliberate
+    key rotation isn't shadowed by a stale shell export (matches the api-key resolution path — see #20591).
+    """
     from hermes_cli.config import get_env_value_prefer_dotenv
     env_vars = PROVIDER_REGISTRY["anthropic"].api_key_env_vars
     return next((v for v in (get_env_value_prefer_dotenv(var) or "" for var in env_vars) if v), "")
@@ -317,6 +321,7 @@ def has_usable_secret(value: Any, *, min_length: int = 4) -> bool:
 # Known API-key prefixes per provider. Only listed providers get prefix validation; everyone else
 # is fail-open. Keeps an obviously malformed key in .env (truncated paste, wrong provider's key)
 # from silently shadowing a valid credential-pool entry and producing opaque 401s.
+# See #93593.
 KNOWN_PROVIDER_KEY_PREFIXES: Dict[str, tuple] = {
     "openrouter": ("sk-or-",),  # all OpenRouter keys are sk-or-... (currently sk-or-v1-)
 }
@@ -362,6 +367,8 @@ def _resolve_api_key_provider_secret(provider_id: str, pconfig: ProviderConfig) 
     for env_var in pconfig.api_key_env_vars:
         val = _usable_declared_secret(provider_id, get_env_value_prefer_dotenv(env_var), env_var)
         if val:
+            # A provably malformed key (declared prefix mismatch) must not shadow a valid credential-pool
+            # entry (#93593). Warn and keep looking instead of returning it.
             return val, env_var
 
     # Fallback: credential pool (e.g. zai key stored via auth.json). Prefer the pool's own
@@ -505,7 +512,10 @@ def _is_same_auth_store(left: Path, right: Path) -> bool:
     """True when two auth paths name ONE store rather than two copies.
     ``_same_path`` resolves symlinks and ``..``; ``samefile`` adds hardlinks and bind-mounts
     (same inode under two resolved names). Used by the forked-grant heal: a shared store has
-    no "other side" to consolidate."""
+    no "other side" to consolidate.
+
+    See #101356.
+    """
     if _same_path(left, right):
         return True
     try:
@@ -696,6 +706,9 @@ def _save_auth_store(auth_store: Dict[str, Any], target_path: Optional[Path] = N
     """Atomically persist *auth_store* (0o600, parent tightened to 0o700) to the active store, or to
     an explicit *target_path* (e.g. the global-root write-through for rotating xAI OAuth grants)."""
     auth_file = target_path if target_path is not None else _auth_file_path()
+    # Tighten parent dir to 0o700 so siblings can't traverse to creds. No-op on Windows (POSIX mode bits not
+    # enforced); ignore failures. secure_parent_dir refuses to chmod /, top-level dirs, or the hermes-agent
+    # install tree (#25821, #93050).
     auth_store["version"] = AUTH_STORE_VERSION
     auth_store["updated_at"] = datetime.now(timezone.utc).isoformat()
     _write_private_file_atomic(auth_file, json.dumps(auth_store, indent=2) + "\n", fsync_dir=True)
@@ -1099,6 +1112,7 @@ def _pool_entry_is_explicit(entry: Any) -> bool:
     if source.startswith("env:"):
         # A stale env-seeded entry survives in auth.json after the user deletes the env var: only
         # count it when the referenced var still resolves to a usable secret NOW.
+        # See #55790.
         env_var = entry.get("source", "").split(":", 1)[1].strip()
         return bool(env_var and _env_secret(env_var))
     return bool(source) and (source in _EXPLICIT_POOL_SOURCES or source.startswith("manual:"))
@@ -1282,6 +1296,9 @@ def _scoped_key_env_reader() -> Callable[[str], str]:
     ONLY ImportError: any other auxiliary_client failure must propagate rather than silently
     falling back to os.getenv (a traceless fail-open)."""
     try:
+        # Scope-aware key reads: under multiplex a secondary profile's API keys live only in its secret
+        # scope, not os.environ — a bare getenv here would find nothing and auto-resolution would report "No
+        # LLM provider configured" for every secondary profile (same class as #86905).
         from agent.auxiliary_client import _scoped_key_env
         return _scoped_key_env
     except ImportError:
@@ -1300,6 +1317,11 @@ def _openrouter_auto_detected(scoped_key_env: Callable[[str], str]) -> bool:
     if any(has_usable_secret(scoped_key_env(v)) for v in ("OPENAI_API_KEY", "OPENROUTER_API_KEY")):
         return True
     try:
+        # Auto-detect an OpenRouter credential added via `hermes auth add openrouter` (manual pool entry, no
+        # env var). Without this, a key that only lives in the credential pool is invisible to
+        # auto-detection — the user sees `hermes auth list` showing the credential while requests go out
+        # with no Authorization header ("HTTP 401: Missing Authentication header"). The env-var check above
+        # only covers keys exported as OPENROUTER_API_KEY / OPENAI_API_KEY. See issue #42130.
         from agent.credential_pool import load_pool as _load_pool
         return bool(_load_pool("openrouter").has_credentials())
     except Exception as e:
@@ -1352,6 +1374,9 @@ def _env_key_auto_detected(
             if has_usable_secret(scoped_key_env(env_var)):
                 if oauth_active and oauth_active != pid:
                     logger.warning(
+                        # An exported API key now wins over a logged-in OAuth provider (the #29285 fix).
+                        # Surface that so a user who deliberately uses OAuth but has a stale key in
+                        # ~/.hermes/.env isn't silently switched without knowing why.
                         "Provider resolved to %r via %s, preempting your "
                         "logged-in OAuth provider %r. If you meant to use the "
                         "OAuth login, unset %s or set `model.provider` "
@@ -1371,7 +1396,11 @@ def resolve_provider(
     "auto" priority (explicit intent beats a stale OAuth login): 1. CLI api_key/base_url ->
     "openrouter"; 2. config.yaml ``model.provider``; 3. OPENAI_API_KEY / OPENROUTER_API_KEY ->
     "openrouter"; 4. OpenRouter pool; 5. provider env keys; 6. auth.json ``active_provider``;
-    7. AWS Bedrock chain; 8. AuthError(no_provider_configured)."""
+    7. AWS Bedrock chain; 8. AuthError(no_provider_configured).
+
+    1. 3. 4. 5. Provider-specific API keys (GLM, Kimi, MiniMax, ...) -> that provider 7. 8. Error (no
+    provider configured) See #29285.
+    """
     normalized = (requested or "auto").strip().lower()
     normalized = _plugin_aliases().get(normalized, normalized)
 
@@ -1404,6 +1433,8 @@ def resolve_provider(
 
     # Logged-in OAuth provider is a LAST-RESORT fallback (it used to sit above the env/config
     # checks, so a stale login silently overrode explicit intent).
+    # Logged-in OAuth provider (auth.json `active_provider`) — a LAST-RESORT fallback, chosen only when the
+    # user expressed no other preference above. Demoted here so explicit intent always wins. See #29285.
     if _oauth_active:
         if isinstance(_model_cfg, dict) and _model_cfg and not _model_cfg.get("provider"):
             logger.warning(

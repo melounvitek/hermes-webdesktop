@@ -69,7 +69,13 @@ class SessionRecoveryMixin:
     ) -> bool:
         """Prevent a gateway from reviving another profile's row. Single-profile: the row's
         namespace must match the ACTIVE profile. Multiplexed: it must match the requested key's
-        namespace (the active profile is meaningless there). Keyless rows stay adoptable."""
+        namespace (the active profile is meaningless there). Keyless rows stay adoptable.
+
+        Multiplexed: several profiles serve traffic at once, so the active profile is meaningless — the
+        requested key carries the profile the turn was routed to, and the recovered row must sit in the same
+        ``agent:<ns>:`` namespace (#74285). Rows with no key namespace stay adoptable in both modes
+        (legacy/keyless data owned by this store).
+        """
         recovered_key = str(recovered.get("session_key") or "")
         if not recovered_key or recovered_key == requested_session_key:
             return True
@@ -179,6 +185,9 @@ class SessionRecoveryMixin:
         recoverable, or when the recovered session is already overdue under the reset policy — the
         row is then durably promoted to a reset boundary instead of resurrected."""
         entry, migrated_legacy = self._query_recoverable_row(
+            # The legacy (pre-workspace) Slack key fallback happens INSIDE _query_recoverable_session
+            # (#20583/#66398 design): it performs the exact-key legacy lookup, claims the key once per
+            # process, and rewrites the peer row to the scoped key on success.
             session_key=session_key, source=source, now=now,
             raise_on_lookup_error=raise_on_lookup_error)
         if entry is None:

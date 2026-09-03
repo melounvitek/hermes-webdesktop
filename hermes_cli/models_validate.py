@@ -289,6 +289,12 @@ def _static_catalog(normalized: str) -> list[str]:
 
 
 _STATIC_FAMILY_PREFIXES = {
+    # Plausibility gate (#45006): the soft-accept (#16172 / #19729) exists for entitlement-gated *hidden*
+    # slugs the curated listing hasn't caught up with — but those are always the provider's own family
+    # (openai-codex -> gpt-*; xai-oauth -> grok-*). Accepting an unrelated typed name (e.g. `qwen3.5-4b`,
+    # `llama-3.1-8b`) here turns what should be an actionable "did you mean --provider <x>?" error into a
+    # confusing success that 400s on the next turn. Only soft- accept names that share the provider's family
+    # prefix; reject the rest with guidance to pin the right provider.
     "openai-codex": ("gpt-", "codex-", "o1", "o3", "o4"),
     "xai-oauth": ("grok-",),
 }

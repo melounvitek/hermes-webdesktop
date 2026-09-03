@@ -108,6 +108,9 @@ def _safe_filename(name: str) -> str:
 
 # Callback-port reservation: bound-but-not-listening sockets keyed by port, held from selection
 # until the waiter adopts them (closes the select→bind TOCTOU window). Bounded so reconnect loops cannot leak fds.
+# Holding the socket from port-selection time until _wait_for_callback adopts it closes the TOCTOU window
+# where another process could grab the port between _find_free_port() closing its probe socket and
+# HTTPServer binding minutes later (#22161).
 _reserved_sockets: "dict[int, socket.socket]" = {}
 _MAX_RESERVED_SOCKETS = 8
 
@@ -177,7 +180,12 @@ def _is_interactive() -> bool:
 
 
 def _raise_if_non_interactive(lead: str) -> None:
-    """Raise ``OAuthNonInteractiveError`` unless interactive; *lead* is the boundary-specific first sentence."""
+    """Raise ``OAuthNonInteractiveError`` unless interactive; *lead* is the boundary-specific first sentence.
+
+    ``lead`` is the boundary-specific first sentence; this helper appends the shared, actionable ``hermes
+    mcp login`` next-step so the guidance wording lives in one place across every non-interactive OAuth
+    boundary (#57836).
+    """
     if not _is_interactive():
         raise OAuthNonInteractiveError(
             f"{lead} Run `hermes mcp login <server>` interactively to (re)authorize, then restart or reload the gateway."
@@ -186,13 +194,22 @@ def _raise_if_non_interactive(lead: str) -> None:
 
 def force_interactive_oauth():
     """Treat the context as interactive despite no TTY (GUI-driven auth: the user IS present, just not
-    on stdin). Crosses the MCP event-loop thread like ``suppress_interactive_oauth``."""
+    on stdin). Crosses the MCP event-loop thread like ``suppress_interactive_oauth``.
+
+    Opens the browser + localhost callback flow that the TTY heuristic would otherwise refuse. Same
+    ContextVar propagation story as suppress_interactive_oauth() (#35927).
+    """
     return _contextvar_set(_oauth_interactive_forced, True)
 
 
 def suppress_interactive_oauth():
     """Disable stdin-based OAuth prompts for the current context; ContextVar-based so a
-    background-discovery thread's suppression reaches the coroutine on the MCP event-loop thread."""
+    background-discovery thread's suppression reaches the coroutine on the MCP event-loop thread.
+
+    Uses a ContextVar so the suppression propagates from a background-discovery thread onto the coroutine
+    scheduled (via run_coroutine_threadsafe) on the dedicated MCP event-loop thread — where the OAuth
+    callback actually runs (#35927). A threading.local would not cross that thread boundary.
+    """
     return _contextvar_set(_oauth_interactive_enabled, False)
 
 
@@ -219,8 +236,18 @@ def _read_json(path: Path) -> dict | None:
 def _write_json(path: Path, data: dict) -> None:
     """Atomically write *data* as JSON created at 0o600 (``O_EXCL`` + mode avoids the write-then-chmod
     window where the file inherits a world-readable umask); parent dir tightened to 0o700. The random
-    per-process tmp suffix avoids clashes with concurrent writers/crash leftovers."""
+    per-process tmp suffix avoids clashes with concurrent writers/crash leftovers.
+
+    The previous ``write_text`` + post-write ``chmod`` opened a TOCTOU window where the temp file briefly
+    inherited the process umask (commonly 0o644 = world-readable), exposing OAuth tokens to other local
+    users between create and chmod. Mirrors the fix in ``agent/google_oauth.py`` (#19673).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    # secure_parent_dir refuses to chmod /, top-level dirs, or the hermes-agent install tree (#25821,
+    # #93050).
+    # Tighten parent dir to 0o700 so siblings can't traverse to the creds. No-op on Windows (POSIX mode bits
+    # aren't enforced); ignore failures. secure_parent_dir refuses to chmod /, top-level dirs, or the
+    # hermes-agent install tree (#25821, #93050).
     secure_parent_dir(path)
     tmp = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
     try:
@@ -527,7 +554,11 @@ def _announce_authorization_url(authorization_url: str, port: int, redirect_uri:
 
 def _make_redirect_handler(port: int, redirect_uri: str | None = None):
     """Redirect handler closing over this flow's port (a closure, not ``_oauth_port``, keeps concurrent
-    flows isolated). ``redirect_uri`` is a configured proxy callback (None for loopback) and only tailors the hint."""
+    flows isolated). ``redirect_uri`` is a configured proxy callback (None for loopback) and only tailors the hint.
+
+    Using a closure instead of reading the module-level ``_oauth_port`` avoids cross-server state pollution
+    when multiple MCP servers run OAuth concurrently (fixes #44588).
+    """
     async def _redirect_handler(authorization_url: str) -> None:
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
@@ -535,6 +566,12 @@ def _make_redirect_handler(port: int, redirect_uri: str | None = None):
             return
         # Fail fast when non-interactive: a cached-but-unusable token makes the SDK fall through to the
         # authorization-code flow past the token-file guard, and the waiter would block for the full timeout.
+        # Fail fast at the authorization boundary in non-interactive contexts (systemd gateway, cron,
+        # background MCP discovery). Without this check we would print a URL and launch a browser flow no
+        # operator can complete, then block in _wait_for_callback for the full timeout. Raise before
+        # launching so gateway adapters start promptly and the caller can skip this server with an
+        # actionable warning. This intentionally re-checks interactivity here rather than trusting the
+        # token-file existence guard alone. See #57836.
         _raise_if_non_interactive(
             "MCP OAuth requires browser authorization but no interactive session is available (non-interactive/background context)."
         )
@@ -587,7 +624,13 @@ def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float
     """Callback waiter bound to one flow's port. ``timeout`` is where ``oauth.timeout`` applies (mcp 2.0
     dropped the provider's own). ``cimd_url`` only tailors the timeout message: a server refusing the
     document aborts at the authorization endpoint, so no redirect arrives and a bare "timed out" would
-    hide the cause. Raises ``OAuthNonInteractiveError`` on timeout or when non-interactive."""
+    hide the cause. Raises ``OAuthNonInteractiveError`` on timeout or when non-interactive.
+
+    Closing over the port (instead of reading the module-level ``_oauth_port``) keeps concurrent OAuth flows
+    isolated: flow A's waiter listens on flow A's port even when flow B's ``_configure_callback_port``
+    overwrites the legacy global afterwards (#34260, the callback-side sibling of the #44588
+    redirect-handler fix).
+    """
     async def _wait():
         dashboard_flow = get_dashboard_oauth_flow()
         if dashboard_flow is not None:
@@ -595,6 +638,14 @@ def _make_callback_waiter(port: int, cimd_url: str | None = None, timeout: float
             return _authorization_code_result(*await dashboard_flow.wait_for_callback())
         # The SDK entered the authorization-code flow, so any cached token is unusable. Reject BEFORE
         # binding: binding would block for the full timeout and collide with the TIME_WAIT port on retry.
+        # Reject before binding the callback listener in non-interactive contexts. Reaching here means the
+        # SDK entered the authorization-code flow (a valid or refreshable token would never call the
+        # callback handler), so a cached token file is present but unusable. Binding the listener here would
+        # block for the full 300s timeout and — on the next connection retry — collide with the
+        # still-bound/TIME_WAIT port, surfacing as ``OSError: [Errno 98] Address already in use``. Failing
+        # fast keeps gateway startup independent of an unusable optional MCP server. This guard holds
+        # "regardless of whether a token file exists" — the point the build_oauth_auth token-file guard
+        # cannot cover. See #57836.
         _raise_if_non_interactive(
             "OAuth callback requires an interactive session but none is available (non-interactive/background "
             "context); skipping browser authorization without binding a callback listener.")
@@ -658,6 +709,8 @@ def _is_valid_cimd_url(url: str) -> bool:
 
 # Pinned ports this process committed to (never released: a provider keeps its port for the process
 # lifetime), including ports restored from a cached registration.
+# Includes a port restored from a cached client registration, so a sibling server is never handed a port
+# another one is already registered on (#34260).
 _assigned_cimd_ports: "list[int]" = []
 
 
@@ -665,7 +718,12 @@ def _pick_cimd_port() -> int | None:
     """Reserve a pinned CIMD callback port, or None when none is usable. Holding the bound socket makes
     contention cooperative: a sibling finds the bind refused and moves down the range. Once every pinned
     port belongs to this process the range wraps rather than falling back to DCR — a reused port only
-    bites if both servers authorize at the same moment (reported by the waiter); DCR may be unsupported entirely."""
+    bites if both servers authorize at the same moment (reported by the waiter); DCR may be unsupported entirely.
+
+    Holding the bound socket until ``_wait_for_callback`` adopts it does the same job here as
+    ``_reserve_callback_port`` does for ephemeral ports (#22161): a fixed port is just as stealable in the
+    minutes between selection and the browser redirect arriving.
+    """
     for port in _CIMD_PORTS:
         if port not in _assigned_cimd_ports and _bind_reserved(port) is not None:
             _assigned_cimd_ports.append(port)
@@ -727,7 +785,12 @@ def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = N
     """Resolve the callback port into ``cfg['_resolved_port']`` (0 = non-loopback URI). Precedence:
     dashboard flow / cached https redirect URI → CIMD pinned port (sets ``cfg['_cimd_url']``) →
     ``oauth.redirect_port`` → cached registration port → fresh ephemeral port (the only parked one).
-    Also sets the legacy ``_oauth_port``."""
+    Also sets the legacy ``_oauth_port``.
+
+    NOTE: also sets the legacy module-level ``_oauth_port`` so existing calls to ``_wait_for_callback`` keep
+    working. The legacy global is the root cause of issue #5344 (port collision on concurrent OAuth flows);
+    replacing it with a ContextVar is out of scope for this consolidation PR.
+    """
     global _oauth_port
     dashboard_flow = get_dashboard_oauth_flow()
     if dashboard_flow is not None:
@@ -747,6 +810,12 @@ def _configure_callback_port(cfg: dict, storage: "HermesTokenStorage | None" = N
         # A cached port may be a pinned CIMD port from an earlier login; claim it from siblings.
         if port in _CIMD_PORTS and port not in _assigned_cimd_ports:
             _assigned_cimd_ports.append(port)
+    # Precedence: explicit config port → cached client-registration port → fresh ephemeral port. The cached
+    # port keeps re-auth consistent with the redirect URI pinned at dynamic client registration (providers
+    # reject a mismatched URI). Only a truly fresh ephemeral pick goes through _reserve_callback_port(),
+    # which keeps the socket bound until _wait_for_callback adopts it — closing the select→bind TOCTOU race
+    # (#22161). Explicit and cached ports are fixed, known values and bind via the reuse_address path
+    # instead.
     cfg["_resolved_port"] = port
     _oauth_port = port
     return port
@@ -823,7 +892,11 @@ def _invalidate_tokens_on_client_change(
     """Drop cached tokens when the configured client identity changes: tokens minted under the old
     ``client_id`` fail refresh with ``invalid_client``, and pre-registered clients are exempt from
     auto-poison, so stale tokens would wedge every request until a manual wipe. Compares on-disk
-    ``client.json`` BEFORE it is overwritten; a matching identity is a no-op."""
+    ``client.json`` BEFORE it is overwritten; a matching identity is a no-op.
+
+    Matching identity is a no-op so live sessions and valid tokens are preserved. Port of
+    cline/cline#12983's "invalidate tokens when OAuth client changes" invariant.
+    """
     existing = _read_json(storage._client_info_path())
     old_client_id = existing.get("client_id") if isinstance(existing, dict) else None
     if not old_client_id or (old_client_id == new_client_id and (existing.get("client_secret") or None) == (new_client_secret or None)):

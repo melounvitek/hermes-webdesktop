@@ -324,6 +324,8 @@ def _api_key_display(entry: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
 
     Keys live in ``.env`` behind ``key_env``; only older entries still carry a
     plaintext ``api_key``. Checking both keeps the panel honest either way.
+
+    See #69449.
     """
     plaintext = str(entry.get("api_key") or "").strip()
     if plaintext:
@@ -411,6 +413,8 @@ def _detach_main_model_from_provider(cfg: Dict[str, Any], provider_key: str) -> 
     construction, so deleting the endpoint without clearing it leaves the agent
     authenticating to the deleted host with the deleted key (and the key in
     config.yaml). Only touches ``model`` when it names the deleted provider.
+
+    See #62269.
     """
     model_cfg = cfg.get("model")
     if not isinstance(model_cfg, dict):
@@ -438,6 +442,9 @@ def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> T
     if not model:
         raise HTTPException(status_code=400, detail="model required")
 
+    # Deliver the bearer token through a named provider entry. A bare ``provider: custom`` cannot carry a
+    # credential for this host: OPENAI_API_KEY is deliberately gated to openai.com (#28660), so the token
+    # was dropped and requests went out as "no-key-required".
     providers = cfg.get("providers")
     if not isinstance(providers, dict):
         providers = {}
@@ -459,6 +466,7 @@ def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> T
     # ``body.models`` is the catalogue the panel's Test button discovered;
     # without it only the hand-typed model survived Save. A payload with no
     # ``models`` (older UI) still ensures the named default is present.
+    # See #69988.
     existing_models = entry.get("models")
     models_map: Dict[str, Any] = dict(existing_models) if isinstance(existing_models, dict) else {}
     for candidate in (*(body.models or ()), model):
@@ -475,6 +483,7 @@ def _write_custom_endpoint(cfg: Dict[str, Any], body: CustomEndpointUpdate) -> T
     # API keys never belong in config.yaml: write to .env and reference it via
     # ``key_env`` — the indirection built-in providers use and that
     # runtime_provider.py resolves at load time.
+    # See #69449.
     env_var = custom_endpoint_key_env(endpoint_id)
     submitted_key = body.api_key.strip() if body.api_key is not None else None
     if submitted_key:

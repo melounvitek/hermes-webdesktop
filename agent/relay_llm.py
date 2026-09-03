@@ -98,6 +98,10 @@ class _ManagedAttempt:
         Relay can invoke callbacks while another still owns the captured Context (hence the
         copy); nested relay calls run unmanaged — see relay_runtime.managed_callback_guard."""
         def guarded() -> Any:
+            # See #77244.
+            # See #77244.
+            # Hermes-side callbacks run while the native pipeline drives this stream; nested relay calls
+            # they make must bypass managed execution (#77244).
             with relay_runtime.managed_callback_guard():
                 return callback(*args)
 
@@ -223,7 +227,14 @@ def stream_current(
     With ``completed_response_predicate`` set, a factory that ignores ``stream=True`` and returns a
     complete response is unwrapped and returned directly (pre-Relay behavior). Detecting that primes
     the lazy pipeline: a genuine first chunk is buffered, but provider latency and pre-first-yield
-    errors may surface before this returns."""
+    errors may surface before this returns.
+
+    AnthropicAuxiliaryClient and other shims that ignore ``stream=True``), unwrap and return the completed
+    response directly. This mirrors the pre-Relay behavior where ``call_llm(stream=True)`` returned the raw
+    response and the consumer's own ``hasattr(stream, "choices")`` check handled it (#11732, #55933) —
+    without the unwrap the response stays trapped as ``final_response`` on the inner ManagedLlmStream and
+    the outer consumer sees an empty stream.
+    """
     session_id = _current_session_id()
     # Inside a managed callback (on the Relay session's loop) a nested ManagedLlmStream would be
     # iterated synchronously on that loop, which asyncio forbids; the outer stream tracks this attempt.

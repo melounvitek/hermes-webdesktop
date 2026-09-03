@@ -58,6 +58,15 @@ class StreamDeliveryMixin:
                 self._deliver_to_stream_callbacks(tail)
                 self._record_streamed_assistant_text(tail)
 
+        # Flush any benign partial-tag tail held by the think scrubber first (#17924): an innocent '<' at
+        # the end of the stream that turned out not to be a tag prefix should reach the UI. Then flush the
+        # context scrubber. Order matters — the think scrubber's output feeds into the context scrubber's
+        # state.
+        # Suppress reasoning/thinking blocks via the stateful scrubber (#17924). Earlier versions ran
+        # _strip_think_blocks per-delta here, which destroyed downstream state machines when a tag was split
+        # across deltas (e.g. MiniMax-M2.7 sends '<think>' and its content as separate deltas — regex case 2
+        # erased the first delta, so the CLI/gateway state machine never saw the open tag and leaked the
+        # reasoning content as regular response text).
         if think_scrubber is not None:
             think_tail = think_scrubber.flush()
             deliver(ctx_scrubber.feed(think_tail) if think_tail and ctx_scrubber is not None else think_tail)
@@ -194,7 +203,10 @@ class StreamDeliveryMixin:
         self._deliver_interim(visible, already_streamed=already_streamed, record=undelivered_parts or [visible])
 
     def _ensure_stream_writer_state(self) -> None:
-        """Lazily create the single-writer guard fields (``AIAgent.__new__``-built instances skip ``agent_init``)."""
+        """Lazily create the single-writer guard fields (``AIAgent.__new__``-built instances skip ``agent_init``).
+
+        See #65991.
+        """
         if getattr(self, "_stream_writer_lock", None) is None:
             self._stream_writer_lock = threading.Lock()
         if getattr(self, "_stream_writer_tls", None) is None:
@@ -209,6 +221,8 @@ class StreamDeliveryMixin:
         Every attempt (each provider path, each retry) claims right before consuming; claiming bumps
         the shared token, so an earlier attempt still alive on another thread is superseded and its
         late chunks fenced out. Stored per-thread: a thread that never claimed can never be fenced.
+
+        See #65991.
         """
         self._ensure_stream_writer_state()
         with self._stream_writer_lock:
@@ -217,11 +231,18 @@ class StreamDeliveryMixin:
         return token
 
     def _stream_writer_is_current(self, token: int) -> bool:
-        """True when ``token`` is still the active writer, so a stream loop can bail the instant it is superseded."""
+        """True when ``token`` is still the active writer, so a stream loop can bail the instant it is superseded.
+
+        active writer — i.e. no newer stream attempt has claimed the sink since (#65991).
+        """
         return token == getattr(self, "_stream_writer_token", token)
 
     def _stream_writer_superseded(self) -> bool:
-        """True when this thread claimed the sink but a newer attempt has since claimed it (never for a non-claimer)."""
+        """True when this thread claimed the sink but a newer attempt has since claimed it (never for a non-claimer).
+
+        stream attempt has since claimed it — i.e. this thread is a stale writer whose chunks must be
+        dropped (#65991).
+        """
         token = getattr(getattr(self, "_stream_writer_tls", None), "token", None)
         return token is not None and token != getattr(self, "_stream_writer_token", token)
 
@@ -261,6 +282,7 @@ class StreamDeliveryMixin:
         """Fire all registered stream delta callbacks (display + TTS)."""
         # A superseded stream must not interleave its tokens alongside the retry that replaced it.
         if self._stream_writer_superseded():
+            # See #65991.
             self._note_dropped_stream_writer("_fire_stream_delta")
             return
         # One paragraph break before the first text delta after a tool iteration, without
@@ -274,6 +296,7 @@ class StreamDeliveryMixin:
             # tag was split across deltas; memory-context spans split across chunks must not leak to
             # the UI. Legacy callers lack the scrubber attributes and get the whole-string fallbacks.
             think_scrubber = getattr(self, "_stream_think_scrubber", None)
+            # See #5719.
             scrubber = getattr(self, "_stream_context_scrubber", None)
             text = think_scrubber.feed(text) if think_scrubber is not None else self._strip_think_blocks(text)
             text = scrubber.feed(text) if scrubber is not None else sanitize_context(text)
@@ -291,6 +314,8 @@ class StreamDeliveryMixin:
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered; superseded writers are fenced like content deltas."""
         if self._stream_writer_superseded():
+            # Single-writer guard (#65991): fence out a superseded stream's reasoning deltas the same way as
+            # content deltas.
             self._note_dropped_stream_writer("_fire_reasoning_delta")
             return
         self._call_quietly(self.reasoning_callback, text)

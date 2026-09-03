@@ -136,7 +136,11 @@ def _ledger_path() -> Path:
 
 
 def _read_ledger(path: Path) -> Optional[list[dict]]:
-    """Entries list, ``[]`` for empty/missing, ``None`` for CORRUPT (never silently an empty roster)."""
+    """Entries list, ``[]`` for empty/missing, ``None`` for CORRUPT (never silently an empty roster).
+
+    Mirrors the #89298 contract: corrupt is a distinct state that must never be silently treated as an empty
+    roster.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -245,6 +249,8 @@ def _append_entry(entry: LedgerEntry) -> bool:
 
     Serialized under ``_LEDGER_LOCK`` with an atomic tmp+replace; no writer touches the file
     outside this function.
+
+    See #91660.
     """
     path = _ledger_path()
     with _LEDGER_LOCK:
@@ -294,7 +300,13 @@ def register_child(pid: int, purpose: str, *, project_root: Optional[Path] = Non
 
 
 def ledger_entries(*, project_root: Optional[Path] = None) -> list[dict]:
-    """Live-verified ledger entries for THIS install (a corrupt ledger is quarantined, read as empty)."""
+    """Live-verified ledger entries for THIS install (a corrupt ledger is quarantined, read as empty).
+
+    Entries whose ``(pid, create_time)`` no longer matches a live process are excluded (PID reuse reads as
+    dead, thanks to the create-time pair). A corrupt ledger is quarantined and read as empty — identical
+    philosophy to the backend-ownership fix (#89298): never let corruption erase or fake a roster; never let
+    it block the caller either.
+    """
     want_install = install_id(project_root)
     with _LEDGER_LOCK:
         entries = _read_ledger_or_quarantine(_ledger_path())

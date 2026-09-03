@@ -52,6 +52,8 @@ def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: t
     suffixes propagate only into the matching subtree, so ``base64Encoded`` is honored
     solely as a sibling on the trusted carrier object — never as ambient trust a
     ``Runtime.evaluate`` by-value object could spoof.
+
+    See #94138, #94142.
     """
     from agent.redact import redact_sensitive_text
     if isinstance(value, str):

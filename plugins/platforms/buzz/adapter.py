@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
+# Profile-scoped read (adapter startup, Slack pattern #59739): a scoped read honors the profile's own
+# secret; only an UNSCOPED read under multiplex (default-profile startup loop) falls back to the process
+# env, which is that profile's own value.
 from agent.secret_scope import (
     UnscopedSecretError as _UnscopedSecretError, current_secret_scope as _current_secret_scope,
     get_secret as _scoped_get_secret, is_multiplex_active as _is_multiplex_active,
@@ -34,10 +37,112 @@ from gateway.platforms._shared import profile_scoped as _profile_scoped
 def _get_scoped_secret(name, default=None):
     """Scope-aware credential read: an active scope is authoritative (a miss is ``default``, never an env
     borrow). Unscoped adds one rung over ``_shared``: the startup gate runs before any scope exists, so
-    externally managed secrets are consulted via a one-shot profile-scope build."""
+    externally managed secrets are consulted via a one-shot profile-scope build.
+
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and connects *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash
+    startup/reconnect (#70652 class); there ``os.environ`` is that profile's own value, so fall back to it.
+    Same pattern as ``whatsapp_common._get_wsecret`` and the WeCom/IRC/ntfy plugin adapters.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    Secondary profiles construct their adapters under a profile secret scope -- the scope is authoritative
+    and a scoped miss returns ``default`` (no cross-profile borrow from ``os.environ``, which may hold
+    another profile's value). The DEFAULT profile's adapter constructs and sends *unscoped* under
+    multiplexing, where a bare ``get_secret`` would raise ``UnscopedSecretError`` and crash this path; there
+    ``os.environ`` is that profile's own value, so fall back to it. Same pattern as the Slack
+    ``SLACK_APP_TOKEN`` read (#59739) and ``gateway/platforms/whatsapp_common.py::_get_wsecret``.
+    """
     try:
         val = _scoped_get_secret(name, None)
     except _UnscopedSecretError:
+        # DEFAULT profile's adapter constructs/connects outside any _profile_runtime_scope under
+        # multiplexing; os.environ is that profile's own value there. Same pattern as Slack SLACK_APP_TOKEN
+        # (#59739) and the Matrix recovery key. A *scoped* miss still returns the default (no cross-profile
+        # borrow).
         val = os.getenv(name)
     if val is None and _current_secret_scope() is None:
         val = _unscoped_profile_secrets().get(name)
@@ -67,7 +172,15 @@ def _unscoped_profile_secrets() -> Dict[str, str]:
 
 
 def _scoped_platform_setting(env_name, extra, key):
-    """Raw non-secret setting; in a secondary profile scope ``os.environ`` is the DEFAULT profile's, so ``extra`` wins."""
+    """Raw non-secret setting; in a secondary profile scope ``os.environ`` is the DEFAULT profile's, so ``extra`` wins.
+
+    Inside a secondary profile scope ``os.environ`` holds the DEFAULT profile's YAML-to-env bridge output
+    (#98738), so the profile's ``PlatformConfig.extra`` is authoritative and env is not consulted: a missing
+    key yields ``None`` and callers fail closed to their default instead of silently borrowing the default
+    profile's relay, channels, or allowlist. Everywhere else — single-profile gateways, the default profile
+    under multiplexing — the legacy ``os.getenv`` read is returned unchanged, so env-over-config precedence
+    is preserved.
+    """
     return (extra or {}).get(key) if _profile_scoped() else os.getenv(env_name)
 
 
@@ -82,6 +195,10 @@ from gateway.config import Platform
 _CHAT_KIND = 9  # ``messages get`` also returns housekeeping kinds, never dispatched
 # Chat + forum post/comment; stream kinds wait for confirmed semantics. ``_is_direct_message_event``
 # stays kind-9-only so a p-tagged forum post can't be reclassified as a DM and bypass mention gating.
+# Kinds that carry agent-relevant conversation content and are dispatched (#90309): chat messages (9) plus
+# the Buzz forum kinds — 45001 is a forum post (thread root) and 45003 a comment reply on it. Block's own
+# ACP harness documents this set (``buzz-acp --kinds 9,46010,40007,45001, 45002,45003``); the stream kinds
+# (46010/40007/45002) are left out until their dispatch semantics are confirmed.
 _DISPATCH_KINDS = frozenset({_CHAT_KIND, 45001, 45003})
 _UNRESOLVED_MENTION_ERROR_RE = re.compile(r"mention '@(?P<name>[^']+)' does not match a current channel member")
 _BUZZ_PRESENTATION_MENTION_SEPARATOR = "\u200b"
@@ -149,6 +266,9 @@ def _attachment_origin(value: str) -> Optional[tuple[str, int]]:
 # WebSocket transport (NIP-42 authenticated Nostr subscription).
 _WS_AUTH_TIMEOUT = 20.0
 # Last-resort read bound: an unsurfaced relay-side close (CLOSE_WAIT) would leave us "connected" with inbound stopped.
+# The library keepalive (ping_interval/ping_timeout below) should catch a dead relay first, but a relay-side
+# close the transport never surfaces (observed as a CLOSE_WAIT socket with the loop parked on recv, #98097)
+# leaves the gateway "connected" while inbound stops; this timeout forces the normal reconnect path instead.
 _WS_READ_IDLE_TIMEOUT = 300.0
 _WS_MAX_MESSAGE_BYTES = 2_000_000
 _WS_MEMBERSHIP_KIND = 44100  # Buzz channel-membership event — live DM discovery
@@ -547,6 +667,10 @@ class BuzzAdapter(BasePlatformAdapter):
         self._membership_since = self._poll_count = 0
         self._lock_key: Optional[str] = None
         # Channels the relay permanently rejected ("restricted"); persists across reconnects so we never re-subscribe.
+        # channel_id -> { "chat_type", "last_ts", "seen": OrderedDict[event_id, None], "event_meta":
+        # OrderedDict[event_id, (author_pubkey, content_snippet)], } event_meta backs NIP-10 reply-parent
+        # resolution for require_mention (thread replies to our own messages count as addressed — #75826).
+        # "restricted: not a channel member").
         self._restricted_channels: set = set()
         # channel_id -> {"chat_type", "last_ts", "seen": OrderedDict[event_id, None], "event_meta":
         #   OrderedDict[event_id, (author_pubkey, snippet)]}; event_meta backs NIP-10 reply-parent resolution.
@@ -568,7 +692,12 @@ class BuzzAdapter(BasePlatformAdapter):
 
     @staticmethod
     def normalize_user_id(user_id: str) -> Optional[str]:
-        """Normalize a user reference (hex or npub) to hex — authz_mixin allowlist hook."""
+        """Normalize a user reference (hex or npub) to hex — authz_mixin allowlist hook.
+
+        Optional hook consumed by ``gateway/authz_mixin`` when matching the profile allowlist carried in
+        ``config.extra.allowed_users`` (#98738): entries may be npubs while inbound ``user_id`` is always
+        the hex pubkey, so a plain string compare would deny listed users.
+        """
         return _normalize_user_ref(user_id)
 
     # ── buzz-cli plumbing ─────────────────────────────────────────────────
@@ -658,6 +787,8 @@ class BuzzAdapter(BasePlatformAdapter):
             )
         # Seed high-water marks so a (re)start never replays history — except where a restored cursor lets
         # events that landed while down still dispatch.
+        # Skip any channel the relay has permanently rejected in a previous session (e.g. "restricted: not a
+        # channel member") so we don't reconnect-loop on them. See #90464.
         self._load_cursors()
         for channel_id in watch:
             if channel_id in self._restricted_channels:
@@ -789,7 +920,17 @@ class BuzzAdapter(BasePlatformAdapter):
 
     async def _run_message_send(self, args: List[str], content: str, mention_pubkeys: Optional[List[str]] = None):
         """Send with bounded recovery (each rung once): explicit ``--mention``s; on "not channel members" retry
-        without; escape an unresolvable ``@token`` and retry; finally ``--mention <self>`` (downgrades @names to text)."""
+        without; escape an unresolvable ``@token`` and retry; finally ``--mention <self>`` (downgrades @names to text).
+
+        1. publish with explicit ``--mention`` pubkeys resolved from the content (#83414) so genuine member
+        mentions carry p-tags and mention-subscribed agents actually wake; 2. if the CLI rejects because a
+        resolved pubkey is no longer a member (membership drift), retry without the explicit mentions —
+        deliver the message rather than lose it; 3. if the CLI's preflight rejects an unresolvable
+        presentation ``@token`` in prose, escape exactly that token with an invisible separator and retry
+        (#82646 / #78797); 4. if the error persists and we know our own pubkey, retry once with ``--mention
+        <self>`` — supplying any explicit identity downgrades unresolvable @names to presentation-only text
+        (#83414); the echo de-dupe already suppresses self-notification.
+        """
         mention_args: List[str] = []
         for pk in mention_pubkeys or []:
             mention_args += ["--mention", pk]
@@ -838,6 +979,9 @@ class BuzzAdapter(BasePlatformAdapter):
         if receipt_error:
             return SendResult(success=False, error=receipt_error)
         assert event_id is not None
+        # Belt-and-braces echo suppression: the poll loop already skips our own pubkey, but marking the
+        # verified id seen makes de-dupe explicit. Also record event_meta so a thread reply to this send
+        # matches even if the WS/poll echo never arrives (#75826).
         self._mark_seen(str(chat_id), event_id)
         return SendResult(success=True, message_id=event_id)
 
@@ -901,7 +1045,10 @@ class BuzzAdapter(BasePlatformAdapter):
         self, chat_id: str, file_path: Path, *, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None, probe: bool = True,
     ) -> SendResult:
-        """Upload a local file as a native attachment; ``probe=False`` when the caller already verified it (a re-probe could race)."""
+        """Upload a local file as a native attachment; ``probe=False`` when the caller already verified it (a re-probe could race).
+
+        See #74999.
+        """
         local = Path(file_path).expanduser()
         if probe and not local.is_file():
             # Never leak host filesystem paths into chat-visible errors.
@@ -914,7 +1061,10 @@ class BuzzAdapter(BasePlatformAdapter):
     async def send_image_file(
         self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None, **kwargs) -> SendResult:
-        """Upload a local image via ``--file``; missing paths keep the Base fallback so host paths never reach chat."""
+        """Upload a local image via ``--file``; missing paths keep the Base fallback so host paths never reach chat.
+
+        See #74999.
+        """
         local = Path(image_path).expanduser()
         if local.is_file():
             return await self._send_file_attachment(chat_id, local, caption=caption, reply_to=reply_to, metadata=metadata, probe=False)
@@ -949,6 +1099,10 @@ class BuzzAdapter(BasePlatformAdapter):
 
     # ── Inbound: WebSocket transport (NIP-42) — same _handle_event() as the poll loop ──────
 
+    # ── Inbound: WebSocket transport (NIP-42 authenticated) ────────────── Push transport contributed in PR
+    # #73636 by @ScaleLeanChris, adapted to dispatch through the same _handle_event() machinery as the poll
+    # loop so de-dupe, mention gating, DM latching, and the allow-list behave identically on both
+    # transports.
     def _websocket_url(self) -> str:
         parsed = urlsplit(self.relay_url.strip())
         scheme = {"http": "ws", "https": "wss"}.get(parsed.scheme, parsed.scheme)
@@ -983,6 +1137,12 @@ class BuzzAdapter(BasePlatformAdapter):
             raise ConnectionError("Buzz relay did not send a NIP-42 AUTH challenge")
         # BUZZ_AUTH_TAG is per-identity: a scoped profile without one fails closed to "" rather than borrowing
         # the default profile's env tag. Resolved lazily so a re-auth on a bare adapter stays scope-correct.
+        # BUZZ_AUTH_TAG is per-identity NIP-OA owner attestation, so it must resolve through the profile
+        # secret scope (#98738): inside a scoped multiplex profile a missing tag fails closed to "" instead
+        # of attaching the default profile's tag from os.environ, while single-profile and unscoped
+        # default-profile reads keep the legacy env behavior. connect() populates ``self._auth_tag`` via
+        # ``_resolve_auth_tag`` (scope-aware read + credentials-file fallback, #79514); resolve lazily here
+        # as well so a re-auth on a bare adapter stays scope-correct.
         auth_tag = getattr(self, "_auth_tag", "") or ""
         if not auth_tag:
             try:
@@ -1009,6 +1169,11 @@ class BuzzAdapter(BasePlatformAdapter):
     async def _send_channel_subscription(self, websocket, subscription_id: str, channel_id: str) -> None:
         state = self._channel_state.get(channel_id) or {}
         last_ts = int(state.get("last_ts") or 0)
+        # A conversation adopted mid-run with no high-water mark is fresh: its history IS the conversation,
+        # so subscribe from the beginning instead of `since ≈ now` — otherwise the message that *created*
+        # the conversation (created_at fractionally before this subscription) is silently dropped (#78429).
+        # `limit` bounds the replay to the same window the poll transport fetches; the seed path gives real
+        # channels a non-zero last_ts, so they never take this branch.
         request_filter = {"kinds": sorted(_DISPATCH_KINDS), "#h": [channel_id]}
         if last_ts:
             # Resume from the high-water mark (same-second overlap de-duped by id).
@@ -1047,7 +1212,14 @@ class BuzzAdapter(BasePlatformAdapter):
 
     async def _ws_discovery_loop(self, websocket, subscriptions: Dict[str, Optional[str]]) -> None:
         """Periodic discovery on the poll cadence: relays don't guarantee a kind-44100 event for every new
-        conversation. Failures retry next tick; the read loop alone owns connection health."""
+        conversation. Failures retry next tick; the read loop alone owns connection health.
+
+        The kind-44100 membership subscription is the fast path, but relays do not guarantee a membership
+        event for every conversation that materializes mid-session (#93557) — some emit none at all for new
+        DM-shaped conversations. The poll transport papers over this by re-running discovery every
+        ``_DM_DISCOVERY_EVERY`` sweeps; this loop gives the WS transport the same guarantee on the same
+        cadence.
+        """
         interval = max(self.poll_interval * _DM_DISCOVERY_EVERY, _MIN_POLL_INTERVAL)
         while True:
             await asyncio.sleep(interval)
@@ -1212,7 +1384,12 @@ class BuzzAdapter(BasePlatformAdapter):
         return int(state.get("last_ts") or 0), len(seen), (next(reversed(seen), None) if seen else None)
 
     def _restore_channel_state(self, channel_id: str, chat_type: str) -> bool:
-        """Install a persisted cursor (True when one existed): seeding would mark downtime arrivals as seen."""
+        """Install a persisted cursor (True when one existed): seeding would mark downtime arrivals as seen.
+
+        Restoring is what closes the restart gap: seeding from current history instead would mark everything
+        that arrived while the gateway was down as already seen, so the relay's durable copy is never
+        dispatched (#90464).
+        """
         restored = self._restored_cursors.pop(channel_id, None)
         if restored is None:
             return False
@@ -1238,6 +1415,7 @@ class BuzzAdapter(BasePlatformAdapter):
                 state["seen"][str(event_id)] = None
             state["last_ts"] = max(state["last_ts"], int(event.get("created_at") or 0))
             # History is never dispatched but feeds event_meta (post-restart replies to us must match) and latches DMs.
+            # See #75826.
             self._remember_event(state, event)
             self._maybe_latch_dm(channel_id, state, event)
         self._trim_seen(state)
@@ -1245,7 +1423,11 @@ class BuzzAdapter(BasePlatformAdapter):
     async def _discover_dms(self, *, seed: bool) -> None:
         """Watch DMs: startup ones are seeded, mid-run ones dispatch from their start. ``dms list`` is best-effort
         (some relays return ``[]``); the fallback shape is a ``channels list`` entry named "DM" with empty
-        description. Named rooms and missing metadata fail closed as groups."""
+        description. Named rooms and missing metadata fail closed as groups.
+
+        ``dms list`` is only a best-effort source: on some hosted relays it returns ``[]`` even when DM
+        conversations exist (#68871).
+        """
         code, out, _err = await self._run_cli(["dms", "list"])
         for dm in _parse_json_list(out) if code == 0 else []:
             dm_id = str(dm.get("dm_id") or "")
@@ -1264,12 +1446,17 @@ class BuzzAdapter(BasePlatformAdapter):
                 continue
             if self._may_reclassify_as_dm(ch_id):
                 # DM-shaped entries promote to DM — including ones already watched.
+                # See #77987, #87899, #99431.
                 if ch_id in self._channel_state:
                     self._channel_state[ch_id]["chat_type"] = "dm"
                 else:
                     await self._adopt_conversation(ch_id, seed)
             elif ch_id not in self._channel_state and not seed and not self.channels:
                 # Watch-all mode adopts channels joined mid-run (seeded: history predates us); explicit lists stay authoritative.
+                # Live adoption of real community channels joined mid-run (#75107): in watch-all mode (no
+                # explicit channels list) a channel the agent is added to after connect() must start
+                # dispatching without a gateway restart. Unlike a fresh DM its history predates us, so it is
+                # always seeded from its newest events — only messages sent after adoption dispatch.
                 await self._seed_channel(ch_id, chat_type="group")
                 logger.info("Buzz: adopted newly joined channel %s (%s)", ch_id, self._channel_names.get(ch_id, ch_id))
 
@@ -1421,6 +1608,7 @@ class BuzzAdapter(BasePlatformAdapter):
             return
         # Cache before any early return so self-echo and concurrent-author traffic can still be reply parents.
         self._remember_event(state, event)
+        # See #75826.
         if pubkey == self._self_pubkey:
             return
         # Reclassify a leaked DM before gating so its first un-mentioned message both latches and dispatches.
@@ -1469,6 +1657,12 @@ class BuzzAdapter(BasePlatformAdapter):
 
     # ── DM classification: DMs leak in via ``channels list`` as "group"; a real channel's p-tag is only addressing ──
 
+    # ── DM classification (issue #68871) ────────────────────────────────── ``buzz dms list`` returns [] on
+    # some hosted relays even when DM conversations exist, so DMs can leak in through ``channels list`` as
+    # chat_type="group". Relay-materialized DMs are named "DM" with an empty description, which periodic
+    # discovery promotes to DM even when messages omit recipient p-tags. Named channels and missing metadata
+    # fail closed. In normal channels a p-tag is only an addressing signal and must wake the agent without
+    # changing the conversation type.
     def _may_reclassify_as_dm(self, channel_id: str) -> bool:
         """True when metadata does not rule out a DM (name "DM", empty description); missing metadata fails closed."""
         meta = self._channel_meta.get(channel_id)
@@ -1737,6 +1931,8 @@ def check_requirements() -> bool:
     """Check if Buzz is configured: a relay URL plus a resolvable key."""
     if _profile_scoped():
         # Secondary profile: os.environ's BUZZ_* are the default profile's and must not satisfy the gate.
+        # Consult the profile's own config.yaml (via the scoped home override) and its secret scope instead;
+        # an unconfigured profile fails closed. See #98738.
         extra = _profile_buzz_extra()
         return bool(str(extra.get("relay_url") or "").strip() and _resolve_private_key(extra))
     # The gate runs before per-profile scopes install; the relay can be externally managed too.
@@ -1748,6 +1944,7 @@ def validate_config(config) -> bool:
     extra = getattr(config, "extra", {}) or {}
     # Scoped: extra is authoritative; unscoped: env read gains the external-secret rung.
     if _profile_scoped():
+        # See #98738.
         relay = _scoped_platform_setting("BUZZ_RELAY_URL", extra, "relay_url")
         relay = relay if relay is not None else extra.get("relay_url", "")
     else:
@@ -1779,6 +1976,10 @@ def _apply_yaml_config(yaml_cfg: dict, buzz_cfg: dict) -> Optional[dict]:
     if not isinstance(extra, dict):
         return None
     # A secondary profile must NOT write the process-global env (first-writer-wins would pin it for every profile).
+    # Under multiplex, a secondary profile's config loads inside its runtime scope; its values must NOT be
+    # written to the process-global env, where first-writer-wins would pin them for every other profile
+    # (issue #72348 Telegram/Discord mirror, Buzz side of #98738). Its adapter reads the profile's
+    # PlatformConfig.extra directly instead.
     skip_env_bridge = _profile_scoped()
     interval = extra.get("poll_interval")
     if interval is not None and not skip_env_bridge and not os.getenv("BUZZ_POLL_INTERVAL"):
@@ -1799,6 +2000,9 @@ def _env_enablement() -> Optional[dict]:
     if _profile_scoped():
         # Process env holds the default profile's BUZZ_*; never fabricate Buzz for a secondary profile.
         return None
+    # Secondary profile scope (#98738): the process env's BUZZ_* values are the default profile's
+    # configuration, not this profile's — env enablement must not fabricate a Buzz platform for a profile
+    # that did not configure one.
     relay = os.getenv("BUZZ_RELAY_URL", "").strip()
     if not relay or not _resolve_private_key():
         return None

@@ -167,7 +167,14 @@ def _read_configured_image_model():
 
 def _read_configured_image_provider():
     """``image_gen.provider`` from config.yaml, or None (unset keeps the in-tree FAL fallback even
-    when other providers are registered; ``"fal"`` routes via ``plugins/image_gen/fal/``)."""
+    when other providers are registered; ``"fal"`` routes via ``plugins/image_gen/fal/``).
+
+    We only consult the plugin registry when this is explicitly set — an unset value keeps users on the
+    in-tree FAL fallback even when other providers happen to be registered (e.g. a user has OPENAI_API_KEY
+    set for other features but never asked for OpenAI image gen). ``"fal"`` explicitly routes through
+    ``plugins/image_gen/fal/`` (which delegates back into this module's pipeline via call-time indirection —
+    see issue #26241).
+    """
     return _read_image_gen_key("provider")
 
 
@@ -565,6 +572,7 @@ IMAGE_GENERATE_SCHEMA = {
             },
             # image_url / reference_image_urls / upscale are added per-capability; never statically.
         },
+        # See #95681.
         "required": ["prompt"],
     },
 }

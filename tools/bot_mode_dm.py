@@ -257,6 +257,8 @@ def _try_relay_delivery(root: Path, raw_target: str, content: str, me: str, *,
             envelope = enqueue_envelope(root, target=match, message=content, sender_profile=me, sender_handle=_handle(me))
         except EnvelopeRefusedError as exc:
             # Fail fast: target definitively offline — nothing was queued.
+            # Structured refusal so the agent can distinguish it from a resolution error ('runtime_offline'
+            # per the #93091 reason enum).
             return json.dumps({"error": str(exc), "reason": exc.reason})
         label = f"@{match['handle']} on {match['connection_label'] or match['connection_id']}"
         return _spawn_delivery(waiter_command(root, envelope), label, task_id=task_id, agent=agent)
@@ -321,9 +323,13 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     """Per-profile turn lock for a LOCAL teammate delivery: local and relay deliveries
     into one profile both run a Bot Chat turn here, so the turn window is serialized on
     ``tools.bot_relay``'s cross-process lock. Peer transports (stdin mode) are locked
-    on the remote gateway by its own deliver path."""
+    on the remote gateway by its own deliver path.
+
+    See #93091.
+    """
     # Match the CLI element by basename: argv[0] may be an absolute venv path
     # (service contexts lack PATH) and carries .exe on Windows; split on both separators.
+    # Split on both separators so the shape matches regardless of which platform built the argv. See #93590.
     cli = (argv[0] if argv else "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
     if stdin_file or len(argv) < 3 or cli not in ("hermes", "hermes.exe") or argv[1] != "-p":
         return contextlib.nullcontext()
@@ -352,6 +358,7 @@ def _run_local_turn(argv: list[str], dm_file: str) -> int:
     if proc.returncode != 0 and "already has a live owner" in (proc.stderr or ""):
         # The target's Bot Chat is held live by another surface (Desktop); the turn
         # never ran — tell the sender plainly instead of leaking a raw lease error.
+        # See #100523.
         who = argv[argv.index("-p") + 1] if "-p" in argv[:-1] else "the teammate"
         print(json.dumps({
             "error": f"Delivery failed: @{who}'s Bot Chat is open on another "
@@ -371,7 +378,14 @@ def _run_local_turn(argv: list[str], dm_file: str) -> int:
 def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool) -> int:
     """Run one DM transport and remove its plaintext file after consumption. The turn
     window (not the enqueue) holds the target profile's cross-process lock, so two
-    deliveries into one profile queue; a bounded wait ends in a 'target_busy' refusal."""
+    deliveries into one profile queue; a bounded wait ends in a 'target_busy' refusal.
+
+    Local (query-file) turns get one policy-gated retry (#93091 item 5): transient failures re-run the same
+    session; a context_overflow re-run lets the retried turn's pre-API compaction pass compact the Bot Chat
+    transcript first (agent/conversation_loop.py) — the sanctioned compression lever; no fresh session is
+    ever minted. Auth/quota/config failures never retry. Peer transports (stdin mode) retry on their own
+    gateway's deliver path, not here.
+    """
     try:
         with _delivery_lock(argv, stdin_file=stdin_file):
             if not stdin_file:
@@ -455,6 +469,7 @@ def _delivery_main(args: list[str]) -> int:
         # 'target_busy': the queued delivery gave up after its bounded wait — surface the
         # structured payload on stdout so the completion notification carries it back.
         if getattr(exc, "reason", "") == "target_busy":
+            # See #93091.
             print(json.dumps({"error": str(exc), "reason": "target_busy"}))
         else:
             print(f"message_agent delivery failed: {type(exc).__name__}: {exc}", file=sys.stderr)

@@ -578,6 +578,7 @@ def _run_remote_per_call(env, env_type: str, code: str, effective_task_id: str,
         _ship_file_to_remote(env, f"{sandbox_dir}/script.py", code)
         # Wrapped so the thread inherits the turn's approval context + callbacks
         # (tools.thread_context) — else sandbox RPC tool calls lose approval routing.
+        # See #30882.
         rpc_thread = threading.Thread(
             target=propagate_context_to_thread(_rpc_poll_loop), daemon=True,
             args=(env, f"{sandbox_dir}/rpc", effective_task_id, [], tool_call_counter,
@@ -638,6 +639,9 @@ def _execute_remote(code: str, task_id: Optional[str], enabled_tools: Optional[L
         # run-to-completion transport. Spawn failure falls OPEN to the per-call
         # path below so a degraded remote host never blocks execution.
         try:
+            # --- Session-kernel path (hermes-agent#96873) ------------------- Same always-on model as
+            # local: one persistent kernel per owner, rebuilt on the run-to-completion transport (detached
+            # runner + file cell protocol).
             from tools.code_kernel_remote import execute_in_remote_kernel
             kernel_result = execute_in_remote_kernel(
                 code, env=env, env_type=env_type, task_env_id=effective_task_id,
@@ -677,6 +681,7 @@ def execute_code(
     # Fail closed under a terminal-policy refusal scope: the routed profile's terminal
     # policy is unresolved, so refuse rather than inherit the launch process's ambient policy.
     try:
+        # See #68559.
         from tools.terminal_scope import enforce_no_refusal
         enforce_no_refusal()
     except Exception as refusal:
@@ -688,6 +693,10 @@ def execute_code(
     # Hard-block gateway-lifecycle commands (mirrors the terminal_tool guard — otherwise
     # `os.system("launchctl bootout ...")` here bypasses it and SIGTERMs the gateway mid-task).
     # Gated on PID-file ownership, not the inherited env marker.
+    # Hard-block gateway-lifecycle commands, mirroring the terminal_tool guard (#68289): without this,
+    # execute_code is a straight bypass — the terminal() path refuses `launchctl bootout ai.hermes.gateway`,
+    # but the identical command inside `os.system(...)` / `subprocess.run([...])` here sailed through and
+    # SIGTERM'd the gateway mid-task.
     from tools.process_registry import _is_supervised_gateway_process
     if _is_supervised_gateway_process():
         from cron.lifecycle_guard import contains_gateway_lifecycle_command
@@ -704,6 +713,7 @@ def execute_code(
     # Arbitrary Python never passes through terminal()/DANGEROUS_PATTERNS, so guard the whole
     # script before either dispatch path spawns it — in this (tool-executor) thread, which holds
     # the session context. A Docker sandbox with host bind mounts gets no container fast-path.
+    # See #30882.
     from tools.approval import check_execute_code_guard
     _guard = check_execute_code_guard(code, env_type, has_host_access=_docker_has_host_access(_env_config))
     if not _guard.get("approved", False):
@@ -834,6 +844,8 @@ def build_execute_code_schema(enabled_sandbox_tools: set = None,
         )
     # Remote hosts that fail open to per-call are not worth schema words; the result's
     # `kernel` field tells the truth per call.
+    # Session kernels are always on (kernel_mode retired in #96787): persistence is part of the tool's one
+    # description, not a bolt-on paragraph behind a dead conditional.
     description = (
         "Run Python that calls Hermes tools programmatically. Use when you "
         "need 3+ tool calls with logic between them: filtering/reducing "

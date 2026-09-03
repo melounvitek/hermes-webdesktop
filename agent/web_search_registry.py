@@ -160,6 +160,12 @@ def _disabled_web_plugin_for(configured: Optional[str] = None, *, capability: Op
     backend because a disabled provider fails the availability gate and silently
     drops to the default. Bundled web plugins live under ``web/<vendor>`` with
     the provider name differing only by hyphen/underscore, so both are normalized.
+
+    When a user sets ``web.extract_backend: firecrawl`` (or the search equivalent) but also lists
+    ``web-firecrawl`` in ``plugins.disabled``, the provider never registers and the dispatcher would
+    otherwise emit a misleading "No web extract provider configured. Set web.extract_backend to ..." error —
+    even though the backend IS configured correctly. This helper detects that case so the dispatcher can
+    point the user at the actual cause (issue #40190 follow-up: pi314's disabled-plugin symptom).
     """
     def _norm(s: str) -> str:
         return s.strip().lower().replace("-", "_")

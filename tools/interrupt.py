@@ -48,7 +48,10 @@ def is_interrupted() -> bool:
 def is_thread_interrupted(thread_id: int | None) -> bool:
     """Whether *thread_id* has an interrupt bit set (``None`` never is). Used when
     a wait moves onto a deadline worker (``run_bounded_sync``) so ``/stop``
-    targeting the original tool-worker tid still kills the subprocess."""
+    targeting the original tool-worker tid still kills the subprocess.
+
+    See #94285.
+    """
     if thread_id is None:
         return False
     with _lock:

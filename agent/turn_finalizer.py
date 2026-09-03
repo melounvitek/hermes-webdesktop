@@ -46,7 +46,12 @@ def _record_kanban_budget_exhausted(
 
     Routed via ``_record_task_failure`` (not ``kanban_block``) so it counts toward the
     consecutive-failure circuit breaker. Idempotent via the ``_end_run`` CAS
-    (``WHERE ended_at IS NULL``), so safe from multiple exit paths."""
+    (``WHERE ended_at IS NULL``), so safe from multiple exit paths.
+
+    This is a bounded fallback (#87096): the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``)
+    guarantees idempotence — if another path already closed the run this is a no-op — so it is safe to call
+    from multiple exit paths.
+    """
     try:
         from hermes_cli import kanban_db as _kb
         _conn = _kb.connect()
@@ -149,6 +154,17 @@ def _resolve_budget_fallback(
     # A kanban worker must record a terminal outcome whether or not a fallback path
     # was eligible, so the dispatcher learns the worker could not complete.
     _kanban_task = os.environ.get("HERMES_KANBAN_TASK") if budget_exhausted else None
+    # If running as a kanban worker, signal the dispatcher that the worker could not complete (rather than
+    # treating it as a protocol violation). This applies whether the user-facing fallback came from the
+    # summary call or an explicitly pending continuation; both exhausted the task budget and must advance
+    # the failure circuit. We route through ``_record_task_failure(outcome="timed_out")`` rather than
+    # ``kanban_block`` so this counts toward the dispatcher's consecutive-failure circuit breaker (#29747
+    # gap 2).
+    # Bounded fallback (#87096): budget was exhausted but none of the normal fallback paths were eligible
+    # (interrupted / failed / anomalous exit_reason). If running as a kanban worker we must still record a
+    # terminal outcome so the task does not remain in an ambiguous lifecycle state. The worker's run is
+    # closed via ``_record_task_failure`` (compare-and-swap receipt path) which is a no-op if another path
+    # closed it — the CAS invariant in ``_end_run`` (``WHERE ended_at IS NULL``) guarantees idempotence.
     if _kanban_task:
         _record_kanban_budget_exhausted(_kanban_task, api_call_count, agent.max_iterations, logger)
     return final_response, _turn_exit_reason, preserved_verification_fallback
@@ -202,6 +218,16 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
     # row; enforce "delivered final_response ⇒ assistant row" here. Compare content,
     # not role, so a matching verification candidate isn't dup'd.
     if final_response and not interrupted:
+        # Some recovery/fallback paths return a real final_response without adding a closing assistant
+        # message to the transcript (e.g. the partial-stream and prior-turn-content recovery ``break`` sites
+        # in ``conversation_loop``). If persisted as-is, the durable session can end at a tool/user message
+        # even though the caller — and the gateway platform — already saw a completed assistant response.
+        # The next turn then replays a user-only backlog and the model re-answers every "unanswered"
+        # message. Close the durable turn at the source, at the single chokepoint every recovery ``break``
+        # flows through, so the invariant "delivered final_response ⇒ assistant row in transcript" holds
+        # regardless of which path produced it. (#43849 / #44100) Compare content (not just role) so a
+        # verification candidate that matches the final response is not duplicated at budget exhaustion.
+        # (#65919 §7)
         _tail = messages[-1] if messages else None
         if not isinstance(_tail, dict) or _tail.get("role") != "assistant":
             append_message(messages, {"role": "assistant", "content": final_response})
@@ -219,6 +245,8 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
 
     # Request is complete, so replace API-local voice/model/skill guidance with the
     # clean user input before the durable snapshot (earlier flushes still needed them).
+    # Earlier turn-start flushes use the DB-only override because their messages are still needed for the
+    # API request; this finalizer runs after that request is complete (#48677 / #63766).
     _apply_override = getattr(agent, "_apply_persist_user_message_override", None)
     if callable(_apply_override):
         _apply_override(messages)
@@ -302,6 +330,13 @@ def _append_file_mutation_footer(agent, final_response, logger):
     """Append the verifier advisory when ``write_file`` / ``patch`` calls failed and were
     never superseded by a successful write to the same path (surfaces over-claiming)."""
     try:
+        # File-mutation verifier footer. This catches the specific case — reported by Ben Eng
+        # (#15524-adjacent) — where a model issues a batch of parallel patches, half of them fail with
+        # "Could not find old_string", and the model summarises the turn claiming every file was edited. The
+        # user then has to manually run ``git status`` to catch the lie. With this footer the truth is
+        # surfaced on every turn, so over-claiming is structurally impossible past the model. Gate: only
+        # applied when a real text response exists for this turn and the user didn't interrupt.
+        # Empty/interrupted turns already have other surface text that shouldn't be augmented.
         _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
         if _failed and agent._file_mutation_verifier_enabled():
             footer = agent._format_file_mutation_failure_footer(_failed)
@@ -473,6 +508,12 @@ def finalize_turn(
 
     # Surrogate chokepoint: RAW SDK text with a lone UTF-16 surrogate crashes downstream
     # consumers (stdout, Telegram ``utf16_len``, JSON); scrub once where it leaves the loop.
+    # Class-level surrogate chokepoint (#80366, #55143, #55309, #19819): ``final_response`` is often the RAW
+    # SDK content (``assistant_message.content``), not the sanitized copy stored in history by
+    # ``build_assistant_message``. Any lone UTF-16 surrogate (U+D800–U+DFFF) in it crashes downstream
+    # consumers — oneshot stdout writes, Telegram's ``utf16_len`` length check, Signal formatting, JSON
+    # envelope encodes — on every provider (Ollama, NVIDIA NIM, …). Scrub once here, where model text leaves
+    # the conversation loop, so every delivery surface receives valid Unicode.
     if isinstance(final_response, str):
         final_response = _sanitize_surrogates(final_response)
 

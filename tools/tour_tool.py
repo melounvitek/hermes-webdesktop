@@ -79,6 +79,7 @@ TOUR_SCHEMA = {
     "name": "gui_tour",
     # Description keeps the targets-first flow + stable-selector preference:
     # without them the model guesses selectors on re-rendering UI.
+    # See #95681.
     "description": (
         "Guided tour in the desktop GUI: dim the screen, highlight an "
         "element, attach a titled popover. Surfaces: 'app' (Hermes itself) "

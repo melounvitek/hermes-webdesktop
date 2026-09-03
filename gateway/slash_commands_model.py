@@ -234,6 +234,7 @@ class GatewayModelCommandsMixin:
         """Persist a committed switch: session DB, next-turn note, override map, config write-through."""
         from hermes_cli.model_switch import format_model_for_display
 
+        # Persist the new model to the session DB so the dashboard shows the updated model (#34850).
         _sess_db = getattr(self, "_session_db", None)
         if _sess_db is not None:  # so the dashboard shows the updated model
             try:
@@ -241,6 +242,7 @@ class GatewayModelCommandsMixin:
                 # Typed path: consume the auto-reset flag so the next message's cleanup does not
                 # wipe the override stored below.
                 if not picker and getattr(_sess_entry, "was_auto_reset", False):
+                    # See #48031.
                     _sess_entry.was_auto_reset = False
                 await _sess_db.update_session_model(
                     _sess_entry.session_id, result.new_model, provider=result.target_provider,
@@ -273,6 +275,13 @@ class GatewayModelCommandsMixin:
             self._pending_one_turn_model_restores.pop(ctx.session_key, None)
         # Non-secret write-through so the override survives a restart (api_key/api_mode are
         # re-resolved on rehydration); a --once override must NOT outlive a restart.
+        # Write-through the non-secret parts (model/provider/base_url) to the session store so the override
+        # survives a gateway restart. api_key/api_mode are never persisted — they are re-resolved via
+        # runtime provider resolution on rehydration. /model --once is intentionally EXCLUDED from the
+        # write-through: a one-turn override must never survive a restart. The persisted value stays at the
+        # pre-once state (the prior session override, or nothing), which is exactly what the finally-restore
+        # reverts the in-memory dict to. (#29923 review defect: the original implementation wrote through,
+        # so a crash before the restore rehydrated the once-model permanently.)
         if not one_turn:
             try:
                 await self.async_session_store.set_model_override(
@@ -355,6 +364,10 @@ class GatewayModelCommandsMixin:
         is session-key-normalized so the picker's thread metadata lands where the next turn reads."""
         from hermes_cli.model_switch import list_picker_providers
         try:  # off-loop: listing can hit a synchronous HTTP fetch on a stale cache
+            # Offload blocking provider-listing (can fall through to a synchronous urllib HTTP fetch on a
+            # stale cache) off the event loop so the gateway doesn't freeze. See #41289.
+            # Offload blocking provider-listing off the event loop so the gateway doesn't freeze on a
+            # stale-cache HTTP fetch. See #41289.
             providers = await asyncio.to_thread(
                 list_picker_providers, max_models=50, include_moa=True, **listing_kwargs
             )
@@ -466,9 +479,22 @@ class GatewayModelCommandsMixin:
                 clear_provider_models_cache()
         # Normalize like a message turn (Telegram DM topic recovery) before deriving the override
         # key, so the override lands under the key the next turn reads.
+        # Check for session override. See #30479.
         source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
         session_key = self._session_key_for_source(source)
         ctx = _ModelSwitchContext(
+            # Gateway routing columns — forward ALL of them at CREATE time, same fix as the
+            # compression-rotation bug in agent/conversation_compression.py. Without these, the branched
+            # child row has NULL routing columns until switch_session() below calls
+            # _record_gateway_session_peer() — a crash/kill anywhere between here and there (most plausibly
+            # mid-history-copy, since each append_message call a few lines down is independently
+            # best-effort) leaves the branch permanently unroutable: unreachable by chat/thread lookup, and
+            # unreachable via /resume's IDOR guard too (which requires the row's chat_id/thread_id to match
+            # the caller's). user_id is critical for the fallback lookup path (hermes_state.py:1994-2009)
+            # that searches by the complete peer tuple when session_key doesn't match. origin_json and
+            # display_name complete the identity (same shape as the reset path's db_create_kwargs in
+            # gateway/session.py, #82633) so consumers that read routing/presentation data from state.db
+            # (mcp_serve, mirror, channel directory) see the branch row fully formed with zero backfill gap.
             session_key=session_key,
             source=source,
             config_path=(profile_home or _hermes_home) / "config.yaml",
@@ -638,6 +664,7 @@ class GatewayModelCommandsMixin:
         raw_args = event.get_command_args().strip()
         args, persist_global = self._parse_reasoning_command_args(raw_args)
         # Normalize (Telegram DM topic recovery) so the override key matches the next turn's.
+        # See #30479.
         _reasoning_source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
         session_key = self._session_key_for_source(_reasoning_source)
         self._show_reasoning = self._load_show_reasoning()

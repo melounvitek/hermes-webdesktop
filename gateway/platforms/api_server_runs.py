@@ -465,6 +465,12 @@ def _run_agent_sync(self, run: _RunLaunch, agent, approval_notify, *, _api_serve
     from gateway.session_context import clear_session_vars
     from gateway.hosted_room_execution_policy import (
         RoomExecutionPolicy, bind_room_execution_policy, reset_room_execution_policy)
+    # No eager slash-worker pre-warm: slash.exec spawns one on demand (its error path already relies on that
+    # respawn to recover from a dead worker). Each worker child runs its own MCP discovery (#61891), so
+    # pre-warming one per session forks the full stdio MCP fleet — ~20 OS processes per retained session on
+    # a config with a few stdio servers — even for sessions that never run a worker-routed command. Sessions
+    # held by a live transport are never reaped, so with the desktop app open for days those fleets
+    # accumulate until the OS refuses new process spawns.
     from tools.approval import (
         register_gateway_notify, reset_current_session_key, set_current_session_key,
         unregister_gateway_notify)
@@ -517,6 +523,9 @@ def _make_approval_notify(self, run: _RunLaunch, *, _api_server) -> Callable[[Di
     def _approval_notify(approval_data: Dict[str, Any]) -> None:
         event = dict(approval_data or {})
         # Clients must never receive the raw flagged command: redact before it hits the stream.
+        # Redact credentials from the command before it enters the SSE/API event stream — same egress bug as
+        # #48456, second transport: API/desktop clients would otherwise receive the raw command Tirith
+        # flagged. Reuse the gateway seam.
         if "command" in event:
             from gateway.run import _redact_approval_command
             event["command"] = _redact_approval_command(event.get("command"))
@@ -616,6 +625,9 @@ def _request_owns_run(self, request: "web.Request", run_id: str) -> bool:
         return owner == scope
     # No in-memory owner: only a durable record under the caller's scope admits it.
     # Under multiplex_profiles every profile holds a valid key, so ownerless = allow-all.
+    # Run state that exists without an owner stamp is an unanswered authorization question, not a run anyone
+    # may control — under gateway.multiplex_profiles every served profile holds a valid key, so admitting it
+    # would make the boundary allow-all (#93689).
     return self._run_idempotency_store.owns_run(scope, run_id)
 
 
@@ -656,6 +668,10 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     if not self._request_owns_run(request, run_id):
         return _run_not_found(_api_server._openai_error, run_id)
     # Allow subscribing slightly before the run is registered (race window).
+    # Confirm the force-kill actually reaped the process before we clear its PID file / scoped locks.
+    # SIGKILL can fail to take (e.g. an uninterruptible-sleep or zombie-reaping parent), and if we blindly
+    # clear the metadata and start a fresh instance we end up with two live gateways fighting over the same
+    # token — the duplicate-gateway failure in #19471.
     for _ in range(20):
         if run_id in self._run_streams:
             break

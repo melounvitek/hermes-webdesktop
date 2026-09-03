@@ -83,6 +83,8 @@ class GatewayBusySessionMixin:
         a NON-busy session the oldest orphan runs as THIS turn, the next is staged into the slot so
         arrival order holds, and the caller enqueues the incoming event behind it. The returned
         event is REMOVED from both stores, else the post-turn dequeue would run it twice.
+
+        See #28503.
         """
         try:
             overflow = self._overflow_queue(session_key)
@@ -186,6 +188,10 @@ class GatewayBusySessionMixin:
                     "user_id": getattr(source, "user_id", "") or "",
                     # Writer identity: a leaked lease from this process is re-acquired by the next
                     # turn rather than fencing it out forever (pruning only reclaims dead PROCESSES).
+                    # Writer identity for re-entrancy (#94595): if this process leaks a lease for this
+                    # session (exception path skipped release), the next turn re-acquires its own entry
+                    # instead of being fenced out of it forever — pruning only reclaims entries whose
+                    # PROCESS died.
                     "live_session_id": str(session_key),
                 },
             )
@@ -214,7 +220,12 @@ class GatewayBusySessionMixin:
     async def _session_has_compression_in_flight(self, session_key: str) -> bool:
         """True when a compression lock is held for this session's id (callers demote interrupt →
         queue, else a follow-up against the pre-rotation parent orphans compression siblings).
-        Both blocking reads run in a worker thread so a large state.db never freezes the loop."""
+        Both blocking reads run in a worker thread so a large state.db never freezes the loop.
+
+        Context compression is interrupt-protected (#23975) but gateway ``interrupt`` busy-input mode can
+        still start a follow-up turn against the pre-rotation parent while compression is mid-flight,
+        producing orphaned compression siblings (#56391).
+        """
         session_store = getattr(self, "session_store", None)
         if not session_key or session_store is None:
             return False
@@ -241,6 +252,7 @@ class GatewayBusySessionMixin:
             holder = await asyncio.to_thread(raw_db.get_compression_lock_holder, str(session_id))
             # Production returns Optional[str]. Reject non-strings so a MagicMock auto-attr (or any
             # unexpected truthy) cannot look like a held lock and skip hygiene.
+            # See #96953.
             return isinstance(holder, str) and bool(holder)
         except (AttributeError, TypeError):
             return False
@@ -270,6 +282,9 @@ class GatewayBusySessionMixin:
         # FIFO so each follow-up gets its own turn in arrival order (the single pending slot used to
         # be silently OVERWRITTEN). Photo bursts still merge into the head slot (album semantics).
         pending_slot = getattr(adapter, "_pending_messages", None)
+        # #28503 — Previously this called ``merge_pending_message_event`` with the default
+        # ``merge_text=False``, which silently OVERWROTE the single pending slot when consecutive text
+        # messages arrived in ``busy_input_mode: queue``.
         existing = pending_slot.get(session_key) if isinstance(pending_slot, dict) else None
         same_security_context = existing is not None and (
             getattr(existing, "internal", False) == getattr(event, "internal", False)
@@ -368,6 +383,18 @@ class GatewayBusySessionMixin:
         # has_blocking_approval so a conversational "yes" never fires a command.
         try:
             from tools.approval import has_blocking_approval
+            # --- Approval response routing (#46866) --- When the agent is blocked waiting for a
+            # dangerous-command approval, plain-text responses like "yes" or "approve" must be routed to the
+            # approval handler instead of being steered/queued/interrupted. Slash forms (/approve, /deny)
+            # already bypass to the runner at the base-adapter guard. This handles the bare-word forms
+            # (Signal/SMS users naturally type "yes" rather than "/approve"). Gating on
+            # has_blocking_approval(session_key) is the disambiguator that keeps a conversational "yes" from
+            # triggering a dangerous command when no approval is actually pending (design intent — see
+            # run.py "Pending exec approvals are handled by /approve and /deny" note). We reuse the
+            # canonical /approve and /deny handlers rather than re-deriving the resolution + i18n messaging:
+            # they resolve the waiting thread, resume typing, AND return a localized confirmation string.
+            # The busy-handler path does not auto-send that return, so we deliver it ourselves (mirroring
+            # the draining-case send above).
             if event.allow_gateway_control and has_blocking_approval(session_key):
                 _raw_text = (event.text or "").strip().lower()
                 _match = self._PLAINTEXT_APPROVAL_WORDS.get(_raw_text)
@@ -424,6 +451,9 @@ class GatewayBusySessionMixin:
         if effective_mode == "steer":
             steer_text = await self._prepare_busy_steer_text(event)
             # Steerable: plain text, OR every attachment is voice media folded into steer_text.
+            # A follow-up qualifies for steering when it is plain text, OR when every attachment is
+            # STT-eligible voice media whose transcript was just folded into steer_text — otherwise a voice
+            # note in steer mode silently degrades to queue mode (#58780).
             _steer_media_urls = getattr(event, "media_urls", None) or []
             _steer_all_voice = bool(_steer_media_urls) and (
                 len(self._pending_event_audio_paths(event)) == len(_steer_media_urls)
@@ -573,6 +603,7 @@ class GatewayBusySessionMixin:
         # Same authorization gate as the cold path, else unauthorized users in shared threads
         # inject messages into a session they don't own.
         from gateway.run import _AGENT_PENDING_SENTINEL
+        # See #17775.
         if not self._is_user_authorized(event.source):
             logger.warning(
                 "Dropping message from unauthorized user in active session: "
@@ -613,6 +644,15 @@ class GatewayBusySessionMixin:
         # the run and must NOT replay). FIFO gives each text its own turn (raw merge would join them).
         if not _steer.steered and not redirected:
             self._queue_or_replace_pending_event(session_key, event)
+        # Store the message so it's processed as the next turn after the current run finishes (or is
+        # interrupted). Skip this for a successful steer — the text already landed inside the run and must
+        # NOT also be replayed as a next-turn user message. Route through _queue_or_replace_pending_event
+        # (the same FIFO infrastructure used by busy queue-mode and /queue) rather than a raw
+        # merge_pending_message_event(merge_text=True). The raw merge newline-joins consecutive TEXT
+        # follow-ups into a SINGLE pending turn, destroying message boundaries — so two separate user
+        # messages sent while the agent was busy (interrupt mode, or a steer that fell back to queue)
+        # arrived as one mashed-together turn (#43066 sub-bug 2). The FIFO path gives each text its own turn
+        # in arrival order while still preserving photo-burst / album merge semantics for media.
         is_queue_mode = effective_mode == "queue"
         is_steer_mode = effective_mode == "steer"
         is_redirect_mode = effective_mode == "interrupt" and redirected
@@ -706,6 +746,9 @@ class GatewayBusySessionMixin:
         registered as Discord slash commands) would interrupt the agent AND get silently
         discarded by the slash-command safety net, producing a zero-char response.
         See #5057, #6252, #10370.
+
+        1. ``busy_handler`` — special mid-run variant (e.g. /goal's control-verb whitelist, /queue's FIFO
+        enqueue, /model's custom reject text). 2. 3. See #5057, #6252, #10370.
         """
         name = cmd_def.name
         policy = getattr(cmd_def, "busy_policy", "reject")
@@ -773,6 +816,8 @@ class GatewayBusySessionMixin:
         # /reset and /new bypass the running-agent guard (else they'd queue as user text and replay
         # into the same broken history); clear pending messages so the old text doesn't replay.
         from gateway.run import _INTERRUPT_REASON_RESET
+        # Interrupt the agent first, then clear the adapter's pending queue so the stale "/reset" text
+        # doesn't get re-processed as a user message after the interrupt completes. See #2170.
         await self._interrupt_and_clear_session(
             quick_key, source, interrupt_reason=_INTERRUPT_REASON_RESET, invalidation_reason="new_command",
         )
@@ -929,6 +974,10 @@ class GatewayBusySessionMixin:
                 # ONLY when this process booted from a chat /restart AND is within a short post-boot
                 # window; consume the flag one-shot so a later legitimate /restart is honored.
                 if (
+                    # Belt-and-suspenders for when the dedup marker goes missing (manually cleaned up, or
+                    # the previous cycle's write failed). Without a marker the update_id comparison below
+                    # can't run, so a redelivered /restart would sail through and re-restart the gateway —
+                    # an infinite loop (issue #18528).
                     getattr(self, "_booted_from_restart", False)
                     and time.time() - getattr(self, "_startup_time", 0.0) < 60
                 ):

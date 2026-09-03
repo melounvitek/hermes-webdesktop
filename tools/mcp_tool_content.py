@@ -15,6 +15,11 @@ logger = logging.getLogger("tools.mcp_tool")
 
 # Hard ceiling for one MCP text payload (chars), deliberately far ABOVE the budget layer's 50K
 # spillover threshold so ordinary large results reach spillover intact; only floods are lossy.
+# This is the FIRST line of defense against a buggy or malicious MCP server returning multi-megabyte text:
+# without it the full payload is allocated, JSON-encoded and handed downstream before the budget/spillover
+# layer ever sees it (#56059). Distilled from #56060 (Stoltemberg), #56072 (AlexFucuson9) and #56511
+# (Tranquil-Flow), which capped at get_max_bytes() (50K) — correct protection, but at that level it would
+# truncate before spillover could preserve the data. The 40% head / 60% tail split is #56511's shape.
 _MCP_HARD_RESULT_CAP_CHARS = 2_000_000
 # Cap on decoded resource bytes per block (a misbehaving server can't fill the cache disk).
 # Base64 expands ~4/3; oversized payloads are rejected BEFORE decoding (never doubled in memory).
@@ -24,7 +29,10 @@ _MCP_RESOURCE_MAX_B64_CHARS = _MCP_RESOURCE_MAX_BYTES * 4 // 3 + 4
 
 def _truncate_mcp_text_result(text: str, max_chars: int = _MCP_HARD_RESULT_CAP_CHARS) -> str:
     """Pass text at or under ``max_chars`` unchanged; otherwise keep a 40% head / 60% tail
-    split with an omission notice between."""
+    split with an omission notice between.
+
+    Bound pathological MCP text before it propagates (#56059).
+    """
     if len(text) <= max_chars:
         return text
     head_chars = int(max_chars * 0.4)
@@ -37,7 +45,10 @@ def _truncate_mcp_text_result(text: str, max_chars: int = _MCP_HARD_RESULT_CAP_C
 def _is_reserved_mcp_meta_key(key: str) -> bool:
     """True if an MCP ``_meta`` key uses a protocol-reserved prefix: a ``modelcontextprotocol``
     or ``mcp`` label followed by at least one more label. A trailing one
-    (``com.example.mcp/...``) is a vendor namespace."""
+    (``com.example.mcp/...``) is a vendor namespace.
+
+    Ported from MoonshotAI/kimi-code#2600.
+    """
     slash = key.find("/")
     if slash <= 0:
         return False

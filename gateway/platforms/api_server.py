@@ -559,7 +559,12 @@ def _reap_disconnected_agent_processes(
     agent: Any, *, source: str = "api_server_sse_disconnect") -> None:
     """Reap background processes an abandoned API-server turn created (these turns bypass
     ``TurnRunner``). Daemon-thread fire-and-forget; epoch-gated so a stale reaper never kills
-    a newer run's process on a shared task_id."""
+    a newer run's process on a shared task_id.
+
+    Mirrors the gateway-turn cleanup in ``gateway/run.py`` (#76115) for this API-server surface, which runs
+    its own agent lifecycle via ``_run_agent`` and never passes through ``TurnRunner`` — so it needs its own
+    trigger for the same baseline-diff reap.
+    """
     process_task_id = getattr(agent, "_gateway_turn_process_task_id", "")
     process_baseline = getattr(agent, "_gateway_turn_process_baseline", None)
     if not process_task_id or process_baseline is None:
@@ -1101,6 +1106,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     # Stateless request/response (``send()`` is a stub): async-delivery tools must not promise
     # delivery here, and a resumed turn completes the work rather than asking.
     supports_async_delivery: bool = False
+    # Same statelessness applies to the startup auto-resume prompt: no client is waiting to answer "session
+    # restored — what next?", so a resumed turn should complete the interrupted work rather than acknowledge
+    # (#57056).
     interactive_resume: bool = False
 
     # Admission-gated OpenAI-compatible entry points (bodies live in the mixin).
@@ -1124,6 +1132,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._model_routes: Dict[str, Dict[str, Any]] = self._parse_model_routes(extra.get("model_routes"))
         # Opt-in bare ``model`` passthrough on OpenAI-compatible surfaces (generic clients
         # hardcode "gpt-4o" etc., hence off by default).
+        # Off by default: generic OpenAI clients routinely hardcode model names ("gpt-4o", ...), and
+        # existing deployments rely on those falling back to the gateway default rather than switching the
+        # executing model. Requests that send an explicit ``provider`` — and the Hermes-native session-chat
+        # and /v1/runs endpoints — are always honored regardless of this flag. (Idea credit: PR #22825 by
+        # @mssteuer.)
         self._direct_model_requests: bool = _coerce_request_bool(
             extra.get("direct_model_requests"), default=False)
         self._app: Optional["web.Application"] = None
@@ -1141,6 +1154,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         self._session_db_lock: Optional[asyncio.Lock] = None  # single-flight for lazy init
         self._max_concurrent_runs: int = self._resolve_max_concurrent_runs()  # 0 disables
         # In-flight _run_agent() turns (/v1/runs tracks its own via _active_run_tasks).
+        # Concurrency cap shared across all agent-serving endpoints (/v1/chat/completions, /v1/responses,
+        # /v1/runs). Read from config.yaml gateway.api_server.max_concurrent_runs; 0 disables the cap.
+        # Bounds CPU / memory / upstream-LLM-quota exhaustion from a request flood (#7483).
         self._inflight_agent_runs: int = 0
         # Every agent inside _run_agent() for shutdown interrupt, keyed by id() (the strong ref
         # keeps the id() from recycling); distinct from the run_id-keyed _active_run_agents.
@@ -1447,7 +1463,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _profile_scope(profile: Optional[str]):
         """Enter the multiplex profile runtime scope, or a no-op when unset. No prefix AND
         multiplexing active enters the DEFAULT profile's scope (an unscoped run would raise
-        UnscopedSecretError on its first credential read); single-profile gateways no-op."""
+        UnscopedSecretError on its first credential read); single-profile gateways no-op.
+
+        Single-profile gateways keep the no-op — ``get_secret`` falls through to ``os.environ`` there,
+        unchanged. See #61276.
+        """
         if not profile:
             with suppress(Exception):
                 from agent.secret_scope import is_multiplex_active
@@ -1563,7 +1583,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _bind_declared_conversation(
         self, session_id: Optional[str], gateway_session_key: Optional[str]) -> None:
         """Record the declared conversation key on the session row (AIAgent writes it unkeyed);
-        ``include_compression_ancestors`` covers a mid-turn rotation. UPDATE: no-op w/o a row."""
+        ``include_compression_ancestors`` covers a mid-turn rotation. UPDATE: no-op w/o a row.
+
+        ``include_compression_ancestors`` carries the key up a mid-turn compression rotation so the pre- and
+        post-rotation rows of one conversation share it, while that same walk deliberately stops at
+        ``/branch``, delegate and tool children (#79161). The statement is an UPDATE, so it is a harmless
+        no-op on a turn that failed before the row was created.
+        """
         key = (gateway_session_key or "").strip()
         sid = str(session_id or "").strip()
         db = self._ensure_session_db() if key and sid else None
@@ -2460,7 +2486,15 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     def _artifact_store_for(self, profile: str) -> ArtifactStore:
         """Profile-scoped artifact store, lazily created under the profile's data dir and cached
-        BY RESOLVED PROFILE (on a multiplex listener profile A must never pin B to A's root)."""
+        BY RESOLVED PROFILE (on a multiplex listener profile A must never pin B to A's root).
+
+        The store root lives under the profile's data directory
+        (``<HERMES_HOME>/plugin-data/.../artifacts``-style controlled root), so artifacts never escape the
+        profile boundary. Stores are cached BY RESOLVED PROFILE — on a multiplex listener, profile A
+        touching the artifact route first must never pin profile B to A's physical root (same frozen-handle
+        class as the per-profile session-storage fix in #88734). The root itself is created on first use;
+        TTL cleanup runs on every store/load/prune.
+        """
         profile_key = str(profile or "default")
         store = self._browser_control_artifacts.get(profile_key)
         if store is not None:
@@ -2732,6 +2766,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # A canonical Bot Chat auto-archived by the orphan reaper would make `hermes peer dm`
             # mint transient sessions: resurrect and re-list; deliberate archives stay put.
             try:
+                # Recoverable-archive resurrection (#92687): a canonical Bot Chat archived by the ws-orphan
+                # reaper / older agent cleanup is invisible to list_sessions_rich (include_archived=False),
+                # which would fail `hermes peer dm` resolution and mint transient sessions — same accident
+                # the tui_gateway lookups heal.
                 from tools.bot_mode_probe import BOT_CHAT_TITLE
                 stale = db.get_session_by_title(title_filter) if title_filter == BOT_CHAT_TITLE else None
                 if stale and stale.get("archived") and db.unarchive_recoverable_session(stale["id"]):
@@ -3015,6 +3053,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """Sanitized runtime metadata for a finished session-chat turn."""
         runtime = self._result_runtime(result, usage)
         return self._sanitize_runtime_metadata(
+            # Same shared ladder /api/status uses. Before this was unified, the two endpoints disagreed on
+            # the same page load — the sidebar strip read "running" (it probed GATEWAY_HEALTH_URL and scoped
+            # to the requested profile) while the Channels page rendered "The gateway is not running" (it
+            # did neither). Cross-container, profile-scoped, and launch-service-managed deployments each hit
+            # that split. profile_home is passed when the request was scoped to a named profile:
+            # gateway/status readers resolve process-level paths and do NOT follow the HERMES_HOME
+            # contextvar override (#56986 / #69143), so the profile's directory has to be handed over
+            # explicitly or messaging silently reports another profile's gateway (#71211).
             runtime=runtime,
             requested_runtime=runtime_request.get("requested"),
             route_source=runtime_request.get("route_source") or "global",
@@ -3073,6 +3119,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         queue, _event_payload = events.queue, events.payload
         # Claim ownership inside the request's profile scope before any run-keyed state
         # exists, so /v1/runs/{id}* control is confined to the starting profile.
+        # See #93689.
         self._run_owners[run_id] = self._run_idempotency_scope(request)
         self._set_run_status(
             run_id, "queued", session_id=session_id, model=ctx["body"].get("model", self._model_name))
@@ -3492,7 +3539,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """Bind session contextvars for an API-server agent run — the SINGLE chokepoint for every
         agent-entry path. Hardwires ``platform="api_server"`` + ``async_delivery=False`` (HTTP
         can never wake the agent after the turn) so no route reintroduces the silent no-op bug.
-        Returns reset tokens for ``clear_session_vars`` in a ``finally`` (request-scoped)."""
+        Returns reset tokens for ``clear_session_vars`` in a ``finally`` (request-scoped).
+
+        See #10760.
+        """
         from gateway.session_context import set_session_vars
         return set_session_vars(
             platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
@@ -3545,6 +3595,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                  "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,
                  "total_tokens": getattr(agent, "session_total_tokens", 0) or 0}
         # Effective session id lets callers track compression-triggered rotations.
+        # (#16938)
         _eff_sid = getattr(agent, "session_id", session_id)
         if isinstance(_eff_sid, str) and _eff_sid:
             result["session_id"] = _eff_sid
@@ -3606,7 +3657,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     effective_task_id = session_id or str(uuid.uuid4())
                     # Process baseline for disconnect reaping (this surface bypasses TurnRunner)
                     # + shutdown-interrupt registration, once for every caller.
+                    # Baseline for selective background-process reaping on SSE client disconnect — mirrors
+                    # gateway/run.py's gateway-turn cleanup (#76115); this API-server surface runs its own
+                    # agent lifecycle and doesn't go through TurnRunner, so it needs its own baseline.
+                    # /v1/runs runs its own agent lifecycle (no TurnRunner, no _run_agent) — record turn
+                    # process ownership so stop/cancel can reap only the background processes this run
+                    # created (#76115).
                     _publish_turn_process_ownership(agent, effective_task_id)
+                    # Registering here, once, covers every _run_agent() caller — the same reason the
+                    # _ProviderAuthResolutionError handler below lives here rather than in each route. Only
+                    # two callers pass ``agent_ref``, and only /v1/runs has a run_id, so neither is a usable
+                    # hook for the rest. See #63529.
                     self._shutdown_interruptible_agents[id(agent)] = agent
                     result = agent.run_conversation(
                         user_message=user_message, conversation_history=conversation_history,
@@ -3633,6 +3694,11 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         self._shutdown_interruptible_agents.pop(id(agent), None)
                         # Bind the declared key to the row the turn actually ended on
                         # (agent.session_id carries a mid-turn rotation). Opt-in per route.
+                        # Record the declared conversation on the row the turn actually ended on —
+                        # ``agent.session_id`` already carries a mid-turn compression rotation (#16938), so
+                        # the next reply resolves the live transcript rather than its retired parent.
+                        # Opt-in: only the routes that resolve their session id from the declared key
+                        # (/v1/responses, /v1/runs) record one, so no other caller's rows change shape.
                         if bind_declared_conversation:
                             self._bind_declared_conversation(
                                 getattr(agent, "session_id", None) or session_id, gateway_session_key)
@@ -3752,6 +3818,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Config error, not transient: a bare ``return False`` would make the reconnect watcher
             # re-instantiate the adapter (+ sqlite connection) until EMFILE.
             self._set_fatal_error(
+                # A rejected API_SERVER_KEY is a configuration error, not a transient blip — the key will
+                # not become valid on its own. A bare ``return False`` makes the reconnect watcher in
+                # gateway.run treat it as retryable and loop forever at the backoff cap, re-instantiating
+                # the adapter (and its ResponseStore sqlite connection) every retry (#38803: ~501 leaked
+                # connections / 1002 fds over 2.5 days until EMFILE took the whole gateway down).
+                # Non-retryable drops it from the reconnect queue — same treatment as the port-conflict
+                # guard (api_server_port_in_use). The guard already logged the specific rejection reason
+                # just above.
                 "api_server_key_invalid",
                 "API_SERVER_KEY was rejected by the startup guard (missing, "
                 "placeholder/too short, or strength unverifiable — see the "
@@ -3800,6 +3874,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             await self._runner.setup()
             # Bind directly (a pre-probe raced the bind, misreporting TIME_WAIT as "in use").
             # SO_REUSEADDR off on macOS (BSD can split traffic between two listeners).
+            # Bind directly instead of probing 127.0.0.1 first — the old single-family pre-probe raced the
+            # real bind and reported a TIME_WAIT socket as "in use" (#10297), failing gateway restarts for
+            # up to ~60s. SO_REUSEADDR is platform-dependent (same rationale as the webhook adapter,
+            # #65482): - macOS (BSD semantics): two sockets with SO_REUSEADDR can silently split traffic
+            # while both report success — disable. - Linux: SO_REUSEADDR only permits rebinding past
+            # TIME_WAIT (a second live listener needs SO_REUSEPORT, never set), so keep the default
+            # (enabled) for instant restart rebinds.
             self._site = web.TCPSite(
                 self._runner, self._host, self._port, reuse_address=False if sys.platform == "darwin" else None)
             try:
@@ -3811,6 +3892,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 if getattr(exc, "errno", None) == errno.EADDRINUSE:
                     # Config error: non-retryable, or the reconnect watcher leaks fds forever.
                     self._set_fatal_error(
+                        # A port conflict is a configuration error, not a transient blip — another process
+                        # holds the port for its lifetime. A bare ``return False`` makes the reconnect
+                        # watcher in gateway.run treat it as retryable and loop forever at the backoff cap
+                        # (observed: 1568+ retries over 5 days across multi-profile setups all defaulting to
+                        # the same port, #52132), filling errors.log and leaking the adapter's ResponseStore
+                        # fds each retry. Non-retryable drops it from the reconnect queue; the operator
+                        # recovers with ``/platform resume api_server`` after changing the port.
                         "api_server_port_in_use",
                         f"Port {self._port} already in use. Set "
                         f"platforms.api_server.port in config.yaml to a "
@@ -3832,7 +3920,14 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
 
     async def disconnect(self) -> None:
         """Stop the aiohttp server and release every owned resource, including the ResponseStore
-        connection (the reconnect loop builds a fresh adapter per retry; leaked fds hit EMFILE)."""
+        connection (the reconnect loop builds a fresh adapter per retry; leaked fds hit EMFILE).
+
+        Without this, every adapter instance leaks 2 file descriptors (the database file and its WAL
+        sidecar) — the reconnect loop in ``gateway.run`` constructs a fresh adapter on every retry, so 2
+        fds/retry × 300s backoff cap ≈ 12 fds/hour, which exhausts the default 2560 fd limit after ~12h of
+        failed reconnects and turns the whole gateway into a zombie (OSError: [Errno 24] Too many open
+        files, #37011).
+        """
         self._mark_disconnected()
         if self._response_store is not None:
             try:

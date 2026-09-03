@@ -32,6 +32,9 @@ def top_level_value_flag_sets() -> tuple[frozenset[str], frozenset[str]]:
     ``main.py`` (``_first_positional_argv``, ``_apply_profile_override``) can never drift from the
     argparse surface — the drift that made ``hermes --reasoning high chat …`` misread ``high`` as
     the subcommand and forced eager plugin discovery.
+
+    Mirrors the ``update_cmd._holder_value_flags`` precedent, including the handwritten-snapshot fallback
+    for a broken parser import. Cached per process. See #93530.
     """
     try:
         parser = build_top_level_parser()[0]

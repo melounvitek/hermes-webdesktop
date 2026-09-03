@@ -117,6 +117,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # brotlicffi: aiohttp needs its 2-arg Decompressor for Discord CDN Brotli attachments
     # (google's 1-arg `Brotli` fails "Can not decode br"). aiohttp is only capped transitively
     # by these adapters, so pin the patched floor explicitly.
+    # Without it, aiohttp falls back to google's `Brotli` package (1-arg API), and any .txt/.md/.doc
+    # uploaded to the Discord gateway fails to decode at att.read() with "Can not decode content-encoding:
+    # br" — see #12511 / #15744.
     "platform.discord": (
         "discord.py[voice]==2.7.1",
         "brotlicffi==1.2.0.1",
@@ -176,6 +179,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     ),
     # Pillow and firecrawl-anydoc are CORE deps; these entries self-heal lean/partial installs.
     # Call sites use prompt=False so read_file / vision never block on input() mid-session.
+    # Vision image-resize recovery (Pillow). Pillow is now a CORE dependency (pyproject `dependencies`), so
+    # this entry is a belt-and-suspenders fallback for stripped/source-build installs that somehow dropped
+    # it. See #40490.
     "tool.vision": ("Pillow==12.3.0",),
     "tool.doc_extract": ("firecrawl-anydoc==0.2.4",),  # imports as `anydoc`; lockstep with pyproject
     # MCP client SDK for the cua-driver, so computer_use never dead-ends on `No module named 'mcp'`.
@@ -187,6 +193,15 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # huggingface-hub is SHARED with transformers (>=1.5.0,<2 via Hindsight) and marked active
     # on mere presence, so `hermes update` re-asserts this pin everywhere hub exists. MUST stay
     # inside transformers' window and match uv.lock (tests/test_project_metadata.py enforces).
+    # HF Agent Trace Viewer upload (hermes trace upload / /upload-trace). huggingface-hub is a SHARED
+    # dependency: transformers (pulled by sentence-transformers for local Hindsight embeddings) requires
+    # >=1.5.0,<2, and faster-whisper/tokenizers depend on it transitively. Because active_features() marks a
+    # feature active from mere package presence, the `hermes update` lazy-refresh pass re-asserts THIS pin
+    # on every install where hub is present — so an exact pin below 1.5.0 force-downgrades the shared
+    # package and breaks Hindsight startup (#60783). Policy: keep the exact pin (no ranges — security
+    # posture), but it MUST stay inside transformers' accepted window and MUST match uv.lock so the whole
+    # tree converges on ONE hub version (tests/test_project_metadata.py enforces both). When bumping: update
+    # here AND `uv lock --upgrade-package huggingface-hub` in lockstep.
     "tool.trace_upload": ("huggingface-hub==1.24.0",),
 }
 
@@ -421,7 +436,16 @@ def _installed_dist_roots(spec: str, target: Optional[Path]) -> set[Path]:
 def _warm_installed_bytecode(specs: tuple[str, ...], target: Optional[Path]) -> None:
     """Byte-compile what was just installed: a fresh install writes no ``__pycache__``, so the next
     import (often a user request, ~2-10s for a big SDK, reading as a hang) would pay the compile. Pay
-    it here while the caller already waits. Best-effort; never fails the install."""
+    it here while the caller already waits. Best-effort; never fails the install.
+
+    A pip/uv install writes ``.py`` sources and no ``__pycache__`` — and an install of the *same* version
+    still deletes the cache the old copy had. Whoever imports the package next pays the whole compile: for
+    ``anthropic==0.87.0`` (541 modules) on cpython-3.12.13 that measured 2.2-2.7s cold against 0.7-1.0s
+    warm, and 10.5s cold under concurrent load. That bill lands wherever the first import happens, and for a
+    lazily-installed backend that is the foreground of a user request (#100461) — with nothing printed while
+    it runs, so it reads as a hang. Worse, N per-profile daemons cold-starting together each pay it in full
+    before any of them has written the cache.
+    """
     if sys.dont_write_bytecode:
         return
     try:

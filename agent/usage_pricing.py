@@ -17,6 +17,8 @@ _ONE_MILLION = Decimal("1000000")
 _NOUS_DEFAULT_BASE_URL = "https://inference-api.nousresearch.com/v1"
 
 # Below $0.01, render at 4 dp so cheap-model costs never display as $0.00.
+# Sub-cent cost threshold: below $0.01, render at 4 decimal places so the display is non-zero (e.g. $0.0046
+# instead of $0.00). See #79220.
 _SUBCENT_THRESHOLD = Decimal("0.01")
 
 # Attached to every CostResult with status="included" so consumers can
@@ -27,13 +29,19 @@ _INCLUDED_NOTE = "subscription-included; no provider invoice for usage"
 def format_cost_label(amount: Decimal) -> str:
     """Cost display label: zero → "$0.00"; sub-cent → "~$0.0046" (4 dp, or
     "~$<0.0001" when it rounds to 0.0000 so the label never reads as zero);
-    else "~$1.23". Shared by per-response labels and insights cost buckets."""
+    else "~$1.23". Shared by per-response labels and insights cost buckets.
+
+    This fixes #79220 where sub-cent per-turn costs on cheap models (DeepSeek, etc.) rendered as "$0.00"
+    despite amount_usd carrying full Decimal precision.
+    """
     if amount == _ZERO:
         return "$0.00"
     if amount < _SUBCENT_THRESHOLD:
         label = f"~${amount:.4f}"
         # Compare the rendered label: a naive `< 0.00005` threshold misses
         # the exact boundary under ROUND_HALF_EVEN.
+        # A positive amount that rounds to 0.0000 at 4 dp would render "~$0.0000" — a zero-looking label,
+        # the exact #79220 dishonesty.
         return label if label != "~$0.0000" else "~$<0.0001"
     return f"~${amount:.2f}"
 

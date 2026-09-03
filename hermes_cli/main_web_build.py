@@ -53,6 +53,12 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
     Update-time clears can't close the stale-bytecode class: ``hermes update`` runs
     the PRE-pull updater code and manual pulls never run it. Cheap file reads, no
     git subprocess. Never raises.
+
+    The stale-bytecode bug class (issues #6207, #60242; Dhruv's WhatsApp ``cannot import name
+    'parse_model_flags_detailed'`` report) has one shared shape: the checkout's ``.py`` files change (git
+    pull inside ``hermes update``, a manual ``git pull``, a ZIP update, a file-sync restore) while
+    ``__pycache__`` retains bytecode from the previous revision, and a later process trusts the stale
+    ``.pyc`` instead of the fresh source.
     """
     from hermes_cli.main import PROJECT_ROOT, _clear_bytecode_cache, _read_git_revision_fingerprint, _record_bytecode_fingerprint
     try:
@@ -207,7 +213,17 @@ def _run_with_idle_timeout(
     env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Stream a subprocess, killing it after *idle_timeout_seconds* of silence (a silent captured
     Vite build on a low-memory host looks like a hang and users reboot mid-install). Returns merged
-    stdout, empty stderr, rc 124 if terminate raced a clean exit; never raises on idle timeout."""
+    stdout, empty stderr, rc 124 if terminate raced a clean exit; never raises on idle timeout.
+
+    Issue #33788: ``npm run build`` (Vite) was invoked with ``capture_output=True`` and no timeout. On
+    low-memory hosts (notably WSL2 with the default 4 GB cap) the build can stall or sit silent for minutes;
+    users see a frozen terminal, assume the update is hung, and reboot — leaving the editable install in a
+    half-state with the ``hermes`` launcher present but ``hermes_cli`` not importable.
+    This helper fixes both halves: stdout is streamed (so the user sees progress), and if no bytes have
+    appeared on stdout/stderr for ``idle_timeout_seconds``, the process is terminated and the call returns
+    with a non-zero ``returncode``. The caller's existing stale-dist fallback (#23817) takes over from
+    there.
+    """
     merged_chunks: list[str] = []
     last_output_ts = _time.monotonic()
     lock = threading.Lock()
@@ -307,6 +323,11 @@ def _run_npm_install_deterministic(
     is forced: an inherited ``NODE_ENV=production`` / ``omit=dev`` silently skips
     the build toolchain and the build dies with ``tsc: not found``. An npm outside
     ``engines.npm`` fails every command, so it gets one engine-repair retry.
+
+    ``--no-save`` on the ``npm install`` fallback keeps it true to this function's contract: never mutate
+    ``package-lock.json``. Without it, an out-of-sync lockfile gets rewritten by the fallback, which drifts
+    the committed lockfile and makes every future ``npm ci`` fail — a self-reinforcing cycle where web
+    devDeps never install and a stale dist is served on every update (PR #65595).
     """
     # CI=1 no-ops unicode-animations' postinstall that animates to /dev/tty.
     run_env = _npm_lifecycle_env(env)
@@ -424,6 +445,16 @@ def _web_npm_install_context(web_dir: Path) -> tuple[Path, tuple[str, ...]]:
     if _is_termux_startup_environment():
         return _termux_workspace_install_context(web_dir)
     npm_cwd = _workspace_root(web_dir)
+    # Scope the install to the web workspace only so that the full workspace graph (including apps/desktop
+    # with its Electron + node-pty deps) is never resolved here. Without --workspace the root package.json's
+    # apps/* glob would pull in desktop on every web build. See #38772. When web/ has its own
+    # package-lock.json, _workspace_root() returns web_dir itself and --workspace would fail. See #42973.
+    # When running from the workspace root, this must name the SAME closure as `hermes update`'s
+    # _update_node_dependencies() (ui-tui + web + --include-workspace-root): the helper prefers `npm ci`,
+    # which deletes node_modules before reifying the requested tree, so a narrower closure here silently
+    # prunes everything the update step just installed (root devDependencies and the ui-tui workspace) while
+    # still exiting 0 — and since the manifests digest was already recorded, later no-op updates skip the
+    # repair. See #43564/#64354.
     if npm_cwd == web_dir:
         return npm_cwd, ()
     args: tuple[str, ...] = ("--workspace", "web", "--include-workspace-root")
@@ -482,6 +513,10 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
         # interrupted link step); a plain retry would keep `tsc: not found`
         # forever. Reinstall non-silently first, then one delayed retry for
         # boot-time races (antivirus scanning Node, npm cache not ready).
+        # First attempt — stream output via idle-timeout helper (issue #33788). capture_output=True on a
+        # long Vite build looks identical to a hang; users react by rebooting, which leaves the editable
+        # install in a half-state. Streaming + idle-kill makes failures observable AND recoverable (the
+        # stale-dist fallback below handles the kill path).
         missing_tool = _missing_web_build_tool((r2.stdout or "") + (r2.stderr or ""))
         if missing_tool:
             _console_print(f"  ⚠ Build could not resolve {missing_tool} — reinstalling web dependencies...")

@@ -167,6 +167,11 @@ def _strip_aggregator_overlaps(rows: list[dict]) -> None:
     for row in rows:
         if row.get("is_user_defined") or not is_routing_aggregator(row.get("slug", "")):
             continue
+        # Only strip overlaps from TRUE routing aggregators (OpenRouter, custom:* proxies). Flat-namespace
+        # resellers (opencode-go / opencode-zen) serve every listed model as a first-party model, so their
+        # rows must keep models that a user's proxy happens to share a name with — otherwise a subscription
+        # provider's own catalog (minimax-m3, glm-5, deepseek-v4-flash, ...) is silently gutted in the
+        # picker. (#47077)
         original = row.get("models") or []
         filtered = [m for m in original if m.lower() not in user_models]
         if len(filtered) < len(original):
@@ -203,7 +208,15 @@ def build_aux_picker_rows(
     """Provider rows for any auxiliary-task picker (vision, compression, …). Honours
     ``excluded_providers``; exhausted-pool providers stay visible (``for_picker``); only the active
     custom endpoint is probed. ``moa`` is excluded: auxiliary_client unwraps it to its aggregator
-    anyway, so offering it would be a choice silently rewritten."""
+    anyway, so offering it would be a choice silently rewritten.
+
+    Aux pickers kept re-deriving their own kwargs and each one silently dropped a different slice of the
+    user's configuration. Two independent contributor PRs landed against the same two call sites for exactly
+    this: 52642 (user ``providers:`` / ``custom_providers:`` entries never appeared) and #66624 (providers
+    with an exhausted credential pool were hidden). Both were per-site kwarg patches, so the next aux picker
+    would have reintroduced the same gap. Routing through one function makes the correct behaviour the
+    default that a new caller cannot forget:
+    """
     ctx = load_picker_context().with_overrides(
         current_provider=current_provider, current_model=current_model, current_base_url=current_base_url,
     )
@@ -345,7 +358,12 @@ def _apply_featured(rows: list[dict]) -> None:
 
 def _apply_custom_aliases(rows: list[dict]) -> None:
     """Attach the accepted identity set to each user-defined row: ``model.options`` reports the canonical
-    ``custom:<key>`` while rows carry the bare key as ``slug``, so GUI exact-match never finds the row."""
+    ``custom:<key>`` while rows carry the bare key as ``slug``, so GUI exact-match never finds the row.
+
+    GUI pickers compare the two to decide which row is active; exact equality never matches for custom
+    providers (#87035). Exposing ``aliases`` — every current and legacy spelling from
+    :func:`hermes_cli.providers.custom_provider_aliases` — lets the frontend do a membership check instead.
+    """
     from hermes_cli.providers import custom_provider_aliases
 
     for row in rows:

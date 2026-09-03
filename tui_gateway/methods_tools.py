@@ -590,6 +590,7 @@ def _cmd_moa(rid, params, session, name, arg):
         # Record the live identity for post-turn restore, then swap the agent's client in
         # place: session["model_override"] alone never switches an already-built agent.
         agent = session.get("agent")
+        # See #53444.
         session["moa_one_shot_restore"] = {
             "override": session.get("model_override"), "model": getattr(agent, "model", None),
             "provider": getattr(agent, "provider", None)}
@@ -726,6 +727,10 @@ def _cmd_loop(rid, params, session, name, arg):
 
 def _cmd_undo(rid, params, session, name, arg):
     if not session:
+        # /undo [N]: back up N user turns (default 1), soft-delete the truncated rows on disk, and prefill
+        # the composer with the text of the user message we backed up to so it can be edited and
+        # resubmitted. N=1 is the Claude-Code-style single-step undo; /undo 3 backs up three user turns at
+        # once. See issue #21910.
         return _err(rid, 4001, "no active session to undo")
     if busy := _busy_error(rid, session, "undo"):
         return busy
@@ -749,6 +754,7 @@ def _cmd_undo(rid, params, session, name, arg):
     # Notify memory providers (same hook /branch fires) with rewound=True so cached per-turn state invalidates.
     agent = session.get("agent")
     if agent is not None:
+        # See #6672 + #21910.
         mm = getattr(agent, "_memory_manager", None)
         for step in (
             lambda: mm is not None and mm.on_session_switch(

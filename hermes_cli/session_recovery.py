@@ -35,6 +35,7 @@ def _init_delivery_ledger_schema(conn: sqlite3.Connection) -> None:
 # state.db tables created lazily by a gateway module (base ``SessionDB`` never creates them on a fresh
 # destination) -> the initializer owning their DDL. Recovery creates them before copying so owed rows
 # don't silently vanish from a "complete" salvage. Register new lazy tables HERE, not as ``if table ==``.
+# See #100313, #86236.
 _AUXILIARY_TABLE_SCHEMAS: dict[str, Callable[[sqlite3.Connection], None]] = {
     "delivery_obligations": _init_delivery_ledger_schema,
 }
@@ -180,6 +181,11 @@ def _copy_source_bundle(source: Path, snapshot_dir: Path) -> tuple[Path, list[st
     The whole copy runs inside ``offline_file_access`` (holds the connection-lifecycle lock). Recovery
     normally runs as its own CLI process against an offline file, so the refusal should never fire; the
     guard keeps this path consistent with ``hermes_state._backup_db_file``.
+
+    Checking for a live connection and *then* copying would be a check/use race: a connection could open in
+    that window, and the copy's ``close()`` would cancel its POSIX advisory locks -- the failure class
+    ``hermes_cli.sqlite_safe_read`` exists to prevent (see #71724). Holding the lock means no connection can
+    appear mid-copy, across the main file and every sidecar.
     """
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     snapshot_source = snapshot_dir / source.name
@@ -1011,6 +1017,7 @@ def _recover_via_lost_and_found(
     verification.update(loss_detected=True, complete=False)
     # Structural checks cannot see a positional mis-mapping: every row still inserts, so integrity/FK/FTS
     # stay green. A systematic timestamp violation is the semantic tell — never report such a salvage as verified.
+    # See #101409.
     plausibility_conn = sqlite3.connect(str(output), isolation_level=None)
     try:
         plausibility_errors = _lost_and_found_plausibility_errors(plausibility_conn)

@@ -127,6 +127,11 @@ class TurnLivenessWatchdog:
             return None
         # Observational only: the commit below can still veto the abort if progress
         # resumed; the definitive settlement is _surface_committed_abort.
+        # Pre-commit surface is OBSERVATIONAL only: it reports the stall and that a recovery attempt is
+        # beginning. It must not claim the abort or the lease withdrawal has committed — the next operation
+        # can still veto the outcome. The definitive aborted/lease-stopped settlement is published by
+        # _surface_committed_abort only after _commit_abort succeeds and the turn is deactivated (#95663
+        # review).
         self._surface_stall(snapshot)
         message = f"Turn made no progress for {int(snapshot.idle_seconds)}s; aborting to release the session."
         if not self._commit_abort(snapshot, message):
@@ -178,7 +183,13 @@ class TurnLivenessWatchdog:
         )
 
     def _surface_committed_abort(self, snapshot: ActivitySnapshot) -> None:
-        """Publish the definitive settlement once the abort has authority."""
+        """Publish the definitive settlement once the abort has authority.
+
+        Runs only once ``_commit_abort`` succeeded (the interrupt was published) and the turn lease was
+        deactivated: the turn IS force-aborted and lease renewal IS stopped, so stating that is now true.
+        Separated from the pre-commit surface so a declined abort never reports a committed outcome (#95663
+        review).
+        """
         logger.error(
             "Turn liveness watchdog aborted turn for session %s: "
             "no progress for %.1fs; turn interrupted and lease renewal "

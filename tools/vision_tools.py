@@ -267,6 +267,11 @@ _MAX_BASE64_BYTES = 20 * 1024 * 1024
 # Proactive embed caps for history reuse: the native path bakes the data URL into the tool
 # result, re-sent every later turn (a 4 MB embed cost ~100-260K billed tokens). Anthropic
 # downsamples to a 1568px long edge anyway, so pixels past that cost wire bytes for no fidelity.
+# The 20 MB hard ceiling / Anthropic 5 MB reject-cap still apply as safety nets; those are one-shot viewing
+# limits, not history-reuse sizes. A 4 MB / 7900px embed was observed at ~400K chars and ~100–260K billed
+# tokens per image (#92699), so we size for model reading instead: 256 KB keeps a 1568px screenshot cheap
+# enough to ride the session (PNGs that exceed it are downscaled further by the byte-budget ladder), well
+# under every provider's per-image limit.
 _EMBED_TARGET_BYTES = 256 * 1024
 _EMBED_MAX_DIMENSION = 1568
 
@@ -314,6 +319,9 @@ def _import_pillow_for_resize():
     except ImportError:
         try:
             from tools.lazy_deps import ensure as _ensure_dep
+            # prompt=False: never raise a blocking input() prompt mid-session. Under the interactive CLI
+            # prompt_toolkit owns stdin, so a bare input() deadlocks the terminal (#40490). The install is
+            # already gated by security.allow_lazy_installs, so reaching here is opt-in.
             _ensure_dep("tool.vision", prompt=False)
             from PIL import Image
         except Exception:
@@ -334,6 +342,12 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
     ``max_dimension``: force a downscale above this long edge even when bytes fit
     (Anthropic's 8000px cap is independent of bytes). ``force_jpeg``: re-encode PNG as JPEG
     when resizing — halving PNG dimensions destroys text legibility on dense screenshots.
+
+    Args: max_dimension: If set, images whose longest side exceeds this pixel count are forcibly downscaled
+    even if they're under the byte budget. Anthropic enforces an 8000 px per-side cap independently of the 5
+    MB byte cap. force_jpeg: Re-encode as JPEG even for PNG input when a resize is needed. History-reuse
+    embeds (#92699) opt in so a text-heavy screenshot keeps its readable resolution and shrinks via JPEG
+    quality instead. Images already under both caps are returned unchanged (still PNG).
     """
     file_size = image_path.stat().st_size
     estimated_b64 = (file_size * 4) // 3 + 100  # base64 ~4/3 + data URL header
@@ -602,6 +616,9 @@ async def _vision_analyze_native(
         # Proactive embed cap: this image is re-sent on every later turn, so resize DOWN to the
         # history-reuse target whenever the byte or long-edge cap is exceeded, not just at 20 MB.
         _scale_info: dict = {}
+        # Anthropic still rejects >5 MB / >8000px with a non-retryable 400, but those are one-shot viewing
+        # limits — history embeds are sized smaller so repeated vision_analyze turns don't blow the context
+        # (#92699).
         _over_dims = await _run_encode_on_cpu_executor(
             _image_exceeds_dimension, prepared.path, _EMBED_MAX_DIMENSION)
         if len(image_data_url) > _EMBED_TARGET_BYTES or _over_dims:
@@ -803,6 +820,8 @@ def check_vision_requirements() -> bool:
     Mirrors its fallback chain: explicit ``auxiliary.vision.provider``, then auto (main
     provider → openrouter → nous) — without the auto step the tool would vanish whenever
     the explicit name was unresolvable. Probe mode skips real SDK client construction.
+
+    See #31179.
     """
     try:
         from agent.auxiliary_client import aux_probe_mode, resolve_vision_provider_client
@@ -822,6 +841,9 @@ VISION_ANALYZE_SCHEMA = {
     # native result says so itself); region keeps its pre-effect guidance — a
     # model that doesn't know crops keep full resolution never zooms.
     "description": (
+        # Dieted (#95681): routing mechanics (native attach vs aux-model text fallback) removed — the route
+        # is automatic and the native path's own tool result says "you can see it natively now"; the schema
+        # doesn't need to predict plumbing.
         "Load an image into the conversation so you can see it. Call it "
         "any time the user references an image — then answer from what "
         "you see."

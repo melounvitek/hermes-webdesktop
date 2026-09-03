@@ -24,7 +24,11 @@ from agent.provider_base import ProviderBase
 def get_provider_env(name: str) -> str:
     """Config-aware env lookup (``os.environ`` first, then ``~/.hermes/.env``) so
     credentials set through the config layer are visible in gateway sessions /
-    delegate children / subprocess runs. Stripped value, or ``""`` when unset."""
+    delegate children / subprocess runs. Stripped value, or ``""`` when unset.
+
+    Falls back to a bare ``os.getenv`` when the config module is unavailable (stripped installs, early
+    import contexts). See #40190.
+    """
     try:
         from hermes_cli.config import get_env_value
 

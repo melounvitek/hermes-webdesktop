@@ -76,6 +76,7 @@ _GLOBAL_ENV_EXACT = frozenset({
     # API-server LISTENER settings — deployment config (compose/systemd env),
     # which the scoped runner reload must keep seeing or containers silently
     # lose the api_server platform. API_SERVER_KEY is a credential: NOT here.
+    # See #64674, #69379.
     "API_SERVER_ENABLED", "API_SERVER_HOST", "API_SERVER_PORT",
     "API_SERVER_CORS_ORIGINS",
     # Relay-connector ROUTING stamps injected by managed deploys. Every reader

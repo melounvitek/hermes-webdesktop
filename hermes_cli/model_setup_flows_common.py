@@ -225,6 +225,7 @@ def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_n
         # A keyed ``providers.<key>`` endpoint stores under the durable slug while
         # legacy pools keep ``custom:<display-name>``; every identity the active
         # endpoint may occupy must be skipped or its own legacy pool gets pruned.
+        # See #100413.
         active_pool_keys = {
             str(key).strip().lower()
             for key in custom_provider_pool_key_candidates(base_url, provider_name=provider_name or None)}

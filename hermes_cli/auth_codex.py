@@ -111,6 +111,13 @@ def _sync_codex_pool_entries(
     access_token equals the PREVIOUS singleton token — a legacy alias of the singleton; an entry
     with its own token material is an independent account and must be left alone. ``manual:api_key``
     and any other source are independent credentials and are never overwritten by a re-auth.
+
+    See #33000, #39236.
+    The original #33538 fix refreshed every ``manual:device_code`` entry unconditionally. That worked when
+    ``manual:device_code`` only meant "legacy alias of the singleton", but the same source string is now
+    also produced by independent-account additions, and the broad sync silently clobbered distinct accounts
+    with the latest-authenticated token pair. The access_token-match check distinguishes the two cases
+    without changing the source-string contract.
     """
     access_token = tokens.get("access_token")
     if not access_token:
@@ -220,6 +227,11 @@ def _codex_http_client(**kwargs: Any) -> "httpx.Client":
     A host advertising AAAA records but blackholing IPv6 makes each serial connect eat the full
     timeout before IPv4 is tried (same failure mode as the chat transport). Best-effort: if the
     racing backend can't be installed (mocked client in tests), serial connect behavior remains.
+
+    Same broken-IPv6 failure mode as the chat transport (#13834): a host that advertises AAAA records but
+    blackholes IPv6 makes each serial connect attempt eat the full connect timeout before IPv4 is tried, so
+    token refresh / device login / usage probes time out where the official Codex CLI (which races families
+    per RFC 8305) works.
     """
     client = httpx.Client(**kwargs)
     with suppress(Exception):
@@ -371,6 +383,12 @@ def resolve_codex_runtime_credentials(
 
     Falls back to the credential pool when the singleton (``providers.openai-codex.tokens``) has no
     usable access_token but the pool (``credential_pool.openai-codex``) does.
+
+    This closes the divergence between the chat path (singleton-only via this function) and the auxiliary
+    path (pool-first via ``_read_codex_access_token``). Without this fallback, a user whose tokens live only
+    in the pool — for example after a manual pool seed, a partial re-auth, or pool-only restoration from a
+    backup — gets a bare HTTP 401 ``Missing Authentication header`` from the wire instead of a usable
+    credential. See issue #32992.
     """
     from hermes_cli.auth import (
         _auth_store_lock, _codex_access_token_is_expiring, _probe_codex_quota_restored,
@@ -655,6 +673,10 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
 
 def _codex_login_rate_limited_error(response: "httpx.Response", *, during: str = "") -> AuthError:
     """AuthError for a 429 from OpenAI's device-auth endpoints (throttle, not credential fault)."""
+    # Upstream rate-limit / usage-quota exhaustion on the token endpoint. The stored refresh token is still
+    # valid here — re-authenticating cannot lift a quota cap. Classify distinctly from auth failures so
+    # callers surface a "retry later" notice instead of a misleading "run hermes auth" prompt (see issue
+    # #32790).
     retry_after = _parse_retry_after_seconds(getattr(response, "headers", None))
     wait_hint = (
         f" Try again in about {retry_after}s." if retry_after is not None

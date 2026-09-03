@@ -50,7 +50,12 @@ def _migrate_sibling_profile_configs() -> list[tuple[str, int, int]]:
     """Migrate every SIBLING profile's config.yaml (the shared checkout serves all profiles). Per
     sibling (active skipped): scope via the context-local HERMES_HOME override (never ``os.environ``)
     and run the NON-INTERACTIVE quiet migration — prompt-requiring settings wait for that profile's
-    own session. Returns ``[(name, from_version, to_version), ...]``; never raises."""
+    own session. Returns ``[(name, from_version, to_version), ...]``; never raises.
+
+    91277 Phase 2 (fleet-wide config migration; #20438/#54926/#79048): the shared checkout serves every
+    profile, but ``hermes update`` historically migrated only the active profile's config — siblings drifted
+    versions until their gateway hit a config the new code couldn't read.
+    """
     from hermes_cli.update_cmd import _run_config_check_fresh, _run_migrate_config_fresh
     migrated: list[tuple[str, int, int]] = []
     with _best_effort('Sibling profile enumeration failed: %s'):
@@ -103,6 +108,10 @@ def _restore_snapshot_safety_nets(pre_update_snapshot_id) -> None:
             f"{', '.join(r['keys'])} from pre-update snapshot {r['snapshot_id']}.")
 
     with _best_effort("Cron jobs auto-restore check failed: %s"):
+        # Safety net: config-version migrations have been observed to leave cron/jobs.json valid-but-empty,
+        # silently dropping every scheduled job (issue #34600). The desktop scheduler can also overwrite
+        # with its own small set, causing partial loss (issue #52144). If the live file now has fewer jobs
+        # than the pre-update snapshot, restore it and warn loudly.
         from hermes_cli.backup import restore_cron_jobs_if_emptied
         cron_restore = restore_cron_jobs_if_emptied(pre_update_snapshot_id)
         if cron_restore:
@@ -155,7 +164,10 @@ def _check_and_apply_config_migration(
 ) -> None:
     """Check/apply config migrations with freshly-reloaded modules. Runs on EVERY completion path
     (post-pull, venv-repair, Node-deps repair on ``commit_count == 0``) so an interrupted update
-    that already pulled code doesn't strand an old config version."""
+    that already pulled code doesn't strand an old config version.
+
+    See #91360.
+    """
     from hermes_cli.update_cmd import (
         _migrate_sibling_profile_configs, _reload_config_modules, _run_config_check_fresh,
         _run_migrate_config_fresh)
@@ -166,6 +178,7 @@ def _check_and_apply_config_migration(
     from hermes_cli.config import get_missing_env_vars, get_missing_config_fields
     # A config-check failure must not break an otherwise-successful update.
     try:
+        # Log, point at the manual command, and return. See #91360.
         missing_env = get_missing_env_vars(required_only=True)
         missing_config = get_missing_config_fields()
         current_ver, latest_ver = _run_config_check_fresh()
@@ -189,6 +202,8 @@ def _check_and_apply_config_migration(
             print("  ✓ Config format updated (no new settings to configure)")
             # quiet=True also mutes steps that RESET/REMOVE a setting; re-surface them so an
             # unattended update never silently changes config (config_added holds only mutations here).
+            # In this branch missing_config is empty, so config_added can only contain migration-step
+            # mutations, not missing-key listings. See #81946, #86656.
             for _note in _mig_results.get("config_added") or []:
                 print(f"  ℹ {_note}")
             for _warn in _mig_results.get("warnings") or []:

@@ -101,7 +101,10 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
         """The Honcho client, refreshing a near-expiry OAuth token in place. Always goes through
         ``get_honcho_client`` WITH this manager's bound config: a long session can't outlive its
         1h access token, and daemon threads can't see the ambient ContextVar profile, so a bare
-        ``get_honcho_client()`` would migrate them onto the first-built profile."""
+        ``get_honcho_client()`` would migrate them onto the first-built profile.
+
+        See #69123, #74065.
+        """
         self._honcho = get_honcho_client(self._config)
         return self._honcho
 
@@ -218,6 +221,7 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
         # Gateway sessions normally use the platform-native runtime identity so multi-user
         # bots scope memory per user; config can alias/prefix it, or pinPeerName pins all
         # identities to peerName for single-user deployments (see _resolve_user_peer_id).
+        # Determine peer IDs — no lock needed (read-only, no shared state mutation). See #14984.
         user_peer_id = self._resolve_user_peer_id(key)
         assistant_peer_id = self._sanitize_id(self._config.ai_peer if self._config else "hermes-assistant")
 

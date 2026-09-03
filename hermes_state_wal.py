@@ -94,7 +94,14 @@ def _darwin_pragma(conn: sqlite3.Connection, pragma: str) -> None:
 def _apply_macos_checkpoint_barrier(conn: sqlite3.Connection) -> None:
     """Enable ``PRAGMA checkpoint_fullfsync`` on macOS. Apple's ``fsync(2)`` guarantees neither data-on-platter nor
     ordering, so without ``F_FULLFSYNC`` a launchd shutdown can turn a "durable" checkpoint into a malformed
-    ``state.db``. Checkpoint boundaries only (~+0.1 ms/commit vs ~+4 ms for ``fullfsync=1``)."""
+    ``state.db``. Checkpoint boundaries only (~+0.1 ms/commit vs ~+4 ms for ``fullfsync=1``).
+
+    During a launchd *system* shutdown/reboot the OS page cache is dropped (effectively a power-loss event
+    for in-flight pages), so a WAL checkpoint whose ``fsync()`` "reported" durable may never have hit the
+    platter — corrupting ``state.db`` with a malformed image. This is the trigger in issue #30636 ("SIGTERM
+    during launchd shutdown under high load"), distinct from a plain in-session kill (which the page cache
+    survives and SQLite recovers from).
+    """
     _darwin_pragma(conn, "PRAGMA checkpoint_fullfsync=1")
 
 
@@ -176,7 +183,16 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
 
     Invariant on every path: never downgrade to DELETE if the on-disk header reports WAL or cannot be read — other
     gateway/cron/worker connections may hold the DB open, and a live downgrade destroys their uncheckpointed
-    commits."""
+    commits.
+
+    An earlier revision of the lock-cancellation fix (#71724) reverted it on the theory that DELETE was "the
+    mode that corrupts", but that comparison was confounded: the clean WAL result came from SQLite 3.53.1,
+    which carries BOTH the WAL-reset fix AND 3.51.0's defenses against close()-broken POSIX locks, so it
+    says nothing about 3.50.4. Re-measured on the actually-bundled 3.50.4 with the lock fix in place, WAL
+    and DELETE are both clean (0/3 each) — i.e. there is no evidence that WAL is safer here, and upstream
+    still documents the WAL-reset bug as real through 3.51.2 with serious consequences. Until a fixed
+    runtime is delivered, keep new databases out of WAL.
+    """
     from hermes_state import is_sqlite_wal_reset_vulnerable, resolve_journal_mode
     configured = resolve_journal_mode()
 
@@ -194,6 +210,8 @@ def apply_wal_with_fallback(conn: sqlite3.Connection, *, db_label: str = "state.
         return "wal"
 
     if configured == "delete":
+        # #68545: honor the canonical database.journal_mode setting. Existing on-disk WAL databases were
+        # returned above and are never live-downgraded.
         if current_mode is None:
             # Probe failed (locked/busy): ownership not provably exclusive. Fail loudly.
             raise sqlite3.OperationalError(_CANNOT_VERIFY_DELETE_MSG)
@@ -230,6 +248,13 @@ def _enable_wal(conn: sqlite3.Connection, db_label: str, require_wal: bool, curr
         msg = str(exc).lower()
         if not any(marker in msg for marker in _WAL_INCOMPAT_MARKERS):
             raise  # unrelated OperationalError — don't silently swallow
+        # ``disk i/o error`` is ambiguous: on ZFS / APFS-CoW it is a deterministic WAL-incompatibility (SHM
+        # corruption under concurrent connection bursts — #55305, #71498), but it can also be a one-shot
+        # transient EIO (page-cache pressure, brief lock contention). Treating a transient EIO as a
+        # permanent downgrade signal produced the mixed-journal-mode corruption pattern fixed in 5c49cd0ed0
+        # (process A downgrades to DELETE while sibling processes set WAL). Disambiguate by retrying the
+        # pragma a couple of times: transient EIO clears and we return "wal"; the deterministic filesystem
+        # cases keep failing and fall through to the guarded DELETE fallback.
         if "disk i/o error" in msg:
             # Retry twice: EIO is either deterministic WAL-incompatibility (ZFS / APFS-CoW) or a one-shot transient,
             # and treating a transient as a permanent downgrade produced mixed-mode corruption (A downgrades to
@@ -316,7 +341,10 @@ def _apply_delete_for_wal_reset_bug(conn: sqlite3.Connection, *, db_label: str, 
 
 
 def _wal_reset_repair_hint() -> str:
-    """Repair hint matching what ``hermes update`` can actually do for this install type."""
+    """Repair hint matching what ``hermes update`` can actually do for this install type.
+
+    See #75153.
+    """
     try:
         from hermes_cli.config import detect_install_method, get_project_root, recommended_update_command_for_method
         method = detect_install_method(get_project_root())

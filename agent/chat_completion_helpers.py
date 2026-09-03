@@ -30,6 +30,9 @@ from agent.errors import EmptyStreamError
 from agent.fast_mode import effective_request_overrides
 from agent.turn_context import substitute_api_content
 from agent.gemini_native_adapter import is_native_gemini_base_url
+# Remote endpoints must never be fingerprinted: the probe waterfall is only valid for local/LM-Studio/Ollama
+# boxes. Non-Ollama remotes (sglang, vLLM, OpenAI-compat) expose Ollama-compat endpoints that can
+# misidentify and, without an api_key, return 401 on every leg (issue #89863).
 from agent.model_metadata import is_local_endpoint
 from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
@@ -1630,6 +1633,18 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
         "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments}}
     # Preserve extra_content (Gemini thought_signature) or Gemini 3 thinking
     # models 400 on the next request.
+    # Tool-call arguments are intentionally NOT redacted here. This dict enters the in-memory conversation
+    # history that is replayed to the model on every subsequent turn AND persisted to state.db, which is
+    # itself replayed verbatim on session resume (get_messages_as_conversation). Masking a credential to
+    # `***` here poisons that replay: the model reads back its own `PGPASSWORD='***' psql ...` call and
+    # copies the placeholder into the next tool call, breaking every credential-dependent command on the
+    # second turn (#43083). The masking also provided no real protection — the same secret still leaks
+    # verbatim through tool OUTPUT (file contents, command output, diffs, the compaction block), none of
+    # which this pass ever touched. Keeping secrets out of the replayable store is a separate
+    # tokenization/vault concern, not something arg-redaction can deliver without breaking replay.
+    # Storage-time redaction remains governed by the `security.redact_secrets` toggle. (#19798 introduced
+    # this; #43083 removed it.) Preserve extra_content (e.g. Gemini thought_signature) so it is sent back on
+    # subsequent API calls. Without this, Gemini 3 thinking models reject the request with a 400 error.
     extra = getattr(tool_call, "extra_content", None)
     if extra is not None:
         tc_dict["extra_content"] = _dump_if_model(extra)
@@ -1658,6 +1673,11 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     elif assistant_tool_calls and agent._needs_thinking_reasoning_pad():
         # DeepSeek v4 / Kimi thinking modes 400 on a replayed tool-call message without
         # reasoning_content; pad with a single space (empty string is rejected too).
+        # Without it, replaying the persisted message causes HTTP 400 ("The reasoning_content in the
+        # thinking mode must be passed back to the API"). Include streamed reasoning text when captured;
+        # otherwise pad with a single space — DeepSeek V4 Pro tightened validation and rejects empty string
+        # ("The reasoning content in the thinking mode must be passed back to the API"). A space satisfies
+        # non-empty checks everywhere without leaking fabricated reasoning. Refs #15250, #17400, #17341.
         msg["reasoning_content"] = reasoning_text or " "
     elif reasoning_text:
         # Streaming-only providers accumulate reasoning via deltas and never set
@@ -1665,6 +1685,16 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         # Promote ONLY when nothing set the field: SDK reasoning_content and the
         # tool-call pad win, and reasoning-less turns leave the field absent so
         # the replay-time leak guard and promotion tiers still apply.
+        # Additive fallback (refs #16844, #16884). Streaming-only providers (glm, MiniMax, gpt-5.x via aigw,
+        # Anthropic via openai-compat shims) accumulate reasoning through ``delta.reasoning_content`` chunks
+        # but never land it on the message object as a top-level attribute, so neither branch above fires
+        # and the chain-of-thought is stored only under the internal ``reasoning`` key. When the user later
+        # replays that history through a DeepSeek-v4 / Kimi thinking model, the missing
+        # ``reasoning_content`` causes HTTP 400 ("The reasoning_content in the thinking mode must be passed
+        # back to the API."). Promote the already-sanitized streamed ``reasoning_text`` to
+        # ``reasoning_content`` at write time, but ONLY when no prior branch already set it AND we actually
+        # captured reasoning text. This preserves every existing behavior: - SDK-exposed
+        # ``reasoning_content`` (OpenAI/Moonshot/DeepSeek SDK) still wins.
         msg["reasoning_content"] = reasoning_text
 
     if getattr(assistant_message, "reasoning_details", None):
@@ -1874,6 +1904,8 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
         return True
     # Identity semantics (axes, shim aliases, credential surfaces, multi-endpoint pools)
     # are owned by agent.backend_identity — do not re-implement comparisons here.
+    # Skip entries that resolve to the same backend that just failed — falling back to it loops the failure.
+    # See #22548, #62984, #70893.
     from agent.backend_identity import BackendIdentity, should_skip_candidate
     current_ident = BackendIdentity.build(provider=getattr(agent, "provider", ""),
         model=getattr(agent, "model", ""), base_url=str(getattr(agent, "base_url", "") or ""))
@@ -1937,6 +1969,8 @@ def _reresolve_fallback_reasoning_config(agent) -> None:
     """Per-model override > global reasoning_effort (YAML False = disabled); a config load
     failure keeps the current reasoning_config rather than killing the swap."""
     try:
+        # Re-resolve reasoning_config for the new fallback model (Closes #21256). Wrapped in try/except
+        # because a config load failure must not kill the swap.
         from hermes_cli.config import load_config
         from hermes_constants import resolve_reasoning_config
         agent.reasoning_config = resolve_reasoning_config(load_config() or {}, agent.model)
@@ -2032,6 +2066,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
 
         # Clear the per-config context_length override so the fallback model's own context
         # window is resolved instead of the previous model's stale value.
+        # See #22387.
         agent._config_context_length = None
         agent.model, agent.provider, agent.requested_provider = fb_model, fb_provider, fb_provider
         agent.base_url, agent.api_mode = fb_base_url, fb_api_mode
@@ -2102,6 +2137,13 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
             api_msg.pop(key, None)
         # api_content holds the exact bytes the main loop sent; substituting (not popping)
         # keeps the summary's prefix identical instead of re-prefilling the largest context.
+        # Strict OpenAI-compatible gateways (Fireworks-backed OpenCode Go, Mistral, Moonshot/Kimi) reject
+        # any message key outside the Chat Completions schema. The main loop drops these via
+        # ChatCompletionsTransport.convert_messages(), but the summary path hand-builds messages and calls
+        # chat.completions.create() directly, bypassing the transport — so mirror that sanitization here:
+        # tool_name (SQLite FTS bookkeeping), the codex_* reasoning carriers, timestamp (preserved on
+        # gateway user replay entries for the stale-confirmation expiry check — #47868 rejection class), and
+        # every Hermes-internal underscore-prefixed scaffolding key.
         substitute_api_content(api_msg)
         if needs_sanitize:
             agent._sanitize_tool_calls_for_strict_api(api_msg, model=sanitize_model)
@@ -2243,6 +2285,8 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     if getattr(agent, "suppress_status_output", False):
         # Strict machine-readable mode (-Q, oneshot): keep diagnostics off stdout. quiet_mode is
         # NOT the gate — the interactive CLI runs quiet_mode=True by default and must see this.
+        # Strict machine-readable mode (hermes chat -Q, oneshot, background review): keep diagnostics out of
+        # stdout so wrappers receive only the final assistant content (#93220 class).
         logger.warning(warning)
     else:
         agent._safe_print(warning)
@@ -2797,6 +2841,8 @@ class _StreamingCall:
         as in-stream chunks (choices=None + error_type/error_message), which
         would otherwise surface as a misleading EmptyStreamError plus retries."""
         usage = chunk.usage if hasattr(chunk, "usage") and chunk.usage else None  # final usage chunk
+        # Without this check the error is silently dropped and the stream ends empty → EmptyStreamError →
+        # misleading "empty stream" message and pointless retries on the same bad request. (#65631)
         _err_type = getattr(chunk, "error_type", None)
         _err_msg = getattr(chunk, "error_message", None)
         if _err_type or _err_msg:
@@ -2806,6 +2852,7 @@ class _StreamingCall:
             raise ProviderStreamError(status_code=_status, body=body, raw_text=f"{_err_type}: {_err_msg}")
         # Nous Portal usage frames (choices=[] + lastOne=true, no [DONE]) are a
         # clean terminal, not a drop; relabelled upstreams send 1 / "true".
+        # See #90848.
         last_one = getattr(chunk, "lastOne", None)
         if last_one is None and isinstance(getattr(chunk, "model_extra", None), dict):
             last_one = chunk.model_extra.get("lastOne")

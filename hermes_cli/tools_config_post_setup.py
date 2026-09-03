@@ -96,6 +96,18 @@ def _post_setup_agent_browser(post_setup_key: str) -> None:
     _ensure_browser_use_cli()
     try:
         # Lazy import so the tools_config UI doesn't pull in browser_tool at import time.
+        # agent-browser resolves lazily via npx on the default install (#43564), invisible to the
+        # PATH/node_modules probes above. Mirror the rung hermes_cli.doctor uses so this probe can't diverge
+        # from it, including the Termux carve-out (bare npx is too fragile to advertise as ready there — see
+        # check_browser_requirements).
+        # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
+        # for most installs, which a bare PATH + node_modules probe can't see. Mirror the local-CLI tail of
+        # :func:`tools.browser_tool.check_browser_requirements` (same cascade, same Termux carve-out) so the
+        # setup/status surfaces can't diverge from what browser tools actually find at runtime;
+        # validate=False keeps this a cheap existence check with no subprocess spawn.
+        # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
+        # (or a global/Hermes-managed install) instead of a local `npm install`, so there's no node_modules/
+        # population step here anymore.
         from tools.browser_tool import (
             _chromium_installed, _running_in_docker, _find_agent_browser, _resolve_npx_bin,
             _is_npx_agent_browser_sentinel, AGENT_BROWSER_NPX_SPEC)

@@ -30,6 +30,7 @@ def _probe_state_db(home: Path) -> dict[str, Any]:
         # writers. ``closing`` is required — sqlite3's context manager only commits/rolls
         # back, never closes, so a bare ``with connect()`` leaks a connection per poll.
         with closing(sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True, timeout=1.0)) as conn:
+            # A readiness probe must never compete with normal state writers. See #69567, #69678.
             conn.execute("PRAGMA query_only = ON")
             conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
         return _check("ok")

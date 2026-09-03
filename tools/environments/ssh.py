@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Windows OpenSSH has no Unix-socket ControlMaster: ControlPath/ControlMaster options
 # fail the connection outright ('getsockname failed: Not a socket'). Skip multiplexing there.
+# Skip multiplexing there; each command pays a fresh connection but the backend works. See #73927.
 _SSH_MULTIPLEX = os.name != "nt"
 
 

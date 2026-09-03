@@ -55,6 +55,9 @@ _DEFAULT_SIDECAR_BIND = "127.0.0.1"
 _MAX_MESSAGE_LENGTH = 8000  # iMessage caps practical size at ~16 KB; conservative, matches BlueBubbles
 # Out-of-process senders (cron, `hermes send`) need the live sidecar's port + spawn-time
 # token; persisted once /healthz passes, removed on every stop / failed-start path.
+# --------------------------------------------------------------------------- Sidecar runtime record The
+# gateway persists this record once the sidecar passes its /healthz readiness check, and removes it on every
+# stop / failed-start path so a stale record never outlives a dead sidecar. See #69960.
 _RUNTIME_RECORD_NAME = "photon-sidecar.json"
 _DEDUP_MAX_SIZE = 4000  # the gRPC stream is at-least-once and a reconnect can replay
 _DEDUP_WINDOW_SECONDS = 48 * 3600
@@ -1024,6 +1027,20 @@ class PhotonAdapter(BasePlatformAdapter):
                 # CancelledError into the fatal handler before the reconnect is queued, leaving
                 # Photon permanently dead — so let it finish exiting on its own.
                 if self._sidecar_supervisor_task is not asyncio.current_task():
+                    # _stop_sidecar() is called both from external cleanup (Gateway shutdown, explicit
+                    # disconnect) AND, indirectly, from WITHIN the supervisor task's own crash-handling
+                    # chain: _supervise_sidecar() detects the sidecar exit, calls _set_fatal_error() +
+                    # self._notify_fatal_error(), which the Gateway's fatal-error handler answers by calling
+                    # adapter.disconnect() -> this same _stop_sidecar(). In that second case,
+                    # self._sidecar_supervisor_task IS the currently-running task. Cancelling it raises
+                    # CancelledError into its own call stack (at the next await point in
+                    # _notify_fatal_error() or here), which aborts the fatal-error handler before the
+                    # Gateway ever reaches the "queue for background reconnection" step -- Photon then stays
+                    # permanently dead until a manual restart, since asyncio.CancelledError inherits from
+                    # BaseException (not Exception) and isn't caught by the handler's `except Exception`
+                    # guards (issue #73159). A task cannot legally cancel itself anyway (the cancellation
+                    # would only take effect at its own next await, which is exactly the corruption
+                    # described above), so skip it here and let the task finish exiting on its own instead.
                     self._sidecar_supervisor_task.cancel()
                 self._sidecar_supervisor_task = None
 
@@ -1301,7 +1318,10 @@ class PhotonAdapter(BasePlatformAdapter):
     @staticmethod
     def _is_permanent_sidecar_failure(result: SendResult) -> bool:
         """``auth_or_config`` / ``target_not_allowed`` can't be fixed by retrying or by the
-        plain-text resend — either would just double-send a doomed request."""
+        plain-text resend — either would just double-send a doomed request.
+
+        See #50971.
+        """
         raw = result.raw_response
         return (isinstance(raw, dict) and raw.get("retryable") is False
                 and raw.get("error_class") in ("auth_or_config", "target_not_allowed"))
@@ -1493,6 +1513,7 @@ def _standalone_error(resp: Any) -> Dict[str, Any]:
 def _standalone_token_from_record(port: int) -> Tuple[Optional[str], int, str]:
     """``(token, port, error)`` from the runtime record the gateway persists once the
     sidecar passes /healthz — the token otherwise exists only in the gateway env."""
+    # See #69960.
     record = _read_runtime_record()
     stale_hint = ""
     if record and record.get("token"):

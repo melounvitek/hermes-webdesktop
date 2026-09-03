@@ -35,6 +35,9 @@ def _heal_bare_custom_provider(provider, *, base_url, model):
     if str(provider or "").strip().lower() != "custom":
         return provider
     try:
+        # Heal bare "custom" persisted by older builds / gateway turns: it's the resolved billing class, not
+        # a routable identity. (Stricter than the TUI gateway's recovery, which keeps bare "custom" when a
+        # base_url exists — the CLI's resolve path would hard-fail on it, #14676.)
         from hermes_cli.runtime_provider import canonical_custom_identity
         return canonical_custom_identity(base_url=base_url or None, model=model or None) or None
     except Exception:
@@ -168,6 +171,12 @@ def _persist_global_switch(cli, result) -> None:
     HermesCLI._clear_persisted_context_for_model_switch(cli, result)
     save_config_value("model.default", result.new_model)
     save_config_value("model.provider", result.target_provider)
+    # base_url/api_mode were previously never persisted here, so a global switch left the OLD provider's
+    # endpoint/wire-protocol in config.yaml. result.base_url/api_mode are always freshly resolved for the
+    # target provider (see model_switch.py), so sync them every time; None clears a value the new provider
+    # doesn't need (#25106).
+    # See _apply_model_switch_result above for why base_url/api_mode must be synced on every global switch
+    # (#25106).
     save_config_value("model.base_url", result.base_url or None)
     save_config_value("model.api_mode", result.api_mode or None)
 
@@ -300,6 +309,12 @@ class CLIModelSwitchMixin:
         ``gateway_runtime`` (CLI --resume) and top-level keys (TUI session.resume) — from one
         or-None dict so stale keys are DELETED (``_merge_model_config_json`` only deletes on
         explicit None) and the shapes never diverge.
+
+        Writes the model column plus the runtime route so ``--resume`` (CLI, reads ``gateway_runtime``) and
+        ``session.resume`` (TUI/desktop, reads top-level ``model_config`` keys via
+        ``_stored_session_runtime_overrides``) both restore the switched provider instead of recombining the
+        model with the ambient default (#79536). Mirrors the gateway's ``update_session_model()`` call.
+        getattr: tests drive the switch paths with ``object.__new__`` stubs.
         """
         from cli import logger
         db = getattr(self, "_session_db", None)
@@ -310,6 +325,12 @@ class CLIModelSwitchMixin:
             "provider": _heal_bare_custom_provider(
                 result.target_provider, base_url=result.base_url, model=result.new_model,
             ) or None,
+            # Both shapes use the same or-None discipline so stale keys from a previous switch are deleted
+            # (not merely omitted) in BOTH the nested gateway_runtime dict (CLI reader) and the top-level
+            # keys (TUI gateway reader). _merge_model_config_json only deletes on explicit None, so falsy
+            # values must be converted, not filtered. Deriving the top-level from **route guarantees the two
+            # shapes can never diverge — the asymmetry that caused the original stale-key bug (#85261
+            # simplify-code review).
             "base_url": result.base_url or None,
             "api_mode": result.api_mode or None}
         try:
@@ -563,6 +584,11 @@ class CLIModelSwitchMixin:
                     api_key=result.api_key, base_url=result.base_url, api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None))
             except Exception as exc:
+                # The agent rolled itself back to the old working model/client. Roll the CLI's own staged
+                # fields back too and abort the rest of the commit (note + success print) so a failed switch
+                # is a no-op rather than a dead session (#50163).
+                # Agent rolled itself back; roll the CLI back too and abort so a failed switch is a no-op
+                # rather than a dead session (#50163).
                 for _k, _v in _cli_snapshot.items():
                     setattr(self, _k, _v)
                 _cprint(

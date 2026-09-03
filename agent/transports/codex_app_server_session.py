@@ -328,6 +328,11 @@ class CodexAppServerSession:
         """Send a user message and block until turn/completed, bridging approvals and projecting items.
 
         post_tool_quiet_timeout: silence this long after a tool completes fast-fails and retires.
+
+        post_tool_quiet_timeout: if codex emits a tool completion and then goes quiet for this many seconds
+        without emitting another item or `turn/completed`, fast-fail and mark the session for retirement.
+        Mirrors openclaw beta.8's post-tool completion watchdog (#81697) so a wedged codex doesn't burn the
+        full turn deadline.
         """
         result = TurnResult()
         if self._start_for(result):

@@ -199,7 +199,11 @@ def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:
 
 def _update_read_timestamp(filepath: str, task_id: str) -> None:
     """After a successful write: invalidate dedup and refresh the stored mtime so
-    consecutive edits by the same task don't trigger false staleness warnings."""
+    consecutive edits by the same task don't trigger false staleness warnings.
+
+    Also invalidates the dedup cache for the written path so that subsequent reads return fresh content
+    (fixes #13144).
+    """
     _invalidate_dedup_for_path(filepath, task_id)
     resolved = _resolved_or_none(filepath, task_id)
     if resolved is None:

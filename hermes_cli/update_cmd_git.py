@@ -46,7 +46,12 @@ def _prune_orphan_rescue_refs(
     Each ref pins a possibly multi-GB snapshot against ``git gc``, so a repeatedly corrupted install would
     grow ``.git`` unbounded. Keep the ``keep`` newest AND drop any older than ``max_age_days`` by the
     ``YYYYMMDD-HHMMSS`` stamp (unparseable names left alone); names sort chronologically so
-    ``for-each-ref`` order is creation order. Best-effort, never blocks."""
+    ``for-each-ref`` order is creation order. Best-effort, never blocks.
+
+    A rescue ref pins every object reachable from that commit against ``git gc`` — and in the incident shape
+    those objects include a full working-tree snapshot (the autostash orphan commit), which can be multi-GB
+    when the tree holds large stray files. See #87694.
+    """
     from hermes_cli.update_cmd import _git_run
     with suppress(OSError):
         prefix = f"refs/hermes-update-backups/orphan-{branch}-"
@@ -264,7 +269,10 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
 
     Returns True only when origin/main was actually verified against upstream/main; False when the check never
     happened, so the caller never reports "up to date" on an origin-only compare. Fetches only upstream/main:
-    a bare fetch drags in thousands of auto-generated branches."""
+    a bare fetch drags in thousands of auto-generated branches.
+
+    See #97052.
+    """
     from hermes_cli.update_cmd import _count_commits_between, _has_upstream_remote, _no_prompt_git_kwargs, _should_skip_upstream_prompt
     if not _has_upstream_remote(git_cmd, cwd) and (
         _should_skip_upstream_prompt() or not _offer_upstream_remote(git_cmd, cwd, assume_yes=assume_yes, input_fn=input_fn)
@@ -359,13 +367,22 @@ def _git_is_trampoline(git_cmd: list) -> bool:
 
     The ~46KB ``bin\\git.exe``/``cmd\\git.exe`` shims re-exec git-core; when they can't find it every call
     dies with the launcher's guard message (a PATH problem, not network). Never raises; unknown states
-    report False so a probe failure can't block an update."""
+    report False so a probe failure can't block an update.
+
+    Git for Windows ships two ~46KB shims (``bin\\git.exe``, ``cmd\\git.exe``) that re-exec the real
+    ``mingw64\\libexec\\git-core\\git.exe``. See #87876.
+    """
     return _probe_fork_bomb(git_cmd) is True
 
 
 def _portable_git_candidates() -> list:
     """PortableGit candidates: shared root first (where the managed tree actually lives, not the
-    profile-scoped HERMES_HOME), then profile home as a fallback for custom layouts."""
+    profile-scoped HERMES_HOME), then profile home as a fallback for custom layouts.
+
+    The Hermes-managed PortableGit tree lives under the SHARED root (``<root>/git/...``), not the
+    profile-scoped HERMES_HOME (``<root>/profiles/<name>``), so a profile-scoped ``hermes update`` must look
+    there (monerostar review, #87876).
+    """
     from hermes_cli.update_cmd import get_default_hermes_root, get_hermes_home
     candidates = []
     with suppress(Exception):
@@ -376,7 +393,12 @@ def _portable_git_candidates() -> list:
 def _locate_real_git() -> Optional[Path]:
     """Find a real Git-for-Windows ``git-core/git.exe`` (standard locations + managed PortableGit) that runs
     without the trampoline guard. None when nothing suits — callers keep the broken command and let the
-    fetch-failure ZIP fallback handle it. A failed probe (None) disqualifies a candidate like a guard hit."""
+    fetch-failure ZIP fallback handle it. A failed probe (None) disqualifies a candidate like a guard hit.
+
+    The trampoline symptom is PATH-level: ``bin\\git.exe`` / ``cmd\\git.exe`` (both ~46KB shims) fail to
+    re-exec git-core, while the real binary at ``mingw64\\libexec\\git-core\\git.exe`` (≈4.4MB) works when
+    invoked directly (#87876).
+    """
     candidates = [
         Path(r"C:\Program Files\Git\mingw64\libexec\git-core\git.exe"),
         Path(r"C:\Program Files (x86)\Git\mingw64\libexec\git-core\git.exe"),
@@ -424,7 +446,12 @@ def _normalize_managed_eol(git_cmd, repo_root):
     fix them. Pin and cleanup are one operation: under ``autocrlf=true`` a CRLF tree reads clean, so pinning
     alone would expose every file as modified (whole-tree autostash). Pin only after the tree verifies clean
     under it; a checkout we can't fully normalize is left as-is. Only ``true`` rewrites LF->CRLF
-    (unset/false/input leave the tree alone). Best-effort."""
+    (unset/false/input leave the tree alone). Best-effort.
+
+    Checkouts created before that landed never got the pin and cannot receive it — the bootstrap installer
+    reuses its build-pinned ``install.ps1`` forever — so ``hermes update``, which ships with the checkout
+    itself, is the only path left that can fix them. See #67730.
+    """
     from hermes_cli.update_cmd import _git_run
     # -c, not config: evaluate the tree as it WOULD look pinned, persisting nothing.
     probe = git_cmd + ["-c", "core.autocrlf=false"]

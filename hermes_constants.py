@@ -271,6 +271,11 @@ def get_hermes_dir(new_subpath: str, old_name: str, *, home: Path | None = None)
     """Resolve a Hermes subdirectory, honouring a populated legacy ``<old_name>/`` (no migration).
 
     An empty legacy dir does NOT count (install scaffolds, manual mkdir) so it cannot shadow the new path.
+
+    A bare empty ``<old_name>/`` directory does **not** count as "the legacy install is in use" — install
+    scaffolds, manual ``mkdir`` work, and cleared-then-abandoned locations all create empty stubs that would
+    otherwise silently shadow real data populated at ``<new_subpath>/``. See #27602 for the pairing-store
+    regression where a dormant empty ``pairing/`` orphaned approved-user data in ``platforms/pairing/``.
     """
     home = home or get_hermes_home()
     old_path = home / old_name
@@ -340,6 +345,9 @@ _HERMES_NODE_TARGET_MAJOR = int(os.environ.get("HERMES_NODE_TARGET_MAJOR", "22")
 _managed_node_heal_attempted = False
 _NODE_BOOTSTRAP_SCRIPT = Path(__file__).resolve().parent / "scripts" / "lib" / "node-bootstrap.sh"
 
+# Install tree root (this file lives at <install_root>/hermes_constants.py). Used by secure_parent_dir() to
+# skip chmod on the install dir — chmodding it 0700 breaks hermes-user traversal in Docker (UID 10000). See
+# #25821, #93050.
 _INSTALL_ROOT = Path(__file__).resolve().parent
 
 
@@ -383,6 +391,8 @@ def managed_node_tree_in_use(home: Path | None = None) -> bool:
 
     Windows locks running executables against delete/overwrite, so the updater must not rewrite
     ``%HERMES_HOME%\\node`` while the desktop app holds it (``[WinError 5]`` on ``npm.cmd``).
+
+    Always ``False`` on POSIX, which has no equivalent lock semantics. See #80926.
     """
     if sys.platform != "win32":
         return False
@@ -522,6 +532,14 @@ def _heal_managed_node_windows(home: Path | None = None) -> bool | None:
     tree is in use and the heal is deferred — callers must not record the once-per-process attempt
     for ``None``. Staging-first (extract to ``node.new-*``, rename live aside, rename staged in) so
     an interrupted heal cannot gut the install; a refused rename *is* the in-use signal.
+
+    The replacement is staging-first: the new tree is fully downloaded and extracted to a sibling
+    ``node.new-*`` directory, then the live tree is renamed aside (``node.old-*``) and the staged tree
+    renamed into place. The live tree is never deleted before its replacement is ready, so an interrupted
+    heal cannot gut the running installation. Windows allows renaming a tree whose executables are running
+    (images are mapped with ``FILE_SHARE_DELETE`` — the same mechanism as the hermes.exe quarantine); when
+    the OS refuses the rename, that refusal *is* the in-use signal and the heal defers instead of forcing
+    the write and crashing with ``PermissionError: [WinError 5]`` on ``npm.cmd`` (#80926).
     """
     import time
 
@@ -587,6 +605,9 @@ def heal_hermes_managed_node() -> bool:
     """Redownload Hermes-managed Node when the tree exists but is broken; at most once per process.
 
     A Windows in-use deferral does NOT record the attempt so a later call can heal once free.
+
+    POSIX installs shell out to ``heal_managed_node`` in ``scripts/lib/node-bootstrap.sh``; Windows
+    downloads the portable zip directly (same source as ``install.ps1``). See #80926.
     """
     global _managed_node_heal_attempted
     if _managed_node_heal_attempted or not hermes_managed_node_tree_present():
@@ -675,6 +696,12 @@ def agent_browser_runnable(path: str | None) -> bool:
     """True when *path* is an agent-browser CLI that runs (``--version`` exits 0) or the npx fallback.
 
     Dead/wrong-arch/hung binaries are rejected so callers try the next candidate.
+
+    A bare presence check (``shutil.which`` / ``Path.exists``) is not enough: agent-browser's npm
+    ``postinstall`` re-points a *global* install symlink (e.g. ``/opt/homebrew/bin/agent-browser``) at our
+    local ``node_modules/agent-browser/bin/...`` binary, which then disappears on the next ``hermes update``
+    — leaving a **dangling symlink** that ``which`` still reports but exec fails on with exit 127 (issue
+    #48521). Callers that trust such a path silently break every browser tool.
     """
     if not path:
         return False
@@ -725,6 +752,7 @@ def secure_parent_dir(path: Path) -> None:
         return
     # Refuse the install tree: chmod 0700 breaks hermes-user traversal in Docker (UID 10000).
     # A credential file here means HERMES_HOME misresolved; surface it (caused production lockouts).
+    # See #25821, #93050.
     if parent == _INSTALL_ROOT or _INSTALL_ROOT in parent.parents:
         import logging
 
@@ -991,7 +1019,10 @@ _container_detected: bool | None = None
 
 
 def is_container() -> bool:
-    """True inside a container (Docker/Podman/LXC/Kubernetes markers); cached per process."""
+    """True inside a container (Docker/Podman/LXC/Kubernetes markers); cached per process.
+
+    See: NousResearch/hermes-agent#47111
+    """
     global _container_detected
     if _container_detected is None:
         _container_detected = _detect_container()
@@ -1071,13 +1102,26 @@ def venv_bin_dir(venv_dir, *, windows: bool | None = None) -> Path:
     """Venv executable dir (``Scripts``/``bin``); *windows* lets tests exercise Windows paths on Linux.
 
     Returned unconditionally — callers differ on whether a missing venv is an error.
+
+    Canonical helper for venv layout. This was open-coded in seven places across four ``hermes_cli`` modules
+    using three different Windows predicates (``platform.system()``, ``is_windows()``, ``_is_windows()``);
+    each new call site had to re-derive it, and #76091 shipped an eighth copy because the correct behaviour
+    lived 2400 lines away in another function. A few sites outside ``hermes_cli``
+    (``tools/code_execution_tool.py``, ``agent/lsp/install.py``, ``agent/lsp/servers.py``) still hand-roll
+    it — convert them as they are touched.
     """
     windows = sys.platform == "win32" if windows is None else windows
     return Path(venv_dir) / ("Scripts" if windows else "bin")
 
 
 def project_venv_dir(project_root) -> Path | None:
-    """The project's ``venv`` or ``.venv`` dir when one exists (``uv venv`` defaults to ``.venv``)."""
+    """The project's ``venv`` or ``.venv`` dir when one exists (``uv venv`` defaults to ``.venv``).
+
+    ``uv venv`` defaults to ``.venv`` while our installers create ``venv``, so both layouts are in the wild.
+    Call sites that only knew about ``venv`` silently no-oped on a ``.venv`` install — that is how the
+    Windows shim-lock preflight skipped itself entirely (#79542). ``venv`` wins when both exist, matching
+    what the installers write.
+    """
     root = Path(project_root)
     return next((root / n for n in ("venv", ".venv") if (root / n).is_dir()), None)
 

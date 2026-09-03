@@ -13,6 +13,17 @@ logger = logging.getLogger("tools.cronjob_tools")
 
 # Strict patterns — user prompt only. A directive-shaped cron prompt has no business
 # containing `cat ~/.hermes/.env` or `rm -rf /`; there it is a smoking gun, not prose.
+# Two threat surfaces, two scanners: 1. `_scan_cron_prompt()` runs against this at create/update time and as
+# a runtime defense-in-depth. 2. Assembled prompt that includes loaded skill content (large markdown bodies,
+# often security docs, postmortems, runbooks discussing attack patterns in PROSE). Reusing the strict
+# patterns here false-positives every time a skill *describes* a command — see #3968 follow-up: the
+# `hermes-agent-dev` skill contains a security postmortem mentioning `cat ~/.hermes/.env`, which tripped
+# `read_secrets` and silently killed all PR-scout jobs. Skill bodies are user-curated and scanned at install
+# time by `skills_guard.py`. The runtime cron scan only needs to catch the patterns whose phrasing does NOT
+# survive normal English prose: classic prompt-injection directives ("ignore previous instructions",
+# "disregard your rules"), deception directives, and invisible unicode. `_scan_cron_skill_assembled()` runs
+# against the assembled prompt with this tighter pattern set. Both scanners share the invisible-unicode
+# check and the GitHub Authorization header exemption.
 _CRON_THREAT_PATTERNS = [
     (r'ignore\s+(?:\w+\s+)*(?:previous|all|above|prior)\s+(?:\w+\s+)*instructions', "prompt_injection"),
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),

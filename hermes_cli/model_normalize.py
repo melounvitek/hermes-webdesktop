@@ -48,6 +48,13 @@ _AUTHORITATIVE_NATIVE_PROVIDERS: frozenset[str] = frozenset({
 _MATCHING_PREFIX_STRIP_PROVIDERS: frozenset[str] = frozenset({
     "zai",
     "kimi-coding",
+    # Providers whose endpoint does not accept image input, even though the provider's broader ecosystem has
+    # vision models available elsewhere. When `auxiliary.vision.provider: auto` sees one of these as the
+    # main provider, it must skip straight to the aggregator chain instead of returning a client that will
+    # 404 on every vision request. kimi-coding / kimi-coding-cn: the Kimi Coding Plan routes through
+    # api.kimi.com/coding (Anthropic Messages wire) which Kimi's own docs describe as having no image_in
+    # capability. Vision lives on the separate Kimi Platform (api.moonshot.ai, OpenAI-wire, pay-as-you-go).
+    # See #17076.
     "kimi-coding-cn",
     "minimax",
     "minimax-oauth",
@@ -226,6 +233,7 @@ def normalize_model_for_provider(model_input: str, target_provider: str) -> str:
 
     # Copilot's own normalizer knows the alias table (vendor stripping, dash-to-dot repair for Claude)
     # and live-catalog lookups; without it dash-notation Claude ids hit HTTP 400 model_not_supported.
+    # See issue #6879.
     if provider in {"copilot", "copilot-acp"}:
         try:
             from hermes_cli.models import normalize_copilot_model_id

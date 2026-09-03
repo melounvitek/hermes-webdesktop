@@ -48,6 +48,7 @@ def is_auto_retryable(reason: str) -> bool:
 # sanctioned context mutation) on the same session first; everything else
 # (auth/quota/config/model/unknown) is never auto-retried — it can't be fixed by
 # a retry and only burns quota.
+# See #93091.
 RETRY_RESUME = "resume"
 RETRY_COMPRESS_THEN_RESUME = "compress_then_resume"
 RETRY_NONE = "none"

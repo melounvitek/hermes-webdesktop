@@ -26,6 +26,13 @@ logger = logging.getLogger("hermes_state")
 # while the index is complete-or-marker-gated. A stale index must keep its
 # triggers DROPPED — an external-content 'delete' for a rowid the index never
 # held is the canonical FTS5 corruption hazard.
+# The trigram tokenizer needs >=3 chars per query term, so 1-2 char CJK terms (ubiquitous in Korean/Chinese:
+# 일본, 구글, 项目, ...) fall through to a LIKE full-table scan — measured 3-6s CPU per query on multi-GB installs
+# and the dominant base cost of session_search on CJK workloads. ``cjk_unicode61`` (native/fts5_cjk/, a
+# ~250-line loadable FTS5 tokenizer with no dependencies) wraps unicode61: maximal CJK runs are re-emitted
+# as overlapping character bigrams (Lucene CJKAnalyzer semantics), everything else passes through unchanged.
+# FTS5 phrase semantics turn a query term's consecutive bigrams into exact substring matching down to 2
+# chars at index speed. Contributed by Soju06 (PR #65544).
 FTS_CJK_TABLE_SQL = """
 CREATE VIEW IF NOT EXISTS messages_fts_cjk_src AS
     SELECT id, role, content, tool_name, tool_calls
@@ -134,7 +141,14 @@ class SessionFtsSetupMixin:
     @staticmethod
     def _db_has_legacy_inline_fts(cursor: sqlite3.Cursor) -> bool:
         """messages_fts exists in ANY pre-v23 shape: every legacy shape lacks
-        tool_name, so "stored CREATE lacks tool_name" catches them all. False when absent."""
+        tool_name, so "stored CREATE lacks tool_name" catches them all. False when absent.
+
+        v23's messages_fts is external-content over THREE real columns (content, tool_name, tool_calls).
+        Every pre-v23 shape lacks the tool_name/tool_calls columns — whether the old inline single-column
+        form (v11..v22) or the even older external-content single-column form (v10-era, pre-#16751). We
+        therefore detect "needs optimize" as "the stored CREATE lacks the tool_name column", which is the
+        precise v23 marker and correctly catches BOTH legacy variants.
+        """
         row = cursor.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
         ).fetchone()

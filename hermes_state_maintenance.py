@@ -135,7 +135,12 @@ class SessionMaintenanceMixin:
         whose sessions predate its first heartbeat, bounded so a PID-reuse respawn cannot protect rows
         forever.  Disable the gate only for state.db-owned sources.  SELECT, live-lease validation and UPDATE
         run in one ``BEGIN IMMEDIATE`` transaction; active leases/locks spare the row, expired guards are
-        removed so their owner is fenced."""
+        removed so their owner is fenced.
+
+        See #65194.
+        ``exclude_pinned`` is intended for broad automatic sweeps; pinned rows remain explicitly
+        recoverable. See #60609.
+        """
         srcs = tuple(s for s in sources if s)
         if max_idle_seconds <= 0 or not srcs:
             return []
@@ -310,7 +315,13 @@ class SessionMaintenanceMixin:
 
     def _freelist_ratio(self) -> Optional[float]:
         """Reclaimable fraction (``freelist_count / page_count``) gating VACUUM in
-        :meth:`maybe_auto_prune_and_vacuum`; None = fall back to the time throttle."""
+        :meth:`maybe_auto_prune_and_vacuum`; None = fall back to the time throttle.
+
+        ``PRAGMA freelist_count / PRAGMA page_count`` read over the existing connection (never a byte-level
+        probe of the live file — see ``sqlite_safe_read``). This is what VACUUM would actually give back; it
+        is the gate :meth:`maybe_auto_prune_and_vacuum` uses to decide whether a full rewrite pays off
+        (#54189).
+        """
         values = self._page_pragmas(("page_count", "freelist_count"), "Could not read freelist ratio: %s")
         return None if values is None else (values[1] / values[0] if values[0] > 0 else 0.0)
 
@@ -356,7 +367,15 @@ class SessionMaintenanceMixin:
         :attr:`_AUTO_PRUNE_STALE_OPEN_SOURCES` older than ``retention_days`` are closed
         (``startup_orphan_reap``); they stay resumable and age from their close.  Returns ``{"skipped",
         "pruned", "closed", "vacuumed"}`` plus ``"freelist_ratio"`` when a VACUUM was considered and
-        ``"error"`` on failure."""
+        ``"error"`` on failure.
+
+        Records the last run timestamp in state_meta so subsequent calls within ``min_interval_hours``
+        no-op. Designed to be called once at startup from long-lived entrypoints (CLI, gateway, cron
+        scheduler). See #54189.
+        When *sessions_dir* is provided, on-disk transcript files (``.json`` / ``.jsonl`` /
+        ``request_dump_*``) for pruned sessions are removed as part of the same sweep (issue #3015).
+        Messaging and UI sources are never touched here. See #54189.
+        """
         from hermes_state import _release_auto_maintenance_lock, _try_acquire_auto_maintenance_lock
         result: Dict[str, Any] = {"skipped": False, "pruned": 0, "closed": 0, "vacuumed": False}
         maintenance_lock = _try_acquire_auto_maintenance_lock(self.db_path)

@@ -111,6 +111,12 @@ def _make_tool_filter(name: str, config: dict) -> Callable[[str], bool]:
     """Include/exclude predicate for a server's tool names: ``tools.include`` is a whitelist (``[]`` = register
     nothing), ``tools.exclude`` a blacklist; entries are exact names or fnmatch globs; include wins over exclude."""
     tools_filter = config.get("tools") or {}
+    # Selective tool loading: honour include/exclude lists from config. Rules (matching issue #690 spec,
+    # extended with glob support): tools.include — whitelist: only matching tool names are registered
+    # tools.exclude — blacklist: all tools EXCEPT matching ones are registered entries may be exact names or
+    # fnmatch globs (e.g. "*_radar_*") include takes precedence over exclude include: [] → register nothing
+    # (an explicit empty whitelist, as written by the install checklist's "uncheck everything" path) Neither
+    # set → register all tools (backward-compatible default)
     include_raw = tools_filter.get("include")
     include_set = _normalize_name_filter(include_raw, f"mcp_servers.{name}.tools.include")
     exclude_set = _normalize_name_filter(tools_filter.get("exclude"), f"mcp_servers.{name}.tools.exclude")
@@ -185,6 +191,14 @@ def _resolve_name_collisions(name: str, candidates: List[_Candidate]) -> List[_C
         unique.append(c)
     ambiguous: Dict[str, List[str]] = {}
     shadowed: set[tuple[str, str]] = set()
+    # A generated resource/prompt utility that normalizes onto a server-native tool's name must not knock
+    # that native tool out of the registry: the native tool is the capability the user connected the server
+    # for, while the generated utility (read_resource/list_resources/list_prompts/get_prompt) is optional
+    # sugar that only matters when the server exposes no such tool of its own (#87112). Resolve that
+    # specific collision in favour of the native tool — keep it, drop the shadowed utility — and fall back
+    # to the conservative skip-everything only for genuinely ambiguous collisions (two or more native tools
+    # normalizing to one name, which we cannot disambiguate). The four utility keys are distinct, so a
+    # colliding set holds at most one utility origin.
     for registry_name, origins in origins_by_name.items():
         if len(origins) <= 1:
             continue
@@ -243,6 +257,8 @@ def _register_candidates(name: str, candidates: List[_Candidate], *, check_fn: C
 def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should_register) -> None:
     """Write-through: persist the manifest so the next startup registers this server lazily (no spawn). Never raises."""
     try:
+        # Write-through (#56832): refresh the on-disk schema cache after a live connect so the next startup
+        # can lazily register this server without spawning it. Cache failures never break registration.
         from tools.mcp_schema_cache import config_fingerprint, write_cache_entry
         tools_payload = []
         for t in server._tools:
@@ -287,7 +303,11 @@ def _register_server_tools(name: str, server: "MCPServerTask", config: dict) -> 
 def _register_from_cache_sync(name: str, config: dict, entry: dict) -> List[str]:
     """Lazy startup: register from a cached manifest with no child process (first real call goes
     through ``_ensure_lazy_server_connected``). Trust metadata is recorded first so the
-    call-time gate is identical for live and cached registrations."""
+    call-time gate is identical for live and cached registrations.
+
+    Lazy startup (#56832, design by Vansh5632): tools appear in the registry immediately; the first real
+    call routes through ``_get_connected_server_for_call`` → ``_ensure_lazy_server_connected``.
+    """
     from tools.mcp_schema_cache import config_fingerprint, tools_from_cache_entry, utility_tools_from_cache_entry
     tool_timeout = _resolve_tool_timeout(config)
     cached_tools = _cached_tools(tools_from_cache_entry(entry))

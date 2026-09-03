@@ -332,6 +332,19 @@ def _sync_agent_to_session(cli, session_id: str, *, parent_session_id: str, reas
         cli.agent._invalidate_system_prompt()
     with suppress(Exception):
         _mm = getattr(cli.agent, "_memory_manager", None)
+        # Notify memory providers that session_id rotated to a fresh conversation. reset=True signals
+        # providers to flush accumulated per-session state (_session_turns, _turn_counter, _document_id).
+        # Fires BEFORE the plugin on_session_reset hook (shell hooks only see the new id; Python providers
+        # see the transition). See #6672. When the old session has history, end-of-session extraction
+        # (LLM-bound, seconds) and this switch are queued as ONE task on the memory manager's serialized
+        # worker — end strictly before switch, without blocking /new (#16454). With no history there is
+        # nothing to extract; switch inline as before.
+        # Notify memory providers that session_id rotated to a resumed session. reset=False — the provider's
+        # accumulated state is still valid; it just needs to target the new session_id for subsequent
+        # writes. See #6672.
+        # Notify memory providers that session_id forked to a new branch. reset=False — the branched session
+        # carries the transcript forward, so provider state tracks the lineage. parent_session_id links the
+        # branch back to the original. See #6672.
         if _mm is not None:
             _mm.on_session_switch(
                 session_id, parent_session_id=parent_session_id or "", reset=False, reason=reason)
@@ -616,6 +629,11 @@ class CLICommandsMixin:
             # No checkpoints for this dir → cross-project view (writes may sit under the session cwd).
             checkpoints = mgr.list_checkpoints(cwd)
             if not checkpoints:
+                # List checkpoints — fall back to the cross-project view when the current directory has none
+                # (#10505, reapply of PR #10633 by @nightq). The Aug 2026 QA sweep hit this live: writes
+                # landed checkpoints under the session cwd (/tmp/qa-repo) while bare /rollback searched only
+                # TERMINAL_CWD's project and reported "No checkpoints found" despite fresh checkpoints
+                # existing.
                 all_checkpoints = mgr.list_all_checkpoints()
                 if all_checkpoints:
                     print(f"  No checkpoints for {cwd} — showing all directories.")
@@ -870,7 +888,10 @@ class CLICommandsMixin:
     # ---- /stop, /agents -------------------------------------------------------------------
     def _handle_stop_command(self):
         """Handle /stop — kill all running background processes and background (async) delegations.
-        Separate from interrupt (stop the current turn), as in Codex."""
+        Separate from interrupt (stop the current turn), as in Codex.
+
+        See #14602.
+        """
         from tools.process_registry import process_registry
         running = [p for p in process_registry.list_sessions() if p.get("status") == "running"]
         # Background subagents live in their own registry, not the process registry.
@@ -905,6 +926,7 @@ class CLICommandsMixin:
                 status = d.get("status", "?")
                 line = f"    {d.get('delegation_id', '?')} · {status} · {(d.get('goal') or '')[:60]}"
                 # Live-status detail for in-flight delegations.
+                # See #51690.
                 if status == "stalling":
                     quiet = d.get("stalled_after_quiet_seconds")
                     if quiet is not None:
@@ -994,6 +1016,7 @@ class CLICommandsMixin:
             # Over SSH native tools write the REMOTE clipboard; OSC 52 reaches the user's terminal.
             # Locally, OSC 52 is the fallback when native tools are unavailable/fail (SSH/tmux).
             if is_remote_shell_session() or not write_clipboard_text(text):
+                # Fixes #31528.
                 self._write_osc52_clipboard(text)
                 _cp(f"  Copied assistant response #{idx + 1} via OSC 52 (terminal support required)")
             else:
@@ -1189,6 +1212,7 @@ class CLICommandsMixin:
                     f"  Resume it on this CLI later with: /resume {session_title}", "")
                 # _run_cleanup must NOT finalize the row on exit: the gateway owns it now, and an
                 # end_reason set under it would drop the handoff leg from session history/search.
+                # See #88234.
                 from cli import _handed_off_session_ids
                 _handed_off_session_ids.add(self.session_id)
                 self._should_exit = True  # same exit semantics as /quit
@@ -1240,6 +1264,10 @@ class CLICommandsMixin:
             if self._show_recent_sessions(reason="resume"):
                 # Arm a one-shot bare-number selection; must be the same list the table showed
                 # and the numbered branch resolves (all use _list_recent_sessions(limit=10)).
+                # Arm a one-shot pending-resume selection so the user can type just the number (`3`) on the
+                # next line instead of having to retype `/resume 3`. The list here must match the one shown
+                # by _show_recent_sessions and used for index resolution below — all three go through
+                # _list_recent_sessions(limit=10). See #34584.
                 self._pending_resume_sessions = self._list_recent_sessions(limit=10)
                 return
             return _cp("  Tip:   Use /history or `hermes sessions list` to find sessions.")
@@ -1278,6 +1306,11 @@ class CLICommandsMixin:
             _cp(f"  ↻ Resumed session {target_id}{title_part} — no messages, starting fresh.")
         # Same contract as startup --resume: retarget the tool cwd, restore the persisted YOLO
         # bypass (approval session key changed) and the model/provider (else config default).
+        # Retarget the process + tool cwd to where the session was started, so a mid-chat /resume (and
+        # /sessions <id>, which delegates here) lands in the same directory as a startup `hermes
+        # -c`/`--resume`. The startup resume paths already call this; without it, the terminal/code-exec
+        # tools and relative-path resolution keep operating in the wrong repo. Idempotent and a no-op when
+        # the session recorded no cwd. See #38562.
         self._restore_session_cwd(session_meta)
         self._restore_session_yolo(session_meta)
         self._restore_session_model(session_meta)
@@ -1301,6 +1334,8 @@ class CLICommandsMixin:
             return _cp(f"  Session not found: {target}",
                        "  Use /sessions or `hermes sessions list` to see available sessions.")
         try:
+            # If the target is the empty head of a compression chain, redirect to the descendant that
+            # actually holds the transcript. See #15000.
             resolved_id = self._session_db.resolve_resume_session_id(target_id)
         except Exception:
             resolved_id = target_id
@@ -1550,6 +1585,11 @@ class CLICommandsMixin:
         if not concept:
             # prompt_toolkit owns stdin on this daemon thread — raw input() never renders and eats
             # keystrokes; prefer the thread-aware helper (None when prompting isn't safe).
+            # Bare /hatch is dispatched from the process_loop daemon thread while prompt_toolkit owns stdin
+            # — a raw input() here types into a prompt that never renders and swallows the next keystrokes
+            # (same class as #23185; found in the Aug 2026 full-surface CLI QA sweep: bare /hatch left the
+            # session eating input until Ctrl+C). Route through the thread-aware prompt helper, which uses
+            # run_in_terminal on the main thread and cancels cleanly (None) when prompting isn't safe.
             prompt_helper = getattr(self, "_prompt_text_input", None)
             try:
                 concept = ((prompt_helper or input)("(o_o) Describe your pet: ") or "").strip()
@@ -1802,6 +1842,10 @@ class CLICommandsMixin:
         if store is None:
             # No live agent store (e.g. Desktop GUI): use a fresh on-disk store, as the gateway
             # does — same MEMORY/USER.md, same configured char limits.
+            # Apply against a freshly loaded on-disk store, mirroring the gateway path
+            # (gateway/slash_commands.py): it persists to the same MEMORY/USER.md and creates MEMORY.md on
+            # the first approved write. Without this the shared handler returns "memory store unavailable".
+            # See #46783.
             from tools.memory_tool import load_on_disk_store
             store = load_on_disk_store()
         out = handle_pending_subcommand(
@@ -1897,6 +1941,9 @@ class CLICommandsMixin:
                     if not self._agent_running:
                         self._spinner_text = text
                         if self._app:
+                            # Display result in the CLI (thread-safe via patch_stdout). Force a TUI refresh
+                            # first so spinner/status bar don't overlap with the output (fixes #2718).
+                            # Same TUI refresh pattern as success path (#2718)
                             self._app.invalidate()
 
                 bg_agent.thinking_callback = _bg_thinking
@@ -2190,6 +2237,15 @@ class CLICommandsMixin:
         _cp(f"  ▶ Goal resumed: {state.goal}")
         # Resume must restart work, not just flip state: queue the continuation prompt the same
         # way /goal <text> queues its kickoff.
+        # Resume must restart work, not just flip persisted state (#75362): enqueue the canonical
+        # continuation through the adapter FIFO — the same path the post-turn judge uses — so the next turn
+        # fires as soon as this reply is delivered. A real user message already queued still preempts
+        # naturally, and pause/clear's stale-continuation cleanup recognizes it.
+        # See #75362.
+        # An `exec` result is display-only — nothing would re-enter the conversation loop until the user
+        # typed another message. Return a `send` dispatch carrying the canonical continuation prompt so the
+        # client fires the next turn immediately; `display` keeps the transcript showing the concise
+        # invocation instead of the model-facing scaffolding. See #75362.
         prompt = mgr.next_continuation_prompt()
         if prompt and self._kick_goal(prompt):
             _cp(_dim_line('Continuing now — taking the next step.'))

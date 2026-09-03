@@ -156,6 +156,7 @@ class _StreamerPlayback:
         # macOS skips sounddevice entirely: PortAudio/CoreAudio init triggers a
         # kTCCServiceMediaLibrary prompt though output needs no media-library access.
         # None routes every sentence through tempfile -> afplay.
+        # See PR #62601 / #13291.
         if platform.system() == "Darwin":
             return None
         try:

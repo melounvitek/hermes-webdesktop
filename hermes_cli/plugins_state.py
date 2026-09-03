@@ -23,7 +23,10 @@ _PLUGIN_STATE_LOCKS_GUARD = threading.Lock()
 
 def _plugin_relative_segments(key: str) -> tuple[str, ...]:
     """Validate/split a plugin-relative settings key; global paths, traversal, and core roots are rejected
-    before any config read."""
+    before any config read.
+
+    The public API accepts only relative keys (``endpoint`` or ``retry.policy``). See #64227.
+    """
     if not isinstance(key, str):
         raise ValueError("Expected a plugin-relative config key string")
     segments = tuple(key.split("."))

@@ -243,7 +243,11 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         transport (which decodes stdout with ``errors="replace"`` and manufactures
         U+FFFD for every undecodable byte, including a multibyte char cut in half
         by ``head -c``). None when no clean base64 came back (no ``base64`` binary);
-        callers then fall back to the text heuristic."""
+        callers then fall back to the text heuristic.
+
+        Wrapping the sample in base64 lets the original bytes survive the transport, so binary detection can
+        happen at the byte layer where it is well-defined (#80308 and friends).
+        """
         result = self._exec(f"head -c {length} {self._escape_shell_arg(path)} 2>/dev/null | base64")
         if result.exit_code != 0:
             return None
@@ -270,7 +274,10 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         multibyte sequence at the very end (artifact of the byte-boundary cut).
         NUL bytes or mid-stream invalid UTF-8 stay read-only so a read→edit→write
         round-trip never rewrites undecodable bytes as U+FFFD; a file that
-        legitimately CONTAINS U+FFFD is valid UTF-8 and reads as text."""
+        legitimately CONTAINS U+FFFD is valid UTF-8 and reads as text.
+
+        See #80308.
+        """
         if not sample:
             return False
         if b"\x00" in sample:
@@ -374,6 +381,21 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
         tmpl = self._escape_shell_arg(".hermes-tmp.XXXXXX")
         script = (
             "set -e; "
+            # One shell script, fully quoted. Notes: - `mkdir -p "$d"` is folded in here so the parent
+            # directory is created in the same subprocess that writes the temp file — saves one entire
+            # subprocess spawn vs. a separate mkdir call. - `mktemp` lands the temp in the target's own dir
+            # (-p) so `mv` is same-FS atomic; we fall back to a PID-stamped name if the backend lacks mktemp
+            # (rare; busybox/macOS/Linux all ship it). - `chmod --reference` is GNU-only, so we read the
+            # octal mode with `stat` (GNU `-c%a` or BSD `-f%Lp`) and `chmod` it explicitly; silent
+            # best-effort — a perms-copy failure must not abort the write (the file then lands at mktemp's
+            # 0600, same as pre-fix). - brand-new targets get `chmod "=rw"` — the POSIX who-less symbolic
+            # form, which sets rw minus the process umask (e.g. 0644 under umask 022) instead of mktemp's
+            # hardcoded 0600 (#70856). Deliberately NOT shell arithmetic on `$(umask)`: zsh (reachable via
+            # _find_bash's $SHELL fallback) parses leading-zero constants as decimal and silently computes a
+            # garbage mode, while `chmod "=rw"` is spec-identical in bash/dash/ash/zsh and degrades to 0600
+            # (pre-fix behavior) if an exotic chmod rejects it. - `trap ... EXIT` guarantees the temp is
+            # removed on every error path (cat failure, mv failure, signal) but NOT after a successful mv
+            # (the temp no longer exists by then). - we `cat >` the temp, then `mv -f` it over the target.
             f"d={q_parent}; t={q_path}; "
             'if [ -L "$t" ]; then '
             'rt="$(readlink -f "$t" 2>/dev/null || realpath "$t" 2>/dev/null || true)"; '
@@ -390,6 +412,8 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
             '[ -n "$m" ] && chmod "$m" "$tmp" 2>/dev/null || true; '
             "fi; "
             'cat > "$tmp"; '
+            # new file: umask-default perms instead of mktemp's 0600 (#70856). Runs AFTER cat so a
+            # write-masking umask can't EACCES the stream; quoted "=rw" so zsh doesn't =word-expand it.
             'if [ ! -e "$t" ]; then chmod "=rw" "$tmp" 2>/dev/null || true; fi; '
             'mv -f "$tmp" "$t"; '
             "trap - EXIT")
@@ -452,6 +476,9 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     # → BE; both parities or a single zero → real binary. Legacy 8-bit
     # encodings (GBK, Big5) are never guessed — a wrong silent guess is worse
     # than a clear refusal.
+    # UTF-16 rescue constants (ported from MoonshotAI/kimi-code#2647, detection derived from VS Code's
+    # encoding sniffer): sample the leading bytes; trust a BOM first, then a zero-byte parity heuristic —
+    # zeros clustering at odd indices mean UTF-16 LE (`0xAA 0x00`), at even indices UTF-16 BE (`0x00 0xAA`).
     _UTF16_MAX_BYTES = 10 * 1024 * 1024
     _UTF16_SAMPLE_BYTES = 512
 
@@ -768,7 +795,13 @@ class ShellFileOperations(LintMixin, SearchMixin, FileOperations):
     def _read_binary_file(self, path: str, offset: int, limit: int,
                           file_size: int, sample_bytes: Optional[bytes]) -> ReadResult:
         """Binary branch shared by every read path: UTF-16 text (Notepad, PowerShell
-        ``>``) trips the binary guard; transcode it, else refuse with the type name."""
+        ``>``) trips the binary guard; transcode it, else refuse with the type name.
+
+        UTF-16 rescue (ported from MoonshotAI/kimi-code#2647): the terminal env decodes stdout as UTF-8 with
+        errors="replace", so a UTF-16 text file (Windows Notepad .txt, PowerShell `>` redirects) arrives
+        mangled with U+FFFD and trips the binary guard. Probe the raw bytes via the backend's Python and
+        transcode to UTF-8 when a BOM or the zero-byte parity heuristic identifies UTF-16.
+        """
         utf16_result = self._try_read_utf16(path, offset, limit, file_size)
         if utf16_result is not None:
             return utf16_result

@@ -54,6 +54,7 @@ class TurnContext:
     persist_user_message: Optional[Any] = None
     persist_user_timestamp: Optional[float] = None
     # display_kind of the persisted user row for a self-injected turn; DB-only, never sent.
+    # "internal_notification" for async-delegation/background notifications (#82888).
     persist_user_display_kind: Optional[str] = None
     user_config: Any = None
     enabled_toolsets: Any = None
@@ -84,6 +85,10 @@ class TurnContext:
     _event_callback_sync: Optional[Callable] = None
     _status_callback_sync: Optional[Callable] = None
     # Slack-native task cards (opt-in); ID-bearing callbacks correlate start/complete by call ID
+    # --- Slack-native task-card progress (opt-in; #29483) ------------------ True when the Slack adapter's
+    # ``native_task_cards_enabled()`` opt-in is set for this turn's platform. The ID-bearing lifecycle
+    # callbacks are published by TurnRunner (like voice_ack_callback above) so tool starts and completions
+    # correlate by real tool-call ID instead of tool name.
     _native_slack_task_cards: bool = False
     native_tool_start_callback: Optional[Callable] = None
     native_tool_complete_callback: Optional[Callable] = None

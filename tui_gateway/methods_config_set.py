@@ -302,6 +302,11 @@ def _set_reasoning(rid, params, key, value, session):
     if scope == "global" or session is None:
         _write_config_key("agent.reasoning_effort", arg)
         if session is not None:
+            # /new is a full conversation boundary: session-scoped runtime overrides (/model, /reasoning,
+            # /fast) do NOT carry forward — the fresh agent re-derives model/provider, reasoning, and
+            # service tier from config.yaml (#48055, #23131). Session pins are cleared below so a rebuild
+            # can't resurrect them. (Global process state is still never touched — see the
+            # cross-session-contamination note in _apply_model_switch.)
             session.pop("create_reasoning_override", None)
     else:  # session-scoped like the gateway's `/reasoning <level>`; a menu pick must not rewrite the global
         session["create_reasoning_override"] = parsed

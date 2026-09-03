@@ -117,6 +117,9 @@ def _open_session_db_at_path(db_path: Path, *, read_only: bool):
 
     from hermes_state import SessionDB, is_malformed_schema_error
 
+    # Read-only file/sidecar preflight (port of kilocode#12508): repair-or-refuse BEFORE the first
+    # connection so users get an actionable message instead of an opaque "attempt to write a readonly
+    # database" from deep inside _init_schema.
     if not read_only:
         return SessionDB(db_path=db_path, read_only=False)
 

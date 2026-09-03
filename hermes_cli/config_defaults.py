@@ -84,15 +84,21 @@ DEFAULT_CONFIG = {
         # the next message, but an interrupted cron run is recorded as a permanent failure, so it
         # must not inherit restart_drain_timeout's 0. Clamped to the shutdown-watchdog leash minus
         # teardown headroom (~50s unless TimeoutStopSec is raised). 0 = opt out.
+        # A chat turn interrupted by a restart is announced to the user and resumed on their next message;
+        # an interrupted cron run is written to jobs.json as a permanent failure that nobody is waiting on,
+        # so it must not inherit restart_drain_timeout's 0 (#82161).
         "cron_drain_timeout": 30,
         # In-band restart (/restart, SIGUSR1): refuse new work, then wait up to this many seconds
         # for in-flight agents/cron/api runs to finish before stop(). 0 = enter stop() at once. 30
         # min is a safety valve for wedged agents, not a target; raise for long unattended turns.
+        # Default 30 min is a safety valve for wedged agents, not a target latency — an interactive `hermes
+        # gateway restart` must never block for hours on a turn that wedged (#79133).
         "restart_after_turn_timeout": 1800,
         # Max seconds a submitted prompt waits for the deferred agent build (MCP discovery, model
         # metadata, skills scan) before failing visibly. The prompt is delivered as soon as the
         # build completes (progress notice past 30s), so this only fires on a hung build. Raise for
         # many slow/unreachable MCP servers.
+        # See #63078.
         "build_wait_timeout": 600,
         # Hermes-level retry attempts for API errors (connection drops, timeouts, 5xx) wrapping the
         # whole call; the OpenAI SDK also retries transient errors (max_retries=2). Set 1 for fast
@@ -178,6 +184,9 @@ DEFAULT_CONFIG = {
         # with "[user did not respond within Xm]". CLI clarify blocks indefinitely and ignores this.
         # 1h because users step away and a shorter value evicted the entry mid-think so a later
         # button tap hit a dead entry. Lower it to free the running-agent guard sooner.
+        # Maximum time (seconds) the gateway will block an agent waiting for a clarify-tool response from
+        # the user. Tradeoff: a higher value holds the gateway's running-agent guard longer for a genuinely
+        # abandoned prompt — lower it if a single session must free up the guard sooner. See #32762.
         "clarify_timeout": 3600,
         # "Still working" status interval (seconds); 0 = off. Lower = faster feedback, more noise;
         # 180 catches spinning weak-model runs before users /restart.
@@ -187,11 +196,13 @@ DEFAULT_CONFIG = {
         # (ignores startup restore, build sentinels, leases, debounce, other processes; scan cadence
         # per AIAgent). Notify-only: tells the user to try /new. Distinct from gateway_timeout
         # (kills the turn) and gateway_notify_interval. 0 = disable.
+        # See #76354.
         "session_stall_timeout": 300,
         # Transcript-sanitiser heal escalation: after this many pre-send heal passes within a
         # 10-minute window, log one ERROR and queue a ONE-TIME out-of-band notice pointing at /debug
         # share or `hermes doctor` (status channel only; prompt cache untouched). 0 = no escalation
         # (per-window WARNINGs still fire).
+        # See #96870.
         "sanitizer_heal_escalation_threshold": 3,
         # Seconds of continuous reconnect failure before a platform gets needs_attention flagged in
         # gateway status (`hermes status` / fleet monitoring). Retries never stop — a signal, not a
@@ -268,6 +279,8 @@ DEFAULT_CONFIG = {
         # immediately kills the delivery (e.g. Bot Mode handoff replies via message_agent /
         # bot_relay). Plain background processes without notify_on_complete are never waited on. 0
         # disables.
+        # Bounded linger (seconds) for one-shot CLI runs (-q/-Q/-z) that exit while background processes
+        # spawned with notify_on_complete=true are still running. See #90879.
         "oneshot_completion_wait_seconds": 600.0,
         # Env vars passed into sandboxed terminal/execute_code (skill-declared
         # required_environment_variables pass through automatically).
@@ -517,6 +530,7 @@ DEFAULT_CONFIG = {
         # threshold_tokens: absolute token cap — compression triggers at the lower of the ratio
         # threshold and this count. Clamped to the model's context length.
         "threshold_tokens": None,
+        # "progress_notices": False,    # opt-in (#52995): when True, routine compression
         "target_ratio": 0.20,         # fraction of threshold to preserve as recent tail
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked
         # digests, anchor index, verbatim user messages and session_search pointers in the summary
@@ -690,6 +704,9 @@ DEFAULT_CONFIG = {
         # prefer_fast_model opts in to the provider fast tier; auto otherwise = main model.
         "title_generation": {
             "enabled": True,
+            # Note: session_search no longer uses an auxiliary LLM (PR #27590 — single-shape tool returns DB
+            # content directly). The old ``auxiliary.session_search.*`` block was removed here. Existing
+            # values in user config.yaml files are harmless leftovers and ignored.
             "provider": "auto",
             "model": "",
             "prefer_fast_model": False,
@@ -811,6 +828,7 @@ DEFAULT_CONFIG = {
         # Seconds between idle prompt_toolkit redraws in the classic CLI; keeps wall-clock
         # status-bar read-outs ticking and the bottom chrome from going stale. 0 disables it if it
         # fights terminal auto-scroll in non-fullscreen mode.
+        # See #45592.
         "cli_refresh_interval": 1.0,
         "user_message_preview": {  # CLI: submitted user-message lines echoed to scrollback
             "first_lines": 2,
@@ -919,11 +937,15 @@ DEFAULT_CONFIG = {
         # A detached RUNNING turn is only interrupted once its activity clock (API waits, stream
         # tokens, tool heartbeats) has been idle this many seconds; an active turn runs to
         # completion. Default = agent.turn_liveness.timeout_s. 0 = interrupt at grace.
+        # See #100325, #98028.
         "ws_orphan_activity_stale_s": 600.0,
         # On gateway boot, close tui/desktop/subagent rows orphaned by a dead gateway (start AND
         # newest message older than HERMES_TUI_SESSION_TTL_S, default 6h) with
         # end_reason='startup_orphan_reap'; otherwise they stay phantom "active" forever.
         # Messaging-gateway and live sessions are never touched; swept rows stay resumable.
+        # The ws-orphan grace timer above is in-process, so a gateway restart (update, crash, systemd)
+        # leaves disconnected sessions ``ended_at IS NULL`` forever — phantom "active" rows in /resume and
+        # dashboards. See #65194.
         "startup_orphan_sweep": True,
         # OAuth gate (engaged when --host is set and --insecure is not), read by the Nous Portal
         # plugin. Env HERMES_DASHBOARD_OAUTH_CLIENT_ID / HERMES_DASHBOARD_PORTAL_URL win when
@@ -1257,6 +1279,11 @@ DEFAULT_CONFIG = {
         "trace_dir": "",
         # PII/credential redaction of advisor outputs: "" off | "display" (UI reference blocks +
         # traces only; aggregator sees raw) | "full" (also the aggregator prompt).
+        # Advisors can echo PII from the conversation (emails, formatted phone numbers) and credential
+        # shapes into reference blocks, traces, and the aggregator prompt. Modes ('' = off, the default):
+        # "display" — redact user-visible surfaces only (reference blocks shown in the UI + saved MoA trace
+        # records); the aggregator still sees raw advisor text. "full"    — additionally redact the advisor
+        # text injected into the aggregator prompt (issue #59959).
         "privacy_filter": "",
         "presets": {
             "default": {
@@ -1306,6 +1333,7 @@ DEFAULT_CONFIG = {
         # Audit ledger: every skill mutation appends to ~/.hermes/skills/.curator_ledger.jsonl with
         # before/after hashes (blobs under ~/.hermes/.curator_backups/blobs/); powers `hermes
         # curator ledger` / `rollback <entry-id>`. Never a gate — failures can't block.
+        # See #79686.
         "ledger": True,
     },
     # Curator — background maintenance of AGENT-CREATED skills (never hub-installed): marks
@@ -1386,6 +1414,7 @@ DEFAULT_CONFIG = {
         # Opt-in DM role auth: DISCORD_ALLOWED_ROLES normally authorizes guild messages only (DMs
         # need DISCORD_ALLOWED_USERS). A guild ID here also authorizes DMs from that guild's members
         # holding the allowed role. Unset / "" / 0 = off.
+        # See #12136.
         "dm_role_auth_guild": "",
         # discord / discord_admin tools: allowed actions (comma string or YAML list; empty = all,
         # subject to bot intents; unknown names dropped with a warning): list_guilds, server_info,
@@ -1467,6 +1496,19 @@ DEFAULT_CONFIG = {
     # timeout: seconds before an unanswered prompt fails closed (CLI and gateway). 60s
     #   proved too tight for Telegram/Discord push notifications, hence 300.
     "approvals": {
+        # single_query_mode — what to do when a single-query (-q) session hits a dangerous command. -q runs
+        # export HERMES_INTERACTIVE=1 (for interactive sudo prompts) but have NO user waiting to answer
+        # approval prompts — an unanswered prompt just waits the full timeout then fails closed, so the
+        # agent is forced to work around the block (often via execute_code). This setting makes that intent
+        # explicit: deny    — block the command and let the agent find another way (default, safe; mirrors
+        # cron_mode deny) approve — auto-approve all dangerous commands in single-query mode These surfaces
+        # bind a session platform like chat gateways do, but have no send_exec_approval and no /approve
+        # channel — a pending approval there just blocks for the full timeout with nobody to answer (#37284,
+        # #87509): deny    — block the command instantly and let the agent find another way (default, safe;
+        # mirrors cron_mode deny) approve — auto-approve all dangerous commands on unattended platforms
+        # Shared by the CLI prompt and gateway/messaging waits. Messaging approvals arrive as a push
+        # notification the user may not see immediately — 60s proved too tight on Telegram/Discord (the
+        # prompt expired before the user reached their phone), so the default is 300.
         "mode": "smart",
         "timeout": 300,
         "cron_mode": "deny",
@@ -1656,10 +1698,20 @@ DEFAULT_CONFIG = {
         # Global cap: positive int = the HOST never has more than N tasks 'running' across all
         # boards and both dispatch lanes. None = ~MemTotal / 512 MiB clamped to [2, 8]; where
         # MemTotal is unreadable (macOS/Windows) None means no cap.
+        # Global concurrency cap (#33488): when set to a positive int, the HOST never has more than N tasks
+        # in 'running' at once — counted across every active board and across both the ready and review
+        # dispatch lanes (workers are OS processes sharing one machine's memory, so the cap bounds the
+        # machine, not each board; OOF-30). Unset (None) means "derive from system memory" (OOF-30/OOF-77):
+        # the dispatcher caps concurrency at roughly MemTotal / 512 MiB, clamped to [2, 8] — e.g. 2 workers
+        # on a 1 GiB VM. On hosts where total memory can't be read (macOS/Windows), unset falls back to no
+        # cap. Set an explicit value to override the derived default in either direction.
         "max_in_progress": None,
         # Per-profile cap: positive int = no single profile runs more than N workers even if the
         # global caps allow; blocked tasks defer to the next tick. None = no per-profile cap. Useful
         # when fan-out would saturate one profile's model/API quota/browser pool.
+        # Unset (None) means "no per-profile cap" — backward-compatible with existing installs. Useful for
+        # fan-out workflows that would otherwise saturate one profile's local model / API quota / browser
+        # pool while leaving other profiles idle. See #21582.
         "max_in_progress_per_profile": None,
         # Auto-run the decomposer on Triage tasks every tick. False = manual via `hermes kanban
         # decompose <id>` or the dashboard's Decompose button.
@@ -1764,6 +1816,9 @@ DEFAULT_CONFIG = {
     # defaults (200K context, tools on, vision/reasoning off) and get patched. Provider keys: Hermes
     # or models.dev id; model ids match case-insensitively. Example: {"custom:my-local-vllm":
     # {"my-llava-model": {"context_window": 8192}}}
+    # Semantics: 1. NOTE: an explicit model.context_length (global) and a custom_providers per-model
+    # context_length are user settings at other layers and are consulted in the resolution chain order
+    # documented in agent/model_metadata.py. 2. See #84482, #8731.
     "model_overrides": {},
     # models.dev registry (context windows, capabilities, pricing, modalities): fetched on startup,
     # served from cache, refreshed by a background daemon with ETag conditional GET. Override `url`
@@ -1814,10 +1869,16 @@ DEFAULT_CONFIG = {
         # Seconds to wait for one platform to connect at startup/reconnect; raise on "discord
         # connect timed out" loops (many slash commands to sync). 0/negative = wait forever. Bridged
         # to HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT, which wins if set explicitly.
+        # Seconds the gateway waits for a single messaging platform to finish connecting during startup (and
+        # on reconnect). Discord in particular can blow past the old fixed 30s when an account has many
+        # slash commands to sync (#19776: 90-173 skills → ~28-31s sync). Raise this if your gateway hits
+        # "discord connect timed out" / "Timeout waiting for connection to Discord" restart loops. ``0`` or
+        # negative disables the timeout entirely (wait indefinitely).
         "platform_connect_timeout": 30,
         # Event-loop liveness watchdog: a daemon thread probes the asyncio loop; after consecutive
         # missed probes it dumps all-thread stacks and hard-exits with the service-restart code so
         # systemd/launchd revives the process instead of leaving a wedged-but-alive zombie.
+        # Set to false to disable. See #69089.
         "loop_watchdog": True,
         # Watchdog tuning (defaults mirror gateway/shutdown_watchdog.py): probe_interval = seconds
         # between probes; probe_timeout = seconds before an unprocessed probe counts as a miss;
@@ -1920,6 +1981,13 @@ DEFAULT_CONFIG = {
         # full retention window before removal.
         "auto_prune": True,
         # Inactive days of ended-session history to keep (= `hermes sessions prune`).
+        # When true, prune ENDED sessions inactive for retention_days once per (roughly) min_interval_hours
+        # at CLI/gateway/cron startup. Activity is the latest message timestamp, falling back to creation
+        # time for empty sessions. Sessions that are still open, pinned, or mid-turn are never deleted — the
+        # only open rows the sweep touches are stale automation sessions (cron/kanban/subagent/one-shot CLI)
+        # whose process died without closing them; those are *closed*, not deleted, and get a further full
+        # retention window before removal. Default true since #54189: without it state.db grows without
+        # bound (multi-GB installs reported within weeks).
         "retention_days": 90,
         # Auto-archive (soft-hide, never delete) sessions with no activity for auto_archive_days,
         # once per min_interval_hours. Pinned sessions are exempt.
@@ -1929,6 +1997,8 @@ DEFAULT_CONFIG = {
         # VACUUM after a prune that deleted rows (SQLite never reclaims disk on DELETE). VACUUM
         # blocks writes (~seconds per 100MB), so it runs only at startup, only when ≥1 session was
         # deleted AND freelist/page_count > 25%.
+        # SQLite does not reclaim disk space on DELETE — freed pages are just reused on subsequent INSERTs —
+        # so without VACUUM the file stays bloated even after pruning. See #54189.
         "vacuum_after_prune": True,
         # Minimum days between VACUUM rewrites; pruning keeps its normal cadence.
         "min_vacuum_interval_days": 30,
@@ -1997,6 +2067,9 @@ DEFAULT_CONFIG = {
         # <HERMES_HOME>/backups/ (``hermes import`` restores; slow on large homes; ``--backup``
         # forces once). off = none (``--no-backup`` forces once). Legacy booleans: true -> full,
         # false -> off.
+        # Pre-update safety backup — ONE consolidated mechanism, three modes: Files over 1 GiB (e.g. a
+        # bloated state.db) are skipped with a warning so the snapshot stays fast. This is the #48200
+        # (wrong-path wipe) safety net.
         "pre_update_backup": "quick",
         # Full backup zips to retain (older pruned after each success; floored to 1 so the newest is
         # always kept). The quick snapshot always keeps exactly 1.
@@ -2118,6 +2191,9 @@ DEFAULT_CONFIG = {
         # Disable cua-driver's cursor overlay, which can peg a core when idle (macOS redraw loop;
         # Linux/WSL2 idle spin). None = auto (off on macOS + headless/ WSL2 Linux, on elsewhere);
         # True = always disable; False = always enable.
+        # The overlay shows where agent actions land but can peg a core when idle (macOS vImage redraw loop
+        # #47032; Linux/WSL2 idle spin #28152). cua-driver ≥ 0.6.x supports --no-overlay; Hermes also calls
+        # set_agent_cursor_enabled(false) after start_session when this is on.
         "no_overlay": None,
         # standard = cua-driver's own approval boundary; bounded = no runtime prompts, anything
         # outside capability_manifest fails closed. `unrestricted` is NOT accepted here: it stays on
@@ -2170,6 +2246,7 @@ DEFAULT_CONFIG = {
         # Chromium default; x11 = XWayland, for compositors that ignore always-on-top for Wayland
         # clients (e.g. COSMIC) — also puts the HUD on the solid-window input path; wayland = force
         # a native Wayland surface.
+        # See #84011.
         "ozone_platform_hint": "auto",
         # Bridged to HERMES_DESKTOP_DISABLE_GPU: auto = disable GPU only on remote displays
         # (SSH/VNC/RDP); true = always software rendering (no-GPU VMs where the GPU path hangs);

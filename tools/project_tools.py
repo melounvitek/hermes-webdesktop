@@ -91,6 +91,8 @@ def project_create(name: str, path: Optional[str] = None, task_id: Optional[str]
             existing = pdb.find_by_primary_path(conn, folder) if folder else None
             if existing is not None:
                 # Idempotent create: duplicates would render N identical sidebar subtrees.
+                # Idempotent create: the folder already belongs to a project. Re-activating it beats minting
+                # a duplicate — duplicated projects render N identical sidebar subtrees (#75820).
                 pdb.set_active(conn, existing.id)
                 proj = existing
             else:
@@ -129,6 +131,8 @@ def _handle_project(args, **kw):
 
 
 # One action enum instead of three tools: each re-taught "desktop Projects" (244 -> ~145 tok).
+# Consolidated (#95681, maintainer-directed): project_list/create/switch each re-taught "desktop Projects
+# (named workspaces)"; one action enum says it once (244 -> ~145 tok).
 registry.register(
     name="desktop_project",
     toolset="project",

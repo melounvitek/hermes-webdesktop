@@ -112,7 +112,10 @@ def _latest_message_preview(db, session_id):
 
 def _resurrect_recoverable_canonical(db, profile_path, session_id):
     """Un-archive an accidentally archived canonical row (judged read-only, written via a
-    short-lived writable handle); False otherwise."""
+    short-lived writable handle); False otherwise.
+
+    See #92687.
+    """
     try:
         row = db.get_session(session_id)
         if not row or not row.get("archived"):
@@ -134,13 +137,25 @@ def _resurrect_recoverable_canonical(db, profile_path, session_id):
 def _canonical_session_row(db, profile_path):
     """Summary of the profile's canonical "Bot Chat" row (identity is the NAME), or None.
     Lineages via ``get_compression_tip`` (NOT the resume walker's unmarked-child fallback);
-    worker sources count as absent. ``id`` is the registry row, ``resolved_id`` the live tip."""
+    worker sources count as absent. ``id`` is the registry row, ``resolved_id`` the live tip.
+
+    The canonical chat's identity is the NAME: the session titled exactly "Bot Chat" on this profile (core
+    UNIQUE(title) makes it a registry of at most one row). Complements ``last_session``: that field answers
+    "what is the newest conversation", this answers "where is the forever-chat" — so a roster row's preview
+    and its click target describe the same session (hermes-agent#88200) with no client-side pointer
+    involved.
+    """
     try:
         row = db.get_session_by_title("Bot Chat")
         session_id = str((row or {}).get("id") or "").strip()
         if not session_id or _denied_source(row):
             return None
         # Archived = retired (absent), except accidental reaper archives: resurrect those.
+        # An archived canonical row usually means the user deliberately retired it — report absent. But the
+        # ws-orphan reaper / older agent cleanup can archive it by accident (#92687): resurrect those. Judge
+        # recoverability READ-ONLY first so the writable open (20s write-lock patience, the very stall this
+        # refactor removes from the 5s poll) is paid only in the rare accidental-archive case, then run the
+        # real predicate through unarchive_recoverable_session on a short-lived writable handle.
         if row.get("archived") and not _resurrect_recoverable_canonical(db, profile_path, session_id):
             return None
         tip = _try(lambda: db.get_compression_tip(session_id), None) or session_id
@@ -158,7 +173,16 @@ def _canonical_session_row(db, profile_path):
 
 def _latest_profile_session_rows(db):
     """(newest human-facing session, newest worker session); the worker row lets rosters show a
-    profile as working (workers heartbeat ``last_activity_at`` every ≤60s)."""
+    profile as working (workers heartbeat ``last_activity_at`` every ≤60s).
+
+    First element mirrors session.list's deny-list (drops ``tool`` sub-agent rows and ``kanban`` dispatcher
+    workers). Second element is the newest DENIED row — the freshest kanban/tool worker — so roster UIs can
+    show that a profile is actively working even though worker sessions never surface in conversation lists
+    (hermes-agent#90268). Workers heartbeat ``last_activity_at`` every ≤60s while running (#72016), so a
+    live worker's ``last_active`` stays fresh and the client can apply its own liveness window. Best-effort:
+    any failure (missing state.db, locked db, older schema) degrades to (None, None) rather than failing the
+    whole profiles.list call.
+    """
     try:
         human = worker = None
         for s in db.list_sessions_rich(source=None, limit=20, order_by_last_active=True, compact_rows=True):
@@ -269,6 +293,10 @@ def _mirror_voice_sections(path) -> bool:
 def _inherit_launch_model(path) -> bool:
     """Inherit launch model.provider/default when the new profile has none. Gate on the MODEL
     SECTION, not config.yaml existing: voice mirroring creates the file first."""
+    # Gate on the MODEL SECTION being absent, not on config.yaml existing — earlier mirroring steps (voice
+    # sections, #85755) legitimately create the file first, and a file-existence gate silently skipped
+    # inheritance for every non-clone bot ("No inference provider configured" on first message, tester
+    # report). Clones bring their own model section and stay untouched.
     from hermes_cli.config import load_config_readonly, read_user_config_raw
     with _hermes_home_scope(path):
         dst_model = (read_user_config_raw() or {}).get("model") or {}
@@ -457,6 +485,13 @@ def _configure_model(profile_dir, params, applied):
     if not (model and provider):
         return None
     confirm_message = None
+    # #95293 remainder: this is the Bots editor's model-switch path, and it used to write guarded
+    # (data-policy / expensive) models silently — the ONE surface that bypassed the selection guard every
+    # other switch path enforces. Same handshake contract as ``config.set model``: without
+    # ``confirm_expensive_model`` a guarded pick answers ``confirm_required`` + ``confirm_message`` and
+    # writes NOTHING; the client resends with ``confirm_expensive_model: true`` once the user confirms. A
+    # misbehaving guard must never break the save (treated as "no warning"), matching
+    # ``_apply_model_switch``.
     if not is_truthy_value(params.get("confirm_expensive_model", False)):
         warn = _lazy("hermes_cli.model_selection_guards", "combined_selection_warning")
         confirm_message = _try(lambda: getattr(warn(model, provider=provider or None), "message", None), None)

@@ -461,6 +461,8 @@ def setup_agent_settings(config: dict):
     _info(f"   Guide: {_DOCS_BASE}/user-guide/configuration", None)
 
     # ── Max Iterations ── (config.yaml is authoritative; never surface a stale legacy .env value)
+    # If a legacy .env entry is still around (from pre-PR#18413 setups), prefer the config value so we don't
+    # surface a stale number to the user.
     current_max = str(cfg_get(config, "agent", "max_turns", default=90))
     _info("Maximum tool-calling iterations per conversation.",
           "Higher = more complex tasks, but costs more tokens.",
@@ -737,6 +739,7 @@ def _run_setup_wizard_impl(args):
     quick_requested = bool(getattr(args, "quick", False))
     config = load_config()
     hermes_home = get_hermes_home()
+    # Back up existing config before setup modifies it (#3522)
     config_path = get_config_path()
     _backup_path = _backup_config_file(config_path)
 

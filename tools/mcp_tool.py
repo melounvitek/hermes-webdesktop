@@ -269,6 +269,7 @@ def _client_session_accepts(kwarg: str) -> bool:
 
 
 # MCP logging levels (RFC 5424 syslog severities) -> Python logging levels.
+# Port of anomalyco/opencode#34529's serverLog mapping.
 _MCP_LOG_LEVEL_MAP = {
     "debug": logging.DEBUG, "info": logging.INFO, "notice": logging.INFO,
     "warning": logging.WARNING, "error": logging.ERROR, "critical": logging.ERROR,
@@ -368,6 +369,11 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # Rapid-drop budget: a session is UNPROVEN until it survives a keepalive interval or a
         # successful call; only a proven session clears the budget, so a post-handshake flapper
         # still parks.
+        # Rapid-drop budget (#62212): a freshly (re)established session is UNPROVEN until it demonstrates
+        # real health — it survived at least one full keepalive interval (keepalive success path) or served
+        # at least one successful tool call. Only a proven session clears the reconnect budget; a transport
+        # that flaps right after the handshake keeps getting charged and still reaches the park instead of
+        # hot-cycling respawns forever.
         self._session_proven: bool = False
         # Never cleared (unlike _ready): separates first-connect from reconnect failures.
         self._ever_connected: bool = False
@@ -375,10 +381,13 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         self._was_parked: bool = False
         # In-flight RPC tasks so a deliberate teardown fails them fast; _reconnecting is True
         # during that teardown so _track_inflight_rpc turns the cancel into a retryable error.
+        # In-flight RPC bookkeeping (#48069 salvage): user-visible requests registered while running so a
+        # reconnect/shutdown teardown can fail them fast instead of orphaning them on a dying transport.
         self._inflight_tasks: set = set()
         self._reconnecting: bool = False
         # Latched by races (teardown-vs-keepalive, auth-lock corruption); ensure_healthy()
         # verifies before the next call.
+        # See #77765, #81051, #84132.
         self._suspect_reason: Optional[str] = None
         # Teardown that failed in-flight calls => next reconnect is RACE RECOVERY, not a
         # budget charge.
@@ -387,6 +396,9 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # cycle before parking.
         self._permanent_grace_used: bool = False
         # Children of the current stdio transport: in-flight calls fail FAST when one dies.
+        # PIDs of the stdio subprocess spawned for the current transport (captured in _run_stdio). Used to
+        # fail in-flight calls FAST when the child dies instead of waiting out the full tool timeout
+        # (#81995).
         self._stdio_child_pids: Set[int] = set()
         self._auth_type: str = ""
         self._refresh_lock = asyncio.Lock()
@@ -400,6 +412,10 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         self._lifecycle_started_at = self._last_tool_call_at = time.monotonic()
         self._idle_timeout_seconds = self._max_lifetime_seconds = self._recycled_reason = None
         # Handshake InitializeResult: the server's REAL advertised capabilities.
+        # Captures the ``InitializeResult`` returned by ``await session.initialize()`` so downstream code
+        # can inspect the server's real advertised capabilities (``.capabilities.resources``,
+        # ``.capabilities.prompts``) instead of assuming every ``ClientSession`` method attribute
+        # corresponds to a supported server method. See #18051.
         self.initialize_result: Optional[Any] = None
         # SEP-2549 cache hints from the last tools/list (ttl_ms, cache_scope).
         self._list_cache_meta: dict = {}
@@ -421,6 +437,7 @@ _server_connecting: set[str] = set()
 _server_connect_errors: Dict[str, str] = {}
 # Lazy startup: servers registered from the schema cache without connecting; popped on
 # first real connection.
+# Keyed by server name; entries are popped once a real connection is established on first use. See #56832.
 _lazy_server_configs: Dict[str, dict] = {}
 _lazy_server_fingerprints: Dict[str, str] = {}
 _lazy_server_tool_names: Dict[str, List[str]] = {}
@@ -433,12 +450,31 @@ _connect_server_claim: contextvars.ContextVar[Optional[Callable[[MCPServerTask],
 # without it every ``discover_mcp_tools()`` (one per worker session) would respawn it — a
 # restart storm whose unreaped children destabilise healthy servers. Exponential-backoff
 # deadline honoured by ``register_mcp_servers``; cleared on success.
+# Connection-retry cooldown (per-server isolation against restart storms). A single stdio MCP server that
+# fails to spawn (bad PATH, ``exec: not found``, crash-on-start) is never recorded in ``_servers`` --
+# ``start()`` raises and ``_discover_and_register_server`` aborts before the ``_servers[name] = server``
+# line. Without a cooldown, EVERY subsequent ``discover_mcp_tools()`` (one per agent worker session, i.e.
+# every few seconds) sees the server as "not connected" and re-spawns it from scratch. That is the restart
+# storm in #50394: the failing server is re-attempted on the shared MCP event loop on every worker session,
+# the subprocesses pile up unreaped, and the churn destabilises the healthy co-located servers (their tools
+# intermittently surface as "Unknown tool"). Fix: after a failed connection attempt, stamp a monotonic
+# ``retry_after`` deadline with exponential backoff. ``register_mcp_servers`` skips a server whose cooldown
+# has not elapsed, so a chronically failing server is retried on a backoff schedule instead of on every
+# worker session -- isolating it from the rest of the bridge. A successful connection clears the state.
 _server_connect_retry_after: Dict[str, float] = {}   # name -> monotonic deadline
 _server_connect_failures: Dict[str, int] = {}        # name -> consecutive failures
 _CONNECT_RETRY_BASE_BACKOFF_SEC, _CONNECT_RETRY_MAX_BACKOFF_SEC = 30.0, 600.0
 
 # Per-server circuit breaker: closed -> open (calls short-circuit until the cooldown) ->
 # half-open (next call probes). Mutate only via _bump_server_error / _reset_server_error.
+# After _CIRCUIT_BREAKER_THRESHOLD consecutive failures, the handler returns a "server unreachable" message
+# that tells the model to stop retrying, preventing the 90-iteration burn loop described in #10447. State
+# machine: closed    — error count below threshold; all calls go through. open      — threshold reached;
+# calls short-circuit until the cooldown elapses. half-open — cooldown elapsed; the next call is a probe
+# that actually hits the session. Probe success → closed. Probe failure → reopens (cooldown re-armed).
+# ``_server_breaker_opened_at`` records the monotonic timestamp when the breaker most recently transitioned
+# into the open state. Use the ``_bump_server_error`` / ``_reset_server_error`` helpers to mutate this state
+# — they keep the count and timestamp in sync.
 _server_error_counts: Dict[str, int] = {}
 _server_breaker_opened_at: Dict[str, float] = {}
 _CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
@@ -569,6 +605,7 @@ def _update_death_supervisor(verb: str, pgids) -> None:
                 # groups still registered, an unregister must still rebuild coverage for the
                 # survivors.
                 return
+            # See #93517.
             proc = _spawn_death_supervisor()
             _death_supervisor = proc
             if proc is None:
@@ -623,6 +660,7 @@ def _server_registry_scope(name: str) -> Optional[str]:
 
 
 # Cross-process discovery guard: advisory file lock so gateway + CLI + TUI don't all discover.
+# See issue #62771.
 _LOCK_UNAVAILABLE: Any = object()  # sentinel: locking broken/unavailable
 _MCP_DISCOVERY_LOCK_PATH: Optional[str] = None  # resolved lazily
 # Bounded wait when another process holds the lock.

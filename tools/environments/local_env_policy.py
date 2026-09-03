@@ -70,7 +70,12 @@ def _build_provider_env_blocklist() -> frozenset:
     # every scrub surface, so an import-time discard would leak BUZZ_PRIVATE_KEY into
     # non-terminal children; the Buzz carve-out is terminal-only and context-gated
     # (``_is_terminal_first_party_env``).
+    # It is set and owned by the user's Claude Code install (subscription OAuth), not a Hermes-managed
+    # inference credential — Claude subscription auth is not a working Hermes provider path. It arrives via
+    # the registry loop above (anthropic api_key_env_vars), so remove it explicitly. See #55878.
     blocked.discard("CLAUDE_CODE_OAUTH_TOKEN")
+    # BUZZ_* is deliberately NOT discarded here, even for Buzz-managed agents (BUZZ_MANAGED_AGENT set by the
+    # buzz-acp harness). See #76243, #78026, #78065, #78511.
     return frozenset(blocked)
 
 
@@ -84,6 +89,34 @@ _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
 # runs a Buzz gateway must not get the signing key. Values are used directly, never
 # scope-resolved (UnscopedSecretError under multiplex); the snapshot treats them as
 # profile-scoped. Prefix-based so future BUZZ_* names need no code change.
+# First-party platform credentials the agent's own platform adapters need in terminal children (e.g. the
+# ``BUZZ_*`` vars for the Buzz messaging platform, which drive the platform-mandated ``buzz`` CLI:
+# BUZZ_PRIVATE_KEY, BUZZ_AUTH_TAG, BUZZ_RELAY_URL, and the other BUZZ_* names). These are the agent's OWN
+# credentials — a Buzz community agent is expected to operate the ``buzz`` CLI — so they are carved out of
+# the terminal scrub. CONTEXT-GATED: the carve-out applies ONLY when this process/session is actually
+# operating as a Buzz agent — either the process is a Buzz-ACP managed agent (``BUZZ_MANAGED_AGENT`` is set,
+# only by Buzz Desktop's buzz-acp harness; see #76243 / #78511) or the current session's platform is
+# ``buzz`` (the gateway's ``HERMES_SESSION_PLATFORM`` ContextVar; concurrency safe under a multi-session
+# host). A Telegram/CLI/cron session on a host that also runs a Buzz gateway does NOT get BUZZ_PRIVATE_KEY
+# in its terminal children — blanket passthrough of a signing key to every terminal child on the host would
+# be wrong (maintainer triage note on #76243: don't expose the key to unrelated shell commands).
+# ``_sanitize_subprocess_env`` is also consumed by search workers (e.g. the ddgs web-search subprocess), the
+# computer-use driver binary, and user-script runners (bang ``!`` commands, quick commands, cron scripts,
+# webhook-filter scripts), so those children receive the vars too — matching the approved background/PTY
+# scope. Every other surface stays sealed — execute_code scrubbing, :func:`hermes_subprocess_env` (browser /
+# TUI host / copilot-executor spawns), docker children, and ``env_passthrough`` registration (skills/config
+# still cannot register these names). The GHSA-rhgp-j443-p4rf seal is preserved because no registration path
+# is opened; this is a scrub-path exemption, not an allowlist addition. First-party matches use the merged
+# env value directly — they are the process's own env values and are never scope-resolved (a profile secret
+# scope under multiplex would otherwise raise UnscopedSecretError at passthrough-resolution call sites);
+# only skill/config passthrough names resolve through the profile secret scope. The snapshot mechanism
+# treats these names like profile-scoped passthrough names (see
+# ``LocalEnvironment._additional_profile_scoped_passthrough_names``) so they never persist in the shared
+# terminal snapshot across profiles. Contrast with CLAUDE_CODE_OAUTH_TOKEN above, which is discarded from
+# the blocklist entirely because it is NOT a Hermes credential; these ARE Hermes-managed first-party
+# platform credentials, so they stay IN the blocklist for every non-terminal surface. See issue #78026 (Buzz
+# agents could not use ``buzz`` from the terminal tool) and #76243 (Buzz Desktop managed agent wakes but
+# cannot reply).
 _TERMINAL_FIRST_PARTY_ENV_PREFIXES = ("BUZZ_",)
 
 
@@ -97,7 +130,10 @@ def _buzz_terminal_context_active() -> bool:
     """True when this process/session operates as a Buzz agent: ``BUZZ_MANAGED_AGENT`` in
     the process env (set only by Buzz Desktop's buzz-acp harness), or the live session's
     platform is ``buzz`` via the gateway ContextVar — authoritative under a concurrent
-    multi-session host, so a sibling Telegram session resolves its OWN platform."""
+    multi-session host, so a sibling Telegram session resolves its OWN platform.
+
+    Gateway / CLI / cron / kanban processes never carry it. See #76243.
+    """
     if os.environ.get("BUZZ_MANAGED_AGENT"):
         return True
     try:
@@ -118,6 +154,18 @@ def _is_terminal_first_party_env(name: str) -> bool:
 # ANOTHER project's deps into the Hermes venv (still reachable via PATH, so stripping
 # is safe); PYTHONHOME redirects a child interpreter's stdlib to the Hermes venv
 # (version-mismatch crashes). PYTHONPATH is handled separately (Hermes-owned entries only).
+# The gateway runs inside its own venv, so its process environment carries VIRTUAL_ENV (and possibly
+# CONDA_PREFIX). If those leak into commands the agent runs against OTHER Python projects, tools like
+# ``uv``/``poetry`` treat the inherited value as the active environment and build/sync that other project's
+# dependencies into the Hermes venv path instead of the project's own ``.venv`` — silently clobbering the
+# Hermes environment (e.g. a project pinned to a different Python version overwrites it and breaks the
+# gateway). PYTHONHOME is included because a gateway-inherited value redirects the standard-library search
+# of ANY child interpreter — including unrelated system/venv Pythons — to the Hermes venv's stdlib, which
+# crashes with version-mismatch errors before a child script even imports a package (#75018). Hermes itself
+# treats PYTHONHOME as contamination in its own child processes (managed_uv.py, sqlite_runtime.py), so
+# stripping it from subprocess envs is consistent. Users who need PYTHONHOME for a specific child can set it
+# explicitly in the command. PYTHONPATH is NOT included here — it's handled by
+# _strip_hermes_owned_pythonpath() which removes only Hermes-owned entries, preserving user-set paths.
 _ACTIVE_VENV_MARKER_VARS = ("VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONHOME")
 
 

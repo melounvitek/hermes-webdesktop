@@ -157,6 +157,10 @@ class GatewaySessionCommandsMixin:
         # drops all later messages. Idempotent, so the run's finally calling it again is harmless.
         self._release_running_agent_state(session_key)
         # Snapshot the old entry so on_session_finalize can report the expiring session id.
+        # Evict the running-agent slot now that the generation is bumped. The in-flight run's own guarded
+        # release (run_generation=old) will return False and leave its dead agent behind; clearing here
+        # keeps the slot from becoming a zombie that silently drops all later messages (#28686). Idempotent,
+        # so the run's finally calling it again is harmless.
         old_entry = self.session_store._entries.get(session_key)
         await self._cleanup_old_agent_for_reset(session_key)
         self._evict_cached_agent(session_key)
@@ -401,6 +405,8 @@ class GatewaySessionCommandsMixin:
             # archives it and inserts the pure scaffold atomically, reselecting the latest carrier
             # on the same snapshot so a concurrent newer turn is never removed for stale text.
             try:
+                # Plain turns keep the existing rewrite path below; #84078 owns its separate
+                # archive_dropped/prefix-CAS semantics.
                 rewind_result = await self.async_session_store.rewind_session(
                     session_entry.session_id, 1, require_retryable_composite=True)
             except ValueError as exc:
@@ -458,7 +464,10 @@ class GatewaySessionCommandsMixin:
     async def _compress_codex_app_server_session(self, session_key: str, session_id: str) -> str:
         """Manual /compress for codex_app_server sessions: compacts the LIVE cached agent's
         app-server thread (``force=True`` bypasses the ``codex_app_server_auto`` gate) and keeps it
-        cached. A temporary agent or a mirror rewrite cannot shrink the server-side thread."""
+        cached. A temporary agent or a mirror rewrite cannot shrink the server-side thread.
+
+        See #73503.
+        """
         from gateway.run import _AGENT_PENDING_SENTINEL
 
         agent = self._cached_agent_for(session_key)
@@ -554,6 +563,8 @@ class GatewaySessionCommandsMixin:
         tmp_agent = await self._build_manual_compression_agent(session_entry.session_id, model, runtime_kwargs)
         try:
             # Estimate with system prompt + tool schemas (real request pressure); needs the built agent.
+            # Must be computed after tmp_agent is built so _cached_system_prompt/tools are populated. See
+            # #6217.
             _sys_prompt = getattr(tmp_agent, "_cached_system_prompt", "") or ""
             _tools = getattr(tmp_agent, "tools", None) or None
             approx_tokens = estimate_request_tokens_rough(msgs, system_prompt=_sys_prompt, tools=_tools)
@@ -844,6 +855,7 @@ class GatewaySessionCommandsMixin:
             return t("gateway.resume.not_found", name=name)
         # Follow compression continuations to the live transcript (matches CLI /resume).
         try:
+            # Follow that chain so gateway /resume matches CLI behavior (#15000).
             target_id = await self._session_db.resolve_resume_session_id(target_id)
         except Exception as e:
             logger.debug("Failed to resolve resume continuation for %s: %s", target_id, e)
@@ -901,6 +913,9 @@ class GatewaySessionCommandsMixin:
         if not new_entry:
             return t("gateway.resume.switch_failed")
         # Conversation boundary: all conversation-scoped state + security state in one funnel call.
+        # Conversation boundary: clear ALL conversation-scoped per-session state (model/reasoning overrides
+        # #10702, one-turn restores, model notes, last-resolved cache #58403, /queue overflow) + security
+        # state in one funnel call. See _CONVERSATION_SCOPED_STATE in gateway/run.py.
         self._clear_conversation_scope(session_key, reason="resume")
         # Evict so the next turn rebuilds with the right session_id — the cached AIAgent's memory
         # provider cached _session_id at initialize() and would keep writing to the wrong session.
@@ -1018,6 +1033,7 @@ class GatewaySessionCommandsMixin:
         parent_session_id = current_entry.session_id
         # Full parent origin (same shape as the reset path in gateway/session.py); the live entry's
         # origin may hold richer metadata than the triggering event's source.
+        # See #82633.
         _branch_origin_json = None
         with contextlib.suppress(Exception):
             _branch_origin_json = _json.dumps((current_entry.origin or source).to_dict())
@@ -1040,6 +1056,9 @@ class GatewaySessionCommandsMixin:
 
         # Chunked transactions; best-effort — a failed copy still yields a usable (partial) branch.
         with contextlib.suppress(Exception):
+            # Copy conversation history to the new session in bounded-chunk transactions (see #23254): one
+            # txn per row was the removed write-amplification pattern, and a history can be hundreds of
+            # rows.
             await self._session_db.append_messages_batch(
                 new_session_id, [_branch_row(msg) for msg in history], chunk_rows=500)
         with contextlib.suppress(Exception):

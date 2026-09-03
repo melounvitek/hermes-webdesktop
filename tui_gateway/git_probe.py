@@ -21,7 +21,12 @@ _NEG_TTL = 30.0  # "not a git repo" TTL: a fresh `git init` shows within seconds
 
 def run_git(cwd: str, *args: str) -> str:
     """``git -C <cwd> <args>`` → stripped stdout, or ``""`` on any failure. ``bounded_git_probe``
-    bounds post-kill cleanup on Windows (a killed git's suspended descendant held the pipes)."""
+    bounds post-kill cleanup on Windows (a killed git's suspended descendant held the pipes).
+
+    Uses the shared :func:`bounded_git_probe` so the post-kill cleanup is bounded on Windows — a plain
+    ``subprocess.run(timeout=...)`` here deadlocked Desktop session readiness when a killed git left a
+    suspended descendant holding the pipe handles (issue #68609).
+    """
     # A missing dir can only fail at the price of a fork; deleted worktrees dominate a long
     # session history's cwds, so the stat pays off.
     if not cwd or not os.path.isdir(cwd):

@@ -107,6 +107,10 @@ def _check_install_target(install_dir: Path) -> None:
       install and stays overwritable (hub installs are lock-guarded in do_install).
     """
     from tools.skills_hub import _skills_dir
+    # Refuse to nest a skill inside an existing skill directory. Installing with ``--category
+    # <name-of-an-existing-skill>`` would create a hybrid skill-plus-category directory; a later update or
+    # uninstall of the outer skill would then rmtree the inner one — the sibling case of the category-bucket
+    # wipe reported in issue #75983.
     skills_root = _skills_dir().resolve()
     ancestor = install_dir.parent
     while ancestor != skills_root and ancestor.is_relative_to(skills_root):
@@ -119,6 +123,13 @@ def _check_install_target(install_dir: Path) -> None:
     if not install_dir.is_dir():
         raise ValueError(f"Refusing to install: '{install_dir.name}' already exists "
                          f"and is not a directory. Remove it or choose a different skill name.")
+    # Guard against silent data loss when the install target collides with an existing category bucket (a
+    # directory that holds other skills). This was reported as GitHub issue #75983: installing a skill with
+    # --name matching an existing category directory caused rmtree to wipe all sibling skills. A directory
+    # that directly contains SKILL.md is an existing skill installation and stays overwritable
+    # (hub-installed skills are additionally guarded by the lock-file check in do_install()). But a
+    # directory that contains *other* skill directories is a category bucket and must NOT be silently
+    # deleted.
     if not (install_dir / "SKILL.md").exists():
         skill_dirs_in = _category_skill_dirs(install_dir)
         if skill_dirs_in:
@@ -217,6 +228,8 @@ def bundle_content_hash(bundle: SkillBundle) -> str:
     carry backslashes, which changed both bytes and sort order and made every
     skill report ``update_available`` forever — normalize before hashing. The
     path is hashed too so swapping contents between two files changes the hash.
+
+    That function keys files by ``relative_to(...).as_posix()`` — forward slashes on every OS. See #62310.
     """
     h = hashlib.sha256()
     normalized = {rel_path.replace("\\", "/"): content for rel_path, content in bundle.files.items()}

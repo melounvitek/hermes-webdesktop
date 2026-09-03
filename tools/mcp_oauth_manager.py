@@ -44,7 +44,11 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
     """OAuthClientProvider with pre-flow disk-mtime reload (external refreshes become visible to
     a running session), expiry seeding on cold load, pre-flight metadata discovery, dead-client
     registration detection and the bidirectional ``async_auth_flow`` bridge. Token-endpoint
-    fixes come from ``HermesProviderMixin``. Only usable when the SDK's OAuth module imported."""
+    fixes come from ``HermesProviderMixin``. Only usable when the SDK's OAuth module imported.
+
+    Reference: Claude Code's ``invalidateOAuthCacheIfDiskChanged`` (``src/utils/auth.ts:1320``, CC-1096 /
+    GH#24317).
+    """
 
     _hermes_logger = logger
 
@@ -170,7 +174,10 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
         is dead server-side: delete ``client.json`` (+ stale metadata) so the SDK re-runs DCR next flow.
         Conservative: acts ONLY on 400/401 at the discovered ``token_endpoint`` (the only request carrying our
         ``client_id``) with ``invalid_client`` in the body; pre-registered clients are never poisoned; any failure
-        is swallowed. The browser-side "Redirect URI Mismatch" case has no HTTP signal (``hermes mcp reauth``)."""
+        is swallowed. The browser-side "Redirect URI Mismatch" case has no HTTP signal (``hermes mcp reauth``).
+
+        See #36767.
+        """
         try:
             if (self._hermes_preregistered or getattr(response, "status_code", None) not in (400, 401)
                     or not await self._is_invalid_client_at_token_endpoint(response)):
@@ -202,6 +209,14 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
             self._log_nonfatal("pre-flow disk-watch", exc)
         # Bridge the bidirectional generator by hand: a naive ``async for item in inner: yield
         # item`` DISCARDS the responses httpx sends back via ``asend``, and the SDK crashes on None.
+        # Manually bridge the bidirectional generator protocol. httpx's auth_flow driver
+        # (httpx._client._send_handling_auth) calls ``auth_flow.asend(response)`` to feed HTTP responses
+        # back into the generator. A naive wrapper using ``async for item in inner: yield item`` DISCARDS
+        # those .asend(response) values and resumes the inner generator with None, so the SDK's ``response =
+        # yield request`` branch in mcp/client/auth/oauth2.py sees response=None and crashes at ``if
+        # response.status_code == 401`` with AttributeError. The bridge below forwards each .asend() value
+        # into the inner generator via inner.asend(incoming), preserving the bidirectional contract.
+        # Regression from PR #11383 caught by tests/tools/test_mcp_oauth_bidirectional.py.
         inner = super().async_auth_flow(request)
         resource_lock_released = retry_after_concurrent_auth = False
         sent_access_token = None
@@ -228,6 +243,8 @@ class HermesMCPOAuthProvider(HermesProviderMixin, *_SDK_BASES):
                     await inner.aclose()
                     retry_after_concurrent_auth = True
                     break
+                # Sniff the response for a dead-client-registration signal before handing it back to the SDK
+                # (best-effort, GH#36767).
                 await self._maybe_flag_poisoned_client(incoming)
                 outgoing = await inner.asend(incoming)
         except StopAsyncIteration:

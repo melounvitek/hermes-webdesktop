@@ -30,6 +30,7 @@ def execute(
         # Everything the tool transitively calls (incl. auxiliary LLM calls on worker
         # threads) must bypass managed Relay: the pipeline's Futures bind to THIS loop,
         # which is blocked until the tool returns.
+        # See #77244.
         with relay_runtime.managed_callback_guard():
             return callback(final_args)
 

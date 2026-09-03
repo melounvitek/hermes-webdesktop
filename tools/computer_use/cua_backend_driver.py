@@ -128,7 +128,17 @@ def _resolve_mcp_invocation(driver_cmd: str, *, timeout: float = 6.0) -> Tuple[s
     """``(command, args)`` that spawn cua-driver's stdio MCP server, asked of the driver itself via ``cua-driver
     manifest`` (``mcp_invocation``) so a subcommand rename keeps working. Falls back to ``(driver_cmd, ["mcp"])``
     on older drivers or any discovery failure — the wrapper must not refuse to start over a failed discovery hop.
-    ``--no-overlay`` appended when allowed."""
+    ``--no-overlay`` appended when allowed.
+
+    Surface 8 of NousResearch/hermes-agent#47072: instead of hardcoding ``["mcp"]`` we ask the driver itself
+    via ``cua-driver manifest`` (trycua/cua#1961). The manifest carries a stable ``mcp_invocation`` pointer
+    with both ``command`` and ``args``, so a future cua-driver that renames or relocates the subcommand
+    keeps working without a Hermes patch.
+    When ``computer_use.no_overlay`` is enabled (or auto-detected — macOS, headless/WSL2/X11 Linux),
+    ``--no-overlay`` is appended to suppress the cursor overlay rendering loop that can consume CPU
+    indefinitely when idle (#28152, #47032). Older drivers that don't recognise the flag will reject it;
+    callers should fall back to the no-overlay invocation on spawn failure.
+    """
     manifest = _driver_json(driver_cmd, "manifest", timeout=timeout, require_ok=True) or {}
     invocation = manifest.get("mcp_invocation")
     args = _valid_mcp_args(invocation)
@@ -188,7 +198,10 @@ def cua_driver_update_check(*, timeout: Optional[float] = None) -> Optional[Dict
     or ``None`` when the binary is missing, the driver predates the verb, the GitHub check failed (``error`` set)
     or the output didn't parse. Never raises. ``timeout`` defaults to 8s on POSIX / 25s on Windows: first spawn of
     the exe routinely eats seconds in Defender scanning, and callers treat ``None`` as indeterminate (the upgrade
-    path used to fall through to a full reinstall on a false timeout)."""
+    path used to fall through to a full reinstall on a false timeout).
+
+    See #1734.
+    """
     timeout = (25.0 if sys.platform == "win32" else 8.0) if timeout is None else timeout
     driver_cmd = _cb().resolve_cua_driver_cmd()
     data = _driver_json(driver_cmd, "check-update", "--json", timeout=timeout, require_ok=False) if driver_cmd else None

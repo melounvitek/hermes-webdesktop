@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 # Hard wall-clock cap per search: ``DDGS(timeout=…)`` only bounds individual HTTP requests;
 # ddgs's multi-engine retry loop has no overall cap, so a rate-limited response could
 # otherwise hang the shared agent loop indefinitely.
+# Enforce a hard cap here by killing a disposable worker process (#68096).
 _SEARCH_TIMEOUT_SECS = 30
 _POLL_INTERVAL_SECS = 0.1  # parent stdout / interrupt-flag poll cadence
 _TERMINATE_GRACE_SECS = 1.0  # wait after terminate() before escalating to kill()
@@ -36,7 +37,11 @@ class _SearchInterrupted(Exception):
 
 def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
     """Blocking ddgs query → normalized hits (module-level: the child worker imports it,
-    tests patch it for in-process runs)."""
+    tests patch it for in-process runs).
+
+    ``DDGS(timeout=…)`` bounds each individual HTTP request; the overall wall-clock cap is enforced by the
+    parent via process timeout (#68096).
+    """
     from ddgs import DDGS  # type: ignore
     results: list[dict[str, Any]] = []
     with DDGS(timeout=10) as client:
@@ -182,7 +187,10 @@ class DDGSWebSearchProvider(BaseWebSearchProvider):
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Run the search in a disposable child with a hard wall-clock timeout so a
-        hung native ``primp`` call cannot freeze the Hermes process."""
+        hung native ``primp`` call cannot freeze the Hermes process.
+
+        See #36776, #68096.
+        """
         if not self.is_available():
             return search_fail("ddgs package is not installed — run `pip install ddgs`")
         try:

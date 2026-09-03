@@ -153,6 +153,15 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
         return
     # Shared-owner path: re-invoke the idempotent spawn first so a zero-connected run gets
     # its retry instead of latching the process MCP-less (runs under the CALLER's profile).
+    # Discovery is spawned via the shared owner (ensure_mcp_discovery_started → hermes_cli.mcp_startup);
+    # wait on it so the first agent build still catches fast servers. Re-invoke the idempotent spawn first:
+    # if the previous run finished with zero connected servers, start_background_mcp_discovery's
+    # retry-after-zero-connected allowance kicks off a fresh discovery run here instead of leaving the
+    # process latched MCP-less for the session. In multi-profile processes this retry runs under the
+    # CALLER's profile context (agent build binds the session profile's HERMES_HOME first), so a launch
+    # profile with no mcp_servers no longer starves selected profiles of discovery (#67605). Gated on
+    # _mcp_discovery_enabled so non-MCP sessions never pay the tools.mcp_tool import on the per-agent-build
+    # wait path.
     if not _mcp_discovery_enabled:
         return
     _spawn_discovery(("debug", "TUI MCP discovery retry-spawn failed"))
@@ -161,7 +170,16 @@ def wait_for_mcp_discovery(timeout: "float | None" = None) -> None:
 
 def mcp_discovery_in_flight() -> bool:
     """True if ANY background MCP discovery thread is still running: the late-refresh
-    scheduler calls this regardless of surface, so it MUST consult both owners."""
+    scheduler calls this regardless of surface, so it MUST consult both owners.
+
+    There are two independent discovery-thread owners by surface: the stdio ``hermes --tui`` path spawns ITS
+    thread here (``_mcp_discovery_thread``), while the desktop app + dashboard WebSocket sidecar
+    (``tui_gateway/ws.py``) and ``hermes dashboard`` spawn theirs via
+    ``hermes_cli.mcp_startup.start_background_mcp_discovery``. The late-refresh scheduler imports this
+    function regardless of surface, so it MUST consult both — checking only the entry thread left the
+    desktop/dashboard surfaces with no late refresh, so a slow MCP server's tools never surfaced for the
+    whole session (#51587).
+    """
     thread = _mcp_discovery_thread
     if thread is not None and thread.is_alive():
         return True
@@ -170,7 +188,11 @@ def mcp_discovery_in_flight() -> bool:
 
 def join_mcp_discovery(timeout: float | None = None) -> bool:
     """Join both discovery owners; True once neither is alive. Accepts an unbounded wait
-    (off-critical-path late-refresh waiter); ``timeout`` bounds EACH join, entry thread first."""
+    (off-critical-path late-refresh waiter); ``timeout`` bounds EACH join, entry thread first.
+
+    Joins both discovery-thread owners (see ``mcp_discovery_in_flight``): the entry thread first, then the
+    ``hermes_cli.mcp_startup`` thread used by the desktop/dashboard surfaces. See #51587.
+    """
     entry_done = True
     thread = _mcp_discovery_thread
     if thread is not None:
@@ -192,7 +214,17 @@ def _has_configured_mcp_servers() -> bool:
 def ensure_mcp_discovery_started() -> None:
     """Start background MCP discovery for the current profile context, once. ``main()`` calls
     this for stdio; ``server._start_agent_build`` also calls it AFTER binding the session
-    profile's HERMES_HOME. MCP registration is process-global: the FIRST profile wins."""
+    profile's HERMES_HOME. MCP registration is process-global: the FIRST profile wins.
+
+    WebSocket/Desktop entrypoints can accept sessions without running ``main()``, so the agent-build path
+    (``server._start_agent_build``) also calls it AFTER binding the session profile's HERMES_HOME override —
+    the shared owner in ``hermes_cli.mcp_startup`` captures the caller's context-local override and
+    propagates it into the discovery thread, so discovery reads the SELECTED profile's ``mcp_servers``, not
+    the launch profile's (#67605).
+    Known limitation: MCP tool registration is process-global, so in a multi-profile process the FIRST
+    profile that builds an agent wins the discovery slot. Full per-profile MCP registries are tracked in
+    #67605.
+    """
     global _mcp_discovery_enabled
     if not _has_configured_mcp_servers():
         return

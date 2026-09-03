@@ -479,6 +479,11 @@ def _default_off_toolsets(platform: str, explicitly_configured: bool) -> Set[str
     default_off = set(_DEFAULT_OFF_TOOLSETS)
     if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
         default_off.remove(platform)
+    # Home Assistant is already runtime-gated by its check_fn (requires HASS_TOKEN to register any tools).
+    # When a user has configured HASS_TOKEN, they've explicitly opted in — don't also strip it via
+    # _DEFAULT_OFF_TOOLSETS, which would silently drop HA from platforms (e.g. cron) that run through
+    # _get_platform_tools without an explicit saved toolset list. Without this, Norbert's HA cron jobs
+    # regressed after #14798 made cron honor per-platform tool config.
     if "homeassistant" in default_off and _homeassistant_credentials_present():
         default_off.remove("homeassistant")
     if explicitly_configured:
@@ -548,6 +553,8 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     toolset_names = platform_toolsets.get(platform)
     # An explicitly saved list (even a composite like ``hermes-discord``) is an opt-in to the platform's
     # native default-off toolsets — see _default_off_toolsets.
+    # Track whether the user explicitly saved a toolset list for this platform (vs. falling back to the
+    # platform default). See #35527.
     explicitly_configured = isinstance(toolset_names, list)
     if not explicitly_configured:
         toolset_names = [_platform_default_toolset(platform)]
@@ -558,6 +565,9 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     plugin_ts_keys = _get_plugin_toolset_keys()
     platform_default_keys = _platform_default_keys()
     # Plugin toolsets are first-class on a saved list: ``[hermes-cli, a2a]`` must survive filtering.
+    # Plugin-provided toolsets are first-class on a platform-toolsets list — explicit config like
+    # ``[hermes-cli, a2a]`` must survive filtering just like a built-in configurable toolset would. See
+    # issue #81163.
     explicit_known_keys = configurable_keys | plugin_ts_keys
 
     if any(ts in explicit_known_keys for ts in toolset_names):
@@ -581,6 +591,8 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     # agent.disabled_toolsets is a global suppression list and runs LAST so it overrides everything above. It
     # may arrive as a JSON-array string ("['memory']") from `hermes config set` or a JSON-mode editor save.
     disabled_toolsets = (config.get("agent") or {}).get("disabled_toolsets")
+    # Honor agent.disabled_toolsets from config.yaml — allows users to globally suppress specific toolsets
+    # (e.g. "memory") across all platforms without per-platform toolset configuration. See #86661.
     if disabled_toolsets:
         from agent.skill_utils import parse_config_string_list
         enabled_toolsets -= {name.strip() for name in parse_config_string_list(disabled_toolsets) if name.strip()}
@@ -671,6 +683,7 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # listed there stays OFF no matter what this writes (Blank Slate installs pre-populate ~27 entries, making
     # the desktop Toolsets UI unable to re-enable anything). Only toolsets just explicitly enabled FOR THIS
     # PLATFORM are cleared, so the list keeps working as a cross-platform suppression list for everything else.
+    # See #49995.
     agent_cfg = config.get("agent")
     newly_enabled = enabled_toolset_keys - preserved_entries
     if isinstance(agent_cfg, dict) and agent_cfg.get("disabled_toolsets") and newly_enabled:

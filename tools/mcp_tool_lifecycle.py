@@ -30,6 +30,11 @@ def _snapshot_child_pids() -> set:
     # loop thread, so union every task's children — reading only the main thread's file
     # returns an empty set on every Linux install.
     try:
+        # ``/proc/<pid>/task/<tid>/children`` is per-THREAD — a child forked from thread T is listed only
+        # under T's task dir. stdio_client() spawns from the background MCP loop thread, so reading only the
+        # main thread's file (``task/<pid>/children``) returned an empty set on every Linux install and left
+        # ``_stdio_child_pids`` / ``_stdio_pids`` empty: the #81995 dead-child fast-fail, the #96452 respawn
+        # signal, and the killpg shutdown sweep never saw the subprocess.
         task_dir = f"/proc/{my_pid}/task"
         found: set = set()
         for tid in os.listdir(task_dir):
@@ -95,6 +100,10 @@ def shutdown_mcp_servers(*, scope: Optional[str] = None):
         selected = [name for name in _core._servers if scope is None or _core._server_scope_keys.get(name) == scope]
         servers_snapshot = [_core._servers[name] for name in selected]
 
+    # Fast path: nothing to shut down. The connect-cooldown maps can still be populated here — a server that
+    # failed to connect is never recorded in ``_servers`` (that is the very premise of the #50394 cooldown),
+    # so "no live servers" is the MOST likely state in which stale backoff entries exist. Clear them so a
+    # post-shutdown restart re-attempts every configured server immediately.
     if servers_snapshot:
         async def _shutdown():
             results = await asyncio.gather(*(server.shutdown() for server in servers_snapshot), return_exceptions=True)
@@ -155,6 +164,10 @@ def _signal_mcp_process(pid: int, sig: int, server_name: str, pgid: Optional[int
             # Child shares the gateway's pgroup: killpg would kill the gateway too, so use
             # per-pid kill. Warn because per-pid kill can't reach grandchildren in this group.
             logger.warning("MCP server '%s' pgid %d matches gateway pgid; skipping "
+                           # Fall through to the per-pid kill() path instead. Warn because per-pid kill
+                           # cannot reach grandchildren in this shared group — if the direct child has
+                           # already exited, they may leak (inherent: group-killing them would also kill the
+                           # gateway). See #47134.
                            "killpg to avoid self-kill and using per-pid kill — any "
                            "grandchildren in this group may not be reaped", server_name, pgid)
         else:

@@ -33,12 +33,24 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     # `hermes` from being a path component or word tail (`/docs/hermes gateway restart-notes.md`)
     # while every real command position (text start, whitespace, `;`/`&`/`|`, `$(`, backtick,
     # U+FFFD) still matches.
+    # See #77173.
     r"(?:(?<![/\w.\-])hermes\s+gateway\s+(?:restart|stop|uninstall)\b)"
     # Branch B: launchctl ops anchored on a hermes-gateway label so unrelated hermes services stay
     # unblocked. `submit`/`bootstrap` register a NEW keepalive job wrapping an arbitrary helper (a
     # laundered restart); neutral-label submissions are caught by
     # `contains_launchctl_submit_command`. `bootout`/`remove`/`disable` are the
     # modern/legacy/durable forms of `unload`.
+    # `submit` and `bootstrap` are included alongside the direct verbs (kickstart/etc.): `launchctl submit
+    # -l ai.hermes.gateway-<suffix> -- <helper-script>` (or `launchctl bootstrap gui/<uid> <plist>`) creates
+    # a NEW keepalive job wrapping an arbitrary helper, which is how a blocked direct restart/kill gets
+    # laundered into a persistent restart loop instead (#62891) — same foot-gun, indirect shape.
+    # Neutral-label submissions that dodge this text anchor are caught separately by
+    # `contains_launchctl_submit_command` (execution-aware, label-independent). `bootout`/`remove`/`disable`
+    # sit alongside `unload`: Apple deprecated load/unload in favour of bootstrap/bootout, so `bootout` is
+    # the modern spelling of an already-listed verb, `remove` is its legacy sibling, and `disable` is what
+    # makes an unload durable across boots. Omitting them left the bypassable approval layer
+    # (tools/approval.py, skipped on force=True) as the only cover, while this hard block — documented as
+    # "force=True cannot help here" — let them through (#80260).
     r"|(?:launchctl\s+(?:kickstart|unload|load|stop|restart|submit|bootstrap|bootout|remove|disable)\b[^\n]*\bhermes[.\-]?gateway)"
     # Branch C: systemctl ops on a hermes-gateway unit.
     r"|(?:systemctl\s+(?:-\S+\s+)*(?:restart|stop|start)\b[^\n]*\bhermes[.\-]?gateway)"
@@ -51,16 +63,27 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
 # Every branch uses `[^\n]*` between verb and label so matches cannot span unrelated lines. A POSIX
 # backslash-newline continuation is therefore collapsed to a space before matching (as the shell
 # does) rather than loosening `[^\n]*`.
+# Every branch above uses `[^\n]*` between its verb and the gateway identifier so the match can't span
+# unrelated lines of a longer cron prompt/script, but that also means a real multi-line shell invocation
+# split across continuation lines (e.g. `launchctl submit \` / `  -l ai.hermes.gateway-... \` / `  -- ...`,
+# the exact reported shape in #62891) would otherwise slip past. Collapse continuations to a single space
+# before matching, mirroring what the shell itself does, rather than loosening `[^\n]*` and risking false
+# positives across genuinely separate lines.
 _SHELL_LINE_CONTINUATION = re.compile(r"\\\r?\n[ \t]*")
 
 # Python argv-list punctuation (`subprocess.run(["launchctl", "bootout", ...])`) separates exec'd
 # words with brackets/commas. Stripped only for the token-join re-scan, never from raw text.
+# See #68289.
 _ARGV_LIST_PUNCTUATION = re.compile(r"[\[\],]+")
 
 # Branch A2: `hermes -p <profile> gateway restart|stop` (also `--profile <name>` /
 # `--profile=<name>`). The selector breaks Branch A's adjacency. A sibling-profile restart is a
 # legitimate fleet operation, so the profile name is captured and blocked only when it equals the
 # profile running the guard. `start` stays excluded as in Branch A.
+# Unlike Branch A this form is NOT unconditionally self-targeting: issued from inside gateway `zeus`,
+# `hermes -p venus gateway restart` operates on a sibling profile's gateway and is a legitimate fleet
+# operation. The pattern captures the named profile so `contains_gateway_lifecycle_command` can block only
+# the self-targeting shape (named profile == the profile running the guard). See #78028.
 _PROFILE_FLAG_LIFECYCLE_PATTERN = re.compile(
     r"(?i)"
     r"hermes\s+"
@@ -77,6 +100,8 @@ _PROFILE_FLAG_LIFECYCLE_PATTERN = re.compile(
 # EARLIER `;`-segment (`label=${item%%:*}; launchctl bootout "gui/$uid/$label"`) leaves only
 # `$label` next to the verb. These verbs act on an EXISTING job, so the hermes-gateway label anchor
 # stays correct, but the check is "verb anywhere AND label anywhere".
+# No profile identity available: cannot prove self-targeting, so do not block — sibling restarts must stay
+# allowed (#78028).
 _LAUNCHCTL_LIFECYCLE_VERBS_RE = re.compile(
     r"(?i)\blaunchctl\s+(?:kickstart|unload|load|stop|restart|bootout|kill|disable|remove)\b"
 )
@@ -118,6 +143,10 @@ _ReadRemoteScriptFn = Callable[[str], Optional[str]]
 
 # Wrappers that hand execution to their argument tail: the real command sits further right, so a
 # first-token-only guard would let `sudo bash ~/restart.sh` / `sudo launchctl submit ...` walk past.
+# A guard that reads only the first token sees `sudo`/`env`/`nohup` and never inspects what they run, so
+# `sudo bash ~/restart.sh` walked past the same walk that stops `bash ~/restart.sh`, and `sudo launchctl
+# submit ...` past the label-independent submit block (#62891). `_PIPE_TO_INTERPRETER` above already reads
+# `sudo ` this way for the pipe case; this generalises that reading to the command position.
 _TRANSPARENT_COMMAND_PREFIXES = frozenset({
     "sudo", "doas", "env", "nohup", "setsid", "nice", "ionice", "stdbuf",
     "timeout", "exec", "command", "builtin", "eatmydata",
@@ -216,12 +245,25 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     escapes resolved (closes splice bypasses like ``kick"start"`` / ``kick\\start``);
     order-independent launchctl pass. Single choke point for every recursion level of
     ``_contains_unsafe_gateway_action``.
+
+    That second pass exists because a real shell resolves quote-splicing (``kick"start"``) and
+    backslash-escaping (``kick\\start``) into one literal word — ``kickstart`` — before the command ever
+    runs. The raw text still has the quote or backslash sitting between the verb's two halves, so the first
+    pass alone lets a spliced verb reach ``launchctl``/``systemctl`` untouched while still executing as the
+    blocked lifecycle command (#80269, reported against #80260's bootout parity fix). Tokenizing closes that
+    gap while keeping the same gateway-label anchoring (``_GATEWAY_LIFECYCLE_PATTERN`` still requires a
+    ``hermes``/``gateway`` token) — this function is the single choke point
+    ``_contains_unsafe_gateway_action`` calls at every recursion level, so referenced-script and ``sh -c``
+    payload scanning inherit the fix automatically.
     """
     if not text:
         return False
     # Provably inert heredoc bodies (quoted delimiter, data-sink consumer like `cat > f <<'EOF'`)
     # are documentation, not commands. The stripper fails open on ANY ambiguity (unquoted delimiter,
     # shell consumer, unterminated body), so executable heredocs are still scanned.
+    # Heredoc bodies that are provably inert data (quoted delimiter, data-sink consumer like `cat > file
+    # <<'EOF'`) are masked before scanning (#88336): a runbook line "a human can run: hermes gateway
+    # restart" inside such a body is documentation, not a command this shell will execute.
     from tools.shell_heredoc import strip_inert_heredoc_bodies
 
     text = strip_inert_heredoc_bodies(text)
@@ -229,6 +271,10 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
     if _GATEWAY_LIFECYCLE_PATTERN.search(normalized):
         return True
     # Profile-flag form: blocked only when the named profile IS the one running the guard.
+    # Profile-flag form (#78028): `hermes -p <profile> gateway restart|stop` bypasses Branch A because the
+    # selector sits between `hermes` and `gateway`. It is only the same foot-gun when the named profile IS
+    # the profile running the guard — sibling-profile restarts are legitimate fleet operations and stay
+    # allowed.
     profile_match = _PROFILE_FLAG_LIFECYCLE_PATTERN.search(normalized)
     if profile_match:
         named = profile_match.group(1) or profile_match.group(2)
@@ -238,6 +284,9 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
             return True
     # Token-aware pass. Tokens are also re-joined with Python argv-list punctuation stripped, since
     # `subprocess.run(["launchctl", "bootout", ...])` separates argv words with commas/brackets.
+    # Token-aware second pass (#80269): re-run the pattern on shell-tokenized segments where quotes/escapes
+    # are resolved, closing splice bypasses like `kick"start"`. Runs after the profile-flag check so both
+    # passes apply independently.
     for segment in _iter_command_segments(normalized):
         joined = " ".join(segment)
         if joined and _GATEWAY_LIFECYCLE_PATTERN.search(joined):
@@ -246,6 +295,10 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
         if stripped != joined and _GATEWAY_LIFECYCLE_PATTERN.search(stripped):
             return True
     # The label may be built in an earlier `;`-segment, so no pass above sees verb + label together.
+    # Order-independent launchctl pass (#77083): a shell loop can build the gateway label from a variable
+    # defined in an earlier `;`-separated segment (`label=${item%%:*}; launchctl bootout
+    # "gui/$uid/$label"`), so neither the same-span regex nor same-segment tokenization sees verb and label
+    # together. Check "verb anywhere AND label anywhere" instead.
     return _contains_launchctl_gateway_lifecycle(normalized)
 
 
@@ -256,6 +309,7 @@ def contains_gateway_lifecycle_command(text: str) -> bool:
 # lifecycle command) and is logged at WARNING so an operator can tell it from a real block. Sizes
 # sit well above any legitimate wrapper graph; remote reads are a backend roundtrip each, so they
 # get a far tighter cap.
+# See #78398.
 _MAX_LIFECYCLE_SCAN_BYTES = _MAX_REFERENCED_SCRIPT_BYTES  # 1 MiB across the walk
 _MAX_LIFECYCLE_SCAN_LINES = 16384
 _MAX_LIFECYCLE_SCAN_LINE_BYTES = 64 * 1024
@@ -312,7 +366,10 @@ class _LifecycleScanBudget:
 
 def _capped_read_limit(max_bytes: Optional[int]) -> int:
     """Per-read byte cap: never above the per-file cap, never negative. One definition so local and
-    remote reads cannot diverge."""
+    remote reads cannot diverge.
+
+    See #76762, #77703.
+    """
     if max_bytes is None:
         return _MAX_REFERENCED_SCRIPT_BYTES
     return min(_MAX_REFERENCED_SCRIPT_BYTES, max(0, int(max_bytes)))
@@ -462,6 +519,8 @@ def contains_launchctl_submit_command(command: str) -> bool:
 
     Label-independent by design: a NEW job's label is attacker-chosen, so a neutral name defeats any
     label-anchored regex. Both verbs register a persistent launchd job — never safe in the gateway.
+
+    See #62891.
     """
     for segment in _iter_command_segments(command):
         index = _executed_command_index(segment)
@@ -561,7 +620,14 @@ def _expand_candidate_path(candidate: str) -> Optional[Path]:
     """Sanitize a tokenized path candidate at the ingestion boundary. Tokens from shlex-splitting
     arbitrary (possibly binary-decoded) text can carry NUL or junk that each downstream ``Path`` op
     rejects differently (ValueError, RuntimeError when HOME is unset under launchd, OSError); reject
-    once here. ``None`` = not a real path, nothing to scan."""
+    once here. ``None`` = not a real path, nothing to scan.
+
+    Every OS-facing ``Path`` operation downstream (``expanduser``, ``os.open``, ``resolve``) raises a
+    *different* exception for the same junk (``ValueError: embedded null byte``, ``RuntimeError: Could not
+    determine home directory`` when HOME is unset under launchd, OSError for over-long paths). Rejecting
+    here — once, before any OS call — is the whole-class fix; catching per-syscall was the whack-a-mole that
+    produced #76762, #77703, #77780, and #78256.
+    """
     if not candidate or "\x00" in candidate:
         return None
     try:
@@ -720,6 +786,8 @@ def _read_referenced_script(
     FileProvider path is never opened — not even to check hydration — because an evicted
     placeholder's ``open()`` can hang preflight. Lexical check: direct paths; resolved: symlinks.
     ``max_bytes`` lowers the per-file cap to what the calling walk can still afford.
+
+    See #88052.
     """
     byte_limit = _capped_read_limit(max_bytes)
     if _on_cloud_path(path):
@@ -732,13 +800,21 @@ def _read_referenced_script(
         # "nothing to scan" — never crash the guard.
         return None, False
     try:
+        # ValueError: an embedded NUL byte in *path* itself — a binary's decoded bytes tokenized into a
+        # bogus script path by the recursion (#77703).
         metadata = os.fstat(descriptor)
+        # Directories are not scripts. Docker Desktop writes ``fpath=(~/.docker/completions …)`` into
+        # ``~/.zshrc``; the walk then treats that dir as a referenced script and used to fail-closed,
+        # blocking ``source ~/.zshrc`` (#86753). Devices/sockets stay fail-closed.
         if not stat.S_ISREG(metadata.st_mode):
             # Directories are not scripts (`fpath=(~/.docker/completions …)` in ~/.zshrc must not
             # block `source ~/.zshrc`). Devices/sockets stay fail-closed.
             return None, not stat.S_ISDIR(metadata.st_mode)
         # Sniff a small prefix first: compiled binaries are never shell scripts, so skip them
         # WITHOUT reading the rest or feeding decoded garbage into the recursion.
+        # Deliberately NOT keyed on the mere presence of a NUL byte (#77927): bash executes a text script
+        # straight past an embedded NUL, so NUL-bearing text must fall through to the magic-number check +
+        # NUL-strip below.
         data = os.read(descriptor, _BINARY_SNIFF_BYTES)
         if _has_binary_magic(data):
             return None, False
@@ -773,7 +849,13 @@ def _sanitize_remote_script_text(
     """Apply the local-read contract to text from an untrusted ``read_remote_script`` callback: NUL
     means binary (nothing to scan, checked first); oversized fails closed. Size compares re-encoded
     *bytes* (matching the ``head -c`` wire bound): a >1 MiB multibyte file truncated at the byte cap
-    decodes to fewer chars, and a char count would scan instead of failing."""
+    decodes to fewer chars, and a char count would scan instead of failing.
+
+    The recursion boundary must not trust its callbacks: any backend (SSH, Modal, Daytona, or a future one)
+    can hand back raw binary bytes decoded as text, or arbitrarily large output. Enforced here rather than
+    inside each callback so the guarantee holds for every callback, not just the ones we hardened. See
+    #76762, #77703.
+    """
     if not text or "\x00" in text:
         return None, False
     byte_limit = _capped_read_limit(max_bytes)
@@ -863,6 +945,11 @@ def contains_gateway_lifecycle_command_or_referenced_script(
     Total by construction: never raises. Direct scans are pure string ops; the referenced-script
     walk (filesystem, remote backends, shlex on decoded bytes) is best-effort defense-in-depth — an
     unexpected failure is logged and treated as "walk found nothing".
+
+    This is the contract #76762 established ("a guarded path must never crash the guard") enforced at the
+    boundary instead of per-syscall: a guard crash propagates out of ``tools/terminal_tool.py`` and breaks
+    every terminal command until the gateway restarts (#77780, #78256), which is strictly worse than either
+    verdict.
     """
     try:
         return _contains_unsafe_gateway_action(
@@ -894,6 +981,11 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         # Attribute the refusal correctly: not a lifecycle command, but a cloud path never opened.
         if resolved_script is not None and _on_cloud_path(resolved_script):
             raise GatewayLifecycleBlocked(
+                # Attribute the refusal correctly: the script is not known to contain a lifecycle command —
+                # it lives on a cloud-synced FileProvider path (iCloud Drive / ~/Library/CloudStorage) that
+                # the guard refuses to open because an evicted placeholder can hang preflight indefinitely
+                # (#88052). Fail closed with the real reason instead of implying a dangerous lifecycle
+                # command.
                 "Blocked: the cron script lives on a cloud-synced path "
                 "(iCloud Drive / ~/Library/CloudStorage). Opening an "
                 "evicted FileProvider placeholder can hang the guard's "
@@ -911,6 +1003,8 @@ def check_gateway_lifecycle(prompt: Optional[str], script: Optional[str] = None)
         # false-positive generator on Python sources (pathlib "/" resolves to the filesystem root).
         # The regex still scans the full text; non-regular/oversized files fail closed (sentinel).
         # The data-exemption masker tokenizes with shlex, so it is charged against the walk budget.
+        # The direct command regex below still scans the full text, so a literal `hermes gateway restart`
+        # embedded in a .py script is still blocked. See #77131, #78398.
         if not _LifecycleScanBudget().charge_text(combined):
             unsafe = _budget_exhausted("text", 0)
         else:

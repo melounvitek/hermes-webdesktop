@@ -169,6 +169,13 @@ def _dispatch_tick_lock(db_path: Path):
     ``_guard_supervised_gateway_conflict``. Non-blocking on purpose: the
     gateway's async watcher must never stall; the loser retries next interval.
     Without ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``).
+
+    Motivation (issue #35240): a ``hermes gateway run --replace`` / ``gateway restart`` invoked from a shell
+    on a systemd/launchd host can leave an orphan gateway whose dispatcher escapes the service cgroup,
+    survives ``systemctl restart``, and becomes a *second* long-lived writer on the same ``kanban.db``. The
+    startup guard (``_guard_supervised_gateway_conflict``) blocks the common way an orphan is born, but this
+    lock is the defense-in-depth that prevents two dispatchers from ever writing concurrently *regardless of
+    how the second one got there*.
     """
     lock_path = db_path.with_name(db_path.name + ".dispatch.lock")
     handle = None
@@ -207,6 +214,8 @@ def _dispatch_tick_lock(db_path: Path):
 # PASSIVE never takes the exclusive checkpoint lock; WAL size is bounded by
 # ``journal_size_limit`` (set at connection init) on the writer's natural
 # post-checkpoint reset. Best-effort, keyed per resolved DB path.
+# Once per coarse interval the dispatcher issues an explicit ``wal_checkpoint(PASSIVE)``. Best-effort: a
+# busy/locked checkpoint is logged at DEBUG and retried next interval. See #44795, #45383, #80255.
 _WAL_CHECKPOINT_INTERVAL_SECONDS = 300.0
 _LAST_WAL_CHECKPOINT: dict[str, float] = {}
 _WAL_CHECKPOINT_LOCK = threading.Lock()
@@ -681,6 +690,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
         # rest of the process's life. Drop the stale entry and re-init.
         conn.close()
         with _INIT_LOCK:
+            # Drop the stale cache entry and fall through to the full init path, which re-runs the header
+            # and integrity probes and the schema script under the cross-process lock. See #83445.
             _INITIALIZED_PATHS.discard(resolved)
         _kb._log.warning(
             "kanban DB %s lost its schema after this process initialized it "
@@ -691,6 +702,7 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     with _kb._cross_process_init_lock(path):
         # Read-only file/sidecar preflight first, so a stray read-only kanban.db
         # fails actionably instead of "attempt to write a readonly database".
+        # See #12508.
         from hermes_state import preflight_db_writability
         preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
         # Cheap byte-level header check before any sqlite connection, then the
@@ -716,7 +728,10 @@ def connect_closing(db_path: Optional[Path] = None, *, board: Optional[str] = No
     """Open a kanban DB connection and guarantee it is closed on exit. Use
     instead of ``with kb.connect() as conn:`` — sqlite3's context manager only
     commits/rolls back, it does NOT close the fd, so long-lived processes
-    (gateway, dashboard) leak FDs until ``[Errno 24] Too many open files``."""
+    (gateway, dashboard) leak FDs until ``[Errno 24] Too many open files``.
+
+    See #33159 for the production incident.
+    """
     conn = _kb.connect(db_path=db_path, board=board)
     try:
         yield conn
@@ -943,6 +958,13 @@ def _backfill_legacy_inflight_runs(conn: sqlite3.Connection) -> None:
 # type, so drift requires a rebuild. Each entry pairs the canonical CREATE
 # TABLE with the indexes DROP TABLE takes down with it.
 # ``test_rebuilt_schema_matches_fresh`` guards this against SCHEMA_SQL drift.
+# The current schema uses ``INTEGER PRIMARY KEY AUTOINCREMENT`` / ``INTEGER NOT NULL DEFAULT 0``. ``CREATE
+# TABLE IF NOT EXISTS`` skips existing tables regardless of schema and ``_add_column_if_missing`` only adds
+# columns, so neither can fix a drifted column type — the table must be rebuilt. See #35096. Each entry
+# pairs the canonical CREATE TABLE with the CREATE INDEX statements that DROP TABLE would otherwise take
+# down with it (including ``idx_events_run``, added by the additive pass above). To guard against this list
+# drifting from SCHEMA_SQL, ``test_rebuilt_schema_matches_fresh`` asserts a rebuilt legacy DB is
+# byte-identical to a fresh one.
 _REBUILD_SPECS = {
     "task_events": (
         "CREATE TABLE task_events ("
@@ -1013,6 +1035,9 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
     the first post-migration tick replays history once — safe for a feature
     that was already fully broken. One transaction under ``connect()``'s init
     locks so an interruption can't leave a table half-renamed. Idempotent.
+
+    Each affected table is rebuilt with the standard SQLite pattern — CREATE new → INSERT shared columns →
+    DROP old → RENAME — recreating its indexes too (DROP TABLE takes them down). See #35096.
     """
     drifted = [t for t in _REBUILD_SPECS if _table_has_drifted(conn, t)]
     if not drifted:

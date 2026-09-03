@@ -59,7 +59,13 @@ def get_terminal_scope() -> Optional[Dict[str, str]]:
 
 
 def enforce_no_refusal() -> None:
-    """Raise when the active scope is a refusal scope (fail closed)."""
+    """Raise when the active scope is a refusal scope (fail closed).
+
+    Execution paths (terminal tool, execute_code) call this before spawning anything: under a refusal scope
+    the profile's terminal policy could not be resolved, and running with the launch process's ambient
+    policy is exactly the authority leak this module closes (#68559 requires refusal, not fallback).
+    Non-scoped and policy-scoped contexts pass silently.
+    """
     scope = _terminal_scope_var.get()
     if isinstance(scope, TerminalPolicyRefusal):
         raise TerminalPolicyUnavailable(

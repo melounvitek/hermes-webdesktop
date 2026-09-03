@@ -56,6 +56,17 @@ def handle_outer_loop_error(
     _outer_error_count += 1
 
     # Interpreter shutdown makes every executor op raise: break.
+    # Phase-aware error classification. The huge outer try/except spans both the actual API request and all
+    # local post-processing of the returned assistant message. Deterministic local bugs (e.g. passing a
+    # multimodal content list into a regex helper after a vision turn or context compaction) should not be
+    # retried: they will fail identically on every iteration and only burn the iteration budget. We classify
+    # an error as local by inspecting the traceback: if the exception propagated through any of the known
+    # local post-processing helpers and never entered the interruptible API-call helpers, it is almost
+    # certainly a local processing bug. (#66267) Interpreter shutdown: if the process is tearing down, every
+    # executor-backed operation (API call, tool dispatch, memory sync) raises ``RuntimeError: cannot
+    # schedule new futures after interpreter shutdown``. Retrying is pointless — the executor is gone for
+    # good — and each retry just spams another traceback. Break immediately so the turn exits cleanly.
+    # (#93217)
     if sys.is_finalizing() or _is_interpreter_shutdown_error(e):
         error_msg = f"Interpreter is shutting down — cannot continue (API call #{api_call_count}): {e}"
         try:

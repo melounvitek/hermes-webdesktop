@@ -20,6 +20,8 @@ from hermes_cli.sizefmt import format_bytes
 
 # ── Plugin context-reference provider API ────────────────────────────────────
 
+# --------------------------------------------------------------------------- Plugin context-reference
+# provider API (Issue #26193) ---------------------------------------------------------------------------
 BUILTIN_PREFIXES = frozenset({"diff", "staged", "file", "folder", "git", "url"})
 
 _context_reference_providers: dict[str, "ContextReferenceProvider"] = {}

@@ -151,6 +151,10 @@ class StreamFallbackMixin:
             # "failed" lets the gateway perform its normal final send.
             self._final_content_delivered = delivery in {"ambiguous", "preview"}
             if delivery == "preview":
+                # This branch is only reached when the ACKed preview already shows the complete final text
+                # (final_text == _visible_prefix()), so record it as the turn-final payload: the gateway's
+                # reconciliation then confirms delivery instead of re-sending a second bubble next to the
+                # never-deleted preview (#71047 Problem B).
                 self._record_turn_final_payload(final_text)
             elif delivery == "ambiguous":
                 self._delivery_ambiguous = True
@@ -327,6 +331,9 @@ class StreamFallbackMixin:
             if result.success:
                 self._notify_new_message()
                 # Lets run.py confirm whether an interim send carried the final.
+                # Record the exact delivered text so run.py can confirm whether an interim "preview"
+                # actually carried the final response, vs. unrelated commentary delivered during a session
+                # split (#14238).
                 self._delivered_commentary_texts.append(text)
             return result.success
         except Exception as e:
@@ -353,6 +360,8 @@ class StreamFallbackMixin:
                 return cap
         return base
 
+    # Fresh send carried exactly ``text`` — record it so the gateway can reconcile the flag against the
+    # completed response (#71643/#95382 content-vs-flag contract).
     async def _suppress_silence_marker(self) -> None:
         """Retract any streamed preview when the final reply is a bare silence marker.  Flags
         stay False: the gateway's whole-response filter turns the marker into "" so no

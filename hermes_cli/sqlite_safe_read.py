@@ -96,6 +96,9 @@ class _TrackingMixin:
     def close(self) -> None:  # type: ignore[misc]
         with _live_lock:
             path = getattr(self, "_hermes_tracked_path", None)
+            # Close first; untrack only once the descriptor is actually gone. Untracking before a failing
+            # close (e.g. cross-thread ProgrammingError) leaves the FD open while the byte-probe guard
+            # thinks nothing is live — see #75629.
             super().close()  # type: ignore[misc]
             if path is not None:
                 self._hermes_tracked_path = None

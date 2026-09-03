@@ -432,7 +432,10 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
                           key_env=""):
     """Save a custom endpoint to ``custom_providers`` in config.yaml, deduplicated by base_url (an
     existing entry gets model / context_length / api_mode updated). *key_env* set means the caller
-    already wrote the key to ``.env``; the entry references it instead of inlining the secret."""
+    already wrote the key to ``.env``; the entry references it instead of inlining the secret.
+
+    See #69449.
+    """
     from hermes_cli.config import load_config, save_config
     cfg = load_config()
     providers = cfg.get("custom_providers") or []

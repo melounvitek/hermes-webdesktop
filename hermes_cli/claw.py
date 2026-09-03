@@ -102,6 +102,7 @@ def _detect_openclaw_processes() -> list[str]:
     if sys.platform == "win32":
         # bounded_probe_run: plain subprocess.run(timeout=...) can hang forever on Windows when a
         # conhost.exe descendant holds duplicated pipe handles — a hang is not an exception.
+        # See #87134.
         from hermes_cli._subprocess_compat import bounded_probe_run
         try:
             for exe in ("openclaw.exe", "clawd.exe"):
@@ -372,6 +373,7 @@ def _cmd_cleanup(args):
         print()
         return print_success("No OpenClaw directories found. Nothing to clean up.")
     # Archiving while the service is active makes it recreate an empty skeleton directory.
+    # See #8502.
     running = _detect_openclaw_processes()
     if running and not _warn_running(
         auto_yes, "OpenClaw appears to be still running:", running,

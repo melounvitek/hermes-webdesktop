@@ -318,6 +318,8 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
     *sync_base* branches from the fetched remote tip (``_resolve_worktree_base``), else local
     HEAD. *name* replaces the random ``hermes-<id>``; named trees lack the ``hermes-`` prefix so
     the pruner ages them on its slower schedule.
+
+    Set ``worktree_sync: false`` in config to branch from local ``HEAD`` (the pre-#10760-followup behavior).
     """
     repo_root = repo_root or _git_repo_root()
     if not repo_root:
@@ -339,6 +341,9 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
 
     _ensure_worktrees_gitignored(repo_root)
 
+    # Resolve the base ref. By default branch from the freshly-fetched remote tip so the worktree starts
+    # current with the project, not from the (possibly stale) local HEAD of the standalone clone (#10760
+    # follow-up).
     base_ref, base_label = (_resolve_worktree_base(repo_root) if sync_base
                             else ("HEAD", "HEAD (local — worktree_sync disabled)"))
 

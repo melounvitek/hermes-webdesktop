@@ -341,6 +341,12 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
     resources until process exit.
     """
     child_future.add_done_callback(lambda _done: _close_child(child, "Failed to close timed-out child after worker exit"))
+    # Bounded drain (#94248 native half): the deferred close above only fires once the abandoned worker
+    # unwinds, but that worker is typically parked inside an in-flight OpenSSL read (Codex / httpx). Never
+    # hard-close that transport from this thread — releasing FDs under a live SSL read is the #29507/#70773
+    # native-corruption family. Instead shutdown() the child's pooled sockets, which is FD-safe from any
+    # thread and settles the blocked read with EOF/EPIPE so the worker can unwind and trigger the deferred
+    # close.
     _drain = getattr(child, "_drain_transports_after_abandonment", None)
     if not callable(_drain):
         return

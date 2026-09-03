@@ -24,6 +24,20 @@ _AUTOSTART_STATES = frozenset({"running"})
 # hard-killed in one of them with no `desired_state` would otherwise stay DOWN on every later boot
 # (observed: staging stranded at `draining`); map them to `running`, mirroring gateway/run.py.
 # `starting` / `startup_failed` are excluded: auto-restarting a mid-boot death is the crash-loop.
+# A gateway only ever reaches these while it is up and serving, so they are NOT an operator stop and NOT a
+# failed boot: - `draining`  — written by the drain watcher / scale-to-zero go-dormant path when an
+# in-flight quiesce begins (gateway/run.py). - `degraded`  — written when the gateway comes up with some
+# platforms queued for retry, then "falls through to the normal running state" (gateway/run.py #5196): the
+# process is up, serving cron + whatever platforms connected, and the reconnect watcher takes the rest from
+# there. When a gateway is hard-killed *while in one of these states* (a container/VM recreate SIGTERMs it
+# before `_stop_impl` reaches its terminal-state persist), the last value left in gateway_state.json is the
+# transient sub-state. With no explicit `desired_state` to fall back to, treating that literal value as the
+# autostart intent would leave the gateway DOWN on every subsequent boot — the gateway never comes back, the
+# dashboard is up but messaging stays dark (observed on a relay-opted-in staging instance stranded at
+# `draining`, 2026-06; `degraded` is the same wedge class). Map these transient sub-states to `running` so a
+# stranded marker reads as the run-intent it actually represents. This mirrors gateway/run.py's #42675
+# handling, which persists `running` (not the mid-shutdown `draining`) when an unexpected signal tears the
+# gateway down — extended here to the case where the gateway died before it could persist anything at all.
 _TRANSIENT_RUNNING_STATES = frozenset({"draining", "degraded"})
 # Container-namespaced state is garbage post-restart (an equal PID is a different process).
 _STALE_RUNTIME_FILES = ("gateway.pid", "processes.json")
@@ -57,6 +71,10 @@ def reconcile_profile_gateways(
     Always registers a ``gateway-default`` slot for the root profile (the implicit profile at
     the top of ``$HERMES_HOME``): ``hermes_cli.gateway`` maps an empty profile suffix to it,
     so it is what ``hermes gateway start`` (no ``-p``) targets.
+
+    Without it, bare ``hermes gateway start`` inside the container would land on ``s6-svc -u
+    /run/service/gateway-default`` → uncaught ``CalledProcessError`` → traceback to the user (PR #30136
+    review).
     """
     actions: list[ReconcileAction] = []
     # Under a multiplexing root gateway named slots are still registered but must not boot from
@@ -230,6 +248,11 @@ def _register_service(scandir: Path, profile: str, *, start: bool) -> None:
     Mirrors ``S6ServiceManager.register_profile_gateway`` but sets start state via the ``down``
     marker (cont-init.d runs before s6-svscan has a control socket). Built in a sibling temp
     dir and ``Path.replace``d into place so an interrupted write never leaves a half-built dir.
+
+    This matches :meth:`S6ServiceManager.register_profile_gateway` (PR #30136 review item O4) — even though
+    cont-init.d runs before s6-svscan starts scanning, an atomic publication keeps the contract uniform
+    between the two registration paths and protects against a half-populated dir if the script is
+    interrupted mid-write.
     """
     import shutil
 
@@ -271,7 +294,14 @@ _LOG_ROTATE_BYTES = 256 * 1024
 
 def _write_reconcile_log(hermes_home: Path, actions: list[ReconcileAction]) -> None:
     """Append one line per profile to $HERMES_HOME/logs/container-boot.log (rotated to ``.1``) —
-    a separate greppable file for "why didn't my profile come back up"."""
+    a separate greppable file for "why didn't my profile come back up".
+
+    Size-bounded: when the file exceeds ``_LOG_ROTATE_BYTES`` (defaults to 256 KiB ≈ 3000 reconcile lines),
+    the current file is renamed to ``container-boot.log.1`` (replacing any previous rotation) before the new
+    entries are appended. This gives long- lived containers a soft cap of ~512 KiB across the two files
+    without pulling in logrotate or s6-log machinery just for this one append-only file (PR #30136 review
+    item O3).
+    """
     import time
     log_dir = hermes_home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)

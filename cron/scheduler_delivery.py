@@ -75,7 +75,13 @@ def _resolve_cron_surface_mode(pconfig, logical_platform_name: str) -> str:
 
 def _resolve_origin(job: dict) -> Optional[dict]:
     """Extract origin info from a job. Non-dict origins (provenance strings, hand-edited
-    jobs.json) are treated as missing — otherwise every fire crashed on ``origin.get``."""
+    jobs.json) are treated as missing — otherwise every fire crashed on ``origin.get``.
+
+    Without this guard, a job tagged with e.g. ``"combined-digest-replaces-x-and-y"`` crashed every fire
+    attempt with ``'str' object has no attribute 'get'`` — ``mark_job_run`` recorded the failure, but the
+    next tick re-loaded the same poisoned origin and crashed identically until the field was patched
+    manually (#18722).
+    """
     origin = job.get("origin")
     if isinstance(origin, dict) and origin.get("platform") and origin.get("chat_id"):
         return origin
@@ -175,6 +181,11 @@ def _maybe_mirror_cron_delivery(
         from gateway.mirror import mirror_to_session
         # USER role + labelled prefix, NOT assistant: an assistant-role mirror lands
         # assistant→assistant and breaks strict alternation; consecutive user turns merge safely.
+        # The brief is not the agent speaking; an assistant-role mirror lands as assistant→assistant after
+        # the agent's last turn and breaks strict alternation (issue #2221, the exact failure #2313
+        # removed). A user-role turn collapses safely via repair_message_sequence's consecutive-user merge
+        # on every provider, and the prefix preserves the "this came from cron" context that the dropped
+        # SQLite mirror metadata would otherwise lose on replay.
         ok = mirror_to_session(
             platform_name, str(chat_id), _cron_mirror_message(job, text),
             source_label="cron", thread_id=thread_id, user_id=user_id, role="user")
@@ -401,7 +412,15 @@ def _home_env_lookup(env_var: str, suffix: str = "", *, strip: bool = False) -> 
 
 
 def _env_home_target_chat_id(platform_name: str) -> str:
-    """Home chat id from the env mirror only (no config)."""
+    """Home chat id from the env mirror only (no config).
+
+    Reads through ``get_secret`` (not raw ``os.getenv``) so a profile-scoped secret scope wins in a
+    multiplex gateway. ``DISCORD_HOME_CHANNEL`` lives in each profile's ``.env``; in a multiplex process the
+    winning cron tick runs with the job-owning profile's scope installed (run_one_job sets it), so reading
+    via ``get_secret`` resolves the OWNING profile's chat id rather than the host process's ``os.environ``
+    (#83182, chat-id leg — the token leg was fixed earlier; chat id / thread id resolve through the same
+    leak).
+    """
     env_var = _resolve_home_env_var(platform_name)
     return _home_env_lookup(env_var) if env_var else ""
 
@@ -419,7 +438,13 @@ def _get_home_target_chat_id(platform_name: str) -> str:
 def _get_home_target_thread_id(platform_name: str) -> Optional[str]:
     """Optional thread/topic id for a platform home target. Telegram: ``TELEGRAM_CRON_THREAD_ID``
     overrides ``TELEGRAM_HOME_CHANNEL_THREAD_ID`` — in topic mode a root-DM delivery lands in the
-    system-only lobby where the user cannot reply."""
+    system-only lobby where the user cannot reply.
+
+    When topic mode is enabled, deliveries that land in the root DM (thread_id unset) end up in the
+    system-only lobby where the user cannot reply — the gateway returns the lobby reminder and drops
+    ``reply_to_message_id`` (#24409). Pointing cron at a dedicated topic via this env var lets replies work
+    as expected without changing the lobby invariant.
+    """
     if platform_name.lower() == "telegram":
         cron_thread = _home_env_lookup("TELEGRAM_CRON_THREAD_ID", strip=True)
         if cron_thread:
@@ -885,7 +910,15 @@ def _confirm_adapter_delivery(
     ``success`` attr/key is NOT success (would log "delivered" while nothing was sent).
     ``delivered is False`` REJECTS even with truthy ``success`` (the silence-narration filter
     returns ``{"success": True, "delivered": False}``). No ``message_id``/``raw_response`` is still
-    accepted (some adapters return a bare success) but logged at WARNING as UNVERIFIED."""
+    accepted (some adapters return a bare success) but logged at WARNING as UNVERIFIED.
+
+    A live adapter that returns ``None`` (e.g. a swallowed exception, a busy platform, or a code path that
+    returns early without producing a ``SendResult``) must NOT be treated as success — doing so causes the
+    scheduler to log ``"delivered to <chat> via live adapter"`` while the gateway never actually sees the
+    message (#47056).
+    * No ``message_id`` and no ``raw_response`` means we have no positive evidence of a send. Telegram
+    ``SendResult`` objects carry ``message_id``; the dict-filter shape does not. See #77763.
+    """
     if send_result is None:
         return False
     if isinstance(send_result, dict):
@@ -914,7 +947,13 @@ def _is_channel_dm_topic(runtime_adapter: Any, chat_id: Any, loop: Any, job_id: 
     """Is an ambiguous ``telegram:<positive_chat_id>:<numeric_thread_id>`` target a channel
     Direct-Messages topic (``direct_messages_topic_id``) rather than a private-chat forum topic
     (``message_thread_id``)? Shape cannot decide; signal is ``get_chat_info`` type == ``channel``.
-    Fails SAFE to False (thread routing) without a probe or on any probe error/timeout."""
+    Fails SAFE to False (thread routing) without a probe or on any probe error/timeout.
+
+    Callers gate this on the ambiguous shape first (``telegram:<positive_chat_id>:<numeric_thread_id>``) —
+    that shape is identical for both cases, so shape alone cannot decide (this was the #52060 regression).
+    Probe the live adapter's ``get_chat_info`` once and only return True when the chat is a channel.
+    See #22773.
+    """
     # Resolve on the CLASS, not the instance: a MagicMock instance auto-creates a truthy
     # ``get_chat_info``, so an instance-level probe would misclassify test doubles.
     get_chat_info = getattr(type(runtime_adapter), "get_chat_info", None)
@@ -1027,6 +1066,7 @@ def _resolve_target_transport(
     if isinstance(adapters, _sched.SharedRouteAdapters):
         # Credentialless satellite: the primary adapter serves THIS target only when an exact
         # primary route maps it to this profile; a miss fails closed below.
+        # See #101113.
         shared = adapters.get(platform, target)
         target_adapters = {platform: shared} if shared is not None else {}
     transport = resolve_delivery_transport(platform, config, target_adapters)
@@ -1090,6 +1130,7 @@ def _live_route_metadata(t: _TargetDelivery) -> tuple[Optional[str], dict, dict]
     if is_ambiguous_telegram_topic and _is_channel_dm_topic(
         t.runtime_adapter, t.chat_id, t.loop, job["id"]):
         # Channel DM topic: direct_messages_topic_id, no bare thread_id; media mirrors text.
+        # See #22773.
         route_thread_id = None
         route_metadata = {
             "direct_messages_topic_id": str(thread_id), "job_id": job["id"],
@@ -1098,6 +1139,10 @@ def _live_route_metadata(t: _TargetDelivery) -> tuple[Optional[str], dict, dict]
         media_metadata = {"direct_messages_topic_id": str(thread_id), "notify": t.notify_delivery}
     else:
         # Forum-style topic or non-topic target: message_thread_id.
+        # Put thread_id in *route_metadata* (not just the DeliveryTarget) deliberately — the
+        # DeliveryRouter's private-chat topic detection (gateway/delivery.py) demands a reply anchor when
+        # thread_id is absent from metadata; cron deliveries have no inbound reply anchor, so the metadata
+        # key bypasses that check and lets the adapter route via a plain message_thread_id. See #52060.
         route_thread_id = str(thread_id) if thread_id is not None else None
         route_metadata = {"job_id": job["id"], "notify": t.notify_delivery}
         if route_thread_id:
@@ -1289,6 +1334,12 @@ def _deliver_via_live_adapter(
 
         # Media rides the same DM-topic-aware routing as text. Skipped after a confirmation
         # timeout (loop contended, text already assumed delivered) — record the drop instead.
+        # Send extracted media files as native attachments via the live adapter, using the same
+        # DM-topic-aware routing as the text send (#22773 — media previously used a bare thread_id and
+        # landed in the General lane for private DM topics). Skip on an in-flight confirmation timeout: the
+        # gateway loop is contended, so each media send would also block its 30s budget, and the text
+        # payload is already assumed delivered (#38922). Record the skipped attachments so the drop is
+        # visible rather than silently lost.
         if adapter_ok and not timed_out and media_files:
             _live_send_media(t, media_metadata, media_files, delivery_errors)
         elif timed_out and media_files:
@@ -1301,6 +1352,9 @@ def _deliver_via_live_adapter(
         if adapter_ok:
             # Log WHERE it went: a ghost delivery in the wrong lane is otherwise indistinguishable.
             logger.info(
+                # Log WHERE it went, not just that it went: a ghost delivery that landed in the wrong lane
+                # (General topic instead of the routed thread) is indistinguishable from a real one without
+                # the routing identity (#77763).
                 "Job '%s': delivered to %s:%s via live adapter thread=%s message_id=%s",
                 job["id"], t.platform_name, t.chat_id,
                 route_thread_id if route_thread_id is not None else "-",
@@ -1520,6 +1574,11 @@ def _unresolved_delivery_outcome(job: dict, for_failure: bool) -> Optional[str]:
         return None
     if deliver_value == "origin":
         logger.info(
+            # deliver=origin with no resolvable origin and no configured home channels: treat as local
+            # rather than reporting an error. CLI-created jobs never capture a {platform, chat_id} origin,
+            # so failing here would make every CLI `deliver=origin` (or auto-detect) job emit a spurious "no
+            # delivery target resolved" error on every run (#43014). The output is still persisted in
+            # last_output for `cron list`/resume.
             "Job '%s': deliver=origin but no origin or home channels — "
             "skipping delivery (output saved in last_output)",
             job.get("name", job.get("id", "?")))

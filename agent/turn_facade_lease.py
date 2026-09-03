@@ -220,6 +220,9 @@ def _durable_session_exists(db, session_id: str) -> bool:
         # A locked / non-WAL read is not proof the row is absent; treating probe failure as "fresh"
         # ran fail-open at the exact contention point. Acquire, or fail closed.
         logger.warning(
+            # Acquire (or fail closed if acquire itself cannot) rather than start load/run/flush
+            # unsynchronized. get_session returns None — it does not raise — when the row is missing. See
+            # #84234.
             "Could not check durable session before turn lease; "
             "will acquire rather than run without serialization",
             exc_info=True,

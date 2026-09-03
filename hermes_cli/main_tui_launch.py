@@ -140,6 +140,11 @@ def _npm_lock_workspace_closure(packages: dict, starts) -> Optional[set]:
     every OTHER workspace's deps (``apps/desktop``, ``web``) as missing and
     reinstall on every launch. Names resolve by walking up ``node_modules``
     ancestors; ``link: true`` entries are followed to their real package.
+
+    The launch install is scoped with ``npm install --workspace ui-tui`` (see ``_make_tui_argv``), so only
+    the ui-tui workspace's dependency closure is written to the hidden ``.package-lock.json``. On Termux it
+    additionally selects ui-tui's child ``packages/*`` workspaces, so their devDependencies join the closure
+    too. See #66978.
     """
     start_set = {starts} if isinstance(starts, str) else {s for s in starts if s}
     present = [s for s in start_set if s in packages]
@@ -239,6 +244,8 @@ def _tui_need_npm_install(root: Path) -> bool:
     # Shared workspace checkout: the launch install is scoped to ui-tui (+ child
     # packages on Termux), so limit the comparison to that closure. Standalone /
     # own-lockfile layouts do a full install and keep the full comparison.
+    # Limit the comparison to the same selected-workspace closure so unrelated workspace deps (apps/desktop,
+    # web, …) don't force a reinstall every launch (#66978).
     closure: Optional[set] = None
     if ws_root != root:
         selected = _tui_selected_workspace_keys(root, ws_root)
@@ -251,6 +258,10 @@ def _tui_need_npm_install(root: Path) -> bool:
         if name not in installed:
             # Workspace link entries are never materialized by a partial
             # `npm install --workspace ui-tui`; don't force a reinstall for them.
+            # Workspace link entries (`"link": true`, paths outside node_modules/ like `apps/desktop`,
+            # `node_modules/web`) are never materialized by a partial `npm install --workspace ui-tui` —
+            # they're deliberately skipped (see #38772) and would otherwise force a reinstall on every
+            # launch.
             if pkg.get("optional") or pkg.get("peer") or pkg.get("link"):
                 continue
             if not name.startswith("node_modules/"):
@@ -362,7 +373,14 @@ def _find_bundled_tui(hermes_cli_dir: Path | None = None) -> Path | None:
 
 def _restore_tui_workspace(tui_dir: Path) -> bool:
     """Best-effort ``git restore`` of a missing ``ui-tui/`` (Windows AV/NTFS filters can delete
-    tracked files after ``hermes update``); True when the directory exists afterwards."""
+    tracked files after ``hermes update``); True when the directory exists afterwards.
+
+    On Windows an antivirus / NTFS filter driver can leave tracked ``ui-tui/`` files deleted in the working
+    tree after ``hermes update`` (HEAD stays intact; the files just vanish — see issue #49145). Those files
+    are tracked, so ``git restore`` puts them back deterministically. Best-effort: returns False (rather
+    than raising) when git is unavailable, this isn't a checkout, or the restore leaves the directory still
+    missing — the caller then prints the manual-recovery message.
+    """
     git = shutil.which("git")
     if not git or not (tui_dir.parent / ".git").exists():
         return False
@@ -377,7 +395,13 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
 
 def _ensure_tui_workspace(tui_dir: Path) -> None:
     """Ensure ``ui-tui/`` exists before it is used as a subprocess cwd (else ``NotADirectoryError``
-    / ``WinError 267`` with no usable message): git-restore first, then abort with recovery steps."""
+    / ``WinError 267`` with no usable message): git-restore first, then abort with recovery steps.
+
+    Without this, a missing workspace falls through to ``subprocess.run(..., cwd=<missing ui-tui>)``, which
+    crashes with ``NotADirectoryError`` (``WinError 267`` on Windows) instead of a usable message (#49145).
+    We first try to self-heal via ``git restore``; only if that can't recover the directory do we abort with
+    concrete manual-recovery steps.
+    """
     if tui_dir.is_dir():
         return
 
@@ -460,6 +484,10 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
     if not os.environ.get("HERMES_QUIET"):
         print("Installing TUI dependencies…")
     npm_cwd = _workspace_root(tui_dir)
+    # --workspace ui-tui avoids resolving apps/desktop (Electron + node-pty). See #38772. When ui-tui/ has
+    # its own package-lock.json (e.g. curl install), _workspace_root() returns tui_dir itself. Passing
+    # --workspace in that case fails because npm cannot find a workspace named "ui-tui" inside ui-tui/. See
+    # #42973.
     npm_workspace_args: tuple[str, ...] = () if npm_cwd == tui_dir else ("--workspace", "ui-tui")
     if termux_startup:
         npm_cwd, npm_workspace_args = _termux_workspace_install_context(tui_dir, include_child_workspaces=True)
@@ -508,6 +536,11 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     # 1. Prebuilt bundle (nix / packaged release / Docker image): just run it.
     # Must run BEFORE _ensure_tui_workspace(): a prebuilt install ships
     # hermes_cli/tui_dist/entry.js but never ui-tui/ (git checkouts only).
+    # 1. A prebuilt install (Docker image, Nix build, or prior `npm run build`) ships
+    #   hermes_cli/tui_dist/entry.js but never ships ui-tui/ at all (that directory only exists in a git
+    #   checkout) — so requiring the workspace to exist first made every prebuilt dashboard Chat tab
+    #   connection hard-exit before it ever got a chance to try the bundled entry.js it already has. See
+    #   #56665.
     if not tui_dev:
         if ext_dir:
             p = Path(ext_dir)
@@ -778,7 +811,14 @@ def _launch_tui(
 
 def _pin_kanban_board_env() -> None:
     """Pin the active kanban board into ``HERMES_KANBAN_BOARD`` so in-process tools and shelled-out
-    ``hermes kanban`` calls agree even if a concurrent ``boards switch`` flips the file mid-turn."""
+    ``hermes kanban`` calls agree even if a concurrent ``boards switch`` flips the file mid-turn.
+
+    Without this, in-process tools (``kanban_*``) and shelled-out CLI calls (``hermes kanban …``) resolve
+    the board on different paths: the env-pin if set, otherwise the global ``<root>/kanban/current`` file. A
+    concurrent ``hermes kanban boards switch`` from another session can flip the file mid-turn, so the same
+    chat sees its tool calls hit board A while its shell calls hit board B (#20074). Pinning at chat boot
+    mirrors what the dispatcher already does for spawned workers.
+    """
     if os.environ.get("HERMES_KANBAN_BOARD"):
         return
     with contextlib.suppress(Exception):

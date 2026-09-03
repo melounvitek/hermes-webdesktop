@@ -93,7 +93,11 @@ def _request_lazy_reconnect(server_name: str, server: _core.MCPServerTask) -> bo
 
 
 def _resolve_server_lazy(name: str, config: dict) -> bool:
-    """True when ``mcp_servers.<name>.lazy`` defers connect to first tool use (default off)."""
+    """True when ``mcp_servers.<name>.lazy`` defers connect to first tool use (default off).
+
+    Gated per-server by ``mcp_servers.<name>.lazy`` in config (default OFF), following the same per-server
+    key pattern as ``idle_timeout_seconds``. Design from #56832 (Vansh5632).
+    """
     return _core._parse_boolish(config.get("lazy", False), default=False)
 
 
@@ -125,7 +129,10 @@ def _adopt_server(name: str, server: _core.MCPServerTask) -> None:
 def _ensure_lazy_server_connected(server_name: str) -> bool:
     """Connect a lazily-registered server on demand (sync; blocks). Honours the cooldown and the
     ``_server_connecting`` dedup set; routes through ``_discover_and_register_server`` so
-    park/recycle/cooldown bookkeeping stays in one place. True when a live session exists."""
+    park/recycle/cooldown bookkeeping stays in one place. True when a live session exists.
+
+    See #50394.
+    """
     with _core._lock:
         server = _core._servers.get(server_name)
         if server is not None and server.session is not None:
@@ -166,7 +173,11 @@ def _ensure_lazy_server_connected(server_name: str) -> bool:
 
 def _get_connected_server_for_call(server_name: str) -> Optional[_core.MCPServerTask]:
     """Return a connected server; the single first-use connect point for lazy servers and
-    the wake-up point for recycled stdio ones."""
+    the wake-up point for recycled stdio ones.
+
+    Also the single first-use connect point for lazy (schema-cache registered) servers, so raw tool calls
+    AND the resource/prompt utility handlers all trigger the deferred spawn (#56832).
+    """
     with _core._lock:
         server = _core._servers.get(server_name)
         is_lazy = server_name in _core._lazy_server_configs
@@ -218,6 +229,9 @@ def _select_new_servers(servers: Dict[str, dict]) -> Dict[str, dict]:
     mid-reconnect with tools deregistered, so nothing else can nudge them: signal a reconnect."""
     with _core._lock:
         connecting = set(_core._server_connecting)
+        # Only attempt servers that aren't already connected (or currently connecting) and are enabled.
+        # Checking ``_server_connecting`` prevents duplicate subprocess spawns when ``discover_mcp_tools()``
+        # is called from multiple entry-points before the first batch finishes (#58862).
         new_servers = {
             k: v for k, v in servers.items()
             if k not in _core._servers and k not in connecting and k not in _core._lazy_server_configs
@@ -242,6 +256,8 @@ def _register_lazy_from_cache(new_servers: Dict[str, dict]) -> Tuple[Dict[str, d
     """Register ``lazy: true`` servers from a valid schema-cache entry without connecting
     (missing/stale entry or failed registration -> eager). Returns (eager servers, lazy tool
     count, lazy server count)."""
+    # A missing or stale cache entry falls back to the normal eager connect below (which write-through
+    # refreshes the cache for next time). See #56832.
     eager_servers: Dict[str, dict] = dict(new_servers)
     lazy_registered = 0
     lazy_server_count = 0
@@ -368,6 +384,9 @@ def _acquire_discovery_lock_with_retry():
         cookie = _core._try_acquire_mcp_discovery_lock()
         if cookie is not None:
             break
+    # Cross-process discovery guard (#62771). A lock loser waits for the holder, then performs its own
+    # process-local discovery. If locking is unavailable or the bounded wait expires, preserve the previous
+    # fail-soft behavior by running discovery unguarded.
     if cookie is None:
         logger.warning("MCP discovery lock still held after %d retries -- running discovery unguarded",
                        _core._MCP_DISCOVERY_LOCK_MAX_RETRIES)

@@ -73,6 +73,8 @@ def wait_for_response(clarify_id: str, timeout: float) -> Optional[str]:
         remaining = 1.0 if deadline is None else deadline - time.monotonic()
         if remaining <= 0 or entry.event.wait(timeout=min(1.0, remaining)):
             break
+        # Periodic activity touch so the gateway's inactivity timeout doesn't kill the agent during long
+        # code execution (#10807).
         if touch_activity_if_due is not None:
             touch_activity_if_due(activity_state, "waiting for user clarify response")
     with _lock:
@@ -270,7 +272,11 @@ def resolve_clarify_timeout(config: dict) -> int:
 def get_clarify_timeout() -> int:
     """Clarify timeout from config.yaml; 0/negative = unlimited. Default 3600: long enough
     that a user who stepped away still finds a live entry when they tap, short enough that
-    an abandoned prompt eventually unblocks the agent thread instead of pinning the guard."""
+    an abandoned prompt eventually unblocks the agent thread instead of pinning the guard.
+
+    The old 600s default evicted the entry mid-think, so a late tap landed on a dead entry and the agent
+    hung on ``running: clarify`` (#32762).
+    """
     try:
         from hermes_cli.config import load_config
         return resolve_clarify_timeout(load_config() or {})

@@ -1139,6 +1139,13 @@ def resolve_execution_context(session_id: str) -> tuple[RelayRuntime | None, Rel
     # Nested managed execution is impossible (see _MANAGED_CALLBACK_DEPTH); the outer scope
     # still records the tool-level event.
     if _MANAGED_CALLBACK_DEPTH.get() > 0 or not relay_instrumentation_enabled():
+        # A managed Relay callback is already executing on this logical call path (e.g. the native
+        # ``tools.execute`` pipeline is mid-dispatch of a Hermes tool). Nested managed execution here is
+        # structurally impossible: the native pipeline binds its Futures to the OUTER call's event loop,
+        # which is blocked inside the synchronous tool callback until the tool returns. A nested managed LLM
+        # call (the vision_analyze auxiliary path) therefore awaits a foreign-loop Future that can never
+        # complete — "attached to a different loop" at best, deadlock at worst, and "Event loop is closed"
+        # during shutdown when the orphaned Future is completed late (#77244).
         return None, None, None
     turn = active_turn(session_id)
     host = turn.lease.live_runtime() if turn is not None else None

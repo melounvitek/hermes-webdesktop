@@ -19,6 +19,8 @@ _AUTOSTASH_NAME_PREFIX = "hermes-update-autostash-"
 
 #: Age past which a leftover autostash is called out. Younger entries are normal
 #: (recent --keep-stash park); older ones are almost always forgotten.
+# Entries younger than this are normal (a parked stash from : the desktop updater's --keep-stash run minutes
+# ago); older ones are almost : always forgotten (#63717 problem 6: an orphan persisted 9+ days unnoticed).
 _AUTOSTASH_WARN_AGE_DAYS = 7
 
 _STASH_LEFT_IN_PLACE = "  The stash was left in place. You can remove it manually after checking the result."
@@ -106,6 +108,11 @@ def _warn_orphaned_update_autostashes(git_cmd: list[str], cwd: Path) -> int:
 
     Autostashes legitimately outlive a run (--keep-stash, failed restore) but nothing re-surfaces them.
     Deliberately NOT a GC: a stash may be the only copy of the user's work, so Hermes never drops one.
+
+    Autostash entries legitimately outlive an update run (``--keep-stash`` parks them; a conflicted or
+    failed restore preserves them for safety), but nothing ever re-surfaces them afterwards — they sit in
+    ``git stash`` invisibly for weeks (#63717 problem 6). This prints a short notice naming the stale
+    entries with recovery/cleanup guidance.
     """
     from hermes_cli.update_cmd import _git_run
     try:

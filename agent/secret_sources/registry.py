@@ -174,7 +174,12 @@ def list_sources(*, scope: Optional[str] = None) -> List[SecretSource]:
 
 def list_plugin_sources() -> List[SecretSource]:
     """Sources registered outside the bundled set: global ``"plugin"`` origins
-    plus every scoped registration (bundled sources register with scope=None)."""
+    plus every scoped registration (bundled sources register with scope=None).
+
+    Includes both legacy global plugin registrations (``_SOURCE_ORIGINS == "plugin"``) and the current
+    scope's profile-keyed registrations — every scoped entry is plugin-registered by definition, since
+    bundled sources register with ``scope=None`` (#64229 profile isolation).
+    """
     _ensure_builtin_sources()
     with _REGISTRY_LOCK:
         merged = {n: s for n, s in _SOURCES.items() if _SOURCE_ORIGINS.get(n) == "plugin"}
@@ -374,6 +379,9 @@ def apply_all(secrets_cfg: dict, home_path: Path,
     Profile aliasing: under a named profile an applied ``FOO_<PROFILE>``
     (credential-shaped suffixes only) also hydrates canonical ``FOO``, under the
     same guards; disabled with ``secrets.profile_alias: false``.
+
+    1. 2. 3. 4. See #58073.
+    See #51447.
     """
     env = environ if environ is not None else os.environ
     report = ApplyReport()

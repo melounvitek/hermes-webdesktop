@@ -161,6 +161,14 @@ def warm_agent_browser_npx_cache(timeout: float = 60.0) -> bool:
     Runs with the credential-scrubbed env every other agent-browser spawn uses (registry-fetched npm code must
     never see the operator keyring), in its own process group, and tree-kills on timeout so a surviving
     descendant cannot hold the capture pipe open. Never raises; True only when npx exited 0.
+
+    agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via ``npx
+    agent-browser`` instead, which keeps it out of the npm workspace install graph entirely (nothing to
+    prune it anymore) but means the first real invocation in a session would otherwise pay npx's
+    registry-lookup/fetch cost. Calling this during ``hermes update`` (or ``hermes doctor --fix``) warms
+    npx's own cache ahead of time, restoring the "available before any session starts" property
+    agent-browser had while it was an eager root dependency — without re-entangling it with the workspace
+    graph.
     """
     _bt = _origin()
     npx_bin = _bt._resolve_npx_bin()
@@ -316,7 +324,12 @@ def check_browser_requirements() -> bool:
 
 
 def check_browser_vision_requirements() -> bool:
-    """Advertise ``browser_vision`` only with BOTH a working browser AND a vision backend."""
+    """Advertise ``browser_vision`` only with BOTH a working browser AND a vision backend.
+
+    Without the vision check, the tool stays in the model's tool list even when no vision provider is
+    configured, then fails at call time with a cryptic provider-side error like ``unknown variant
+    `image_url`, expected `text``` (issue #31179).
+    """
     if not _origin().check_browser_requirements():
         return False
     try:

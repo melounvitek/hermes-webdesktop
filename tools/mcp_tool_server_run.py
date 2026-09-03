@@ -52,7 +52,12 @@ class MCPServerRunMixin:
         down, transport re-entered; event cleared first) or ``"recycle"`` (stdio idle/lifetime
         limit; restarts lazily on next call). Shutdown wins a tie. A keepalive (``ping``,
         list_tools fallback) runs every ``keepalive_interval`` (must stay below the server's
-        session TTL); a failure triggers a reconnect."""
+        session TTL); a failure triggers a reconnect.
+
+        Periodically sends a lightweight keepalive (``ping``, with a ``list_tools`` fallback for servers
+        that don't implement the optional ping utility — see :meth:`_keepalive_probe`) to prevent
+        TCP/session state from going stale during idle periods (#17003).
+        """
         keepalive_interval = max(
             _core._MIN_KEEPALIVE_INTERVAL,
             float(self._config.get("keepalive_interval", _core._DEFAULT_KEEPALIVE_INTERVAL)))
@@ -73,6 +78,7 @@ class MCPServerRunMixin:
                     return "recycle"
                 # Timeout: probe for a stale session — NEVER while an RPC is in flight (a
                 # concurrent ping can wedge the stdio stream; a busy server is alive anyway).
+                # Timeout — no lifecycle event fired. See #48069.
                 if self.session:
                     if self._rpc_lock.locked() or any(not t.done() for t in self._inflight_tasks):
                         continue
@@ -87,6 +93,7 @@ class MCPServerRunMixin:
                         self._reconnect_event.set()
                         break
                     # Survived a full keepalive interval: real proof of health.
+                    # Clear the rapid-drop budget (#62212).
                     self._mark_session_proven()
         finally:
             await self._cancel_waiters(shutdown_task, reconnect_task)
@@ -94,6 +101,7 @@ class MCPServerRunMixin:
             self._fail_inflight_calls("shutdown")
             return "shutdown"
         # Deliberate teardown: fail in-flight RPCs NOW instead of riding out the tool timeout.
+        # See #48069, #81995.
         self._fail_inflight_calls("reconnect")
         self._reconnect_event.clear()
         return "reconnect"
@@ -117,6 +125,13 @@ class MCPServerRunMixin:
         leaves the server unrevivable). With tools deregistered no call can reach the breaker
         probe, so the wait is TIMED (one self-probe per ``_PARKED_RETRY_INTERVAL``); an explicit
         ``_reconnect_event.set()`` wakes it immediately."""
+        # Do NOT return — exiting the task orphans the server: nothing would ever listen for
+        # _reconnect_event again and the server would be permanently wedged for the life of the process
+        # (#16788). Instead, drop the phantom tools from the registry and park. Because parking deregisters
+        # the tools, no tool call can reach the circuit-breaker half-open probe or _signal_reconnect — so
+        # the park is a TIMED wait: every _PARKED_RETRY_INTERVAL we wake and attempt one reconnect ourselves
+        # (#57129). An explicit _reconnect_event.set() (OAuth recovery, manual /mcp refresh) still wakes us
+        # immediately.
         self._was_parked = True
         self._deregister_tools()
         self._reconnect_event.clear()
@@ -188,6 +203,11 @@ class MCPServerRunMixin:
                     break
             except asyncio.CancelledError:
                 # Not a connection failure: re-raise so shutdown()'s ``await self._task`` completes.
+                # Task was cancelled (shutdown, gateway restart, explicit task.cancel()). Don't treat this
+                # as a connection failure — CancelledError inherits from BaseException (not Exception) in
+                # Python 3.11+, so the broad ``except Exception`` below would NOT catch it; we'd silently
+                # exit the reconnect loop and the MCP server would stay dead until Hermes is fully
+                # restarted. See #9930.
                 self.session = None
                 raise
             except Exception as exc:
@@ -214,6 +234,12 @@ class MCPServerRunMixin:
         logger.debug("MCP server '%s': reconnecting (OAuth recovery or manual refresh)", self.name)
         # A clean return is NOT proof of health (a flapper handshakes fine, then drops). Only a
         # PROVEN session clears the budget; a teardown race is recovery, never a park charge.
+        # A clean transport return means a session was established and then asked to rebuild (auth recovery
+        # / manual refresh / keepalive failure / transport TaskGroup drop). That alone is NOT proof of
+        # health: a flapping transport handshakes fine and drops moments later, and resetting the budget
+        # here let such servers respawn forever (#62212 — 6212 spawns in 63h). Only clear the
+        # consecutive-failure budget once the session PROVED healthy — survived >=1 full keepalive interval
+        # or served >=1 successful tool call (_mark_session_proven).
         if self._teardown_race and not self._session_proven:
             logger.info("MCP server '%s': reconnect after teardown race (in-flight calls were failed); "
                         "not charging the rapid-drop budget", self.name)
@@ -268,6 +294,12 @@ class MCPServerRunMixin:
             self._recycled_reason = None
         # Initial-connect ladder (a startup blip must not kill the server); gated on
         # _ever_connected, not _ready (which clears every reconnect cycle).
+        # If this is the first connection attempt, retry with backoff before giving up. Gated on
+        # ``_ever_connected`` rather than ``_ready`` — ``_ready`` is cleared on every reconnect cycle (see
+        # below), so a server that already registered tools once and then dropped would otherwise be
+        # misclassified as never having connected and re-enter this initial-connect ladder (#94654).
+        # ``_ever_connected`` itself is set once and never cleared. (Ported from Kilo Code's MCP resilience
+        # fix.)
         if not self._ever_connected:
             return await self._on_initial_connect_error(exc, root, failure_class, budget)
         if self._shutdown_event.is_set():

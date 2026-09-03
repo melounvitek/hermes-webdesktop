@@ -27,6 +27,11 @@ def _prompt_choice(title: str, rows: list[str], default: int = 0) -> int:
 
 def _model_options() -> list[dict[str, Any]]:
     payload = build_models_payload(
+        # Keep the profile override inside the worker thread so the full sync picker build (config load,
+        # pricing, refresh probes) runs off the event loop under the requested profile. Use
+        # _config_profile_scope (contextvar only, no skill-module lock) — the payload build can block for
+        # 15s on a models.dev cache miss, and _profile_scope's RLock held across that block starves
+        # concurrent /api/config and freezes the server (#58576).
         load_picker_context(),
         # Slot pickers must only offer providers the user can actually call.
         # Including setup-only rows makes an unconfigured canonical provider

@@ -121,6 +121,11 @@ def _setup_credentials(token: str, dashboard_id: str, name: str) -> Optional[str
     id *is* the Spectrum id. A valid existing secret is reused: regenerating breaks a running
     sidecar's sends until restart. Returns the secret or None."""
     try:
+        # 3. Spectrum is always enabled and provisioned at create-time, and the dashboard project id *is*
+        #   the Spectrum project id (ids unified), so there's nothing to enable — the id we already have is
+        #   the Spectrum id. Regenerating invalidates the credential that a running sidecar holds in its
+        #   process env, causing all outbound sends to fail with AuthenticationError until the gateway is
+        #   restarted (GH #50755).
         print("[3/5] Provisioning Spectrum credentials...")
         existing_id, existing_secret = photon_auth.load_project_credentials()
         secret: str = ""

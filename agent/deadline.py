@@ -41,6 +41,8 @@ _LOOP_BLOCKED_DUMP_GRACE_S = 5.0
 
 # ``Event.wait`` is a C-level block: KeyboardInterrupt / SetAsyncExc only land when the
 # thread returns to Python, so the sync wait is sliced to observe /stop or SIGINT promptly.
+# Slice the wait so a /stop or SIGINT during a bounded sync call is observed within this window rather than
+# at the full deadline (#94285, tools/test_local_interrupt_cleanup).
 _BOUNDED_SYNC_WAIT_SLICE_S = 0.2
 
 
@@ -165,6 +167,12 @@ def resolve_timeout(key: str, *, default: Optional[float], env_var: Optional[str
 # second timer dumps all thread stacks when the loop provably failed to process the expiry.
 
 
+# --------------------------------------------------------------------------- Bounded execution — async
+# flavor. Generalizes plugins/platforms/telegram/adapter.py:_await_with_thread_deadline (the #63309 fix):
+# the deadline is driven by a daemon threading.Timer so a blocked event loop cannot disable it, and a second
+# timer dumps all thread stacks when the loop provably failed to process the expiry — the one piece of
+# information loop-blocked hangs otherwise never surface.
+# ---------------------------------------------------------------------------
 def _consume_abandoned(task: "asyncio.Future[Any]") -> None:
     """Observe an abandoned task's outcome so it never logs 'never retrieved'."""
     try:
@@ -282,7 +290,10 @@ def run_bounded_sync(
     """Run ``fn`` in a daemon worker thread under a wall-clock deadline; exceptions re-raise in
     the caller. On expiry the worker is **abandoned** (every timeout leaks one daemon thread, so
     do NOT use per-item in hot loops) and ``on_timeout`` runs best-effort in the caller's thread.
-    The worker runs under ``contextvars.copy_context()`` so secret scope / session id survive."""
+    The worker runs under ``contextvars.copy_context()`` so secret scope / session id survive.
+
+    See #94285.
+    """
     timeout_s = clamp_timeout(timeout)
     start = time.monotonic()
     if timeout_s is None:

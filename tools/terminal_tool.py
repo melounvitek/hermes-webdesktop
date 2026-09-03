@@ -441,9 +441,20 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     scope = _session_scope()
     if task_id and scope.session_isolated:
         return _resolve_container_alias(task_id)
+    # Per-session isolation: when a session key is present (the WebUI streaming layer sets it per-session,
+    # the gateway per-message via contextvars), scope the container to it so switching profiles can't reuse
+    # a previous profile's SSHEnvironment and silently run commands on the wrong remote host. Subagents
+    # inherit the same session key, so they still collapse onto the parent's container (the #16177
+    # shared-container intent). CLI mode has no session key and falls through to "default", behaviour
+    # unchanged. See commit e00f940a9. This runs *after* the isolation-override and
+    # docker/container_persistent branches above: those paths already key containers per task_id, so they
+    # stay authoritative where they apply and this only covers the cases that would otherwise collapse to
+    # the shared "default" key (notably SSH).
     session_key = _current_session_key()
     shared = _tenv("TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "").strip() if scope.docker_profile_scoped else ""
     if shared:
+        # Explicit opt-in: trusted profiles configuring the same terminal.docker_shared_container_key share
+        # ONE container/cache slot (and sandbox dir) regardless of profile name (#84671).
         return f"shared:{shared}"
     if not session_key:
         return "default"
@@ -549,6 +560,8 @@ def _ensure_terminal_env_bridged() -> None:
     defaults are backfilled only when none is set. A per-turn terminal scope
     suppresses the bridge entirely: writing scope values into the process-global
     env would re-create the first-writer-wins cross-profile leak the scope fixes.
+
+    terminal_tool reads ALL terminal settings from os.environ (TERMINAL_*). See #61115, #65696.
     """
     from tools.terminal_scope import get_terminal_scope
 
@@ -773,6 +786,8 @@ def _resolve_command_cwd(
     container backends a recorded HOST path (a desktop/TUI surface registering
     its workspace) is unusable in the sandbox — ``cd <host path>`` fails with
     exit 126 — so it is discarded in favor of ``default_cwd``.
+
+    Same guard class as the env-creation sanitizers (#50636, #54447); this is the per-command sibling site.
     """
     if workdir:
         return workdir
@@ -906,6 +921,7 @@ def _plan_execution(
     # Fail closed under a refusal scope: the routed profile's terminal
     # policy could not be resolved, so running with the launch process's
     # ambient policy is forbidden.
+    # See #68559.
     if not _host_local:
         from tools.terminal_scope import enforce_no_refusal
 

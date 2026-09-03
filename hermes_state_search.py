@@ -191,6 +191,10 @@ class SessionSearchMixin:
         try:
             self._merge_fts_incrementally(max_pages=self._FTS_MERGE_MAX_PAGES_PER_INDEX)
         except Exception as exc:  # noqa: BLE001 - post-commit maintenance
+            # The canonical write is already committed before this cadence runs. No maintenance failure —
+            # including the bare SystemError the CPython sqlite3 layer can raise under cross-thread errmsg
+            # scrambling — may escape and make the caller replay an ambiguous, possibly-durable write
+            # (#90734, #85079).
             logger.warning("FTS incremental merge failed after commit: %s", exc)
 
     # ── Deferred rebuild engine (base + CJK backfills) ─────────────────────
@@ -341,7 +345,13 @@ class SessionSearchMixin:
         """Tear down one chunk of a demoted v22 FTS shadow table (a PLAIN table now); True while
         work remains. INTEGER single-column-key tables drain with a high-water marker so
         each chunk's scan is bounded (restarting the scan was O(n²)); compound-key tables
-        keep the chunked ``LIMIT`` delete — they are small by construction."""
+        keep the chunked ``LIMIT`` delete — they are small by construction.
+
+        Single-column-key trash tables (the common shape — FTS shadow tables carry a rowid/integer PK) are
+        drained with a high-water marker mirroring :meth:`fts_rebuild_step`: each chunk deletes only rows
+        after the previously-drained key, so the per-chunk scan is bounded instead of re-scanning from the
+        start of the table every chunk (O(n²) total on large trash tables, #79324).
+        """
         with self._read_ctx() as conn:
             trash = [r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ? ESCAPE '\\'",
@@ -373,6 +383,9 @@ class SessionSearchMixin:
                 if cur.rowcount > 0:
                     self.set_meta(marker_key, str(upper), cursor=conn)
                 return True
+            # Compound-key or rowid trash table: legacy chunked delete. These shadow tables are small, so
+            # the quadratic re-scan is not a concern (#79324 keeps the high-water path for the big
+            # single-key tables).
             cur = conn.execute(
                 f"DELETE FROM {tbl} WHERE ({key}) IN (SELECT {key} FROM {tbl} LIMIT {self._FTS_REBUILD_CHUNK_ROWS})"
             )
@@ -474,7 +487,10 @@ class SessionSearchMixin:
         """Heal interrupted demote/backfill bookkeeping before optimize runs: orphan high_water
         gets progress re-seeded; an empty external index with messages and no markers gets
         a full backfill claim. Never invents markers on a still-legacy inline DB — optimize
-        would then skip demote and INSERT against the inline table forever."""
+        would then skip demote and INSERT against the inline table forever.
+
+        Covers two post-#65798 failure classes:
+        """
         def _do(conn):
             if _meta_row(conn, "fts_rebuild_high_water") is not None:
                 self._reseed_missing_progress(conn)
@@ -568,6 +584,10 @@ class SessionSearchMixin:
         # a TRUNCATE reset from a transient CLI would race a live writer.
         try:
             with self._lock:
+                # Best-effort: fold the WAL back into the main file so the on-disk size settles now rather
+                # than at close(). Callers must therefore NOT size the result by stat()ing the file; use
+                # :meth:`logical_size_bytes`, which is truthful immediately regardless of readers. See
+                # #45383.
                 self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
         except Exception as exc:
             logger.debug("WAL checkpoint (PASSIVE) after optimize VACUUM failed: %s", exc)
@@ -1046,6 +1066,10 @@ class SessionSearchMixin:
             except sqlite3.DatabaseError as exc:
                 # Corruption parent class: detach the derived indexes and answer from
                 # canonical rows; repair paths own the rebuild.
+                # A corrupt FTS index raises the malformed / "fts5: corrupt structure record" class on the
+                # MATCH read, the same class the write path handles (#66296). OperationalError (query
+                # syntax) is a subclass caught above; this arm is the corruption parent. The existing
+                # stale-open/repair paths retain rebuild ownership.
                 if not self._enter_fts_fail_open(exc):
                     raise
                 matches = self._search_messages_like_fallback(query, limit=limit, offset=offset, sort=sort, **filters)
@@ -1068,6 +1092,13 @@ class SessionSearchMixin:
         # "concatenate"). Skipped for role='tool' (both indexes exclude tool rows).
         if not matches and not is_cjk and not (bool(role_filter) and "tool" in role_filter):
             fb_query = _quote_fts_tokens(query.strip('"').strip())
+            # ── CJK-bigram route (messages_fts_cjk, cjk_unicode61) ────── When the bigram index is
+            # available it serves EVERY CJK query shape the legacy code split between trigram (>=3
+            # chars/token) and LIKE full scans (1-2 char tokens) — the whole point of the index (PR #65544).
+            # Exceptions stay on the legacy routes: - role_filter=['tool'] queries (tool rows aren't in the
+            # cjk index, same exclusion as trigram), - queries containing a LONE 1-char CJK run: the index
+            # stores bigrams for runs >=2, so a single-char term can only match isolated chars — LIKE
+            # substring semantics are broader.
             if self._fts_cjk_available:
                 matches = self._match_rows("messages_fts_cjk", fb_query, **route) or matches
             if not matches and self._trigram_available and self._trigram_eligible_tokens(query):
@@ -1175,7 +1206,19 @@ class SessionSearchMixin:
         that rejects writes while reads succeed. Two processes rebuilding one state.db
         concurrently corrupted production DBs, so this admits through
         ``fts_rebuild_admission`` and FAILS CLOSED, returning 0 on deferral (callers treat 0
-        as "no progress" and use the stale-FTS breadcrumb path). Returns indexes rebuilt."""
+        as "no progress" and use the stale-FTS breadcrumb path). Returns indexes rebuilt.
+
+        Uses the FTS5 ``'rebuild'`` command, which rewrites the internal b-tree segments from the content
+        rows. Unlike ``optimize_fts`` (which merges existing segments), ``rebuild`` discards and recreates
+        the index data entirely. See #50502.
+        A full structural rebuild must never run concurrently in two processes sharing one state.db — that
+        interleaving has structurally corrupted the database in production (PR #93200) — so this admits
+        through the cross-process ``fts_rebuild_admission`` authority and FAILS CLOSED: if another process
+        holds the rebuild lock beyond the bounded wait, this call defers (returns 0) rather than racing it.
+        Callers already treat 0 as "rebuild made no progress" and fall back to the stale-FTS breadcrumb
+        path, which retries in-process from the gateway housekeeping tick (``retry_deferred_fts_recovery``)
+        and at next startup.
+        """
         rebuilt = 0
         with fts_rebuild_admission(self.db_path) as admitted:
             if not admitted:

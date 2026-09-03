@@ -167,6 +167,8 @@ def smooth_whitespace_for_tts(text: str) -> str:
 
 # ``/reasoning show`` emits ``<think>...</think>`` in the final message: users want to
 # SEE reasoning, not hear it. An unterminated block (streaming cut-off) is also silenced.
+# Reasoning blocks: models with ``/reasoning show`` enabled emit ``<think>...</think>`` blocks in the final
+# assistant message. See #34213.
 _THINK_BLOCK_RE = re.compile(r"<think[\s>].*?</think>", flags=re.DOTALL | re.IGNORECASE)
 _THINK_BLOCK_OPEN_RE = re.compile(r"<think[\s>].*\Z", flags=re.DOTALL | re.IGNORECASE)
 
@@ -187,7 +189,10 @@ def strip_nonspoken_blocks(text: str) -> str:
 def flatten_newlines_for_payload(text: str) -> str:
     """Collapse newlines into sentence breaks for single-line TTS payloads: some OpenAI-compatible
     backends (e.g. Kokoro) truncate at the first newline; smoothing already ends each line with
-    punctuation, so this is safe."""
+    punctuation, so this is safe.
+
+    See #9004.
+    """
     if not text:
         return ""
     for pattern, repl in ((r"\n{2,}", ". "), (r"(?<=[.!?;:,])\n", " "), (r"\n", ". "), (r"\.\s*\.", "."),

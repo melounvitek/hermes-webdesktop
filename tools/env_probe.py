@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 # signals completion. Callers block at most ``_PROBE_WAIT_TIMEOUT`` s then fail open
 # with "" — a stuck probe (e.g. a Windows pipe wedged by an orphaned pip descendant)
 # can degrade only the probe line, never system-prompt construction.
+# Module-level cache. The probe result is deterministic for the lifetime of the process — Python install
+# state doesn't change mid-session in any way that would matter for the system prompt. See #67964.
 _CACHE_LOCK = threading.Lock()
 _CACHED_LINE: Optional[str] = None  # None = not probed yet; "" = probed, nothing to say.
 _PROBE_DONE = threading.Event()
@@ -169,7 +171,11 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     """Return the cached probe line (building it on first call); "" when the
     environment is clean, so the prompt assembler drops the section. Waits at most
     ``_PROBE_WAIT_TIMEOUT`` on the single worker, then fails open with "".
-    ``force_refresh`` is for tests."""
+    ``force_refresh`` is for tests.
+
+    A wedged probe subprocess (#67964) therefore can never block system-prompt construction — at worst the
+    toolchain line is absent from prompts built while the probe is stuck.
+    """
     global _WAIT_ALREADY_TIMED_OUT
     if force_refresh:
         _reset_cache_for_tests()
@@ -177,6 +183,7 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
     # routed profile's backend lives in the per-turn terminal scope, which the worker
     # thread does not inherit. Remote backends answer "" without consulting the cache
     # — the cached line describes the HOST toolchain.
+    # See #68559.
     backend = _resolve_terminal_backend()
     if backend in _REMOTE_BACKENDS or _plugin_backend_is_remote(backend):
         return ""

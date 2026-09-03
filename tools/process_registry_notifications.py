@@ -26,7 +26,12 @@ def _format_age(seconds: float) -> str:
 
 def _model_not_found_patterns() -> "list[str]":
     """Model-not-found phrases from ``agent.error_classifier`` (the failover path's
-    own list, so nothing drifts); a minimal built-in set if the import fails."""
+    own list, so nothing drifts); a minimal built-in set if the import fails.
+
+    Imported from ``agent.error_classifier`` so the batch renderer applies the SAME classification the
+    failover path consumes — no hand-copied pattern list to drift. Fails open to a minimal built-in set so a
+    classifier import problem never hides the per-task blocks. See #97667.
+    """
     try:
         from agent.error_classifier import _MODEL_NOT_FOUND_PATTERNS
         return list(_MODEL_NOT_FOUND_PATTERNS)

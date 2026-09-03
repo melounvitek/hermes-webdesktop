@@ -97,6 +97,8 @@ def _normalize_json_strings_for_schema(value: Any, schema: Any) -> Any:
     Schema-guided: a string is only parsed when its schema position expects a
     container, so legitimate JSON-looking ``type: string`` fields survive.
     Returns the same object when nothing changed (identity = cheap no-op check).
+
+    Ported from cline/cline#11803, adapted to hermes-agent's coercion layer.
     """
     if not isinstance(schema, dict):
         return value

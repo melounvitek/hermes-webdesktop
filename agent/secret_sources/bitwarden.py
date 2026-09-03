@@ -242,6 +242,8 @@ def _b64e(raw: bytes) -> str:
 def _derive_encrypted_cache_key(access_token: str, salt: bytes) -> bytes:
     """HKDF the local cache key from the bootstrap BWS token. cryptography is imported
     lazily: eagerly mapping ``_rust.pyd`` on Windows blocks the updater replacing it."""
+    # Keep the native cryptography extension lazy. Most CLI commands import this module while building
+    # argparse, even though only encrypted-cache reads/writes need it. See #73381.
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 

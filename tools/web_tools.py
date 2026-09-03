@@ -59,7 +59,13 @@ logger = logging.getLogger(__name__)
 # ─── Backend Selection ────────────────────────────────────────────────────────
 
 def _env_value(name: str) -> str:
-    """Resolve ``name`` via the config-aware env layer (``hermes config set`` values), then process env."""
+    """Resolve ``name`` via the config-aware env layer (``hermes config set`` values), then process env.
+
+    Mirrors the SearXNG provider's ``_searxng_url()`` so that values set through Hermes' config/.env layer
+    (``hermes config set``, ``hermes tools``) are honored here too — not just raw process-env exports.
+    Without this, a config-only ``SEARXNG_URL`` (or any provider key) leaves the backend auto-detect cascade
+    and ``check_web_api_key()`` blind to it. See #34290.
+    """
     try:
         from hermes_cli.config import get_env_value
         val = get_env_value(name)
@@ -213,7 +219,14 @@ _LEGACY_WEB_BACKENDS = frozenset(_BUILTIN_AVAILABILITY)
 
 def _is_backend_available(backend: str) -> bool:
     """True when *backend* is usable — the single availability chokepoint. Non-legacy names delegate to the
-    registered provider's ``is_available()`` (unregistered names fall through); built-ins use cheap probes."""
+    registered provider's ``is_available()`` (unregistered names fall through); built-ins use cheap probes.
+
+    For plugin-registered backends (any name outside :data:`_LEGACY_WEB_BACKENDS`), availability is
+    delegated to the provider's ``is_available()`` via the web_search_registry. This is the single
+    chokepoint through which ``_get_backend``, ``_get_capability_backend``, and ``check_web_api_key`` all
+    resolve availability — fixing custom-provider discovery for every caller at once (issues #28651, #31873,
+    #32698). Built-in backends keep their cheap hardcoded probes below.
+    """
     backend = (backend or "").lower().strip()
     provider = None if backend in _LEGACY_WEB_BACKENDS else _registered_web_provider(backend)
     if provider is not None:
@@ -222,6 +235,11 @@ def _is_backend_available(backend: str) -> bool:
     return probe() if probe else False
 
 
+# ─── Firecrawl Client ──────────────────────────────────────────────────────── After PR #25182, the
+# firecrawl client, lazy SDK proxy, dual-auth config resolution, response normalizers, and
+# check_firecrawl_api_key() all live in plugins.web.firecrawl.provider and are re-exported at the top of
+# this module so external callers (integration tests, tool-registry gating) and unit tests that patch
+# tools.web_tools.<name> continue to work.
 def _web_requires_env() -> list[str]:
     """Tool-registry metadata env vars for the web backends. Gateway vars are always listed: gating them
     on ``managed_nous_tools_enabled()`` cost a synchronous portal HTTP refresh at every CLI startup.
@@ -237,10 +255,22 @@ _debug = DebugSession("web_tools", env_var="WEB_TOOLS_DEBUG")
 
 # ─── Dispatch ─────────────────────────────────────────────────────────────────
 
+# ─── Exa / Parallel inline helpers — moved into plugins ────────────────────── After PR #25182, the exa
+# client + search/extract and parallel client + search/extract helpers all live in their respective plugins:
+# - plugins/web/exa/provider.py - plugins/web/parallel/provider.py Both plugins register through
+# agent.web_search_registry and the dispatchers in this file resolve them via get_active_*_provider().
 def _ensure_web_plugins_loaded() -> None:
     """Idempotently run plugin discovery so the web registry is populated. Dispatch is reachable from contexts
     that never triggered discovery (subprocess agent runs, delegate children, scripts); without it a
-    configured backend yields a misleading "No web ... provider" error."""
+    configured backend yields a misleading "No web ... provider" error.
+
+    Every bundled web provider (brave-free, ddgs, searxng, exa, parallel, tavily, firecrawl, keenable)
+    registers itself via ``plugins/web/<vendor>/__init__.py`` during plugin discovery. Tool dispatch can be
+    reached from contexts that haven't already triggered discovery — subprocess agent runs, delegate
+    children, standalone scripts, certain test paths — and without it the registry is empty and
+    ``get_provider('firecrawl')`` returns ``None`` even when the user has ``web.extract_backend: firecrawl``
+    configured and ``FIRECRAWL_API_KEY`` set. See #27580.
+    """
     try:
         from hermes_cli.plugins import _ensure_plugins_discovered
         _ensure_plugins_discovered()
@@ -407,6 +437,8 @@ def _provider_is_ready(provider) -> bool:
     ``get_active_*_provider()`` returns an explicitly configured backend even when ``is_available()`` is
     False (so dispatch can emit a precise error), so readiness gates (tool check_fn, ``hermes doctor``)
     must probe for real. Keyless mode (Exa/Parallel free tier) is a working state, not a misconfig.
+
+    See #78412.
     """
     if provider is None:
         return False
@@ -421,6 +453,8 @@ def check_web_api_key() -> bool:
 
     A plugin-registered provider reporting ``is_available()`` must light the tools up even with no
     built-in credentials; resolution funnels through :func:`_is_backend_available`.
+
+    See #28651, #31873.
     """
     # Boolean OR over configured + built-ins — probe order is irrelevant here.
     candidates = [c for c in (_configured_backend(),) if c] + list(_LEGACY_WEB_BACKENDS)

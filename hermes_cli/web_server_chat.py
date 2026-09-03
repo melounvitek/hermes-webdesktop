@@ -47,6 +47,7 @@ _PTY_READ_CHUNK_TIMEOUT = 0.2
 
 # Back-off between idle PTY reads so a quiet terminal does not spin the event
 # loop (keeps dashboard idle CPU low).
+# A positive sleep lets other coroutines run and keeps dashboard idle CPU low (#42627).
 _PTY_IDLE_BACKOFF = 0.05
 PTY_REGISTRY = PtySessionRegistry(
     ttl=30 * 60, max_sessions=16, buffer_cap=1 * 1024 * 1024, read_timeout=_PTY_READ_CHUNK_TIMEOUT)
@@ -54,7 +55,12 @@ PTY_REGISTRY = PtySessionRegistry(
 
 async def _legacy_pump(ws: "WebSocket", bridge) -> None:
     """Original 1:1 socket<->PTY pump: stream until disconnect, then close the
-    bridge. Used when no ``?attach=`` token is supplied (keep-alive opt-in)."""
+    bridge. Used when no ``?attach=`` token is supplied (keep-alive opt-in).
+
+    Behavior is identical to the pre-keep-alive ``pty_ws`` body, including the 54028 half-open-socket
+    protection (reader EOF → close the WS so the writer's ``ws.receive()`` unparks) and the #53227
+    ``to_thread`` offloads for the blocking ``bridge.close()``.
+    """
     loop = asyncio.get_running_loop()
 
     async def pump_pty_to_ws() -> None:
@@ -77,6 +83,8 @@ async def _legacy_pump(ws: "WebSocket", bridge) -> None:
             # here too (idempotent): cancelling the handler the instant the WS
             # closes can skip the writer's ``finally``.
             with contextlib.suppress(Exception):
+                # The child has exited (EOF) or the send side broke. Closing from the EOF path makes the
+                # reap independent of that cancellation race (#54028).
                 await asyncio.to_thread(bridge.close)
             with contextlib.suppress(Exception):
                 await ws.close()

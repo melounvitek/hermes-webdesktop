@@ -27,6 +27,9 @@ _TOOL_PROGRESS_CYCLE = ["off", "new", "all", "verbose"]
 # Raw ANSI (not Rich markup): _cprint routes through prompt_toolkit's renderer, while Rich markup
 # written to stdout gets mangled by patch_stdout's StdoutProxy ('?[33mTool progress: NEW?[0m').
 _TOOL_PROGRESS_LABELS = {
+    # Use raw ANSI codes via _cprint so the output is routed through prompt_toolkit's renderer.
+    # self.console.print() with Rich markup writes directly to stdout which patch_stdout's StdoutProxy
+    # mangles into garbled sequences like '?[33mTool progress: NEW?[0m' (#2262).
     "off": f"{_Colors.DIM}Tool progress: OFF{_Colors.RESET} — silent mode, just the final response.",
     "new": f"{_Colors.YELLOW}Tool progress: NEW{_Colors.RESET} — show each new tool (skip repeats).",
     "all": f"{_Colors.GREEN}Tool progress: ALL{_Colors.RESET} — show every tool call.",
@@ -770,6 +773,11 @@ class CLIInfoMixin:
         When opted out it only notifies and points at ``/reload-mcp`` — every reload rebuilds the
         tool surface and INVALIDATES the provider prompt cache (next message re-sends the full
         prefix), so silent reloads are wrong when external tooling rewrites config.yaml often.
+
+        Instead it notifies the user that the config changed and that they can apply it with ``/reload-mcp``
+        — while warning that ``/reload-mcp`` rebuilds the tool surface and **invalidates the provider prompt
+        cache** (the next message re-sends the full input prefix, expensive on long-context / high-reasoning
+        models). See #1474.
         """
         import yaml as _yaml
 

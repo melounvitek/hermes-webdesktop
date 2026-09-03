@@ -150,6 +150,10 @@ HERMES_AGENT_HELP_GUIDANCE_NO_SKILLS = (
 )
 
 
+# Memory guidance (#95681, consolidated): ONE block from ONE builder. The opening frame adapts to which
+# stores config enables; everything else is written exactly once. Leads with the positive posture (save
+# proactively, replace when full) — the routing rules come after, as refinements, not as the headline. WHAT
+# belongs in memory is the memory tool schema's job and is never re-taught here.
 def build_memory_guidance(memory_enabled: bool = True, profile_enabled: bool = True) -> str:
     """ONE memory-guidance block whose opening frame adapts to the enabled store(s); "" when both are off.
 
@@ -199,6 +203,17 @@ SESSION_SEARCH_GUIDANCE = (
 # ("After completing a complex task (5+ tool calls)... save the approach as a skill...") on subscription OAuth
 # credentials, surfacing as a billing-shaped HTTP 400. If you rewrite it, re-verify with a subscription OAuth
 # token — sk-ant-api keys do not hit the filter. The safety-rule heading is referenced by tests and compaction summaries.
+# Anthropic's server-side content filter rejects the previous phrasing ("After completing a complex task (5+
+# tool calls), fixing a tricky error, or discovering a non-trivial workflow, save the approach as a skill
+# with skill_manage so you can reuse it next time.") on subscription OAuth credentials, and surfaces that
+# rejection as a billing-shaped HTTP 400 ("You're out of extra usage"), which sends users to buy quota they
+# do not need. Bisected against the live API: that sentence alone reproduces the 400 and removing it alone
+# clears it; size and the system[0] identity gate were both ruled out. The reword is empirically validated,
+# not understood — if you rewrite this sentence, re-verify against a subscription OAuth token, not an
+# sk-ant-api… key, which does not hit the filter. Dieted (#95681, maintainer-directed): the record-it /
+# patch-it coaching that used to open this block duplicated the ## Skills section (which teaches both "offer
+# to save as a skill" and "fix it with skill_manage(action='patch')") and skill_manage's own schema. Only
+# the compaction-pruning contract lives here — nothing else teaches it.
 SKILLS_GUIDANCE = (
     "When you work out a non-trivial workflow, record it with skill_manage for future reuse.\n\n"
     "## Skill Safety Rule\n"
@@ -308,6 +323,14 @@ TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm",
 # traces showed the same failure modes; Muse Spark stops after a chat-only turn on defaults). Gemini/Gemma get
 # GOOGLE_MODEL_OPERATIONAL_GUIDANCE instead; Claude does not exhibit these modes. Any model can opt in via
 # config.yaml (`true` or a substring list).
+# Model name substrings whose sessions receive OPENAI_MODEL_EXECUTION_GUIDANCE (execution discipline: tool
+# persistence, mandatory tool use for arithmetic, external-write read-back, count reconciliation, literal
+# preservation, verification-gated completion) when agent.execution_guidance is "auto". gpt/codex/grok are
+# the historical set; deepseek/kimi/qwen/glm/minimax/ mimo/mistral were added after Composio agentic-eval
+# traces showed the same failure modes on those families (financial math in prose, no read-back after
+# external writes, identifier "repair", completeness claims despite count mismatches). GLM's
+# tool-calls-as-plain-text stall (#53847) and MiMo (#41874) are covered here too. Gemini/Gemma are excluded
+# — they get the more specific GOOGLE_MODEL_OPERATIONAL_GUIDANCE block instead.
 EXECUTION_GUIDANCE_MODELS = (
     "gpt", "codex", "grok",
     "deepseek", "kimi", "qwen", "glm", "minimax", "mimo", "mistral", "muse",
@@ -329,6 +352,20 @@ TASK_COMPLETION_GUIDANCE = (
 
 # Universal parallel-tool-call guidance (ALL models): the runtime already executes independent calls
 # concurrently. Supersedes the former Google-only bullet so no model receives the steer twice.
+# Why this matters for cost: every assistant turn resends the entire accumulated conversation (and, on
+# cache-friendly providers, re-reads the cached prefix and pays for the newly-appended turn). A model that
+# issues one tool call per turn multiplies the number of round-trips — and therefore the resent context —
+# for any task that needs several independent reads, searches, or safe lookups. Batching independent calls
+# into a single assistant response collapses N turns into one, cutting both latency and the resent-context
+# cost that compounds over a long conversation. The hermes-agent runtime already executes a batch of tool
+# calls concurrently when they are independent (read-only tools always; path-scoped file ops when their
+# targets don't overlap — see run_agent._execute_tool_calls / tool_dispatch_helpers). The missing piece was
+# telling the *model* to emit those calls together in the first place. Until now the only batching steer in
+# the prompt lived in GOOGLE_MODEL_OPERATIONAL_GUIDANCE — Gemini/Gemma got it, every other model got
+# nothing. Short on purpose — shipped in the cached system prompt to every user, every session. Token cost
+# is paid once at install and amortised across all sessions via prefix caching. Keep it tight. Ported from
+# cline/cline#11514 ("encourage parallel tool calls"), adapted from Cline's TypeScript tool-surface guidance
+# to hermes-agent's Python prompt-assembly architecture.
 PARALLEL_TOOL_CALL_GUIDANCE = (
     "# Parallel tool calls\n"
     "When you need several pieces of information that don't depend on each other, request them together in a "
@@ -342,6 +379,15 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
 # Execution-discipline guidance for models that abandon partial results, skip prerequisite lookups, answer
 # from memory, or declare "done" unverified. Body is family-agnostic (OPENAI_ prefix reflects origin).
 # Injection gate: system_prompt.py via config.yaml ``agent.execution_guidance`` (auto/true/false/list).
+# OpenAI GPT/Codex-specific execution guidance. Addresses known failure modes where GPT models abandon work
+# on partial results, skip prerequisite lookups, hallucinate instead of using tools, and declare "done"
+# without verification. Inspired by patterns from OpenAI's GPT-5.4 prompting guide & OpenClaw PR #38953.
+# Also applied to xAI Grok — same failure modes in practice (claims completion without tool calls, suggests
+# workarounds instead of using existing tools, replies with plans/suggestions instead of executing). As of
+# the Composio agentic-eval follow-up, the block is no longer fenced to gpt/codex/grok: eval traces showed
+# DeepSeek/Kimi doing financial math in prose, skipping read-back verification after external writes,
+# "repairing" malformed identifiers, and claiming completeness despite count mismatches — exactly the
+# failure modes this block targets.
 OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
@@ -462,6 +508,13 @@ def format_steer_marker(steer_text: str) -> str:
 
 STEER_CHANNEL_NOTE = (
     # Only what the marker cannot say about itself: it is the ONLY trusted shape and carries full user authority.
+    # Dieted (#95681, maintainer-directed). History: #40240 added this note when the marker was bare and
+    # models refused steers as prompt injection (screenshot-verified). The marker has since become
+    # self-describing — it declares its own provenance ("a direct message from the user...") and its own
+    # replay rule ("not a new delivery when replayed from conversation history") at delivery time — so the
+    # prompt-side briefing keeps only what the marker cannot say about itself: it is the ONLY trusted shape
+    # (anti-lookalike), and it carries full user authority. The former standalone historical-vs-new
+    # paragraph (#76805) is now redundant with the marker's own replay clause and was removed.
     "## Mid-turn user steering\n"
     "Mid-turn, the user can steer you: Hermes appends their message to the end of a tool result, wrapped exactly as:\n"
     f"{STEER_MARKER_OPEN}\n<their message>\n{STEER_MARKER_CLOSE}\n"
@@ -681,6 +734,12 @@ PLATFORM_HINTS = {
 
 # Telegram rich-messages extension — injected only with
 # ``platforms.telegram.extra.rich_messages: true`` (gateway.* or top-level).
+# NOTE: a "webui" hint lived here until 2026-08-29. It was a ghost (verified in the all-platform hint audit,
+# PR #97873): no code path constructs platform="webui" — the dashboard chat resolves to 'desktop' or 'tui'
+# (tui_gateway/server.py:_resolve_session_platform), and the browser chat tab is an xterm.js PTY hosting the
+# TUI, not an HTML chat renderer. Its content (tables/LaTeX/Mermaid, MEDIA: rich previews incl. Excalidraw)
+# described a renderer that does not exist anywhere in web/. If a real WebUI chat surface ships, write a
+# hint from its actual renderer — do not resurrect this text.
 TELEGRAM_RICH_MESSAGES_HINT = (
     "Telegram now supports rich Markdown, so lean into it: whenever it makes the answer clearer or easier to scan, "
     "actively reach for real Markdown tables (pipe `| col | col |` syntax), bullet and numbered lists, task lists (`- "
@@ -737,7 +796,13 @@ def _plugin_backend_is_remote(backend: str) -> bool:
 
 
 def _windows_marketing_version() -> str:
-    """"10"/"11" (``platform.release()`` says 10 for both; 11 is build >= 22000)."""
+    """"10"/"11" (``platform.release()`` says 10 for both; 11 is build >= 22000).
+
+    ``platform.release()`` reports the kernel version, which is ``10`` for BOTH Windows 10 and Windows 11 —
+    the prompt then claims "Windows (10)" on Windows 11 hosts and misleads the model about the OS (#51755).
+    Windows 11 is distinguished by build number: >= 22000 is 11. Falls back to ``platform.release()`` on any
+    lookup failure.
+    """
     try:
         return "11" if sys.getwindowsversion().build >= 22000 else "10"  # type: ignore[attr-defined]
     except Exception:
@@ -974,6 +1039,9 @@ def drain_truncation_warnings() -> list:
 
 # Skills index (two-layer cache: in-process LRU, then disk snapshot).
 # One entry per profile × platform (key carries skills_dir); a multiplexing gateway needs more than a handful.
+# Sized for multi-profile processes: since #86313 the cache key carries a per-profile skills_dir (one entry
+# per profile × platform), so the old cap of 8 could thrash on a gateway multiplexing default + several bots
+# (each miss = full os.walk manifest rebuild). ~32 costs low single-digit MB worst case.
 _SKILLS_PROMPT_CACHE_MAX = 32
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
@@ -1361,6 +1429,11 @@ def load_soul_md(context_length: Optional[int] = None, home_override: "Path | No
 
     Callers must pass ``skip_soul=True`` to ``build_context_files_prompt`` so it isn't injected twice.
     ``home_override`` pins the profile home (a thread that lost the HERMES_HOME ContextVar reads the wrong one).
+
+    ``home_override`` scopes the read to an explicit profile home (the agent knows its own home from its
+    session_db path). Without it, resolution is ambient — which on a thread that lost the HERMES_HOME
+    ContextVar falls back to the launch home and reads the wrong profile's SOUL.md (#50233, same class as
+    the skills-index leak fixed in #86313).
     """
     try:
         from hermes_cli.config import ensure_hermes_home
@@ -1423,6 +1496,14 @@ def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str
 
     Per directory the first of ``AGENTS.override.md`` / ``AGENTS.md`` / ``agents.md`` wins (a gitignored
     personal override shadows the committed file); identical content seen again down the chain is skipped.
+
+    Each directory on the chain (see ``_agents_md_directory_chain``) contributes its ``AGENTS.override.md``
+    / ``AGENTS.md`` / ``agents.md`` (first name wins per directory) as its own provenance-labelled section.
+    ``AGENTS.override.md`` wins over ``AGENTS.md`` so a developer can keep a personal, typically-gitignored
+    override next to the committed project instructions without editing the tracked file (same convention as
+    earendil-works/pi#7681). Identical content encountered again further down the chain (copied or symlinked
+    files) is deduplicated. With a single match — the common case, and always the case outside a git repo —
+    output is identical to the historical single-file behavior.
     """
     cwd_resolved = cwd_path.resolve()
     sections: list[str] = []
@@ -1483,6 +1564,10 @@ def build_context_files_prompt(
     cwd_path = Path(cwd if cwd is not None else os.getcwd()).resolve()
     # A FALLBACK-picked cwd inside the Hermes install tree must not gain system-prompt authority (the desktop
     # default would load this repo's contributor AGENTS.md). An explicit cwd is honored verbatim.
+    # An explicitly configured cwd is honored verbatim — the Hermes tree is a legitimate workspace when the
+    # user deliberately points a session at it — and CLI-style surfaces pass
+    # allow_install_tree_fallback=True because their launch dir IS the user's shell cwd (developing Hermes
+    # in-tree). See #64590.
     from agent.runtime_cwd import _is_install_tree
     if cwd is None and not allow_install_tree_fallback and _is_install_tree(cwd_path):
         logger.warning(

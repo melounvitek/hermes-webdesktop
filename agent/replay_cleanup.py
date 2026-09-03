@@ -95,7 +95,12 @@ def strip_interrupted_tool_tails(agent_history: List[Dict[str, Any]]) -> List[Di
 def strip_dangling_tool_call_tail(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Strip a trailing ``assistant(tool_calls)`` with NO answers — a call that killed the gateway itself
     (``docker restart``) left zero ``tool`` rows, invisible to ``strip_interrupted_tool_tails``. A partially
-    answered block still resumes. Read-only tails are dropped; side-effecting ones get UNKNOWN-effect results."""
+    answered block still resumes. Read-only tails are dropped; side-effecting ones get UNKNOWN-effect results.
+
+    On resume the model sees an unanswered tool call at the tail and naturally re-issues it — which restarts
+    the gateway again, producing the infinite reboot loop in #49201. ``strip_interrupted_tool_tails`` does
+    not catch this because there is no tool result to inspect for an interrupt marker.
+    """
     if not agent_history:
         return agent_history
     last = agent_history[-1]
@@ -124,6 +129,8 @@ def sanitize_replay_history(agent_history: List[Dict[str, Any]]) -> List[Dict[st
 # --- Stale dangerous-confirmation text expiry ---
 
 # Short on purpose: a dangerous confirmation must not survive any restart or resume gap.
+# ────────────────────────────────────────────────────────────────────── Stale dangerous-confirmation text
+# expiry (#59607) ──────────────────────────────────────────────────────────────────────
 _DANGEROUS_CONFIRMATION_EXPIRY_SECONDS = 60.0
 
 # Phrases that unlock destructive host actions; case-insensitive substring match so trailing punctuation /
@@ -155,7 +162,13 @@ def strip_stale_dangerous_confirmations(
 ) -> List[Dict[str, Any]]:
     """Redact IN PLACE dangerous-confirmation text older than ``expiry_seconds`` in user messages: a confirmation
     surviving a restart reads as a fresh re-confirmation minutes later. Untimestamped messages (legacy
-    transcripts, test scaffolding) are left untouched."""
+    transcripts, test scaffolding) are left untouched.
+
+    See #59607.
+    On the next inbound message — possibly a casual "are you there?" from the user minutes later — the LLM
+    sees the stale confirmation and may interpret the new turn as a fresh re-confirmation, re-executing the
+    destructive action. This is the failure mode reported in #59607.
+    """
     if not agent_history:
         return agent_history
     cleaned: List[Dict[str, Any]] = []

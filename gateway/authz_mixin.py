@@ -30,6 +30,10 @@ _ALLOW_ALL_ENV = {p: v.replace("_ALLOWED_USERS", "_ALLOW_ALL_USERS") for p, v in
 _GROUP_USER_ENV = {Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_USERS"}
 _GROUP_CHAT_ENV = {Platform.TELEGRAM: "TELEGRAM_GROUP_ALLOWED_CHATS", Platform.QQBOT: "QQ_GROUP_ALLOWED_USERS"}
 _ALLOW_BOTS_ENV = {
+    # Bots admitted by {PLATFORM}_ALLOW_BOTS bypass the human allowlist (#4466). Checked before the
+    # no-user-id guard below: some platforms deliver bot/automation traffic with no user_id at all -- e.g.
+    # Slack Workflow Builder posts arrive as subtype=bot_message with user=None -- so deferring past the
+    # guard would reject them outright (the same reason the chat-scoped allowlist above runs early).
     Platform.DISCORD: "DISCORD_ALLOW_BOTS",
     Platform.FEISHU: "FEISHU_ALLOW_BOTS",
     Platform.TELEGRAM: "TELEGRAM_ALLOW_BOTS",
@@ -43,6 +47,10 @@ def _platform_gate_env(name: str, default: str = "") -> str:
     With a profile secret scope installed AND multiplexing active, a scoped miss returns ``default``
     instead of falling through to ``os.environ``, which may hold ANOTHER profile's first-writer
     bridged value (allowlist leak). Single-profile deployments behave exactly like ``os.getenv``.
+
+    Under multiplex the process env may hold ANOTHER profile's first-writer-bridged value (the YAML→env
+    bridges in the Discord/Telegram adapters' ``_apply_yaml_config`` are first-writer-wins), so falling
+    through would leak profile A's allowlist into profile B (issue #72348).
     """
     if not name:
         return default
@@ -93,6 +101,9 @@ def _adapter_config_extra(adapter) -> dict:
 
 # Nostr npub -> hex (Buzz): ``BUZZ_ALLOWED_USERS`` accepts hex or ``npub1…`` but inbound pubkeys
 # are always hex. Pure stdlib; mirrors plugins/platforms/buzz/adapter.py.
+# Without decoding, the central allowlist comparison string-matches the raw npub against the hex pubkey and
+# an operator who listed only their npub sees every message rejected ("Unauthorized user: <hex pubkey>",
+# #78428).
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_GENERATOR = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
 
@@ -149,7 +160,12 @@ def _npub_to_hex(npub: str) -> Optional[str]:
 
 
 def _normalize_nostr_allow_entries(entries: set) -> set:
-    """Add the hex form of every valid ``npub1…`` entry; invalid entries are kept as-is."""
+    """Add the hex form of every valid ``npub1…`` entry; invalid entries are kept as-is.
+
+    Hex entries pass through unchanged; each valid ``npub1…`` entry is decoded and its 64-char hex form
+    added, so either form authorizes the same identity (#78428). Invalid entries are kept as-is (they simply
+    never match an inbound hex pubkey).
+    """
     return set(entries) | {h for e in entries if e.lower().startswith("npub1") and (h := _npub_to_hex(e))}
 
 
@@ -173,6 +189,10 @@ def _principal_matches_allowlist(source, user_id: str, allowed_ids: set) -> bool
         check_ids.add(source.user_name)
     # Buzz: allowlist may hold npub or hex; inbound pubkeys are hex.
     if platform_value == "buzz":
+        # Buzz (Nostr-based): BUZZ_ALLOWED_USERS accepts npub or hex, but inbound event pubkeys are always
+        # 64-char hex. Decode npub entries to hex so an operator who listed only their npub authorizes the
+        # same identity as the hex form (#78428). Hex entries pass through unchanged, so existing hex-only
+        # allowlists keep working.
         allowed_ids = _normalize_nostr_allow_entries(allowed_ids)
         hex_user = _npub_to_hex(user_id) if user_id.startswith("npub") else None
         if hex_user:
@@ -366,6 +386,9 @@ class GatewayAuthorizationMixin:
             # bridge), so read the live adapter's.
             entry = _registry_entry(source.platform)
             if entry and entry.allowed_users_env:
+                # Buzz) carry the same operator-configured allowlist in
+                # ``PlatformConfig.extra.allowed_users``. An absent/empty entry changes nothing here — the
+                # default-deny below still applies. See #82871, #98738.
                 adapter_allow = extra.get("allowed_users")
         if not adapter_allow:
             return False
@@ -526,6 +549,14 @@ class GatewayAuthorizationMixin:
         Order: explicit per-platform config; Email → "ignore" (inboxes hold arbitrary mail); explicit
         non-default global; adapter dm_policy (pairing → "pair", allowlist/disabled → "ignore"); any
         configured allowlist → "ignore" (spamming unknown contacts with codes is noisy and leaks); else "pair".
+
+        1. 2. Email defaults to ``"ignore"`` unless explicitly opted into pairing. 3. Explicit global
+        ``unauthorized_dm_behavior`` in config — wins for chat-shaped platforms when no per-platform
+        override is set. 4. When an adapter-level DM policy opts into pairing or silent drop, honor it. 5.
+        When an allowlist (``PLATFORM_ALLOWED_USERS``, ``PLATFORM_GROUP_ALLOWED_USERS`` /
+        ``PLATFORM_GROUP_ALLOWED_CHATS``, or ``GATEWAY_ALLOWED_USERS``) is configured, default to
+        ``"ignore"`` — the allowlist signals that the owner has deliberately restricted access; spamming
+        unknown contacts with pairing codes is both noisy and a potential info-leak. (#9337) 6.
         """
         config = getattr(self, "config", None)
         if (

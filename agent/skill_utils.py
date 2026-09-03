@@ -289,7 +289,10 @@ def parse_config_string_list(value) -> List[str]:
     """Normalize a config value that may hold a JSON-array string into a list.
     ``hermes config set`` stores lists as quoted JSON/Python-literal strings;
     treating one as a single name would silently filter nothing. A scalar
-    string still means one name."""
+    string still means one name.
+
+    See #13026, #86661.
+    """
     if isinstance(value, str):
         if value.strip().startswith("["):
             try:
@@ -412,7 +415,14 @@ _PROJECT_ROOT_MAX_DEPTH = 64  # walk-up bound for pathological cwds
 def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
     """Nearest ancestor containing ``.git`` (dir or worktree file), or None.
     Without *start*, the surface's ``TERMINAL_CWD`` wins over process cwd so
-    cron/API surfaces inherit an interactive trust decision by project identity."""
+    cron/API surfaces inherit an interactive trust decision by project identity.
+
+    When *start* is not given, the surface's working directory wins over the process cwd: ``TERMINAL_CWD``
+    is the same per-surface workdir the terminal tool and cron jobs use (a cron job sets it from its per-job
+    ``workdir`` without chdir'ing the scheduler process). This is what lets non-interactive surfaces inherit
+    a prior interactive trust decision by project identity — and a surface with no workdir in a trusted repo
+    simply resolves no project and loads nothing (#48975).
+    """
     try:
         if start is None:
             from agent.runtime_cwd import scope_terminal_cwd
@@ -501,6 +511,16 @@ def get_untrusted_project_skills_root() -> Optional[Tuple[Path, int]]:
 # cached under HERMES_HOME, never inside the repo); "dangerous" excludes the
 # skill from index, list, view and slash commands ("caution" loads, as on the hub).
 
+# ── Project skill quarantine (scan-time injection defense) ──────────────── Trust (`hermes skills trust`)
+# is a REPO-level decision made once; the repo's skill content keeps changing underneath it with every pull.
+# The hub install path runs skills_guard on install, but project skills are read straight from a checkout —
+# without this gate a `git pull` could inject a malicious skill into an already-trusted repo with no scan
+# anywhere (#48974). Every project SKILL.md's parent dir is scanned with the same skills_guard scanner the
+# hub uses (content-hash cached, so the cost is one scan per skill per content change). A "dangerous"
+# verdict quarantines the skill: it is excluded from the index, skills_list, skill_view, and slash commands.
+# "caution" loads (matches hub behavior for prose-level keyword hits) — the quarantine is for
+# high-confidence findings only. The scan cache lives under HERMES_HOME, never inside the repo (we don't
+# write artifacts into the user's checkout).
 _PROJECT_SCAN_SOURCE = "project-local"
 _PROJECT_QUARANTINE_CACHE: Dict[str, bool] = {}  # skill_dir -> quarantined
 
@@ -552,6 +572,7 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     # (which follows the live profile-scoped HERMES_HOME), so normalization
     # must agree with that exact root. Import deferred (cycle).
     try:
+        # See #67277.
         from tools import skills_tool as _skills_tool
         primary_root = _skills_tool._skills_dir()
     except Exception:

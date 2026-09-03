@@ -443,6 +443,11 @@ def _resolve_api_mode(agent, api_mode, provider_name, base_url):
         # Covers api.meta.ai → codex_responses (prompt caching: 0% on chat vs 93-99%).
         # URL-driven, not provider-name-driven: `providers.meta` may point anywhere.
         try:
+            # Note: provider="meta" without an api.meta.ai base_url (or with a non-api.meta.ai base_url)
+            # intentionally falls through to chat_completions here. The wire protocol for Meta is URL-driven
+            # BY DESIGN, not provider-name-driven, because user config `providers.meta` may point at any
+            # OpenAI-compatible endpoint, and forcing `codex_responses` on the provider name alone would
+            # break custom endpoints named "meta" that do not host the Responses API. See #63425.
             from hermes_cli.providers import host_mandated_api_mode as _host_mandated_api_mode
             _mandated = _host_mandated_api_mode(base_url or "")
         except Exception:
@@ -453,6 +458,8 @@ def _resolve_api_mode(agent, api_mode, provider_name, base_url):
 def _finalize_routing(agent, api_mode, credential_pool):
     # Credential-pool validation runs AFTER provider auto-detection so a pool scoped to
     # "anthropic" isn't rejected for provider=None + anthropic.com URL.
+    # Regression from #63048 which placed this check before the URL-based auto-detection block above (fixed
+    # #63425).
     if credential_pool is not None:
         try:
             from agent.credential_pool import credential_pool_matches_provider
@@ -481,6 +488,13 @@ def _finalize_routing(agent, api_mode, credential_pool):
     # exceptions live in _provider_model_requires_responses_api.
     _base_lower = str(agent.base_url or "").lower()
     if (
+        # GPT-5.x models usually require the Responses API path, but some providers have exceptions (for
+        # example Copilot's gpt-5-mini still uses chat completions). ACP runtimes are excluded: an ACP
+        # client handles its own routing and does not implement the Responses API surface. Keyed on the
+        # `acp://` scheme, not one vendor, so every ACP client is covered. When api_mode was explicitly
+        # provided, respect it — the user knows what their endpoint supports (#10473). Exception: Azure
+        # OpenAI serves gpt-5.x on /chat/completions and does NOT support the Responses API — skip the
+        # upgrade for Azure (openai.azure.com), even though it looks OpenAI-compatible.
         api_mode is None
         and agent.api_mode == "chat_completions"
         and agent.provider != "copilot-acp"
@@ -647,6 +661,11 @@ def _init_prompt_cache_config(agent):
     # unknown values keep "5m". A falsy/off value disables caching entirely (OAuth plans
     # billing cache writes, proxies adding their own cache_control); the disable survives
     # /model switches and fallback re-derivation.
+    # Anthropic supports "5m" (default) and "1h" cache TTL tiers. Read from config.yaml under
+    # prompt_caching.cache_ttl; unknown values keep "5m". 1h tier costs 2x on write vs 1.25x for 5m, but
+    # amortizes across long sessions with >5-minute pauses between turns (#14971). This is useful for OAuth
+    # subscription users where cache writes bill against "extra usage" or for third-party proxies that
+    # inject their own cache_control markers (#13477).
     agent._cache_ttl = "5m"
     with suppress(Exception):
         from hermes_cli.config import load_config_readonly as _load_pc_cfg
@@ -721,6 +740,7 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
         return
     # ANTHROPIC_TOKEN fallback only for native Anthropic — other anthropic_messages providers
     # must use their own key or Anthropic credentials leak to third-party endpoints.
+    # Falling back would send Anthropic credentials to third-party endpoints (Fixes #1739, #minimax-401).
     _is_native_anthropic = agent.provider == "anthropic"
     effective_key = api_key or (resolve_anthropic_token() if _is_native_anthropic else None) or ""
 
@@ -742,6 +762,10 @@ def _init_anthropic_client(agent, api_key, base_url, _provider_timeout):
     agent._anthropic_api_key = effective_key
     # OAuth only for native Anthropic: third-party anthropic_messages providers must never
     # trip OAuth paths — those inject Claude-Code identity headers → 401/403.
+    # Only mark the session as OAuth-authenticated when the token genuinely belongs to native Anthropic.
+    # Third-party providers (MiniMax, Kimi, GLM, LiteLLM proxies) that accept the Anthropic protocol must
+    # never trip OAuth code paths — doing so injects Claude-Code identity headers and system prompts that
+    # cause 401/403 on their endpoints. See #1739.
     from agent.anthropic_adapter import _is_oauth_token as _is_oat
     agent._is_anthropic_oauth = _is_oat(effective_key) if (_is_native_anthropic and isinstance(effective_key, str)) else False
     agent._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
@@ -758,6 +782,12 @@ def _init_moa_client(agent, api_key):
     # build_moa_facade relays "moa.*" events through tool_progress_callback so every surface
     # shows each reference's answer before the aggregator acts. Display-only; shared with
     # fallback-restore so a restored facade keeps emitting.
+    # build_moa_facade wires the reference relay that routes reference-model outputs to the agent's
+    # tool_progress_callback so every surface that already consumes it (CLI spinner/scrollback, TUI,
+    # desktop, gateway) can show each reference's answer as a labelled block before the aggregator acts. The
+    # facade emits "moa.reference", "moa.progress", "moa.phase", and "moa.aggregating" events, forwarded
+    # through the same callback the tool lifecycle uses. Best-effort and cache-safe — display-only events,
+    # they never touch the message history. See #53802.
     agent.client = build_moa_facade(agent, agent.model)
     agent._client_kwargs = {}
     agent.api_key = api_key or "moa-virtual-provider"
@@ -837,6 +867,9 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Dict[str,
     # No credentials: try the fallback chain BEFORE failing (an exhausted single-entry pool
     # must not die with a misleading "No LLM provider configured"); only explicitly named
     # providers keep the missing-key diagnostic.
+    # An exhausted single-entry pool (typically ``openrouter`` under free-tier daily quotas) must still
+    # reach the chain instead of dying at init with a misleading "No LLM provider configured" error. See
+    # #17929.
     _explicit = (agent.provider or "").strip().lower()
     for _fb in _fallback_entries(fallback_model):
         try:
@@ -1237,6 +1270,11 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     agent._iters_since_skill = 0
     # skip_memory skips the external *provider*; enabled_toolsets=["memory"] still gets the
     # built-in store so the memory tool never sees store=None.
+    # Flush/background agents can still pass enabled_toolsets=["memory"] so the built-in file store exists
+    # and the memory tool does not fail with store=None (#65429). A toolset on disabled_toolsets is not a
+    # request: a caller that denylists memory while its default toolset still names it must not get
+    # MEMORY.md loaded by an enabled-only check. (Cron agents now run with skip_memory=False and take the
+    # normal path here.)
     _memory_toolset_requested = (
         "memory" in (agent.enabled_toolsets or [])
         and "memory" not in (agent.disabled_toolsets or [])
@@ -1768,6 +1806,9 @@ def _select_context_engine(_agent_cfg):
             # parent's. Uncopyable state (locks, DB conns) → built-in with an ACCURATE message.
             import copy
             try:
+                # Copy can fail for engines holding uncopyable state (locks, DB connections, clients); in
+                # that case fall back to the built-in compressor with an ACCURATE message rather than
+                # silently mislabelling it "not found". See #42449.
                 _selected_engine = copy.deepcopy(_candidate)
             except Exception as _copy_err:
                 _copy_failed = True
@@ -1812,6 +1853,9 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
         # External engines own compaction policy — the host threshold (and its Codex
         # autoraise) never reaches the plugin, so drop the notice.
         agent._compression_threshold_autoraised = None
+        # External engines own compaction policy: the host compression threshold (including the Codex
+        # gpt-5.5 autoraise above) only configures the built-in ContextCompressor and never reaches the
+        # plugin, so the autoraise notice would announce a change that does not apply. (#44439)
         from agent.model_metadata import get_model_context_length
         _plugin_ctx_len = get_model_context_length(
             agent.model, base_url=agent.base_url, api_key=getattr(agent, "api_key", ""),
@@ -1924,6 +1968,14 @@ def _inject_context_engine_tools(agent):
     # Context engine tool schemas (lcm_*), deduped against existing names (plugins may
     # register the same schemas; duplicates 400 provider-side) and gated on enabled_toolsets
     # so `platform_toolsets: telegram: []` can't leak them.
+    # Skip names that are already present — the _ra().get_tool_definitions() quiet_mode cache returned a
+    # shared list pre-#17335, so a stray mutation here would poison subsequent agent inits in the same
+    # Gateway process and trip provider-side 'duplicate tool name' errors. Even with the cache fix, dedup is
+    # the right defense against plugin paths that may register the same schemas via ctx.register_tool().
+    # Mirrors the memory tools dedup above. Respect the platform's enabled_toolsets configuration (#5544):
+    # context engine tools follow the same gating pattern as memory provider tools — without the gate,
+    # `platform_toolsets: telegram: []` would still leak lcm_* tools into the tool surface and incur the
+    # same local-model latency penalty.
     agent._context_engine_tool_names: set = set()
     if (
         agent.context_compressor
@@ -1939,6 +1991,7 @@ def _inject_context_engine_tools(agent):
             if _schema is None:
                 # A nameless tool makes strict providers 400 and disables the whole toolset.
                 _ra().logger.warning(
+                    # Skip it. See #47707.
                     "Context engine returned a tool schema with no resolvable "
                     "name; skipping to avoid poisoning the request (%r)",
                     _raw_schema,
@@ -2002,6 +2055,11 @@ def _configure_ollama_num_ctx(agent, _model_cfg, _config_context_length):
         )
     # Recalibrate the compressor to the served window: every request runs at num_ctx, so a
     # trigger derived from the probed model window could sit above it and never fire.
+    # A config that sets only model.ollama_num_ctx (without model.context_length) previously left the
+    # compressor targeting the probed window while the server truncated/rejected at num_ctx — the compaction
+    # trigger could sit several times ABOVE the real served window and never fire. Clamp the compressor's
+    # window to the effective num_ctx so threshold math operates on the context the server actually serves.
+    # (Overlaps #60103's silent-clamp dead zone; this is the init-order half.)
     _cc_window = getattr(agent.context_compressor, "context_length", 0) or 0
     if agent._ollama_num_ctx and agent._ollama_num_ctx > 0 and _cc_window and agent._ollama_num_ctx < _cc_window:
         _ra().logger.info(
@@ -2020,6 +2078,9 @@ def _emit_compression_summary(agent, cs):
     _autoraise = agent._compression_threshold_autoraised or {}
     _autoraise_notice = None
     if (
+        # A change in the raised threshold (or the autoraised model) updates the marker state and
+        # re-notifies once. The config display gate (compression.codex_gpt55_autoraise_notice) still
+        # suppresses the banner entirely without disabling the threshold autoraise. See #54432.
         bool(_autoraise)
         and cs.enabled
         and cs.autoraise_notice_enabled

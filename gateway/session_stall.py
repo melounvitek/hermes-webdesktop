@@ -35,7 +35,10 @@ def should_clear_session_stall_notification(
 
 
 def format_session_stall_notification(idle_seconds: float) -> str:
-    """User-facing stall warning (ASCII minutes)."""
+    """User-facing stall warning (ASCII minutes).
+
+    See #72016.
+    """
     mins = max(1, int(idle_seconds // 60))
     return f"⚠️ Agent session appears stalled (last activity {mins} min ago). Try /new to reset."
 
@@ -56,7 +59,10 @@ def resolve_session_idle_seconds_from_activity(
 ) -> Optional[float]:
     """Idle seconds from a shared activity snapshot: a finite ``seconds_since_activity``, else
     derived from ``last_activity_at`` / ``last_activity_ts``.  None when there is no usable
-    progress timestamp — callers must not fall back to turn-start or inbound clocks."""
+    progress timestamp — callers must not fall back to turn-start or inbound clocks.
+
+    See #72039.
+    """
     if not activity:
         return None
     idle = _finite_float(activity.get("seconds_since_activity"))

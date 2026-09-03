@@ -694,6 +694,9 @@ def _model_flow_stepfun(config, current_model=""):
     model = _finish_model(selected, provider_id, f"Default model set to: {selected} (via {pconfig.name})",
                           base_url=effective_base, drop_api_mode=True)
     if model is not None:
+        # Sync the caller's config dict so the setup wizard's final save_config(config) preserves our model
+        # settings. Without this, the wizard overwrites model.provider/base_url with the stale values from
+        # its own config dict (#4172).
         config["model"] = dict(model)
 
 

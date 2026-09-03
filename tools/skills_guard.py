@@ -292,6 +292,10 @@ THREAT_PATTERNS = [
     # critical for AGENT config files (exactly how persistence attacks instruct the agent; project-skill
     # quarantine only acts on "dangerous") but high for Hermes/other config (setup docs routinely say
     # "edit config.yaml"); bare references = low.
+    # Flagging any mention as critical produced permanent false-positive blocks for popular community skills
+    # (#92021). * Mechanical persistence (shell redirection, sed -i, tee, cp/mv into the file) is critical —
+    # an unambiguous write path. * Prose modification intent — an imperative-position verb or an explicit
+    # directive ("you must edit ...") aimed at the file.
     (_prose_modify_re(_AGENT_CONFIG_FILES),
      "agent_config_mod", "critical", "persistence", "instructs modification of agent config files (could persist instructions across sessions)"),
     (_shell_write_re(_AGENT_CONFIG_FILES),
@@ -436,7 +440,12 @@ def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
 def _content_digest(skill_path: Path) -> str:
     """Canonical SHA-256 over (POSIX relative path, file bytes) ORDERED by the rel-path STRING — Path sorting is
     case-insensitive on Windows and diverged from ``skills_hub.bundle_content_hash`` (every installed skill then
-    reported ``update_available`` forever). String order keeps both sides byte-symmetric."""
+    reported ``update_available`` forever). String order keeps both sides byte-symmetric.
+
+    Ordering by ``sorted(rglob(...))`` diverged from the bundle side on Windows: Path comparison is
+    case-insensitive there (normcase), while ``bundle_content_hash`` sorts plain strings — the same skill
+    hashed to different digests and every installed skill reported ``update_available`` forever (#62310).
+    """
     if not skill_path.is_dir():
         return hashlib.sha256(skill_path.read_bytes()).hexdigest()
     h = hashlib.sha256()

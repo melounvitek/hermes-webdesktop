@@ -149,6 +149,8 @@ class WebhookAdapter(BasePlatformAdapter):
     """Generic webhook receiver that triggers agent runs from HTTP POSTs."""
 
     # Event-triggered, no human present: startup auto-resume must FINISH the interrupted work, not ask "what next?".
+    # The startup auto-resume turn must instruct the model to FINISH the interrupted work instead of
+    # emitting an interactive acknowledgement that abandons the task (#57056).
     interactive_resume: bool = False
 
     def __init__(self, config: PlatformConfig):
@@ -531,6 +533,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response({"status": "ignored", "reason": "filter", "route": route_name})
         # Script, prompt render and skill lookup read the profile's home (skills/, config); the runner
         # only enters the routed profile's scope later around handle_message, so enter it here.
+        # See #67277.
         with self._profile_scope(profile):
             script = route_config.get("script")
             if script:
@@ -720,6 +723,9 @@ class WebhookAdapter(BasePlatformAdapter):
         try:
             # Off-loop: `gh` does network I/O up to its 30s timeout; inline it froze every adapter and
             # timer on the gateway event loop.
+            # Running it inline froze every adapter and timer on the gateway event loop for the duration
+            # (Pattern A, #91912 class). asyncio.to_thread keeps the loop serving while the subprocess runs;
+            # the worker thread is bounded by the subprocess timeout below.
             result = await asyncio.to_thread(
                 subprocess.run, ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)

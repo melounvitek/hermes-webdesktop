@@ -21,6 +21,9 @@ logger = logging.getLogger("cron.scheduler")
 BLOCKED_CONFIG_MARKER = "[blocked_config]"
 BLOCKED_CONFIG_SILENT_MARKER = "[blocked_config:silent]"
 # Drift-guard skip: same contract (drift_alerted bit on the job record).
+# Same alert-once contract as blocked_config: run_one_job keys off it to record last_status and the
+# ``:silent`` variant means "already alerted on a previous tick — do not deliver again" (the drift_alerted
+# bit on the job record, #73506 shape).
 DRIFT_SKIP_MARKER = "[drift_skip]"
 DRIFT_SKIP_SILENT_MARKER = "[drift_skip:silent]"
 
@@ -123,7 +126,13 @@ def _primary_profile_routes_for_current_home() -> list:
     holding its own token is a ``duplicate_credential`` fatal). Reads the primary config.yaml
     directly (top-level or nested ``gateway.``) instead of ``load_gateway_config()`` so no primary
     platform config leaks into this process. Shared by preflight rescue and delivery-time
-    resolution so they cannot drift."""
+    resolution so they cannot drift.
+
+    Under ``gateway.multiplex_profiles`` a satellite profile's cron jobs are ticked by the primary gateway's
+    in-process ticker (#69377) and delivered through the primary gateway's live adapters — the satellite
+    home never holds the platform credentials itself (giving it a token of its own is a
+    ``duplicate_credential`` fatal).
+    """
     try:
         from hermes_constants import get_default_hermes_root, get_hermes_home
         primary_home = get_default_hermes_root()
@@ -157,7 +166,10 @@ def _primary_profile_routes_for_current_home() -> list:
 
 
 def _delivery_platform_routed_from_primary_gateway(platform_name: str) -> bool:
-    """True when the primary gateway routes this platform to the profile being served."""
+    """True when the primary gateway routes this platform to the profile being served.
+
+    scheduler is currently serving (preflight rescue, #97476).
+    """
     platform_key = platform_name.lower()
     return any(
         str(route.platform).lower() == platform_key
@@ -169,7 +181,10 @@ class SharedRouteAdapters:
     """Read-only adapter map for a credentialless satellite profile. ``get(platform, target)``
     resolves the PRIMARY adapter iff the inbound route matcher (``ProfileRoute.matches``) accepts
     the target; anything else (unmatched target, disabled route, other profile, or target-less
-    ``get(platform)``) is a miss — fail closed, never the default bot."""
+    ``get(platform)``) is a miss — fail closed, never the default bot.
+
+    See #101113.
+    """
 
     def __init__(self, primary_adapters, routes) -> None:
         self._primary = dict(primary_adapters or {})
@@ -245,6 +260,9 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
         # Multiplex: a satellite served by the primary's adapters reads unconnected — no block.
         if (
             platform_name.lower() not in connected
+            # Multiplex escape hatch: a satellite profile whose deliveries are routed by the primary
+            # gateway's profile_routes is served by the primary's adapters, so its own unconnected reading
+            # is a false block (#97476).
             and not _delivery_platform_routed_from_primary_gateway(platform_name)
         ):
             return (
@@ -295,7 +313,11 @@ def _preflight_check_skills(job: dict) -> Optional[str]:
 def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     """Pre-dispatch validation: return a reason (missing key, unconfigured delivery, unready skill)
     so the caller refuses BEFORE building agent machinery or burning an LLM call. Every check fails
-    open — preflight blocks only on an affirmative misconfiguration verdict."""
+    open — preflight blocks only on an affirmative misconfiguration verdict.
+
+    Same fail-before-spend spirit as the #44585 drift guard and the fail-loud-on-hidden-tools direction in
+    #27948; alert dedup follows the alert-once pattern from the dead-pin auto-pause (#73506).
+    """
     for name, check in (
         ("provider_key", lambda: _preflight_check_provider_key(job, cfg)),
         ("skills", lambda: _preflight_check_skills(job)),

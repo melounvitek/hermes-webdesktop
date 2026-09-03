@@ -198,6 +198,7 @@ class CLIStreamMixin:
             # try/except rather than path.exists(): the paste file may be deleted between
             # check and read (TOCTOU), silently dropping the input.
             try:
+                # See #17666.
                 return path.read_text(encoding="utf-8")
             except (OSError, IOError):
                 logger.warning("Paste file gone or unreadable, returning placeholder: %s", path)

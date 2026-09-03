@@ -25,7 +25,11 @@ _DOMINANCE_RATIO = 0.5
 
 def is_repetition_dominated(text: str) -> bool:
     """True when a single 60+ char substring recurs often enough to cover at least half
-    of ``text`` — the signature of a repetition loop. Fail-open for non-string/short input."""
+    of ``text`` — the signature of a repetition loop. Fail-open for non-string/short input.
+
+    That shape is the signature of a model repetition loop (issue #86581), and continuing such a fragment is
+    pointless — the continuation nudge would just stitch more repeated text into the final response.
+    """
     if not isinstance(text, str):
         return False
     n = len(text)

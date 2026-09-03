@@ -524,6 +524,7 @@ class CLIVoiceMixin:
             self._tts_lease_async(True)  # warm the engine so the first reply isn't dead air
         # Startup-pinned label so the advertised shortcut always matches the live
         # prompt_toolkit binding (live config would drift after a mid-session edit).
+        # See #19835.
         _cprint(f"\n{_ACCENT}Voice mode enabled{tts_status}{_RST}")
         _cprint(f"  {_DIM}{self._voice_record_key_label()} to start/stop recording{_RST}")
         # Spoken-stop hint from voice.stop_phrases (first entry); "" when disabled.
@@ -540,7 +541,11 @@ class CLIVoiceMixin:
     def _typed_voice_stop(self, user_input) -> bool:
         """Typed bare stop phrase during an active voice chat ends the chat (mirrors the spoken
         one; outside voice mode "stop" passes through to the agent). Exact-match via
-        ``is_voice_stop_phrase``, so longer messages containing "stop" are never swallowed."""
+        ``is_voice_stop_phrase``, so longer messages containing "stop" are never swallowed.
+
+        Saying "stop" ends the voice chat (PR #73106); TYPING the same bare stop phrase while voice mode is
+        on must behave identically instead of sending "stop" to the agent as a turn.
+        """
         from cli import _DIM, _RST, _cprint
         if not isinstance(user_input, str):
             return False
@@ -837,6 +842,7 @@ class CLIVoiceMixin:
         _cprint(f"  Recording: {'YES' if self._voice_recording else 'no'}")
         # Startup-pinned label so /voice status always matches the live prompt_toolkit
         # binding (live config would drift after a mid-session config edit).
+        # See #19835.
         _cprint(f"  Record key: {self._voice_record_key_label()}")
         _cprint(f"\n  {_BOLD}Requirements:{_RST}")
         for line in reqs["details"].split("\n"):

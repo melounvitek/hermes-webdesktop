@@ -225,6 +225,8 @@ class GatewaySlashCommandsMixin(
         correct for the write-back round-trip (merged defaults must not be persisted back to the
         user's file); the cached agent is dropped so the setting takes effect next message."""
         from gateway.run import _gateway_config_home
+        # Persist to config (default) unless --session opted out, mirroring the text /model command path
+        # above so a picked model survives across sessions like a typed one (#49066).
         from hermes_cli.config import read_user_config_raw
         config_path = _gateway_config_home() / "config.yaml"
         session_key = self._session_key_for_source(event.source)
@@ -233,6 +235,10 @@ class GatewaySlashCommandsMixin(
             user_config = read_user_config_raw(config_path)
             user_config.setdefault(section, {})["write_approval"] = bool(enabled)
             atomic_config_write(config_path, user_config)
+            # Evict any cached agent for this session so the next message rebuilds with the correct
+            # session_id end-to-end — mirrors /branch and /reset. Without this, the cached AIAgent (and its
+            # memory provider, which cached `_session_id` during initialize()) keeps writing into the wrong
+            # session's record. See #6672.
             self._evict_cached_agent(session_key)
         return _set_approval
 
@@ -429,6 +435,7 @@ class GatewaySlashCommandsMixin(
         # No running agent anywhere for this scope. A platform status indicator can still be stuck —
         # e.g. Slack's persistent assistant.threads.setStatus survives a gateway restart or a turn
         # that died without a final send.
+        # Best-effort clear so /stop always dismisses a phantom "is thinking...". See #32295.
         adapter = getattr(self, "adapters", {}).get(source.platform)
         try:
             if adapter and hasattr(adapter, "_stop_typing_with_metadata"):
@@ -535,6 +542,9 @@ class GatewaySlashCommandsMixin(
         from gateway.restart import is_container_restart_context, is_gateway_supervisor_process
         via_service = is_gateway_supervisor_process() or is_container_restart_context()
         self.request_restart(detached=not via_service, via_service=via_service)
+        # Track sessions that were active at shutdown for stuck-loop detection (#7536). On each restart, the
+        # counter increments for sessions that were running. If a session hits the threshold (3 consecutive
+        # restarts while active), the next startup auto-suspends it — breaking the loop.
         if active_agents:
             return t("gateway.draining", count=active_agents)
         return EphemeralReply(t("gateway.restart.restarting"))
@@ -603,6 +613,7 @@ class GatewaySlashCommandsMixin(
         # Voice state belongs to the (bot, chat) pair: resolve the adapter that received the
         # command and key the mode by its owning profile so two multiplexed bots in one chat keep
         # independent /voice state.
+        # See #75198.
         voice_key = self._voice_key_for_source(event.source)
         adapter = self._adapter_for_source(event.source)
 
@@ -1127,7 +1138,11 @@ class GatewaySlashCommandsMixin(
 
     async def _handle_deny_command(self, event: MessageEvent) -> str:
         """Handle /deny — reject pending dangerous command(s) with a definitive BLOCKED result, as in
-        the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything."""
+        the CLI. ``/deny`` denies the oldest; ``/deny all`` denies everything.
+
+        ``/deny <reason>`` (or ``/deny all <reason>``) attaches a one-line reason that is relayed back to
+        the agent so it can adapt instead of only hearing "denied". Ported from qwibitai/nanoclaw#2832.
+        """
         from tools.approval import resolve_gateway_approval
         session_key, stale = self._blocking_approval_or_stale(event, "gateway.deny.stale",
                                                               "gateway.deny.no_pending")

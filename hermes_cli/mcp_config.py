@@ -153,6 +153,8 @@ def _strip_bearer_prefix(token: str) -> str:
 
     The header template already stores ``Authorization: Bearer ${MCP_X_API_KEY}``; a token pasted
     with its own prefix would send ``Bearer Bearer <jwt>`` and get a 401.
+
+    Normalize on save. (#37792)
     """
     if not isinstance(token, str):
         return token
@@ -231,6 +233,12 @@ def _resolve_mcp_server_config(config: dict) -> dict:
 
     Mirrors ``_load_mcp_config()`` in ``tools/mcp_tool.py``; without it the discovery probe sent
     literal placeholders in header templates and auth-requiring servers returned 401.
+
+    Mirrors ``_load_mcp_config()`` in ``tools/mcp_tool.py``: load ``~/.hermes/.env`` into ``os.environ`` and
+    recursively interpolate any ``${VAR}`` placeholders. The CLI builds header templates like
+    ``Authorization: Bearer ${MCP_X_API_KEY}`` but the probe path never resolved them, so the discovery
+    probe sent the literal placeholder and auth-requiring servers (e.g. n8n) returned 401 — while runtime
+    tool loading worked because it interpolates. (#37792)
     """
     from tools.mcp_tool import _interpolate_env_vars
     from agent.secret_scope import current_secret_scope
@@ -696,6 +704,9 @@ def cmd_mcp_reauth(args):
     """Re-authenticate one OAuth MCP server, or all of them sequentially.
 
     Serial-by-design: a human can only complete one browser OAuth flow at a time.
+
+    This is the self-service fix for the recurring stale-client ritual in GH#36767 (and avoids the startup
+    popup storm when several servers go stale at once).
     """
     servers = _get_mcp_servers()
     name = getattr(args, "name", None)

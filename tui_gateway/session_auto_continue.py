@@ -12,6 +12,9 @@ from .method_ctx import bind_module
 # finally; only a process death leaves it behind, so a marker at session.resume proves the turn never finished AND the
 # client never saw a terminal frame. Fresh: re-submit automatically (as the messaging gateway does). Stale: clear it
 # and let the partial transcript speak.
+# If the interruption is fresh, re-submit the interrupted prompt automatically (the messaging gateway has
+# done this for restart-interrupted sessions since #27856); if it's stale, clear the marker and let the
+# recovered partial transcript speak for itself — the user can ask to continue manually.
 _AUTO_CONTINUE_FRESHNESS_MINUTES_DEFAULT = 15
 
 
@@ -91,6 +94,8 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
             session["last_active"] = time.time()
         # Ownership admission BEFORE message.start: a sibling backend sharing this HERMES_HOME may have written the
         # marker and still be mid-turn. Leave the marker so a later resume retries.
+        # Running the continuation anyway would be the double-writer this fence exists to prevent. See
+        # #94778.
         if _ensure_active_session_slot(sid, session) is not None:
             logger.info("auto-continue for %s refused: session has another live owner", session_key)
             with session["history_lock"]:
@@ -125,6 +130,7 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
     image_paths = list(image_paths or [])
     # Scrub live-turn self-duplicates first so the text merge below can't glue "{original}\n\n{later}" and re-fire the
     # original after a correction settles.
+    # See #84417.
     _drop_queued_duplicates_of_inflight_user(session)
     text_only = not image_paths and isinstance(text, str)
     # Never queue a text-only self-copy of the live prompt: draining it would restart it.
@@ -145,7 +151,12 @@ def _enqueue_prompt(session: dict, text: Any, transport: Any, image_paths: list[
 def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict | None:
     """Drop (``None``) a text-only self-duplicate of the live user text, or rewrite a merged slot
     ``"{original}\\n\\n{later}"`` to ``later`` so the correction survives without re-firing the original. Image-bearing
-    envelopes are left alone (chronology is load-bearing)."""
+    envelopes are left alone (chronology is load-bearing).
+
+    Returns ``None`` to drop the envelope, or a (possibly rewritten) dict to keep. A merged slot
+    ``"{original}\\n\\n{later}"`` (from ``_enqueue_prompt``'s consecutive text merge) is rewritten to just
+    ``later`` so a later correction is not lost and the original is not re-fired (#84417).
+    """
     if not isinstance(entry, dict):
         return None
     text = entry.get("text")
@@ -158,7 +169,13 @@ def _sanitize_queued_entry_vs_inflight_user(entry: Any, original: str) -> dict |
 
 def _drop_queued_duplicates_of_inflight_user(session: dict) -> None:
     """Remove server-queue copies of the live turn's original user text: a mid-turn ``prompt.submit`` of the same text
-    queued while redirect was unavailable must not drain and restart the original."""
+    queued while redirect was unavailable must not drain and restart the original.
+
+    A mid-turn ``prompt.submit`` of the same text can land in ``queued_prompt`` when redirect is not yet
+    available (model not active, build window, tool boundary). If the user then corrects the turn with a
+    different prompt via redirect, that stale self-duplicate must not ``_drain_queued_prompt`` after the
+    redirected turn completes — otherwise the original prompt restarts as a fresh agent turn (#84417).
+    """
     if not (original := _ac_inflight_original(session)):
         return
     head = session.get("queued_prompt")
@@ -250,6 +267,10 @@ def _handle_busy_submit(rid, sid: str, session: dict, text: Any, transport: Any,
     # Attachments need their own model invocation: queue without cancelling so the user gets both results in order.
     # ``steer`` must NEVER escalate to a hard interrupt: it would kill the live turn AND drop ``AIAgent._pending_steer``
     # (earlier accepted steers); steer fall-throughs stay FIFO-queued.
+    # A burst of user messages while the agent is busy can land as a mix of accepted steers (stashed in
+    # ``AIAgent._pending_steer``) and fall-through queue envelopes (payload not steerable, ``steer()``
+    # rejected/raised). A hard interrupt here kills the live turn AND ``AIAgent.interrupt()`` drops the
+    # pending steer buffer — silently destroying the earlier messages of the burst. See #86134.
     if mode == "interrupt" and not image_paths:
         _interrupt_busy_session(sid, session, agent)
     return _ok(rid, {"status": "queued"})
@@ -271,6 +292,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         if int(session.get("_queued_prompt_generation", 0)) != queue_generation:
             # Generation bump cancelled the claim (Stop, compress re-anchor, …): don't dispatch, but restore the
             # envelope (claimed head first, then whatever advanced into the slot) so a legitimate follow-up isn't dropped.
+            # See #84417.
             advanced = session.get("queued_prompt")
             _ac_set_queue(session, [queued, *([advanced] if advanced else []), *(session.get("queued_prompts") or [])])
             session["running"] = False

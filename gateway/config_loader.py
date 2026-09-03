@@ -290,6 +290,10 @@ def apply_plugin_yaml_hooks(yaml_cfg: dict, gateway_platforms: Any, platforms_da
     if registry is None:
         return
     for entry in registry.all_entries():
+        # Plugin-owned YAML→env config bridges (#24836). See ``PlatformEntry.apply_yaml_config_fn`` for the
+        # hook contract. Order: shared-key loop (above) → this dispatch → legacy hardcoded blocks (below;
+        # no-op when a hook already set their env var) → ``_apply_env_overrides()`` after
+        # ``GatewayConfig.from_dict``.
         if entry.apply_yaml_config_fn is None:
             continue
         platform_cfg, _ = platform_section(yaml_cfg, entry.name, gateway_platforms)
@@ -315,9 +319,18 @@ def bridge_core_env_settings(yaml_cfg: dict, platforms_data: dict) -> None:
     if tl_require_mention is not None and "require_mention" not in (yaml_cfg.get("telegram") or {}):
         tg_plat = platforms_data.setdefault(Platform.TELEGRAM.value, {})
         tg_plat.setdefault("extra", {}).setdefault("require_mention", tl_require_mention)
+        # Also bridge to the TELEGRAM_REQUIRE_MENTION env var that the adapter reads at runtime. This used
+        # to live in the telegram_cfg block in core; it stays in core because it keys off the TOP-LEVEL
+        # require_mention (not a telegram: block), so the telegram plugin's apply_yaml_config_fn hook —
+        # which only runs when a telegram config block exists — can't cover the no-telegram-block case
+        # (#3979).
         if not os.getenv("TELEGRAM_REQUIRE_MENTION"):
             os.environ["TELEGRAM_REQUIRE_MENTION"] = str(tl_require_mention).lower()
 
+    # Telegram settings → env vars / extra: migrated to the telegram plugin's apply_yaml_config_fn hook
+    # (plugins/platforms/telegram/adapter.py). #41112 / #3823.
+    # WhatsApp settings → env vars: migrated to the whatsapp plugin's apply_yaml_config_fn hook
+    # (plugins/platforms/whatsapp/adapter.py). #41112 / #3823.
     signal_cfg = yaml_cfg.get("signal", {})
     if isinstance(signal_cfg, dict) and "require_mention" in signal_cfg and not os.getenv("SIGNAL_REQUIRE_MENTION"):
         os.environ["SIGNAL_REQUIRE_MENTION"] = str(signal_cfg["require_mention"]).lower()

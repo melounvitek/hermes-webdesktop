@@ -12,6 +12,8 @@ from typing import Any, Callable, Optional
 
 from agent.reasoning_effort import (
     ACTUAL_RELAY_EFFORTS, XAI_GROK46_EFFORTS, XAI_LEGACY_EFFORTS, clamp_effort,
+    # Same declared vocabulary + shared clamp as the main Codex transport (agent.reasoning_effort):
+    # per-model — "max" is gpt-5.6-only, "minimal"/"ultra" always rejected (live-verified, #68365).
     codex_supported_efforts,
 )
 from agent.transports.base import ProviderTransport
@@ -21,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Cron fires use ``cron_<job_id>_<YYYYMMDD_HHMMSS>``; the per-fire timestamp is
 # stripped so repeat fires of one job share a cache scope.
+# See #51395, #52295.
 _CRON_SESSION_ID_RE = re.compile(r"^(cron_.+)_\d{8}_\d{6}$")
 
 
@@ -64,6 +67,10 @@ _XAI_CLIENT_WEB_SEARCH_ALIAS = "hermes_web_search"
 # OpenCode /v1/responses rejects client tools using these names (HTTP 400
 # "custom function name 'X' is reserved"); xAI reserves ``tool_search`` for
 # Grok's native Tool Search. Aliased as hermes_<name>.
+# OpenCode's /v1/responses endpoints (Zen and Go, including custom providers pointing at opencode.ai)
+# reserve certain function names server-side and reject client tools that use them with HTTP 400 ("custom
+# function name 'X' is reserved"). Same treatment as the xAI web_search collision: rename on the wire
+# (hermes_<name>), map back in normalize_response so Hermes dispatch is unaffected. See #85589.
 _OPENCODE_RESERVED_TOOL_NAMES = ("web_search", "search_files")
 _XAI_RESERVED_TOOL_NAMES = ("tool_search",)
 _RESERVED_TOOL_ALIAS_PREFIX = "hermes_"
@@ -126,6 +133,11 @@ def _xai_prefers_native_web_search() -> bool:
     """True when xAI Responses should use Grok's native ``web_search`` built-in.
 
     Web-search registry first, then the legacy ``_get_search_backend`` probe; fails closed to native (True).
+
+    Delegates to the web-search registry's provider resolution (which reads ``web.search_backend`` /
+    ``web.backend`` from config) and checks whether the resolved provider is xAI. On any resolution failure,
+    returns True (fail-closed to native — preserves the #48108 incomplete-hang fix rather than risk
+    reintroducing it).
     """
     try:
         from agent.web_search_registry import get_active_search_provider
@@ -160,9 +172,25 @@ def _alias_wire_tools(response_tools: Any, params: dict[str, Any], is_xai_respon
                 {**t, "name": _XAI_CLIENT_WEB_SEARCH_ALIAS} if is_client_web_search(t) else t for t in response_tools
             ]
             wire_aliases[_XAI_CLIENT_WEB_SEARCH_ALIAS] = "web_search"
+    # OpenCode Responses backends reserve web_search / search_files as function names (HTTP 400 "custom
+    # function name 'X' is reserved", #85589). Alias them on the wire; normalize_response maps them back.
     if response_tools and _is_opencode_responses_backend(params):
         response_tools, _oc_aliases = _alias_reserved_tools(response_tools, _OPENCODE_RESERVED_TOOL_NAMES)
         wire_aliases.update(_oc_aliases)
+    # xAI server-side web search vs Hermes web providers. grok models on xAI's /v1/responses surface have a
+    # *native*, server-executed web search. A client-side function literally named ``web_search`` collides
+    # with that engine: declared as a plain ``function`` rather than ``{"type": "web_search"}``, the search
+    # dispatches but never reconciles → incomplete turn + 3 retries. Verified live against
+    # grok-composer-2.5-fast (2026-06); see #48108. Two modes, chosen by the user's web-search backend
+    # config: 1. **Native** (active/configured backend is ``xai``, or resolution fails): drop the client
+    # ``web_search`` function and declare xAI's built-in instead. 1:1 swap only when client ``web_search``
+    # was already present — never an additive grant. 2. **Client** (Firecrawl / Tavily / Exa / … configured
+    # or resolved): keep Hermes dispatch so ``web.backend`` / ``web.search_backend`` is honored, but rename
+    # the wire tool to ``hermes_web_search`` so Grok cannot hijack the name. The alias is mapped back to
+    # ``web_search`` in ``normalize_response``. Request-local alias provenance: every wire alias THIS
+    # request emits is recorded here and stashed on the transport, so the reverse rewrite in
+    # ``normalize_response`` applies only to aliases that were actually sent (never to a real tool that
+    # merely shares an alias-shaped name).
     if is_xai_responses and response_tools:
         response_tools, _xai_aliases = _alias_reserved_tools(response_tools, _XAI_RESERVED_TOOL_NAMES)
         wire_aliases.update(_xai_aliases)
@@ -183,6 +211,10 @@ def _resolve_reasoning(model: str, params: dict[str, Any]) -> tuple[Any, bool]:
         elif reasoning_config.get("effort"):
             reasoning_effort = reasoning_config["effort"]
 
+    # Wire vocabularies are declared in agent.reasoning_effort; the shared clamp policy (nearest weaker
+    # supported level, never escalate, never invert the ladder) replaces the per-backend hand maps that
+    # repeatedly leaked internal levels like "ultra" to the wire (#89503 class) or clamped one rung below a
+    # model's real ceiling (#87279).
     if params.get("is_xai_responses", False):
         from agent.model_metadata import is_grok_46_family
 
@@ -215,6 +247,11 @@ def _default_prompt_cache_retention_for_request(model: str, base_url: Any) -> Op
 
     hostname = base_url_hostname(str(base_url or "")).lower()
     # Meta Model API: caching is opt-in via prompt_cache_retention (0% hits without).
+    # Meta Model API (api.meta.ai) only achieves prompt-cache hits on the Responses API with
+    # prompt_cache_retention; chat/completions stays cache-cold (0% vs 93-99% measured). Exact-hostname
+    # match per #32243.
+    # Meta Model API: prompt caching only on Responses API (0% on chat/completions vs 93-99% on /responses
+    # with retention). See #32243.
     if hostname == "api.meta.ai":
         return "24h"
     parts = hostname.split(".")
@@ -229,6 +266,12 @@ def _content_cache_key(instructions: str, tools: Optional[list[dict[str, Any]]],
     """``pck_<sha256[:24]>`` of (scope_id, instructions, name-sorted tools), or None if nothing static.
 
     Routing hint only; ``scope_id`` keeps unrelated sessions off one bucket.
+
+    ``scope_id`` (pass ``_cache_scope_from_session_id(session_id)``) keeps unrelated sessions — independent
+    conversations, main vs. child/subagent, sibling children — from concentrating onto the same bucket
+    merely because their static prefix matches (see #78941), while still letting recurring cron fires of one
+    job share a stable key across their timestamped session_ids (the original #51395/#52295 fix this built
+    on). Sorting tools by name keeps the hash insertion-order independent.
     """
     if not instructions and not tools:
         return None
@@ -421,6 +464,20 @@ class ResponsesApiTransport(ProviderTransport):
         cache key / xAI conv header), max_tokens, timeout, request_overrides, provider, base_url,
         is_github_responses, is_codex_backend, is_xai_responses, github_reasoning_extra,
         context_management, replay_encrypted_reasoning.
+
+        params: instructions: str — system prompt (extracted from messages[0] if not given)
+        reasoning_config: dict | None — {effort, enabled} session_id: str | None — transcript/session id;
+        drives the Codex ``session_id`` header, and is the cache-scope fallback when no ``cache_scope_id``
+        is given cache_scope_id: str | None — rotation-stable logical scope id (compression-lineage root;
+        see agent/prompt_cache_scope.py). Preferred over session_id when deriving the prompt_cache_key
+        content hash and the xAI x-grok-conv-id header; the Codex x-client-request-id header mirrors the
+        resulting body key. Keeps the cache warm across context-compression session rotation (#79017)
+        max_tokens: int | None — max_output_tokens timeout: float | None — per-request timeout forwarded to
+        the SDK request_overrides: dict | None — extra kwargs merged in provider: str | None — provider name
+        for backend-specific logic base_url: str | None — endpoint URL base_url_hostname: str | None —
+        hostname for backend detection is_github_responses: bool — Copilot/GitHub models backend
+        is_codex_backend: bool — chatgpt.com/backend-api/codex is_xai_responses: bool — xAI/Grok backend
+        github_reasoning_extra: dict | None — Copilot reasoning params
         """
         from run_agent import DEFAULT_AGENT_IDENTITY
 
@@ -490,6 +547,8 @@ class ResponsesApiTransport(ProviderTransport):
         _bound_prompt_cache_key_field(kwargs)
 
         # Older xAI models reject ``service_tier`` (HTTP 400); only Grok 4.6 accepts Priority Processing.
+        # Grok 4.6 accepts Priority Processing, but continue stripping stale or unsupported tier values on
+        # every other xAI path. See #28490 and #84799.
         if is_xai_responses:
             from agent.model_metadata import is_grok_46_family
 
@@ -521,6 +580,13 @@ class ResponsesApiTransport(ProviderTransport):
             _merge_extra_headers(kwargs, **{"x-grok-conv-id": _cache_scope})
             # xAI reads prompt_cache_key from the body; extra_body survives SDK builds whose
             # Responses.stream() dropped the typed kwarg. An explicit request_overrides value wins.
+            # Scoped like the body cache key below — otherwise cron's per-fire timestamp in session_id
+            # (cron_<id>_<ts>) pins every fire of the same job to a different xAI backend server (#78941).
+            # xAI Responses cache-routing — body-level field per
+            # https://docs.x.ai/developers/advanced-api-usage/prompt-caching/maximizing-cache-hits. A
+            # caller's request_overrides={"prompt_cache_key": ...} lands on the top-level kwarg set above —
+            # read it back here so an explicit override actually governs the field xAI reads, instead of
+            # being silently outrun by the auto-derived cache_key (#78941).
             existing_extra_body = kwargs.get("extra_body")
             kwargs["extra_body"] = dict(existing_extra_body) if isinstance(existing_extra_body, dict) else {}
             kwargs["extra_body"].setdefault("prompt_cache_key", kwargs.get("prompt_cache_key", cache_key))

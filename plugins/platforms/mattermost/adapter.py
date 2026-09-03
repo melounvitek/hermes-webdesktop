@@ -447,6 +447,11 @@ class MattermostAdapter(BasePlatformAdapter):
                 # healthy with a dead listener). Type-based: substring "401" matching misclassified transient errors.
                 if isinstance(exc, aiohttp.WSServerHandshakeError) and exc.status in {401, 403}:
                     logger.error("Mattermost WS auth failed (HTTP %d) — stopping reconnect", exc.status)
+                    # Escalate through the fatal-error hook instead of a bare return: the old silent exit
+                    # left _running True, so is_connected() kept reporting healthy while the listener was
+                    # dead and the gateway was never told (OOF-156 class). Type-based only — the substring
+                    # fallback that used to sit below this branch misclassified transient errors whose
+                    # message merely contained "401" (#80489).
                     self._set_fatal_error(
                         "mattermost_auth_error",
                         f"Mattermost WebSocket authentication rejected (HTTP {exc.status}). The bot token is "
@@ -706,6 +711,10 @@ def _apply_yaml_config(yaml_cfg: dict, mattermost_cfg: dict) -> dict | None:
     Env vars win over YAML (writes guarded by ``not os.getenv``). Under a multiplexed secondary
     profile the env write is skipped (it would leak into every profile via ``os.environ``); the
     values are returned so the caller seeds this profile's ``extra``, which read sites check first.
+
+    Implements the ``apply_yaml_config_fn`` contract (#24836 / #25443). Mirrors the legacy
+    ``mattermost_cfg`` block that used to live in ``gateway/config.py::load_gateway_config()`` before this
+    migration.
     """
     skip_env_bridge = _profile_scoped_config_load()
     seeded: dict = {}

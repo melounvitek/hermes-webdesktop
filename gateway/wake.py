@@ -74,7 +74,16 @@ def _delegation_display_metadata(evt: dict) -> dict:
 async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: str, evt: Optional[dict] = None) -> None:
     """Persist an async-delegation completion as a durable DELIVERY row (see module docstring)
     WITHOUT running any agent turn. Raises on failure so the caller can release the durable claim
-    and retry."""
+    and retry.
+
+    85957: on stateless api_server sessions the client owns the turn after ``event.complete`` — a completion
+    must never become a new ``role=user`` prompt via the self-post (that starts an unauthorized agent turn
+    and can cross a pending human-confirmation gate). Instead, append the completion to the session
+    transcript as a timeline bookkeeping row (``display_kind="async_delegation_complete"`` + display
+    metadata — the exact shape the TUI/desktop delivery path persists), WITHOUT running any agent turn.
+    Clients polling ``GET /api/sessions/{id}/messages`` see it immediately; the pre-request repair belt
+    folds it into the next real client turn as context. See #85957.
+    """
     if not session_id:
         raise ValueError("persist_delegation_delivery: raw session id required to persist "
                          "the completion on the api_server session transcript")

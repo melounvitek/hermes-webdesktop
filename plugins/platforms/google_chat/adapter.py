@@ -415,7 +415,13 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     # -- configuration -------------------------------------------------------
     def _load_sa_credentials(self) -> Any:
-        """SA credentials: ``extra['service_account_json']`` → GOOGLE_APPLICATION_CREDENTIALS → ADC."""
+        """SA credentials: ``extra['service_account_json']`` → GOOGLE_APPLICATION_CREDENTIALS → ADC.
+
+        Priority: 1. Explicit ``extra['service_account_json']`` (path or inline JSON) 2. 3. Application
+        Default Credentials via ``google.auth.default()`` — works on Cloud Run / GCE / GKE with a workload
+        identity attached, or locally via ``gcloud auth application-default login``. Lets operators run the
+        gateway in GCP without managing SA key files. Pattern lifted from PR #14965.
+        """
         sa_path = self.config.extra.get("service_account_json") or _get_scoped_secret("GOOGLE_APPLICATION_CREDENTIALS")
         try:
             credentials = _load_sa_credentials_from(sa_path)
@@ -1145,7 +1151,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     @classmethod
     def format_message(cls, content: str) -> str:
-        """Convert standard Markdown to Google Chat's dialect (see ``cards.format_message``)."""
+        """Convert standard Markdown to Google Chat's dialect (see ``cards.format_message``).
+
+        Pattern lifted from PR #14965.
+        """
         return _format_message(content)
 
     def _resolve_thread_id(self, reply_to: Optional[str], metadata: Optional[Dict[str, Any]],
@@ -1171,7 +1180,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
 
     async def _call_with_retry(self, sync_fn: Callable[[], Any], *, op_name: str = "chat-api-call") -> Any:
         """Run ``sync_fn`` in a thread with bounded retry + jittered backoff; only
-        transient failures are retried, permanent ones bubble up on the first attempt."""
+        transient failures are retried, permanent ones bubble up on the first attempt.
+
+        Pattern lifted from PR #14965.
+        """
         delay = _RETRY_BASE_DELAY
         for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
             try:

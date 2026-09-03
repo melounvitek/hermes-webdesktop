@@ -33,6 +33,7 @@ DEFAULT_KEEP = 5
 # is the backup dir itself; .git is repository metadata — rolling it back breaks git tracking, and snapshots that include it grow
 # with the full history (once backups are committed back, each snapshot contains the prior ones: 38MB of skills inflated to 24GB
 # in weeks). The tar filter in ``snapshot_skills`` applies the same set to nested paths, so a nested ``.git`` is skipped too.
+# See #91449.
 _EXCLUDE_TOP_LEVEL = {".curator_backups", ".hub", ".git"}
 
 # Snapshot id: UTC ISO with colons replaced by dashes (Windows-safe filename); optional ``-NN`` suffix for same-second snapshots.

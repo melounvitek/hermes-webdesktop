@@ -71,7 +71,13 @@ class MCPServerHealthMixin:
         return task
 
     def _make_logging_callback(self):
-        """``logging_callback`` forwarding server ``notifications/message`` into Hermes logging (SDK default drops them)."""
+        """``logging_callback`` forwarding server ``notifications/message`` into Hermes logging (SDK default drops them).
+
+        Routes MCP ``notifications/message`` log notifications from the server into Hermes' logging
+        (agent.log via hermes_logging), tagged with the server name. Without this, the SDK's default
+        callback silently discards them, so server-side warnings/errors during a tool call were invisible.
+        Port of anomalyco/opencode#34529.
+        """
         async def _on_log(params):
             try:
                 level = _core._MCP_LOG_LEVEL_MAP.get(str(getattr(params, "level", "info")).lower(), logging.INFO)
@@ -187,7 +193,11 @@ class MCPServerHealthMixin:
     def _mark_session_proven(self) -> None:
         """Record that the session demonstrated real health (keepalive or tool-call success).
         Only then is the reconnect budget cleared: a handshake that drops moments later must keep
-        consuming ``_reconnect_retries`` so a flapping transport still reaches the park."""
+        consuming ``_reconnect_retries`` so a flapping transport still reaches the park.
+
+        Called from the keepalive success path (session survived at least one full keepalive interval) and
+        the tool-call success path. See #62212.
+        """
         if self._session_proven:
             return
         self._session_proven = True
@@ -200,7 +210,11 @@ class MCPServerHealthMixin:
         self._permanent_grace_used = self._teardown_race = False
 
     def mark_suspect(self, reason: str) -> None:
-        """Latch a suspicion (no I/O); the NEXT call verifies via :meth:`ensure_healthy` and recycles on failure."""
+        """Latch a suspicion (no I/O); the NEXT call verifies via :meth:`ensure_healthy` and recycles on failure.
+
+        The NEXT call verifies via :meth:`ensure_healthy` and recycles the transport if the probe fails,
+        instead of the connection silently staying poisoned until process restart (#81051/#77765/#84132).
+        """
         if self._suspect_reason is None and reason:
             logger.warning("MCP server '%s': connection marked suspect (%s); next call will health-check it",
                            self.name, reason)
@@ -262,6 +276,10 @@ class MCPServerHealthMixin:
             return False
 
     async def _watch_stdio_children(self) -> None:
-        """Poll child liveness during a stdio RPC; resolves when a tracked child dies so the caller cancels the RPC."""
+        """Poll child liveness during a stdio RPC; resolves when a tracked child dies so the caller cancels the RPC.
+
+        See #81995.
+        """
         while not self._stdio_children_dead():
+            # Async context — never block the loop (#36163).
             await asyncio.sleep(0.25)

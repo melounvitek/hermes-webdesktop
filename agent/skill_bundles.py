@@ -129,7 +129,15 @@ def build_bundle_invocation_message(
     loaded_skill_names, missing_skill_names)`` or ``None`` if the bundle wasn't
     found. Uninstalled members are skipped with a note; disabled ones too, since
     ``_load_skill_payload`` bypasses the scan-time filter (``platform`` scopes
-    that check — gateway passes it, None resolves from env)."""
+    that check — gateway passes it, None resolves from env).
+
+    Disabled skills are also skipped: bundles load members via ``_load_skill_payload`` directly, bypassing
+    the scan-time disabled filter in ``get_skill_commands()``, so the disabled list must be re-applied here.
+    ``platform`` scopes the check to a specific platform's ``skills.platform_disabled`` config (gateway
+    dispatch passes it explicitly because the gateway handles multiple platforms in one process); when
+    *None*, the platform resolves from session env vars and the global disabled list still applies. Mirrors
+    the stacked-skill gate in gateway dispatch (#58888).
+    """
     info = get_skill_bundles().get(cmd_key)
     if not info:
         return None

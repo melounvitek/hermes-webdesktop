@@ -89,7 +89,12 @@ def _load_durable_truncation_history(
 def _resolve_truncate_row_id(session: dict, history: list, target_row_id: int):
     """Resolve ``truncate_before_row_id`` to ``(user_ordinal, history_index)``: in-memory
     stamps first, else the durable transcript mapped onto the live list by user ordinal.
-    Never falls back to a client-supplied ordinal — unknown row ids refuse."""
+    Never falls back to a client-supplied ordinal — unknown row ids refuse.
+
+    Prefer in-memory ``_row_id`` / ``row_id`` stamps. When a live turn rewrote ``session["history"]``
+    without stamps (provider-format messages), load the session's durable transcript with
+    ``include_row_ids=True`` and map the matched user-turn ordinal onto the live list. See #82959.
+    """
     if (hit := _find_user_turn_by_row_id(history, target_row_id)) is not None:
         return hit
     db_history = _load_durable_truncation_history(session)
@@ -167,6 +172,10 @@ def _typed_stop_phrase_response(rid, text):
     if not (isinstance(text, str) and _voice_mode_enabled()):
         return None
     try:
+        # Typed bare stop phrase while backend voice mode is active ends the voice chat instead of sending
+        # "stop" to the agent — the typed twin of the spoken stop phrase (PR #73106), applied at the ONE
+        # server-side choke point every TUI submit passes through. (The desktop's voice conversation is
+        # renderer-owned and never flips the backend flag, so it handles its own typed stop client-side.)
         from tools.voice_mode import is_voice_stop_phrase
         if not is_voice_stop_phrase(text):
             return None
@@ -376,6 +385,18 @@ def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids
         if db is not None:
             try:
                 # NULL session_key (old CLI-origin sessions) would trip an FK violation.
+                # active_only=True: replace only the live (active=1) rows. In-place compaction (#38763)
+                # keeps the pre-compaction transcript as active=0/compacted=1 rows under this same session
+                # key; a bare replace_messages() would DELETE that durable archive on every edit/regenerate
+                # — the same bug class #80216 fixed for /retry. On an uncompacted session all rows are
+                # active=1, so this is behaviorally identical to the full replace. archive_dropped: a rewind
+                # overwrites turns the user may not have meant to drop, and this write is the last step
+                # before they are gone — three reported incidents ended here with nothing to restore from
+                # (#70516, #80763, #82756). Soft-archiving keeps them on disk (active=0) and in the FTS
+                # index, so a mis-aimed cut is recoverable instead of terminal. The live transcript is
+                # unchanged. Fall back to session id when session_key is NULL — CLI-origin sessions created
+                # before the session_key default fix have no key, and replace_messages(None) triggers an FK
+                # violation.
                 truncation_key = session.get("session_key") or sid
                 old_active_row_ids = _row_ids_of(history)
                 if requested_rebind_ids is not None:
@@ -447,6 +468,9 @@ def _persist_session_row_for_submit(rid, session):
 def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_terminal_callback):
     """Turn thread body: patient wait for a deferred build (a slow build must not eat the
     accepted in-flight message), then run."""
+    # The wait delivers the prompt when the still-running build completes, honors a cancel promptly, notices
+    # the user once past the slow threshold, and only errors when the build itself fails or the bounded cap
+    # expires. See #63078.
     err = _wait_agent_for_prompt(session, rid, sid)
     if err:
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
@@ -583,6 +607,14 @@ def _(rid, params: dict) -> dict:
             # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
             return isolated_response
+        # An ordinal/id alone is not consent. A client that carries a leftover ordinal into an ORDINARY
+        # submit sends a request that is indistinguishable, field by field, from a real rewind — same
+        # method, same shape, an in-range target — and the cut it asks for is a destructive
+        # replace_messages() the user never requested (#80763: 296 -> 52 messages, 244 durable rows gone).
+        # Only the client knows whether this submit is a rewind/edit/regenerate, so it has to say so; refuse
+        # the cut when it doesn't. Consent is checked BEFORE target resolution: an unconfirmed
+        # (leaked-state) request must refuse with 4029 without paying the durable transcript read or
+        # heal-stamping live history dicts that row-id resolution performs.
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
@@ -877,6 +909,16 @@ def _spawn_side_agent(
 
     def run():
         session_tokens = _set_session_context(task_id, cwd=(cwd or _session_cwd(session)))
+        # Bug #50233: ephemeral agent threads don't inherit the session's HERMES_HOME override (the
+        # ContextVar set on the session-create thread doesn't propagate here), so a background turn under a
+        # non-default profile would run against the wrong home. Re-bind the override for the duration of
+        # this turn, exactly as the normal prompt turn does, and restore it afterward.
+        # Bug #50233: ephemeral preview-restart agent threads don't inherit the session's HERMES_HOME
+        # override (the ContextVar set on the session-create thread doesn't propagate here). Re-bind it for
+        # the duration of the turn, mirroring the normal prompt turn, then restore it. NOTE: we deliberately
+        # do NOT close this agent through task-wide process cleanup — the whole point of preview.restart is
+        # to leave a background server running under this task_id, and AIAgent.close() would kill every
+        # process for the task_id and tear down the very server the restart just started.
         profile_home = session.get("profile_home")
         home_token = set_hermes_home_override(profile_home) if profile_home else None
         try:
@@ -1082,7 +1124,10 @@ def _(rid, params: dict) -> dict:
 def _approval_respond_session_fallback(params: dict):
     """Durable-identity fallback for a stale live sid (re-minted after a reconnect while
     the prompt stayed on screen): (1) the ``request_id`` against every live session's
-    pending approvals, then (2) ``session_id`` as a STORED id.  Live session or None."""
+    pending approvals, then (2) ``session_id`` as a STORED id.  Live session or None.
+
+    See #91684.
+    """
     request_id = str(params.get("request_id") or "")
     if request_id:
         try:

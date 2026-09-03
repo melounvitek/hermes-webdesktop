@@ -218,7 +218,14 @@ class CLIModalMixin:
 
         ``run_in_terminal`` only works on the main-thread loop; on the ``process_loop`` daemon
         thread a bare ``input()`` would block forever on loop-owned stdin, so with an app running
-        off-main we cancel cleanly (None) — mirroring ``_stdin_fallback`` in the modal prompt."""
+        off-main we cancel cleanly (None) — mirroring ``_stdin_fallback`` in the modal prompt.
+
+        Mirrors the thread-aware guard in ``_run_curses_picker``: ``run_in_terminal`` returns a coroutine
+        that must be awaited by the prompt_toolkit event loop, which only exists on the main thread. Slash
+        commands are dispatched from the ``process_loop`` daemon thread (see issue #23185), so calling
+        ``run_in_terminal`` from there orphans the coroutine — ``_ask`` never runs, and user keystrokes leak
+        into the composer instead. Fall back to a direct ``input()`` when we're off the main thread.
+        """
         result = [None]
 
         def _ask():
@@ -228,6 +235,11 @@ class CLIModalMixin:
                 pass
 
         in_main_thread = threading.current_thread() is threading.main_thread()
+        # Slash-worker guard (#23185 / billing auto-reload hang): when a prompt_toolkit app is running but
+        # we're on a non-main thread (the process_loop / TUI slash-worker daemon thread), stdin is owned by
+        # the event loop / JSON-RPC pipe. A bare input() there blocks forever until the worker's 45s timeout
+        # fires. We cannot safely prompt off the main thread, so cancel cleanly (None) instead of hanging —
+        # mirrors the _stdin_fallback discipline in _prompt_text_input_modal.
         if self._app and not in_main_thread:
             self._invalidate()
             return None
@@ -282,7 +294,14 @@ class CLIModalMixin:
         prompt_toolkit's stdin ownership: prompt above the TUI, Enter read as EOF). All platforms
         drive the modal via ``self._app.loop`` + ``call_soon_threadsafe``; raw ``input()`` is kept
         only for the safe cases (no app, no loop, scheduling failure) — on Windows a non-main-thread
-        input() deadlocks against prompt_toolkit, so that case cancels instead."""
+        input() deadlocks against prompt_toolkit, so that case cancels instead.
+
+        **Platform note (Windows — issue #33961):** Earlier code bypassed the modal on ``sys.platform ==
+        "win32"`` and fell back to a raw ``input()`` prompt. When the confirm was triggered from the
+        ``process_loop`` daemon thread (the normal case) that ``input()`` ran off the main thread and
+        deadlocked against prompt_toolkit's stdin ownership — the user saw a frozen cursor and Ctrl-C was
+        swallowed (bare ``/reset`` froze; ``/reset now`` worked only because it skips the prompt entirely).
+        """
         if not choices:
             return None
         if not getattr(self, "_app", None):
@@ -295,6 +314,9 @@ class CLIModalMixin:
         in_main_thread = threading.current_thread() is threading.main_thread()
 
         def _stdin_fallback() -> str | None:
+            # On native Windows a raw input() from a non-main thread deadlocks against prompt_toolkit's
+            # stdin ownership (#33961). With an app running we cannot safely prompt off the main thread, so
+            # cancel cleanly (None) rather than hang the terminal.
             if sys.platform == "win32" and not in_main_thread:
                 self._invalidate()
                 return None
@@ -497,7 +519,15 @@ class CLIModalMixin:
         """Confirm a destructive slash command (``/clear``, ``/new``/``/reset``, ``/undo``): returns
         ``"once"``, ``"always"`` (persists the opt-out) or ``None`` (cancelled). Gate off → "once"
         silently; ``now`` / ``--yes`` / ``-y`` in ``cmd_original`` bypasses the modal (callers strip
-        the tokens via :meth:`_split_destructive_skip`)."""
+        the tokens via :meth:`_split_destructive_skip`).
+
+        Inline-skip: if ``cmd_original`` contains ``now``, ``--yes``, or ``-y`` as an argument (e.g.
+        ``/reset now``, ``/new --yes My title``), the modal is bypassed and ``"once"`` is returned
+        immediately. This is an escape hatch for non-interactive use and for the degraded path where the
+        modal can't be marshaled onto the app loop (native Windows itself now drives the modal normally —
+        see #33961). Callers are responsible for stripping the skip tokens from any remaining argument
+        parsing (see :meth:`_split_destructive_skip`).
+        """
         if cmd_original and self._split_destructive_skip(cmd_original)[1]:
             return "once"
         return _gated_confirm(
@@ -546,7 +576,10 @@ class CLIModalMixin:
         open-ended questions) and block until the key bindings answer or the timeout dismisses it
         (the agent is then told to decide). ``multi_select`` shows checkboxes (Space toggles).
         A non-empty ``questions`` list switches to the batch panel and returns
-        ``{"answers": {qid: raw}}`` (plus ``"timed_out": True`` on a partial deadline expiry)."""
+        ``{"answers": {qid: raw}}`` (plus ``"timed_out": True`` on a partial deadline expiry).
+
+        The single-question path below is unchanged. See #18450.
+        """
         from cli import CLI_CONFIG, _DIM, _RST, _cprint
         from tools.clarify_gateway import resolve_clarify_timeout
 
@@ -580,6 +613,7 @@ class CLIModalMixin:
         _cprint(f"\n{_DIM}(clarify timed out after {timeout}s — agent will decide){_RST}")
         return _CLARIFY_TIMEOUT_REPLY
 
+    # --- Batch clarify (multi-question, issue #18450) -----------------------
     def _clarify_batch_set_active(self, state, index) -> None:
         """Point the batch clarify panel at question ``index``: mirror it into the flat keys the
         single-question keybindings/renderer read so ↑/↓/Space/number keys work unchanged;

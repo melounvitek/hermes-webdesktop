@@ -7,6 +7,9 @@ Protocol: reads JSON lines from stdin {id, command}, writes {id, ok, output|erro
 # top-level modules: this worker is spawned as ``-m tui_gateway.slash_worker`` with the user's CWD, so
 # ``import cli`` would otherwise resolve ``utils`` to a colliding local package and crash the child in a
 # retry loop. ``hermes_bootstrap`` lives at the repo root (no collision risk), so importing it first is safe.
+# ``hermes_bootstrap`` lives at the repo root, so importing it is safe before the guard runs (its name won't
+# collide with a user package), and it owns the canonical path-hardening logic shared with the other entry
+# points — #51693 added the guard to ``entry.py``/``acp_adapter/entry.py`` but missed this child.
 import hermes_bootstrap
 
 hermes_bootstrap.harden_import_path()
@@ -41,7 +44,10 @@ def _is_orphaned(original_ppid, getppid=os.getppid) -> bool:
 
 def _prepare_slash_worker_runtime() -> None:
     """Start bounded MCP discovery before HermesCLI snapshots tools: each slash_worker child is its
-    own process — the parent ``hermes serve`` discovery thread does not populate this registry."""
+    own process — the parent ``hermes serve`` discovery thread does not populate this registry.
+
+    See #61891.
+    """
     from hermes_cli.mcp_startup import start_background_mcp_discovery, wait_for_mcp_discovery
     start_background_mcp_discovery(logger=logger, thread_name="slash-worker-mcp-discovery")
     wait_for_mcp_discovery()

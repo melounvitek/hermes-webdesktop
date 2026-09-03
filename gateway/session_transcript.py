@@ -126,6 +126,10 @@ class SessionTranscriptMixin:
         """Queue *message* (retry lock held); evicts + spools the oldest past the cap."""
         pending = self._dirty_transcripts.setdefault(session_id, [])
         pending.append(dict(message))
+        # Cap pending messages per session to avoid unbounded memory growth when the DB is persistently
+        # broken. Spool the evicted oldest message to the on-disk pending spool (same machinery
+        # flush_pending_to_file uses at shutdown) so a runtime cap rotation does not silently discard it
+        # (#78182); it is replayed on the next successful transcript flush.
         if len(pending) > self._MAX_PENDING_PER_SESSION:
             spool_path = _spool_dropped(session_id, pending.pop(0))
             if spool_path is not None:
@@ -214,7 +218,11 @@ class SessionTranscriptMixin:
 
     def _append_to_transcript_serialized(self, session_id: str, message: Dict[str, Any]) -> None:
         """Append a message to a session's transcript (SQLite), draining the per-session retry
-        queue."""
+        queue.
+
+        Args: skip_db: When True, skip the SQLite write. Used when the agent already persisted messages to
+        SQLite via its own _flush_messages_to_session_db(), preventing the duplicate-write bug (#860).
+        """
         with self._transcript_retry_lock:
             pending = self._enqueue_transcript_message(session_id, message)
             msg = pending[0]
@@ -297,6 +305,7 @@ class SessionTranscriptMixin:
                         msg = pending[0]
                 if queue_empty:
                     # Backlog clear: replay cap-dropped messages spooled to disk.
+                    # See #78182.
                     self._drain_spooled_drops(session_id)
                     return
                 continue
@@ -341,6 +350,8 @@ class SessionTranscriptMixin:
             # persistence path or the next replay diverges.
             api_content=extract_api_content_sidecar(message),
             # Presentation typing (e.g. "internal_notification"); DB-only.
+            # "internal_notification" for self-injected async-delegation/background notification turns,
+            # #82888). DB-only; stripped from provider-bound payloads.
             display_kind=message.get("display_kind"),
             display_metadata=message.get("display_metadata"),
         )
@@ -350,7 +361,12 @@ class SessionTranscriptMixin:
         """True only when the failure is provably scoped to the FTS index. A bare SQLITE_CORRUPT
         can mean structural B-tree damage; only errors naming ``messages_fts`` or carrying FTS
         provenance (``SessionDB._is_fts_write_corruption_error``) may authorize the one-shot
-        rebuild-and-retry; everything else takes the retry path."""
+        rebuild-and-retry; everything else takes the retry path.
+
+        A generic ``database disk image is malformed`` (bare SQLITE_CORRUPT) can mean structural damage to
+        canonical B-trees, not just the FTS shadow tables — treating it as FTS-only here made the store
+        rebuild the index and retry transcript writes against a structurally corrupt database (#97940).
+        """
         if "messages_fts" in str(exc).lower():
             return True
         import sqlite3
@@ -390,7 +406,11 @@ class SessionTranscriptMixin:
             self._transcript_append_failures.pop(session_id, None)
 
     def has_platform_message_id(self, session_id: str, platform_message_id: str) -> bool:
-        """Whether a message with this platform_message_id is persisted (False without a DB)."""
+        """Whether a message with this platform_message_id is persisted (False without a DB).
+
+        Thin wrapper over SessionDB.has_platform_message_id(). Returns False when no DB is available
+        (in-memory sessions). Used by the gateway's transient-failure dedupe guard (#47237).
+        """
         db = self._db_for_session_id(session_id)
         if not db:
             return False
@@ -414,6 +434,17 @@ class SessionTranscriptMixin:
             return True
         with self._get_transcript_drain_lock():
             try:
+                # Even when the current agent doesn't "own" persistence, the session on disk may already
+                # carry compaction-archived rows — e.g. after a model switch or a /restore, both of which
+                # mint a fresh agent with _session_db_created=False (so the check above is False) yet leave
+                # the durable archived transcript in place. A full-history replace would DELETE those
+                # archived rows just like the owned-agent case. Guard against it by replacing ONLY the live
+                # (active=1) set unconditionally: on a fresh create/fork every row is active=1, so
+                # active-only replace is behaviorally identical to the full replace — and when archived rows
+                # DO exist they survive. An existence probe here (has_archived_messages) would fail OPEN
+                # into the destructive replace on any DB error and can race a concurrent archive_and_compact
+                # — the same probe failure mode #80216's /retry fix (gateway/slash_commands.py) deliberately
+                # avoids.
                 db.replace_messages(
                     session_id, messages, active_only=active_only,
                     reject_active_turn_lease=reject_active_turn_lease)

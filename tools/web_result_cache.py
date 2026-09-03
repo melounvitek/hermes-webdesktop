@@ -123,6 +123,7 @@ class SearchMemo:
                 # Bound the lock table, but never evict a HELD lock: dropping one lets a concurrent
                 # identical request mint a fresh lock and issue a duplicate paid call. locked() is a
                 # safe snapshot under _store_lock because holders already have their reference.
+                # See #94618.
                 if len(self._key_locks) > 256:
                     self._key_locks = {k: v for k, v in self._key_locks.items() if v.locked()}
                 lock = self._key_locks[key] = threading.Lock()
@@ -199,7 +200,11 @@ def _url_digest(url: str, format: Optional[str], provider: str = "") -> str:
 
 def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional[Path]:
     """Dedicated cache file per (url, format, provider) — deliberately NOT the truncate-store file
-    (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
+    (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite.
+
+    The truncate-store file keeps its role for read_file paging; these files exist only for cache reuse and
+    carry the full key in their name. See #94618.
+    """
     if (d := _cache_dir()) is None:
         return None
     slug = "page"

@@ -113,7 +113,11 @@ def resolve_provider_secret(env_var: str, provider_id: str, config_value: str = 
     ``config_value`` -> profile secret scope / env -> ``.env`` via ``env_getter`` (or
     ``hermes_cli.config.get_env_value``) -> credential pool for ``provider_id``. Under an
     active multiplex turn the profile scope is authoritative: a miss returns ``""`` rather
-    than borrowing another profile's env or pool. Never raises."""
+    than borrowing another profile's env or pool. Never raises.
+
+    Resolution order (fixes #68003 — keys added via ``hermes auth add <provider>`` were invisible to the
+    voice tools, which only consulted env/.env):
+    """
     key = str(config_value or "").strip() or _scoped_credential(env_var)
     if key:
         return key
@@ -144,7 +148,12 @@ def resolve_provider_secret(env_var: str, provider_id: str, config_value: str = 
 def resolve_openai_audio_api_key() -> str:
     """Prefer VOICE_TOOLS_OPENAI_KEY, else OPENAI_API_KEY (scope-aware, pool fallback for the
     latter). Must go through the secret scope: a raw ``os.environ`` read could bill another
-    profile's account under multiplex."""
+    profile's account under multiplex.
+
+    Outside a multiplexed turn, ``OPENAI_API_KEY`` additionally falls back to the credential pool (``hermes
+    auth add openai-api``) via ``resolve_provider_secret`` — same #68003 fix as the other voice providers.
+    The dedicated voice-tools override remains env/scope-only.
+    """
     return (resolve_provider_secret("VOICE_TOOLS_OPENAI_KEY", "")
             or resolve_provider_secret("OPENAI_API_KEY", "openai-api"))
 
@@ -219,6 +228,15 @@ def selection_exists(section: str) -> bool:
 REMOVED_BACKENDS: Dict[str, Dict[str, str]] = {}
 
 
+# Backends that once shipped in-tree but were removed. A config that still points at one otherwise fails
+# silently at the FIRST tool call with a generic "no registered provider has that name" — no migration, no
+# startup notice (reported after the Tavily removal in #99199). Both the startup config check
+# (hermes_cli.config.validate_config_structure) and selection_error() consult this map so the user learns
+# what actually happened and what to do. Declared data, one policy — add future removals here, never as
+# one-off string checks at call sites.
+# Currently empty: the Tavily removal (#99199) that introduced this registry was reverted by the #99731
+# restore. Future backend removals add an entry here, e.g. "web": {"<name>": "the <Name> backend was removed
+# in vX.Y.Z (...)"},
 def removed_backend_note(section: str, name: str) -> Optional[str]:
     """Explanation for a backend that used to ship in-tree, or None. ``name`` tolerates the
     quoted form callers pass to selection_error()."""

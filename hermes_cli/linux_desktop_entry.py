@@ -49,6 +49,10 @@ def _running_interpreter() -> str:
     (uv, pyenv, conda). ``resolve()`` follows it out of the venv, and CPython discovers
     ``pyvenv.cfg`` from the *lexical* argv[0] — so a dereferenced path boots without the venv's
     site-packages. Keep the lexical form when any ancestor holds a ``pyvenv.cfg``.
+
+    See #80547, #90292.
+    Idea credit: the lexical-preservation rule was independently proposed in #92516/#94115/#94544 and by
+    nosliwhtes' review of this PR; the pyvenv.cfg-detection refinement here keeps both properties.
     """
     lexical = os.path.abspath(sys.executable)
     path = Path(lexical)
@@ -67,6 +71,8 @@ def _can_import_hermes_cli(interpreter: Path) -> bool:
     the answer matches a cold desktop environment. Cached per process; an unprobeable interpreter
     (missing binary, spawn failure, timeout) is assumed capable and deliberately NOT cached, so one
     transient hiccup doesn't freeze the assumption for the session.
+
+    Probe design per @nosliwhtes' isolated-mode capability check (#92122 lineage, commit 4150501f641).
     """
     key = str(interpreter)
     if key in _probe_cache:
@@ -98,6 +104,12 @@ def resolve_exec_command(project_root: Optional[Path] = None) -> str:
     if not _can_import_hermes_cli(Path(interpreter)):
         # Persisting an interpreter that can't import the CLI writes a dead entry (the DE spawns
         # Exec in a cold environment where exactly this import must succeed).
+        # The candidate interpreter cannot actually import hermes_cli.main (checked in isolated mode from a
+        # neutral cwd — so the probe can't be fooled by a checkout cwd or an inherited PYTHONPATH). Fall
+        # back to the module form under the RUNNING interpreter, which by definition has the CLI importable.
+        # Probe design follows the isolated-mode capability check proposed by @nosliwhtes (#92122 review
+        # lineage, commit 4150501f641) — cached here per-process so a desktop launch pays the subprocess
+        # cost at most once.
         interpreter = _running_interpreter_fallback()
     argv = [interpreter, "-m", "hermes_cli.main", "desktop"]
     if bin_path:
@@ -106,6 +118,7 @@ def resolve_exec_command(project_root: Optional[Path] = None) -> str:
         # with `#!/usr/bin/env python3`) would die silently on the first third-party import under
         # Terminal=false — run it under the venv interpreter explicitly.
         prefix = [interpreter] if _needs_interpreter(resolved) else []
+        # See #90292.
         argv = [*prefix, str(resolved), "desktop"]
     return " ".join(_quote_exec_arg(a) for a in argv)
 
@@ -113,7 +126,11 @@ def resolve_exec_command(project_root: Optional[Path] = None) -> str:
 def _is_interpreter(candidate: Path) -> bool:
     """A python interpreter binary (``bin/python*``), not a launcher: strict basename match
     (rejects ``python3-config``, ``pythonw``) inside a bin/Scripts dir (rejects a stray script
-    named ``python`` elsewhere)."""
+    named ``python`` elsewhere).
+
+    Regex approach proposed independently in 94051; kept here with the parent-dir guard so a script named
+    ``python`` outside a bin/Scripts tree is not misclassified. See #94051.
+    """
     return bool(re.fullmatch(r"python[23]?(\d+)?(\.\d+)?", candidate.name.lower())) and (
         candidate.parent.name in {"bin", "scripts"}
     )
@@ -156,6 +173,8 @@ def _resolve_hermes_bin_for_desktop_entry(
     the entry depend on how the previous launch happened (a bootstrap loop). Skip such candidates
     and fall through to PATH, then to the installer's known wrapper locations. ``resolve_fn`` is
     injectable for tests.
+
+    See #90492.
     """
     if resolve_fn is None:
         from hermes_cli.relaunch import resolve_hermes_bin as resolve_fn
@@ -177,6 +196,13 @@ def _resolve_hermes_bin_for_desktop_entry(
     if primary and not _inside_checkout(primary, checkout_root, original_argv0):
         return primary
 
+    # A primary that is NOT checkout-internal and not the invoking interpreter is an external launcher (e.g.
+    # /opt/.../bin/hermes from another install method, or a venv console script). It must be evaluated
+    # BEFORE any known-location probing: probing first could silently switch the entry to a different
+    # installation (#94443 review case 3).
+    # Only reroute when argv[0] actually drove the resolution: re-run the resolver with argv[0] hidden and
+    # compare. If PATH yields nothing, keep the resolver's original answer (its fallback chain stays
+    # authoritative; #90492 semantics preserved).
     sys.argv[0] = ""
     try:
         rerouted = resolve_fn()
@@ -330,6 +356,16 @@ def _shebang_escapes_running_env(shebang: str) -> bool:
     ``<venv>/bin``. ``env`` shebangs ALWAYS escape — ``env`` resolves through the DE's cold PATH,
     not the shell that installed the venv — except the rare ``env -S <abs-interpreter>`` form,
     which is judged by its absolute target.
+
+    Tokenizes the shebang (interpreter path plus any flags) and compares PATH COMPONENTS, never substrings:
+    ``<venv>/bin-extra/python`` is not inside ``<venv>/bin`` even though it starts with it
+    (sibling-directory confusion; independently surfaced in nosliwhtes' #92122 hardening ``b96427d0`` —
+    reimplemented here with two extensions).
+    The comparison uses the LEXICAL interpreter directory (abspath, not resolve()): on uv venvs the resolved
+    parent is the base interpreter's dir, which makes a valid ``.venv/bin/python`` shebang look foreign
+    (#94443 review case 1). Both sides use the SAME case operation (``.lower()``): interpreter paths
+    legitimately carry uppercase (conda env names, usernames, uv's ephemeral build dirs) and an asymmetric
+    compare would flag the venv's own console script as foreign.
     """
     tokens = _shebang_tokens(shebang)
     if not tokens:
@@ -538,6 +574,8 @@ def install_desktop_entry(project_root: Path) -> Optional[Path]:
             return entry_path
         # Atomic replace: an interrupted plain write leaves a zero-byte entry, which permanently
         # breaks the taskbar pin (nothing later rewrites a file that exists at the right path).
+        # The temp+rename dance in utils.atomic_write_text is the codebase's shared implementation — ported
+        # from #80547, which closed unmerged with this piece unlanded.
         from utils import atomic_write_text
 
         atomic_write_text(entry_path, contents, create_mode=0o755)

@@ -330,6 +330,8 @@ class SessionResetPolicy:
     notify: bool = True  # Notify the user when auto-reset occurs
     notify_exclude_platforms: tuple = ("api_server", "webhook")
     # A background process this old no longer blocks reset (not killed, only ignored by the guard).
+    # A forgotten preview server should not keep a session alive forever (#29177). Raise this if you run
+    # legitimate multi-day jobs whose liveness should pin the conversation open.
     bg_process_max_age_hours: int = 24
 
     def to_dict(self) -> Dict[str, Any]:
@@ -369,6 +371,8 @@ class ChannelOverride:
 # Platforms whose primary credential is ``PlatformConfig.token`` → its env var (empty-token
 # warnings; multiplex primary-startup gate in ``gateway.run``). Platforms absent here
 # authenticate another way and must never be skipped for a missing token.
+# Platforms absent from this map authenticate some other way (session files, port-bound webhooks,
+# api_key-only) and must never be skipped for a missing token. See #64674.
 PLATFORM_TOKEN_ENV_NAMES: dict["Platform", str] = {
     Platform.TELEGRAM: "TELEGRAM_BOT_TOKEN",
     Platform.DISCORD: "DISCORD_BOT_TOKEN",
@@ -458,6 +462,11 @@ class StreamingConfig:
     buffer_threshold: int = DEFAULT_STREAMING_BUFFER_THRESHOLD
     cursor: str = DEFAULT_STREAMING_CURSOR
     # >0: final edit becomes a fresh message once the preview was visible this long (Telegram only; 0 = off).
+    # Ported from openclaw/openclaw#72038. When >0, the final edit for a long-running streamed response is
+    # delivered as a fresh message if the original preview has been visible for at least this many seconds,
+    # so the platform's visible timestamp reflects completion time instead of the preview creation time.
+    # Currently applied to Telegram only (other platforms ignore the setting). Default 0 disables the
+    # fresh-message replacement path; set >0 to opt in.
     fresh_final_after_seconds: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -538,6 +547,9 @@ class GatewayConfig:
     quick_commands: Dict[str, Any] = field(default_factory=dict)  # slash commands that bypass the agent loop
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
     # Legacy sessions.json mirror of the routing index (primary: state.db) for external tooling / downgrades.
+    # The primary copy lives in state.db (gateway_routing table, #9006). Default True for backward
+    # compatibility with external tooling and downgrade safety; set gateway.write_sessions_json: false in
+    # config.yaml to stop producing the file.
     write_sessions_json: bool = True
     always_log_local: bool = True  # Always save cron outputs to local files
     # Drop outbound "silence narration" (*(silent)*, 🔇, a bare ".") that ping-pongs in bot-to-bot
@@ -561,6 +573,11 @@ class GatewayConfig:
     # stalls (adapter reconnect doing sync socket I/O) so a short block does not cause restart churn.
     # max_strikes ~= 90-120s sustained block; the heartbeat-fsync false positive is fixed at the root
     # (off-loop write + two-witness probe), so raising it would only delay recovery.
+    # On by default; set gateway.loop_watchdog: false in config.yaml to disable. Telegram/Discord reconnect
+    # doing synchronous socket I/O during a network blip — so a short block does not force exit code 75 and
+    # trigger a restart churn that stalls cron dispatch (recurring fleet incidents on 2026-08-17, kanban
+    # t_0f76430f/t_70483f23). A genuine wedge (event loop frozen for the full tolerance window) still
+    # escalates to a supervised restart. See #69089.
     loop_watchdog: bool = True
     loop_watchdog_probe_interval_s: float = DEFAULT_LOOP_WATCHDOG_INTERVAL_S
     loop_watchdog_probe_timeout_s: float = DEFAULT_LOOP_WATCHDOG_TIMEOUT_S
@@ -605,6 +622,21 @@ class GatewayConfig:
         try:
             from gateway.platform_registry import platform_registry
             with contextlib.suppress(Exception):
+                # Iterate built-in platforms plus any registered plugin platforms so plugin authors get the
+                # same shared-key bridging (#24836).
+                # Registry-driven enable for plugin platforms. Built-ins have explicit blocks above. A
+                # plugin platform is enabled when its credentials are configured (``is_connected``) and its
+                # dependencies are either present (passive ``check_fn``) or installable on demand
+                # (``ensure_deps_fn``, run later by ``create_adapter()`` — never here). Plugins that need to
+                # seed ``PlatformConfig.extra`` from env vars (e.g. Google Chat's project_id /
+                # subscription_name) can supply ``env_enablement_fn`` on their PlatformEntry — called here
+                # BEFORE adapter construction. Enablement gate (#31116): when a plugin registers
+                # ``is_connected`` (the "has the user actually configured credentials for this?" check), we
+                # MUST consult it before flipping ``enabled = True``. Otherwise ``check_fn`` alone — a
+                # passive "is the SDK importable?" probe — silently enables platforms the user never opted
+                # into, and the gateway then tries to connect to Discord / Teams / Google Chat with no token
+                # and emits noisy retry-forever errors. ``_platform_status`` was already fixed for the same
+                # bug class in commit 7849a3d73; this is the runtime counterpart.
                 from hermes_cli.plugins import discover_plugins
                 discover_plugins()
             entry = platform_registry.get(platform.value)
@@ -767,6 +799,14 @@ def load_gateway_config() -> GatewayConfig:
         config_loader.load_yaml_layer(_home, gw_data)
     except Exception as e:
         logger.warning(
+            # DingTalk settings → env vars: migrated to the dingtalk plugin's apply_yaml_config_fn hook
+            # (plugins/platforms/dingtalk/adapter.py). #41112 / #3823.
+            # Mattermost config bridge moved into plugins/platforms/mattermost/
+            # adapter.py::_apply_yaml_config — see #25443 (apply_yaml_config_fn).
+            # Matrix settings → env vars: migrated to the matrix plugin's apply_yaml_config_fn hook
+            # (plugins/platforms/matrix/adapter.py). #41112 / #3823.
+            # Feishu settings → env vars: migrated to the feishu plugin's apply_yaml_config_fn hook
+            # (plugins/platforms/feishu/adapter.py). #41112 / #3823.
             "Failed to process config.yaml — falling back to .env / gateway.json values. "
             "Check %s for syntax errors. Error: %s",
             _home / "config.yaml", e,
@@ -791,6 +831,9 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         policy.idle_minutes = 1440
 
     try:
+        # Reject known-weak placeholder tokens. Ported from openclaw/openclaw#64586: users who copy
+        # .env.example without changing placeholder values get a clear startup error instead of a confusing
+        # "auth failed" from the platform API.
         from hermes_cli.auth import has_usable_secret
     except ImportError:
         has_usable_secret = None

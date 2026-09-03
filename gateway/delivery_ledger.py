@@ -95,7 +95,12 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
 def _transaction() -> Iterator[sqlite3.Connection]:
     """Open a connection, commit/rollback on exit, and ALWAYS close it: ``sqlite3.Connection`` as a
     context manager only commits/rolls back, so ``with _connect()`` alone leaks a connection (and its
-    WAL/SHM fds) per call — ``record_obligation`` runs on every final response; exhausts RLIMIT_NOFILE."""
+    WAL/SHM fds) per call — ``record_obligation`` runs on every final response; exhausts RLIMIT_NOFILE.
+
+    On a long-running gateway that exhausts ``RLIMIT_NOFILE`` (the cron-ledger sibling of this bug was
+    #69567 / PR #69594). ``record_obligation`` runs on every outbound final response, so this ledger is the
+    highest-frequency leaker.
+    """
     conn = _connect()
     with closing(conn), conn:
         yield conn

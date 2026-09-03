@@ -77,7 +77,11 @@ class GatewayAdapterLifecycleMixin:
     async def _bounded_adapter_teardown(self, adapter, platform, *, profile: Optional[str] = None) -> None:
         """Tear down one adapter on the shutdown path with bounded awaits (never raises). Unbounded,
         a half-dead transport stalls past systemd's ``TimeoutStopSec``; the SIGKILL skips ``atexit``
-        PID-file cleanup and the next start dies with "PID file race lost"."""
+        PID-file cleanup and the next start dies with "PID file race lost".
+
+        Both ``cancel_background_tasks()`` and ``disconnect()`` can block indefinitely when a platform's
+        network state is half-dead (e.g. a wedged Feishu/Lark WebSocket thread waiting on I/O). See #14128.
+        """
         timeout = self._adapter_disconnect_timeout_secs()
         suffix = f" (profile: {profile})" if profile else ""
         started_at = time.monotonic()
@@ -123,7 +127,12 @@ class GatewayAdapterLifecycleMixin:
 
     def _platform_connect_timeout_secs(self, platform=None, *, initial: bool = False) -> float:
         """Per-platform connect timeout. Telegram's full 180s is NOT spent at cold start (it would
-        hold the gateway out of ``running``); the watcher retries with the full budget."""
+        hold the gateway out of ``running``); the watcher retries with the full budget.
+
+        ``initial=True`` marks the cold-start connect awaited before the gateway reaches ``running``. The
+        cold-start wait is capped and the platform is handed to the reconnect watcher, which retries with
+        the full budget (and ``is_reconnect=True``, preserving the offline update queue — #46621).
+        """
         from gateway.run import (
             _PLATFORM_CONNECT_TIMEOUT_SECS_DEFAULT, _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT,
             _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT,
@@ -139,7 +148,15 @@ class GatewayAdapterLifecycleMixin:
         self, adapter, platform, *, is_reconnect: bool = False, initial: bool = False
     ) -> bool:
         """Connect with a bound so one platform can't block others. ``is_reconnect``: cold boot
-        drops the stale server-side queue, a reconnect keeps it. ``initial``: capped budget."""
+        drops the stale server-side queue, a reconnect keeps it. ``initial``: capped budget.
+
+        ``is_reconnect`` is forwarded to ``adapter.connect()`` so platform adapters can distinguish a cold
+        first boot (drop any stale server-side queue) from a watcher reconnect after a prolonged outage
+        (preserve the queue so messages sent during the outage are delivered rather than silently dropped —
+        #46621).
+        ``initial`` selects the capped cold-start budget for platforms whose full connect budget is too long
+        to spend before the gateway reaches ``running`` (#85993 — Telegram's 180s).
+        """
         timeout = self._platform_connect_timeout_secs(platform, initial=initial)
         if timeout <= 0:
             return await adapter.connect(is_reconnect=is_reconnect)
@@ -192,6 +209,8 @@ class GatewayAdapterLifecycleMixin:
         """Queue a retryable fatal adapter for background reconnection (True when newly queued).
 
         Must not await: callers run this BEFORE any disconnect so a wedged close can't strand it.
+
+        Idempotent if already queued. See #80598.
         """
         if not adapter.fatal_error_retryable:
             return False
@@ -201,12 +220,24 @@ class GatewayAdapterLifecycleMixin:
         if adapter.platform in self._failed_platforms:
             # Already queued is exactly when the watcher may have died (supervision gave up); without
             # this backstop nothing retries and the stranded check treats "queued" as safe.
+            # Nothing to enqueue -- but "already queued" is precisely the state in which the watcher has had
+            # time to die, and the enqueue branch below holds the ONLY call to
+            # _ensure_reconnect_watcher_running(). _spawn_supervised auto-restarts the watcher after a crash
+            # (#71758), but only _MAX_SUPERVISED_RESTARTS times in rapid succession; past that it logs
+            # "giving up restarts" and the watcher stays dead forever. _ensure_reconnect_watcher_running is
+            # the documented backstop for exactly that budget exhaustion (#70344) -- and it was unreachable
+            # for a platform already in the queue, which is the only kind of platform the watcher can have
+            # been retrying long enough to exhaust it on. The result is a silent permanent outage: nothing
+            # retries, and the stranded check in _handle_adapter_fatal_error_detached deliberately treats a
+            # queued platform as safe, so the process never restarts either (#90386).
             self._ensure_reconnect_watcher_running()
             return False
         self._failed_platforms[adapter.platform] = self._reconnect_queue_entry(
             adapter.platform, adapter, platform_config, attempts=0, delay=0.0,
         )
         logger.info("%s queued for background reconnection", adapter.platform.value)
+        # Ensure the reconnect watcher is alive — if it died (e.g. from exhausting its restart budget),
+        # respawn it so queued platforms are not permanently stranded (#70344).
         self._ensure_reconnect_watcher_running()
         return True
 
@@ -217,6 +248,9 @@ class GatewayAdapterLifecycleMixin:
             # Outer hard deadline: the stranded check in ``finally`` only runs when we return.
             timeout = self._adapter_disconnect_timeout_secs()
             if timeout <= 0:
+                # Outer hard deadline (#80598): even with queue-before-disconnect, a hang anywhere in the
+                # impl (status write side effects, detach races, etc.) must not leave this task wedged
+                # forever — the stranded check in ``finally`` only runs when we return.
                 await self._handle_adapter_fatal_error_impl(adapter)
             else:
                 # Disconnect budget + proportional bookkeeping overhead (tests shrink the timeout).
@@ -228,6 +262,10 @@ class GatewayAdapterLifecycleMixin:
                         "Fatal-error handling for %s timed out after %.1fs; "
                         "ensuring reconnect queue is populated", adapter.platform.value, outer,
                     )
+                    # Best-effort queue before re-raising: a cancelled fatal handler must not strand a
+                    # retryable platform (#80598).
+                    # Best-effort queue so an unexpected raise mid-handler cannot leave a retryable platform
+                    # permanently deaf (#80598).
                     self._queue_retryable_fatal_platform(adapter)
         except asyncio.CancelledError:
             # A cancelled or raising fatal handler must not strand a retryable platform.
@@ -291,6 +329,11 @@ class GatewayAdapterLifecycleMixin:
         self._queue_retryable_fatal_platform(adapter)
         if existing is adapter:
             # Bounded by the shutdown-path timeout so this always returns to the stranded check.
+            # Queue retryable failures BEFORE any disconnect await (#80598). A half-dead transport can wedge
+            # native close() (or swallow CancelledError inside it) so the previous "disconnect then queue"
+            # order left platforms permanently deaf inside a live process even after the network recovered.
+            # Populate the queue first so the reconnect watcher always has work; teardown is best-effort
+            # after.
             await self._safe_adapter_disconnect(adapter, adapter.platform)
         if not self.adapters and not self._failed_platforms:
             self._exit_reason = adapter.fatal_error_message or "All messaging adapters disconnected"
@@ -342,7 +385,16 @@ class GatewayAdapterLifecycleMixin:
         failures (counter resets after ``_SUPERVISED_HEALTHY_SECS`` healthy). Fresh ``Context`` per
         spawn (an inherited delegated-child marker would make the Kanban dispatcher reject its own
         writes). ``on_spawn`` fires on EVERY spawn incl. respawns — handle trackers MUST pass it or a
-        respawn leaves a stale handle and a SECOND watcher; ``on_give_up(name)`` fires at budget end."""
+        respawn leaves a stale handle and a SECOND watcher; ``on_give_up(name)`` fires at budget end.
+
+        ``on_give_up`` (optional) is invoked with ``name`` when supervision is abandoned — the restart
+        budget is spent and this task will never be respawned by the supervisor again. Supervision being
+        finite is correct; having no owner of the invariant afterwards is not. A task that still has queued
+        work depending on it needs somewhere to hand that fact to, and before this hook existed the only
+        thing standing between budget exhaustion and a permanent silent outage was a *later, unrelated
+        event* happening to call ``_ensure_...`` (#90386). This is the supervisor telling its caller "I am
+        done; the invariant is yours now", which is a thing only the supervisor knows.
+        """
         # Spawn timestamp lets ``_done`` tell a rapid crash-loop from a healthy-run-then-crash.
         _started = time.monotonic()
         # No create_task kwargs (test doubles mock a narrow signature); Context().run isolates instead.
@@ -446,6 +498,15 @@ class GatewayAdapterLifecycleMixin:
                     continue
                 # INVARIANT (do not weaken): created inside _profile_runtime_scope but RUNS after it
                 # exits; it sees the profile scope only because ensure_future copies the Context.
+                # Positional, not keyword: the watcher's existing unit tests bind a stand-in
+                # ``_process_handoff(row)`` with no second parameter, and a keyword call would TypeError
+                # into the failure branch — turning a passing suite into a silent no-op watcher. Arity is
+                # probed above. It still sees the profile's home and secret scope only because
+                # ``set_hermes_home_override`` and ``set_secret_scope`` are ContextVar-based — ensure_future
+                # copies the current Context into the Task. If either seam is ever migrated to a
+                # thread-local or module global, secondary- profile handoffs silently regress to
+                # primary-config delivery (the exact bug fixed in #91217) while still recording
+                # handoff_state='completed'.
                 inflight[session_id] = asyncio.ensure_future(
                     _dispatch(row, session_id, session_db, profile_name)
                 )
@@ -482,7 +543,16 @@ class GatewayAdapterLifecycleMixin:
     def _on_reconnect_watcher_gave_up(self, name: str = "") -> None:
         """Own the reconnect invariant once supervision gives up: while running with queued
         platforms, a watcher is live or a bounded respawn is scheduled (no later event can notice
-        a dead watcher). Slow-tier exhaustion logs loudly; deliberately NOT a process restart."""
+        a dead watcher). Slow-tier exhaustion logs loudly; deliberately NOT a process restart.
+
+        Before this, the only thing that noticed a dead watcher was a *later fatal error from some other
+        platform* reaching ``_queue_retryable_fatal_platform``. That is event-coupled recovery: it needs an
+        event that, by construction, may never come. #81036 moved queue publication ahead of disconnect and
+        drops the failed adapter from the live map, so once the watcher's budget is spent there may be no
+        adapter left that can emit the event recovery was waiting on. The platform stays queued, nothing
+        retries it, and the stranded check in ``_handle_adapter_fatal_error_detached`` treats a queued
+        platform as safe — so the process is never restarted either.
+        """
         if not getattr(self, "_running", False):
             return
         if getattr(self, "_failed_platforms", None):
@@ -535,7 +605,15 @@ class GatewayAdapterLifecycleMixin:
 
     def _ensure_reconnect_watcher_running(self) -> None:
         """Respawn a dead reconnect watcher (called on BOTH _queue_retryable_fatal_platform paths:
-        the re-fatal of an already-queued platform is the only case that exhausts the budget)."""
+        the re-fatal of an already-queued platform is the only case that exhausts the budget).
+
+        If the tracked reconnect watcher task has died (e.g. from exhausting its restart budget, or a
+        terminal exception that _spawn_supervised could not recover), respawns it so platforms queued for
+        reconnection are not permanently stranded. Called from _queue_retryable_fatal_platform on BOTH paths
+        (#70344, #90386): after a new enqueue, and after a re-fatal for a platform that is already queued --
+        the latter being the only case in which the watcher can have been retrying long enough to exhaust
+        its supervised restart budget.
+        """
         task = getattr(self, "_reconnect_watcher_task", None)
         if not getattr(self, "_running", False) or (task is not None and not task.done()):
             return  # not running, or already alive
@@ -624,6 +702,7 @@ class GatewayAdapterLifecycleMixin:
         attempt = info["attempts"] + 1
         # Empty-token primary configs can never reconnect; drop them so multiplex setups
         # where a secondary profile owns the bot do not spin forever.
+        # See #64674.
         if not _platform_has_bot_credential(platform, platform_config):
             self._drop_from_reconnect_queue(platform, "no bot credential on queued config")
             return
@@ -646,6 +725,11 @@ class GatewayAdapterLifecycleMixin:
                     platform.value, adapter.fatal_error_message,
                 )
                 # Never installed on self.adapters: dispose here or its __init__ resources leak ~2 fds each.
+                # The adapter is about to be dropped from the queue without ever being installed on
+                # self.adapters, so nothing else will call disconnect() on it. We must dispose it here,
+                # otherwise the resource owners it constructed in __init__ (ResponseStore for
+                # APIServerAdapter, etc.) leak 2 fds each. The gateway hits the 2560-fd limit after ~12h of
+                # failed reconnects at the 300s backoff cap (#37011).
                 await _dispose_unused_adapter(adapter)
                 del self._failed_platforms[platform]
             else:
@@ -655,6 +739,10 @@ class GatewayAdapterLifecycleMixin:
                     adapter.fatal_error_message or "failed to reconnect",
                 )
                 logger.info("Reconnect %s failed, next retry in %ds", platform.value, backoff)
+                # Same fd-leak concern as the non-retryable branch above: the adapter failed to connect and
+                # is being thrown away. Without an explicit dispose call, the resources it opened in
+                # __init__ stay open until the next GC pass — and aiohttp/SQLite handles don't get GC'd
+                # promptly, so 2 fds/retry leak at 300s backoff cap = ~12 fds/hour (#37011).
                 await _dispose_unused_adapter(adapter)
         except Exception as e:
             if adapter is not None:
@@ -931,6 +1019,7 @@ class GatewayAdapterLifecycleMixin:
                 continue
             profile_map[platform] = adapter
             # Restore persisted /voice state for this bot (primary startup and reconnects do too).
+            # See #84872.
             self._sync_voice_mode_state_to_adapter(adapter)
             for claim in (credential_claim, listener_claim):
                 if claim is not None:
@@ -971,6 +1060,8 @@ class GatewayAdapterLifecycleMixin:
         _set_owner = getattr(adapter, "set_owner_profile", None)
         if callable(_set_owner):
             _set_owner(profile_name)
+        # Voice transcripts from this bot's channels dispatch through THIS adapter (primary wiring lives at
+        # connect time; see #75198).
         text_modes = getattr(self, "_busy_text_modes_by_profile", None)
         self._wire_adapter_handlers(
             adapter,
@@ -988,6 +1079,7 @@ class GatewayAdapterLifecycleMixin:
         # Voice transcripts from this bot's channels dispatch through THIS adapter.
         self._bind_voice_input_callback(adapter)
         # Secondary adapters carry their profile so prune paths namespace topic bindings correctly.
+        # See #76423.
         adapter._hermes_profile_name = profile_name
 
     async def _secondary_reconnect_attempt(self, profile_name: str, platform: Platform):
@@ -1007,6 +1099,8 @@ class GatewayAdapterLifecycleMixin:
             if profile_config is None or not profile_config.enabled:
                 return None, None
             # Startup credential gate mirror: a removed credential must not rebuild.
+            # Mirrors the startup credential gate (#84079): a credential removed from this profile's scope
+            # must not rebuild an adapter that would fan out turns.
             if not _platform_has_bot_credential(platform, profile_config):
                 logger.info(
                     "Secondary %s reconnect skipped: no bot credential (profile: %s)",
@@ -1097,6 +1191,8 @@ class GatewayAdapterLifecycleMixin:
         if is_global_startup_conflict(getattr(adapter, "fatal_error_code", None)):
             # A live foreign token holder is an ownership conflict, not a blip: park it fatal.
             logger.error(
+                # Park it fatal (like ``duplicate_credential``) instead of retry-storming the token every
+                # backoff (#83183).
                 "[MULTIPLEX] Profile '%s': %s credential is held by another "
                 "gateway (%s) — parked, not retried. %s", profile_name, platform.value,
                 adapter.fatal_error_code, adapter.fatal_error_message or "",
@@ -1368,7 +1464,11 @@ class GatewayAdapterLifecycleMixin:
         """Platform-bound auth callback for adapters (prompt-injection mitigation for fetched
         context); delegates to :meth:`_is_user_authorized`. ``profile_name`` binds a secondary to
         its scope; for the shared primary (None) the routed profile is stamped so its pairing store
-        is consulted while allowlist reads stay under the transport home."""
+        is consulted while allowlist reads stay under the transport home.
+
+        Without this an inline-button caller approved only in the routed profile's pairing store was denied
+        (#86296), because the adapter's callback source was never route-stamped.
+        """
         from gateway.run import get_hermes_home
         transport_home = Path(get_hermes_home()) if self._multiplex_on() and profile_name is None else None
 

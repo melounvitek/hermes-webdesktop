@@ -436,6 +436,14 @@ def continue_codex_incomplete(
             agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({n}/3)")
         # Spinner/heartbeat notice: these retries can take minutes and otherwise look
         # like infinite thinking.
+        # #70773: same FD-recycle corruption vector as #67142. The shared OpenAI client's connection pool
+        # must NOT be closed from this watchdog/poll thread — worker threads from previous stale-killed
+        # attempts may still be unwinding their SSL BIOs. The request-local client is already closed above
+        # via _close_request_client_once. The shared client will be replaced lazily by
+        # _ensure_primary_openai_client on the next request.
+        # Surface the continuation on the live spinner/status line (CLI/TUI/Desktop) and gateway heartbeat:
+        # each of these retries can spend minutes waiting on the provider, and without a distinct notice the
+        # user only sees a generic thinking spinner ("infinite thinking", #64434).
         agent._emit_wait_notice(
             f"↻ model returned reasoning with no final answer — asking it to continue ({n}/3)"
         )

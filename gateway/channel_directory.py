@@ -312,7 +312,10 @@ async def _build_slack(adapter) -> List[Dict[str, Any]]:
 
 
 def _build_from_sessions(platform_name: str) -> List[Dict[str, str]]:
-    """Known channels/contacts from session origins: state.db first, sessions.json fallback (pre-migration)."""
+    """Known channels/contacts from session origins: state.db first, sessions.json fallback (pre-migration).
+
+    state.db is the primary source (#9006): gateway session rows persist origin_json.
+    """
     return _build_from_sessions_db(platform_name) or _build_from_sessions_json(platform_name)
 
 

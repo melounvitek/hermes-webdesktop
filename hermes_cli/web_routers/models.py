@@ -266,11 +266,13 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
             # incomplete slots for the hardcoded defaults — correct tolerance at READ time,
             # silent data loss at WRITE time (desktop autosave of a half-filled slot replaced
             # the user's whole preset). Refuse loudly so no client can corrupt config here.
+            # See #64156.
             problems = validate_moa_payload(raw)
             if problems:
                 raise HTTPException(status_code=422, detail="Invalid MoA config: " + "; ".join(problems))
             normalized = normalize_moa_config(raw)
             # Merge, don't overwrite: hand-edited keys not in MoaConfigPayload (save_traces, trace_dir) survive.
+            # See issue #58819.
             cfg.setdefault("moa", {}).update(normalized)
             save_config(cfg)
             return {"ok": True, **normalized}

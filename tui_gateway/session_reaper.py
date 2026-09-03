@@ -22,7 +22,10 @@ from .method_ctx import bind_module
 
 def _flush_session_messages(session: dict | None) -> bool:
     """Best-effort durable flush of one session's transcript via ``agent._persist_session`` (same marker-deduped
-    contract as ``_finalize_session``: repeated calls never duplicate rows)."""
+    contract as ``_finalize_session``: repeated calls never duplicate rows).
+
+    See #13121.
+    """
     agent = session.get("agent") if session else None
     snapshot = getattr(agent, "_session_messages", None) if hasattr(agent, "_persist_session") else None
     if not snapshot:
@@ -245,6 +248,8 @@ def _schedule_session_cap_enforcement() -> None:
 # `ended_at IS NULL` forever. Scheduled once per process from both gateway entry points (stdio `entry.main`, WS
 # sidecar `handle_ws`). state.db is shared by sibling processes on the same profile, so eligibility is
 # conservative. Disable via `dashboard.startup_orphan_sweep: false`.
+# This is the startup complement every other resource type already has (docker_orphan_reaper, compression
+# orphans). See #65194.
 _ORPHAN_SWEEP_SOURCES = ("tui", "desktop", "subagent")
 _startup_orphan_sweep_ran = False
 _startup_orphan_sweep_lock = threading.Lock()
@@ -367,7 +372,10 @@ def _start_backend_heartbeat_refresher() -> None:
 def _schedule_startup_orphan_sweep() -> None:
     """Schedule the once-per-process startup orphan sweep, delayed by the WS-orphan grace window so a client
     reconnecting right after a restart can ``session.resume`` its row first. Grace 0 (park forever), TTL 0 and
-    ``dashboard.startup_orphan_sweep: false`` all suppress the sweep."""
+    ``dashboard.startup_orphan_sweep: false`` all suppress the sweep.
+
+    See #65194.
+    """
     global _startup_orphan_sweep_ran
     if _WS_ORPHAN_REAP_GRACE_S <= 0 or _SESSION_TTL_S <= 0 or not _session_orphan_reaper_enabled():
         return

@@ -373,6 +373,11 @@ class GatewayGoalsMixin:
         wakeup = await self._run_in_executor_with_context(mgr.fire_tick)
         if not wakeup:
             return
+        # #85957: after the parent turn's event.complete the CLIENT owns the next turn on this stateless
+        # surface. Persist the completion as a durable delivery row — never self-post it as a new role=user
+        # prompt.
+        # #85957: same client-owns-the-turn rule as the raw-key branch above — persist the completion as a
+        # delivery row, never self-post it as a new role=user prompt.
         try:
             logger.info(
                 "loop wakeup #%s — injecting for %s chat=%s thread=%s",

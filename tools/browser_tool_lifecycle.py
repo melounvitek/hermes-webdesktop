@@ -141,6 +141,8 @@ def _cleanup_inactive_browser_sessions():
     Each teardown runs under its owner profile's scope. A session whose cleanup
     keeps failing is force-reaped after MAX_INACTIVITY_CLEANUP_FAILURES attempts;
     only a successful cleanup clears its failure count.
+
+    See #100738, #86402.
     """
     current_time = time.time()
 
@@ -417,7 +419,10 @@ def _stop_browser_cleanup_thread():
 
 def _update_session_activity(task_id: str):
     """Touch the activity timestamp and record the owning Hermes home on first sight (the
-    janitor tears down under the owner's scope). Does NOT reset ``_cleanup_failures``."""
+    janitor tears down under the owner's scope). Does NOT reset ``_cleanup_failures``.
+
+    See #86402.
+    """
     with _bt._cleanup_lock:
         _bt._session_last_activity[task_id] = time.time()
         _bt._session_owner_homes.setdefault(task_id, str(get_hermes_home()))
@@ -430,6 +435,17 @@ def _kill_process_tree(proc: "subprocess.Popen") -> None:
     daemon grandchild keep a capture pipe open so ``communicate()`` never sees EOF, so
     the whole tree must go (no grace: the caller already burned its timeout). Delegates
     to :func:`agent.deadline.kill_process_tree`, falling back to the legacy kill.
+
+    ``Popen.kill()`` only signals the direct child PID. npm/npx routinely fork further processes
+    (registry-fetch helpers, npm's own lifecycle runner, agent-browser's own detached daemon grandchild)
+    that can survive a plain ``kill()`` of the top-level PID and keep a ``capture_output``-style pipe open,
+    hanging the caller's ``communicate()`` past the nominal timeout — the same orphaned-pipe hazard already
+    hit in production on POSIX (see ``tools/process_registry.py``'s ``_reader_loop``, issue 68915: a
+    backgrounded grandchild inheriting a pipe's write end kept it from ever reaching EOF). That hazard is
+    cross-platform, not Windows-specific; what *is* Windows-specific is the lack of a remedy other than
+    killing the tree — anonymous pipes there don't support overlapped I/O, so there's no ``select()``-style
+    non-blocking read to poll around a stuck grandchild the way POSIX can. Killing the whole process
+    group/tree the child was launched into reaches those descendants on both platforms. See #68915.
     """
     try:
         from agent.deadline import kill_process_tree as _deadline_kill_tree
@@ -560,7 +576,12 @@ def _kill_verified_daemon(socket_dir: str, session_name: str) -> bool:
 
 def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> None:
     """Untrack ``task_id``, close its cloud provider session, kill its daemon — the
-    unconditional tail of a teardown, and the whole of the janitor's force-reap path."""
+    unconditional tail of a teardown, and the whole of the janitor's force-reap path.
+
+    The unconditional tail of ``_cleanup_single_browser_session``; also the whole of the janitor's
+    force-reap path (#100738), which skips the polite agent-browser/Camofox ``close`` that kept failing but
+    must still release the cloud session and the local Chromium.
+    """
     bb_session_id = session_info.get("bb_session_id", "unknown")
     _forget_session_tracking(task_id, session=True)
 
@@ -581,7 +602,10 @@ def _release_session_resources(task_id: str, session_info: Dict[str, Any]) -> No
 
 
 def _force_reap_browser_session(task_id: str) -> None:
-    """Janitor last resort: skip the failing ``close`` round-trips, release resources directly."""
+    """Janitor last resort: skip the failing ``close`` round-trips, release resources directly.
+
+    Janitor last resort after repeated cleanup failures (#100738).
+    """
     _bt._stop_cdp_supervisor(task_id)
     with _bt._cleanup_lock:
         session_info = _bt._active_sessions.get(task_id)

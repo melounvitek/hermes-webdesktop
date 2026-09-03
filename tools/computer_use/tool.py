@@ -35,6 +35,7 @@ def set_approval_callback(cb) -> None:
 
 # Hard-blocked regardless of approval level (e.g. logout kills the session Hermes runs in). Alt is
 # canonicalized to option, so the Windows variants are blocked before any backend sees them.
+# See #4562.
 _BLOCKED_KEY_COMBOS = {
     frozenset({"cmd", "shift", "backspace"}), frozenset({"cmd", "option", "backspace"}),  # empty trash / force delete
     frozenset({"cmd", "ctrl", "q"}), frozenset({"cmd", "shift", "q"}),                    # lock screen / log out
@@ -81,6 +82,9 @@ _backend_permission_modes: Dict[str, str] = {}
 _AUX_VISION_ROUTE_CACHE: Dict[Tuple[str, str], bool] = {}  # process-scoped: (provider, model) → bool
 # Approval state keyed by session_id so a gateway serving concurrent sessions can't leak one run's
 # "always approve" into another; callers without a session_id share "".
+# Falls back to a shared "" bucket for callers that don't pass a session_id (e.g. the classic single-run
+# CLI). Values: _session_auto_approve[sid] -> bool   ("always_approve everything") _always_allow[sid]
+# -> set of (action, delivery_mode) scope keys See NousResearch/hermes-agent#67052 gap 4.
 _approval_lock = threading.Lock()
 _session_auto_approve: Dict[str, bool] = {}   # sid -> "always_approve everything"
 _always_allow: Dict[str, set] = {}            # sid -> set of (action, delivery_mode) scope keys
@@ -188,7 +192,12 @@ def release_computer_use_session(session_id: str) -> bool:
 def _shutdown_backend_atexit() -> None:
     """Stop all cached backends so cua-driver subprocesses don't outlive us. atexit only, no signal handlers: a
     ``SystemExit`` from a prompt_toolkit key binding corrupts its coroutine state and makes the process unkillable.
-    Never raises. Drops the global lock before stop(): teardown budgets 5s and must not block spawns."""
+    Never raises. Drops the global lock before stop(): teardown budgets 5s and must not block spawns.
+
+    Each session backend holds a long-lived ``cua-driver`` subprocess, so without this a driver can survive
+    the Hermes process that spawned it (#28152 item 3). #69903 kept the orphan from burning a core by
+    disabling the cursor overlay; the process itself still lingered.
+    """
     global _backend
     with _backend_lock:
         unique = {id(b): (b, _backend_call_locks.get(sid)) for sid, b in _backends.items()}
@@ -261,7 +270,12 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
 def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -> Optional[str]:
     """None if approved, else a JSON error string. Scoped by (action, delivery_mode) AND session_id: foreground
     delivery is a visible focus change, so a background ``approve_session`` must NOT cover it; the blanket
-    ``always_approve`` does. No CLI approval wired -> default allow (gateway approval runs one layer out)."""
+    ``always_approve`` does. No CLI approval wired -> default allow (gateway approval runs one layer out).
+
+    ``always_approve`` (the blanket "auto-approve everything" unlock) still covers foreground, since the
+    user explicitly opted into unattended operation. State is keyed on session_id so concurrent runs don't
+    leak unlocks into one another. See #67052.
+    """
     scope_key = (action, "foreground" if args.get("delivery_mode") == "foreground" else "background")
     with _approval_lock:
         if _session_auto_approve.get(session_id) or scope_key in _always_allow.get(session_id, set()):
@@ -545,6 +559,10 @@ def _capture_response(cap: CaptureResult, max_elements: int = _DEFAULT_MAX_ELEME
                 "meta": {"mode": cap.mode, "width": v.width, "height": v.height, "elements": v.total, "png_bytes": cap.png_bytes_len,
                          **_present(screenshot_path=v.screenshot_path, elements_file=v.elements_file, bounds_scale=v.bounds_scale)},
             }
+        # Decide whether to hand the screenshot to the auxiliary.vision pipeline (text-only result) or keep
+        # the multimodal envelope (main model handles vision natively). Issue #24015: previously the
+        # multimodal envelope was returned unconditionally, so non-vision main models tripped HTTP 404 / 400
+        # at the provider boundary even when auxiliary.vision was explicitly configured to handle this.
         routed = _route_capture_through_aux_vision(
             cap, summary, visible_elements=v.visible, truncated_elements=v.truncated,
             elements_file=v.elements_file, screenshot_path=v.screenshot_path)

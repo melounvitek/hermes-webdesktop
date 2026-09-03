@@ -91,7 +91,11 @@ _MD_STRIP_RULES: Tuple[Tuple[re.Pattern, Any], ...] = (
 
 def strip_markdown_preserving_urls(text: str) -> str:
     """Strip Markdown LINE can't render; ``[label](url)`` → ``label (url)`` keeps URLs
-    tappable (LINE auto-links bare URLs only). Code-block content is kept."""
+    tappable (LINE auto-links bare URLs only). Code-block content is kept.
+
+    Source: PR #18153 (leepoweii) — adapted to keep code-block content visible (LINE users frequently want
+    command snippets to land as plain text, not be eaten by the fence).
+    """
     if not text:
         return text
     for pattern, repl in _MD_STRIP_RULES:
@@ -149,7 +153,10 @@ class _CacheEntry:
 
 
 class RequestCache:
-    """In-memory cache for slow-LLM postback retrieval (PENDING → READY|ERROR → DELIVERED)."""
+    """In-memory cache for slow-LLM postback retrieval (PENDING → READY|ERROR → DELIVERED).
+
+    We keep the same model here. See #18153.
+    """
 
     def __init__(self) -> None:
         self._entries: Dict[str, _CacheEntry] = {}
@@ -202,14 +209,20 @@ _SOURCE_KINDS = {"group": ("groupId", "group"), "room": ("roomId", "room"), "use
 
 
 def _resolve_chat(source: Dict[str, Any]) -> Tuple[str, str]:
-    """Return ``(chat_id, chat_type)`` from a LINE event ``source`` block (user/group/room)."""
+    """Return ``(chat_id, chat_type)`` from a LINE event ``source`` block (user/group/room).
+
+    Source: PR #21023 (perng), unchanged.
+    """
     kind = _SOURCE_KINDS.get((source or {}).get("type", ""))
     return ("", "dm") if kind is None else (source.get(kind[0], ""), kind[1])
 
 
 def _allowed_for_source(
     source: Dict[str, Any], *, allow_all: bool, user_ids: Set[str], group_ids: Set[str], room_ids: Set[str]) -> bool:
-    """Three-list gate: users, groups, rooms."""
+    """Three-list gate: users, groups, rooms.
+
+    See #18153.
+    """
     if allow_all:
         return True
     sid, chat_type = _resolve_chat(source)
@@ -286,7 +299,10 @@ def _text_messages(content: str) -> List[Dict[str, Any]]:
 
 def build_postback_button_message(text: str, button_label: str, request_id: str) -> Dict[str, Any]:
     """Slow-LLM postback bubble. Template Buttons stay tappable from history (Quick
-    Reply chips vanish on the next message). LINE limits: text ≤160, altText ≤400."""
+    Reply chips vanish on the next message). LINE limits: text ≤160, altText ≤400.
+
+    See #18153.
+    """
     truncated = text if len(text) <= 160 else text[:157] + "..."
     alt = text if len(text) <= 400 else text[:397] + "..."
     action = {
@@ -618,6 +634,8 @@ class LineAdapter(BasePlatformAdapter):
         if pending_rid and not _is_system_bypass(content):
             self._cache.set_ready(pending_rid, content)
             return SendResult(success=True, message_id=pending_rid)
+        # System busy-acks (interrupting / queued / steered) bypass the postback cache and route directly to
+        # LINE so they reach the user as visible bubbles. Source: PR #18153.
         return await self._send_text_chunks(chat_id, content, force_push=False)
 
     async def _send_text_chunks(self, chat_id: str, content: str, *, force_push: bool) -> SendResult:
@@ -733,7 +751,13 @@ class LineAdapter(BasePlatformAdapter):
 
     async def _handle_media(self, request) -> Any:
         """Serve a registered local file for LINE's media URLs. Defence-in-depth: the resolved
-        path is rechecked against allowed roots (tempdir, ``/tmp``→``/private/tmp`` on macOS, HERMES_HOME)."""
+        path is rechecked against allowed roots (tempdir, ``/tmp``→``/private/tmp`` on macOS, HERMES_HOME).
+
+        Defence-in-depth: even though ``_register_media`` is only called from trusted internal code, we
+        recheck the resolved path against an allowed-roots set before serving. Sources allowed:
+        ``tempfile.gettempdir()``, ``/tmp`` (which resolves to ``/private/tmp`` on macOS), and
+        ``HERMES_HOME``. PR #8398.
+        """
         from aiohttp import web
         token = request.match_info["token"]
         file_path, expires_at = self._media_tokens.get(token) or ("", 0.0)
@@ -785,6 +809,7 @@ class LineAdapter(BasePlatformAdapter):
         if err:
             return err
         # LINE requires previewImageUrl: use the supplied preview, else a stdlib 1×1 PNG.
+        # Use one if supplied, otherwise write a stdlib 1×1 PNG to /tmp and serve it. PR #8398.
         if preview_path and Path(preview_path).is_file():
             preview_url = self._serve_file(Path(preview_path))
         else:

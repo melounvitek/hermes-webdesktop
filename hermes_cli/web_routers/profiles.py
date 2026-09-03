@@ -427,6 +427,8 @@ def get_profiles_sessions_sidebar(
     ``recents_profile`` scopes the WHOLE payload, not just recents — the sidebar has one
     scope, so a concrete profile must never show another profile's Telegram threads or
     cronjobs; ``all`` asks for everything.
+
+    See #42651, #65710, #70629.
     """
     targets = _profile_targets("GET /api/profiles/sessions/sidebar", lightweight=True)
 

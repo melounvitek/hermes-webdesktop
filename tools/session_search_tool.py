@@ -20,6 +20,12 @@ from hermes_state_common import _RESET_END_REASONS
 _HIDDEN_SESSION_SOURCES = ("kanban", "subagent", "tool")
 # Searchable but DEMOTED below interactive sessions: cron vocabulary dominates bare
 # BM25 and starves out the user's own sessions ("recall blindness").
+# Automation sources that are kept searchable but DEMOTED below interactive sessions in discover ranking.
+# Cron jobs run on a schedule and accumulate large volumes of repetitive vocabulary (recurring project
+# names, dates, "session", summaries); under bare BM25 they dominate the top-N FTS rows and starve out the
+# user's own interactive sessions, producing "recall blindness" where only cron sessions surface (#19434).
+# Demoting — not excluding — keeps cron content reachable when it's the only match, while interactive
+# sessions always win when both match.
 _DEMOTED_SESSION_SOURCES = ("cron",)
 # FTS rows scanned before dedup-by-lineage — well above the distinct sessions a query
 # returns, so interactive matches buried under cron hits survive the demotion pass.
@@ -267,6 +273,7 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
     # can't starve the user's own sessions out of the top `limit`; stable sort keeps BM25
     # order within each class.
     raw_results = sorted(raw_results, key=lambda r: (r.get("source") or "") in _DEMOTED_SESSION_SOURCES)
+    # See #19434.
     if not raw_results and not title_result:
         return _discover_payload(db, query, detail, [], message=(
             "No matching sessions found. FTS5 ANDs all terms by default — "
@@ -285,6 +292,16 @@ def _discover(db, query: str, role_filter: Optional[List[str]], limit: int, sort
         if len(seen_sessions) >= limit:
             break
         raw_sid, resolved_sid = r["session_id"], _resolve_lineage(db, r["session_id"])
+        # Skip the current session lineage — UNLESS the hit's transcript has left live context. Three
+        # sub-cases: Legacy compression rotation: the FTS hit lives in a session that itself ended with
+        # end_reason='compression'. That session's content has been replaced by a summary in the
+        # continuation child, so it must stay discoverable. /new-reset (and idle/daily/CLI new_session): the
+        # predecessor was ended without carrying any transcript into the child. Same lineage root, but the
+        # prior conversation is NOT in the active context — hiding it made gateway recall go blind after
+        # every /new (#85756). A live delegation child has end_reason=None, so it stays excluded. In-place
+        # compaction: the FTS hit lives on the SAME session_id as the current session, but the matched
+        # message row is an archived (active=0, compacted=1) row. The live-context load filters active=1, so
+        # that content is no longer in context — let it through.
         is_compacted_hit = _is_compacted_message(db, r.get("id"))
         if current_lineage_root and resolved_sid == current_lineage_root and not (
                 _session_left_live_context(db, raw_sid) or is_compacted_hit):

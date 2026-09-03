@@ -244,7 +244,11 @@ class GatewayNotificationsMixin:
         EXPLICIT-ONLY, unlike the non-streaming path in ``gateway/platforms/base.py``: a bare local
         path in a streamed reply is shown text or stale inspected content, and promoting it sent
         files the model never asked for. MEDIA tags are NOT deduped against prior turns (a final-reply
-        directive is a deliberate attach); stale auto-appended tags are deduped upstream."""
+        directive is a deliberate attach); stale auto-appended tags are deduped upstream.
+
+        Only ``MEDIA:`` directives — the explicit attachment contract — trigger post-stream uploads. See
+        #20834.
+        """
         from urllib.parse import quote as _quote
         with _log_suppressed(logging.WARNING, "Post-stream media extraction failed: %s"):
             # Capture [[as_document]] before extract_media strips it: images then go via send_document.
@@ -253,6 +257,13 @@ class GatewayNotificationsMixin:
             media_files, cleaned = adapter.extract_media(response)
             media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
             # Strip image URLs (parity with the non-streaming chain); no extract_local_files here.
+            # Do NOT deduplicate explicit MEDIA tags against prior turns here (#73771). This rescan is
+            # already EXPLICIT-ONLY (see docstring): a MEDIA: directive in the final streamed reply is the
+            # model deliberately attaching a file — including a user-requested resend. Stale auto-appended
+            # tags are deduped upstream in _collect_auto_append_media_tags with history_media_paths. Mirrors
+            # the same filter removal on the non-streaming path in gateway/platforms/base.py. Bare local
+            # paths in an already-streamed reply are text the user has seen (or stale inspected content),
+            # not an attachment request.
             adapter.extract_images(cleaned)
             _thread_meta = (
                 dict(thread_metadata)
@@ -704,6 +715,8 @@ class GatewayNotificationsMixin:
         When SessionDB init fails at gateway startup, messages may flow but nothing is persisted
         — /resume, /history, and session_search all silently break. Best-effort: failures are
         logged, not raised.
+
+        See #88235.
         """
         error = getattr(self, "_session_db_init_error", None)
         if not error:
@@ -804,6 +817,8 @@ class GatewayNotificationsMixin:
 
         The queue is ALWAYS drained (so watch events don't rot or requeue-spin) but injection is
         skipped entirely when ``display.background_process_notifications`` is ``off``.
+
+        See #9290.
         """
         from gateway.run import _drain_gateway_watch_events, _format_gateway_process_notification
         watch_events = _drain_gateway_watch_events(completion_queue)
@@ -1039,6 +1054,10 @@ class GatewayNotificationsMixin:
         parent_session_id = str(evt.get("parent_session_id") or "").strip()
         if not parent_session_id:
             return claim
+        # Pre-flight (#65838-class): adapter acceptance is NOT proof of delivery — the inner #55578 resolver
+        # can still fail closed inside the message pipeline AFTER the adapter accepted, which would falsely
+        # acknowledge the durable row as delivered. Verify the target here, before acceptance, and give
+        # drops an honest durable disposition.
         verdict = await self._classify_completion_target(parent_session_id)
         if verdict == "terminal":
             if evt_type == "async_delegation":
@@ -1338,6 +1357,9 @@ class GatewayNotificationsMixin:
                     _pr.completion_queue.put(evt)
                 # A fan-out finishing together yields N completions for one session; group by full route +
                 # parent session so each group becomes ONE consolidated turn.
+                # A same-tick drain often carries several completions for the SAME originating session (a
+                # fan-out of background subagents finishing together). Events for different sessions never
+                # coalesce. See #70300.
                 groups: dict[tuple[str, ...], list[dict]] = {}
                 for evt in async_events:
                     self._enrich_async_delegation_routing(evt)
@@ -1388,6 +1410,9 @@ class GatewayNotificationsMixin:
         _raw = redact_terminal_output(_raw, _command)
         # Keep the last ~2000 chars snapped to a line boundary, with a marker when cut.
         _LIMIT = 2000
+        # Truncate at line boundaries so notifications never start mid-line (fixes #23284). Keep the last
+        # ~2000 chars but snap to the nearest preceding newline, then prepend a truncation marker when
+        # output was cut.
         if len(_raw) > _LIMIT:
             _tail = _raw[-_LIMIT:]
             _nl = _tail.find("\n")

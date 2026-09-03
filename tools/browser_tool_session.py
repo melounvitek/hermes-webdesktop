@@ -336,6 +336,7 @@ def _discard_timed_out_browser_session(task_id: str, session_info: Dict[str, Any
             return
         try:
             # Tree-kill: terminating only the daemon PID leaks the Chromium tree.
+            # See #68139.
             from agent import deadline as _deadline
 
             _deadline.kill_process_tree(daemon_pid)
@@ -388,6 +389,14 @@ def _handle_browser_command_timeout(task_id: str, session_info: Dict[str, Any], 
     Local daemon wedged/dead: tree-kill and evict now (Chromium children would leak).
     Both local branches ``mark_suspect`` first so the poisoned-cache invariant holds
     even if eviction races another thread's replacement.
+
+    See #68139, #72205.
+    * **Local daemon alive** (PID readable, process alive, identity-verified as ours, control socket accepts
+    a connection): the *command* wedged — page hang, stuck navigation — but the daemon itself is fine.
+    Killing it would be overkill and slow. Mark the session suspect only; the next use recycles it through
+    ``ensure_healthy`` → clean agent-browser ``close`` → fresh session. Tree-kill the daemon's process tree
+    via ``agent.deadline.kill_process_tree`` and evict the cache entry now; the next browser call respawns
+    from scratch. See #72206.
     """
     if session_info.get("bb_session_id") or session_info.get("cdp_url"):
         _bt._discard_timed_out_browser_session(task_id, session_info, task_socket_dir)

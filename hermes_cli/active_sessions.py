@@ -105,6 +105,9 @@ MAX_CONCURRENT_SESSIONS = "MAX_CONCURRENT_SESSIONS"
 # Ownership could not be PROVEN (registry unreadable/corrupt). Deliberately distinct
 # from SESSION_NOT_OWNED: treating "can't tell" as a go-ahead is the fail-open hole
 # that let two writers share one session.
+# Distinct from SESSION_NOT_OWNED on purpose -- "someone else owns this" and "I cannot tell who owns this"
+# call for different operator action, and collapsing the second into a silent go-ahead is exactly the
+# fail-open hole that let two writers share one session (#94595 review, blocker 2).
 SESSION_COORDINATION_UNAVAILABLE = "SESSION_COORDINATION_UNAVAILABLE"
 
 # Advertised through the gateway. A module constant, not a config flag: it holds
@@ -360,6 +363,7 @@ class ActiveSessionLease:
     # Pinned at acquisition: a lease taken under the root HERMES_HOME must release
     # against the same registry even inside a profile-home override, or phantom
     # leases fill the session cap.
+    # See #85431.
     state_path: Optional[Path] = None
     lock_path: Optional[Path] = None
     track_liveness: bool = False
@@ -438,6 +442,9 @@ def try_acquire_active_session(
     owner per stored session); ``max_concurrent_sessions`` is resource POLICY, applied
     only when configured. ``registry_home`` lets profile-scoped backends share the owning
     profile's registry. Ownership uncertainty fails CLOSED (SESSION_COORDINATION_UNAVAILABLE).
+
+    Liveness tracking keeps richer desktop lifecycle semantics; ``registry_home`` lets profile-scoped
+    backends share the owning profile's registry even when launched from another home. See #94595.
     """
     max_sessions = resolve_max_concurrent_sessions(config)
     lease_id = uuid.uuid4().hex
@@ -522,6 +529,7 @@ def try_acquire_active_session(
 def release_active_session(lease: ActiveSessionLease) -> None:
     # Prefer the registry the lease was acquired against: the caller may be
     # running under a profile HERMES_HOME override.
+    # See #85431.
     state_path, lock_path = _lease_paths(lease)
     with _FileLock(lock_path):
         if lease.released:
@@ -584,6 +592,7 @@ def transfer_active_session(
 # the file lock and the server attaches the lease to its session record only after that
 # returns. A concurrent finalize that snapshotted its live ids in between would otherwise
 # read the brand-new lease as an orphan and drop it. Real orphans are minutes old.
+# See #101415.
 _SELF_ORPHAN_GRACE_SECONDS = 30.0
 
 

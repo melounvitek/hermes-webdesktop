@@ -351,7 +351,13 @@ _MAX_PATCH_RETRIES = 5
 def _list_available_patches(
     uv_bin: str, minor: str, *, cwd: Path, env: dict) -> list[tuple[int, int, int]]:
     """Known patch versions for ``minor`` (e.g. "3.11"), newest first; [] on any failure
-    (network, parse), in which case callers fall back to the bare-minor request."""
+    (network, parse), in which case callers fall back to the bare-minor request.
+
+    Queries ``uv python list --all-versions`` rather than trusting the bare minor-line request to resolve to
+    the newest patch (issue #71250: on some hosts/uv versions, the resolved candidate for a bare "3.11"
+    request can be an older cached/indexed patch that still links a vulnerable SQLite, even when a newer
+    non-vulnerable patch is available).
+    """
     try:
         result = subprocess.run(
             [
@@ -454,6 +460,11 @@ def _retry_explicit_patches(
     the fix and the downgrade guard rejects the rest; on a stale uv catalog the newest indexed
     patch can be the installed one, and the loop would burn every retry walking backwards.
     """
+    # The bare minor-line request resolved to a still-vulnerable (or otherwise rejected) candidate. Rather
+    # than giving up immediately, query which patches on this minor line uv actually knows about and retry
+    # with explicit newer versions, newest-first -- this handles the case where the default resolution for a
+    # bare request picks an older cached/indexed patch even though a newer, non-vulnerable one is available
+    # (issue #71250).
     env_for_list = managed_python_env(project_root, install_dir=python_root)
     patches = _list_available_patches(uv_bin, request, cwd=project_root, env=env_for_list)
     attempts = 0
@@ -513,6 +524,7 @@ def _install_safe_python_generation(
     # All patches on the current minor line are vulnerable or rejected. Fall forward to the next
     # supported minor (e.g. 3.11 → 3.12) so the user isn't stuck on every `hermes update`. The
     # requires-python window (>=3.11,<3.14) and the import smoke-test gate compatibility.
+    # See #76106.
     cur_major, cur_minor = current.python_version[:2]
     fb_tried: set[tuple[int, int, int]] = set(tried_versions)
     for next_minor in range(cur_minor + 1, 14):  # up to 3.13
@@ -710,6 +722,12 @@ def _windows_runtime_self_lock(live: Path) -> tuple[bool, str]:
     ``_detect_venv_python_processes`` excludes the calling process and its ancestors on purpose
     (``hermes update`` itself runs from the venv python), which is correct for the dependency-sync
     path where only a *loaded* ``.pyd`` image blocks the rewrite and a fresh child dodges it.
+
+    For the whole-venv park rename that exemption is fatal: Windows keeps the image of any executable a
+    running process was started from mapped until that process exits, so a directory containing the
+    updater's own ``python.exe`` (or a waiting ``hermes.exe`` launcher ancestor) can never be renamed from
+    inside the updater. The retry loop in ``_cut_over_candidate`` cannot help against that — the lock is
+    structural, not transient (#93032).
     """
     if platform.system() != "Windows":
         return False, ""
@@ -761,7 +779,16 @@ def _uv_version_string(uv_bin: str) -> str:
 
 def _refresh_managed_uv_catalog(uv_bin: str) -> bool:
     """Re-bootstrap the managed uv binary to refresh its Python catalog (the only supported
-    refresh path for unmanaged installs). A caller-supplied foreign uv path is left alone."""
+    refresh path for unmanaged installs). A caller-supplied foreign uv path is left alone.
+
+    The managed uv is installed with ``UV_UNMANAGED_INSTALL``, which disables ``uv self update`` by design —
+    so its embedded python-build-standalone download catalog stays frozen at bootstrap age.
+    python-build-standalone re-releases existing CPython patch versions with newer SQLite (e.g. the 3.11.15
+    build was re-cut with SQLite 3.53.x), so a stale catalog can make every provisioning attempt resolve to
+    a vulnerable build even though a fixed build of the SAME patch version exists (issue #72093). The
+    patch-retry loop cannot recover from that: the fixed build carries no newer version number to retry
+    with.
+    """
     managed = managed_uv_path()
     try:
         if Path(uv_bin).resolve() != managed.resolve():
@@ -794,6 +821,10 @@ def _sweep_stale_runtime_backups(
     On POSIX this is safe while an older process still maps files from the tree (open FDs/mmaps
     keep their inodes). ``min_age_seconds`` avoids racing a concurrent repair whose fresh backup
     may still be its rollback path; ``keep`` exempts the backup this repair just created.
+
+    A successful runtime repair parks the previous venv as ``<live>.stale.runtime-<token>``; historically
+    nothing ever reclaimed those, so each repair leaked a full venv (~1 GB) at the project root forever
+    (issue #73109).
     """
     try:
         candidates = list(live.parent.glob(f"{live.name}.stale.runtime-*"))
@@ -830,6 +861,7 @@ def _repair_windows_preflight(
         # staged for a cutover that can never run only leaks an incomplete generation.
         for line in (
             f"  ⚠ SQLite runtime repair deferred: {self_detail}.",
+            # See #93032.
             "    Retrying `hermes update` from inside this venv cannot help: "
             "the mapped executable is released only when this process exits.",
             "    To complete the repair, run the updater from an interpreter "
@@ -862,6 +894,7 @@ def _repair_under_lock(
     # versions with fixed SQLite, but a frozen catalog keeps resolving the old vulnerable build
     # and the patch-retry loop has no newer number to try. Refresh the binary and retry once.
     if provisioned is None and _refresh_managed_uv_catalog(uv_bin):
+        # See #72093.
         print("  → Managed uv refreshed; retrying provisioning...")
         provisioned = _install_safe_python_generation(uv_bin, project_root=root, current=current)
     if provisioned is None:
@@ -916,6 +949,7 @@ def repair_vulnerable_runtime(
         # Already fixed: any venv.stale.runtime-* markers next to the live venv are leftovers
         # from a past repair and will never be rolled back to. Sweep them so they don't leak
         # ~1 GB each forever. Age-gated to avoid racing an in-flight repair in a sibling process.
+        # See #73109.
         _sweep_stale_runtime_backups(live, root=root)
         return _result("safe", current, sqlite_after=current.sqlite_version_string)
     deferred = _repair_windows_preflight(root, live, current)

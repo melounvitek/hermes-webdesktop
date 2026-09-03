@@ -223,6 +223,14 @@ def sanitize_tool_call_arguments(
     ``cursor["prefix"]`` holds strong refs (not ``id()``: address reuse aliases) to the
     messages validated last call; the ``is``-identical prefix is skipped. Safe because only
     the surrogate sanitizers mutate live dicts; every other path replaces dicts, breaking identity.
+
+    Safety argument for skipping: a message in the matched prefix was fully scanned before — every tool_call
+    argument was either already valid JSON or was rewritten to ``"{}"`` (valid). The only code paths that
+    mutate ``function["arguments"]`` on live history dicts between calls are the surrogate / non-ASCII
+    sanitizers, which substitute characters *inside* JSON string values and cannot invalidate JSON syntax.
+    Compression, repair, undo, and steer paths replace or reorder message dicts, which breaks the identity
+    match and forces a re-scan. Holding strong references (the objects themselves, not ``id()``s) makes
+    address reuse aliasing (#50372-style) impossible.
     """
     log = logger or logging.getLogger(__name__)
     if not isinstance(messages, list):
@@ -252,6 +260,8 @@ def sanitize_tool_call_arguments(
                 continue
             # Canonical ``call_id || id`` precedence so scan and stub share the id the pipeline
             # uses; bare ``id`` misses Codex call_id results and orphans a stub.
+            # Keying on bare ``id`` here would fail to find a result built with ``call_id`` (Codex Responses
+            # format) and insert a duplicate stub that itself becomes an orphan (#58168).
             tool_call_id = _ra().AIAgent._get_tool_call_id_static(tool_call) or None
             function_name = function.get("name", "?")
             # Log the FULL (bounded) argument string: we are about to overwrite the only copy, which
@@ -365,6 +375,15 @@ def _merge_assistant_into(prev: Dict, msg: Dict) -> None:
     else:
         # Drop a stale ``tool_calls: []`` at the source: strict providers (DeepSeek v4, Kimi) 400 on
         # it and it persists into replayed history.
+        # Neither turn carries tool calls, but the surviving turn may still carry a stale ``tool_calls: []``
+        # from the earlier message. An empty array is semantically "no tool calls", yet strict
+        # OpenAI-compatible providers (DeepSeek v4, Moonshot/Kimi) reject it with HTTP 400 ("Invalid
+        # 'messages[N].tool_calls': empty array..."). Drop the key HERE, at the source:
+        # ``sanitize_api_messages`` only fixes the per-call wire copy, so a ``[]`` left on the repaired turn
+        # survives in the live/persisted trajectory returned to callers (gateway/WebUI transcripts, session
+        # resume, subagents, cron) and is replayed on the next turn — which is how #58755 kept reproducing
+        # after the chokepoint fix (#77921). Popping is non-destructive: an empty array carries no
+        # information.
         prev.pop("tool_calls", None)
     # Concatenate plain-text content only; leave multimodal (list) content alone.
     prev_content = prev.get("content")
@@ -374,6 +393,8 @@ def _merge_assistant_into(prev: Dict, msg: Dict) -> None:
         joined = "\n".join(p for p in (prev_content.strip(), new_content.strip()) if p)
         prev["content"] = joined
         # A falsy new_content leaves ``joined`` == prev_content; that is not a rewrite.
+        # "") strips to nothing and ``joined`` collapses back to ``prev_content`` unchanged -- that must NOT
+        # count as a rewrite (wz-heng, #78063 review).
         content_rewritten = joined != prev_content
     elif not prev_content and new_content is not None:
         prev["content"] = new_content
@@ -384,6 +405,18 @@ def _merge_assistant_into(prev: Dict, msg: Dict) -> None:
         prev["reasoning_content"] = msg["reasoning_content"]
     # A stale ``api_content`` sidecar overrides ``content`` at API-build time and would replay
     # pre-merge bytes; drop it only when content actually changed.
+    # ``prev`` may carry an ``api_content`` sidecar (the exact bytes previously sent to the API, e.g. a
+    # sanitize-divergence stamp — see ``_flush_messages_to_session_db``) from BEFORE this merge. The sidecar
+    # takes priority over ``content`` at API-build time (``conversation_loop``'s ``api_messages`` build
+    # substitutes it back in for role ``assistant``), so leaving it in place while ``prev["content"]``
+    # changes would silently replay the pre-merge bytes and discard everything this merge just concatenated
+    # on — the same stale-field-survives-the-merge shape as the ``tool_calls`` gap above, just for a
+    # different field. Only drop it when the merge actually changed the resulting value (e.g. the later
+    # turn's content is ``None``, or either side is multimodal/list — both branches skip the reassignment
+    # and ``prev["content"]`` is untouched; a falsy ``new_content`` that strips to nothing also leaves
+    # ``joined`` equal to the original ``prev_content``): in those cases the sidecar is still the exact
+    # bytes previously sent for the UNCHANGED content, and dropping it would break the prompt-cache replay
+    # invariant for no reason (wz-heng, #78063 review).
     if content_rewritten:
         drop_stale_api_content(prev)
 
@@ -416,6 +449,11 @@ def _drop_stray_tool_results(messages: List[Dict]) -> Tuple[List[Dict], int]:
     alias is not replayed to strict providers."""
     repairs = 0
     known_tool_ids: Dict[str, int] = {}  # alias -> group id; reset by assistant/user turns
+    # Pass 1: drop stray tool messages that don't follow a known assistant tool call. A Responses call can
+    # have several equivalent spellings (call_id, id, response_item_id, or a composite ``call|item`` id), so
+    # consume the whole alias group when one spelling is matched. Alias expansion lives in
+    # ``agent.message_sanitization.tool_call_id_variants`` / ``tool_result_id_variants`` (single policy
+    # owner) — which also handles SDK tool_call objects, preserving the #91768 dict-or-object tolerance.
     matched_tool_groups: set = set()
     next_tool_group = 0
     filtered: List[Dict] = []
@@ -644,6 +682,18 @@ def _is_entitlement_403(agent, status_code, error_context) -> bool:
     if status_code != 403:
         return False
     haystack = " ".join(
+        # Subscription/entitlement 403s look like auth failures on the wire but refresh cannot fix them —
+        # the OAuth token is already valid, the account simply lacks the entitlement. Without this guard,
+        # the refresh path keeps minting fresh tokens against the same unsubscribed account and the main
+        # agent loop spins re-issuing the same 403 until the user Ctrl+C's. Defense-in-depth for #26847:
+        # xAI's backend has been seen to 403 standard SuperGrok subscribers with bodies that don't match the
+        # existing entitlement keyword set in ``_is_entitlement_failure``. Any 403 against ``xai-oauth`` is
+        # treated as entitlement here so the refresh loop can't spin in those cases either. Exception
+        # (#29344): xAI's ``[WKE=unauthenticated:...]`` suffix and the ``OAuth2 access token could not be
+        # validated`` phrasing are xAI's authoritative "this is a stale token, not entitlement" signal. When
+        # either fires we must NOT apply the catch-all override — refresh is the recoverable path for these
+        # bodies, and blanket-classifying them as entitlement was the bug that left long-running TUI
+        # sessions stuck on stale tokens until the user exited and reopened.
         str(error_context.get(k) or "").lower()
         for k in ("message", "reason", "code", "error")
         if isinstance(error_context, dict)
@@ -746,6 +796,11 @@ def recover_with_credential_pool(
     # The pool belongs to the PRIMARY provider: acting on fallback errors would corrupt its state
     # and reset base_url to the primary endpoint. Empty pool provider means unscoped; empty agent
     # provider is a mismatch (swap would leave provider="" model="").
+    # Defensive guard: if a fallback provider is active and its provider name doesn't match the pool's
+    # provider, the pool belongs to the PRIMARY provider. Mutating it based on fallback errors would corrupt
+    # the primary's credential state (see #33088) and, via _swap_credential, overwrite the agent's base_url
+    # back to the primary's endpoint — every subsequent request then goes to the wrong host and 404s (see
+    # #33163). The pool should only act when the agent is still on the same provider that seeded the pool.
     current_provider = (getattr(agent, "provider", "") or "").strip().lower()
     pool_provider = (getattr(pool, "provider", "") or "").strip().lower()
     if pool_provider and not credential_pool_matches_provider(
@@ -860,6 +915,10 @@ def _rebuild_primary_client(agent, rt: Dict[str, Any], *, reason: str) -> None:
         # reference_callback relay survives recovery.
         from agent.moa_loop import build_moa_facade
         agent.client = build_moa_facade(agent, agent.model)
+        # MoA is a virtual chat-completions provider. It never has real OpenAI client kwargs; restoring it
+        # after a fallback must recreate the facade, not call OpenAI() with an empty api_key. Use the shared
+        # factory so the restored facade keeps the reference_callback relay wired at init — a bare
+        # MoAClient() would silently stop emitting moa.reference/moa.aggregating display events (#53802).
         agent._anthropic_client = None
     elif agent.api_mode == "anthropic_messages":
         _build_anthropic_client_from_runtime(agent, rt)
@@ -885,6 +944,11 @@ def try_recover_primary_transport(
     try:
         # Never hard-close the shared client here: stale streaming workers may still be unwinding on
         # the old pool; _retire_shared_openai_client defers FD release to GC.
+        # Retire the existing client to release stale connections. #70773: never hard-close the shared
+        # client here — this runs on the conversation-loop thread while workers from stale-killed streaming
+        # attempts may still be unwinding their SSL BIOs on the old pool. ``_retire_shared_openai_client``
+        # shuts the sockets down (FD-safe from any thread) and defers the FD release to GC, which cannot
+        # complete until every borrowing thread has unwound.
         if getattr(agent, "client", None) is not None:
             with contextlib.suppress(Exception):
                 agent._retire_shared_openai_client(agent.client, reason="primary_recovery")
@@ -893,6 +957,9 @@ def try_recover_primary_transport(
         if agent.api_mode == "anthropic_messages":
             _build_anthropic_client_from_runtime(agent, rt)
         elif (agent.provider or "").strip().lower() == "moa":
+            # MoA is a virtual provider with empty client_kwargs — rebuilding via _create_openai_client
+            # would raise "api_key client option must be set". Recreate the facade through the shared
+            # factory so the reference_callback relay survives recovery (#53802).
             from agent.moa_loop import build_moa_facade
             agent.client = build_moa_facade(agent, agent.model)
         else:
@@ -1021,6 +1088,8 @@ def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, lo
         return
     if matches_primary(entry):
         # _swap_credential rebuilds the client and reapplies base-url-scoped headers.
+        # ``_swap_credential`` rebuilds the OpenAI/Anthropic client, reapplies base-url-scoped headers, and
+        # carries the accumulated base_url / OAuth-detection fixes (#33163).
         agent._swap_credential(entry)
         logger.info(
             "Restore re-selected pool entry %s (%s)",
@@ -1043,6 +1112,11 @@ def restore_primary_runtime(agent) -> bool:
         # _fallback_index past the chain end and silently block future fallbacks.
         agent._fallback_index = 0
         return False
+    # Reset the chain index even when no fallback was activated this turn. Without this, a turn where
+    # _try_activate_fallback() was called but returned False (chain exhausted or provider not configured)
+    # leaves _fallback_index >= len(_fallback_chain) while _fallback_activated stays False. The next turn
+    # skips this block entirely, stranding the index and silently blocking all future fallback attempts for
+    # the session. Fixes #20465.
     if getattr(agent, "_rate_limited_until", 0) > time.monotonic():
         return False  # primary still in rate-limit cooldown, stay on fallback
     rt = agent._primary_runtime
@@ -1150,6 +1224,7 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
     if not parts and isinstance(content, list):
         # DeepSeek V4 Pro returns typed content blocks ({"type": "thinking", ...}); dropping them
         # makes the next turn fail with HTTP 400 "thinking must be passed back".
+        # Refs #21944.
         for block in content:
             if isinstance(block, dict) and block.get("type") == "thinking":
                 _add((block.get("thinking") or block.get("text") or "").strip())
@@ -1253,7 +1328,12 @@ def _raw_cache_ttl_from_config(default: Any) -> Any:
 
 
 def prompt_caching_disabled_from_config() -> bool:
-    """True when ``prompt_caching.cache_ttl`` is configured as off (same detection as ``agent_init``)."""
+    """True when ``prompt_caching.cache_ttl`` is configured as off (same detection as ``agent_init``).
+
+    Same disable detection as ``agent_init`` (via ``cache_ttl_means_disabled``) so stub-based policy paths
+    (MoA slot decoration, auxiliary fallback replan) honor the same config contract without holding a live
+    ``AIAgent`` (#76085 / #33555).
+    """
     return cache_ttl_means_disabled(_raw_cache_ttl_from_config("5m"))
 
 
@@ -1281,11 +1361,18 @@ def plan_cache_sections_for_destination(
     """Plan request-local cache sections for one resolved destination (MoA / auxiliary senders):
     stripped copies (non-caching route) or a ``build_prompt_cache_plan`` layout; never mutates
     inputs. ``cache_disabled``/``cache_ttl`` default to live config so the operator's disable and
-    tier are honored; ``static_system_prefix`` gives the system prompt the main loop's early breakpoint."""
+    tier are honored; ``static_system_prefix`` gives the system prompt the main loop's early breakpoint.
+
+    ``cache_disabled`` threads the operator's ``prompt_caching.cache_ttl`` disable into the blank policy
+    stub. When omitted, the live config is consulted so MoA/auxiliary paths cannot re-enable markers after
+    the user turned caching off (#76085).
+    """
     from agent.prompt_caching import (
         build_prompt_cache_plan, effective_cache_ttl, envelope_tool_part_cache_markers_supported,
         strip_anthropic_cache_control, strip_anthropic_tool_cache_control,
     )
+    # The policy function reads agent.* only as fallbacks for kwargs we don't pass; blank_cache_policy_stub
+    # is the only sanctioned stub so _cache_disabled cannot be left off again (#76085).
     stub = blank_cache_policy_stub(cache_disabled)
     dest = dict(provider=provider, base_url=base_url, api_mode=api_mode, model=model)
     should_cache, native_layout = anthropic_prompt_cache_policy(stub, **dest)
@@ -1386,6 +1473,11 @@ def anthropic_prompt_cache_policy(
     envelope (OpenRouter / OpenAI-wire proxies; Qwen/Alibaba too). The operator disable is read
     from ``_cache_disabled`` (not ``_cache_ttl``, unset during init) so it survives switches
     and restores. Branch ORDER is load-bearing (see inline notes).
+
+    Qwen / Alibaba-family models on OpenCode, OpenCode Go, and direct Alibaba (DashScope) also honour
+    Anthropic-style ``cache_control`` markers on OpenAI-wire chat completions. Upstream pi-mono #3392 / pi
+    #3393 documented this for opencode-go Qwen. Without markers these providers serve zero cache hits,
+    re-billing the full prompt on every turn.
     """
     if getattr(agent, "_cache_disabled", False):
         return (False, False)
@@ -1403,6 +1495,10 @@ def anthropic_prompt_cache_policy(
     is_claude = "claude" in model_lower
     # Kimi/Moonshot via OpenRouter uses the same envelope cache_control as Claude; without this it
     # serves ~1% cache hits. Family matcher covers bare k1./k2. slugs.
+    # Without this branch moonshotai/kimi-k2.6 falls through to (False, False), serving ~1% cache hits on
+    # 64K-token prompts and re-billing the full prompt on every turn. Observed within-turn progression with
+    # cache enabled: 1% → 67% → 84% → 97% (#25970). Reuses the canonical family matcher (covers bare
+    # k1./k2./k25 release slugs the substring check missed).
     from agent.anthropic_adapter import _model_name_is_kimi_family
     is_kimi = _model_name_is_kimi_family(eff_model) or "moonshot" in model_lower
     is_openrouter = base_url_host_matches(eff_base_url, "openrouter.ai")
@@ -1471,6 +1567,11 @@ def anthropic_prompt_cache_policy(
     # Qwen/Alibaba on OpenCode and DashScope accept envelope cache_control on the OpenAI wire
     # (pi-mono's "alibaba" cacheControlFormat). DeepSeek on OpenCode is excluded: its relay 400s on
     # block-array content. Family set/predicate shared with the effective_cache_ttl clamp.
+    # Qwen/Alibaba on OpenCode (Zen/Go) and native DashScope: OpenAI-wire transport that accepts
+    # Anthropic-style cache_control markers and rewards them with real cache hits. Without this branch
+    # qwen3.6-plus on opencode-go reports 0% cached tokens and burns through the subscription on every turn.
+    # OpenCode Zen's relay rejects the Anthropic-style content block format that cache markers produce
+    # (content becomes a block array instead of a plain string), causing HTTP 400 (#77217).
     from agent.prompt_caching import ALIBABA_FAMILY_PROVIDERS, is_qwen_model
     if provider_lower in ALIBABA_FAMILY_PROVIDERS and is_qwen_model(model_lower):
         return True, False
@@ -1569,9 +1670,20 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     from agent.ssl_verify import resolve_httpx_verify
     # Treat client_kwargs as read-only: callers pass agent._client_kwargs, and in-place mutation
     # leaks into later requests (a torn-down httpx transport got reused).
+    # Callers pass agent._client_kwargs (or shallow copies of it) in; any in-place mutation leaks back into
+    # the stored dict and is reused on subsequent requests. #10933 hit this by injecting an httpx.Client
+    # transport that was torn down after the first request, so the next request wrapped a closed transport
+    # and raised "Cannot send a request, as the client has been closed" on every retry. The revert resolved
+    # that specific path; this copy locks the contract so future transport/keepalive work can't reintroduce
+    # the same class of bug.
     client_kwargs = dict(client_kwargs)
     # The MoA virtual provider has no OpenAI wire endpoint; the facade *is* the client. Rebuild the
     # facade, never a native client (TypeError; relay re-wire).
+    # Rebuilding a native OpenAI client while agent.provider == "moa" (client replacement, stream-retry pool
+    # cleanup, credential rotation, fallback+restore) drops the facade: the next primary call either raises
+    # a `_moa_prepared_request` TypeError (#78382) or, when _client_kwargs carry an unrelated relay
+    # base_url, leaks the request to a foreign gateway. Rebuild the facade instead (build_moa_facade also
+    # re-wires the reference relay, see #53802).
     if (getattr(agent, "provider", "") or "").strip().lower() == "moa":
         from agent.moa_loop import build_moa_facade
         return build_moa_facade(agent, getattr(agent, "model", None) or "default")
@@ -1604,12 +1716,26 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # behind a per-client view whose ``close()`` is a no-op for the pool, so a closed wrapper
     # never takes a sibling's (or the successor's) connections with it
     # (tests/agent/test_shared_http_transport.py).
+    # Without this, a peer that drops mid-stream leaves the socket in a state where epoll_wait never fires,
+    # ``httpx`` read timeout may not trigger, and the agent hangs until manually killed. Probes after 30s
+    # idle, retry every 10s, give up after 3 → dead peer detected within ~60s. Safety against #10933: the
+    # ``client_kwargs = dict(client_kwargs)`` above means this injection only lands in the local per-call
+    # copy, never back into ``agent._client_kwargs``. Each ``_create_openai_client`` invocation therefore
+    # gets its OWN fresh ``httpx.Client`` whose lifetime is tied to the OpenAI client it is passed to. When
+    # the OpenAI client is closed (rebuild, teardown, credential rotation), the paired ``httpx.Client``
+    # closes with it, and the next call constructs a fresh one — no stale closed transport can be reused.
     if "http_client" not in client_kwargs:
         keepalive_http = agent._build_keepalive_http_client(client_kwargs.get("base_url", ""), verify=httpx_verify)
         if keepalive_http is not None:
             client_kwargs["http_client"] = keepalive_http
     # Retries belong to the outer conversation loop (honors Retry-After); SDK retries would
     # double-retry inside it. auxiliary_client keeps SDK retries as it isn't wrapped.
+    # Delegate all rate-limit / 5xx retry to hermes's outer conversation loop, which honors Retry-After and
+    # applies adaptive/jittered backoff. The OpenAI SDK default (max_retries=2) uses its own 1-2s backoff
+    # that ignores Retry-After and double-retries inside our loop — the same deadlock the Anthropic clients
+    # hit (#26293). This is the single chokepoint every primary OpenAI/aggregator client passes through
+    # (init, switch_model, recovery, restore, request-scoped); auxiliary_client builds its own clients and
+    # keeps SDK retries because it is NOT wrapped by the conversation loop.
     client_kwargs.setdefault("max_retries", 0)
     _ensure_copilot_headers(client_kwargs)
     # OpenCode Free is served anonymously: any unrecognized bearer is a 401, so an empty
@@ -1768,6 +1894,9 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
         )
         # Read live config, not agent._custom_providers, so mid-session ssl_ca_cert / ssl_verify
         # edits are honored.
+        # Read custom_providers from live config (not the init-time snapshot on ``agent._custom_providers``)
+        # so ssl_ca_cert / ssl_verify edits are honored when switching mid-session, matching the
+        # context-length reload below (#15779).
         apply_custom_provider_tls_to_client_kwargs(
             agent._client_kwargs, str(effective_base or ""),
             get_compatible_custom_providers(load_config_readonly()),
@@ -1906,6 +2035,7 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
         "reasoning_echo_flag": getattr(agent, "_reasoning_echo_flag", False),
         # Overrides must travel with the switched-to identity or a later recovery/restore resurrects
         # PRE-switch overrides from the stale init snapshot.
+        # See #75091.
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "runtime_capabilities": dict(getattr(agent, "runtime_capabilities", {}) or {}),
         "compressor_model": getattr(cc, "model", agent.model),
@@ -1973,6 +2103,12 @@ def switch_model(
     snapshot and re-raises (callers catch)."""
     old_model = agent.model
     old_provider = agent.provider
+    # ── Reload credential pool for the new provider (issue #52727) ── Without this,
+    # ``recover_with_credential_pool`` sees a ``pool.provider != agent.provider`` mismatch and
+    # short-circuits, leaving the new provider with no rotation/recovery on 401/429 and burning the original
+    # pool's entries. Only reload when the provider actually changed (or the pool was missing) —
+    # re-selecting the same provider must not churn the pool reference. A reload failure is logged +
+    # swallowed: the switch itself must still complete.
     old_norm = (old_provider or "").strip().lower()
     new_norm = (new_provider or "").strip().lower()
     api_mode, base_url, destination_capabilities = _resolve_switch_destination(
@@ -2131,6 +2267,12 @@ def repair_tool_call(agent, tool_name: str) -> str | None:
     # VolcEngine api/plan leaks XML attribute fragments into tool_use.name (`terminal"
     # parameter="command" ...`); trim at the first quote/angle bracket. Do NOT split on whitespace:
     # "write file" must reach ``_norm`` -> ``write_file``.
+    # `terminal" parameter="command" string="true` `execute_code" parameter="code" string="true`
+    # `session_search" parameter="session_id" string="true` We trim at the first unambiguous XML/quote
+    # character so the rest of the repair pipeline (lowercase / snake_case / fuzzy match) can resolve the
+    # cleaned name to a real tool. Crucially we DO NOT split on whitespace: legitimate inputs like "write
+    # file" must keep flowing through ``_norm`` -> ``write_file`` (covered by test_space_to_underscore in
+    # tests/run_agent/test_repair_tool_call_name.py). See #33007.
     for _xml_sep in ('"', "'", "<", ">"):
         _idx = tool_name.find(_xml_sep)
         if _idx > 0:
@@ -2171,12 +2313,19 @@ _INTERRUPTED_PLACEHOLDER = "[response interrupted]"
 
 # Escalate repeated heals once per session window, then stay quiet. Default threshold; tunable via
 # ``agent.sanitizer_heal_escalation_threshold`` (<= 0 disables).
+# Repeated heals of the same poisoned transcript used to WARNING on every send (#96870).
+# ``_EMPTY_HEAL_ESCALATE_AFTER`` is the built-in default; deployments tune it via
+# ``agent.sanitizer_heal_escalation_threshold`` in config.yaml (<= 0 disables escalation entirely — WARNINGs
+# still fire per window).
 _EMPTY_HEAL_ESCALATE_AFTER = 3
 _EMPTY_HEAL_WINDOW_S = 600.0
 _empty_heal_log_state: Dict[str, Dict[str, Any]] = {}
 _empty_heal_log_lock = threading.Lock()
 # Sessions already told ONCE (out-of-band, never in conversation context); kept apart from the
 # windowed log state so a new window never re-arms the notice.
+# Session keys that already received the one-time user notice. Separate from the windowed log state so a new
+# 10-minute window never re-notifies: the user is told ONCE per session, ever (#96870 — out-of-band,
+# delivery channel only, never injected into conversation context).
 _empty_heal_user_notified: set = set()
 # One-shot pending notices keyed by session, drained via ``consume_pending_sanitizer_heal_notice``
 # and delivered via the status/warning callback.
@@ -2374,12 +2523,31 @@ def _drop_invalid_roles(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _drop_empty_tool_calls_arrays(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Strict providers 400 on ``tool_calls: []``; normalize on shallow copies so history stays byte-stable."""
+    # --- Drop empty / malformed tool_calls arrays on assistant messages --- An assistant message carrying
+    # ``tool_calls: []`` (an empty array) — or a non-list value under the key — is semantically identical to
+    # an assistant message with no tool calls, but strict OpenAI-compatible providers reject the empty array
+    # outright: DeepSeek v4 returns HTTP 400 "Invalid 'messages[N].tool_calls': empty array. Expected an
+    # array with minimum length 1, but got an empty array instead." (#58755, follow-up to #56980). Empty
+    # arrays reach here from session resume, host-fed histories, or the consecutive-assistant merge in
+    # ``repair_message_sequence`` (which preserves a pre-existing ``[]`` on the surviving turn). This is the
+    # final pre-API chokepoint, so normalize defensively — and, per the #56980 review, do it HERE on the
+    # per-call copy rather than in ``repair_message_sequence``, which would destructively rewrite the
+    # persisted trajectory. Shallow-copy the message before dropping the key so stored history (and prompt
+    # caching) stays byte-stable.
     normalized: List[Dict[str, Any]] = []
     dropped = 0
     for msg in messages:
         if (
             isinstance(msg, dict)
             and msg.get("role") == "assistant"
+            # Defense-in-depth: a strict OpenAI-compatible provider (e.g. onerouter / Qwen, DeepSeek v4)
+            # rejects an assistant message carrying ``tool_calls: []`` (empty array) with HTTP 400 "Empty
+            # tool_calls is not supported in message." The pre-API sanitizer in agent_runtime_helpers drops
+            # these, but only on the conversation_loop path — other routes can reach the wire without it.
+            # For every request that serializes through this transport (conversation loop and any caller
+            # using it), this is the last boundary, so normalize here. Requests built by fully separate
+            # payload paths (e.g. some auxiliary clients) never pass through this layer and are out of scope
+            # for it. (#58755 follow-up)
             and "tool_calls" in msg
             and not (isinstance(msg["tool_calls"], list) and msg["tool_calls"])
         ):
@@ -2444,6 +2612,22 @@ def _pair_tool_calls_positionally(messages: List[Dict[str, Any]]) -> List[Dict[s
     """Positional tool_call <-> tool_result pairing: strict providers (DeepSeek v4, Kimi) require
     results IMMEDIATELY after their call. Drops positional orphans, stubs unanswered declared
     ids; matching is alias-aware."""
+    # --- Positional tool_call <-> tool_result pairing --- Strict OpenAI-compatible providers (DeepSeek v4,
+    # Kimi) enforce the POSITIONAL invariant: an assistant message carrying tool_calls must be IMMEDIATELY
+    # followed by tool messages covering every tool_call_id. The previous implementation compared global id
+    # sets, which misses the failure mode where a result exists somewhere in the transcript but not in the
+    # run right after its call — an interrupted turn or a compression window can displace a result past a
+    # user turn. The id then survives in the global result set, so the call looks answered, no stub is
+    # injected, and the provider rejects the payload with HTTP 400 "An assistant message with 'tool_calls'
+    # must be followed by tool messages responding to each 'tool_call_id' (insufficient tool messages
+    # following tool_calls message)". Rewritten as a single rolling walk on the per-call copy (#94704): (a)
+    # tool results that do not immediately follow an assistant message declaring their id are dropped
+    # (positional orphans — includes results appearing BEFORE their call, which strict providers also
+    # reject); (b) declared ids not covered by the immediately-following tool run get a stub result injected
+    # at the end of that run, even when a mispositioned result exists elsewhere. Matching is variant-aware
+    # (``tool_call_id_variants`` / ``tool_result_id_variants``): a result keyed on ANY alias spelling
+    # (``id`` / ``call_id`` / ``response_item_id`` / composite bridge) answers the call, preserving the
+    # unified alias policy from #55626/#63000/#93251.
     paired: List[Dict[str, Any]] = []
     declared_calls: Dict[str, tuple] = {}
     dropped = 0
@@ -2504,6 +2688,24 @@ def _dedupe_tool_call_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     (not ids ever seen) because llama.cpp reuses one constant id, and whole variant groups so
     alias-keyed results are not deleted."""
     outstanding: Dict[str, int] = {}  # every alias of an unanswered call -> its group id
+    # 3. Deduplicate tool_call_ids. Strict providers (DeepSeek) reject a payload where the same tool_call_id
+    #   appears more than once with HTTP 400 "Duplicate value for 'tool_call_id'" (#58327). Duplicates can
+    #   arise from retries, crash/resume glitches, or a compression window that re-emits a tool result. This
+    #   is the final pre-API chokepoint, so dedup defensively here even though repair_message_sequence also
+    #   consumes matched ids. (a) collapse duplicate tool_calls WITHIN an assistant message (b) drop tool
+    #   results that answer no OUTSTANDING tool call (b) tracks outstanding calls rather than every id ever
+    #   seen, because ``tool_call_id`` is NOT globally unique in practice: llama.cpp emits a single constant
+    #   id for every tool call it ever returns (verified: three separate completions from one server all
+    #   carry the same id). A seen-once-drop-forever rule reads the SECOND legitimate tool result of such a
+    #   session as a duplicate and deletes it, so from the second tool call onward the model never sees any
+    #   result — it announces its next action and the turn dies with the work unfinished. Outstanding-call
+    #   semantics keep both protections intact: a re-emitted result still answers no pending call and is
+    #   still dropped, while a genuine new call that reuses the id re-arms that id first. Variant-group
+    #   tracking: answering or deduping one spelling consumes its siblings too. A Codex/Responses tool_call
+    #   registers ``id`` (fc_...), ``call_id`` (call_...), ``response_item_id``, and composite spellings
+    #   (#55626/#58168/#63000); tracking only the coalesced id here made a result keyed on any OTHER variant
+    #   look like it answered no outstanding call, so this pass deleted the very result step 2's
+    #   variant-aware matching had just preserved (issue #93251 — whole parallel batches vanished).
     outstanding_groups: Dict[int, frozenset] = {}
     next_group_id = 0
     deduped: List[Dict[str, Any]] = []
@@ -2536,6 +2738,9 @@ def _dedupe_tool_call_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 continue
             if candidate_groups:
                 # Consume EVERY variant of the matched call; ids are re-armed by the next call reusing them.
+                # Consume the whole alias group so a SECOND result replaying any sibling spelling falls into
+                # the drop branch below — strict providers reject duplicate tool_call_ids with HTTP 400
+                # (#58327, #66974). Credit: #55436.
                 group_id = min(candidate_groups)
                 for variant in outstanding_groups.pop(group_id, frozenset()):
                     if outstanding.get(variant) == group_id:
@@ -2552,6 +2757,22 @@ def _dedupe_tool_call_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
 def _realign_tool_result_names(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Align each tool result's wire ``name`` with its call's function name (per-call copy only):
     Google 400s on a mismatch, routine when tool_search bridges via ``tool_call``."""
+    # 4. Google matches functionResponse.name against functionCall.name and rejects a mismatch with HTTP 400
+    #   "Request contains an invalid argument" (INVALID_ARGUMENT); behind an OpenAI-compatible gateway that
+    #   surfaces only as a generic "Provider returned error". When tool_search defers MCP/plugin tools the
+    #   model calls the bridge tool ``tool_call``, while ``make_tool_result_message()`` labels the result
+    #   with the unwrapped internal tool name (``mcp__github__create_issue``) that dispatch, hooks, logging,
+    #   and guardrails need. #72089 fixed exactly this for the native Gemini adapter, which now prefers
+    #   ``tool_name_by_call_id`` over the result name; requests that reach Gemini through the
+    #   OpenAI-compatible path (OpenRouter, Vertex/LiteLLM proxies, any OpenAI-shaped gateway) skip that
+    #   translation entirely and still send the internal name on the wire. Normalizing here rather than in
+    #   the OpenAI-compat serializer keeps it provider-agnostic: Gemini reaches Hermes under many model
+    #   strings and base URLs, so sniffing for "is this really Google?" is unreliable, and every other
+    #   provider either ignores the field or agrees with the call name. Runs on the per-call copy, so the
+    #   stored trajectory keeps the real tool name for the session DB and the UI — only the wire payload
+    #   changes. A no-op for the native Gemini path, which already resolves the same name. A result whose
+    #   assistant call frame is missing entirely never reaches here — pass 1 above drops it as an orphan —
+    #   so the only results this pass sees are ones whose call name is knowable.
     call_names: Dict[str, str] = {}
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -2688,7 +2909,14 @@ def reapply_reasoning_echo_for_provider(agent, api_messages: list) -> int:
     """Re-pad or strip assistant turns' reasoning_content for the CURRENT provider after a
     fallback switch: ``api_messages`` is shaped for the primary; require-side providers
     (DeepSeek/Kimi/MiMo) 400 without the pad, strict ones (Mistral, Cerebras, Groq) 400/422
-    with it. Idempotent; returns the number of assistant turns changed."""
+    with it. Idempotent; returns the number of assistant turns changed.
+
+    * Switching TO a strict provider that rejects the field (Mistral, Cerebras, Groq, SambaNova, …):
+    assistant turns built under a reasoning primary carry a ``reasoning_content`` pad (often a single space
+    ``" "``), and the strict provider rejects it with HTTP 400/422 ("Extra inputs are not permitted"). This
+    is the exact cross-provider fallback bug from #45655 — a DeepSeek primary pads history with ``" "``, the
+    request falls back to Mistral, and Mistral 422s on the stale pad.
+    """
     from agent.message_sanitization import reapply_reasoning_echo
     return reapply_reasoning_echo(api_messages, agent._needs_thinking_reasoning_pad())
 
@@ -2701,7 +2929,11 @@ def _iter_httpx_pools_with_owner(http_client: Any):
     ``owner`` is ``None`` for a pool this client owns outright, or the ``_SharedTransport`` view
     id when the pool is process-shared with other clients
     (``process_bootstrap.build_keepalive_http_client``). Callers must then touch only the
-    in-flight requests stamped with that owner."""
+    in-flight requests stamped with that owner.
+
+    Walking the default transport alone makes ``force_close_tcp_sockets`` return 0 while a stream is still
+    mid-recv — the interrupt logs success and the provider keeps burning the slot (#72975).
+    """
     seen_pools: set[int] = set()
     try:
         transports = [getattr(http_client, "_transport", None)]

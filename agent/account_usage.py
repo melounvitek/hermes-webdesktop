@@ -304,6 +304,11 @@ def _resolve_codex_usage_credentials(
     # and hand back a DIFFERENT pool account's usage; such errors must propagate to the fail-open outer guard.
     # account_id is best-effort: a partial singleton store must not sink a usable credential.
     try:
+        # Tier 2: the native runtime resolver. It ALREADY falls back to the credential pool when the
+        # singleton is empty (see ``resolve_codex_runtime_credentials`` — issue #32992), so in a pool-only
+        # setup this returns a usable ``source="credential_pool"`` token. A refresh/network error must
+        # propagate — the outer ``fetch_account_usage`` guard fails open (shows nothing this turn) rather
+        # than reporting the wrong account.
         creds = resolve_codex_runtime_credentials(refresh_if_expiring=True)
         account_id: Optional[str] = None
         try:

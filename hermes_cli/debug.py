@@ -354,6 +354,7 @@ def collect_debug_report(
     # In-process sanitiser heal counters: populated only inside a process that ran agent turns
     # (gateway /debug share); a fresh CLI's errors.log tail carries the same escalation lines.
     with contextlib.suppress(Exception):
+        # See #96870.
         from agent.agent_runtime_helpers import get_sanitizer_heal_stats
         heal_stats = get_sanitizer_heal_stats()
         if heal_stats:

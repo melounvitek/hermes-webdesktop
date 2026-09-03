@@ -75,7 +75,10 @@ def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider
     Custom while ``model.provider`` still names a previous provider, so non-loopback URLs are rejected
     unless the YAML provider is already ``custom`` or a local-server alias (ollama/vllm/llamacpp —
     else a legit LAN ollama endpoint falls through to OpenRouter): a stale OpenRouter/Z.ai base_url
-    cannot hijack local sessions."""
+    cannot hijack local sessions.
+
+    See #14676.
+    """
     cfg_provider_norm = (cfg_provider or "").strip().lower()
     bu = (cfg_base_url or "").strip()
     return bool(bu) and (cfg_provider_norm == "custom" or _resolves_to_custom(cfg_provider_norm)
@@ -101,7 +104,18 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     """Auto-detect api_mode from the resolved base URL, or None. Exact-hostname matches reject
     lookalike subdomains (api.anthropic.com.attacker.test) and path-segment spoofing
     (proxy.test/api.anthropic.com/v1). Official OpenAI hosts (incl. us./eu. data-residency hosts)
-    need Responses for GPT-5.x tool calls with reasoning."""
+    need Responses for GPT-5.x tool calls with reasoning.
+
+    - Direct api.anthropic.com endpoints must use the native Messages API (``/v1/messages``). Anthropic also
+    exposes an OpenAI-compat ``/chat/completions`` shim on the same host, but Pro/Max OAuth subscriptions
+    are only billed against the native Messages route; hitting the shim accounts against a separate "extra
+    usage" pool that is empty by default and surfaces as HTTP 400 "You're out of extra usage."  See issue
+    #32243. - Third-party Anthropic-compatible gateways (MiniMax, Zhipu GLM, LiteLLM proxies, etc.)
+    conventionally expose the native Anthropic protocol under a ``/anthropic`` suffix — treat those as
+    ``anthropic_messages`` transport instead of the default ``chat_completions``. - Kimi Code's
+    ``api.kimi.com/coding`` endpoint also speaks the Anthropic Messages protocol (the /coding route accepts
+    Claude Code's native request shape).
+    """
     normalized = (base_url or "").strip().lower().rstrip("/")
     hostname = base_url_hostname(base_url)
     mandated = _HOST_MANDATED_API_MODES.get(hostname) or ("codex_responses" if is_official_openai_host(base_url) else None)
@@ -109,6 +123,10 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
         return mandated
     path = urlparse(normalized).path.rstrip("/")
     if path.endswith(("/anthropic", "/anthropic/v1")) or (hostname == "api.kimi.com" and "/coding" in normalized):
+        # Direct native Anthropic host: realign with providers.determine_api_mode, which already maps this
+        # host to anthropic_messages. The exact-hostname match rejects lookalike subdomains
+        # (api.anthropic.com.attacker.test) and path-segment spoofing (proxy.test/api.anthropic.com/v1).
+        # (#32243)
         return "anthropic_messages"
     return None
 
@@ -199,6 +217,10 @@ def _api_key_provider_api_mode(provider: str, model_cfg: Dict[str, Any], api_key
     if provider == "copilot":
         return _copilot_runtime_api_mode(model_cfg, api_key, target_model=effective_model)
     if provider in ("xai", "actual"):
+        # Ramp Router: Responses-native host — /v1/chat/completions is only a minimal compatibility shim,
+        # while reasoning and caching support live on /v1/responses (docs.router.com/api/endpoint). Mirrors
+        # the host_mandated_api_mode clause in hermes_cli/providers.py so the runtime resolver stays in
+        # lockstep. Exact hostname per #32243.
         return "codex_responses"
     return _configured_or_fallback_api_mode(provider, model_cfg, base_url, effective_model, opencode_by_model=opencode_by_model)
 
@@ -814,6 +836,10 @@ def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, targe
     yield _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
     yield _tag(_resolve_named_custom_runtime(requested_provider=requested_provider, explicit_api_key=explicit_api_key,
                                              explicit_base_url=explicit_base_url, target_model=target_model), requested_provider)
+    # If provider is "auto" (or unset) but config.yaml has an explicit base_url pointing at a custom/local
+    # endpoint (e.g. Ollama at localhost:11434), route through the OpenAI-compatible resolver instead of
+    # letting resolve_provider() pick up an ANTHROPIC_API_KEY or OPENAI_API_KEY from the environment and
+    # send the request to a cloud API. Fixes #3846.
     if not explicit_base_url and not explicit_api_key:
         yield _local_endpoint_bypass(requested_provider, explicit_api_key, explicit_base_url)
     provider = resolve_provider(requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url)

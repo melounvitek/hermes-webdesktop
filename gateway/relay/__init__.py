@@ -169,7 +169,15 @@ def relay_display_name() -> Optional[str]:
     """The human-facing agent display name forwarded at provision — the connector's
     multi-agent reply-attribution prefix (``**<displayName>:** ``).
     ``GATEWAY_RELAY_DISPLAY_NAME`` env, then the skin's branded agent name (a skin
-    rename propagates on the next boot). Absent -> connector's linked-owner fallback."""
+    rename propagates on the next boot). Absent -> connector's linked-owner fallback.
+
+    The PRIMARY source for the connector's multi-agent reply-attribution prefix (gateway-gateway #171): in a
+    multi-agent scope the shared bot prepends ``**<displayName>:** `` to this instance's replies.
+    Gateway-asserted but safely scoped exactly like ``relay_instance_id()`` / ``relay_wake_url()`` — the
+    tenant stays token-verified, so a dishonest gateway can only label its OWN instance. Absent -> the
+    connector stores null and attribution falls back to the instance's linked-owner identity, else skips the
+    prefix.
+    """
     value = os.environ.get("GATEWAY_RELAY_DISPLAY_NAME", "").strip()
     if not value:
         try:

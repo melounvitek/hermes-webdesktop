@@ -259,7 +259,10 @@ def _called_process_error_is_python_dep_install(exc: subprocess.CalledProcessErr
 def _format_update_failure_stage(exc: subprocess.CalledProcessError) -> str:
     """Name the failed stage: git pull and dep install share one ``try``, and calling every
     CalledProcessError a git failure misled users and keyed the ZIP overlay on exception
-    *type* rather than on git actually failing."""
+    *type* rather than on git actually failing.
+
+    See #85840, #87304.
+    """
     if _called_process_error_is_python_dep_install(exc):
         return "Python dependency install failed"
     if _called_process_error_is_git(exc):
@@ -284,7 +287,10 @@ def _refuse_update_for_contended_shims(exc: BaseException) -> None:
     """Fail closed when live shims could not be quarantined: a rename failing every retry
     proves a holder without FILE_SHARE_DELETE, and installing anyway strands the venv between
     versions. The code swap is already committed; only the dep install is deferred (via the
-    update-incomplete marker). Exits 2 so the receipt records a refusal, not a failure."""
+    update-incomplete marker). Exits 2 so the receipt records a refusal, not a failure.
+
+    See #87331.
+    """
     print("✗ Cannot continue the update: live Hermes launcher(s) could not be")
     print("  moved aside:")
     for name in getattr(exc, "failed_shims", []) or ["hermes.exe"]:
@@ -419,6 +425,10 @@ def _log_only_write(text: str) -> None:
 def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     """Run ``cmd`` with combined output captured into update.log only; returns the
     ``CompletedProcess`` so the caller can surface the output on failure."""
+    # Check if there are updates. On shallow checkouts `rev-list --count` walks the truncated graph and can
+    # report the entire remote ancestry (e.g. "Found 9980 new commit(s)" on a depth-1 install — #53479). The
+    # zero/nonzero gate is still sound (HEAD == origin/<branch> counts 0), so keep it, but treat the shallow
+    # NUMBER as unknown and recover the real one via the GitHub compare API when possible.
     result = subprocess.run(
         cmd, cwd=cwd, env=env, check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, encoding="utf-8", errors="replace")
@@ -538,6 +548,10 @@ def _repair_venv_on_current_checkout(
     """Reinstall ``.[all]`` + lazy/tool deps into an unhealthy (or handed-off) venv; returns
     whether the checkout can be reported complete."""
     # Self-lock deferral: the repair rewrites the venv too (same mapped-extension hazard).
+    # See #86735.
+    # Self-lock deferral (relocated preflight — #86735): if THIS process holds a native extension the sync
+    # must rewrite, defer NOW — after the code swap, so only the dependency install is pending and the next
+    # fresh launch completes it via the marker.
     _m()._abort_dependency_sync_if_self_locked(_windows_gateway_resume)
     _write_update_incomplete_marker()
     from hermes_cli.managed_uv import ensure_uv
@@ -552,6 +566,9 @@ def _repair_venv_on_current_checkout(
     _m()._install_python_dependencies_with_optional_fallback(repair_prefix, env=repair_env, group="all")
     _m()._refresh_active_lazy_features(repair_prefix, env=repair_env, features=active_lazy_features)
     _m()._restore_active_tool_dependencies(active_tool_dependencies, repair_prefix, env=repair_env)
+    # Core ``.[all]`` install finished. Clear the generic core breadcrumb before the lazy-refresh phase —
+    # that phase uses its own marker so a later lazy failure cannot be "healed" by clearing the core marker
+    # based on a narrow 7-package import probe (#58004 review).
     _m()._clear_update_incomplete_marker()
     healthy_after, detail_after = _venv_core_imports_healthy()
     if not healthy_after:
@@ -559,6 +576,7 @@ def _repair_venv_on_current_checkout(
         print("  Close all Hermes windows/gateways and re-run: hermes update")
         return False
     print("✓ Dependencies repaired!")
+    # Check for config migrations (#91360).
     _check_and_apply_config_migration(
         assume_yes=assume_yes, gateway_mode=gateway_mode, pre_update_snapshot_id=pre_update_snapshot_id)
     # The hand-off child never reaches the commits-pulled rebuild; do it here.
@@ -573,6 +591,10 @@ def _pip_install_prefix(uv_bin) -> tuple[list[str], dict | None]:
     """``(install prefix, env)``: ``uv pip`` isolated from third-party UV env vars (so a foreign
     UV_PYTHON_INSTALL_DIR can't hijack it), else ``sys.executable -m pip`` (avoids PEP 668 errors)."""
     if uv_bin:
+        # Same third-party UV-env isolation as the main update path (#83914): a user-level
+        # UV_PYTHON_INSTALL_DIR / UV_PYTHON from unrelated software must not steer which interpreter uv
+        # resolves here.
+        # See #83914.
         from hermes_cli.managed_uv import managed_python_env
         env = managed_python_env()
         env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
@@ -721,6 +743,9 @@ def _pull_updates(
     post-pull syntax error in a critical file rolls back. Exits on failure; returns pre-pull SHA."""
     update_succeeded = False
     # Pre-pull SHA for auto-rollback (stray conflict markers once bricked every updater).
+    # Capture the pre-pull SHA so we can auto-roll-back if the new code has a syntax error in a
+    # critical-path file (PR #28452 incident: orphan merge-conflict markers in hermes_cli/config.py bricked
+    # every user who ran ``hermes update`` for the 7 minutes between the bad commit and the fix landing).
     pre_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
     try:
         # merge --ff-only the already-fetched ref instead of `git pull`, which would do a
@@ -853,6 +878,12 @@ def _prepare_checkout_for_update(
     # A fork can match origin yet trail upstream, so the sync can move HEAD with
     # commit_count == 0; detect that BEFORE the no-update return so deps, restarts AND the
     # fleet matrix still run (it used to live in the early-return branch and verified nothing).
+    # The sync can therefore advance HEAD even though the origin comparison found no commits. Detect that
+    # BEFORE taking the no-update return so dependency refreshes, gateway restarts, AND the fleet version
+    # matrix still run for the pulled code (#73108 — previously the sync lived inside the commit_count == 0
+    # branch, which returns immediately after: an update that pulled hundreds of upstream commits printed
+    # "Already up to date!" and verified nothing). Non-fork checkouts have no upstream question: origin IS
+    # the official repo, so "Already up to date!" is fully verified there.
     upstream_checked = True
     if commit_count == 0 and is_fork and branch == "main":
         pre_sync_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
@@ -893,6 +924,10 @@ def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
     active_tool_dependencies = _m()._capture_active_tool_dependencies()
 
     # Captured before any pull so the completion line can report the transition.
+    # Snapshot the pre-update version before files are replaced so the completion line can report the
+    # transition (prime-agent#630 port).
+    # Snapshot the pre-update version before any code is pulled so the completion line can report the
+    # transition (prime-agent#630 port).
     pre_update_version = _read_project_version()
     gw_input_fn = (
         (lambda prompt, default="": _gateway_prompt(prompt, default)) if gateway_mode else None)
@@ -902,6 +937,7 @@ def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
     keep_stash = bool(getattr(args, "keep_stash", False))
     # --switch-branch: prefer switching over an in-place merge so an update never writes the
     # branch's history; only meaningful with parked_branch_strategy "update_in_place".
+    # See #89507.
     switch_branch = bool(getattr(args, "switch_branch", False))
 
     # Interactive terminals always stash-and-ask; only non-interactive updates consult
@@ -925,11 +961,17 @@ def _begin_update_receipt_and_plan(args):
     holds the venv shim."""
     # Structured receipt: record what this run discovers/does/skips so silent failures are diagnosable.
     with _best_effort('Update receipt unavailable: %s'):
+        # See #74973, #81193, #85753, #88848, #91277.
         from hermes_cli.update_receipt import begin_update_receipt
         begin_update_receipt()
 
     # Plan phase: snapshot runtimes/supervisors/version (read-only; probe failure records
     # nothing). Re-read AFTER the restart phase to reconcile — the plan is the worklist.
+    # Plan phase (#91277 Phase 2): snapshot the pre-update fleet — every running Hermes runtime, its
+    # supervisor, and its running code version — into the receipt, so a post-mortem can compare what the
+    # update SAW against what it did. ``_pre_update_plan`` is read again AFTER the restart phase to
+    # reconcile every planned runtime against the phase's bookkeeping (restart via declared mechanism — the
+    # plan is the worklist, not just a printout).
     _pre_update_plan = None
     with _best_effort('Update plan phase failed: %s'):
         from hermes_cli.update_inventory import collect_runtime_inventory, record_plan_in_receipt
@@ -943,6 +985,13 @@ def _begin_update_receipt_and_plan(args):
     # Windows: another hermes.exe holding the venv shim means WinError 32 spam and a
     # deferred-rename leftover or silent ZIP fallback. Positively identified gateways are
     # paused/restarted by the update instead; anything else still aborts.
+    # Continuing would result in a string of WinError 32 warnings and then either a deferred-rename leftover
+    # or a failed git-pull fast path that silently falls back to the slower ZIP route. See issue #26670.
+    # Exception (#37039): when every concurrent instance is a gateway runtime, the pause machinery a few
+    # lines below (``_pause_windows_gateways_for_update``) stops it before any file mutation, and the
+    # post-update restart phase brings it back. Aborting just to make the user run the same kill manually is
+    # friction without benefit. Anything not positively identified as a gateway (TUI shell, Desktop backend
+    # child, unreadable cmdline) still aborts exactly as before.
     if _m()._is_windows() and not getattr(args, "force", False):
         scripts_dir = _m()._venv_scripts_dir()
         concurrent = _m()._detect_concurrent_hermes_instances(scripts_dir) if scripts_dir is not None else []
@@ -968,6 +1017,7 @@ def _prepare_git_command() -> tuple[bool, list, bool]:
         _git_run(git_cmd, ["config", "windows.appendAtomically", "false"])
     # A broken Git-for-Windows trampoline refuses every call with a "BUG (fork bomb)" guard;
     # swap in a real binary up front so git survives instead of degrading to ZIP.
+    # See #87876.
     git_cmd = _ensure_non_trampoline_git(git_cmd)
 
     # Before stash/branch logic: npm rewrites package-lock.json non-deterministically and
@@ -991,6 +1041,13 @@ def _verify_head_after_pull(
     """Return the post-pull HEAD SHA; ``sys.exit(1)`` if the pull was a no-op or landed off-branch."""
     # A detached checkout pinned to a SHA can report "N new commit(s)" and a successful
     # merge --ff-only yet stay put; surface the no-op instead of claiming "Code updated!".
+    # Verify HEAD actually moved (issue #79678). ``merge --ff-only`` succeeding only means the merge
+    # completed, not that the update applied: a checkout that is pinned to a raw SHA (detached HEAD) can
+    # report "N new commit(s)" against origin yet still sit on the old commit afterward (the branch-switch
+    # step re-detaches to the SHA). Before this guard, ``hermes update`` printed "✓ Code updated!" and
+    # reinstalled deps + rebuilt the desktop app against the stale tree — no error, no warning, ``hermes
+    # doctor`` healthy. Compare pre-pull and post-pull HEAD; if they match, surface the no-op instead of
+    # claiming success.
     post_pull_sha = _capture_head_sha(git_cmd, _m().PROJECT_ROOT)
     if pre_pull_sha and post_pull_sha == pre_pull_sha:
         print()
@@ -1095,6 +1152,10 @@ def _finish_already_up_to_date(
     _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
     # A prior pull may still owe the fleet a restart; catch up here too, BEFORE the exit
     # gate so a partial outcome can't strand the fleet on stale code.
+    # Catch up even on the "Already up to date" path — that early return is what left the gateway on stale
+    # code for two days. Runs BEFORE the runtime-verification exit gate below: a vulnerable SQLite runtime
+    # demotes the outcome to partial, but must not strand the fleet on stale code (#91277 fleet contract —
+    # the pending-restart check always executes).
     _apply_pending_fleet_restart_catchup()
     if not current_checkout_complete:
         if gateway_mode:
@@ -1116,6 +1177,7 @@ def _apply_pulled_update(
     # Gateways still serve pre-pull modules until the restart phase; an interrupt before a
     # completed restart leaves this marker so the next update catches up even when git is
     # current. Distinct from ``.update-incomplete`` (venv/install repair).
+    # See #95294.
     _write_fleet_restart_pending_marker(expected_sha=post_pull_sha or "")
     # Stale .pyc would ImportError on gateway restart when new source references new names.
     _sweep_bytecode_after_update(branch)
@@ -1190,6 +1252,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _clear_windows_venv_holders_or_exit(args, gateway_mode, _windows_gateway_resume)
 
     # After every fail-closed venv guard, before either path can remove the release tree.
+    # Self-lock deferral moved: the venv-holder sweep above excludes this process by design (a CLI `hermes
+    # update` IS the venv python), and an updater that has imported a native venv extension cannot rewrite
+    # its own mapped .pyd (#83569). That check used to run HERE — before the fetch — but firing pre-fetch
+    # meant a deferral stranded the user on the OLD checkout, and any startup path that eagerly loaded
+    # cryptography turned every Windows update into an exit-2 loop (#86735/#86780/#86781). It now runs via
+    # _abort_dependency_sync_if_self_locked() after the code swap, immediately before the dependency sync —
+    # the only phase the lock can actually break — and only when the sync would truly rewrite the loaded
+    # distribution.
     desktop_dir = _m().PROJECT_ROOT / "apps" / "desktop"
     had_desktop_app_before_update = _desktop_app_present(desktop_dir)
 
@@ -1219,6 +1289,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("  (removed %d aborted-fetch pack temp file(s))" % len(swept))
 
         # Surface autostashes left by earlier updates (--keep-stash, failed restores).
+        # Surface autostash entries left behind by earlier updates (#63717 problem 6) — parked --keep-stash
+        # runs and failed restores preserve the stash but nothing ever mentioned it again.
         _m()._warn_orphaned_update_autostashes(git_cmd, _m().PROJECT_ROOT)
 
         print("→ Fetching updates...")
@@ -1264,6 +1336,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             _windows_gateway_resume=_windows_gateway_resume)
     except _shim_quarantine_error_type() as e:
         # Strict quarantine refused BEFORE any installer ran — defer via marker, exit 2, no ZIP.
+        # See #87331.
         _refuse_update_for_contended_shims(e)
     except subprocess.CalledProcessError as e:
         _handle_update_called_process_error(e, args, gateway_mode, had_desktop_app_before_update)

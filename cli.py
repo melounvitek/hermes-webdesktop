@@ -188,6 +188,10 @@ def _strip_reasoning_tags(text: str) -> str:
     """Strip reasoning blocks (closed, unterminated, orphan-close) and leaked tool-call XML from display text.
 
     Keep in sync with ``run_agent._strip_think_blocks`` and the stream consumer's think-tag sets.
+
+    Also strips tool-call XML blocks some open models leak into visible content (``<tool_call>``,
+    ``<function_calls>``, Gemma-style ``<function name="…">…</function>``). Ported from
+    openclaw/openclaw#67318.
     """
     cleaned = text
     for tag in _REASONING_TAGS:
@@ -613,6 +617,11 @@ _cli_wake_owner = None
 _single_query_finalize_attempted_session_ids: set[str | None] = set()
 # /handoff sessions belong to the gateway: finalizing them here would stamp end_reason on
 # a row the gateway just reopened, making the handoff leg vanish from history.
+# Session IDs that were handed off to the gateway via /handoff. The CLI process exits after a successful
+# handoff, but the gateway now owns the session lifecycle — _run_cleanup must NOT call finalize_session on
+# these, because doing so sets end_reason on a row the gateway just reopened and is actively writing to
+# (#88234). The race made the handoff leg vanish from session history and broke session_search recall for
+# the handed-off session.
 _handed_off_session_ids: set[str | None] = set()
 _active_agent_ref = None  # active AIAgent, for memory-provider shutdown at exit
 _deferred_agent_startup_done = False
@@ -621,6 +630,9 @@ _deferred_agent_startup_done = False
 _tui_input_modes_active = False
 
 
+# Set True once the TUI's prompt_toolkit app starts (which enables focus reporting + mouse tracking). Gates
+# the on-exit terminal reset so non-TUI one-shot CLI runs — which also register _run_cleanup via atexit —
+# don't emit escape codes for modes they never enabled (#36823).
 def _mark_tui_input_modes_active() -> None:
     """Record that the TUI app started, so _run_cleanup resets input modes."""
     global _tui_input_modes_active
@@ -688,6 +700,10 @@ def _arm_exit_watchdog(timeout_s: float | None = None, *, from_signal: bool = Fa
     Backstop for a cleanup step wedged on network I/O and for interpreter teardown
     blocked joining non-daemon threads (ThreadPoolExecutor's atexit join). The daemon
     timer survives ``Py_FinalizeEx``'s joins. ``HERMES_EXIT_WATCHDOG_S=0`` disables.
+
+    1. 2. Interpreter teardown blocked joining non-daemon threads — stdlib ``ThreadPoolExecutor`` workers
+    are joined unconditionally by ``concurrent.futures``' atexit hook even after ``shutdown(wait=False)``,
+    so one tool thread wedged on a socket held the process open forever (#27563 class).
     """
     if timeout_s is None:
         timeout_s = _exit_watchdog_timeout()
@@ -728,6 +744,13 @@ def _arm_exit_watchdog_on_shutdown_signal() -> None:
     (main thread in a syscall, prompt_toolkit teardown never returning). Leash is 2x
     the cleanup timeout so a progressing cleanup is never cut short. Never arm at
     startup: the timer exits unconditionally.
+
+    SIGTERM/SIGHUP establish unambiguous shutdown intent, but the graceful path from signal →
+    ``agent.interrupt()`` → ``app.exit()`` / ``KeyboardInterrupt`` → ``finally`` → ``_run_cleanup`` has
+    several wedge points BEFORE ``_run_cleanup`` arms the normal watchdog: a main thread parked in a syscall
+    that never observes the unwind, a prompt_toolkit teardown that never returns, or an agent worker
+    blocking the ``finally``. When that happens the process has NO backstop and a "dead" CLI lingers
+    (observed: ``hermes --tui`` alive ~47 min at 4% CPU after terminal close — the #65998 class).
     """
     global _signal_watchdog_armed
     if _signal_watchdog_armed:
@@ -754,6 +777,9 @@ def _shutdown_agent_memory_provider(agent) -> None:
     # no-arg fallback for stubs / partially-initialised agents.
     _session_msgs = getattr(agent, '_session_messages', None)
     _sid = getattr(agent, "session_id", None) or "<unknown>"
+    # ``_session_messages`` is set on ``AIAgent.__init__`` and refreshed every turn via
+    # ``_persist_session``. Fall back to no-arg on test stubs / partially-initialised agents where the
+    # attribute is missing. See #15165.
     if isinstance(_session_msgs, list):
         logger.info("CLI cleanup calling memory shutdown for session %s with %d message(s)", _sid, len(_session_msgs))
         agent.shutdown_memory_provider(_session_msgs)
@@ -805,6 +831,7 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
         _arm_exit_watchdog()
         # Reset terminal input modes FIRST: teardown below can take seconds and a later
         # step raising must not skip the reset. No-op unless the TUI ran.
+        # See #36823.
         _reset_terminal_input_modes_on_exit()
 
         for step, swallow in _CLEANUP_STEPS:
@@ -824,6 +851,8 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
 
 def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
     # A handed-off session is owned by the gateway process — never finalize it here.
+    # The CLI must not finalize it on exit — that sets end_reason on a row the gateway reopened and is
+    # actively writing to, causing the handoff leg to vanish from session history (#88234).
     if session_id is not None and session_id in _handed_off_session_ids:
         return False
     if not _single_query_finalize_attempted_session_ids:
@@ -898,6 +927,16 @@ def _flush_one_shot_session_store(cli) -> None:
     One-shot runs get a single turn, so nothing retries a transiently-failed transcript
     flush, closes the session row, or drains token deltas the kanban ``os._exit(0)``
     path skips. Handed-off sessions are left alone.
+
+    - a turn whose in-loop ``_flush_messages_to_session_db`` failed under write-lock contention (e.g. a busy
+    multiplex gateway sharing state.db) was silently lost — the reply reached stdout and agent.log but the
+    resumed session's stored history never changed (#88583); - the resumed/created titled session row was
+    left dangling open (``ended_at``/``end_reason`` NULL) on every one-shot exit; - queued async
+    token-accounting deltas relied on interpreter-exit hooks, which the kanban SIGTERM path's
+    ``os._exit(0)`` skips entirely.
+    Idempotent and best-effort: ``_persist_session`` dedupes via the per-message ``_DB_PERSISTED_MARKER``
+    stamps (already-written turns are not re-written) and ``end_session`` no-ops on an already-ended row.
+    See #88234.
     """
     agent, session_id = _oneshot_agent_and_session(cli)
     if agent is None or not session_id or session_id in _handed_off_session_ids:
@@ -930,6 +969,8 @@ def _wait_for_oneshot_background_completions(cli) -> None:
 
     Waits on the whole registry: a one-shot process hosts one agent, and task_id
     filtering would skip processes registered before the session id settled.
+
+    See #90879.
     """
     from tools.process_registry import process_registry
 
@@ -971,6 +1012,11 @@ def _reset_terminal_input_modes_on_exit() -> None:
     Ctrl+C / SIGTERM / crashes bypass prompt_toolkit's unwind, leaving focus events and
     mouse reports as visible text in the next shell. Writes to stdout when it is the
     terminal, else /dev/tty (the TUI may have run with stdout redirected).
+
+    Called from ``_run_cleanup`` (atexit-registered + invoked on the normal / EOF / interrupt exit paths)
+    this covers normal quit, Ctrl+C and SIGTERM/SIGHUP. ``kill -9`` is uncatchable, and the kanban worker's
+    ``os._exit(0)`` path bypasses ``atexit``; neither runs this — but both are non-TTY / non-TUI, so there
+    is nothing to reset there. See #36823.
     """
     global _tui_input_modes_active
     if not _tui_input_modes_active:
@@ -1025,6 +1071,8 @@ from hermes_cli.worktree_ops import (  # noqa: F401  (mixins/tests/worktree_gc i
     _worktree_merge_cache_path,
 )
 
+# ============================================================================= Git Worktree Isolation
+# (#652) =============================================================================
 _active_worktree: Optional[Dict[str, str]] = None
 
 
@@ -1182,6 +1230,9 @@ def _query_osc11_background() -> str | None:
     answer DA1, so its reply proves our OSC 11 was processed — otherwise a late reply
     leaks into prompt_toolkit's stdin as typed text. Skipped over SSH (round-trip too
     slow; a late BEL reads as Ctrl+G). A 50 ms drain after TCSAFLUSH catches stragglers.
+
+    After the main read + TCSAFLUSH, a short drain window (50 ms) catches late-arriving bytes that slipped
+    past the flush — a race observed on VPS and container terminals under load (#40250).
     """
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         return None
@@ -1626,6 +1677,9 @@ def _cprint(text: str):
         loop = None
     try:
         # get_running_loop(): get_event_loop() warns from threads with no current loop.
+        # Use get_running_loop() instead of get_event_loop() to avoid the DeprecationWarning /
+        # RuntimeWarning emitted by Python 3.10+ when get_event_loop() is called from a thread that has no
+        # current event loop set (e.g. the process_loop background thread). Fixes #19285.
         current_loop = _asyncio.get_running_loop()
     except Exception:
         current_loop = None
@@ -1880,6 +1934,10 @@ def _hermes_call_output_screen_diff(
     Inflates ``previous_screen.height`` when the new screen is taller so pt skips the
     cursor move that stamps chrome into scrollback; on a corrupt previous paint buffer
     (tmux re-attach) retries once as a first paint instead of crashing the loop.
+
+    1. 2. On AttributeError/TypeError from a corrupt previous paint buffer (classic after tmux attach with
+    same width), retry once with ``previous_screen=None`` so pt first-paints cleanly instead of crashing the
+    event loop with ``'cell' object has no attribute 'char'``. See #26137.
     """
     try:
         if previous_screen is not None and hasattr(previous_screen, "height") and previous_screen.height < screen.height:
@@ -1962,6 +2020,11 @@ def _apply_bracketed_paste_timeout_patch() -> None:
 
 # CPR replies (``ESC[<row>;<col>R``) can race past the input parser under resize storms
 # and land as literal text; the ``^[[...R`` form appears when a filter stripped the ESC.
+# Cursor Position Report (CPR / DSR) response, format ``ESC[<row>;<col>R``. prompt_toolkit's _on_resize() +
+# renderer send ``ESC[6n`` queries to the terminal; under resize storms or tab switches the terminal's reply
+# can race past the input parser and end up in the input buffer as literal text (see issue #14692). Also
+# matches the visible-form ``^[[<row>;<col>R`` that appears when the ESC byte was stripped by a prior
+# filter.
 _DSR_CPR_ESC_RE = re.compile(r"\x1b\[\d+;\d+R")
 _DSR_CPR_VISIBLE_RE = re.compile(r"\^\[\[\d+;\d+R")
 _SGR_MOUSE_ESC_RE = re.compile(r"\x1b\[<\d+;\d+;\d+[Mm]")
@@ -1990,6 +2053,9 @@ def _is_ghostty_terminal(env: Optional[Mapping[str, str]] = None) -> bool:
 
     Ghostty gets ONLY modifyOtherKeys: its Kitty disambiguate mode strips Alt from
     Backspace (upstream bug), breaking backward-kill-word.
+
+    Ghostty implements modifyOtherKeys correctly (it then emits ``\\x1b[27;3;127~``, which the alias table
+    also maps). See #87630.
     """
     env = os.environ if env is None else env
     return (env.get("TERM_PROGRAM") or "").strip() == "ghostty" or (env.get("TERM") or "").strip().lower() == "xterm-ghostty"
@@ -2017,6 +2083,17 @@ def _enable_extended_enter_keys(output=None, env: Optional[Mapping[str, str]] = 
     stock prompt_toolkit barely maps (Ctrl+C once arrived as ``ESC[99;5u``), so
     ``install_modify_other_keys_aliases()`` must have run first. Ghostty gets only
     modifyOtherKeys. The exit reset pops both modes.
+
+    Under either protocol the terminal re-encodes modified keys as escape sequences — Kitty disambiguate
+    mode as ``ESC[<codepoint>;<mod>u`` (plus the Esc key as ``ESC[27u``), modifyOtherKeys=2 as
+    ``ESC[27;<mod>;<codepoint>~``. Stock prompt_toolkit 3.x maps almost none of these, which is why the CSI
+    >1u push was temporarily removed in 87074 (Ctrl+C arrived as ``ESC[99;5u`` and died, #56684).
+    ``install_modify_other_keys_aliases()`` (called at CLI startup from ``hermes_cli.pt_input_extras``) now
+    populates ``ANSI_SEQUENCES`` with the full Ctrl/Alt/Shift/multi-modifier and functional-key tables under
+    BOTH formats, so every existing key binding continues to fire — including Ctrl+C, which is handled by
+    prompt_toolkit's ``c-c`` binding (raw mode clears ISIG, so the kernel INTR path was never in play for
+    the CLI).
+    See #87630.
     """
     if not _terminal_supports_extended_enter_keys(env):
         return False
@@ -2057,7 +2134,10 @@ def _apply_backslash_line_continuation(text: str) -> str:
 
 
 def _preserve_ctrl_enter_newline() -> bool:
-    """Environments delivering Ctrl+Enter as bare LF (Windows Terminal, WSL, SSH, Ghostty): c-j must stay newline."""
+    """Environments delivering Ctrl+Enter as bare LF (Windows Terminal, WSL, SSH, Ghostty): c-j must stay newline.
+
+    See issue #22379.
+    """
     env = os.environ
     if (
         sys.platform == "win32"
@@ -2079,7 +2159,12 @@ def _preserve_ctrl_enter_newline() -> bool:
 
 
 def _bind_prompt_submit_keys(kb, handler, *, multiline_shortcuts_enabled: Optional[bool] = None) -> None:
-    """Enter always submits; c-j submits only with multiline shortcuts off AND where Ctrl+Enter isn't c-j."""
+    """Enter always submits; c-j submits only with multiline shortcuts off AND where Ctrl+Enter isn't c-j.
+
+    Even when the setting is disabled, environments where Ctrl+Enter is known to arrive as c-j (Windows,
+    WSL, SSH, Windows Terminal, Ghostty) keep c-j reserved for newline; otherwise Ctrl+Enter submits instead
+    of composing. See _preserve_ctrl_enter_newline() and issue #22379.
+    """
     if multiline_shortcuts_enabled is None:
         multiline_shortcuts_enabled = _cli_multiline_shortcuts_enabled()
     kb.add("enter")(handler)
@@ -2094,12 +2179,23 @@ def _disable_prompt_toolkit_cpr_warning(app) -> None:
 
 
 def _terminal_may_leak_cpr() -> bool:
-    """Suppress prompt_toolkit CPR queries (delayed replies leak into input); Windows keeps pt's default."""
+    """Suppress prompt_toolkit CPR queries (delayed replies leak into input); Windows keeps pt's default.
+
+    Delayed CPR replies (``ESC[<row>;<col>R`` / visible ``^[[<row>;<col>R``) leak into the status line and
+    can freeze input when the reply is slow (#13870 on SSH/slow PTYs). The same race hits local POSIX TTYs
+    under heavy subagent / status-line load — see ``tests/cli/test_cpr_local_leak.py``.
+    """
     return os.environ.get("PROMPT_TOOLKIT_NO_CPR", "") == "1" or sys.platform != "win32"
 
 
 def _build_cpr_disabled_output(stdout):
-    """Vt100_Output with ``enable_cpr=False`` (``from_pty()`` doesn't expose it), or None on failure."""
+    """Vt100_Output with ``enable_cpr=False`` (``from_pty()`` doesn't expose it), or None on failure.
+
+    prompt_toolkit's renderer sends ``ESC[6n`` (Device Status Report) to learn the cursor row before
+    painting in non-fullscreen mode; the terminal replies ``ESC[<row>;<col>R``. When that reply is delayed
+    it races into the display as raw ``^[[39;1R`` and can stall the renderer's pending-CPR future (#13870;
+    also local POSIX under heavy subagent load).
+    """
     try:
         import io as _io
         from prompt_toolkit.output.vt100 import Vt100_Output, _get_size
@@ -2370,7 +2466,15 @@ def save_config_value(key_path: str, value: any) -> bool:
 
 
 def _normalize_moa_model(model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    """``moa:<preset>`` -> ``("moa", preset)`` (same routing as ``/moa``); anything else -> ``(None, model)``."""
+    """``moa:<preset>`` -> ``("moa", preset)`` (same routing as ``/moa``); anything else -> ``(None, model)``.
+
+    Returns ``("moa", "<preset>")`` when *model* selects the MoA virtual provider, otherwise ``(None,
+    model)`` unchanged. This gives non-interactive ``hermes chat -Q -m moa:<preset>`` the same routing the
+    interactive ``/moa`` command and the model picker already use: ``resolve_runtime_provider`` handles
+    ``requested_provider == "moa"`` and ``agent_init`` builds the MoAClient off ``provider == "moa"``.
+    Without this the raw ``moa:<preset>`` string is sent to the real provider and rejected with a 401/400
+    "model not supported" (#56828).
+    """
     if isinstance(model, str) and model.strip().lower().startswith("moa:"):
         preset = model.strip().split(":", 1)[1].strip()
         if preset:
@@ -2381,7 +2485,12 @@ _split_model_config_default = _lazy_shim("hermes_cli.config", "split_model_confi
 
 
 class _VoiceInputMessage:
-    """Sentinel for voice-transcribed input so the concise voice prefix never applies to typed text."""
+    """Sentinel for voice-transcribed input so the concise voice prefix never applies to typed text.
+
+    Distinguishes STT output from manually typed text while voice mode is active, so the
+    concise-voice-response prefix is applied only to messages that actually came from the microphone
+    (#65827).
+    """
 
     __slots__ = ("text",)
 
@@ -2603,6 +2712,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 _startup_api_key_override = _startup_route.api_key
         # ``moa:<preset>`` selects the MoA virtual provider before provider resolution so the
         # real provider never sees the unknown model; the prefix wins over --provider.
+        # A ``moa:<preset>`` model string selects the MoA virtual provider in one shot (parity with
+        # interactive ``/moa`` and the model picker). See #56828.
         _moa_provider_override, self.model = _normalize_moa_model(self.model)
         _env_mt = os.environ.get("HERMES_MAX_TOKENS")
         _mt = _model_config.get("max_tokens")
@@ -2617,6 +2728,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._model_is_default = not model and not _config_model
 
         # --api-key wins; otherwise a URL-bearing startup alias carries its own credential.
+        # See #28660.
         self._explicit_api_key = api_key or _startup_api_key_override or None
         self._explicit_base_url = base_url
 
@@ -2627,6 +2739,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         )
         # `--provider <custom>` without `-m` uses that entry's default_model, else the global
         # default goes to the custom endpoint and the compressor gets the wrong context length.
+        # Explicit `-m` still wins. See #86978.
         if not model and provider:
             try:
                 from hermes_cli.runtime_provider import _get_named_custom_provider
@@ -2705,6 +2818,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self.prefill_messages = _load_prefill_messages(_resolve_prefill_messages_file(CLI_CONFIG))
 
         # Per-model override > global reasoning_effort.
+        # Reasoning config (OpenRouter reasoning effort level) Per-model override > global reasoning_effort
+        # — resolved through the shared chokepoint in hermes_constants (Closes #21256).
         from hermes_constants import resolve_reasoning_config
         self.reasoning_config = resolve_reasoning_config(CLI_CONFIG, self.model)
         # --reasoning wins for this run only (never persisted); unparseable -> warn and ignore.
@@ -2771,6 +2886,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         except Exception as e:
             # Without a store the transcript is NOT persisted while the chat looks healthy,
             # so surface it prominently rather than only logging.
+            # #41386: a failed session store means the transcript is NOT persisted to state.db — the live
+            # chat looks healthy but resume later shows a truncated/empty session. A buried log line is not
+            # enough; surface it prominently so the user knows persistence is off for this run and can fix
+            # the store before relying on resume.
             self._session_db_unavailable = True
             logger.warning("Failed to initialize SessionDB — session will NOT be indexed for search: %s", e)
             try:
@@ -2798,6 +2917,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._terminal_io_broken = False  # stdout EIO: freeze UI paints instead of spinning
         self._delete_session_on_exit = False  # /exit --delete
         # /update: relaunch() runs from run() after prompt_toolkit restored terminal modes.
+        # /exit --delete: when True, the current session's SQLite history and on-disk transcripts are
+        # deleted during shutdown. Set by process_command() when the user runs /exit --delete or /quit
+        # --delete. Ported from google-gemini/gemini-cli#19332.
         self._pending_relaunch: list[str] | None = None
         self._last_ctrl_c_time = 0
         # Blocking-prompt overlays (clarify / sudo / approval / slash-confirm / model picker).
@@ -2889,6 +3011,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 surface=surface,
                 config=self.config,
                 # Writer identity: a re-claim by this process replaces its own entry.
+                # See #94595.
                 metadata={"live_session_id": str(self.session_id)},
             )
         except Exception as exc:
@@ -3143,7 +3266,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
         # A bare `/resume` prompt is one-shot: any other command disarms it so a later
         # number isn't swallowed as a stale selection.
+        # See #34584.
         if canonical not in {"resume", "sessions"}:
+            # Armed when a bare `/resume` prints the recent-sessions list so the very next bare numeric
+            # input (e.g. `3`) resolves to that session. Holds the exact list used for index resolution;
+            # one-shot (cleared on the next submitted input, whether it's the selection or anything else).
+            # See #34584.
             self._pending_resume_sessions = None
 
         entry = self._slash_handler(canonical)
@@ -3202,6 +3330,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                 timeout=30, env=build_subprocess_env(),
                 creationflags=windows_hide_flags(),  # no console flash on Windows (#56747)
             )
+            # See #56747.
             output = result.stdout.strip() or result.stderr.strip()
             if output:
                 from agent.redact import redact_sensitive_text
@@ -3333,6 +3462,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         Busy-time input lands in ``_interrupt_queue`` and is only drained by the explicit
         interrupt path; a turn that finishes naturally would otherwise strand it and the
         CLI appears to hang. Never raises.
+
+        Called once at the end of every turn from ``process_loop``'s ``finally`` block. Catches and swallows
+        ``Exception`` because the drain must never break the main loop. (#20271)
         """
         try:
             while not self._interrupt_queue.empty():
@@ -3351,6 +3483,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     # Inline tokens that bypass the destructive-slash confirmation modal (scripting, or
     # when the modal can't be marshaled onto the app loop).
+    # A general escape hatch for non-interactive use (scripting/automation) and for the degraded path where
+    # the modal can't be marshaled onto the app loop — lets users self-serve without flipping
+    # approvals.destructive_slash_confirm in config. (Native Windows now drives the modal normally — see
+    # #33961.)
     _DESTRUCTIVE_SKIP_TOKENS = frozenset({"now", "--yes", "-y"})
 
     def _tui_process_loop(self):
@@ -3385,6 +3521,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
     def _tui_unwrap_input(self, user_input):
         """Unwrap ``_VoiceInputMessage`` / ``_SeededQueryMessage`` -> ``(text_or_tuple, is_voice_input, is_seeded_query)``."""
+        # Voice-transcribed messages arrive wrapped in a sentinel so only genuine STT output gets the voice
+        # prefix (#65827).
         is_voice_input = isinstance(user_input, _VoiceInputMessage)
         if is_voice_input:
             user_input = user_input.text
@@ -3487,6 +3625,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         if self._last_turn_interrupted:
             self._recover_terminal_after_interrupt()
 
+        # Re-queue any messages that arrived in _interrupt_queue while the agent was running and were never
+        # claimed by the explicit interrupt path. See _drain_interrupt_queue_to_pending_input for the full
+        # rationale. Regression of #17666 / #18760 — the drain block from the original PR #17939 was
+        # deferred as "worth its own review" and never re-landed (#20271).
         self._drain_interrupt_queue_to_pending_input()
 
         # /goal continuation (queued user input still preempts), then /loop tick completion.
@@ -3529,6 +3671,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         with suppress(Exception):
             logger.debug("Received signal %s, triggering graceful shutdown", signum)
         # Arm the backstop IMMEDIATELY: if the unwind wedges, _run_cleanup never arms its own.
+        # Shutdown intent is now unambiguous — arm the exit backstop IMMEDIATELY, before the graceful unwind
+        # below. If any step of that unwind wedges (main thread parked in a syscall, prompt_toolkit teardown
+        # never returning), _run_cleanup never runs and would never arm its own watchdog — leaving a "dead"
+        # CLI alive for minutes (#65998 class).
+        # Arm the exit backstop now that shutdown intent is unambiguous — covers wedges in the unwind below
+        # that would otherwise leave the process alive with no watchdog (#65998 class).
         _arm_exit_watchdog_on_shutdown_signal()
         if self._agent_running:
             _interrupt_agent_for_signal(self.agent, signum)
@@ -3616,6 +3764,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
 
         # Redaction is ON by default; be loud when the operator turned it off.
         with suppress(Exception):
+            # The redactor snapshots its state at import time so any toggle now won't affect the running
+            # process — we just want the operator to see that they're running without the safety net. See
+            # #17691.
             _redact_raw = os.getenv("HERMES_REDACT_SECRETS", "true")
             if _redact_raw.lower() not in {"1", "true", "yes", "on"}:
                 self._console_print(
@@ -3690,6 +3841,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             # 0 (default) avoids fighting terminal auto-scroll in non-fullscreen mode.
             refresh_interval=float(CLI_CONFIG.get("display", {}).get("cli_refresh_interval", 0)),
             # Erase the bottom chrome on exit instead of freezing a copy into scrollback.
+            # Without this, prompt_toolkit's render_as_done teardown repaints the chrome one last time and
+            # leaves it stranded above the exit summary — so a dead status bar + empty prompt sit between
+            # the conversation transcript and the "Resume this session" block, and stack with the next
+            # session's UI on resume (#38252). The actual conversation transcript is printed through
+            # patch_stdout into normal scrollback and is unaffected; only the managed chrome is erased.
+            # Applies to every exit path (/exit, /quit, EOF, Ctrl+C).
             erase_when_done=True,
             **extra_kw,
         )
@@ -3760,6 +3917,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # paint, pushing chrome into scrollback where a column-shrink reflows it into
         # duplicates. Wrapping _output_screen_diff keeps its reserve-space branch from firing.
         try:
+            # Background: prompt_toolkit's renderer (renderer.py L232-242) explicitly moves the cursor to
+            # the bottom of the canvas after painting "to make sure the terminal scrolls up, even when the
+            # lower lines of the canvas just contain whitespace". In non-fullscreen mode this scrolls chrome
+            # content (status bar, input rules) into terminal scrollback on every render. When the terminal
+            # column-shrinks, the emulator reflows the previously rendered full-width rows into multiple
+            # narrower rows that get pushed up — leaving ghost duplicates AND polluting scrollback. Same
+            # issue as pt #29 (open since 2014), #1675, #1933. Surgical fix: wrap _output_screen_diff so
+            # that when its internal `if current_height > previous_screen.height` branch fires (the one that
+            # does the bottom-cursor-move), we make it fall through by inflating previous_screen.height
+            # first.
             import prompt_toolkit.renderer as _pt_renderer
             from prompt_toolkit.renderer import _output_screen_diff as _orig_osd
 
@@ -3791,12 +3958,22 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         try:
             with patch_stdout():
                 try:
+                    # run_in_terminal() may return either: • a coroutine / Future (prompt_toolkit ≥ 3.0) —
+                    # must be scheduled via ensure_future so the coroutine is actually awaited; calling it
+                    # bare would leave it unawaited and silently drop the output (fixes #23185 Bug A). •
+                    # None (some mocks / older PT builds) — just call the inner function directly since PT
+                    # already executed it synchronously. Do NOT fall back to a bare _pt_print when
+                    # ensure_future raises, because run_in_terminal already invoked the lambda in that case
+                    # (the mock path), which would double-print the line.
                     import asyncio as _aio
                     _aio.get_running_loop().set_exception_handler(self._tui_suppress_closed_loop_errors)
                 except Exception:
                     pass  # no running loop -- nothing to patch
                 # Record that the app enables focus reporting + mouse tracking so _run_cleanup
                 # resets them; extended key modes are popped by the same reset.
+                # When multiline shortcuts are on, also ask supported terminals (e.g. iTerm2) to report
+                # modified keys distinctly (kitty protocol + modifyOtherKeys); the cleanup reset pops both
+                # modes. See #36823.
                 _mark_tui_input_modes_active()
                 if self._tui_multiline_shortcuts:
                     _enable_extended_enter_keys(app.output)
@@ -4095,12 +4272,26 @@ def _install_single_query_signal_handlers(cli):
         # Kanban: a non-daemon worker blocked in _wait_for_process survives KeyboardInterrupt
         # and the dispatcher sees 'running' forever, so os._exit(0) (SIGALRM deadman guards
         # a blocking flush). That skips atexit + the token-drain hook, hence the explicit flush.
+        # Kanban worker exit path (#28181): SIGTERM hits a dispatcher-spawned worker that's likely in a
+        # non-daemon thread waiting on a child subprocess in _wait_for_process. Raising KeyboardInterrupt
+        # only unwinds the main thread; the worker thread keeps running, the process gets reparented to
+        # init, and the dispatcher's _pid_alive check returns True forever — task stuck in 'running'
+        # indefinitely. Skip the controlled-unwind dance and call os._exit(0) so the kernel reclaims the PID
+        # immediately and detect_crashed_workers can reclaim the stale claim on the next tick. Flush logging
+        # + stdout/stderr first so the final debug trace isn't lost; SIGALRM deadman guards the flush
+        # against any rare blocking-I/O case (the reporter measured flush in <1ms; the alarm is a failsafe,
+        # not the common path).
         if os.environ.get("HERMES_KANBAN_TASK"):
             with suppress(Exception):
                 if hasattr(_signal, "SIGALRM"):
                     _signal.signal(_signal.SIGALRM, lambda *_: os._exit(0))
                     _signal.alarm(5)
             with suppress(Exception):
+                # Durable flush FIRST: memory-provider shutdown inside _run_cleanup can issue aux-LLM calls,
+                # and nothing after it may fail in a way that loses the turn (#88583).
+                # os._exit(0) skips atexit AND SessionDB's token-drain hook, so flush + finalize the session
+                # store here or the worker's turn (and its usage deltas) never become durable (#88583 /
+                # #50881 class). Best-effort under the SIGALRM deadman above.
                 _flush_one_shot_session_store(cli)
             _flush_logging_and_stdio()
             os._exit(0)
@@ -4269,6 +4460,13 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
         return cli.run()
     cli._single_query_mode = True  # agent waits the full MCP cold-start before its only tool snapshot
     # No user can answer approval prompts: the approval gate takes the deterministic path.
+    # One-shot mode: no between-turns MCP late-binding refresh, so the agent must wait the full MCP
+    # cold-start bound before its first (and only) tool snapshot. See #51316.
+    # Mark single-query for the approval gate. cli.py sets HERMES_INTERACTIVE earlier for interactive sudo
+    # prompts, but a -q run has NO user waiting to answer approval prompts. The gate reads this marker (via
+    # gateway.session_context.get_session_env, which falls back to os.environ when the session-context layer
+    # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
+    # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
         sys.exit(1)

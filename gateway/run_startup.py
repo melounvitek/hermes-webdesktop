@@ -198,7 +198,11 @@ class GatewayStartupMixin:
         flood-control sleep must not freeze inbound on every platform): same bounded wait as the
         resume gate, sends finish in the background on timeout. The ledger claim + ``resume_pending``
         clear run INLINE before the send task exists — deferring it let a hung notification expire the
-        gate with zero rows claimed, so answered turns were replayed AND redelivered."""
+        gate with zero rows claimed, so answered turns were replayed AND redelivered.
+
+        ``_send_restart_notification`` and ``_redeliver_pending_obligations`` used to be awaited inline
+        *before* ``_finish_startup_restore`` released the gate. See #91969.
+        """
         from gateway.run import _clear_planned_restart_notification, _startup_restore_drain_timeout_secs
         claimed = await self._claim_pending_obligations()
 
@@ -249,7 +253,13 @@ class GatewayStartupMixin:
         work, no sends). Must run INLINE BEFORE ``_schedule_resume_pending_sessions`` and the
         abandonable boot-send task: these sessions already produced their answer, so the resume path
         must not re-run (re-pay for) the turn however long the sends take. Mid-send / rejected rows
-        carry a visible recovered-reply marker (gateway/delivery_ledger.py). Returns the rows."""
+        carry a visible recovered-reply marker (gateway/delivery_ledger.py). Returns the rows.
+
+        A session with a recoverable obligation already produced its answer — the turn completed and only
+        delivery is owed — so clearing ``resume_pending`` here prevents the resume path from re-running (and
+        re-paying for) a turn whose output we hold, regardless of how long the sends ahead of redelivery
+        take (#91969).
+        """
         try:
             from gateway.delivery_ledger import ledger_enabled, sweep_recoverable
             if not await asyncio.to_thread(ledger_enabled):
@@ -275,6 +285,8 @@ class GatewayStartupMixin:
         if not claimed:
             return []
         # Clear resume_pending for EVERY claimed row before any send: the answer is in the ledger.
+        # Claiming already spent one of the row's redelivery attempts — the answer is in the ledger, so the
+        # resume path must never re-run these turns (#91969).
         await self._clear_resume_pending_for_claimed_obligations(claimed)
         return claimed
 
@@ -507,7 +519,10 @@ class GatewayStartupMixin:
 
     def _start_loop_liveness_guards(self, loop: asyncio.AbstractEventLoop) -> None:
         """Arm the selector floor and out-of-loop watchdog before adapters. Disabled entirely with
-        ``gateway.loop_watchdog: false`` in config.yaml (config-only knob)."""
+        ``gateway.loop_watchdog: false`` in config.yaml (config-only knob).
+
+        See #69089.
+        """
         from gateway.run import _arm_loop_floor_timer, start_loop_liveness_watchdog
         config = getattr(self, "config", None)
         if config is not None and not getattr(config, "loop_watchdog", True):
@@ -600,7 +615,10 @@ class GatewayStartupMixin:
 
     def _start_loop_heartbeat_task(self) -> None:
         """Start the loop-liveness heartbeat task (idempotent, best-effort). An asyncio task so a
-        frozen loop stops refreshing ``state/gateway.heartbeat``; cancelled with the others in stop()."""
+        frozen loop stops refreshing ``state/gateway.heartbeat``; cancelled with the others in stop().
+
+        See #66892.
+        """
         with _log_suppressed(logging.DEBUG, "Failed to start gateway loop heartbeat", exc_info=True):
             _existing_hb = getattr(self, "_loop_heartbeat_task", None)
             if _existing_hb is not None and not _existing_hb.done():
@@ -628,6 +646,9 @@ class GatewayStartupMixin:
         """Enable faulthandler (stderr or a log file) plus the SIGUSR2 stack-dump hook."""
         # sys.stderr may be None (Windows VBS / pythonw / detached service): fall back to a log file.
         try:
+            # Enable faulthandler for stack dumps on freezes/crashes (#70344). Falls back to a log file when
+            # sys.stderr is None (Windows VBS / pythonw / detached service) — otherwise the gateway would
+            # die here and take every adapter offline. See #71671.
             faulthandler.enable()
         except (RuntimeError, ValueError, OSError):
             with _log_suppressed(logging.DEBUG, "faulthandler.enable() unavailable", exc_info=True):
@@ -666,6 +687,7 @@ class GatewayStartupMixin:
         # Warn prominently when redaction is opted out; the redactor snapshots its state at import time,
         # so this line is the source of truth for the process lifetime.
         with suppress(Exception):
+            # Redaction status: ON by default (#17691).
             _redact_raw = os.getenv("HERMES_REDACT_SECRETS", "true")
             if _redact_raw.lower() in {"1", "true", "yes", "on"}:
                 logger.info(
@@ -846,6 +868,7 @@ class GatewayStartupMixin:
                 )
         # Stuck-loop detection: a session active across 3+ consecutive restarts is auto-suspended.
         with _log_suppressed(logging.DEBUG, "Stuck-loop detection failed: %s"):
+            # Auto-suspend it so the user gets a clean slate on the next message. See #7536.
             stuck = self._suspend_stuck_loop_sessions()
             if stuck:
                 logger.warning("Auto-suspended %d stuck-loop session(s)", stuck)
@@ -865,6 +888,10 @@ class GatewayStartupMixin:
                 continue
             # Multiplex: a platform enabled in the shared config.yaml may hold its token only in a
             # secondary profile's .env; an empty primary would queue a reconnect loop that never heals.
+            # Starting that primary adapter with an empty token fails immediately and queues an infinite
+            # reconnect loop that can never heal (#64674). Secondary profiles still start their own adapters
+            # under _profile_runtime_scope with the real token -- skip the empty primary instead of failing
+            # loudly.
             if _multiplex_on and not _platform_has_bot_credential(platform, platform_config):
                 logger.info(
                     "Skipping %s on default profile: no bot credential in this "
@@ -1033,6 +1060,8 @@ class GatewayStartupMixin:
             self._platform_lock_takeover_on_start = False
         # A platform skipped on the primary should have been picked up by a secondary owning the token;
         # if none did it is enabled yet silently unserved — say so loudly.
+        # If none did, the platform is enabled in config.yaml yet silently unserved — surface it loudly so
+        # the operator sees a config problem instead of a quiet dead channel (#64674 follow-up).
         for _skipped in _multiplex_skipped_platforms:
             if not any(_skipped in _profile_map for _profile_map in self._profile_adapters.values()):
                 logger.warning(
@@ -1059,6 +1088,14 @@ class GatewayStartupMixin:
             # Mixed (some fatal, some transient): exiting 78 would take the gateway PERMANENTLY down
             # over a blip. Log the fatal side loudly and fall through to the degraded/retry path.
             logger.error(
+                # WhatsApp enabled but never paired) while others hit merely transient errors (e.g. Telegram
+                # TimedOut during polling startup). Exiting with GATEWAY_FATAL_CONFIG_EXIT_CODE here is
+                # wrong in both supervision worlds: under supervisors that honor the exit-78 contract
+                # (systemd RestartPreventExitStatus, s6 finish→125 since #51228) the gateway goes
+                # PERMANENTLY down over a network blip; under anything else it crash-loops. Either way the
+                # retryable platforms never get their retry. Log the fatal side loudly, then fall through to
+                # the degraded/retry path below: the reconnect watcher recovers the retryable platforms; the
+                # non-retryable ones remain fatal-parked and visible in runtime status.
                 "%d platform(s) fatally misconfigured and parked: %s. "
                 "Staying alive so retryable platforms can recover.",
                 len(startup_nonretryable_errors), "; ".join(startup_nonretryable_errors),
@@ -1077,6 +1114,10 @@ class GatewayStartupMixin:
         # No adapter for any enabled platform: fleet nodes share one config.yaml but hold a subset of
         # credentials, so degrade gracefully.
         logger.warning(
+            # Fall through to the normal "running" state — reconnect watcher takes it from here. In fleet
+            # deployments the same config.yaml is shared across nodes that may only have credentials for a
+            # subset of platforms. Rather than failing hard, degrade gracefully and allow cron jobs to run
+            # (#5196).
             "No adapter could be created for any of the %d configured platform(s). "
             "Check that required dependencies are installed and credentials are set. "
             "Gateway will continue for cron job execution.", enabled_platform_count,
@@ -1128,6 +1169,8 @@ class GatewayStartupMixin:
             self._booted_from_restart = True
         # Boot-path adapter.send() calls must not pin the inbound restore gate (a Telegram flood-
         # control sleep here once froze every platform).
+        # Restart notification, home-channel startup notice, and obligation redelivery all call
+        # adapter.send(). Bound them the same way _finish_startup_restore bounds resume turns. See #91969.
         await self._await_startup_boot_sends(
             planned_restart_notification_pending=_planned_restart_notification_pending(),
         )
@@ -1136,6 +1179,7 @@ class GatewayStartupMixin:
         self._schedule_resume_pending_sessions()
         await self._finish_startup_restore()
         # Surface state.db init failures to messaging platforms before the user loses data.
+        # See #88235.
         await self._send_session_db_warning_notifications()
         # Resume recovered process watchers. Detach the batch atomically (fresh list, not clear(): a
         # concurrent append during the yield must not be lost); yield every 100 to keep the loop live.
@@ -1349,6 +1393,8 @@ class GatewayStartupMixin:
             try:
                 store = getattr(self.async_session_store, "_store", self.async_session_store)
                 resolver = getattr(store, "_resolve_profile_for_key", None)
+                # Resolve the bound text channel's channel_prompt so voice input gets the same per-channel
+                # context as typed messages (#50149).
                 if callable(resolver):
                     resolved = resolver(dest.source)
                     if isinstance(resolved, str) and resolved.strip():

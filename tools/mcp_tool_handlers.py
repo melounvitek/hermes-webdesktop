@@ -162,7 +162,14 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
 
 def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
     """Transport reconnect + one retry on session expiry; None to fall through. Skips
-    ``handle_401``: the token is valid, only the server-side session is stale."""
+    ``handle_401``: the token is valid, only the server-side session is stale.
+
+    Unlike :func:`_handle_auth_error_and_retry`, this does **not** call the OAuth manager's ``handle_401`` —
+    the access token is still valid, only the server-side session state is stale. Setting
+    ``_reconnect_event`` causes the server task's lifecycle loop to tear down the current
+    ``streamablehttp_client`` + ``ClientSession`` and rebuild them, reusing the existing OAuth provider
+    instance. See #13383.
+    """
     srv = _lookup_reconnectable_server(server_name, require_loop=True) if _is_session_expired_error(exc) else None
     if srv is None:
         return None
@@ -182,7 +189,13 @@ class _StdioChildExited(RuntimeError):
 def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry_call, op_description: str):
     """Respawn a dead stdio child and retry once; None if not our error. Never spawns itself: it
     sets ``_reconnect_event`` and waits, so spawn frequency stays governed by ``run()``'s
-    rapid-drop budget. Single-shot: a child that dies again reports and stops."""
+    rapid-drop budget. Single-shot: a child that dies again reports and stops.
+
+    Why retrying here cannot hot-cycle respawns: this function never spawns anything. It sets
+    ``_reconnect_event`` (one signal, same as before) and waits for the server task to publish a fresh
+    session. Spawn frequency stays governed entirely by ``run()``'s rapid-drop budget, which parks a
+    transport that keeps dropping without proving healthy (#62212).
+    """
     if not isinstance(exc, _StdioChildExited):
         return None
     reconnected = False
@@ -241,7 +254,13 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
 async def _track_inflight_rpc(server: Any, server_name: str, op: str):
     """Register the running RPC so teardown can fail it fast. A deliberate teardown
     (``_reconnecting`` set first) turns the cancel into a retryable RuntimeError; external
-    cancels propagate unchanged. Doubles without ``_inflight_tasks`` skip tracking."""
+    cancels propagate unchanged. Doubles without ``_inflight_tasks`` skip tracking.
+
+    Every user-visible request family wraps its RPC in this context (#48069 salvage). If a deliberate
+    reconnect/shutdown teardown cancels the task (``_fail_inflight_calls`` sets ``_reconnecting`` first),
+    the cancel is converted into a clean retryable RuntimeError instead of a raw CancelledError; external
+    cancels (caller timeout, user interrupt) propagate unchanged.
+    """
     inflight, task = getattr(server, "_inflight_tasks", None), asyncio.current_task()
     tracked = task is not None and inflight is not None
     if tracked:
@@ -263,6 +282,8 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
     child must not hold the slot for the full timeout) and mid-call (race against
     ``_watch_stdio_children``). Both raise :class:`_StdioChildExited` for the respawn path, which
     owns the reconnect signal. callable()/``is True`` because MagicMock attributes are truthy."""
+    # Fast-fail (#81995): a stdio subprocess that is already dead must not own this call slot — fail
+    # immediately instead of waiting out the full tool timeout on a transport nobody will ever answer.
     _stdio_dead = getattr(server, "_stdio_children_dead", None)
     if callable(_stdio_dead) and _stdio_dead() is True:
         raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' had already exited when the call was dispatched")
@@ -271,6 +292,8 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
         return await _call_coro if asyncio.iscoroutine(_call_coro) else _call_coro
+    # Fast-fail machinery (#81995): the RPC races a stdio-children watcher so a dead subprocess fails the
+    # call immediately instead of riding out the full tool timeout.
     rpc_task = asyncio.ensure_future(_call_coro)
     watch_task = asyncio.ensure_future(_watch_children())
     try:
@@ -302,6 +325,12 @@ def _render_content_blocks(result, server_name: str) -> Tuple[str, int]:
     (whitespace-only text and drop notices excluded) that the structuredContent arbitration uses."""
     parts: List[str] = []
     usable_parts = 0
+    # MCP tool results can also include ImageContent blocks (screenshot / Blockbench / Playwright etc.);
+    # cache those via the gateway's image-cache helper so they flow through Hermes' MEDIA: tag convention
+    # and out to messaging adapters that render images natively. Without this, image blocks were silently
+    # dropped and the agent got an empty response. Distilled from #17915 (c3115644151) and #10848
+    # (gnanirahulnutakki), both too stale to cherry-pick. #10848's approach (integrate with Hermes' MEDIA
+    # tag + cache_image_from_bytes) was the cleaner of the two — plugs into existing infrastructure.
     for block in (result.content or []):
         if getattr(block, "text", None):
             parts.append(strip_unicode_tags(block.text))
@@ -328,6 +357,23 @@ def _render_content_blocks(result, server_name: str) -> Tuple[str, int]:
 def _capped_structured_content(result):
     """``structuredContent`` (or None); over the hard cap it degrades to the head+tail
     truncated JSON string (multi-MB JSON flood guard)."""
+    # Hard-cap pathological payloads before they propagate (#56059); ordinary large results pass untouched
+    # to the spillover layer.
+    # content and structuredContent are ALTERNATIVES — never both forwarded (ported from
+    # MoonshotAI/kimi-code#3234). Spec-following servers already render their data into content (the
+    # verbatim dual-emit SHOULD, or a faithful human reorganisation), so forwarding both sent the same
+    # information to the model twice. content wins whenever it rendered anything usable; there is no
+    # reliable signal that the structured payload is richer than what the server put in content (semantic
+    # equality misses faithful reorganisations, size ratios misjudge both directions), so no heuristic is
+    # attempted. structuredContent fills in only when the content blocks rendered effectively empty, which
+    # keeps structuredContent-only servers working. Server-level `_meta` is also surfaced (ported from
+    # MoonshotAI/kimi-code#2596): servers return namespaced metadata there (validated contracts,
+    # browser-handoff payloads, ...) that was previously invisible to the agent. Protocol-reserved keys are
+    # dropped first (kimi-code#2600) — per the MCP spec's key-name rules a prefix is reserved when a
+    # `modelcontextprotocol` or `mcp` label is followed by at least one more label (e.g.
+    # `modelcontextprotocol.io/...`, `tools.mcp.com/...`); those carry host/protocol plumbing, not
+    # model-facing data. Unprefixed and vendor-namespaced keys (`com.example.mcp/...`) pass through — their
+    # semantics belong to the server.
     structured = mcp_field(result, "structured_content", "structuredContent")
     try:
         as_json = json.dumps(structured, ensure_ascii=False, default=str) if structured is not None else ""
@@ -354,6 +400,9 @@ def _render_call_tool_result(result, server_name: str) -> str:
         return json.dumps({"result": text_result}, ensure_ascii=False)
     # Key order is part of the output: "result" leads when there is text, otherwise "_meta" precedes it.
     payload: Dict[str, Any] = {"result": text_result} if text_result else {}
+    # Cap structuredContent too — a malicious server could flood context via a multi-MB JSON payload
+    # (#56059). When the serialized form exceeds the hard cap, replace it with the truncated string (head +
+    # tail preserved) so it degrades gracefully instead of flooding downstream.
     if structured is not None:
         payload["structuredContent" if text_result else "result"] = structured
     if meta is not None:

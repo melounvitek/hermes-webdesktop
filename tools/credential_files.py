@@ -77,6 +77,11 @@ def register_credential_file(relative_path: str, container_base: str = "/root/.h
     if not resolved.is_file():
         logger.debug("credential_files: skipping %s (not found)", resolved)
         return False
+    # Master credential stores are never mountable, even though they sit inside HERMES_HOME and therefore
+    # pass the containment check above. Fails CLOSED: if the canonical guard can't be consulted we refuse
+    # the mount rather than risk bind-mounting auth.json into a sandbox. The import lives at module top (no
+    # circular-import concern — file_safety is stdlib-only); the sentinel + logger.exception keep guard
+    # failures debuggable instead of silently swallowed (#67665).
     if get_read_block_error is None:
         logger.error("credential_files: refusing %r — agent.file_safety could not be "
                      "imported, so the master-store deny-list cannot be consulted", relative_path)
@@ -243,7 +248,11 @@ _CACHE_DIRS: list[tuple[str, str]] = [
     ("cache/spillover", "cache/spillover"),  # oversized tool results; host side is canonical
     # Flat top-level desktop staging dirs (tui_gateway attach RPCs; no legacy alias),
     # mounted so vision/file tools in sandboxes reach uploads and dropped files.
+    # Mount it so vision can reach uploads inside sandbox containers (#69575). No legacy alias exists, so
+    # both tuple slots are ``images``.
     ("images", "images"),
+    # Mount it so the agent's file tools can read dropped binaries (zip/pdf/...) from inside sandbox
+    # containers instead of dangling host paths (#76577).
     ("attachments", "attachments"),
 ]
 
@@ -260,6 +269,12 @@ def _cache_dir_roots(container_base: str, *, create_missing: bool) -> Iterator[T
             # would dangle for the container's life: create it now (empty bind mount is free).
             # get_hermes_dir already picked new-vs-legacy, so this can't shadow a legacy dir.
             try:
+                # Create missing staging dirs instead of skipping them: Docker snapshots this mount list at
+                # container CREATION, so a dir that appears later (first desktop attachment, first clipboard
+                # image) would dangle for the whole life of a persistent container (#76577). An empty
+                # bind-mounted dir costs nothing; a missing mount costs the feature. get_hermes_dir()
+                # already resolved new-vs-legacy layout, so creating its answer cannot shadow a populated
+                # legacy dir.
                 host_dir.mkdir(parents=True, exist_ok=True)
             except OSError:
                 continue  # unwritable home (tests, RO mounts) — skip as before
@@ -304,6 +319,12 @@ def to_agent_visible_cache_path(host_path: str, container_base: str = "/root/.he
     ``/root/.hermes``; ssh/daytona/vercel_sandbox under ``~/.hermes``; plugin backends declare
     ``cache_path_base`` (None = host paths stay correct); local/singularity/unknown unchanged
     (Apptainer auto-binds the host home, so translation would dangle).
+
+    * docker / modal — bind-mounted (docker) or per-file-synced (modal) at ``/root/.hermes`` (the
+    *container_base* default). * ssh / daytona / vercel_sandbox — file-synced under the remote user's home;
+    ``~/.hermes`` is shell-expanded by the remote shell, so tool commands resolve it regardless of the
+    actual remote home. Previously these backends synced the bytes but still rendered the dangling host path
+    (#76577 gap).
     """
     backend = (os.environ.get("TERMINAL_ENV") or "local").strip().lower()
     if backend in _HOME_RELATIVE_BACKENDS:

@@ -68,6 +68,8 @@ VIDEO_GENERATE_SCHEMA: Dict[str, Any] = {
             },
             # Capability-gated args are added by _build_dynamic_video_schema; never statically.
         },
+        # NOTE (schema diet, #95681): image_url / reference_image_urls / negative_prompt / audio / seed /
+        # upscale are added per-capability by _build_dynamic_video_schema.
         "required": ["prompt"],
     },
 }

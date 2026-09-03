@@ -78,6 +78,8 @@ class SpecifyOutcome:
 
 
 def _truncate(text: str, limit: int) -> str:
+    # Stored history is untrusted for display — remove escape sequences and control chars so a recap line
+    # can't clear the screen / retitle the window when echoed to a terminal (openai/codex#31494 bug class).
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
@@ -154,6 +156,9 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
         log.debug("%s: auxiliary client import failed: %s", verb, exc)
         return None, "auxiliary client unavailable"
     try:
+        # Route through call_llm so auxiliary.triage_specifier.* config (provider/model/base_url,
+        # extra_body, reasoning_effort, retries) all apply — the direct-create path dropped extra_body
+        # (#35566).
         resp = call_llm(
             task=aux_task,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

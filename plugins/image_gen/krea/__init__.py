@@ -494,6 +494,7 @@ class KreaImageGenProvider(StaticImageGenProvider):
 
         # Materialise locally — Krea result URLs may expire.
         try:
+            # See #26942.
             image_ref = str(save_url_image(result_image_url, prefix=f"krea_{model_id}"))
         except Exception as exc:  # noqa: BLE001
             logger.warning(

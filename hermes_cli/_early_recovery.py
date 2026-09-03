@@ -20,6 +20,7 @@ from pathlib import Path
 # metadata but wiped import files. ``module`` is probed via a real import; ``attr`` guards against
 # an empty/stub module. main.py's marker-recovery path reuses these tables — keep them here so
 # both layers probe and repair the same set.
+# See #57828.
 LAZY_REFRESH_IMPORT_PROBES: tuple[tuple[str, str], ...] = (
     ("yaml", "SafeDumper"), ("dotenv", "load_dotenv"), ("click", "Command"),
     ("certifi", "contents"), ("rich", "print"), ("cryptography", "__version__"),
@@ -36,6 +37,10 @@ LAZY_REFRESH_REPAIR_PACKAGES: dict[str, str] = {
 # leaves no ``hermes`` on PATH, and the command that would repair it IS ``hermes update``. The
 # updater, the early-recovery installer and the startup orphan sweep all restore through this one
 # stdlib-only helper so the retry ladder and the recovery wording cannot drift apart again.
+# --- Windows entry-point shim quarantine ----------------------------------- They used to be separate
+# one-shot renames with swallowed errors; the two that had messages had already drifted apart. The logic
+# lives here, in the one stdlib-only module all of them can import, so the ladder and the recovery wording
+# stay in lockstep. See #75584.
 QUARANTINE_RESTORE_BACKOFF_MS: tuple[int, ...] = (0, 100, 250, 500, 1000)
 
 
@@ -280,6 +285,8 @@ def _base_interpreter_is_externally_managed() -> bool:
     Those ship an ``EXTERNALLY-MANAGED`` marker next to their stdlib (PEP 668), so
     ``python -m pip install`` aborts with ``externally-managed-environment``; the early repair
     must then go through uv (or explicitly override pip) or the venv stays broken.
+
+    See #83569.
     """
     try:
         import sysconfig
@@ -371,6 +378,9 @@ def recover_if_needed(project_root: Path | None = None, argv: list[str] | None =
         # updater inside the marker-to-install window — never race it. A dead owner MUST be
         # recovered even when this launch is itself `hermes update`: CLI and Desktop retries keep
         # that argv, and skipping solely on argv recreates the self-lock loop.
+        # Bounded retries: a persistently failing install must not hammer every launch, so attempts past the
+        # ceiling are left for main.py's post-import recovery path (which can safely probe-import after this
+        # process already holds whatever extensions it needs). See #83569.
         if core_marker.exists():
             if _marker_owner_is_live(core_marker):
                 return
@@ -446,6 +456,12 @@ def _complete_pending_core_install(root: Path, core_marker: Path) -> bool:
 
     Never raises: any failure leaves the marker for the post-import path and returns ``False``.
     Returns ``True`` only after the install succeeds.
+
+    ``recover_if_needed`` invokes this when ``.update-incomplete`` exists — a prior ``hermes update`` (or
+    the self-lock preflight, #83569) left the dependency sync deliberately unfinished. Completing it here
+    matters on Windows: the deferral exists precisely because the process that wrote the marker had a native
+    venv extension mapped; this process, running before ``hermes_cli.main``'s third-party imports, maps
+    nothing yet, so the installer can replace ``.pyd`` files without hitting the lock.
     """
     try:
         from hermes_cli import _install_repair as ir

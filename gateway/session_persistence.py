@@ -46,7 +46,11 @@ class SessionPersistenceMixin:
         """SessionDB for the active profile scope. ``db_path`` pins the store; otherwise
         ``_default_db_path()`` follows the context-local HERMES_HOME (resolved per call so
         multiplexed profiles reach their own store). Handles are cached per path; failed opens enter
-        a bounded backoff during which callers keep using the JSONL fallback."""
+        a bounded backoff during which callers keep using the JSONL fallback.
+
+        Resolving here rather than once in ``__init__`` is the whole fix for #88532: it lets the scoping
+        that the multiplexed inbound path already performs actually reach session storage.
+        """
         from hermes_state import _default_db_path, get_shared_session_db
 
         path = Path(db_path) if db_path is not None else Path(_default_db_path())
@@ -84,7 +88,13 @@ class SessionPersistenceMixin:
         flat dict holding every profile's keys, so it must persist to ONE file (``_routing_home``),
         not whichever profile is scoped — otherwise a mid-turn rewrite and the unscoped startup
         load see different copies and crash markers under a secondary profile go unrecovered. A
-        pinned handle still wins; bare test instances lacking the handle cache report no DB."""
+        pinned handle still wins; bare test instances lacking the handle cache report no DB.
+
+        Reading it through ``_db`` made that file whichever profile happened to be scoped at the time: a
+        whole-index rewrite during one profile's turn copied every other profile's routing rows into that
+        profile's store, and startup — which runs unscoped — then loaded a different copy than the one the
+        last writer produced. See #66887.
+        """
         pinned = self._pinned_db()
         if pinned is not _DB_UNPINNED:
             return pinned
@@ -132,7 +142,14 @@ class SessionPersistenceMixin:
         """The SessionDB holding *session_key*'s rows, whatever scope is active (the owning profile
         is encoded in the key). ``_db`` follows the ambient HERMES_HOME that only the inbound message
         path installs; unscoped background work (expiry watcher) would otherwise write profile rows
-        into the ROOT store until the stale-route self-heal drops a live conversation."""
+        into the ROOT store until the stale-route self-heal drops a live conversation.
+
+        Background work runs unscoped while operating on every profile's keys out of the single process-wide
+        ``_entries`` dict — ``_session_expiry_watcher`` is the clearest case — so it reads and writes the
+        ROOT store for rows that actually live under ``profiles/<name>/state.db``. The two writers then
+        drift apart on the same logical session until the routing index disagrees with the row and the
+        #54878 self-heal drops a live conversation (#66887).
+        """
         pinned = self._pinned_db()
         if pinned is not _DB_UNPINNED:
             return pinned
@@ -239,7 +256,12 @@ class SessionPersistenceMixin:
 
     def _ensure_loaded_locked(self) -> None:
         """Load the routing index (lock held). state.db ``gateway_routing`` is primary;
-        sessions.json is the legacy import for keys the DB lacks (persisted on the next _save)."""
+        sessions.json is the legacy import for keys the DB lacks (persisted on the next _save).
+
+        Read order (#9006 follow-up): the ``gateway_routing`` table in state.db is the primary source;
+        sessions.json is the legacy import path for pre-migration installs (its entries are folded in for
+        keys the DB doesn't have, then persisted to the DB on the next _save).
+        """
         if self._loaded:
             self._reconcile_recovered_routing_locked()
             return
@@ -341,6 +363,9 @@ class SessionPersistenceMixin:
             return recovered_entry
         # Same-id recovery == successful resume: keep the ORIGINAL entry object (the recovered one
         # is rebuilt minimal and would drop counters, model_override, resume markers, metadata).
+        # A non-None recovery with the SAME session id is a successful resume (all recovery gates passed,
+        # row reopened): keep the routing entry — it is proven valid, not a dead route (#95957). Nothing in
+        # sessions.json changes, so no save is needed for this branch.
         if recovered_entry is not None:
             logger.info(
                 "gateway.session: reopened ended session %s for sessions.json entry %r "

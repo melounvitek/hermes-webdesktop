@@ -250,6 +250,9 @@ class IndentDumper(yaml.SafeDumper):
     PyYAML emits "indentless" sequences while ruamel (:func:`atomic_roundtrip_yaml_update`)
     indents them; mixing both in one ``config.yaml`` makes stricter parsers like ``js-yaml``
     reject it, so every write path is forced to the same shape.
+
+    Forcing ``indentless=False`` aligns the two serializers so all write paths emit byte-identical layouts
+    (#31999).
     """
 
     def increase_indent(self, flow=False, indentless=False):  # noqa: ARG002
@@ -301,6 +304,7 @@ def atomic_roundtrip_yaml_update(path: Union[str, Path], key_path: str, value: A
     # Honor escaped dots and prefer existing literal dotted keys (model IDs like ``glm-5.3``) over
     # blind splitting — same navigation as ``hermes config set``'s ``_set_nested``; otherwise
     # /model + TUI persistence wrote ``glm-5: {'3': ...}`` phantom siblings.
+    # See #91607.
     from hermes_cli.config import _greedy_literal_match, _split_key_path
 
     path = Path(path)

@@ -769,6 +769,10 @@ async def cancel_telegram_onboarding(pairing_id: str):
 async def get_messaging_platforms(profile: Optional[str] = None):
     # Profile-scoped so the global profile switcher shows the TARGET profile's channel state.
     def _run():
+        # Profile-scoped so the dashboard's global profile switcher shows the TARGET profile's channel
+        # credentials/state, not the root install's. load_env() honors the HERMES_HOME contextvar override;
+        # the gateway status readers do NOT (they resolve process-level paths), so the profile directory is
+        # passed explicitly for those (#71211).
         with _profile_scope(profile) as scoped_dir:
             return {
                 "env_path": str(get_env_path()),

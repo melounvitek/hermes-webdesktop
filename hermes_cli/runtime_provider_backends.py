@@ -134,6 +134,9 @@ def _resolve_openrouter_runtime(
     )
     base_url = ((explicit_base_url or "").strip() or env_custom_base_url or (cfg_base_url.strip() if use_config_base_url else "")
                 or env_openrouter_base_url or OPENROUTER_BASE_URL).rstrip("/")
+    # Choose API key based on whether the resolved base_url targets OpenRouter. When hitting OpenRouter,
+    # prefer OPENROUTER_API_KEY (issue #289). When hitting a custom endpoint (e.g. Z.ai, local LLM), prefer
+    # OPENAI_API_KEY so the OpenRouter key doesn't leak to an unrelated provider (issues #420, #560).
     is_openrouter_url = base_url_host_matches(base_url, "openrouter.ai")
     # Explicitly-configured OpenRouter mirrors (OPENROUTER_BASE_URL + provider=openrouter) still
     # count as OpenRouter for key selection.

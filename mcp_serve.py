@@ -107,6 +107,10 @@ def _load_sessions_index() -> dict:
 
     state.db is primary (gateway session rows carry session_key/origin metadata);
     sessions.json is the fallback for pre-migration databases without session_keys.
+
+    state.db is the primary source (#9006): gateway sessions persist their routing metadata (session_key,
+    chat/thread ids, display_name, origin) on the durable session row, so a single database read replaces
+    the old dual-file sessions.json dependency.
     """
     return _load_sessions_index_from_db() or _load_sessions_index_from_json()
 
@@ -281,6 +285,8 @@ class EventBridge:
         # Baseline existing history BEFORE polling so startup never replays old
         # messages as events; sessions appearing later default to last_seen=0.0
         # in _poll_once, so new-conversation delivery is preserved.
+        # Unit tests that drive _poll_once directly bypass start() and still observe first-poll delivery.
+        # See #13414.
         self._establish_baseline()
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True)
@@ -393,6 +399,8 @@ class EventBridge:
         The routing index lives in the same file as the messages, so a new
         conversation and its first message land under a single mtime change (no
         dual-file race that could drop brand-new conversations).
+
+        See #8925, #9006.
         """
         db_mtime = _read_state_db_mtime()
         if db_mtime == self._state_db_mtime:

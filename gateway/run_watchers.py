@@ -120,6 +120,7 @@ class GatewaySessionWatchersMixin:
         # persisted flag also drops the /model override: finalization is a conversation boundary.
         self._evict_cached_agent(key)
         self._clear_conversation_scope(key, reason="expiry_finalized")
+        # See #9006.
         await self.async_session_store.set_expiry_finalized(entry)
         logger.debug("Session expiry finalized for %s", entry.session_id)
 
@@ -133,6 +134,10 @@ class GatewaySessionWatchersMixin:
             logger.debug("Idle agent sweep failed: %s", e)
         # Neither LRU cap nor idle TTL knows what a cached transcript costs in memory.
         try:
+            # Neither the LRU cap nor the idle TTL is aware of how much memory a cached transcript costs, so
+            # a busy gateway keeps every warm session's tool output resident until RSS hits the cgroup limit
+            # (#80764). Shed LRU transcripts once the heap is over budget; they reload from the persisted
+            # session on the next turn.
             self._sweep_agent_cache_under_pressure()
         except Exception as e:
             logger.debug("Agent cache pressure sweep failed: %s", e)
@@ -153,7 +158,10 @@ class GatewaySessionWatchersMixin:
         return _float_env("HERMES_SESSION_STALL_TIMEOUT", 300)
 
     def _session_activity_for_stall(self, session_key: str) -> Optional[dict]:
-        """Stall-progress snapshot from ``AIAgent.get_activity_summary()`` only; no other clocks."""
+        """Stall-progress snapshot from ``AIAgent.get_activity_summary()`` only; no other clocks.
+
+        See #72039.
+        """
         from gateway.run import _AGENT_PENDING_SENTINEL
         agent = (getattr(self, "_running_agents", None) or {}).get(session_key)
         if agent is None or agent is _AGENT_PENDING_SENTINEL:
@@ -234,6 +242,7 @@ class GatewaySessionWatchersMixin:
         # Re-read pending state + activity IMMEDIATELY before delivery: the snapshot ages while
         # earlier candidates await sends; an agent that progressed (or drained its queue) must not
         # get a false stall notice. Abort with the latch un-set so the next tick re-evaluates.
+        # See #76354.
         still_pending = (
             (getattr(adapter, "_pending_messages", None) or {}).get(session_key) is not None
             or bool((getattr(self, "_queued_events", None) or {}).get(session_key))
@@ -291,7 +300,11 @@ class GatewaySessionWatchersMixin:
     async def _session_stall_watcher(self, interval: float = 30.0):
         """Pending-inbound + stale-activity stall watchdog. Progress comes only from
         ``get_activity_summary()``; pending inbound is a notify policy gate, not a progress clock.
-        Notify-only: never kills the turn (contrast ``gateway_timeout`` / ``shutdown_watchdog``)."""
+        Notify-only: never kills the turn (contrast ``gateway_timeout`` / ``shutdown_watchdog``).
+
+        See #72016.
+        See #72039.
+        """
         # Short initial delay so startup reconnect noise does not false-fire.
         await asyncio.sleep(min(30.0, max(1.0, float(interval))))
         while self._running:

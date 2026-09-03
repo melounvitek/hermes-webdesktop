@@ -17,6 +17,8 @@ _TELEGRAM_API_HOST = "api.telegram.org"
 
 # TCP keepalive so a half-open/CLOSE-WAIT long-poll errors out instead of blocking getUpdates forever
 # (Windows leaves SO_KEEPALIVE off). Idle/interval knobs are best-effort per Python/OS combo.
+# Windows does not enable SO_KEEPALIVE on new sockets by default, so a dead api.telegram.org peer can hang
+# forever (#87057).
 _TCP_KEEPALIVE_IDLE_S = 30
 _TCP_KEEPALIVE_INTERVAL_S = 10
 _TCP_KEEPALIVE_COUNT = 3
@@ -58,6 +60,7 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
     api.telegram.org (like ``curl --resolve``) so a blackholed IPv6 AAAA can't pin initialize()."""
 
     # Bound every pool: httpx's 100-connection default × (wedged endpoint + seed IPs) can outgrow the fd limit.
+    # See #63311.
     _POOL_LIMITS = httpx.Limits(max_connections=8, max_keepalive_connections=4)
 
     def __init__(self, fallback_ips: Iterable[str], **transport_kwargs):
@@ -99,7 +102,11 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
 
     async def _reset_fallback(self, ip: str) -> None:
         """Discard a failed fallback pool: a peer-closed connect leaves a CLOSE_WAIT socket in it, and the
-        poisoned pool would leak one fd per retry."""
+        poisoned pool would leak one fd per retry.
+
+        Retaining the poisoned pool leaks one descriptor per retry until the process hits its file limit and
+        can no longer accept connections or resolve DNS (#63311).
+        """
         async with self._fallback_lock:
             transport = self._fallbacks.pop(ip, None)
         if transport is None:
@@ -229,11 +236,20 @@ async def _query_doh_provider(client: httpx.AsyncClient, provider: dict) -> list
 async def discover_fallback_ips() -> list[str]:
     """Resolve api.telegram.org via Google + Cloudflare DoH; unique A records, in order. IPs matching the
     system resolver are deliberately KEPT (often the most reliable path). Falls back to
-    ``SEED_FALLBACK_IPS`` only when DoH yields nothing usable."""
+    ``SEED_FALLBACK_IPS`` only when DoH yields nothing usable.
+
+    IPs that match the local system resolver are kept rather than excluded: in many networks the system-DNS
+    IP is the most reliable path to api.telegram.org and a transient primary-path failure should be retried
+    against the same address via the IP-rewrite path before the seed list is consulted (#14520).
+    """
     async with httpx.AsyncClient(timeout=httpx.Timeout(_DOH_TIMEOUT)) as client:
         system_dns_task = asyncio.ensure_future(asyncio.to_thread(_resolve_system_dns))
         results = await asyncio.gather(*[_query_doh_provider(client, p) for p in _DOH_PROVIDERS], return_exceptions=True)
     # The getaddrinfo leg has no timeout of its own and only feeds the log line below — bound it.
+    # The system-resolver leg runs socket.getaddrinfo in a worker thread with no timeout of its own — a
+    # wedged OS resolver (broken VPN/DNS) can sit for minutes. Its result only feeds the no-usable-answers
+    # log line below, so it must never gate discovery: bound it and move on (#63309). The DoH legs are
+    # already bounded by the client timeout above.
     system_ips: set[str] = set()
     try:
         system_result = await asyncio.wait_for(system_dns_task, timeout=_DOH_TIMEOUT)

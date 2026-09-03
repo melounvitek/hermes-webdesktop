@@ -397,6 +397,14 @@ def _enable_plugin_platform(config: GatewayConfig, entry) -> None:
         return
     # Dependencies LAST — only for platforms already enabled or past the credential gate.
     try:
+        # ``check_fn`` is a PASSIVE probe (never installs); a platform whose deps are missing but which
+        # registered ``ensure_deps_fn`` still gets enabled here — the registry's ``create_adapter()`` runs
+        # the active installer at gateway start, when the user actually wants the platform up. Historically
+        # the ACTIVE installer was wired as ``check_fn`` and this sweep pip-installed
+        # Discord/Telegram/Slack/Feishu/Dingtalk SDKs on every ``load_gateway_config()`` call — including
+        # the desktop/dashboard readiness probe (``GET /api/status``) — blocking startup until every install
+        # finished and boot-looping the desktop app at 94%. The check_fn/ensure_deps_fn split (#79812) makes
+        # that impossible by construction.
         deps_ok = bool(entry.check_fn())
     except Exception as e:
         logger.debug("check_fn for %s raised: %s", entry.name, e)

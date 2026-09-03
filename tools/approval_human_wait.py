@@ -17,6 +17,16 @@ import threading
 import time
 
 
+# ========================================================================= Human-wait accounting (per
+# session) ========================================================================= Tracks the wall-clock
+# time the agent spends verifiably blocked on a HUMAN prompt (CLI approval prompt, gateway approval
+# round-trip). The concurrent tool batch deadline in agent/tool_executor.py excludes this time so a slow
+# human answer never times a batch out — but ONLY this time. Measuring human waits at the source (rather
+# than residency in the authorization gate, which is arbitrary code) is what keeps a wedged pre_tool_call
+# plugin or a dead approval client from growing the exclusion 1:1 with wall clock and defeating the deadline
+# entirely (#79719). Keyed by session so one gateway session's pending approval cannot extend a different
+# session's batch deadline. State is process-global like the rest of this module's approval state; entries
+# are bounded by _HUMAN_WAIT_MAX_SESSIONS.
 class _HumanWaitState:
     __slots__ = ("pending", "window_started", "completed_seconds")
 
@@ -102,7 +112,10 @@ def human_wait_window(session_key: str | None = None):
     excludes this time; wrapping anything else re-creates the hang where
     arbitrary wedged code pushes the deadline out forever. Overlapping windows
     for the same session coalesce (pending counter), so two serialized approval
-    prompts don't double-count the same wall clock."""
+    prompts don't double-count the same wall clock.
+
+    See #79719.
+    """
     key = _resolve_key(session_key)
     now = time.monotonic()
     with _human_wait_lock:
@@ -135,7 +148,13 @@ def human_wait_seconds(session_key: str | None = None) -> float:
     safe direction: the deadline fires sooner). Deadline consumers snapshot a
     baseline at batch start and use the delta. Each window's contribution is
     clamped to :func:`human_wait_ceiling` (belt-and-braces against the
-    wedged-window hang)."""
+    wedged-window hang).
+
+    Each window's contribution is clamped to :func:`human_wait_ceiling`: every legitimate human wait
+    self-terminates at ``approvals.timeout`` (both the CLI prompt join and the gateway poll loop enforce
+    it), so a window that overstays that bound is itself wedged and must not keep extending a batch deadline
+    (belt-and-braces for #79719).
+    """
     key = _resolve_key(session_key)
     now = time.monotonic()
     # Resolve the clamp outside the lock: it reads the config cache, which must never nest under _human_wait_lock.

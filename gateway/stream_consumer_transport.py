@@ -109,6 +109,10 @@ class StreamTransportMixin:
             try:
                 deleted = await delete_fn(self.chat_id, stale_id)
                 if retry_on_false and deleted is False:
+                    # Telegram's delete_message reports failure by returning False, not raising. The same
+                    # flood window that broke the finalize edit can reject this delete too, leaving the
+                    # preview bubble next to the fresh final (#71047 Problem B). One short bounded retry
+                    # clears the common transient case; a second failure stays best-effort.
                     await asyncio.sleep(1.0)
                     await delete_fn(self.chat_id, stale_id)
             except Exception as e:
@@ -196,7 +200,10 @@ class StreamTransportMixin:
         return bool(self._message_id) and self._message_id != "__no_edit__"
 
     def _should_send_fresh_final(self) -> bool:
-        """True when fresh-final is enabled and a real preview has been visible ≥ threshold."""
+        """True when fresh-final is enabled and a real preview has been visible ≥ threshold.
+
+        Ported from openclaw/openclaw#72038.
+        """
         threshold = getattr(self.cfg, "fresh_final_after_seconds", 0.0) or 0.0
         if threshold <= 0 or not self._has_real_preview() or self._message_created_ts is None:
             return False
@@ -242,7 +249,13 @@ class StreamTransportMixin:
 
     async def _try_fresh_final(self, text: str, *, is_turn_final: bool = True) -> bool:
         """Send ``text`` fresh and best-effort delete the preview(s); False on any failure so
-        the caller falls back to edit.  ``is_turn_final=False`` leaves the delivery flag unset."""
+        the caller falls back to edit.  ``is_turn_final=False`` leaves the delivery flag unset.
+
+        ``is_turn_final`` is False when finalizing an interim segment at a tool boundary (a preamble) rather
+        than the turn-final answer; the final-delivery flag is then left unset so the gateway still delivers
+        the real answer from the next API call (#29346).
+        Ported from openclaw/openclaw#72038.
+        """
         # Replacing every preview is only sound while ``text`` holds the whole answer;
         # after a split, deleting sealed heads would erase delivered text.
         if self._turn_split_delivery:
@@ -482,6 +495,10 @@ class StreamTransportMixin:
             # twice, and record the on-screen payload.
             self._final_content_delivered = True
             self._record_turn_final_payload(text)
+        # ``text`` is already cleaned/fence-closed here and equals the visible prefix — the on-screen
+        # content IS this finalize payload (#71643). Record it on split turns too: post-#78541 an unrecorded
+        # split reads as a mismatch and would re-send this already-visible answer, reintroducing the
+        # duplicate #45517 fixed (#36965 / #25349).
         raw_response = getattr(result, "raw_response", None)
         if isinstance(raw_response, dict) and raw_response.get("partial_overflow"):
             # Some overflow chunks landed but not the whole response: preserve the

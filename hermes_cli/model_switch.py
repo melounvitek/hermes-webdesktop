@@ -180,7 +180,10 @@ class DirectAlias(NamedTuple):
     ``api_key`` / ``key_env`` carry the alias endpoint's OWN credential. Without them the switch
     would keep the *default* provider's key, which 401s against the alias host and sends that
     provider's secret to an unrelated third party. Both default so positional
-    ``DirectAlias(model, provider, base_url)`` keeps working."""
+    ``DirectAlias(model, provider, base_url)`` keeps working.
+
+    See #83612.
+    """
     model: str
     provider: str
     base_url: str
@@ -207,7 +210,10 @@ def _load_direct_aliases() -> dict[str, DirectAlias]:
     ``api_key`` — literal or ``"${VAR}"`` — / ``key_env``); with neither credential field the key
     is resolved from the alias HOST, never from the previously active provider. ``model.aliases``
     never overrides ``model_aliases``; its string entries (``ds-flash: deepseek/deepseek-v4-flash``)
-    take the provider from the ``provider/`` prefix, else the current provider."""
+    take the provider from the ``provider/`` prefix, else the current provider.
+
+    See #83612.
+    """
     merged = dict(_BUILTIN_DIRECT_ALIASES)
     try:
         from hermes_cli.config import load_config
@@ -316,7 +322,10 @@ def direct_alias_runtime_request(alias: DirectAlias) -> tuple[str, Optional[str]
     would otherwise reach that provider's explicit-runtime branch and put the live vendor token
     on the foreign wire. Bare ``custom`` is host-gated, so an authoritative URL still resolves
     its vendor key and a foreign one resolves none. An alias with no base_url keeps its label —
-    there is no foreign host, and the label is the only routing information."""
+    there is no foreign host, and the label is the only routing information.
+
+    See #28660.
+    """
     return ("custom" if alias.base_url else (alias.provider or "custom")), direct_alias_api_key(alias) or None
 
 
@@ -370,6 +379,10 @@ def resolve_startup_model_route(
             # model/base_url only.
             return StartupModelRoute(model=direct.model, provider=explicit_provider, base_url=direct.base_url)
         # Same owner as the interactive /model and oneshot paths: credential for the alias HOST.
+        # Resolve through the SAME owner the interactive /model and oneshot paths use: a URL-bearing alias
+        # must resolve its credential for the alias HOST, never for its provider label — a label like
+        # ``anthropic`` on a foreign URL would otherwise reach that provider's explicit-runtime branch and
+        # put the live vendor token on the foreign wire (#28660).
         alias_provider, alias_key = direct_alias_runtime_request(direct)
         return StartupModelRoute(
             model=direct.model, provider=alias_provider, base_url=direct.base_url, api_key=alias_key or "")
@@ -490,7 +503,16 @@ def resolve_persist_behavior(
     the pick does not evaporate into whatever ``*_API_KEY`` is lying around on the next launch;
     ``--provider`` without a persist flag -> False (exploratory); else
     ``model.persist_switch_by_default`` (default False). A flat-string ``model`` IS a configured
-    default; an unreadable config -> False."""
+    default; an unreadable config -> False.
+
+    1. ``--once`` explicitly opts out → ``False`` (next turn only). 2. ``--session`` explicitly opts out →
+    ``False`` (this session only). 3. 4. Applies to every surface (CLI, gateway, Desktop picker) so no
+    client has to hardcode ``--global``. 5. Provider switches are typically exploratory — the user is trying
+    a different backend for this conversation, not reconfiguring the default. 6. Otherwise defer to
+    ``model.persist_switch_by_default`` in ``config.yaml`` (defaults to ``False``: a plain ``/model <name>``
+    affects only the current session). Users who want the old persist-by-default behavior can set the key to
+    ``true``; a one-off ``--global`` always persists. See #86414.
+    """
     if is_once or is_session:
         return False
     if is_global:
@@ -769,7 +791,12 @@ def resolve_display_context_length(
     models.dev reports per-vendor context but provider-enforced limits can be lower (Codex OAuth
     caps gpt-5.5 at 272k), so ``agent.model_metadata.get_model_context_length`` is authoritative
     (it also honors ``custom_providers[].models.<id>.context_length``); ``model_info.context_window``
-    is the fallback. A ``config_context_length`` pin is dropped when the route changed."""
+    is the fallback. A ``config_context_length`` pin is dropped when the route changed.
+
+    When ``custom_providers`` is provided, per-model ``context_length`` overrides from
+    ``custom_providers[].models.<id>.context_length`` are honored — this closes #15779 where ``/model``
+    switch ignored user-set overrides.
+    """
     if config_context_length is not None and (configured_model or configured_provider or configured_base_url):
         try:
             from hermes_cli.route_identity import should_clear_context_pin
@@ -808,7 +835,11 @@ def _configured_provider_matches(
     """``{provider_slug: canonical_model_id}`` for every configured provider whose declared models
     (``models``, ``model``, ``default_model`` — exact, case-insensitive, never fuzzy) contain
     ``model_name``, so a typed name routes to the provider that declares it instead of being
-    soft-accepted by the current provider (openai-codex) as an unknown hidden model."""
+    soft-accepted by the current provider (openai-codex) as an unknown hidden model.
+
+    Used by :func:`switch_model` to route a *typed* model name to the provider that actually declares it in
+    user/custom provider config, instead of leaving it on the current provider. See #45006.
+    """
     if not model_name or not model_name.strip():
         return {}
     target = model_name.strip().lower()
@@ -1352,6 +1383,14 @@ def _copilot_api_mode(provider: str, model: str, api_key: str) -> str:
 
 
 def _opencode_api_mode(provider: str, model: str, api_key: str) -> str:
+    # Re-derive api_mode from the effective model rather than the persisted api_mode: the opencode providers
+    # serve both anthropic_messages and chat_completions models, so the previous session's mode must not
+    # leak across /model switches. Refs #16878.
+    # opencode-zen/go must always re-derive api_mode from the target model (not the stale persisted
+    # api_mode), because the same provider serves both anthropic_messages (e.g. minimax-m2.7) and
+    # chat_completions (e.g. deepseek-v4-flash) and switching models via /model would otherwise carry the
+    # previous mode forward, stripping /v1 from base_url for chat_completions models and 404'ing. Refs
+    # #16878.
     from hermes_cli.models import opencode_model_api_mode
     return opencode_model_api_mode(provider, model)
 

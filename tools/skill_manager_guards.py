@@ -104,7 +104,15 @@ def _is_path_redirect(path: Path) -> bool:
 
 def _validate_delete_target(skill_dir: Path) -> Optional[str]:
     """Last-line guard before rmtree: even a poisoned tree must never delete (1) a path outside
-    every known skills root, (2) a skills root itself, (3) a symlink/junction (rmtree follows it)."""
+    every known skills root, (2) a skills root itself, (3) a symlink/junction (rmtree follows it).
+
+    ``_find_skill`` already restricts ``skill_dir`` to a real ``SKILL.md`` parent discovered by walking the
+    skills roots, so the agent cannot inject an arbitrary path the way Kilo Code's HTTP endpoint could
+    (their issue 11227: a built-in-skill sentinel resolved to the server cwd and a recursive delete wiped
+    the user's entire working directory). This is the matching defense-in-depth for our agent-facing
+    ``skill_manage`` delete path: even if discovery or a poisoned tree hands us a bad directory, never
+    recursively delete See #11227.
+    """
     if _is_path_redirect(skill_dir):
         return (f"Refusing to delete '{skill_dir}': the skill directory is a "
                 f"symlink/junction. Remove the link target manually if intended.")
@@ -186,6 +194,14 @@ def _background_review_write_guard(
         # on presence made the policy depend on the guard's own side effect: the
         # first write created a null record, the next identical write was refused).
         usage_rec = skill_usage.load_usage().get(name)
+        # Skills that are not curator-managed are off-limits to autonomous curation. This prevents the LLM
+        # consolidation pass from mutating skills the user owns (manually authored, URL-installed, or
+        # created by a foreground `skill_manage(create)` at the user's request), which lack the `created_by:
+        # "agent"` marker. Keying on `isinstance(usage_rec, dict)` made the policy depend on the guard's own
+        # side effect: a local skill with no telemetry record passed, the successful write called
+        # bump_patch() which created a `created_by: null` record, and the very same write was refused from
+        # then on. "Allowed exactly once" is not a policy — it is a race with our own bookkeeping. Fail
+        # closed for both shapes; `hermes curator adopt <name>` is the supported way in. See #67140.
         if not skill_usage._is_curator_managed_record(usage_rec):
             _detail = (f"created_by={usage_rec.get('created_by')!r}" if isinstance(usage_rec, dict)
                        else "no usage record")
@@ -227,7 +243,13 @@ def _curator_consolidation_delete_guard(
     """Fail closed on unverified deletes during the curator consolidation pass. The fork's only
     legitimate delete is a consolidation declared via ``absorbed_into=<umbrella>`` (existence
     validated in ``_delete_skill``); the deterministic inactivity prune never calls skill_manage,
-    so a bare delete here can only be the LLM pass pruning without evidence."""
+    so a bare delete here can only be the LLM pass pruning without evidence.
+
+    A delete with no forwarding target — ``absorbed_into`` omitted (``None``) or empty (``""``) — is the
+    fail-open behavior reported in #29912: the consolidation pass archived whole clusters of active skills
+    with zero verified consolidations (``consolidated_this_run == 0``), leaving active automations pointing
+    at names that no longer resolve. Refuse it; keep the skill active.
+    """
     if not _is_background_review() or (isinstance(absorbed_into, str) and absorbed_into.strip()):
         return None
     return _refusal(

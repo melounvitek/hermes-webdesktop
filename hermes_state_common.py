@@ -126,17 +126,26 @@ _RESET_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RESET_END_REASON
 # by a fresh session.resume; startup_orphan_reap = dead-gateway sweep, same class as ws_orphan_reap but kept
 # distinct for forensics.
 _RECOVERABLE_END_REASONS = ("agent_close", "ws_orphan_reap", "superseded_by_resume", "startup_orphan_reap")
+# Startup sweep of rows orphaned by a dead gateway process (#65194): the in-process ws-orphan grace timer
+# died with the process, so the row was closed at the next boot instead.
 _RECOVERABLE_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RECOVERABLE_END_REASONS)
 
 # End reasons written by AUTOMATIC cleanup (shutdown, orphan reapers, idle/LRU eviction), not a deliberate
 # conversation boundary: "some runtime went away", so a writer that can prove liveness (e.g. a compression
 # rotation holding the lease) may clear it.  Recoverable set plus the TUI gateway's automatic reasons.
+# Superset of the recoverable set: those are already resumable accidents; the extra TUI reasons are the same
+# accident class but were historically only known to tui_gateway's _AUTOMATIC_SESSION_END_REASONS. See
+# #88197.
 _AUTOMATIC_END_REASONS = frozenset(_RECOVERABLE_END_REASONS) | {
     "tui_shutdown", "ws_disconnect", "idle_timeout", "lru_evict"}
 
 
 def is_automatic_end_reason(reason) -> bool:
-    """True when *reason* is an automatic-cleanup end stamp; compression-liveness sites must call this."""
+    """True when *reason* is an automatic-cleanup end stamp; compression-liveness sites must call this.
+
+    Single owner of the "accidental vs deliberate end" predicate — every compression-liveness site must call
+    this instead of re-implementing the reason taxonomy (#88197, never-patch-predicates).
+    """
     return isinstance(reason, str) and reason in _AUTOMATIC_END_REASONS
 
 
@@ -188,6 +197,10 @@ def _sql_session_last_active_by_id(session_id_expr: str) -> str:
 SCHEMA_VERSION = 30
 
 # Auto-maintenance VACUUMs only above this freelist fraction; below it a rewrite costs more I/O than it returns.
+# Auto-maintenance only VACUUMs when at least this fraction of the database file is reclaimable (``PRAGMA
+# freelist_count / PRAGMA page_count``). Below it a full rewrite costs more I/O than it returns — pruning a
+# handful of small sessions on a dense multi-GB state.db should never rewrite the whole file to reclaim a
+# few MB (#54189). Composes with ``min_vacuum_interval_days``.
 AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 
 # FTS storage-layout version, tracked INDEPENDENTLY of SCHEMA_VERSION in the
@@ -809,6 +822,28 @@ END;
 # only when provably dead, indeterminate liveness defers.  `<db>.fts_rebuild.lock` is distinct from
 # `<db>.repair.lock` (offline schema surgery, minutes in VACUUM).  Lives here: mixins cannot import hermes_state.
 
+# ── Cross-process full-FTS-rebuild admission (single authority) ────────────── Several independent Hermes
+# processes routinely share one state.db (gateway service, the Desktop app's `hermes serve` backend,
+# interactive CLI sessions, the TUI slash worker). A full structural FTS rebuild — the FTS5 'rebuild'
+# command or the drop/recreate script in `_recover_stale_fts` — must only ever run in ONE of them at a time:
+# two concurrent rebuilds collide on write and have structurally corrupted state.db in production (PR
+# #93200; the 2026-08-15 / 2026-08-23 incidents and issues #89293 / #90950). This is the single admission
+# authority for every full structural rebuild entry point: `SessionSearchMixin.rebuild_fts()`,
+# `SessionSchemaMixin._rebuild_fts_indexes()` (via `_init_schema`), and
+# `SessionSchemaMixin._recover_stale_fts()`. The chunked deferred backfill (`fts_rebuild_step`) is
+# deliberately NOT routed through it — it claims progress under `_execute_write`'s SQLite transaction
+# authority and is intentionally multi-process. Semantics mirror `hermes_state._cross_process_repair_lock`
+# (the schema- surgery authority): portable (msvcrt on Windows, flock elsewhere), bounded wait, and FAIL
+# CLOSED — a caller that cannot acquire the lock must NOT rebuild. The kernel drops both lock types when the
+# holder dies — UNLESS a forked child inherited the lock fd (flock rides the open file description, which
+# fork() duplicates), in which case the orphaned descriptor holds the lock forever (issue #100108).
+# `_acquire_db_flock` therefore records the holder's pid + start time under the lock and, when the recorded
+# holder is provably dead, breaks the orphaned lock by unlinking and retaking it on a fresh inode;
+# indeterminate liveness still defers. It lives here (not hermes_state) because the search/schema mixins
+# cannot import hermes_state (cycle). The lock file is `<db>.fts_rebuild.lock`, distinct from
+# `<db>.repair.lock`: schema surgery runs on an EXCLUSIVE offline connection and can legitimately take
+# minutes in VACUUM, while runtime rebuilds run on live connections. The timeout is sized for a full
+# 'rebuild' of both indexes on a large DB.
 logger = logging.getLogger("hermes_state")
 
 _FTS_REBUILD_LOCK_TIMEOUT_SECONDS = 120.0
@@ -861,7 +896,11 @@ def _rewrite_lock_file(handle, payload: bytes) -> None:
 
 def _write_lock_holder_record(handle) -> None:
     """Record this process as holder (best effort) so timed-out contenders can tell an orphaned-fd holder
-    from a live wedged one."""
+    from a live wedged one.
+
+    Written under the flock so contenders that time out can tell an orphaned-fd holder (recorded process
+    dead, flock inherited by a forked child — issue #100108) from a live wedged holder.
+    """
     record = {"pid": os.getpid(), "start_ticks": _proc_start_ticks(os.getpid()), "acquired_at": time.time()}
     _rewrite_lock_file(handle, json.dumps(record, sort_keys=True).encode("utf-8"))
 
@@ -900,7 +939,12 @@ def _acquire_db_flock(lock_path, handle, timeout_seconds, poll_seconds, descript
     without the held-by-another-process warning).  ``flock`` rides the open file DESCRIPTION, which ``fork()``
     duplicates, so a holder that forks then dies leaves the lock held forever; when the acquirer is provably
     dead the file is unlinked and retaken on a fresh inode (the orphan's flock excludes nobody).  Every
-    acquire verifies its inode still names *lock_path*, so a racer on a dead inode retries."""
+    acquire verifies its inode still names *lock_path*, so a racer on a dead inode retries.
+
+    A holder that forks (multiprocessing worker, daemonized helper) and then dies leaves the flock held by a
+    child that will never release it — the kernel's holder-death release never triggers, and every contender
+    defers forever. Indeterminate liveness always defers (fail closed). See #100108.
+    """
     import fcntl
     deadline = time.monotonic() + timeout_seconds
     broke_lock = False

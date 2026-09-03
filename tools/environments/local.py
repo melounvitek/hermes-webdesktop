@@ -179,7 +179,14 @@ def _resolve_safe_cwd(cwd: str) -> str:
     """``cwd`` if enterable, else the nearest usable ancestor, else
     ``tempfile.gettempdir()``. MSYS paths are normalized first on Windows so a valid
     ``pwd -P`` result is not rejected. Lets ``_run_bash`` recover from a deleted or
-    inaccessible cwd instead of ``Popen`` raising and wedging every later call."""
+    inaccessible cwd instead of ``Popen`` raising and wedging every later call.
+
+    Used by ``_run_bash`` to recover when the configured cwd is gone — most commonly because a previous tool
+    call deleted its own working directory (issue #17558) — or inaccessible to this user, e.g. ``/root``
+    leaking from a root-launched CLI session into a non-root gateway's cron jobs (issue #65583). Without
+    this guard, ``subprocess.Popen(..., cwd=...)`` raises ``FileNotFoundError``/``PermissionError`` before
+    bash starts, wedging every subsequent terminal call until the gateway restarts.
+    """
     cwd = _msys_to_windows_path(cwd)
     if cwd and _cwd_usable(cwd):
         return cwd
@@ -288,6 +295,9 @@ def _scrubbed_env(parts, plugin_strip: frozenset, fix_path) -> dict:
     for items, unwrap_force in parts:
         _filter_secret_env(items, out, unwrap_force=unwrap_force, plugin_strip=plugin_strip)
     path_key = _path_env_key(out)
+    # Keep bare ``hermes`` invocations available to child jobs even when the gateway was launched by a
+    # service manager or cron without the console script's directory on PATH. The terminal environment
+    # already applies this invariant; Cron scripts use this sanitizer directly (#92998).
     if path_key is not None:
         out[path_key] = _prepend_hermes_bin_dir(fix_path(out.get(path_key, "")))
     return _finalize_child_env(out)
@@ -433,6 +443,7 @@ def _prepend_git_bash_dirs(existing_path: str) -> str:
 # POSIX-sh-family shells that understand spawn_local's ``[shell, "-lic", "set +m; …"]``
 # invocation; fish, csh/tcsh, nushell, elvish, xonsh would error, so _find_shell
 # falls back to bash for them.
+# (#42203)
 _SPAWN_COMPATIBLE_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "mksh"})
 
 
@@ -517,7 +528,16 @@ def _append_missing_sane_path_entries(existing_path: str) -> str:
 def _apply_windows_msys_bash_env_defaults(env: dict) -> None:
     """Disable MSYS argument path conversion (``/FO`` -> ``C:/.../git/FO`` breaks
     tasklist/schtasks/wmic/``cmd /c``). Git for Windows honors ``MSYS_NO_PATHCONV``;
-    MSYS2/Cygwin bash honor ``MSYS2_ARG_CONV_EXCL`` — set both; users can override."""
+    MSYS2/Cygwin bash honor ``MSYS2_ARG_CONV_EXCL`` — set both; users can override.
+
+    Git Bash rewrites arguments that look like Unix paths (``/FO``, ``/TN``, ``/Create``) into
+    ``C:/.../git/FO``-style paths, which breaks native Windows commands such as ``tasklist``, ``schtasks``,
+    and ``wmic``. Hermes runs terminal commands through bash on Windows, so set the standard MSYS opt-out by
+    default. Refs #56700.
+    MSYS2-proper and Cygwin bash (which ``_find_bash`` can still return via the final ``shutil.which``
+    fallback) ignore it and honor ``MSYS2_ARG_CONV_EXCL`` instead, so set both. ``*`` disables all argv
+    conversion — the semantic equivalent of ``MSYS_NO_PATHCONV=1``. Also fixes ``cmd /c`` mangling (#56147).
+    """
     if _IS_WINDOWS:
         env.setdefault("MSYS_NO_PATHCONV", "1")
         env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
@@ -745,6 +765,11 @@ class LocalEnvironment(BaseEnvironment):
         (e.g. a command ``rm -rf``'d its own cwd) — otherwise Popen raises before bash
         starts and every subsequent call fails. A benign MSYS→Windows normalization
         is not warned about."""
+        # Recover when the cwd has been deleted out from under us — usually by a previous tool call that ran
+        # ``rm -rf`` on its own working dir (issue #17558). On Windows, ``_resolve_safe_cwd`` also
+        # normalises Git Bash-style POSIX paths (``/c/Users/...``) to native form so a perfectly valid ``pwd
+        # -P`` result from bash isn't mistakenly treated as "missing" and spammed as a warning on every
+        # command.
         safe_cwd = _resolve_safe_cwd(self.cwd)
         if safe_cwd == self.cwd:
             return
@@ -805,6 +830,7 @@ class LocalEnvironment(BaseEnvironment):
     def cleanup(self):
         """Clean up temp files, including orphaned atomic-write snapshots
         (``snap.tmp.<bashpid>``) a failed/interrupted mv could leave behind."""
+        # See #38249.
         import glob
         try:
             stale = glob.glob(f"{self._snapshot_path}.tmp.*")

@@ -24,10 +24,23 @@ logger = logging.getLogger("hermes_state")
 # *returned*, and EMFILE is a peak-instant condition, so a connection holds a
 # permit for its whole lifetime; once permits are gone reads degrade to the
 # locked writer connection — slower, but not a wedge the supervisor can't see.
+# Transient SQLITE_IOERR retry budget for READ-ONLY opens (#100436). A WAL database being actively written
+# (checkpoint, WAL reset/truncate, frame flush) can surface "disk I/O error" to a concurrent ``mode=ro``
+# reader in a millisecond-wide transition window: the read-only connection cannot perform the WAL recovery a
+# read through a stale or mid-update -shm file needs, because recovery requires writing the -shm index,
+# which mode=ro refuses. The window closes on its own (the writer finishes the transition), so a bounded
+# number of short retries makes the open succeed instead of 500-ing the whole /api/sessions poll (or any
+# other read-only opener). Deliberately NOT attempted on writable opens: a writer owns the transition, so an
+# IOERR there means a real storage/fd problem.
 _READ_POOL_MAX = 8
 
 # Ceiling ALIVE in this PROCESS across every state.db (a multiplexed gateway
 # opens one per profile); three profiles' worth, then readers degrade likewise.
+# _READ_POOL_MAX bounds one file. A multiplexed gateway serves N profiles from one process and each profile
+# has its OWN state.db, so a per-file ceiling still lets the descriptor cost grow with the profile count —
+# the same shape as the per-instance bug, one level out (#98573). Past it, readers on the (N+1)th file
+# degrade to their writer connection instead of opening descriptors, which is the same trade _READ_POOL_MAX
+# makes and for the same reason: a slow read path is recoverable, a process-wide EMFILE is not.
 _READ_POOL_PROCESS_MAX = 24
 
 # Warn past this many SessionDB handles on one file in one process (diagnostic:
@@ -36,6 +49,10 @@ _HANDLES_PER_PATH_WARN = 4
 
 # Descriptors kept in reserve for everything that is NOT this module (httpx
 # sockets, terminal pipes, log files): the EMFILE SQLite pushes over surfaces elsewhere.
+# The ceilings above bound Hermes's SQLite descriptors, which is only ever part of the fd table. The #98573
+# report is exactly that case: ~20 state.db descriptors were not the whole 256, they were the share that
+# pushed httpx and terminal pipes over, and the EMFILE surfaced in tools/terminal_tool.py rather than here.
+# So the read pool also yields when the PROCESS is close to its limit, whatever is consuming it.
 _FD_HEADROOM_RESERVE = 64
 
 # The fd count is a directory listing; cache it briefly so a read burst isn't a
@@ -123,7 +140,14 @@ class _PathReadBudget:
     """Read-connection permits for ONE database file, shared process-wide
     (per-instance semaphores let N SessionDBs peak at N x (1 + MAX)). An idle
     pooled connection keeps its permit, so a permit miss first reclaims an IDLE
-    connection from a peer on the same path."""
+    connection from a peer on the same path.
+
+    ``_READ_POOL_MAX`` used to be enforced by a ``BoundedSemaphore`` owned by each SessionDB, which bounded
+    the wrong noun: the descriptors are spent on a *file*, so N SessionDB objects on one state.db each got
+    their own allowance and peak scaled as ``N x (1 + _READ_POOL_MAX)``. A long-lived gateway holds at least
+    two (``SessionStore`` and ``GatewayRunner`` open independent handles per profile path) and the count
+    grows with the profile count, which is how a healthy process walked into EMFILE — #98573.
+    """
 
     def __init__(self) -> None:
         self.permits = threading.BoundedSemaphore(_READ_POOL_MAX)
@@ -143,6 +167,10 @@ class _PathReadBudget:
             # Writer connections cannot be capped; the only bound is not opening
             # redundant handles, so make the duplicate visible before it's an incident.
             logger.warning(
+                # The only real bound on writers is not opening redundant handles in the first place (which
+                # is what GatewayRunner borrowing SessionStore's handle does, #98573), so the next duplicate
+                # should be visible before it becomes an incident rather than inferred from an lsof after
+                # one.
                 "%d live SessionDB handles on %s in this process; each holds "
                 "its own writer connection (read connections are capped at %d "
                 "for the file). A long-lived process should share one handle per path.",

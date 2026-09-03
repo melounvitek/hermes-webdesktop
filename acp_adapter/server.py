@@ -554,6 +554,14 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         Best-effort: a corrupt message must not turn the load into an error."""
         if replay_verb:
             try:
+                # Per ACP spec, `session/load` must stream the prior conversation back to the client via
+                # `session/update` notifications BEFORE responding, so the client receives the full
+                # transcript within the load request's lifetime. Awaiting the replay here matches Codex /
+                # Claude Code / OpenCode / Pi and the Zed client (which registers the session-update routing
+                # entry before awaiting the loadSession RPC specifically so in-call history replay updates
+                # can find the thread). Deferring this via `loop.call_soon` (as we did briefly in May 2026)
+                # broke every spec-compliant ACP client that measures notifications synchronously against
+                # the load response — see #12285 follow-up.
                 await self._replay_session_history(state)
             except Exception:
                 logger.warning(

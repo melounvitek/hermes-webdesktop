@@ -103,6 +103,16 @@ def finish_text_response(
     agent._emit_pending_fallback_notice()
     agent._clear_status_buffer()
 
+    # Defensive: repair malformed role-alternation before API call. Catches cases where the history got
+    # wedged into a ``tool → user`` or ``user → user`` tail (e.g. after empty- response scaffolding was
+    # stripped and a new user message landed after an orphan tool result). Most providers return empty
+    # content on malformed sequences, which would otherwise retrigger the empty-retry loop indefinitely.
+    # repair_message_sequence_with_cursor also recomputes the SessionDB flush cursor (_last_flushed_db_idx)
+    # when repair compacts the list, so the turn-end flush doesn't skip the assistant/tool chain (#44837).
+    # One-time repeated-heal escalation notice (#96870): if the sanitizer above just crossed the per-session
+    # heal threshold, deliver the queued notice through the status/warning callback — the normal out-of-band
+    # delivery channel (gateway status message / CLI print). NEVER appended to messages/api_messages:
+    # conversation context and the cached prompt prefix stay byte-identical.
     from agent.agent_runtime_helpers import (
         intent_ack_continuation_mode, trailing_continue_intent
     )

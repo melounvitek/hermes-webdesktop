@@ -84,6 +84,11 @@ def split_command_line(line: str) -> list[str]:
     ``shlex.split`` (posix=True) treats every backslash as an escape, mangling Windows paths. On
     Windows use ``posix=False`` and strip one layer of matching quotes per token; on POSIX this is
     exactly ``shlex.split``. Raises ValueError on unbalanced quotes.
+
+    ``shlex.split(line)`` (posix=True) treats every backslash as an escape character, so Windows paths are
+    silently mangled: ``C:\\Users\\me\\out.txt`` becomes ``C:Usersmeout.txt`` — no error, just a wrong path
+    that then "succeeds" against a mangled relative filename (#83934) or makes a valid hook script report
+    "not executable" (#78293).
     """
     import shlex
 
@@ -119,6 +124,7 @@ _CREATE_NEW_PROCESS_GROUP = 0x00000200
 # CREATE_NO_WINDOW child instead OWNS a hidden console all descendants inherit (A/B verified on
 # Windows 11 by the desktop backend fix, commit aa2ae36c3f: with per-site hide flags neutered,
 # naive git/gh/cmd spawns don't flash under a hidden-console parent and do under a console-less one).
+# 1. Combining them means DETACHED_PROCESS governs and the no-window bit is dead. 2. See #54220, #56747.
 _CREATE_NO_WINDOW = 0x08000000
 # Escape any Win32 job object the parent belongs to. Without this a detached child inherits the
 # parent's job, and when that parent (Electron, Tauri, Windows Terminal, the Desktop bootstrap
@@ -137,6 +143,17 @@ def windows_detach_flags() -> int:
     (#54220/#56747) at every spawn; CREATE_BREAKAWAY_FROM_JOB escapes Electron/Tauri job objects. A
     job that forbids breakaway yields PermissionError from Popen — callers catch OSError and fall
     back to :func:`windows_detach_flags_without_breakaway`.
+
+    Rationale: This both detaches it from the parent's console lifetime (closing the launching terminal
+    doesn't CTRL_CLOSE it) AND gives every console-subsystem descendant (git, gh, cmd, node, …) a console to
+    inherit, so they don't allocate visible flashing ones. This deliberately replaces the old
+    ``DETACHED_PROCESS`` approach: MSDN specifies CREATE_NO_WINDOW is *ignored* when combined with
+    DETACHED_PROCESS, and a truly console-less daemon re-creates the per-descendant console-flash bug
+    (#54220/#56747) at every spawn — see the note on ``_DETACHED_PROCESS`` above. Electron (Desktop app) and
+    Tauri (bootstrap installer) wrap their children in job objects; without breakaway, those children die
+    when the parent process exits even though they have their own console. This was the missing flag that
+    made the post-update gateway respawn watcher silently die alongside the Tauri updater after the Electron
+    Desktop's update flow finished.
     """
     if not IS_WINDOWS:
         return 0
@@ -221,6 +238,14 @@ def noninteractive_git_env(base: "Mapping[str, str] | None" = None) -> dict[str,
     *working* askpass helper or ssh-agent should still succeed non-interactively. Pair with
     ``stdin=subprocess.DEVNULL``. Internal plumbing only — the agent-facing terminal tool has its
     own policy layer and visible PTY.
+
+    Hermes shells out to git from many non-interactive contexts — MCP catalog installs, plugin
+    install/update, profile distribution staging, worktree base fetches, desktop review-pane fetch/push.
+    When the remote is private, misconfigured, or requires auth, git's default behavior is to prompt on the
+    inherited terminal (or via an askpass helper), which silently hangs the operation until its timeout — or
+    forever at call sites without one. Ported from openai/codex#34540 / #34612 ("detach non-interactive
+    subprocesses from stdin"): a background tool invocation must fail fast with a readable error, not wait
+    for input nobody can type.
     """
     env = dict(base if base is not None else os.environ)
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -313,6 +338,17 @@ def kill_process_tree(proc: "subprocess.Popen") -> None:
     ``proc.kill()`` alone only terminates the direct child. This is cleanup on an already-failing
     path whose contract is to fail open, so every failure (access denied, already reaped) is
     swallowed rather than escaping the caller's ``except``.
+
+    On Windows a suspended descendant (e.g. ``git.exe``) can survive holding duplicates of the captured pipe
+    handles, which keeps the pipes from reaching EOF and leaks two reader threads + the process per fired
+    timeout — ``taskkill /T /F`` takes the whole tree down so the bounded drain that follows can actually
+    reach EOF. On POSIX the same class exists: killing the launcher leaves descendants (credential helpers,
+    ``git-remote-https``, hook children) running and holding the pipe write ends. Callers spawn the child in
+    its own process group (``process_group=0``, Python ≥3.11), so when — and only when — the child leads its
+    own group (``pgid == pid``), the entire group is signalled with ``os.killpg``. The ownership check means
+    a fallback spawn that shares our group can never cause us to kill unrelated processes. Ported from
+    openai/codex#36793 ("Terminate timed-out Git process trees"); generalized for the shell-hook runner via
+    openai/codex#37527 ("Terminate timed-out hook process trees").
     """
     try:
         from agent.deadline import kill_process_tree as _deadline_kill_tree
@@ -364,6 +400,13 @@ def bounded_probe_run(
 
     Returns a ``CompletedProcess`` when the child finished within *timeout* (any exit code), or
     ``None`` on spawn failure or timeout.
+
+    Why not ``subprocess.run``: on Windows, ``run()``'s post-timeout cleanup calls an *unbounded*
+    ``communicate()`` after killing the direct child. Killing it can leave a descendant (``git.exe`` under a
+    launcher shim, ``conhost.exe`` under wmic/powershell) holding duplicates of the captured stdout/stderr
+    handles, so the pipes never reach EOF and the reader-thread join blocks forever. The wmic /
+    ``Get-CimInstance Win32_Process`` gateway scan hit exactly this during ``hermes update`` on slow-WMI
+    machines (#87134); the git probes hit it first (#68609 / #66037).
     """
     _popen_kwargs: dict = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
     try:
@@ -400,6 +443,18 @@ def bounded_git_probe(argv: Sequence[str], *, timeout: float) -> str:
     repo-configured ``core.fsmonitor`` program. Every probe therefore runs under
     :func:`noninteractive_git_env`; diff-rendering callers additionally pass
     :data:`NO_DRIVER_DIFF_FLAGS` (attribute-scoped drivers can't be disabled via env).
+
+    Killing the PATH-resolved launcher can leave a suspended descendant ``git.exe`` holding duplicates of
+    the captured stdout/stderr handles, so the pipes never reach EOF and the reader-thread join blocks
+    forever. On the Desktop agent-build path (``_start_agent_build → _session_info → branch() → run_git``)
+    that turned an optional branch label into ``agent initialization timed out`` (issues #68609 / #66037).
+    The normal-path spawn contract mirrors the previous ``run`` call byte-for-byte: PIPE/PIPE/DEVNULL,
+    ``text`` with UTF-8 ``errors="replace"`` decoding, and the hidden-window ``creationflags`` on Windows
+    only. On POSIX the probe is additionally placed in its own process group (``process_group=0``, Python
+    ≥3.11) so timeout cleanup can take down descendants — credential helpers, ``git-remote-https``, hook
+    children — with the launcher instead of orphaning them (see :func:`_kill_git_process_tree`; port of
+    openai/codex#36793). ``process_group`` only changes which group the child belongs to; it does not detach
+    the terminal or alter the fast path.
     """
     result = bounded_probe_run(argv, timeout=timeout, env=noninteractive_git_env())
     if result is None or result.returncode != 0:

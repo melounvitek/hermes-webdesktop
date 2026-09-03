@@ -124,7 +124,12 @@ def _strip_hermes_owned_pythonpath_and_runtime_markers(env: dict) -> None:
 def _strip_hermes_owned_pythonpath(env: dict) -> None:
     """Remove Hermes-owned PYTHONPATH entries: only exact matches of the repo root
     (any launcher spelling) and runtime site-packages — never descendants, which are
-    user paths. Empty components (= cwd) and everything else are preserved."""
+    user paths. Empty components (= cwd) and everything else are preserved.
+
+    Everything else -- user libs, Nix plugin paths, a pythonX.Y/site-packages entry meant for a DIFFERENT
+    child version -- is preserved byte-for-byte: ownership is decided by path provenance, never by a
+    cross-version heuristic (#74817 follow-up).
+    """
     pp = env.get("PYTHONPATH")
     if not pp:
         return

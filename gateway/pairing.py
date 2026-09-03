@@ -43,6 +43,18 @@ MAX_FAILED_ATTEMPTS = 5             # Failed approvals before lockout
 PAIRING_DIR = None
 
 
+# Default (non-profile-scoped) pairing directory. Left unresolved (``None``) here rather than computed
+# eagerly: this module is imported once by the long-lived gateway process at container/process boot, and
+# computing the path eagerly freezes it to whatever HERMES_HOME/profile context existed at that exact import
+# moment for the rest of the process's lifetime -- even if a context-local override (see
+# hermes_constants.set_hermes_home_override) is established afterward. A freshly-started, short-lived
+# process (e.g. the ``hermes pairing`` CLI) re-imports this module later with the final environment already
+# in place, so it never observes the stale value -- the resulting asymmetry is what made pending pairing
+# codes issued by the gateway unrecoverable while CLI-side writes to the same directory kept working
+# (NousResearch/hermes-agent#93449). ``_default_pairing_dir()`` below resolves this fresh on every call in
+# production. Tests patch this attribute directly to a concrete path for isolation (e.g.
+# ``patch("gateway.pairing.PAIRING_DIR", tmp_path)``); that continues to work unchanged, since a patched
+# (non-``None``) value takes precedence over recomputing.
 def _default_pairing_dir() -> Path:
     return PAIRING_DIR if PAIRING_DIR is not None else get_hermes_dir("platforms/pairing", "pairing")
 
@@ -51,6 +63,7 @@ def _default_pairing_dir() -> Path:
 # an already-configured allowlist (revoke removes them) so the operator's list stays
 # the visible source of truth. Platforms absent here (or with no allowlist
 # configured) keep the pairing store as the sole grant record (authz union).
+# See #23778.
 _PLATFORM_ALLOWLIST_ENV = {
     "telegram": "TELEGRAM_ALLOWED_USERS", "discord": "DISCORD_ALLOWED_USERS",
     "whatsapp": "WHATSAPP_ALLOWED_USERS", "whatsapp_cloud": "WHATSAPP_CLOUD_ALLOWED_USERS",
@@ -119,6 +132,8 @@ def _read_allowlist_env(env_var: str) -> str:
     miss must return empty rather than borrow it; unscoped callers keep the legacy
     ``os.getenv`` read. Writes (``save_env_value``/``remove_env_value``) target the
     active profile's ``.env`` / installed scope, not ``os.environ``.
+
+    See #88441.
     """
     with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
@@ -241,6 +256,10 @@ def _load_json_file(path: Path) -> dict:
         return data if isinstance(data, dict) else {}
     except PermissionError as e:
         try:
+            # Surface this loudly: a 0600 file owned by a different user (classic Docker symptom: `docker
+            # exec` runs as root and writes the file, then the gateway process — running as `hermes` after
+            # gosu drop — can't read it) would otherwise be swallowed by the generic OSError branch below,
+            # silently leaving the user marked unauthorized. See issue #10270.
             st = path.stat()
             owner_info = f"owner_uid={st.st_uid} mode={oct(st.st_mode)[-4:]}"
         except OSError:
@@ -455,6 +474,8 @@ class PairingStore:
         Returns ``{user_id, user_name}``, or ``None`` if the code is invalid/expired OR the
         platform is locked out (disambiguate with ``_is_locked_out``). Constant-time
         salted-hash compare; legacy plaintext entries are ignored and pruned at TTL.
+
+        See #10195.
         """
         with self._lock:
             self._cleanup_expired(platform)

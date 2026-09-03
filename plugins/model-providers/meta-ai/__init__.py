@@ -67,6 +67,7 @@ meta_ai = MetaAIProfile(
     # Natively multimodal, but only on user turns: an image envelope inside a role:tool
     # message 400s "content did not match any supported type".
     supports_vision=True, supports_vision_tool_messages=False,
+    # See #101668.
     default_aux_model="muse-spark-1.2-contributor",
     # Muse spends completion budget on hidden reasoning first; low caps can finish with empty content.
     default_max_tokens=16384,

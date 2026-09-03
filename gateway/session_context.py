@@ -176,7 +176,10 @@ def session_is_messaging_surface() -> bool:
 def declare_stateless_channel() -> None:
     """Declare that this session cannot receive an async background completion.  Unlike
     ``set_session_vars(async_delivery=False)`` this does NOT latch ``_session_context_engaged``
-    (flipping the subprocess env bridge), which a one-shot CLI must not do as a side effect."""
+    (flipping the subprocess env bridge), which a one-shot CLI must not do as a side effect.
+
+    See NousResearch/hermes-agent#53027 and #63142.
+    """
     _SESSION_ASYNC_DELIVERY.set(False)
 
 

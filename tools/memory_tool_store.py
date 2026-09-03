@@ -71,6 +71,7 @@ class MemoryStore:
     # Failed consolidation attempts (overflow / zero-match) allowed per turn before
     # a TERMINAL "save skipped" result, so a fragile replace/add can't loop the turn
     # to budget exhaustion and suppress the user's reply.
+    # See #42405.
     _MAX_CONSOLIDATION_FAILURES_PER_TURN = 3
 
     def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375, *,
@@ -82,6 +83,8 @@ class MemoryStore:
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
         self._consolidation_failures = 0  # per turn; reset by reset_consolidation_failures()
 
+    # Per-turn counter of failed at-capacity consolidation attempts; reset at each turn boundary by
+    # reset_consolidation_failures() (#42405).
     def target_enabled(self, target: str) -> bool:
         return self.user_profile_enabled if target == "user" else self.memory_enabled
 
@@ -91,7 +94,12 @@ class MemoryStore:
 
     def _consolidation_failure(self, response: Dict[str, Any]) -> Dict[str, Any]:
         """Count a consolidation failure: under the per-turn cap return ``response``
-        (it says how to retry); past it a TERMINAL result so the model stops looping."""
+        (it says how to retry); past it a TERMINAL result so the model stops looping.
+
+        Once the cap is exceeded, drop the retry instruction and return a TERMINAL result so the model stops
+        looping memory calls and proceeds to answer the user — a failed memory side effect must never block
+        the turn's reply (#42405).
+        """
         self._consolidation_failures += 1
         if self._consolidation_failures <= self._MAX_CONSOLIDATION_FAILURES_PER_TURN:
             return response
@@ -327,6 +335,8 @@ class MemoryStore:
         """TERMINAL and WITHOUT the entries list: echoing entries invites the model to
         "find more to fix" and re-issue the same ops. A successful write resets the
         per-turn failure budget."""
+        # A successful write means the consolidation loop made progress, so the per-turn failure budget
+        # resets (the cap counts consecutive failures, not lifetime ones within a turn) (#42405).
         self._consolidation_failures = 0
         return {"success": True, "done": True, "target": target,
                 "usage": self._usage_pct(target, self._char_count(target)),
@@ -349,6 +359,12 @@ class MemoryStore:
         if not path.exists():
             return "", True
         try:
+            # utf-8-sig strips a leading UTF-8 BOM (Notepad-edited memory files on Windows) and is
+            # byte-identical to utf-8 otherwise. Plain utf-8 kept U+FEFF glued to the first entry,
+            # corrupting matching/dedup for that entry forever (#10878 / PR #10888). Decode errors stay
+            # STRICT on purpose: errors="replace" would hand read-modify-write callers a lossy view that a
+            # subsequent save persists over the real bytes — the wipe class documented above. Undecodable
+            # bytes must surface as read_ok=False.
             return path.read_text(encoding="utf-8-sig"), True
         except (OSError, UnicodeDecodeError):
             return "", False

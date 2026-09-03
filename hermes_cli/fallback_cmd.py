@@ -147,6 +147,8 @@ def cmd_fallback_add(args) -> None:
     # Same deployment as the primary → nothing to add. Identity semantics are owned by
     # agent.backend_identity: same provider+model on a DIFFERENT explicit base_url is a different
     # backend (multi-endpoint pool) and a legitimate fallback.
+    # Picker picked the same thing that's already the primary → nothing changed, and there's nothing useful
+    # to add as a fallback to itself. See #54250, #57584, #62984.
     from agent.backend_identity import same_deployment
     new_ident = _identity(new_entry)
     primary_entry = _extract_fallback_from_model_cfg(model_before)

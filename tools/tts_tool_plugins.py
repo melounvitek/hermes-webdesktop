@@ -36,7 +36,14 @@ def _dispatch_to_plugin_provider(text: str, output_path: str, provider: str, tts
 
     Invariants re-checked here so a caller refactor can't break them: built-in names never reach
     the registry; a same-named ``type: command`` provider wins; only an exact registered name
-    dispatches. Plugin exceptions propagate to ``text_to_speech_tool``'s error envelope."""
+    dispatches. Plugin exceptions propagate to ``text_to_speech_tool``'s error envelope.
+
+    Resolution invariants enforced here (matches issue #30398):
+    1. The caller is responsible for the elif chain that handles ``edge``/``openai``/etc.; this function
+    explicitly rejects those names defensively. 2. 3. Plugin dispatch fires only when ``provider`` matches a
+    registered :class:`TTSProvider` whose ``name`` equals the configured value. Unknown names return None
+    (caller falls through to Edge default). See #17843.
+    """
     key = (provider or "").lower().strip()
     if not key or key in BUILTIN_TTS_PROVIDERS:
         return None

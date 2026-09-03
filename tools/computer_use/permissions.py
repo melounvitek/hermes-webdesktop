@@ -20,7 +20,11 @@ _RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})  # mirrors the tool
 _BOOLS = ("accessibility", "screen_recording", "screen_recording_capturable")
 
 def _child_env() -> Dict[str, str]:
-    """cua-driver child env (telemetry policy + provider secrets stripped); ``os.environ`` on import error."""
+    """cua-driver child env (telemetry policy + provider secrets stripped); ``os.environ`` on import error.
+
+    cua-driver is a third-party binary — it must never inherit provider API keys (#53503/#55709/#58889
+    lineage). Each layer degrades gracefully so permission probes never break on a helper import error.
+    """
     try:
         from tools.computer_use.cua_backend import sanitized_cua_driver_env
         return sanitized_cua_driver_env()

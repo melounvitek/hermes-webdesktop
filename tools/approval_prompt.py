@@ -34,12 +34,15 @@ def prompt_dangerous_approval(command: str, description: str, timeout_seconds: i
     Returns 'once', 'session', 'always', 'deny', or 'timeout'. 'timeout' means no
     user response — still blocked (fail-closed), but callers report "no response"
     rather than an explicit denial.
+
+    See #81887.
     """
     from tools import approval as _a
     if timeout_seconds is None:
         timeout_seconds = _a._get_approval_timeout()
     # Everything below is a human prompt (callback panel or input() fallback, both bounded by the approval deadline):
     # record it as human-wait time so the concurrent batch deadline excludes it.
+    # See #79719.
     with human_wait_window():
         return _ask_human(command, description, timeout_seconds, allow_permanent,
                           approval_callback, allow_session, smart_denied)
@@ -101,6 +104,11 @@ def _ask_human(command: str, description: str, timeout_seconds: int, allow_perma
     # invisible deadlock. Deny loudly instead; threads needing interactive approval must install a callback via
     # tools.terminal_tool.set_approval_callback() first.
     try:
+        # Deny fast and log loudly instead so the caller can surface a real error to the agent. Any thread
+        # that needs interactive approval must install a callback via
+        # tools.terminal_tool.set_approval_callback() before reaching this point (see delegate_tool.py,
+        # run_agent.py _execute_tool_calls_concurrent / _spawn_background_review for the established
+        # pattern). See #15216.
         from prompt_toolkit.application.current import get_app_or_none
         if get_app_or_none() is not None:
             logger.warning("Dangerous-command approval requested on a thread with no "

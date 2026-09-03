@@ -135,7 +135,10 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
 def _print_macos_fda_tip() -> None:
     """One-time macOS tip: one Full Disk Access grant kills every per-folder prompt. Same
     prompt-free probe as doctor's check_macos_full_disk_access (the FDA-gated TCC dir never
-    triggers a dialog); silent on non-macOS and when FDA is granted or indeterminate."""
+    triggers a dialog); silent on non-macOS and when FDA is granted or indeterminate.
+
+    every per-folder permission prompt, permanently (issue #52010 follow-up).
+    """
     from hermes_cli.setup import _info
     if sys.platform != "darwin":
         return
@@ -172,6 +175,9 @@ def _blank_slate_minimal_toolsets(config: dict):
         for k, tdef in TOOLSETS.items():
             if k.startswith("hermes-") or (isinstance(tdef, dict) and (tdef.get("includes") or tdef.get("posture"))):
                 continue
+            # selections made by agent/coding_context.py — not permanent user-facing disables. Adding them
+            # here causes model_tools to subtract their tools (terminal, read_file, …) from the minimal
+            # Blank Slate surface (#57315).
             all_keys.add(k)
         disabled = sorted(all_keys - keep)
         if disabled:

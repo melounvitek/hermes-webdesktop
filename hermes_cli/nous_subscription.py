@@ -203,6 +203,7 @@ def _has_agent_browser() -> bool:
         # from the *probe* process's PATH); local node_modules/.bin (PATHEXT-aware ``shutil.which`` so
         # Windows picks the ``.cmd`` shim). The hit must also run: a dangling symlink is reported by
         # ``which`` but fails at exec.
+        # See #48521.
         from hermes_constants import with_hermes_node_path
 
         local_bin_dir = Path(__file__).parent.parent / "node_modules" / ".bin"
@@ -531,6 +532,9 @@ def _get_gateway_direct_credentials() -> Dict[str, bool]:
     audio_direct = bool(resolve_openai_audio_api_key())
     return {
         "web": _any_env("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "PARALLEL_API_KEY", "TAVILY_API_KEY", "EXA_API_KEY", "SEARXNG_URL"),
+        # Env-configured keyless local backend: a reachable self-hosted SearXNG is a working web setup even
+        # with no stored selection (the autodetect cascade in tools/web_tools.py picks it up), so it must
+        # not be classified "unconfigured" and pre-checked (#92647).
         "image_gen": fal_direct,
         "video_gen": fal_direct,
         "tts": audio_direct or _any_env("ELEVENLABS_API_KEY"),
@@ -604,6 +608,8 @@ def prompt_enable_tool_gateway(config: Dict[str, object], *, force_fresh: bool =
     # Unconfigured tools first (pre-checked for new users), then tools with the user's own key
     # (unchecked). Tools previously offered and left unchecked are recorded in
     # ``tool_gateway_declined_tools`` and never pre-checked again (no re-fire on every model swap).
+    # Acceptance used to be sticky while refusal was not, so the identical pre-checked checklist re-fired on
+    # every Nous model swap. See #92647.
     declined_raw = config.get("tool_gateway_declined_tools")
     declined: set[str] = {str(k) for k in declined_raw} if isinstance(declined_raw, list) else set()
     offer_keys: list[str] = list(unconfigured) + list(has_direct)

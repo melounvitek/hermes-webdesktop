@@ -96,7 +96,11 @@ async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs)
 
 
 def _is_telegram_thread_not_found(error: Exception) -> bool:
-    """Mirror of the gateway adapter's ``_is_thread_not_found_error``."""
+    """Mirror of the gateway adapter's ``_is_thread_not_found_error``.
+
+    Matches the gateway adapter's ``_is_thread_not_found_error`` for the standalone ``_send_telegram`` path
+    (issue #27012).
+    """
     return "thread not found" in str(error).lower()
 
 
@@ -169,6 +173,8 @@ async def _telegram_send_text_chunk(bot, chat_id, chunk, parse_mode, has_html, t
     try:
         return await send(chunk, parse_mode)
     except Exception as md_error:
+        # Thread not found — retry without message_thread_id so the message still delivers (matching the
+        # gateway adapter's fallback behaviour, issue #27012).
         if _is_telegram_thread_not_found(md_error) and text_kwargs.get("message_thread_id") is not None:
             logger.warning("Thread %s not found in _send_telegram, retrying without message_thread_id",
                            text_kwargs.pop("message_thread_id"))
@@ -238,6 +244,7 @@ async def _send_telegram(token, chat_id, message, media_files=None, thread_id=No
         from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
         from gateway.platforms.base import BasePlatformAdapter, utf16_len
         # Telegram accepts a numeric chat_id OR an @username string; never force-int.
+        # See #13206.
         int_chat_id = normalize_telegram_chat_id(chat_id)
         media_files = media_files or []
         thread_kwargs = _telegram_thread_kwargs(thread_id)
@@ -479,10 +486,16 @@ async def _send_signal(extra, chat_id, message, media_files=None):
         return _error(f"Signal send failed: {e}")
 
 
+# "ephemeral connect (may re-init E2EE per send, see #46310)",
 async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, thread_id=None):
     """Matrix adapter send (native media preserved). Prefer the live gateway adapter's persistent
     olm/megolm session: ephemeral per-send connects re-init E2EE and claim one-time keys, which
-    under bursts exhausts recipient OTKs and silently drops messages — ephemeral is cron-only."""
+    under bursts exhausts recipient OTKs and silently drops messages — ephemeral is cron-only.
+
+    When a live gateway adapter is available (i.e. the tool runs inside a running gateway), the persistent
+    connection is reused — one olm/megolm session for all sends. This avoids per-message E2EE re-init storms
+    that exhaust recipient OTKs and silently drop messages (issue #46310).
+    """
     media_files = media_files or []
     metadata = {"thread_id": thread_id} if thread_id else None
     from gateway.config import Platform

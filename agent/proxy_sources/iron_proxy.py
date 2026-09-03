@@ -71,6 +71,13 @@ _BEARER_PROVIDERS: Dict[str, Tuple[str, ...]] = {
 # two require-rules on one host would reject each other's requests; the sandbox gets the token
 # under every name.  Authorization is also matched for Anthropic/Azure (SDKs may send Bearer);
 # Gemini's ``?key=<token>`` style is covered by match_query.
+# Providers whose API authenticates with a NON-Authorization header. iron-proxy v0.39's
+# ``secrets.replace.match_headers`` targets arbitrary header names (case-insensitive; confirmed by the
+# iron-proxy author on PR #30179 and verified in the pinned v0.39.0 source — ``swapHeaders`` +
+# ``parseHeaderMatchers``), so these are first-class swapped providers, not "uncovered". ``aliases`` are
+# interchangeable env-var names for the SAME upstream credential (Hermes' auth.py keys Google on both
+# GEMINI_API_KEY and GOOGLE_API_KEY). The sandbox receives the minted token under the canonical name AND
+# every alias so SDKs reading either work.
 _HEADER_AUTH_PROVIDERS: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "ANTHROPIC_API_KEY": {"hosts": ("api.anthropic.com",), "match_headers": ("x-api-key", "Authorization"), "aliases": ()},
     "AZURE_OPENAI_API_KEY": {"hosts": ("*.openai.azure.com", "*.cognitiveservices.azure.com", "*.services.ai.azure.com"),

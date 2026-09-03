@@ -23,10 +23,16 @@ logger = logging.getLogger("hermes_cli.tools_config")
 # One upstream-installer run must outlive the installer's own stale-lock recovery (_install-rust.sh
 # force-releases a dead holder's lock only after LOCK_STALE_AFTER_SECONDS=600; a shorter timeout
 # kills every run before that fires — a permanent wedge). 660s = 600s + 60s headroom.
+# With a shorter Python-side timeout, a stale lock means every run gets killed before the installer's
+# recovery can fire — a permanent "always times out" wedge (issue #58762). 660s = 600s lock window + 60s
+# headroom for the actual download/swap.
 _CUA_INSTALLER_TIMEOUT = 660
 # Bounded pipe drain after a timeout kill: the kill is best-effort (_reap_after_timeout), and a
 # surviving descendant holding the inherited stdout would otherwise block the read on an EOF that
 # never comes. A successful kill closes the pipe at once, so this costs nothing.
+# Grace period for draining the installer's pipes after a timeout kill. A successful kill closes the pipe
+# immediately, so this costs nothing in the normal case; it only caps how long a failed one can stall the
+# update. See #87703.
 _CUA_INSTALLER_DRAIN_GRACE = 15
 # Quiet ``hermes update`` refreshes stay bounded even when upstream waits on Read-Host / a consent
 # prompt (explicit ``install --upgrade`` keeps the full ceiling); safe because the lock/network
@@ -443,7 +449,12 @@ def _clear_stale_cua_install_lock() -> None:
 def _cua_install_lock_held() -> bool:
     """True when the upstream installer's lock is held by a LIVE process.
     Called after ``_clear_stale_cua_install_lock()``: anything provably stale is already gone, so a
-    surviving lock artifact means a concurrent (or orphaned-but-alive) install owns it."""
+    surviving lock artifact means a concurrent (or orphaned-but-alive) install owns it.
+
+    Upstream waits up to ``LOCK_STALE_AFTER_SECONDS=600`` on a held lock before probing — unattended
+    refreshes must not eat that wait (the 11-minute hang class, 87703): they skip instead. Best-effort:
+    unreadable state reports not-held so a probe failure can never block an install. See #87703.
+    """
     try:
         if sys.platform != "win32":
             return _cua_install_lock_dir().is_dir()
@@ -586,11 +597,20 @@ def _kill_installer_tree(proc, *, is_windows: bool) -> None:
 def _reap_after_timeout(proc, *, is_windows: bool) -> None:
     """Kill the installer tree, then drain its pipes under a deadline.
     An unbounded drain blocks on an EOF that only arrives when someone kills a surviving descendant
-    by hand, so ``_CUA_INSTALLER_TIMEOUT`` would stop bounding anything."""
+    by hand, so ``_CUA_INSTALLER_TIMEOUT`` would stop bounding anything.
+
+    Bound the drain instead: a kill that landed closes the pipe at once, and one that did not costs
+    ``_CUA_INSTALLER_DRAIN_GRACE`` rather than forever. The caller re-raises the original ``TimeoutExpired``
+    either way, so the manual re-run hint still prints and the update unwinds. Losing the tail of a
+    timed-out installer's log is the cheaper half of that trade. See #87703.
+    """
     _kill_installer_tree(proc, is_windows=is_windows)
     try:
         drained_out, _ = proc.communicate(timeout=_CUA_INSTALLER_DRAIN_GRACE)
         # Partial output names WHERE the installer was stuck (lock wait, consent prompt, download).
+        # Diagnosability (#87703 post-mortem): the partial output names WHERE the installer was stuck (lock
+        # wait, consent prompt, download) — before this, the answer died with the process and the timeout
+        # line was unactionable.
         if drained_out:
             logger.warning("cua-driver installer timed out; last output before kill:\n%s",
                            drained_out[-2000:])
@@ -714,9 +734,17 @@ def _run_cua_driver_installer(label: str = "Installing", verbose: bool = True,
         installer_env["CUA_DRIVER_RS_VERSION"] = pin_version
     # A previous timed-out install can leave upstream's concurrent-install lock behind; clear it
     # when provably stale so the refresh doesn't wedge waiting on a dead holder.
+    # See #58762.
     _clear_stale_cua_install_lock()
 
     # Unattended refreshes (installer_timeout set by `hermes update`) preflight and may skip.
+    # Unattended refreshes (installer_timeout set by `hermes update`) fail FAST on the two conditions that
+    # otherwise consume the whole ceiling: 1. Install lock held by a live process — upstream would poll it
+    # for up to LOCK_STALE_AFTER_SECONDS=600 before probing the holder. That is the 11-minute silent hang
+    # class (#87703; observed live 2026-08-25: "cua-driver refreshing timed out after 660s"). 2. Release
+    # host unreachable (outage/DNS/firewall) — the installer would die slowly inside its own retries. A 5s
+    # HEAD answers now. Explicit `computer-use install --upgrade` runs keep upstream's full lock-recovery
+    # semantics — a human is watching and can wait or Ctrl-C.
     if installer_timeout is not None:
         install_cmd = _unattended_installer_preflight(install_cmd, is_windows)
         if install_cmd is None:

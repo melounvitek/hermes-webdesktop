@@ -85,6 +85,7 @@ def _admit_prompt_turn(
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
+    # When the session already holds its lease this is a cheap dict check. See #94778.
     if (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
         logger.info(
             "Refusing turn for session %s at _run_prompt_submit: %s",
@@ -215,6 +216,13 @@ def _commit_turn_history(
             session["history"] = result["messages"]
             session["history_version"] = history_version + 1
             return None
+        # History mutated externally during the turn. Check if the only mutation was a pivot marker the
+        # gateway itself inserted mid-turn (#76870). If so the agent output is still valid — merge it into
+        # the current history that now contains the marker. A personality change counts here too: unlike a
+        # model switch it has no pending queue, so `/personality` during a running turn lands immediately
+        # and used to read as a genuine desync, dropping the finished turn (#82756).
+        # _append_model_switch_marker strips prior markers in-place then appends a new one, so the delta is
+        # NOT a simple tail-slice — we must compare content, not indices.
         current_history = list(session["history"])
         history_no_markers = [e for e in history if not _is_pivot_marker(e)]
         current_no_markers = [e for e in current_history if not _is_pivot_marker(e)]
@@ -254,6 +262,9 @@ def _turn_outcome(result: Any) -> tuple[Any, str, str | None]:
         raw = f"Error: {result.get('error')}"
     # "Operation interrupted: waiting for model response (…)" is cancellation
     # metadata, not assistant prose (gateway/run.py and ACP suppress it too).
+    # "Operation interrupted: waiting for model response (…)" is cancellation metadata, not assistant prose.
+    # gateway/run.py and the ACP adapter already suppress this sentinel; without this the desktop paints it
+    # as the agent's reply whenever a stop/steer lands mid-request (#7921).
     if status == "interrupted" and isinstance(raw, str) and raw.strip().startswith(
             INTERRUPT_WAITING_FOR_MODEL_PREFIX):
         raw = ""
@@ -446,6 +457,11 @@ def _prepare_turn_input(sid: str, session: dict, st: _TurnRun, text: Any, images
     # fall through to /dev/tty and hang the headless gateway (re-run is a no-op).
     _wire_callbacks(sid)
     if not st.one_turn_restore:
+        # Skip the config-model sync while a /model --once override is active: the once-model is
+        # intentionally not pinned as a session model_override (it must not persist), so without this guard
+        # the sync would see "agent model != config model" and clobber the once-override back to the config
+        # model before the turn runs (#29923 review defect). Any config.yaml change is adopted on the NEXT
+        # turn, after the finally-restore below.
         _apply_pending_model_switch(sid, session)
         _sync_agent_model_with_config(sid, session)
         _sync_agent_compression_with_config(sid, session)
@@ -567,6 +583,7 @@ def _absorb_turn_result(
         # Undo a /moa one-shot through the switch path: resetting model_override alone
         # would leave the live client pinned to MoA after the in-place switch_model().
         _restore = session.pop("moa_one_shot_restore", None)
+        # Restore the model the user was on before the /moa one-shot. See #53444.
         if isinstance(_restore, dict):
             _prev_override = _restore.get("override")
             _prev_model = _restore.get("model")
@@ -596,6 +613,7 @@ def _absorb_turn_result(
         # Auto-compression may have rotated agent.session_id: sync session_key before
         # title/goal/finalize use it, keep pending_title (user intent), restart the slash
         # worker so worker-backed commands target the live session.
+        # Fix for #20001.
         _sync_session_key_after_compress(
             sid, session, clear_pending_title=False, restart_slash_worker=True)
     return status_note
@@ -745,6 +763,12 @@ def _run_prompt_submit(
     # session_key and the agent's live session_id together.  No prompt content is logged.
     _turn_started_monotonic = time.monotonic()
     logger.info(
+        # Desktop/TUI observability (#86647): this is the ONE INFO record proving a Desktop/TUI prompt was
+        # accepted by THIS process, and it ties together every id a rotation-mute trace needs — the UI
+        # session id, the gateway session_key, and the agent's live session_id (which compression rotates
+        # independently of the other two). Before this line a Desktop request left no trace in agent.log at
+        # all ("0 platform=desktop" — see #86647), so a muted window was structurally indistinguishable from
+        # a request that never arrived.
         "tui prompt accepted: ui_session=%s session_key=%s agent_session_id=%s "
         "kind=%s chars=%s images=%d",
         sid, session.get("session_key") or "", getattr(agent, "session_id", "") or "",

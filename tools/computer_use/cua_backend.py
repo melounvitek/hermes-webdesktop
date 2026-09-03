@@ -52,7 +52,10 @@ def _cua_no_overlay() -> bool:
     """Pass ``--no-overlay``? ``computer_use.no_overlay`` overrides; else off on macOS (cursor-overlay redraw
     loop can peg a core after a session), headless Linux / WSL2 / containers, and Linux X11 (the overlay is a
     fullscreen always-on-top all-workspaces window with no compositor-owned lifecycle, so an unclean session
-    end can leave it wedged over every app); on for Windows and Linux Wayland (compositor owns the surface)."""
+    end can leave it wedged over every app); on for Windows and Linux Wayland (compositor owns the surface).
+
+    Explicit ``True`` / ``False`` overrides auto-detection. See #28152, #47032.
+    """
     val = _computer_use_cfg().get("no_overlay")
     if val is not None or sys.platform != "linux":
         return bool(val) if val is not None else sys.platform == "darwin"
@@ -60,6 +63,13 @@ def _cua_no_overlay() -> bool:
     with contextlib.suppress(Exception), open("/proc/version", encoding="utf-8") as f:
         wsl = "microsoft" in f.read().lower()
     return wsl or not os.environ.get("DISPLAY") or (
+        # Linux/X11: the cursor overlay is a fullscreen, always-on-top, all-workspaces X11 window
+        # (save-unders path). An unclean session end (agent interrupted mid-capture, stale target window)
+        # can leave it stuck above every app on every workspace, wedging desktop input until the app
+        # restarts — the same failure class as the HUD window on Mutter/X11 (#83473). There is no
+        # compositor-owned surface to tear down with the client connection, so default the overlay off on
+        # X11 too; set computer_use.no_overlay: false to keep the cursor. Wayland keeps it: the compositor
+        # owns the overlay surface lifecycle there.
         os.environ.get("XDG_SESSION_TYPE") != "wayland" and not os.environ.get("WAYLAND_DISPLAY"))
 
 def _cua_telemetry_disabled() -> bool:
@@ -113,6 +123,8 @@ def sanitized_cua_driver_env() -> Dict[str, str]:
     never inherit API keys. Falls back to the unsanitized telemetry env if the sanitizer can't import."""
     env = cua_driver_child_env()
     with contextlib.suppress(Exception):
+        # cua-driver is a third-party binary — never hand it provider API keys via inherited env (same
+        # policy as the manifest probe and MCP spawn; #53503/#55709/#58889 lineage).
         from tools.environments.local import _sanitize_subprocess_env
         return _sanitize_subprocess_env(env)
     return env
@@ -140,6 +152,8 @@ def _linux_session_locked() -> Optional[bool]:
     """Is the graphical session locked? (Linux; best-effort.) A locked KDE/GNOME session freezes renderers and
     half-disables the AX tree, so discovery legitimately returns nothing — which otherwise reads as a driver bug.
     True/False when loginctl answers, None when unavailable (non-Linux, no systemd-logind, probe failure)."""
+    # Auto-detect: macOS overlay can peg a core indefinitely after a computer_use session (#47032). Prefer
+    # off until the driver teardown is solid; set computer_use.no_overlay: false to keep the cursor.
     if sys.platform != "linux":
         return None
     try:
@@ -295,6 +309,11 @@ class CuaDriverBackend(_CaptureMixin, _InputMixin, ComputerUseBackend):
     def _clear_active_target(self) -> None:
         """Forget a capture/focus target so a failed lookup cannot misroute input."""
         self._active_pid = self._active_window_id = self._last_app = self._last_target = None
+        # Surface 6 of NousResearch/hermes-agent#47072: per-snapshot `element_index -> element_token` map
+        # populated on capture(). Action tools (click/scroll/set_value/...) attach the matching token
+        # alongside `element_index` so cua-driver detects "stale" explicitly instead of silently
+        # re-resolving to a different element. Cleared whenever a fresh capture overwrites the snapshot
+        # context.
         self._snapshot_tokens: Dict[int, str] = {}
 
     def _set_active_target(self, target: Dict[str, Any]) -> None:

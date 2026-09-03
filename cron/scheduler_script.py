@@ -260,6 +260,12 @@ def _resolve_script_path(script_path: str) -> tuple[Optional[Path], Optional[str
 
     # Reject NUL eagerly: on Windows Path ops raise ValueError *after* expanduser so the try below
     # would not catch it. str() first so the guard itself cannot raise on a non-str script_path.
+    # Same ingestion contract as cron.lifecycle_guard._expand_candidate_path: a NUL-bearing value can never
+    # name a real script, and on Windows the Path operations raise ValueError *after* expanduser (expanduser
+    # never expands "~user" there, so the try below never fires) — reject eagerly so both platforms fail
+    # cleanly instead of crashing the scheduler. str() first so the guard itself can never raise TypeError
+    # on a non-str script_path (e.g. a Path passed by a future caller) — the guard must be crash-proof even
+    # though every current call site passes a plain str (#86832 review).
     if "\x00" in str(script_path):
         return None, f"Blocked: script path contains a NUL byte: {script_path!r}"
     try:
@@ -311,7 +317,13 @@ def _run_job_script(
     """Execute a cron job's script and return ``(success, output)``; on failure *output* is the
     error message for the LLM to report. Env goes through ``build_subprocess_env`` (SECURITY.md
     §2.3). ``workdir`` sets the subprocess cwd only; the Python process cwd is NEVER mutated (an
-    ``os.chdir()`` would leak into concurrent gateway sessions)."""
+    ``os.chdir()`` would leak into concurrent gateway sessions).
+
+    Args: script_path: Path to the script. Relative paths are resolved against HERMES_HOME/scripts/.
+    Absolute and ~-prefixed paths are also validated to ensure they stay within the scripts dir. workdir:
+    Optional absolute path to use as the script's cwd. When set, the subprocess runs in this directory
+    instead of the scripts-dir parent. See #69396.
+    """
     path, err = _resolve_script_path(script_path)
     if path is None:
         return False, err
@@ -327,11 +339,18 @@ def _run_job_script(
             popen_kwargs = {
                 "creationflags": _sched.windows_hide_flags()
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+                # Lossy UTF-8 decode — locale-mismatched bytes from the STT command must not raise in the
+                # reader threads on non-UTF-8 Windows (#45099).
+                # Lossy UTF-8 decode — locale-mismatched bytes from the TTS command must not raise in the
+                # reader threads on non-UTF-8 Windows (#45099).
                 "encoding": "utf-8",
                 "errors": "replace"}
         env = build_subprocess_env()
         env.update(env_overlay)
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
+        # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
+        # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent
+        # gateway sessions (#69396).
         proc = subprocess.Popen(
             argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             cwd=workdir or str(path.parent), env=env, **popen_kwargs)
@@ -347,6 +366,12 @@ def _run_job_script(
             if remaining <= 0:
                 _sched._terminate_cron_script_tree(proc)
                 _drain_script_pipes(proc)
+                # Phase 4a (#85125): a script timeout must leave ZERO living descendants. killpg only
+                # reaches the script's own process group — a grandchild that called setsid (backgrounded
+                # shell jobs, watchdogs) escapes it and keeps running after the job reports failure (#71148
+                # / #59549). agent.deadline.kill_process_tree snapshots the descendant set via psutil BEFORE
+                # signalling, so own-session grandchildren are reached too — the unified deadline layer's
+                # tree-kill (#85147, d6a5cb9725).
                 return False, f"Script timed out after {script_timeout}s: {path}"
             try:
                 stdout_raw, stderr_raw = proc.communicate(timeout=min(0.1, remaining))

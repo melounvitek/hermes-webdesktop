@@ -46,6 +46,19 @@ def _safe_int(value: Any) -> int | None:
 # summary sees it while the detached stalled worker does not. A stall raises nothing, so the aux client's
 # exception-path fallback never fires; the host pins a fallback route for exactly ONE retry (the sole aux
 # call per compaction). The main-model retry must NOT re-issue the pin.
+# ── Pinned summary route ───────────────────────────────────────────────── The summary call normally
+# resolves its provider/model from ``auxiliary.compression``. One caller needs to override that for a single
+# attempt: after the host's progress-aware timeout aborts a stalled summary (#78981),
+# ``agent.conversation_compression`` re-runs compression with the route pinned to a configured
+# ``fallback_chain`` entry. Nothing raised out of the stalled call, so the auxiliary client's own fallback
+# handling — which only runs from its exception path — never saw that failure. A ContextVar, not an
+# attribute on the compressor: the aborted worker is detached and still alive on the pool, and the
+# compressor object is shared with it. Context is copied per worker (``propagate_context_to_thread``), so
+# the pin reaches the retry's whole synchronous call chain and cannot leak into the stalled attempt or any
+# unrelated auxiliary call. Coverage is the single ``_generate_summary`` LLM call only. That is one call per
+# compression run (its only non-recursive call site is the compress path; the two recursive calls are the
+# deliberate main-model retry that must NOT re-issue the pin). The summary call is the ONLY auxiliary LLM
+# call a lean compaction attempt makes (#96603) — there are no sibling digest calls.
 _SUMMARY_ROUTE_PIN: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
     contextvars.ContextVar("hermes_summary_route_pin", default=None)
 )
@@ -93,7 +106,10 @@ _HYGIENE_PREAGENT_ONLY_COOLDOWN_MARKERS: tuple[str, ...] = (
 def _is_hygiene_preagent_only_cooldown(error: object) -> bool:
     """Return True for a cooldown that belongs only to pre-agent hygiene.
     Hygiene watchdog timeouts / turn-hold deferrals are not evidence of an auxiliary-model failure and
-    must never block the in-agent compressor."""
+    must never block the in-agent compressor.
+
+    See #74136, #86972.
+    """
     text = str(error or "").strip().casefold()
     return any(marker in text for marker in _HYGIENE_PREAGENT_ONLY_COOLDOWN_MARKERS)
 
@@ -114,6 +130,10 @@ def _response_finish_reason(response: Any) -> str:
 
 # Marker for a length-stopped (PARTIAL) summary; the except-branch classifier keys
 # on this exact substring, so keep raise sites and classifier in sync.
+# RuntimeError marker raised when the summarizer's generation stopped on the output-token cap
+# (``finish_reason == "length"``). A length stop means the summary text is PARTIAL — persisting it as a
+# compaction checkpoint would silently truncate the conversation's memory and feed the cut-off text back
+# into every subsequent iterative-update prompt. (Ported from earendil-works/pi#7048 / commit 97fa14e39.)
 _TRUNCATED_SUMMARY_MARKER = "finish_reason=length"
 
 
@@ -123,6 +143,11 @@ def _is_summary_access_or_quota_error(exc: Exception) -> bool:
     # No active secret scope is a missing-credential failure of our own making;
     # classify as credential so compress() preserves the session unchanged.
     try:
+        # A credential read that failed closed because no profile secret scope was active (multiplexed
+        # gateway, worker thread without the caller's ContextVars) is a missing-credential failure of our
+        # own making: the summary model cannot be reached until the spawn site is fixed, and a placeholder
+        # summary would only destroy the middle window for nothing. Classify it with the credential class so
+        # compress() preserves the session unchanged (#100849 bundle: every hygiene pass truncated).
         from agent.secret_scope import UnscopedSecretError
     except Exception:  # pragma: no cover - import guard
         UnscopedSecretError = ()  # type: ignore[assignment]
@@ -150,6 +175,12 @@ HISTORICAL_TASK_HEADING = "## Historical Task Snapshot"
 
 
 SUMMARY_PREFIX = (
+    # Jul 2026 (#65848 class): identical to the pre-#69619 prefix except it lacked the explicit "tools
+    # remain fully active" clause — the strong REFERENCE ONLY framing bled into general tool-use suppression
+    # (observed: 7 consecutive narration-only turns immediately after a compression event on a production
+    # deployment).
+    # Carveout era (#41607/#38364/#42812): "consistent → use as background" licensed stale-task resumption
+    # on topic overlap.
     "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
     "into the summary below. This is a handoff from a previous context "
     "window — treat it as background reference, NOT as active instructions. "
@@ -193,6 +224,21 @@ COMPRESSED_SUMMARY_HAS_USER_TURN_KEY = "_compressed_summary_has_user_turn"
 # Only micro markers may be superseded/defragged/rehydrated: a batch marker's
 # content is NOT in the rolling micro summary, so rewriting one destroys history.
 MICRO_COMPACT_MARKER_KEY = "_micro_compact_marker"
+# Intrinsic marker stamped on a message dict once it has been written to the SQLite session store. Used by
+# ``_flush_messages_to_session_db`` to decide what is already durable. An object-identity (``id(msg)``)
+# dedup set cannot be trusted across turns: once a flushed message dict is dropped from the live list (e.g.
+# by scaffolding rewind or in-place compaction) and garbage- collected, CPython is free to hand its address
+# to a brand-new assistant/tool message, whose ``id()`` then collides with the stale entry and the real turn
+# is silently never persisted. A marker bound to the dict itself cannot be aliased that way. The ``_``
+# prefix is mandatory: the wire sanitizers (agent/transports/chat_completions.py,
+# agent/chat_completion_helpers.py) strip every top-level ``_``-prefixed key before the request leaves the
+# process, so this never reaches a strict OpenAI-compatible gateway. CONTRACT (#92231): the marker asserts
+# "this dict's CONTENT is durable as written". Loaded rows are stamped at materialization time
+# (hermes_state._rows_to_conversation), so any code that mutates a loaded or flushed dict's content in place
+# and needs the change persisted MUST pop the marker (and invalidate _db_flush_scan_prefix if the dict may
+# sit inside the bounded-scan prefix) — see agent/turn_finalizer.py (fill-empty-tail) and
+# agent/context_compressor.py (micro-compaction defrag) for the two canonical pop sites. Mutating without
+# popping leaves the DB silently stale.
 _DB_PERSISTED_MARKER = "_db_persisted"
 # Carried-forward tail rows archive as rewind-style (active=0, compacted=0) so
 # they don't duplicate live copies in recall; never persisted (unknown column).
@@ -630,6 +676,12 @@ def _is_clarify_non_response_sentinel(response: Any) -> bool:
 
 # Ghost-skill defense: the ONE canonical prune marker; emit sites and presence
 # checks must use the same string so they cannot drift.
+# Ghost-skill defense (#32106): when compaction reduces an old ``skill_view`` result to a 1-line metadata
+# summary, the model still believes the skill is loaded even though its instructions are gone. The marker
+# below is the ONE canonical prune signal — ``_skill_pruned_marker()`` builds it and every presence check
+# matches against the same string, so the emit side and the check side can never drift apart (the original
+# PR #44166 emitted ``[SKILL_PRUNED:`` but presence-checked ``[SKILL_PRUNED]``, making re-injection fire
+# even when the marker had survived).
 SKILL_PRUNED_MARKER_PREFIX = "[SKILL_PRUNED:"
 # Small skill_view results stay verbatim; shared by emit site and summarizer scan.
 _SKILL_VIEW_PRUNE_MIN_CHARS = 5000
@@ -783,6 +835,13 @@ def _build_recovery_footer(session_id: str, region_len: int) -> str:
 
 # Detailed session log comes from the SAME single summary request (one aux LLM
 # call per attempt); coverage via input sampling, exact needles via anchor index.
+# One flat 2-3K-token summary cannot carry a 400K+ region's specifics — the eval showed recall collapsing to
+# ~33% when the big tail (which accidentally archived restated facts) shrank. The detailed,
+# identifier-preserving session log is produced by the SAME single summary request as the narrative summary
+# (one auxiliary LLM call per compaction attempt, total — #96603: the earlier per-chunk digest loop made up
+# to 28 extra aux calls and pushed compactions to 7-11 minutes on slow aux routes). Coverage over oversized
+# regions comes from even input sampling (see ``_sample_summary_input``), and exact-needle defense comes
+# from the LLM-free anchor index below.
 _LEAN_SESSION_LOG_HEADING = "## Detailed Session Log (oldest first)"
 # Extra output-token guidance for the session-log section (single response).
 _LEAN_SESSION_LOG_BUDGET_TOKENS = 4_000
@@ -852,6 +911,8 @@ def _build_anchor_index(turns: List[Dict[str, Any]]) -> str:
 
 # Message-count window (distinct from the token-based tail boundary) in which a
 # just-loaded skill_view body must survive the Phase-1 prune.
+# A skill_view call within this many trailing messages counts as "just loaded": its full instruction body
+# must survive the Phase-1 prune even when the token-budget boundary would otherwise demote it (#32106).
 _SKILL_PRUNE_RECENT_WINDOW = 10
 
 
@@ -912,12 +973,15 @@ _MAX_TAIL_MESSAGE_FLOOR = 8
 
 # Skip the LLM call when the compressible middle is below this fraction of the
 # threshold (and a prior ineffectiveness strike exists); dropping alone suffices.
+# See #60451.
 _FEASIBILITY_SKIP_MIDDLE_FRACTION = 0.10
 # Under pressure, demote large tool outputs even inside the protected region but
 # keep this many trailing messages verbatim.
 _PRESSURE_KEEP_RECENT_MESSAGES = 3
 # Newest image-bearing tool results kept verbatim; older image payloads retire
 # even inside protect_last_n (matches the Anthropic adapter's keep-window).
+# Native vision_analyze / computer_use screenshots that sit inside the protected tail cannot be demoted by
+# pass 2, so they ride every later request until anti-thrash disables compression (#92699).
 _MAX_KEEP_TOOL_IMAGES = 3
 
 # Below this window the threshold is floored (raise-only): at 50% the incompressible
@@ -929,6 +993,8 @@ _SMALL_CTX_THRESHOLD_PERCENT = 0.75
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
 
 # MEDIA directives must not reach the summarizer or they get re-emitted as active.
+# MEDIA delivery directives must not reach the summarizer — if one leaks into the summary, the downstream
+# model may re-emit it as an active directive on the next turn, triggering bogus attachment sends (#14665).
 _MEDIA_DIRECTIVE_RE = re.compile(r"MEDIA:\S+")
 _HISTORICAL_TASK_SECTION_RE = re.compile(rf"(?ms)^{re.escape(HISTORICAL_TASK_HEADING)}\s*\n.*?(?=^## |\Z)")
 
@@ -1079,6 +1145,9 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
         tokens += _serialized_length_for_budget(msg.get(key)) // _CHARS_PER_TOKEN
     # Charge only thinking TEXT, never the signed/base64 envelope; skip when the
     # same text already rides in reasoning/reasoning_content.
+    # When the same thinking text already rides in ``reasoning``/``reasoning_content`` (measured
+    # byte-identical on Anthropic-wire sessions), skip it here entirely so the prose is not charged twice on
+    # top of the envelope exclusion. See #73298.
     if not (msg.get("reasoning") or msg.get("reasoning_content")):
         tokens += _reasoning_details_text_chars(msg.get("reasoning_details")) // _CHARS_PER_TOKEN
     return tokens
@@ -1256,6 +1325,11 @@ def _strip_historical_media(messages: List[Dict[str, Any]]) -> List[Dict[str, An
         # non-empty for the zero-user-turn guard). Rule 2: superseded tool-result image, even in the tail.
         return (
             (0 < anchor and index < anchor)
+            # When the ONLY image-bearing user message is the very first one (``anchor == 0``) and newer
+            # tool-result images exist, the model has moved on — but the opening base64 blob used to survive
+            # every compaction forever, which is half the wedge in #89938 (the reported session opened with
+            # a ~200KB poster). When nothing newer exists the opening image IS the newest image and is kept,
+            # consistent with keep-newest everywhere else.
             or (anchor == 0 and index == 0 and tool_anchor > 0)
             or (message.get("role") == "tool" and index != tool_anchor)
         )
@@ -1437,6 +1511,8 @@ def _json_dict(text: Any) -> dict:
     """Parse ``text`` as a JSON object; ``{}`` for empty, invalid, or non-object input."""
     try:
         parsed = json.loads(text) if text else {}
+    # Just-loaded / actively-referenced skills survive verbatim (#32106). Pass-4 pressure demotion overrides
+    # this.
     except (json.JSONDecodeError, TypeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
@@ -1484,6 +1560,10 @@ def _memory_provider_section(memory_context: str) -> str:
 def _today_for_prompt() -> str:
     """Date-only (user tz) for temporal anchoring; "" when the clock fails. Cache-safe: the summary is outside the prefix."""
     try:
+        # Date-only granularity matches system_prompt.py:337 (PR #20451) and the user's configured timezone
+        # via hermes_time.now(). The compaction summary is a mid-conversation message that is NOT part of
+        # the cached prefix, so a date here never affects prompt-cache stability. Resolved defensively — a
+        # clock failure must never block compaction.
         from hermes_time import now as _hermes_now
         return _hermes_now().strftime("%Y-%m-%d")
     except Exception:  # pragma: no cover - clock resolution is best-effort
@@ -1724,7 +1804,17 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         """Clear all per-session compaction state at a real session boundary.
         Session end (CLI exit, gateway expiry, id rotation) — NOT /new or /reset. Every per-session
         flag/counter can contaminate the next live session (suppressed compression, stale cooldowns,
-        misleading warnings), so the whole surface is reset here."""
+        misleading warnings), so the whole surface is reset here.
+
+        Session end (CLI exit, gateway expiry, session-id rotation) goes through this method rather than
+        ``on_session_reset()`` (/new, /reset). The original fix (#38788) only cleared ``_previous_summary``,
+        but the same cross-session contamination risk applies to every per-session variable that
+        ``on_session_reset()`` clears: stale ``_ineffective_compression_count`` can suppress compression in
+        a subsequent live session; ``_summary_failure_cooldown_until`` can block summary generation;
+        ``_last_compress_aborted`` can make callers think compression is still aborted;
+        ``_last_aux_model_failure_*`` can surface stale error warnings; ``_last_summary_dropped_count`` /
+        ``_last_summary_fallback_used`` can produce misleading user warnings.
+        """
         self._reset_session_compaction_state()
 
     def _reset_real_usage_pairing(self) -> None:
@@ -1880,7 +1970,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._durable_write("set_compression_ineffective_count", "compression ineffective count", self._ineffective_compression_count)
 
     def _load_anti_thrash_recovery_deadline(self) -> None:
-        """Restore the durable recovery deadline (wall-clock epoch); missing storage leaves it disarmed."""
+        """Restore the durable recovery deadline (wall-clock epoch); missing storage leaves it disarmed.
+
+        See #100185.
+        """
         self._load_durable("_anti_thrash_recovery_deadline", "get_compression_recovery_deadline", "compression recovery deadline", float, 0.0)
 
     def _set_anti_thrash_recovery_deadline(self, deadline: float) -> None:
@@ -1924,6 +2017,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._verify_compaction_cleared_threshold = True
         if feasibility_skip:
             # A pre-LLM feasibility skip is not a summary-quality verdict: it must neither extend nor reset the streak.
+            # A deliberate pre-LLM feasibility skip (#60451) is not a summary-quality verdict: it must
+            # neither extend a fallback streak (two skips would otherwise latch the >= 2 breaker and disable
+            # compression entirely — including the cheap deterministic dropping the skip exists to reach)
+            # nor reset one (a skip proves nothing about the summary model's health).
             if not self.quiet_mode:
                 logger.info(
                     "Compaction completed via pre-LLM feasibility skip; fallback_compression_streak unchanged (%d)",
@@ -1980,6 +2077,9 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             return None
         # Hygiene-only cooldowns share the column but are not a 429/aux fault; the in-agent compressor may run.
         # A hygiene write may have overwritten an aux-model row; drop the in-memory cooldown too.
+        # Hygiene watchdog timeouts and turn-hold deferrals persist the same column so the pre-agent pass
+        # can skip (#74136), but they are not evidence of a 429/aux-model fault. The in-conversation
+        # compressor has its own budget and must still be allowed to run (#86972).
         if _is_hygiene_preagent_only_cooldown(state.get("error")):
             self._summary_failure_cooldown_until, self._last_summary_error = 0.0, None
             return None
@@ -1994,6 +2094,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     def _record_compression_failure_cooldown(self, cooldown_seconds: float, error: Optional[str]) -> None:
         # Never shorten a longer live deadline; record the latest error text only.
         self._summary_failure_cooldown_until = max(self._summary_failure_cooldown_until, time.monotonic() + float(cooldown_seconds))
+        # A later stall or timeout records the latest error text but keeps the later of the two clocks. See
+        # #96775.
         self._last_summary_error = error
         cooldown_until = time.time() + max(0.0, self._summary_failure_cooldown_until - time.monotonic())
         if not getattr(self, "_session_db", None) or not getattr(self, "_session_id", ""):
@@ -2020,6 +2122,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
     def _compression_cancelled(self) -> bool:
         """Read the host-owned cooperative cancellation signal, if installed."""
+        # #76354 review F4: fence check BEFORE cooldown-clear. A late worker whose host already timed out
+        # (and recorded a timeout cooldown) must not undo that cooldown when its summary eventually
+        # succeeds. The hook is installed by compress_context for the duration of the fenced call; when it
+        # reports cancellation, keep the host's cooldown.
         cancelled_check = getattr(self, "_compression_cancelled_check", None)
         if not callable(cancelled_check):
             return False
@@ -2042,6 +2148,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._base_threshold_percent = resolve_model_threshold(model, self.model_thresholds, _config_pct)
         self.threshold_percent = self._effective_threshold_percent(context_length, self._base_threshold_percent)
         # max_tokens=None means "unspecified": keep the existing output reservation.
+        # A switch that genuinely changes the output budget passes the new value explicitly. (#43547)
         if max_tokens is not None:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
         self.threshold_tokens = self._compute_threshold_tokens(context_length, self.threshold_percent, self.max_tokens)
@@ -2072,6 +2179,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     _MIN_CTX_TRIGGER_RATIO = 0.85
 
     # Anti-thrash recovery: after this long blocked, allow ONE probe (counters drop to 1 strike).
+    # Anti-thrash recovery window (#14694): once the ineffective/fallback breaker trips, automatic
+    # compaction stays blocked for this long, then ONE probe attempt is allowed (counters drop to 1 strike,
+    # so another ineffective pass re-trips immediately). Long enough that a genuinely incompressible session
+    # isn't compacting in a loop; short enough that a session which has since grown real compressible
+    # material recovers well before it rides into the provider's hard context limit.
     _ANTI_THRASH_RECOVERY_SECONDS = 300.0
 
     # Structural no-op (nothing eligible) is not an ineffective attempt: defer retries instead of striking.
@@ -2109,7 +2221,21 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     ) -> int:
         """Compute the compaction trigger in tokens from the effective input budget.
         Base is ``(context_length - max_tokens) * threshold_percent`` floored at MINIMUM_CONTEXT_LENGTH;
-        when the floor binds it is capped at 85% of the budget so small windows can still fire."""
+        when the floor binds it is capped at 85% of the budget so small windows can still fire.
+
+        The base value is ``effective_input_budget * threshold_percent``, floored at
+        ``MINIMUM_CONTEXT_LENGTH`` so large-context models don't compress prematurely at 50%. BUT that floor
+        degenerates at small windows: for a model whose ``context_length`` is at/below the minimum (e.g. a
+        64K local model), ``max(0.5*64000, 64000) == 64000`` makes the threshold equal the ENTIRE window —
+        auto-compression can never fire because the provider rejects the request before usage reaches 100%
+        (#14690).
+        The provider reserves ``max_tokens`` of output space out of the same window, so the usable INPUT
+        budget is ``context_length - max_tokens``. With a large ``max_tokens`` (e.g. 65536 on a custom
+        provider) the input budget is materially smaller than the raw window, and a threshold based on the
+        full window lets the session hit a provider 400 before compaction fires (#43547). The percentage and
+        the degenerate-window check below both operate on the effective input budget. ``max_tokens=None``
+        (provider default) conservatively assumes no reservation (full window).
+        """
         effective_window = context_length - (max_tokens or 0)
         if effective_window <= 0:
             effective_window = context_length
@@ -2166,6 +2292,11 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # Usable input = context_length - max_tokens; only a positive int counts as a reservation.
         self.max_tokens = self._coerce_max_tokens(max_tokens)
         # True: summary failure aborts (messages unchanged); False: insert deterministic handoff and drop middle.
+        # Output-token reservation: the provider carves max_tokens out of the context window, so the usable
+        # input budget is context_length - max_tokens. None = provider default => assume no reservation.
+        # (#43547) Coerce defensively: only a positive int is a real reservation; any other value (None,
+        # non-numeric, <=0) means "no reservation" so the threshold arithmetic never sees a non-int (e.g. a
+        # test MagicMock).
         self.abort_on_summary_failure = abort_on_summary_failure
 
         # Micro-compaction is OFF by default: each pass breaks the prompt-cache prefix every turn.
@@ -2173,18 +2304,30 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self._reset_micro_compact_cursor_state()
         self._micro_compact_defrag_threshold_tokens = 2000
         # Set when _defrag_rolling_summary pops _DB_PERSISTED_MARKER in place; finalize_turn resets the flush cursor.
+        # Set by _defrag_rolling_summary when it pops _DB_PERSISTED_MARKER from a live dict in place;
+        # consumed by finalize_turn to invalidate the agent's bounded flush-scan cursor (sibling of the
+        # #75170 site).
         self._flush_scan_cursor_invalidated: bool = False
         self._micro_compact_passes = self._micro_compact_tokens_saved_total = self._micro_compact_turns_since_pass = 0
         # Cadence dial: how often the cache-breaking pass is paid. 1 = every turn.
         self._micro_compact_every_n_turns: int = 1
         # Deferred: get_model_context_length() may issue a sync HTTP probe that must not block construction.
         # Floor and cap are applied on first resolution (see _resolve_context_length / threshold_tokens).
+        # The small-context threshold floor and the absolute threshold cap both need the resolved window, so
+        # they are applied on first resolution (see _resolve_context_length / the threshold_tokens property)
+        # instead of here. update_model() re-derives the floor for a new window from
+        # _config_threshold_percent (the raw config value snapshotted above), so switching small -> large
+        # correctly drops back to the configured value. See #32221.
         self._config_context_length = config_context_length
         self._configured_threshold_percent = self.threshold_percent
         self._resolved_context_length: int | None = None
         self._threshold_tokens = self._tail_token_budget = self._max_summary_tokens = None
         self.compression_count = 0
         # The init log reports resolved budgets; emit it on first resolution to keep construction non-blocking.
+        # The "initialized" log reports resolved token budgets, which would force the deferred
+        # get_model_context_length() probe to run inside __init__ and re-introduce the exact synchronous
+        # blocking this change removes (#32221). Emit it on first context-length resolution instead so
+        # construction stays non-blocking on every path (not just quiet).
         self._log_init_summary = not quiet_mode
         self._context_probed = False  # True after a step-down from context error
         self.last_prompt_tokens = self.last_completion_tokens = 0
@@ -2227,6 +2370,16 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._pending_request_rough_tokens = 0
             # Anti-thrash verdict lives HERE: effectiveness is "prompt under threshold" per the provider's real count,
             # not "messages shrank"; should_compress() runs twice per turn with mixed measures and would reset it.
+            # Anti-thrashing verdict, judged HERE because this is the only place that sees the provider's
+            # real prompt count for the just-compacted conversation. Effectiveness is "did the prompt get
+            # under the threshold?", not "did the message list shrink?": compaction can only shrink
+            # messages, while the system prompt and tool schemas are an incompressible floor (with 50+
+            # tools, 20-30K tokens — see #14695). When that floor alone meets the threshold, every pass
+            # shrinks messages by a healthy margin yet leaves the prompt over the line, so the next turn
+            # compacts again, forever. It must NOT live in should_compress(): that runs twice per turn with
+            # two different measures (a rough preflight estimate and the real post-response count, #36718),
+            # and the rough one can dip below the threshold and reset the strike every turn, re-opening the
+            # loop. Keying on real usage compares like with like and fires exactly once per compaction.
             if self._verify_compaction_cleared_threshold:
                 if self.last_prompt_tokens >= self.threshold_tokens:
                     self._record_ineffective_compression_verdict(self._ineffective_compression_count + 1)
@@ -2351,6 +2504,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # probe by dropping counters to 1 strike (persisted). Deadline is armed lazily and persisted on the row.
         if self._tripped():
             # Wall clock: the deadline is persisted so a rebuilt compressor resumes the SAME window.
+            # Wall clock, not monotonic: the deadline is persisted on the session row (#100185) so a fresh
+            # compressor bound to the same session — the gateway rebuilds the AIAgent on every cache
+            # eviction — resumes the SAME window instead of restarting it. Without that, a blocked messaging
+            # session never earned its probe and stayed blocked forever.
             _now = time.time()
             if self._anti_thrash_recovery_deadline <= 0.0 or (
                 # Clock jumped backwards: never wait longer than one window from now.
@@ -2359,6 +2516,20 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 self._set_anti_thrash_recovery_deadline(_now + self._ANTI_THRASH_RECOVERY_SECONDS)
             elif _now >= self._anti_thrash_recovery_deadline:
                 self._set_anti_thrash_recovery_deadline(0.0)
+                # Anti-thrashing: back off if recent compressions were ineffective. The back-off must not be
+                # permanent (#14694): the tripped state was judged against the transcript as it existed THEN
+                # (e.g. a middle region too small to matter), but the conversation keeps growing and can
+                # accumulate plenty of compressible material later. Without a recovery path the session
+                # never auto-compacts again and rides into the provider's hard context limit. Recovery is a
+                # probation probe: after _ANTI_THRASH_RECOVERY_SECONDS of continuous block, allow ONE
+                # attempt by dropping the tripped counter(s) to 1 strike (persisted, so sibling agents on
+                # the same session row unblock too). If the probe is ineffective again the very next verdict
+                # re-trips the guard, so the worst case in the truly-incompressible state is one compaction
+                # attempt per recovery window — bounded, not thrash. The clock is armed lazily on the first
+                # BLOCKED evaluation and persisted on the session row (#100185): a fresh process/compressor
+                # that loads a durable tripped counter (#69872) with no stored deadline starts a full window
+                # blocked, preserving the restart-must-not-disarm contract (#54923) — but one that loads an
+                # already-armed deadline resumes that window instead of restarting it.
                 if self._ineffective_compression_count >= 2:
                     self._record_ineffective_compression_verdict(1)
                 if self._fallback_compression_streak >= 2:
@@ -2548,6 +2719,8 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         prune_boundary = self._prune_boundary(result, protect_tail_count, protect_tail_tokens)
         pruned = self._dedupe_tool_results(result)
         # Just-loaded / tail-referenced skills keep full skill_view bodies through the ordinary passes.
+        # Without this, a skill loaded moments before a compaction can be demoted to metadata while the
+        # model still believes its instructions are in context. See #32106.
         protected_skills = _collect_protected_skill_names(result, prune_boundary)
         # Pass 2: summarize old tool results. Pass 3: shrink large tool_call arguments INSIDE the parsed JSON so
         # the result stays valid; otherwise providers 400 on every turn until the call leaves the window.
@@ -2559,6 +2732,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._truncate_tool_call_args_at(result, i)
         # Pass 3.5: retire image payloads inside the protected tail; re-sent embeds otherwise make
         # compression look ineffective and trip anti-thrash. Newest frames stay live.
+        # Newest frames stay live for follow-up QA; older ones become placeholders. See #92699.
         pruned += _retire_stale_tool_result_images(result)
         if protect_tail_tokens is not None and protect_tail_tokens > 0 and result:
             pruned += self._pressure_demote_tail(
@@ -2645,7 +2819,18 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         object as ``(messages, 0)``. The rearm gate is measured on message bodies only, so it is
         bypassed (never the reclaim gate) when a provider-billed ``current_tokens`` reading already
         puts the request over ``threshold_tokens`` (#101889); every no-op taken while over threshold
-        is logged once per distinct reason."""
+        is logged once per distinct reason.
+
+        ``_prune_old_tool_results`` runs all deterministic passes: (1) dedup byte-identical tool results —
+        keeps the newest full copy and back-references older exact duplicates ANYWHERE in the list
+        (including the protected tail), so no unique content is ever lost; (2) summarize non-tail tool
+        results larger than ``min_prune_chars``; (3) truncate oversized tool_call arguments on non-tail
+        assistant messages; (3.5) retire image payloads on all but the newest ``_MAX_KEEP_TOOL_IMAGES``
+        image-bearing tool results — tail-agnostic and lossy by design (#92699). Only pass (2)'s floor is
+        raised by ``proactive_prune_min_result_chars``; passes (1) and (3) keep their own fixed floors. The
+        recent-tail protection applies to passes (2) and (3); pass (1) is tail-agnostic by design because
+        dedup is lossless.
+        """
         if self.proactive_prune_tokens <= 0 or (
             current_tokens is not None and current_tokens < self.proactive_prune_tokens
         ):
@@ -2689,6 +2874,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 logger.warning("Proactive tool-result prune DB commit failed; keeping the original transcript: %s", exc)
                 return messages, 0
             # Shared post-commit stamp site with the in-place commit and micro-compaction sync.
+            # See #98450.
             stamp_db_persisted_markers(pruned_msgs)
         self._proactive_prune_rearm_tokens = next_rearm_tokens
         # Reclamation just ran: let a future lockout warn again.
@@ -2864,6 +3050,10 @@ None recoverable from deterministic fallback.
 ## Critical Context
 Summary generation was unavailable, so this is a best-effort deterministic fallback for {len(turns_to_summarize)} compacted message(s).{reason_text}"""
         # Per-turn truncation cuts [SKILL_PRUNED] markers; re-derive from raw turns and re-inject.
+        # Ghost-skill defense (#32106): the fallback's per-turn truncation (``_FALLBACK_TURN_MAX_CHARS``)
+        # routinely cuts [SKILL_PRUNED: ...] markers out of the compacted turns. Re-derive the ghosted
+        # skills from the raw turn contents and re-inject deterministically, exactly like the LLM-summary
+        # path.
         _pruned_names = _collect_ghosted_skill_names(turns_to_summarize)
         del _pruned_names[_MAX_PRUNED_SKILL_MARKERS:]
         summary = self._with_summary_prefix(_redact_compaction_text(body.strip()))
@@ -3001,6 +3191,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             call_kwargs["model"] = self.summary_model
         # Pinned route (stall fallback) overrides task routing so the retry leaves the stalled backend.
         call_kwargs.update(_pinned_summary_call_kwargs())
+        # Compression is atomic: protect the in-flight summary call from a mid-turn gateway interrupt.
+        # Without this, an incoming user message aborts the summary and compression falls back to a degraded
+        # static marker, losing the real handoff (#23975). Re-entrant: a main-model retry (_generate_summary
+        # recursion) re-enters harmlessly.
         _aux_call_start = time.monotonic()
         _latency_info: Dict[str, int] = {"prompt_build_ms": max(0, int((_aux_call_start - prompt_started_at) * 1000))}
         call_kwargs["latency_info"] = _latency_info
@@ -3026,8 +3220,25 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # Reasoning-field fallback (DeepSeek/Qwen/Kimi put the summary in reasoning_content); capped.
         content = extract_content_or_reasoning(response, max_reasoning_chars=8000)
         where = f"(provider={self.provider or 'auto'} model={self.summary_model or self.model})"
+        # Some OpenAI-compatible proxies (e.g. cmkey.cn, one-api channels) return a well-formed HTTP 200
+        # with an empty or whitespace-only ``content`` instead of an error or empty ``choices``. That
+        # payload passes ``_validate_llm_response`` (a ``message`` exists), so it reaches here and would
+        # otherwise be stored as a prefix-only summary with no body — silently wiping the compacted turns
+        # and making the model forget the in-progress task (#11978, #11914). Treat empty content as a
+        # failure so it routes through the same main-model fallback + cooldown machinery as a transport
+        # error, rather than replacing real context with an empty summary.
         if not content.strip():
             raise RuntimeError(f"Context compression LLM returned empty content {where}")
+        # A finish_reason of "length" means the summarizer hit its output token cap mid-generation: the text
+        # present is PARTIAL. Persisting a partial summary as the compaction checkpoint silently truncates
+        # the conversation's memory — the cut-off text replaces the real middle turns AND is fed back into
+        # every subsequent iterative update prompt, compounding the loss across compactions. Treat it as a
+        # failure so it routes through the same main-model fallback + abort machinery as other degraded
+        # responses instead of becoming a checkpoint. (Ported from earendil-works/pi#7048.)
+        # A length stop means the merged rolling summary is partial — persisting it would silently drop the
+        # tail of the merge and feed the cut-off text into every later micro-compact pass. Leave the
+        # exchange unabsorbed instead; a later pass retries it. (Same class as _generate_summary's guard;
+        # pi#7048.)
         if _response_finish_reason(response) == "length":
             raise RuntimeError(
                 f"Context compression summary was truncated ({_TRUNCATED_SUMMARY_MARKER}): generation hit the output "
@@ -3046,6 +3257,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # bypass_cooldown: provider-proven overflow gets ONE real attempt while armed.
         if prompt_started_at < self._summary_failure_cooldown_until and not bypass_cooldown:
             logger.debug(
+                # See #100661.
                 "Skipping context summary during cooldown (%.0fs remaining)",
                 self._summary_failure_cooldown_until - prompt_started_at,
             )
@@ -3076,6 +3288,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             # The summarizer may echo secrets verbatim; redact the output too.
             summary = _redact_compaction_text(content.strip())
             # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
+            # See #32106.
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
             summary = self._augment_summary_lean(summary, turns_to_summarize)
@@ -3229,6 +3442,12 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Classify a summary-call failure; retry once on the main model (returning its result) or arm a cooldown (None)."""
         # Only a genuine no-provider RuntimeError gets the long cooldown; empty/invalid-response
         # RuntimeErrors are transient and must get the main-model retry below first.
+        # ``call_llm`` raises ``RuntimeError`` for two very different cases: 1. 2. An empty/invalid response
+        # from a configured provider (``_validate_llm_response`` empty-``choices``/``None``, or our
+        # empty-``content`` guard above) — a transient/proxy fault that should fall back to the main model
+        # first, exactly like the transport errors handled below. Only (1) belongs in the long no-provider
+        # cooldown; (2) and every other exception flow into the generic fallback logic so they get a
+        # main-model retry before any cooldown. (#11978, #11914)
         if isinstance(e, RuntimeError) and "no llm provider configured" in str(e).lower():
             self._record_compression_failure_cooldown(_SUMMARY_FAILURE_COOLDOWN_SECONDS, "no auxiliary LLM provider configured")
             self._last_summary_error = "no auxiliary LLM provider configured"
@@ -3269,6 +3488,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Terminal network/empty-content failure after any fallback: flag so compress() ABORTS
         # and preserves the session; independent of abort_on_summary_failure.
         if kind.streaming_closed:
+            # A terminal connection/network failure or empty-content response from a degraded provider (we
+            # reach this branch only after any main-model fallback has already been tried or is
+            # unavailable). Flag it so compress() ABORTS and preserves the session unchanged instead of
+            # destroying the middle window for a placeholder marker — retrying once the provider recovers is
+            # strictly better than dropping context (#29559, #25585, #94448).
             self._last_summary_network_failure = True
         elif kind.truncated:
             self._last_summary_truncated_failure = True
@@ -3494,6 +3718,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Find handoff summaries inside a compression window."""
         n = len(messages)
         # Clamp: callers may pass end = len(messages)+1.
+        # Defensive: clamp bounds so a caller passing an out-of-range end (e.g. tail-cut returning
+        # len(messages)+1 when head_end >= n) cannot trigger IndexError. (#75588)
         start = max(0, min(start, n))
         end = max(start, min(end, n))
         return [
@@ -3578,7 +3804,12 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     @staticmethod
     def _tool_call_id_variants(tc) -> set:
-        """Return every id variant a result might reference *tc* by (forwards to message_sanitization)."""
+        """Return every id variant a result might reference *tc* by (forwards to message_sanitization).
+
+        Thin forwarder — the policy owner is ``agent.message_sanitization.tool_call_id_variants``, which
+        also expands ``response_item_id`` and composite ``call|item`` bridge spellings (#63000), so the
+        compressor's pairing tolerance matches the pre-call sanitizer's exactly and the two can never drift.
+        """
         from agent.message_sanitization import tool_call_id_variants
         return set(tool_call_id_variants(tc))
 
@@ -3648,7 +3879,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         return self.protect_first_n
 
     def _protect_head_size(self, messages: List[Dict[str, Any]]) -> int:
-        """Head messages to protect: the system prompt (if present) plus the decaying ``protect_first_n`` extra rows."""
+        """Head messages to protect: the system prompt (if present) plus the decaying ``protect_first_n`` extra rows.
+
+        The ``protect_first_n`` portion DECAYS after the first compression (see _effective_protect_first_n)
+        so early user turns don't fossilize across repeated compactions (#11996).
+        """
         head = 1 if messages and messages[0].get("role") == "system" else 0
         return head + self._effective_protect_first_n(messages)
 
@@ -3762,6 +3997,16 @@ Write only the summary body. Do not include any preamble or prefix."""
         from agent.conversation_compression import _is_real_user_message
 
         last_user_idx = -1
+        # Find the newest user message that carries at least one image part. We anchor on image-bearing user
+        # messages (not all user messages) so a plain text follow-up after a big-image turn still strips the
+        # old image — matching the problem kilocode#9434 set out to solve.
+        # Newest tool message carrying an image. Tool-result images (``vision_analyze``,
+        # screenshot-returning tools) accumulate on their own timeline and the user anchor never protects
+        # the stale ones: a session whose only image-bearing user message is the FIRST one leaves ``anchor
+        # <= 0`` and strips nothing at all, so twenty tool results keep multi-MB of base64 in every request
+        # body until the provider answers 413 -- and the 413 handler's recovery compaction lands right back
+        # here and frees nothing, which is the wedge in #89938. Keep the newest tool image, since that is
+        # the one the model is reasoning about, and drop every older one wherever it sits.
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
             # _is_real_user_message also rejects metadata-flagged scaffolding
@@ -3898,7 +4143,16 @@ Write only the summary body. Do not include any preamble or prefix."""
     def _ensure_last_n_user_messages_in_tail(
         self, messages: List[Dict[str, Any]], cut_idx: int, head_end: int, n: int,
     ) -> int:
-        """Keep the last N actionable user messages in the tail; n <= 1 delegates to the single-message method."""
+        """Keep the last N actionable user messages in the tail; n <= 1 delegates to the single-message method.
+
+        Only REAL actionable user turns count toward N — the collector uses the same
+        ``_is_actionable_user_turn`` / ``_is_synthetic_compression_user_turn`` pair as
+        ``_find_last_user_message_idx``, so blank platform echoes, compaction handoffs, continuation
+        markers, and todo-snapshot rows never consume a slot (#69291 bug class).
+        A user message is already a clean boundary — there is no tool_call/result group that spans across
+        it, so ``_align_boundary_backward`` is intentionally NOT called. Calling it can pull the cut past
+        the user message into the preceding assistant(tool_calls)→tool group and split it (#22566).
+        """
         if n <= 1:
             return self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
 
@@ -3957,6 +4211,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         cut_idx = self._align_boundary_backward(messages, cut_idx)
         # Latest user message must stay in the tail (active task). Latest assistant reply must stay too;
         # anchors only walk backward, so chaining is monotonic.
+        # Ensure the most recent user message is always in the tail so the active task is never lost to
+        # compression (fixes #10896).
         cut_idx = self._ensure_last_user_message_in_tail(messages, cut_idx, head_end)
         cut_idx = self._ensure_last_assistant_message_in_tail(messages, cut_idx, head_end)
 
@@ -4275,6 +4531,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         self.compression_count += 1
         # Replace historical image payloads with placeholders; multi-MB base64 blobs otherwise
         # exceed body limits.
+        # Replace image parts in all compressed messages before the newest image-bearing user turn with a
+        # short text placeholder. Without this, tail messages keep their original multi-MB base-64 image
+        # payloads forever, which can push every subsequent API request past the provider's body-size limit
+        # and wedge the session. Port of Kilo-Org/kilocode#9434.
         compressed = _strip_historical_media(compressed)
 
         # Like-for-like savings: current_tokens includes system prompt/tool schemas, new_estimate is
@@ -4300,6 +4560,10 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Compaction frees the biggest allocation: hand pages back to the OS (glibc/config-gated,
         # rate-limited, #70782). debug, not warning: compression must never fail because of a trim.
         try:
+            # A successful compaction just freed the largest allocation a long session ever drops (the
+            # compressed-away message dicts), which makes this the natural point to hand allocator pages
+            # back to the OS. #76905's trim lifecycle covers the gateway/TUI housekeeping loops but not the
+            # CLI compression path, so RSS keeps the pre-compaction high-water mark until exit. (#70782)
             from hermes_cli.mem_trim import trim_memory
             trim_memory(reason="post-compression")
         except Exception as exc:
@@ -4317,7 +4581,19 @@ Write only the summary body. Do not include any preamble or prefix."""
     ) -> List[Dict[str, Any]]:
         """Summarize the middle turns: prune tool results and blank echoes (survives an abort), protect head and a
         token-budget tail, summarize, clean orphaned tool pairs. ``force`` clears the failure cooldown and bypasses
-        the feasibility skip; ``bypass_cooldown`` runs the summary LLM without clearing the cooldown."""
+        the feasibility skip; ``bypass_cooldown`` runs the summary LLM without clearing the cooldown.
+
+        Args: focus_topic: Optional focus string for guided compression. When provided, the summariser will
+        prioritise preserving information related to this topic and be more aggressive about compressing
+        everything else. Inspired by Claude Code's ``/compact``. force: If True, clear any active
+        summary-failure cooldown before running so a manual ``/compress`` can retry immediately after an
+        auto-compression abort, and bypass the pre-LLM feasibility skip so an explicit user request always
+        exercises the full summary path. Auto-compress callers pass False. memory_context: Optional
+        provider-supplied context to preserve in the summary prompt. Whitespace-only values are ignored.
+        bypass_cooldown: If True, run the summary LLM even while the summary-failure cooldown is armed,
+        WITHOUT clearing it (#100661). Set by provider-proven overflow recovery, which is already bounded by
+        the caller's attempt budget.
+        """
         telemetry = self._begin_compress_attempt(current_tokens, force)
         n_messages = len(messages)
         # Only need head + 3 tail messages minimum (token budget decides the real tail size)

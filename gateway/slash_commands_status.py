@@ -398,6 +398,8 @@ class GatewayStatusCommandsMixin:
                             if hasattr(task, "done") and not task.done()]
 
         # Background (async) delegations — delegate_task(background=true).
+        # Live per-child activity comes from the registry's progress sampler (#51690): api calls, current
+        # tool, seconds since last activity.
         from tools.async_delegation import list_async_delegations
         delegations = [d for d in _quiet_sync(list_async_delegations, [])
                        if d.get("status") in ("running", "stalling", "finalizing")]

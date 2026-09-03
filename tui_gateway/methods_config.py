@@ -41,6 +41,7 @@ def _(rid, params: dict) -> dict:
             _reconcile_repo_discovery(pdb, conn, policy, _repo_discovery_policy_key(policy))
             # `scan=true` (remote-gateway desktop): its native scan only sees its own filesystem,
             # so the host scans the policy roots so zero-session repos surface.
+            # See #81723.
             if params.get("scan") and policy["enabled"]:
                 _scan_discovered_repos_remote(conn, policy)
             repos = _discover_repos_payload(db, conn=conn, include_cached=policy["enabled"])

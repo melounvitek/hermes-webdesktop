@@ -45,6 +45,7 @@ class CustomProfile(ProviderProfile):
         if reasoning_config and isinstance(reasoning_config, dict):
             effort = (reasoning_config.get("effort") or "").strip().lower()
             if effort == "none" or reasoning_config.get("enabled", True) is False:
+                # See #14820.
                 top_level["reasoning_effort"] = "none"
                 if _looks_like_ollama_endpoint(ctx.get("base_url")):
                     extra_body["think"] = False
@@ -67,6 +68,9 @@ custom = CustomProfile(
     base_url="",  # User-configured
     # Floor only (user model.max_tokens overrides); without it Ollama falls
     # back to num_predict=128 and truncates.
+    # Without this, no max_tokens is sent and Ollama falls back to its internal num_predict=128, truncating
+    # responses after a few tokens (#39281). This is only a floor used when the user hasn't set
+    # model.max_tokens — they can override per-model — so we set it generously rather than lowballing it.
     default_max_tokens=65536,
 )
 

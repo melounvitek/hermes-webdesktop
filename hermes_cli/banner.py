@@ -301,6 +301,7 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     # if it already shows HEAD behind, that is sound evidence an update exists. Return the positive
     # stale count; None (inconclusive) otherwise so the caller doesn't cache a false "up to date".
     if is_shallow:
+        # (#82166, review #92578)
         if not fetch_ok:
             return None
         # No history across the shallow boundary. `origin/main` may not be a tracking ref in a

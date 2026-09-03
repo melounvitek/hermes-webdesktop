@@ -28,6 +28,10 @@ _TIMEOUT = 10  # seconds
 # restarts reuse warm verdicts; expiry is absolute wall-clock time so it survives restarts.
 # Trade-off: a MAL advisory published right after a clean verdict is noticed at TTL expiry
 # (<= 1h by default) rather than at next process start — lower OSV_CHECK_CACHE_TTL to tighten.
+# Without a cache, a flapping server turns into a sustained OSV query/DNS stream — the #75485 incident
+# logged 779K api.osv.dev DNS queries in 16h from revival loops. Malware advisories don't appear or vanish
+# on second-to-second timescales, so a successful verdict (clean OR blocked) is reusable. The window is the
+# same one the in-process cache already accepted; it just now spans restarts.
 _CACHE_TTL_S = float(os.getenv("OSV_CHECK_CACHE_TTL", "3600"))
 _CACHE_MAX_ENTRIES = 256
 _cache: dict = {}

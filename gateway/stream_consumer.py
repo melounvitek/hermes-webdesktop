@@ -68,6 +68,9 @@ class StreamConsumerConfig:
     buffer_only: bool = False
     # >0: final goes out as a fresh message once the preview has been visible this
     # long (timestamp reflects completion); 0 = always edit in place.
+    # This makes the platform's visible timestamp reflect completion time instead of first-token time for
+    # long-running responses (e.g. reasoning models that stream slowly). Ported from
+    # openclaw/openclaw#72038. The gateway enables this selectively per-platform.
     fresh_final_after_seconds: float = 0.0
     # "auto"/"draft": native drafts when adapter+chat support it, else "edit"
     # (progressive editMessageText).  "off" is handled by the gateway.
@@ -140,6 +143,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # Every real preview id on screen this response (fresh-final deletes them all);
         # the per-segment set holds only the active segment so failure recovery never
         # deletes an earlier finalized preamble/commentary.
+        # Wall-clock timestamp (time.monotonic) when ``_message_id`` was first assigned from a successful
+        # first-send. Used by the fresh-final logic to detect long-lived previews whose edit timestamps
+        # would be stale by completion time. Ported from openclaw/openclaw#72038.
         self._preview_message_ids: "set[str]" = set()
         self._already_sent = False
         self._edit_supported = True  # False once progressive edits stop working
@@ -199,10 +205,17 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         may carry a stale preview); None = legacy trust.  A payload-less
         ``_turn_split_delivery`` must NOT inherit legacy trust; ``_delivery_ambiguous`` (a
         full-final send timed out but MAY have landed) is the only case that does."""
+        # #29346: a tool/segment boundary means what we delivered was an interim preamble, not the final
+        # answer — clear the flags so a premature setter can't fool the gateway. Safe: got_done returns
+        # before any reset, and run.py reads these only after the consumer task exits.
         self._final_response_sent = False
         self._final_content_delivered = False  # content landed even if the cosmetic edit failed
         self._delivered_final_text: Optional[str] = None
         self._turn_split_delivery = False
+        # True when a full-final send timed out in a way that MAY have reached the platform
+        # (``_send_empty_fallback_final`` → "ambiguous"). The only case where a payload-less delivery flag
+        # keeps legacy trust in ``delivered_final_matches`` (#95382 tightening) — re-sending there risks a
+        # duplicate rather than recovering a loss.
         self._delivery_ambiguous = False
 
     def _stream_is_message(self) -> bool:
@@ -284,6 +297,12 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
     def _mark_final_delivered(self, record: Optional[str] = None) -> None:
         """Set both turn-final flags; ``record`` also records the delivered payload."""
         self._final_response_sent = True
+        # Only claim final delivery if the sealed chunks and final tail actually landed. ``_already_sent``
+        # may be True from prior progress/fallback state (#10748).
+        # The final clean-up edit failed, but the complete answer is already visible from the last streaming
+        # frame (usually with only the cursor still stuck on screen). Mark the content delivered so the
+        # gateway suppresses its normal full final send; otherwise users see the same long answer twice when
+        # Telegram/Discord rate-limit this cosmetic final edit (#36965, #25349).
         self._final_content_delivered = True
         if record is not None:
             self._record_turn_final_payload(record)
@@ -318,6 +337,13 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         # No recorded payload: judge against the FINAL content, not the flag.
         # ``_already_sent`` gates the match: draft frames set ``_last_sent_text`` but
         # deliberately not ``_already_sent``.
+        # #95382 / #98552 class fix: a delivery flag with NO recorded payload must still be judged against
+        # the FINAL content, not trusted blindly. Every internal flag-setting site records a payload; a
+        # record-less consumer whose visible/streamed text does not contain the completed response has
+        # demonstrably NOT delivered it (first-edit prefix, mid-stream truncation) — the flag alone must not
+        # suppress the corrective send. ``_already_sent`` gates the visible-text match: draft frames set
+        # ``_last_sent_text`` for dedupe but are ephemeral (they deliberately do not set ``_already_sent``),
+        # so draft-only visibility must not count as durable delivery.
         if self._already_sent and self.has_delivered_text(final_text):
             return True
         # Only a timed-out full-final send that MAY have landed keeps legacy trust.
@@ -583,6 +609,11 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                 return
             self._use_native_streaming = False
         self._use_draft_streaming = self._resolve_draft_streaming()
+        # Native draft streaming: bump the draft_id so the next text segment animates as a fresh preview
+        # below the tool-progress bubbles, not over the prior segment's already-finalized draft. This is how
+        # we avoid the "inter-tool-call text leak" failure mode openclaw documented in their issue #32535 —
+        # each text block becomes its own visible message via the finalize, then a new draft animates for
+        # the next one.
         if self._use_draft_streaming:
             self._bump_draft_id()
             logger.debug("Stream consumer using native-draft transport (chat=%s draft_id=%s)",
@@ -898,6 +929,11 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                     self._signal_flush(item[1])
 
     @staticmethod
+    # Strip MEDIA:<path> tags before display. Uses the shared anchored MEDIA_TAG_CLEANUP_RE from
+    # gateway/platforms/base.py — only tags whose path ends in a deliverable extension are removed, so an
+    # unknown-extension path stays visible instead of being silently dropped (issue #34517). Streaming and
+    # non-streaming paths share the same regex, so a tag is treated identically whichever path delivered the
+    # text.
     def _clean_for_display(text: str) -> str:
         """Hide MEDIA:<path> / [[audio_as_voice]] directives; media is delivered post-stream."""
         return _BasePlatformAdapter.strip_media_directives_for_display(text)

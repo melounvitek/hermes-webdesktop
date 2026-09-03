@@ -79,6 +79,7 @@ DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD = 0.6
 # Minimum normalized-transcript length before the sliding-window fallback runs. Below
 # this a genuine one-word barge-in ("yes") landing verbatim inside a longer reply would
 # score a trivial 1.0; a real self-capture spans pre-roll plus time-to-silence, so it is longer.
+# See #75792.
 MIN_FRAGMENT_LENGTH_FOR_ECHO = 10
 
 

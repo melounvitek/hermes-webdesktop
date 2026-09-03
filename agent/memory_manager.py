@@ -127,6 +127,7 @@ def inject_memory_provider_tools(agent: Any) -> int:
     if not memory_provider_tools_exposed(agent):
         # Say so once: a silent 0 leaves the provider looking "half on" with no clue which
         # config key (platform_toolsets / disabled_toolsets) gated it.
+        # See #81014.
         _providers = [p for p in getattr(memory_manager, "providers", None) or []
                       if getattr(p, "name", "") != "builtin"]
         if _providers:
@@ -344,6 +345,9 @@ class MemoryManager:
 
         # Core tool names are reserved: built-ins always win at agent init, so a shadowing
         # provider tool would linger in ``_tool_to_provider`` and hijack dispatch.
+        # ``clarify``, ``delegate_task``). Reject it here, at the door, so it never enters the routing table
+        # at all — matching the built-ins-always-win invariant used by the TTS/browser/search provider
+        # registries. See #40466.
         from toolsets import _HERMES_CORE_TOOLS
 
         for raw_schema in provider.get_tool_schemas():
@@ -592,6 +596,16 @@ class MemoryManager:
 
         ``on_session_end`` (LLM-bound, seconds) must run strictly BEFORE ``on_session_switch`` rebinds
         provider state; an ad-hoc thread raced the inline switch and misattributed transcripts.
+
+        Running extraction inline blocked the /new command for the whole LLM round-trip (#16454); running it
+        on an ad-hoc thread raced the inline switch — providers key off internal state, so a late
+        ``on_session_end`` ran against post-switch bindings (transcript misattributed to the new session id,
+        double-ingest of the old turn buffer, new-session buffers cleared).
+        Submitting BOTH hooks as one task on the manager's single background worker gives both properties at
+        a single chokepoint: the caller returns immediately, and the worker's FIFO order serializes
+        end→switch against every other provider write (per-turn ``sync_all``, prefetches), which already
+        share the same worker. If the executor is unavailable, ``_submit_background`` degrades to inline
+        execution — the pre-#16454 synchronous behavior, slow but correct.
         """
         if not self._providers:
             return

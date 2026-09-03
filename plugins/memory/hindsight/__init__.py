@@ -117,7 +117,10 @@ def _fetch_hindsight_api_version(api_url: str, api_key: str | None = None,
 
 def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = None) -> bool:
     """Cached ``update_mode='append'`` check for *api_url*. False on any probe failure
-    (safe default: per-process document_id, no update_mode = resume-overwrite fix intact)."""
+    (safe default: per-process document_id, no update_mode = resume-overwrite fix intact).
+
+    Probes once per URL per process. See #6654.
+    """
     if not api_url:
         return False
     with _append_capability_lock:
@@ -360,7 +363,12 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def unavailable_reason(self) -> str:
         """Install hint for an unavailable local_embedded runtime (is_available() gates
-        initialize() out, so the hint it would log never fires; agent_init shows this)."""
+        initialize() out, so the hint it would log never fires; agent_init shows this).
+
+        ``is_available()`` returns False for local modes when the embedded runtime can't be imported, so
+        ``initialize()`` — and the hint it would log — is never reached (#7718). Surface the install
+        guidance here, where agent_init warns about an unavailable provider.
+        """
         try:
             if _load_config().get("mode", "cloud") not in _LOCAL_MODES:
                 return ""
@@ -628,7 +636,14 @@ class HindsightMemoryProvider(MemoryProvider):
         stable session-scoped id with ``update_mode='append'``; older APIs get
         *fallback_document_id* (per-process unique) and no update_mode — the only
         way the resume-overwrite fix works there. The /version probe targets the
-        embedded client's dynamic per-profile port when running, else api_url."""
+        embedded client's dynamic per-profile port when running, else api_url.
+
+        On Hindsight ≥ 0.5.0 the API supports ``update_mode='append'``, which lets us reuse a stable
+        session-scoped ``document_id`` across process lifecycles without overwriting prior turns. On older
+        APIs we fall back to *fallback_document_id* (the per-process unique ``f"{session_id}-{start_ts}"``
+        minted at initialize / switch time) and don't pass ``update_mode`` at all — that's the only way the
+        resume-overwrite fix (#6654) keeps working on legacy servers.
+        """
         url = getattr(self._client, "url", None) if self._mode == "local_embedded" else None
         probe_url = str(url) if url else (self._api_url or "")
         if self._session_id and _check_api_supports_update_mode_append(probe_url, self._api_key):
@@ -777,6 +792,8 @@ class HindsightMemoryProvider(MemoryProvider):
             logger.warning(msg)
             # Also print: otherwise the user would only see Hermes get sluggish.
             with contextlib.suppress(Exception):
+                # Surface to the terminal too — a daemon that never starts would otherwise fail silently and
+                # the user would only see Hermes get sluggish. (issue #13125)
                 print(f"  ⚠ {msg}", file=sys.stderr, flush=True)
             self._mode = "disabled"
             return
@@ -882,6 +899,7 @@ class HindsightMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Opt-in: recall synchronously against the *current* message so the
         # injected memories match this turn's query, not the previous turn's.
+        # See NousResearch/hermes-agent#5820.
         if self._recall_sync:
             return self._finish_prefetch(*(("", 0) if self._recall_disabled() else self._do_recall(query)))
         # Default: the background worker's result for the previous turn (capped join).
@@ -941,6 +959,7 @@ class HindsightMemoryProvider(MemoryProvider):
         relative phrases in content) from the item timestamp: explicit occurred_at
         wins, else the configured event clock."""
         item: Dict[str, Any] = {
+            # See #93568.
             "content": content,
             "metadata": metadata or self._build_metadata(message_count=1, turn_index=self._turn_index),
             "timestamp": (occurred_at or "").strip() or _event_timestamp(),
@@ -1091,7 +1110,16 @@ class HindsightMemoryProvider(MemoryProvider):
         lose them), join the in-flight prefetch and drop its result (no stale recall
         for the new session), then set ``_session_id``, mint a fresh ``_document_id``
         and clear the batch buffers. ``reset`` is accepted but unneeded: buffer
-        clearing is correct for every switch."""
+        clearing is correct for every switch.
+
+        Without this hook, initialize()-cached state (``_session_id``, ``_document_id``, ``_session_turns``,
+        ``_turn_counter``) would keep pointing at the previous session and writes would land in the wrong
+        document. See hermes-agent#6672.
+        Always update ``_session_id`` so metadata and tags on subsequent retains reflect the active session.
+        Always clear the accumulated batch buffers (``_session_turns``, ``_turn_counter``, ``_turn_index``)
+        — even for /resume and /branch, the new session's batching must start from zero so an in-flight
+        retain doesn't flush under the wrong ``_document_id``. See #1303.
+        """
         new_id = str(new_session_id or "").strip()
         if not new_id:
             return
@@ -1166,6 +1194,13 @@ class HindsightMemoryProvider(MemoryProvider):
         # thread, reclaimed at process exit.
 
 
+# The module-global background event loop (_loop / _loop_thread) is intentionally NOT stopped here. It is
+# shared across every HindsightMemoryProvider instance in the process — the plugin loader creates a new
+# provider per AIAgent, and the gateway creates one AIAgent per concurrent chat session. Stopping the loop
+# from one provider's shutdown() strands the aiohttp ClientSession + TCPConnector owned by every sibling
+# provider on a dead loop, which surfaces as the "Unclosed client session" / "Unclosed connector" warnings
+# reported in #11923. The loop runs on a daemon thread and is reclaimed on process exit; per-session cleanup
+# happens via self._client.aclose() above.
 def register(ctx) -> None:
     """Register Hindsight as a memory provider plugin."""
     ctx.register_memory_provider(HindsightMemoryProvider())

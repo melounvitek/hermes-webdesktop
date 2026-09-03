@@ -164,7 +164,12 @@ def _stamp_worker_session_metadata(task_id: str, metadata: Optional[dict]) -> Op
 def _enforce_worker_task_ownership(tid: str) -> None:
     """A dispatcher-spawned worker may only mutate its own HERMES_KANBAN_TASK; a
     prompt-injected ``task_id`` must not corrupt sibling/cross-tenant runs.
-    Orchestrators (toolset enabled, no env task) legitimately route child tasks."""
+    Orchestrators (toolset enabled, no env task) legitimately route child tasks.
+
+    Tools like ``kanban_complete`` / ``kanban_block`` / ``kanban_heartbeat`` mutate run-lifecycle state, so
+    a buggy or prompt-injected worker that passed an explicit ``task_id`` for some other task could corrupt
+    sibling or cross-tenant runs (see #19534).
+    """
     env_tid = os.environ.get("HERMES_KANBAN_TASK")
     if env_tid and tid != env_tid:
         raise _Reject(
@@ -392,6 +397,19 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
 # rate-limited per process (a race costs one harmless extra write); no-op outside a
 # dispatcher-spawned worker.
 
+# --------------------------------------------------------------------------- Runtime-activity →
+# board-heartbeat bridge (#31752)
+# --------------------------------------------------------------------------- When the agent ticks
+# ``_touch_activity`` during normal work (between tool calls, mid-stream chunks, etc.), we want the kanban
+# board's ``last_heartbeat_at`` columns to reflect that liveness so the dispatcher watchdog (which reads
+# ``tasks.last_heartbeat_at``, not the agent's in-process timestamp) doesn't reclaim an actively-running
+# worker as stale. The model is not required to call the explicit ``kanban_heartbeat`` tool for this to work
+# — that tool stays available for workers that want to attach a note or pre-emptively extend a claim across
+# a known-long op. Constraints: - Best-effort: never raise. The agent loop must not care if the bridge fails
+# (board missing, DB locked, etc.). - Rate-limited to one DB write per 60s per-process; runtime activity can
+# tick on every chunk/tool result and we don't need that resolution. - No-op outside dispatcher-spawned
+# worker context (no ``HERMES_KANBAN_TASK``). - No durable note on these auto-heartbeats; that's reserved
+# for the explicit tool which carries a model-supplied note.
 _AUTO_HEARTBEAT_MIN_INTERVAL_SECONDS = 60.0
 _auto_heartbeat_last_attempt: float = 0.0
 
@@ -536,6 +554,9 @@ def _handle_complete(args: dict, **kw) -> str:
     _require_dict_metadata(metadata)
     metadata = _stamp_worker_session_metadata(tid, metadata)
     with _board(args.get("board")) as (kb, conn):
+        # Goal-mode pre-completion judge gate (Issue #38367). Prevent workers from bypassing the auxiliary
+        # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
+        # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
         _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
         try:
@@ -543,6 +564,11 @@ def _handle_complete(args: dict, **kw) -> str:
                 conn, tid, result=result, summary=summary, metadata=metadata,
                 created_cards=created_cards, expected_run_id=_worker_run_id(tid))
         except kb.ArtifactPreservationError as artifact_err:
+            # Structured rejection — surface the phantom ids so the worker can retry with a corrected list
+            # or drop the field. Audit event already landed in the DB. The task itself was NOT mutated (the
+            # gate runs before the write txn), so the worker can simply call kanban_complete again. Spell
+            # that out — without it the model often interprets a tool_error as a terminal failure and either
+            # blocks or crashes the run instead of retrying. See #22923.
             return tool_error(
                 f"kanban_complete could not preserve the declared artifacts: {artifact_err}. "
                 f"Your task is still in-flight and its scratch workspace was kept. Fix the "
@@ -576,6 +602,13 @@ def _handle_block(args: dict, **kw) -> str:
         # The goal loop treats ANY blocked status as terminal, so kanban_block
         # would be an escape hatch around the completion judge: goal_mode tasks
         # may only block on genuine external blockers.
+        # Goal-mode block gate (Issue #38696, sibling of the kanban_complete judge gate in #38367).
+        # kanban_block is a second exit path out of the goal loop — run_kanban_goal_loop() treats ANY
+        # `blocked` status as terminal, identically to `done`, regardless of kind. Without this, a worker
+        # that learns kanban_complete is gated can just call kanban_block(reason="anything") to escape the
+        # loop instead. Restrict goal_mode tasks to the kinds that represent a genuine external blocker the
+        # worker cannot resolve itself; `capability` and `transient` (or an unset kind) route back through
+        # kanban_complete, which the judge now gates.
         task = kb.get_task(conn, tid)
         _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
                f"goal_mode tasks can only block with kind in "
@@ -653,6 +686,10 @@ def _handle_comment(args: dict, **kw) -> str:
     # injected into future workers' system prompts, so an args["author"] override could
     # forge a directive from ``hermes-system``. Cross-task commenting stays unrestricted —
     # it is the handoff channel between tasks.
+    # Comments are injected into the next worker's system prompt by ``build_worker_context`` as
+    # ``**{author}** (timestamp): {body}`` — accepting an ``args["author"]`` override let a worker forge a
+    # comment from an authoritative-looking name like ``hermes-system`` and poison the future-worker context
+    # with what reads as a system directive. See #19713.
     author = os.environ.get("HERMES_PROFILE") or "worker"
     with _board(args.get("board")) as (kb, conn):
         cid = kb.add_comment(conn, tid, author=author, body=str(body))
@@ -778,6 +815,7 @@ def _handle_create(args: dict, **kw) -> str:
     # mutate review evidence or race its checkout). Project identity is the one safe thing
     # to inherit implicitly (the DB turns it into a fresh per-task worktree).
     workspace_kind, workspace_path = args.get("workspace_kind"), args.get("workspace_path")
+    # See #67567.
     project_id = args.get("project") or args.get("project_id")
     project_source_task_id = None
     triage, skills, goal_mode = (

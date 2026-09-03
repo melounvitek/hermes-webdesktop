@@ -96,6 +96,11 @@ def _check_dispatcher_presence(hermes_home: Optional[Path] = None) -> tuple[bool
     alive for this HERMES_HOME with ``kanban.dispatch_in_gateway`` on, else False + human guidance.
     Fails OPEN (probe/config errors -> ``(True, "")``) — a missed warning beats crying wolf.
     ``hermes_home`` scopes the probe to a profile dir (dashboard backend); CLI callers pass None.
+
+    The dashboard plugin API passes it because the dashboard backend process can be running under a
+    different HERMES_HOME than the profile the request targets, which otherwise produced a "no gateway is
+    running" warning against a perfectly healthy profile gateway (#71211). CLI callers leave it ``None`` and
+    keep the existing process-level behavior.
     """
     try:
         from gateway.status import resolve_gateway_liveness  # type: ignore
@@ -612,6 +617,11 @@ def _rows_by_task(conn, table: str, ids: list[str]) -> dict[str, list]:
 def _cmd_diagnostics(args: argparse.Namespace) -> int:
     """List active diagnostics on the board via the same rule engine the dashboard uses."""
     from hermes_cli import kanban_diagnostics as kd
+    # Honour kanban.default_assignee as the fallback for unassigned ready tasks (#27145),
+    # kanban.max_in_progress as the global concurrency cap (#33488), kanban.max_in_progress_per_profile as
+    # the per-profile cap (#21582), and kanban.max_spawn as the per-tick spawn limit (#28805). Same
+    # semantics as the gateway dispatch path so behavior matches whether the user runs the CLI directly or
+    # relies on the gateway-embedded dispatcher.
     from hermes_cli.config import load_config
 
     diag_config = kd.config_from_runtime_config(load_config())
@@ -784,6 +794,11 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
     Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
     unachievable; ``"continue"``/``"wait"`` reject with the judge's reason. Judge failures allow
     the handoff (logged).
+
+    See #100954.
+    ``{"done", None}`` means the judge allows the handoff; anything else is a rejection whose verdict
+    disambiguates the guidance the caller gives the worker (``continue`` = not done yet, ``blocked`` =
+    judged unachievable — see #100954).
     """
     if task is None or not task.goal_mode:
         return ("done", None)

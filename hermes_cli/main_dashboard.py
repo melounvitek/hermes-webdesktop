@@ -243,7 +243,10 @@ def _dashboard_cmdline_for_pid(pid: int) -> list[str] | None:
 def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
     """Respawn manually-started dashboards after ``hermes update``, detached, logging to
     ``logs/dashboard-restart.log``; returns the argvs that failed to spawn. Callers pre-filter via
-    ``_filter_dashboard_respawn_candidates`` (no Desktop ``--port 0`` backends, capped per profile)."""
+    ``_filter_dashboard_respawn_candidates`` (no Desktop ``--port 0`` backends, capped per profile).
+
+    See #78821.
+    """
     from hermes_constants import get_hermes_home
     respawned: list[list[str]] = []
     failed: list[tuple[list[str], str]] = []
@@ -383,6 +386,9 @@ def _report_dashboard_status() -> int:
 
     Serve-mode backends are INCLUDED: ``--stop`` kills them, so hiding them from
     ``--status`` let an operator kill what they couldn't see.
+
+    Ledger-registered serves (profiled launches the argv scan can't match) surface via the spawn-ledger
+    augmentation in _scan_dashboard_processes. See #81564.
     """
     from hermes_cli.main import _dashboard_listening, _self
     from gateway.status import _pid_exists
@@ -551,6 +557,7 @@ def _read_ssh_session_token_file(path: str) -> str:
     # desktop-ssh, independent of HERMES_HOME and the active profile. Anchor
     # validation there, NOT get_hermes_home(): a non-default profile or a Docker
     # /opt/data root re-homes get_hermes_home() and would reject every token.
+    # See #69551.
     token_root = Path.home() / ".hermes" / "desktop-ssh"
     try:
         relative = Path(path).relative_to(token_root)
@@ -726,6 +733,8 @@ def _resolve_dashboard_web_dist(args, _headless_backend: bool) -> None:
             sys.exit(1)
     elif skip_build:
         _dist_root = (
+            # --build-mode skip trusts the caller to have pre-built the web UI. Verify the dist actually
+            # exists; otherwise the server will start and serve 404s with no obvious cause (issue #23817).
             Path(os.environ["HERMES_WEB_DIST"])
             if "HERMES_WEB_DIST" in os.environ
             else PROJECT_ROOT / "hermes_cli" / "web_dist"
@@ -734,6 +743,9 @@ def _resolve_dashboard_web_dist(args, _headless_backend: bool) -> None:
             # Only the default dist location is recoverable (desktop launches with
             # --build-mode skip after a wipe of web_dist); a custom HERMES_WEB_DIST
             # is a caller-managed directory the build cannot populate.
+            # The caller promised a pre-built dist but there isn't one. Instead of hard-failing (issue
+            # #59288 — desktop launches with --build-mode skip after a wipe of web_dist), warn and attempt
+            # ONE recovery build through the normal build path.
             _recoverable = "HERMES_WEB_DIST" not in os.environ
             if _recoverable:
                 print(f"⚠ --skip-build was passed but no web dist found at: {_dist_root}")
@@ -751,6 +763,10 @@ def _resolve_dashboard_web_dist(args, _headless_backend: bool) -> None:
     else:
         # HERMES_WEB_DIST without --skip-build: the env var points at a
         # caller-managed dist, so validate it like the --skip-build branch.
+        # HERMES_WEB_DIST is set without --skip-build: the build is skipped (the env var points at a
+        # caller-managed dist), so validate it the same way the --skip-build branch does — otherwise the
+        # server starts and serves 404s with no obvious cause (same failure mode as #23817, via the env-var
+        # path).
         _dist_root = Path(os.environ["HERMES_WEB_DIST"]).expanduser()
         if not (_dist_root / "index.html").exists():
             print(f"✗ HERMES_WEB_DIST is set but no web dist found at: {_dist_root}")

@@ -46,6 +46,8 @@ class DaemonThreadPoolExecutor(ThreadPoolExecutor):
         num_threads = len(self._threads)
         if num_threads < self._max_workers:
             thread_name = "%s_%d" % (self._thread_name_prefix or self, num_threads)
+            # Carry the active profile into the review thread so MEMORY.md / skill review writes land in the
+            # right profile (#54937).
             t = threading.Thread(
                 name=thread_name, target=_worker, daemon=True,
                 args=(weakref.ref(self, weakref_cb), self._work_queue, self._initializer, self._initargs),

@@ -150,7 +150,13 @@ def _recover_gateway_restart_after_abort(
     plan, *, gateway_mode: bool, skip_profiles: set[str] | None = None,
     skip_units: set[str] | None = None) -> dict[str, list]:
     """Retry supervised gateway restarts from a clean Python process (the in-process restart ran
-    in the pre-``git pull`` interpreter). Only inventory-classified supervisor-owned profiles."""
+    in the pre-``git pull`` interpreter). Only inventory-classified supervisor-owned profiles.
+
+    ``skip_units`` names the units the aborted phase already settled, as ``<scope>/<unit>``. The scope is
+    part of the identity, not decoration: ``hermes-serve.service`` can exist in both the user and the system
+    manager as two different processes, and an unqualified token would let a settled one suppress recovery
+    of a stale one (review on #96235).
+    """
     from hermes_cli.update_cmd import _gateway_recovery_partition
     candidates, skipped = _gateway_recovery_partition(plan, skip_profiles=skip_profiles)
     profiles = sorted(candidates)

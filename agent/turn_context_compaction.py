@@ -42,6 +42,14 @@ class CompactionOutcome:
 
 def _clear_overflow_warn(agent: Any) -> None:
     """Re-arm the context-overflow warning dedup (test doubles may lack the method)."""
+    # Compression is actually running (block cleared / was never blocked) — reset the blocked-overflow
+    # warning dedup so a future blocked-over-threshold turn can warn again. Mirrors the turn-context
+    # preflight reset (silent-overflow fix #62625). getattr guard: test doubles built via object.__new__
+    # lack the method (gateway test-double pitfall) — treat absence as no-op.
+    # Compression is actually running (block cleared / was never blocked) — reset the blocked-overflow
+    # warning dedup so a future blocked-over-threshold turn can warn again (silent-overflow fix #62625).
+    # getattr guard: test doubles built via object.__new__ lack the method (gateway test-double pitfall) —
+    # treat absence as no-op.
     _clear_warn = getattr(agent, "_clear_context_overflow_warn", None)
     if callable(_clear_warn):
         _clear_warn()
@@ -94,6 +102,10 @@ def _apply_grown_window(agent: Any, compressor: Any, grown: int) -> None:
 
 def _refund_api_call(agent: Any, api_call_count: int) -> int:
     """A pass that never reached the provider refunds the call count and budget."""
+    # Host progress-aware timeout (#98722, salvaged from #98741): this preflight iteration never reached the
+    # provider. Refund its provisional call/budget exactly like a successful pre-API compaction, then stop
+    # before the unchanged oversized request reaches the provider — its overflow error would only invoke
+    # compression again on the same transcript with the wait budget already spent.
     api_call_count -= 1
     agent._api_call_count = api_call_count
     agent.iteration_budget.refund()
@@ -200,6 +212,7 @@ def _codex_native_auto_compaction(agent: Any) -> bool:
     """Codex app-server threads are compacted by the codex agent itself; Hermes only
     initiates compaction in "hermes" mode."""
     return (
+        # See #36801.
         getattr(agent, "api_mode", None) == "codex_app_server"
         and str(
             getattr(agent, "codex_app_server_auto_compaction", "native") or "native"
@@ -367,6 +380,10 @@ def _run_preflight_passes(
             # Lock-skip: another path holds the lock, so this is a DEFER, not proof of
             # incompressibility — don't arm the blocker; stop passes this turn.
             logger.info(
+                # That is a temporary DEFER, not proof the transcript cannot compress — do NOT arm the
+                # insufficient-progress blocker (the loop's error handlers must keep their provider-proven
+                # retry budget) and stop preflight passes for this turn; the lock winner is shrinking the
+                # same session concurrently. See #69870.
                 "Preflight compression deferred: compression lock "
                 "held by another path (session %s)",
                 agent.session_id or "none",

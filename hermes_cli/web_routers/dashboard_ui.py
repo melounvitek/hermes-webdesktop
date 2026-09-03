@@ -289,7 +289,10 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     allowlist — user plugins ship a ``plugin_api.py`` backend the browser never
     fetches, and without it anyone on the loopback port could curl a private
     plugin's source. Path traversal is blocked via ``resolve().is_relative_to()``;
-    user plugins must be enabled (bundled ones not disabled) (GHSA-mcfc-hp25-cjv7)."""
+    user plugins must be enabled (bundled ones not disabled) (GHSA-mcfc-hp25-cjv7).
+
+    See #46435.
+    """
     plugins = _get_dashboard_plugins()
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
     if not plugin or not _plugin_activated(plugin, *_plugin_enable_sets()):

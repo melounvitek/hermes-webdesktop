@@ -86,6 +86,7 @@ _FIRE_EXIT_BOUND_S = 10.0
 
 # Handle states. Transitions are guarded by the handle's state lock so a
 # disarm and a fire can never both "win": armed -> disarmed or armed -> firing.
+# See #89750.
 _ARMED = "armed"
 _DISARMED = "disarmed"
 _FIRING = "firing"

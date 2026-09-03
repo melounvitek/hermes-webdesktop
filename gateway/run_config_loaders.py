@@ -130,6 +130,11 @@ class GatewayConfigLoadersMixin:
         config on every call (callers run inside ``_profile_runtime_scope``, so routed multiplex
         profiles get their own personality/system_prompt and ``/personality`` edits apply next turn).
         Legacy ``channel_prompts`` are applied separately via ``event.channel_prompt`` in ``run_sync``.
+
+        Callers run inside ``_profile_runtime_scope`` (``run_sync`` under ``_run_agent``), so a routed
+        multiplex profile gets its own ``display.personality`` / ``agent.system_prompt`` instead of a
+        boot-time snapshot of the launch profile's (#89161); ``/personality`` edits take effect on the next
+        turn for the same reason.
         """
         override = self._channel_override(platform, chat_id, thread_id, parent_id)
         if override and override.system_prompt:
@@ -142,6 +147,8 @@ class GatewayConfigLoadersMixin:
 
         Per-model override > global ``agent.reasoning_effort``; YAML False = disabled. Empty
         ``model`` uses ``model.default``.
+
+        Closes #21256.
         """
         from gateway.run import _load_gateway_runtime_config
         from hermes_constants import resolve_reasoning_config
@@ -343,7 +350,10 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_cron_drain_timeout(cls) -> float:
-        """The cron-only floor under the stop()/drain wait."""
+        """The cron-only floor under the stop()/drain wait.
+
+        See #82161.
+        """
         return cls._load_env_or_agent_cfg_timeout(
             "HERMES_CRON_DRAIN_TIMEOUT", "cron_drain_timeout",
             parse_cron_drain_timeout, DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT,
@@ -410,6 +420,11 @@ class GatewayConfigLoadersMixin:
         Lets a chain edited after startup reach messaging sessions (cron already re-reads per job).
         A TRANSIENT read/parse failure (user mid-edit, non-atomic write) keeps the last known-good
         chain; only a successful read that genuinely lacks the key clears it.
+
+        Cron already does this per job via ``get_fallback_chain``; the gateway previously froze
+        ``self._fallback_model`` at process start, so a chain configured (or changed) after ``hermes
+        gateway`` was running never reached messaging sessions even though the same process's cron jobs fell
+        back correctly. Fixes #60955.
         """
         from gateway.run import _hermes_home
         try:
@@ -443,6 +458,9 @@ class GatewayConfigLoadersMixin:
         Skips the rewrite while a cooldown holds the agent on an activated fallback provider
         (``restore_primary_runtime`` owns that lifecycle); otherwise replaces the chain so
         mid-uptime ``fallback_providers`` edits apply without a restart.
+
+        When primary is active (or cooldown expired), replace the chain so mid-uptime ``fallback_providers``
+        edits take effect without requiring a gateway restart (#60955).
         """
         if agent is None:
             return
@@ -458,6 +476,7 @@ class GatewayConfigLoadersMixin:
         # A config edit means the user changed something — drop the session-scoped unavailability
         # memo so re-configured entries (e.g. credentials added mid-uptime) get retried. Only on real
         # content change, so the per-message no-op refresh keeps the memo's rate-limiting benefit.
+        # See #60955.
         if new_chain != old_chain:
             unavailable = getattr(agent, "_unavailable_fallback_keys", None)
             if unavailable:

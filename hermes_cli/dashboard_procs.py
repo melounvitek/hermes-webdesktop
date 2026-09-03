@@ -43,6 +43,15 @@ def _iter_process_table() -> list[tuple[int, str]]:
         # errors="ignore": wmic may emit the system code page. bounded_probe_run, not run():
         # run()'s post-timeout cleanup joins pipe readers unbounded and a conhost descendant
         # holding duplicated handles wedges it forever.
+        # In text mode, subprocess output decoding depends on Python's configuration (locale-dependent by
+        # default, or UTF-8 in UTF-8 mode). The important protection here is errors="ignore": it prevents a
+        # reader-thread UnicodeDecodeError from leaving result.stdout=None and turning the later .split()
+        # into an AttributeError (#17049). bounded_probe_run (rather than subprocess.run with a timeout)
+        # keeps a slow scan from wedging the caller forever: run()'s post-timeout cleanup joins the pipe
+        # reader threads unbounded, and a conhost.exe descendant holding duplicated pipe handles blocks that
+        # join indefinitely (#87134). It also passes CREATE_NO_WINDOW: this scan can run from the windowless
+        # pythonw.exe desktop/gateway backend during an update, where a bare wmic spawn would pop a console
+        # window.
         from hermes_cli._subprocess_compat import bounded_probe_run
         result = bounded_probe_run(
             ["wmic", "process", "get", "ProcessId,CommandLine", "/FORMAT:LIST"],
@@ -73,6 +82,12 @@ def _scan_dashboard_processes(*, exclude_pids: set[int] | None = None) -> list[t
     A forgotten dashboard keeps the old Python backend against the new JS bundle after
     ``hermes update`` (every API call 401s). *exclude_pids* (Desktop's HERMES_DESKTOP_CHILD_PID
     backends) are never returned.
+
+    *exclude_pids* is an optional set of PIDs that must never be returned. This is used by the Hermes
+    Desktop Electron app to protect its own backend child process: when the desktop spawns ``hermes serve``
+    as a backend and triggers an auto-update, the update must not kill the backend that the desktop itself
+    manages. The desktop sets the environment variable ``HERMES_DESKTOP_CHILD_PID`` on the spawned backend
+    process; ``_kill_stale_dashboard_processes`` reads it and passes it here. (#37532)
     """
     skip = {os.getpid(), *(exclude_pids or ())}
     try:
@@ -83,6 +98,10 @@ def _scan_dashboard_processes(*, exclude_pids: set[int] | None = None) -> list[t
     # Spawn-ledger augmentation: substring patterns miss profiled launches (`hermes --profile p
     # serve`); the ledger holds live-verified pids. Unavailable ledger → scan-only.
     with contextlib.suppress(Exception):
+        # Every serve/ dashboard registers itself in the machine spawn ledger at startup with live-verified
+        # (pid, create_time), so ledger rows are positive identity, not argv guessing. Add any live ledger
+        # serve/dashboard the scan missed; prefer the ledger's recorded argv (full launch args) over the
+        # scan's truncated view. See #81564.
         from hermes_cli.process_identity import ledger_entries
         seen = {pid for pid, _ in found} | skip
         for entry in ledger_entries():
@@ -125,7 +144,10 @@ def _profile_flag_value(argv: list[str]) -> str | None:
 
 def _is_ephemeral_port_zero_backend(argv: list[str]) -> bool:
     """True for Desktop-style ``serve|dashboard --port 0`` backends — replaying them after
-    ``hermes update`` multiplies listening backends because ``--port 0`` binds a fresh port."""
+    ``hermes update`` multiplies listening backends because ``--port 0`` binds a fresh port.
+
+    See #78821.
+    """
     if _dashboard_subcommand_index(argv) is None:
         return False
     return any((tok == "--port" and i + 1 < len(argv) and str(argv[i + 1]) == "0")
@@ -160,7 +182,10 @@ def _resolved_home(home: str) -> Path:
 
 
 def _normalized_home_for_compare(home: str) -> str:
-    """Install-identity key for *home*: symlinked / differently-spelled roots compare equal."""
+    """Install-identity key for *home*: symlinked / differently-spelled roots compare equal.
+
+    See #94030.
+    """
     return os.path.normcase(str(_resolved_home(home)))
 
 
@@ -169,6 +194,8 @@ def _profile_key_for_respawn(argv: list[str], hermes_home: str | None = None) ->
 
     A home ending in ``profiles/<name>`` → ``profile:<name>`` (shares a cap with an explicit
     ``--profile``); other homes keep a ``home:`` key so unrelated installs never collapse.
+
+    See #78821.
     """
     if hermes_home:
         parts = _resolved_home(hermes_home).parts
@@ -188,6 +215,14 @@ def _filter_dashboard_respawn_candidates(
     and steal the foreign install's fixed port → EADDRINUSE crash-loop; unreadable ``None``
     stays eligible); dedupe by normalized cmdline; one backend per profile / home. PPID-1 is
     NOT skipped: a prior respawn detaches, so fixed-port manual backends sit under init.
+
+    1. Never resurrect Desktop ephemeral ``serve|dashboard --port 0`` backends — Desktop
+    (``HERMES_DESKTOP_CHILD_PID``) owns their lifecycle. These are also the PPID-1 orphans that previously
+    multiplied across updates because ``--port 0`` always binds a fresh free port. 2. A foreign install's
+    backend is owned by that install's supervisor/user. 3. 4. See #78821, #94030.
+    Intentionally does **not** blanket-skip every PPID-1 process: a prior ``hermes update`` respawn detaches
+    with ``start_new_session=True``, so fixed-port manual backends are reparented to init and must still be
+    eligible for the next update's #40449 restart.
     """
     if own_home is None:
         try:
@@ -289,6 +324,13 @@ def _kill_stale_dashboard_processes(
     kill (systemd treats our SIGTERM as a clean stop, so ``Restart=on-failure`` never fires) and
     manual PIDs are respawned from captured argv. PIDs owned by *already_restarted_units* (no
     ``.service`` suffix) are left untouched, not killed twice.
+
+    Manually-started dashboards are not auto-restarted because we don't know the original launch args
+    (--host, --port, --insecure, --tui, --no-open). See #68934.
+    *already_restarted_units* names units (no ``.service`` suffix) the caller already restarted directly —
+    e.g. ``hermes update``'s systemd fleet-restart loop, which restarts ``hermes-serve*`` units before this
+    function runs. Without excluding them, a Serve-only install's freshly restarted process is found again
+    here and restarted a second time for no benefit (review on #83595).
     """
     if restart_managed and _m()._restart_managed_dashboard_service(reason):
         # The dashboard unit is handled but other backends (e.g. hermes-serve.service) are not:
@@ -315,6 +357,9 @@ def _kill_stale_dashboard_processes(
             pid_service[pid] = _m()._get_systemd_service_for_pid(pid)
             if not pid_service[pid] and (cmdline := _m()._dashboard_cmdline_for_pid(pid)):
                 # Manual process: exact argv + HERMES_HOME for the respawn and its profile cap.
+                # Manually-started process: preserve its exact argv so we can respawn it after the update
+                # (#40449, #68934). Snapshot HERMES_HOME before the kill so per-profile caps still work
+                # after the process is gone (#78821).
                 pid_cmdline[pid] = cmdline
                 pid_home[pid] = _hermes_home_for_pid(pid)
         if already_restarted_units:
@@ -345,6 +390,10 @@ def _restart_killed_backends(
     pid_cmdline: dict[int, list[str]], pid_home: dict[int, str | None]) -> list[int]:
     """Update path: restart systemd units, respawn manual argv (detached, headless, logged to
     logs/dashboard-restart.log; one per profile, no ``--port 0``). Returns PIDs not brought back."""
+    # Two categories: Without this, a remote backend (hermes serve) under Restart=on-failure never comes
+    # back after our clean SIGTERM, and the Desktop can't reconnect (#68934). Filtered so Desktop
+    # ``serve|dashboard --port 0`` backends are not resurrected and duplicates collapse to one per profile
+    # (#78821).
     unrecovered: list[int] = []
     failed_restarts: list[tuple[str, str]] = []
     seen_services: set[str] = set()

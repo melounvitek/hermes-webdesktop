@@ -602,6 +602,8 @@ def register(ctx):
         label="IRC",
         adapter_factory=IRCAdapter,
         check_fn=check_requirements,
+        # ACTIVE lazy-installer — create_adapter() calls this when check_fn is False, right before the
+        # gateway connects Teams (#79812).
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["IRC_SERVER", "IRC_CHANNEL", "IRC_NICKNAME"],

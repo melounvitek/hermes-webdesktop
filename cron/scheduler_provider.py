@@ -20,8 +20,15 @@ _EMFILE_BACKOFF_MAX_SECONDS = 15 * 60
 DEFAULT_MISFIRE_GRACE_MINUTES = 10
 
 
+# Cap for the exponential tick backoff applied while consecutive ticks fail with fd exhaustion
+# (EMFILE/ENFILE, #87644). Base is the tick interval (60s by default); each consecutive EMFILE failure
+# doubles the wait, capped here so a still-alive-but-exhausted gateway never sleeps longer than this between
+# recovery attempts.
 def _backoff_wait_seconds(interval: float, consecutive_failures: int) -> float:
-    """Plain ``interval`` while healthy; doubles per fd-exhaustion failure, capped."""
+    """Plain ``interval`` while healthy; doubles per fd-exhaustion failure, capped.
+
+    Exponential tick backoff shared by both ticker loops (#87644).
+    """
     if consecutive_failures <= 0:
         return interval
     return min(interval * (2 **(consecutive_failures - 1)), _EMFILE_BACKOFF_MAX_SECONDS)
@@ -29,7 +36,12 @@ def _backoff_wait_seconds(interval: float, consecutive_failures: int) -> float:
 
 def _note_tick_failure(exc: BaseException, consecutive_failures: int) -> int:
     """On fd exhaustion: reclaim fds and bump the backoff counter; any other failure resets it —
-    backoff is reserved for the EMFILE storm."""
+    backoff is reserved for the EMFILE storm.
+
+    Shared by both ticker loops (#87644): on fd exhaustion, attempt reclamation (gc.collect + raise the soft
+    nofile limit) so the NEXT tick can succeed, and bump the counter so ``_backoff_wait_seconds`` backs off
+    exponentially while the process has no chance of making progress.
+    """
     from cron.scheduler import _is_fd_exhaustion, _reclaim_fds_best_effort
 
     if _is_fd_exhaustion(exc):
@@ -46,7 +58,14 @@ def _profile_entry(entry) -> tuple:
 
 def _existing_profile_homes(profile_homes: list) -> list:
     """Drop homes no longer on disk: ticking/heartbeating a deleted home would recreate its
-    ``cron/`` workspace and silently resurrect the profile."""
+    ``cron/`` workspace and silently resurrect the profile.
+
+    Ticking or heartbeating a deleted home recreates its ``cron/`` workspace (``record_ticker_heartbeat`` ->
+    ``ensure_dirs`` -> ``mkdir(parents=True)``) on every 60s cycle, so the "deleted" profile silently comes
+    back on disk and in ``hermes profile list`` (#47368). Filtering on directory existence leaves a deleted
+    profile's home untouched, which is the correct invariant: a home that does not exist cannot hold jobs to
+    fire.
+    """
     return [entry for entry in profile_homes if Path(_profile_entry(entry)[1]).is_dir()]
 
 
@@ -56,6 +75,10 @@ def _profile_cron_scope(home):
     from cron.jobs import use_cron_store
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
 
+    # Record per-profile heartbeat after each tick cycle. Distinguish a COMPLETED cycle (``_tick_error``
+    # unset) — where each profile's beat reflects its own outcome, so a yielding profile does not darken
+    # healthy siblings — from an aborted one (exception), where no profile completed and all beats are
+    # unsuccessful (#32612).
     home_token = set_hermes_home_override(str(home))
     try:
         with use_cron_store(home):
@@ -247,6 +270,9 @@ def fire_overdue_jobs(
             continue
         job_id = str(job.get("id") or "")
         # One-shots past ONESHOT_GRACE_SECONDS "will never fire"; don't resurrect them hours late.
+        # One-shot jobs share the module-wide policy: more than ONESHOT_GRACE_SECONDS past their run time
+        # means "will never fire" (create/update/resume/recovery and, since #89571, the due-scan all enforce
+        # it). The misfire backstop must not resurrect them hours late after downtime — that's #93526.
         schedule = job.get("schedule") or {}
         if str(schedule.get("kind") or "") == "once" and overdue_seconds > ONESHOT_GRACE_SECONDS:
             logger.warning(
@@ -349,6 +375,11 @@ class InProcessCronScheduler(CronScheduler):
         logger.info("In-process cron scheduler started (interval=%ds)", interval)
 
         # Multiplex: tick EACH profile's store every cycle, heartbeats/recovery scoped per profile.
+        # ── Multiplex profiles ──────────────────────────────────────────── When profile_homes is set
+        # (multiplex_profiles on), tick EACH profile's cron store on every tick cycle so secondary-profile
+        # jobs actually fire instead of languishing in a store no ticker owns (#69377). Without this, only
+        # the process-global HERMES_HOME (the default profile) is ticked. Heartbeats and recovery are also
+        # scoped per profile so `hermes cron status` reflects liveness for every profile independently.
         if profile_homes:
             self._start_multiplex(
                 stop_event, profile_homes=profile_homes, adapters=adapters, loop=loop,
@@ -380,6 +411,11 @@ class InProcessCronScheduler(CronScheduler):
             except BaseException as e:
                 # BaseException, not Exception: a SystemExit must not silently kill the ticker;
                 # KeyboardInterrupt is caught on purpose — shutdown is driven by stop_event.
+                # Catch BaseException (not just Exception) so a SystemExit from a misbehaving provider SDK /
+                # agent retry path does not kill the ticker thread silently (#32612). KeyboardInterrupt is
+                # intentionally caught here too — gateway shutdown is driven by stop_event (set by the main
+                # thread's signal handler), not by an exception in this daemon thread, so swallowing it and
+                # re-checking stop_event keeps shutdown clean.
                 if isinstance(e, CronTickYielded):
                     # Expected while a fresh gateway owns the lock; still recorded for status.
                     logger.info("Cron tick yielded: %s", e)
@@ -389,6 +425,10 @@ class InProcessCronScheduler(CronScheduler):
                 record_ticker_error(f"{type(e).__name__}: {e}")
                 consecutive_failures = _note_tick_failure(e, consecutive_failures)
             # Liveness every iteration; success marker only on a clean tick.
+            # EMFILE: reclaim fds + back off exponentially so the exhausted process stops hammering the
+            # store while it has no chance of making progress (#87644).
+            # Record liveness every iteration; bump the success marker only on a clean tick, so status can
+            # tell "alive but failing every tick" from "actually firing jobs" (#32612, #32895).
             record_ticker_heartbeat(success=ok)
             if ok:
                 clear_ticker_error()
@@ -427,6 +467,8 @@ class InProcessCronScheduler(CronScheduler):
             return tick_adapters
 
         # Recovery + heartbeat per profile; one broken store must not abort startup for the others.
+        # A profile may have been deleted since this snapshot was taken; never recreate a deleted home's
+        # cron workspace via the heartbeat below (#47368).
         for entry in _existing_profile_homes(profile_homes):
             _, home = _profile_entry(entry)
             try:
@@ -449,6 +491,7 @@ class InProcessCronScheduler(CronScheduler):
             _tick_error = None
             _profile_errors: dict[str, str] = {}
             # Worst failure this cycle (fd exhaustion wins); backoff applied once per cycle.
+            # See #87644.
             _cycle_exc: BaseException | None = None
             cycle_homes = [_profile_entry(e) for e in _existing_profile_homes(profile_homes)]
             if profile_gate is not None:
@@ -484,6 +527,7 @@ class InProcessCronScheduler(CronScheduler):
             except BaseException as e:
                 logger.error("Cron tick error: %s", e, exc_info=True)
                 _tick_error = f"{type(e).__name__}: {e}"
+                # EMFILE: reclaim fds + exponential backoff (#87644).
                 consecutive_failures = _note_tick_failure(e, consecutive_failures)
             # Completed cycle: each profile's own outcome; aborted cycle: all beats unsuccessful.
             for _, home in cycle_homes:

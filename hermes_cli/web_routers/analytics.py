@@ -59,6 +59,7 @@ async def update_config_raw(body: RawConfigUpdate, profile: Optional[str] = None
         with _profile_scope(body.profile or profile):
             # Full-document replacement: the editor owns the whole file; never
             # merge omitted sections back from disk.
+            # See #62723.
             approvals_mode_changed = _approval_mode_of(parsed) != _approval_mode_of(read_raw_config())
             save_config(parsed, merge_existing=False)
         # Same indicator refresh as the schema-driven save.
@@ -109,6 +110,8 @@ def _get_usage_analytics(days: int = 30, profile: Optional[str] = None):
 
         # Fold in auxiliary usage (vision, compression, ...) from session_model_usage.
         # Aux calls never touch the sessions counters, so this is add-only — no double count.
+        # Without it the models list shows only the main agent model even when aux models are actively
+        # burning tokens (issue #23270).
         aux_rows = _aux_usage_rows(db, cutoff)
         by_model = _merge_aux_into_by_model(by_model, aux_rows)
 
@@ -252,6 +255,7 @@ def _get_models_analytics(days: int = 30, profile: Optional[str] = None):
 
         # Aux-only models (dedicated vision/compression) as (model, provider) rows,
         # keyed like the GROUP BY above, so they appear on the Models page.
+        # See #23270.
         for aux in _aux_usage_rows(db, cutoff):
             raw_rows.append({
                 "model": aux.get("model") or "unknown",

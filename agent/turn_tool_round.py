@@ -205,6 +205,11 @@ def run_tool_round(
     agent._session_messages = messages
     # Touch activity so slow post-tool work plus a slow follow-up API call can't exceed
     # the gateway inactivity timeout (HERMES_AGENT_TIMEOUT).
+    # Touch activity before continuing so the gateway's inactivity monitor never sees a stale timestamp
+    # between tool completion and the start of the next API call. Without this, a tool-call result (which
+    # takes ~0s to process) followed by slow post-tool processing (compression, persist) and a slow
+    # follow-up API call can exceed the gateway inactivity timeout (HERMES_AGENT_TIMEOUT, default 1800s) and
+    # the gateway kills the session before the next activity touch fires (#69559, #69131).
     agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
     return _verdict("continue")
 

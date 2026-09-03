@@ -282,6 +282,12 @@ class GitHubSource(SkillSource):
                 return False
             self._add_support_file(repo, item_path, rel_path, files, item_path, ref=ref)
         for rel_path in sorted(referenced):
+            # A SKILL.md-linked support path that isn't in the tree is a dangling link — a repo-only dev
+            # tool, prose over-match, or a file the author forgot to push. Warn and install without it
+            # rather than aborting the whole install (#66760/#90081): the skill body still works, and the
+            # gap is visible in the log. A referenced path that IS in the tree but as a symlink (or any
+            # non-regular entry) stays a hard rejection — that shape is an escape attempt, not a forgotten
+            # file.
             if rel_path in symlinked:
                 logger.warning("Rejected non-regular referenced file in skill bundle: %s%s", prefix, rel_path)
                 return False

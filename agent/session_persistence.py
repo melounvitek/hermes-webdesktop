@@ -309,7 +309,12 @@ class SessionPersistenceMixin:
 
     def _persist_session(self, messages: List[Dict], conversation_history: List[Dict] = None):
         """Save to JSON log and SQLite on any exit path. Trailing empty-response scaffolding is dropped from
-        the live list; the persist override is applied to the DB row only."""
+        the live list; the persist override is applied to the DB row only.
+
+        The persist user-message *override* is NOT applied here — it is resolved inside
+        ``_flush_messages_to_session_db`` and written only to the DB row, never mutating the live message
+        list used by the API call (#48677 is thus closed for every persist caller, not just this one).
+        """
         from agent.agent_runtime_helpers import note_turn_persisted
         with _persist_lock(self):
             self._drop_trailing_empty_response_scaffolding(messages)
@@ -356,7 +361,15 @@ class SessionPersistenceMixin:
         """Persist un-flushed messages to SQLite. Dedup is the intrinsic ``_DB_PERSISTED_MARKER`` on each written
         dict — not positional slices (drift after sequence repair) nor an ``id(msg)`` set (address reuse). The
         persist override touches the written row only. A compression-closed session adopts its live tip and
-        retries exactly once."""
+        retries exactly once.
+
+        Deduplicates via an intrinsic ``_DB_PERSISTED_MARKER`` stamped on each written message dict, so
+        repeated calls (from multiple exit paths) only write truly new messages — preventing the
+        duplicate-write bug (#860) without relying on positional slices that can drift after
+        message-sequence repair, and without a retained ``id(msg)`` set that CPython could alias onto a
+        freed-then-reused address (#50372). The ``_flushed_db_message_ids`` attribute is now only a one-shot
+        seed (translated to markers, then cleared each flush), not a persisted set.
+        """
         # Persistence-isolated agents (background review fork) share the parent's session_id for cache warmth;
         # a write here would land the curator's turn in the user's real history.
         if getattr(self, "_persist_disabled", False) or not self._session_db:

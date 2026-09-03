@@ -16,6 +16,7 @@ _compute_host_supervisor_lock = threading.Lock()
 # Cap on how long session.compress blocks its RPC on the compute host. Must stay
 # below the desktop's SESSION_COMPRESS_TIMEOUT_MS (660s) so the client gets the
 # `pending` answer, not its own timeout; the late-ack path covers anything slower.
+# See #97948.
 _COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS = 630.0
 
 
@@ -242,7 +243,10 @@ def _send_compute_host_control(
 def _compute_host_compress_wait_seconds(cfg: dict | None = None) -> float:
     """RPC wait budget for a compute-host compress control: the configured compression
     ceiling plus slack, capped below the desktop's RPC timeout (a fixed waiter reported
-    false timeouts while the host kept working); slower acks land via the late-ack path."""
+    false timeouts while the host kept working); slower acks land via the late-ack path.
+
+    See #97948.
+    """
     from agent.conversation_compression import resolve_context_compression_timeouts
     try:
         compression_cfg = (cfg if cfg is not None else _load_cfg()).get("compression", {})

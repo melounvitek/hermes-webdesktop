@@ -360,6 +360,7 @@ async def get_action_status(name: str, lines: int = 200):
         # update (written by every run, incl. refused/failed; survives the
         # dashboard restarting itself mid-action). Surface it so clients READ
         # the outcome instead of inferring it from liveness probes.
+        # See #81193, #87359, #91277.
         update_receipt_summary = _latest_update_receipt_summary()
 
     proc = _ACTION_PROCS.get(name)
@@ -396,7 +397,13 @@ def _read_latest_receipt() -> Optional[Dict[str, Any]]:
 
 def _latest_update_receipt_summary() -> Optional[Dict[str, Any]]:
     """Compact summary of the latest receipt (written by EVERY ``hermes update`` run,
-    incl. refused/failed), or None; never raises. Steps/skips stay in the full endpoint."""
+    incl. refused/failed), or None; never raises. Steps/skips stay in the full endpoint.
+
+    Phase-1 bullet 3 (#91277): the receipt (written by EVERY ``hermes update`` run since #91283, including
+    refused and failed ones, with a ``latest.json`` pointer) is the durable success signal the Desktop and
+    dashboard should read instead of inferring outcomes from liveness probes across the update's stop/start
+    gap (#81193, #87359).
+    """
     receipt = _read_latest_receipt()
     if not receipt:
         return None
@@ -417,7 +424,10 @@ async def get_update_receipt():
     """The FULL latest update receipt (steps, skips, gateway restart outcome, fleet
     matrix) plus a compact ``summary``; 404 when no update has run since receipts landed.
     Clients read this instead of inferring success from backend liveness, which misread
-    the update's own restart gap as a failed update/boot."""
+    the update's own restart gap as a failed update/boot.
+
+    See #81193, #87359, #91277.
+    """
     receipt = _read_latest_receipt()
     if not receipt:
         raise HTTPException(status_code=404, detail="No update receipt found (no `hermes update` run recorded).")

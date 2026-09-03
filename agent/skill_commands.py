@@ -61,7 +61,13 @@ def append_user_instruction(parts: list, instruction: str) -> str:
     """Append the instruction line to ``parts``; return the stable prefix, which
     ends exactly at the instruction marker so (registered with
     ``agent.prompt_cache_boundary``) the cache planner can break on the scaffold.
-    Single construction site guarantees the prefix is a byte-prefix of the message."""
+    Single construction site guarantees the prefix is a byte-prefix of the message.
+
+    Shared by every builder that ends a static skill scaffold with the caller-supplied volatile instruction
+    (single-skill invocations, cron job prompts). Keeping construction in one place guarantees the
+    registered prefix stays a byte-prefix of the built message — the invariant the request-time split
+    depends on. See #81867.
+    """
     stable_prefix = "\n".join(parts) + "\n" + _SINGLE_SKILL_INSTRUCTION
     parts.append(f"{_SINGLE_SKILL_INSTRUCTION}{instruction}")
     return stable_prefix
@@ -116,7 +122,11 @@ def _cut_after(message: str, marker: str, stop_marker: str, find) -> Optional[st
 def _resolve_skill_commands_platform() -> Optional[str]:
     """Current platform scope for disabled-skill filtering, or None (CLI, RL,
     scripts). A change invalidates the scan cache so each platform sees its
-    own ``skills.platform_disabled`` view."""
+    own ``skills.platform_disabled`` view.
+
+    Used to detect when the active platform has shifted so :func:`get_skill_commands` can drop a stale cache
+    that was populated for a different platform's ``skills.platform_disabled`` view (#14536).
+    """
     try:
         from gateway.session_context import get_session_env
         resolved_platform = os.getenv("HERMES_PLATFORM") or get_session_env("HERMES_SESSION_PLATFORM")
@@ -127,7 +137,14 @@ def _resolve_skill_commands_platform() -> Optional[str]:
 
 def _resolve_skill_commands_home() -> str:
     """Effective Hermes home the scan is scoped to (profiles carry their own
-    ``skills.external_dirs``, so a profile switch must invalidate the cache)."""
+    ``skills.external_dirs``, so a profile switch must invalidate the cache).
+
+    A gateway session can switch between profiles that each carry their own ``skills.external_dirs`` (via
+    ``set_hermes_home_override``), but the module-level scan only tracked
+    ``_resolve_skill_commands_platform()``. Switching profiles without a platform change left the previous
+    profile's skill list cached, so ``get_skill_commands()`` reported a cache miss for skills that only
+    exist under the new profile (#88023).
+    """
     from hermes_constants import get_hermes_home
     return str(get_hermes_home())
 
@@ -248,6 +265,10 @@ def _build_skill_message(
         parts.append("")
         # Everything before the volatile instruction is a stable scaffold; the
         # registered boundary lets the cache planner break there (see append_user_instruction).
+        # Everything before the caller-supplied instruction is a stable scaffold; declare the exact boundary
+        # so the Anthropic cache planner can put a breakpoint on it instead of caching the whole message as
+        # one atomic block (#81867). The static instruction prose stays on the stable side; the volatile
+        # instruction (webhook payload, ticket IDs, timestamps) and any runtime note ride in the tail.
         stable_prefix = append_user_instruction(parts, user_instruction)
     if runtime_note:
         parts += ["", f"[Runtime note: {runtime_note}]"]
@@ -263,6 +284,9 @@ def _render_skill_block(
     """Bump Curator usage tracking (never fatal) and build the message block for one loaded skill."""
     loaded_skill, skill_dir, skill_name = loaded
     try:
+        # Track active usage for Curator lifecycle management (#17782)
+        # Track active usage for Curator lifecycle management (#17782)
+        # Track active usage for Curator lifecycle management (#17782)
         from tools.skill_usage import bump_use
         bump_use(skill_name, task_id=task_id)
     except Exception:
@@ -344,6 +368,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     global _skill_commands, _skill_commands_platform, _skill_commands_home
     platform = _resolve_skill_commands_platform()
     home = _resolve_skill_commands_home()
+    # Build into a local map and publish once, at the end. Writing straight into the global made a scan's
+    # partial results visible to everything else in the process: a second, overlapping scan deduped against
+    # its own (empty) ``seen_names`` but collided against the first scan's already- published slugs, logging
+    # one bogus "already claimed" warning per skill — each naming the same skill as its own incumbent
+    # (#74574).
     commands: Dict[str, Dict[str, Any]] = {}
     try:
         from tools.skills_tool import _skills_dir, _get_disabled_skill_names
@@ -356,6 +385,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         # Precedence: project (through the quarantine chokepoint) > local > external.
         # Resolve the local dir at call time: import-time SKILLS_DIR is frozen to
         # the launch home, but a multiplexed profile scope may have changed it.
+        # See #67277.
         skills_dir = _skills_dir()
         iters = [iter_project_skill_files(d) for d in get_project_skills_dirs()]
         local = [skills_dir] if skills_dir.exists() else []
@@ -372,6 +402,11 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     # could accept the new map under a stale platform tag and serve another
     # platform's disabled-skill view.
     with _publish_lock:
+        # Bare assignments are not atomic together: a reader landing between them sees the NEW map still
+        # carrying the OLD platform tag, and if that stale tag happens to match its own platform it accepts
+        # the map without rescanning — serving another platform's disabled-skill view, exactly the leak
+        # #14536 closed. Only the publish/lookup pair is locked; the scan above (file I/O, deferred imports)
+        # stays outside it.
         _skill_commands = commands
         _skill_commands_platform = platform
         _skill_commands_home = home
@@ -382,7 +417,10 @@ def get_skill_commands() -> Dict[str, Dict[str, Any]]:
     """Return the current skill commands mapping (scan first if empty). Rescans
     when the platform scope (one gateway serving Telegram and Discord) or the
     active profile's home (Desktop profile switch) changes, so each sees its
-    own ``platform_disabled`` / ``external_dirs`` view."""
+    own ``platform_disabled`` / ``external_dirs`` view.
+
+    See #14536, #88023.
+    """
     current_platform = _resolve_skill_commands_platform()
     current_home = _resolve_skill_commands_home()
     with _publish_lock:
@@ -539,7 +577,12 @@ def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | N
     """Load skills for session-wide CLI/TUI preloading; returns (prompt_text,
     loaded_skill_names, missing_identifiers). Disabled skills count as missing:
     this path bypasses the scan-time filter, and ``hermes -s <skill>`` must not
-    force-load an operator-disabled skill."""
+    force-load an operator-disabled skill.
+
+    Disabled skills are treated the same as missing ones: this loads via a raw identifier straight into
+    ``_load_skill_payload``, bypassing ``get_skill_commands()``'s scan-time disabled filter — mirrors the
+    bundle-invocation gate (#59156).
+    """
     loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(
         [(raw or "").strip() for raw in skill_identifiers],
         lambda identifier: _load_skill_payload(identifier, task_id=task_id),

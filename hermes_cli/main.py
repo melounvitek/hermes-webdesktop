@@ -43,6 +43,8 @@ from hermes_cli import _startup_fast  # noqa: E402
 # import; the marker lifecycle stays with the full recovery path. Its own
 # import is unguarded on purpose: same package dir, so if IT can't import
 # nothing in hermes_cli can.
+# It is also the canonical home of the probe/repair tables reused by the full recovery path below. See
+# #57828.
 from hermes_cli import _early_recovery as _early_recovery_mod
 
 try:
@@ -82,6 +84,8 @@ def _exit_after_oneshot(rc: object) -> None:
     file logging, then ``os._exit`` past finalization. The ``atexit`` chain is
     deliberately skipped — several handlers re-enter native code that may be
     the abort source; stateful cleanup lives in ``_cleanup_oneshot_runtime``.
+
+    See #30387, #43055.
     """
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -171,6 +175,7 @@ def _run_and_exit_oneshot(
     finally:
         # Even an interrupt during cleanup must not fall back into interpreter
         # finalization, where the native SIGABRT occurs.
+        # The hard exit is the safety boundary for #43055.
         _exit_after_oneshot(rc)
 
 
@@ -549,6 +554,12 @@ _apply_profile_override()
 # AFTER the profile override on purpose — no hermes module may import before
 # profiles resolve; the helper anchors on the DEFAULT root, so profile
 # sessions heal the same shared dir.
+# That dir lives OUTSIDE the git checkout precisely because an earlier layout staged the copies at
+# ``<checkout>\bin``, where ``hermes update``'s autostash (``git stash push --include-untracked``) swept
+# them off disk; with the desktop updater's ``--keep-stash`` nothing restored them and ``hermes`` stopped
+# resolving in every new terminal (venv\Scripts itself must stay off PATH — it shadows the user's
+# ``python``, #83797). Costs a few stat calls when healthy; gates fail toward inaction so source checkouts
+# are untouched.
 if sys.platform == "win32":
     try:
         from hermes_cli import _install_repair as _install_repair_mod
@@ -566,6 +577,9 @@ from hermes_cli.env_loader import load_hermes_dotenv
 # replaces the environment: on Windows Bitwarden's cryptography import maps
 # ``_rust.pyd`` and the parent updater then blocks its own child installer.
 # Profile flags are already stripped, so argv[1] is the authoritative subcommand.
+# Profile flags have already been stripped above, so the first remaining argument is the authoritative
+# argparse subcommand. Dotenv/managed config still loads; only external secret fetches are unnecessary for
+# installation maintenance. See #73381.
 load_hermes_dotenv(
     project_env=PROJECT_ROOT / ".env",
     load_external_secrets=sys.argv[1:2] != ["update"],
@@ -1044,6 +1058,8 @@ def _dotenv_has_provider_key(env_file: Path, provider_env_vars: set) -> bool:
             if line.startswith("#") or "=" not in line:
                 continue
             if line.startswith("export "):
+                # Strip the bash-compatible ``export `` prefix so lines like ``export API_KEY=...`` parse as
+                # ``API_KEY`` rather than being stored under the wrong key ``"export API_KEY"`` (#6659).
                 line = line[7:]
             key, _, val = line.partition("=")
             if key.strip() in provider_env_vars and val.strip().strip("'\""):
@@ -1446,6 +1462,10 @@ def _create_titled_session(title: str) -> Optional[str]:
 
     Same timestamp+uuid id shape the CLI uses; the title is recorded with
     user provenance so auto-titling never overwrites it.
+
+    Used by ``chat -c <title> --create-if-missing`` (#86794): programmatic callers (plugins, scripts) that
+    want "send to this named thread, making it if needed" get a deterministic outcome instead of a silent
+    no-op.
     """
     db = None
     try:
@@ -1462,6 +1482,7 @@ def _create_titled_session(title: str) -> Optional[str]:
         # Programmatic callers rely on --create-if-missing being deterministic;
         # swallow the failure but log the cause so it lands in errors.log
         # (DB lock, I/O error, import error — all otherwise invisible).
+        # See #86794.
         logger.exception("Failed to create titled session %r", title)
         return None
     finally:
@@ -1479,6 +1500,8 @@ def _resolve_continue_arg(args, *, use_tui: bool) -> None:
     1) so programmatic callers see it even under quiet mode, or with
     ``--create-if-missing`` create a fresh titled session. Bare ``-c``: this
     terminal's breadcrumb session if valid, else the MRU session.
+
+    Handles both forms: See #86794.
     """
     continue_val = getattr(args, "continue_last", None)
     if continue_val and not getattr(args, "resume", None):
@@ -1489,6 +1512,8 @@ def _resolve_continue_arg(args, *, use_tui: bool) -> None:
             elif getattr(args, "create_if_missing", False):
                 # "send to this named thread, making it if needed" — without it
                 # a quiet send to a not-yet-existing session silently no-ops.
+                # --create-if-missing: no session matches the title — create a new session with that title
+                # and proceed. See #86794.
                 new_sid = _create_titled_session(continue_val)
                 if new_sid:
                     args.resume = new_sid
@@ -2341,6 +2366,10 @@ def _clear_bytecode_cache(root: Path) -> int:
 def _finalize_update_receipt(code: int, reason: str) -> None:
     """Best-effort receipt close at the command boundary; no-op if already finalized."""
     try:
+        # Receipt boundary (#91283 review): the impl has many early sys.exit paths (concurrent-instance
+        # preflight, venv-holder refusal, head-pinned no-op, fetch failure) that never reach an inner
+        # finalize. Persist any still-open receipt with the real exit code, then let the exit proceed
+        # unchanged. No-op when an inner path already finalized (exactly-once by construction).
         from hermes_cli.update_receipt import finalize_pending_update_receipt
 
         finalize_pending_update_receipt(code, reason)
@@ -2360,6 +2389,8 @@ def _update_preflight_handled(args) -> bool:
     # docker/nix/apt refusal gates: on an image/package-managed install the
     # plan itself reports "not updatable in place" plus the right mechanism.
     if getattr(args, "plan", False):
+        # Read-only plan phase (#91277 Phase 2): inventory every running Hermes runtime across profiles, its
+        # supervisor, and its running code version — without mutating anything. Safe on a live fleet.
         from hermes_cli.update_inventory import (
             collect_runtime_inventory,
             print_update_plan,
@@ -2371,6 +2402,12 @@ def _update_preflight_handled(args) -> bool:
     # Image/package-managed admission gate: baked provenance marker first
     # (fail-closed on malformed), then docker/nix/apt heuristics. Records a
     # `refused` receipt and exits 2 (refused-by-contract, distinct from errors).
+    # Image-managed / package-managed admission gate (#91277 Phase 3): one shared decision for every
+    # mutation surface. Prints the real update command, records a `refused` receipt so fleet tooling sees
+    # the blocked attempt, and exits 2 (refused-by-contract, distinct from exit 1 errors).
+    # Shared admission gate (#91277 Phase 3): same marker-first decision as the apply path, so --check can
+    # never report git state for an install whose real update mechanism is an image pull.
+    # The response keeps the pre-existing per-kind error codes the dashboard UI already keys on. See #91277.
     from hermes_cli.update_contract import (
         evaluate_update_admission,
         record_refusal_receipt,
@@ -2444,6 +2481,9 @@ def cmd_update(args):
         # is durable. Every durable step is done by now, so on the hand-off
         # path only (marker env set solely by
         # _reexec_dependency_sync_off_windows_shim) flush and exit hard.
+        # By this point every durable step is done (receipt finalized above, lock released, stdio restored),
+        # so on the hand-off path only, flush and exit hard instead of waiting for the interpreter to unwind
+        # — the same treatment #79040's cron workaround applies.
         if _update_handoff_exit_code is not None and os.environ.get(_UPDATE_REEXEC_ENV) == "1":
             logger.debug(
                 "Update hand-off child %s exiting via os._exit(%s)",
@@ -2598,6 +2638,8 @@ def _dashboard_prepare_runtime(args, headless_backend) -> bool:
     # this those consumers saw an unset TERMINAL_ENV and ran every command on
     # the host even under `terminal.backend: docker` (#63141, #54449).
     try:
+        # PTY chat spawns already bridge their child env copy; this covers the in-process consumers. See
+        # #61115, #65696.
         from hermes_cli.config import apply_terminal_config_to_env
 
         apply_terminal_config_to_env()
@@ -2803,6 +2845,10 @@ def _resolve_deferred_platform_cli_command(command_name: str | None) -> None:
     on import; ``discover_plugins()`` alone leaves ``hermes photon`` failing
     with ``invalid choice``. Importing just the matching platform keeps
     startup cheap.
+
+    On the unknown-top-level-command slow path, ``discover_plugins()`` records the deferred loader but does
+    not import it, so the CLI registration never happens and ``hermes photon`` fails with argparse ``invalid
+    choice`` (issue #54678).
     """
     if not command_name:
         return
@@ -2865,6 +2911,7 @@ def _prepare_agent_startup(args) -> None:
     # below imports tools.approval, which freezes _YOLO_MODE_FROZEN at import.
     # main() sets it earlier too, but other launchers (Termux fast-CLI) reach
     # here directly, so the guarantee lives where the import is triggered.
+    # See #7994.
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
     _apply_safe_mode(args)
@@ -3233,6 +3280,10 @@ def _advertise_agent_env() -> None:
     value must be our id in the public agent-harness registry
     (``hermes-agent``) — matching is exact. ``HERMES_AGENT`` is the
     Hermes-specific marker. setdefault: never clobber an outer harness.
+
+    ``AI_AGENT`` is the emerging cross-agent standard (huggingface_hub's agent detection reads it; pi and
+    other agents set it — earendil-works/pi#7493) so generic tooling can attribute subprocesses to the
+    harness that spawned them. Hermes running inside another agent's terminal).
     """
     os.environ.setdefault("AI_AGENT", "hermes-agent")
     os.environ.setdefault("HERMES_AGENT", "true")
@@ -3271,6 +3322,7 @@ def _register_plugin_cli_commands(subparsers) -> None:
         discover_plugins()
         # The invoked platform may still be a deferred entry; import it so its
         # register_cli_command side effect runs before we read _cli_commands.
+        # See #54678.
         _resolve_deferred_platform_cli_command(_first_positional_argv())
         for cmd_info in get_plugin_manager()._cli_commands.values():
             if cmd_info["name"] not in seen_plugin_commands:
@@ -3466,6 +3518,7 @@ def main():
     # substring match is deliberately loose: over-matching (``hermes skills
     # install update``) only defers recovery one launch; under-matching
     # (``hermes -p work update``) would race. Never raises.
+    # See #95294.
     if "update" not in sys.argv[1:]:
         try:
             _recover_from_interrupted_install()

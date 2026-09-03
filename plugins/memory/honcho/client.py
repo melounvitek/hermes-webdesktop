@@ -13,6 +13,10 @@ import ipaddress
 import json
 import logging
 import os
+# --- per-identity client cache ------------------------------------------- One slot per client identity,
+# replacing the single process-wide slot that pinned the first profile's workspace and bearer for every
+# later profile in multi-profile processes (#69123 multiplexed gateway, #74065 dashboard). The legacy names
+# above are retained only for reset bookkeeping.
 import threading as _threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -336,6 +340,9 @@ class HonchoClientConfig:
     ai_peer: str = "hermes"
     # True: peer_name wins over gateway runtime identity (Telegram UID, ...), so a
     # single-user deployment keeps one memory across platforms.
+    # This keeps memory unified across platforms for single-user deployments where Honcho's one peer-name is
+    # an unambiguous identity — otherwise each platform would fork memory into its own peer (#14984).
+    # Default ``False`` preserves existing multi-user behaviour.
     pin_peer_name: bool = False
     # Gateway runtime user id -> stable Honcho peer; host map replaces root map.
     user_peer_aliases: dict[str, str] = field(default_factory=dict)
@@ -382,6 +389,11 @@ class HonchoClientConfig:
     explicitly_configured: bool = False
     # Provenance captured at resolution time; bound consumers use these instead of
     # re-resolving (the resolvers read a ContextVar background threads can't see).
+    # Provenance: WHERE this config was resolved from, captured at resolution time (inside the caller's
+    # profile scope). Bound consumers (session manager, OAuth refresh paths) use these instead of
+    # re-resolving resolve_config_path()/get_hermes_home() later — those resolvers read a ContextVar that
+    # background threads cannot see, so re-resolution from a daemon thread silently lands on the DEFAULT
+    # profile (#69123, #74065).
     config_path: Path | None = None
     hermes_home: Path | None = None
 
@@ -503,7 +515,10 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     IDENTITY (host, workspace, provenance paths, credential fingerprint, timeout) so
     multi-profile processes don't share a first-config-wins client. With no config the active
     honcho.json is resolved — correct only on threads that see the profile ContextVar; pass a
-    bound config elsewhere. Each identity's client is built once under concurrent first calls."""
+    bound config elsewhere. Each identity's client is built once under concurrent first calls.
+
+    See #69123, #74065.
+    """
     key = _client_cache_key(config)
     slot = _slot_for(key)
     cached = slot.peek()

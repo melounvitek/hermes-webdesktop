@@ -444,6 +444,10 @@ async def delete_empty_sessions_endpoint(profile: Optional[str] = None):
     "Empty" means NO ``messages`` rows at all — a rewound/compacted chat reads
     ``message_count == 0`` while its soft-archived rows are the only transcript
     copy (see :meth:`SessionDB.delete_empty_sessions`).
+
+    * Active sessions are skipped (``ended_at IS NULL``) so a live agent isn't yanked mid-handshake. *
+    Archived sessions are skipped — the user explicitly chose to keep those rows. * Children of deleted
+    parents are orphaned, not cascade-deleted. See #95868.
     """
     deleted = await asyncio.to_thread(
         _with_db, profile, lambda db: db.delete_empty_sessions(), read_only=False)
@@ -579,6 +583,13 @@ async def backfill_session_owner_profiles(body: SessionOwnerBackfill):
     A multi-connection Desktop fails closed on unowned rows.  Each ``state.db``
     belongs to exactly one profile, so this is a single-match, idempotent
     backfill (non-NULL owners are never overwritten).
+
+    That was fine while one backend served everything, but a Desktop with registry topology (≥2 registered
+    connections) fails closed on unowned rows by design — leaving every pre-campaign session unresumable
+    with no migration path. Each profile's ``state.db`` belongs to exactly one profile, so stamping that
+    store's own name is a single-match backfill, never a guess; the value written is the SAME
+    serving-profile identity the list endpoints already stamp onto outgoing rows (``row_profile`` in
+    ``get_sessions``). See #95407.
     """
     stamp = _serving_profile(body.profile)
 

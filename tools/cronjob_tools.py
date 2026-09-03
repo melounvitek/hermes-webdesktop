@@ -16,9 +16,14 @@ logger = logging.getLogger(__name__)
 
 # Heartbeat cadence keeping the caller's inactivity watchdog at bay while a manual
 # `cronjob(action="run")` executes in-process (comfortably below HERMES_AGENT_TIMEOUT).
+# Mirrors the 10s cadence of tools/environments/base.py::touch_activity_if_due (delegate_task's heartbeat
+# uses 30s) — comfortably below the 1800s default HERMES_AGENT_TIMEOUT. See #76502.
 _CRON_RUN_HEARTBEAT_INTERVAL = 10.0
 # Hard ceiling: with HERMES_CRON_TIMEOUT=0 a truly hung run would otherwise mask the
 # gateway watchdog forever; past this the heartbeat stops and the watchdog regains authority.
+# The child cron run has its own inactivity watchdog (HERMES_CRON_TIMEOUT, default 600s) that bounds a
+# wedged job, but with HERMES_CRON_TIMEOUT=0 (explicit "unlimited") a truly hung run_one_job would otherwise
+# mask the gateway watchdog forever — pre-#76502 the parent was at least reaped at ~1800s.
 _CRON_RUN_HEARTBEAT_CEILING = 6 * 3600.0
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -153,7 +158,13 @@ def _forward_relay_fronted_run(job: Dict[str, Any], extra_prompt: Optional[str] 
 
 def _manual_run_delivery_note(deliver: str, refreshed: Dict[str, Any]) -> str:
     """Parenthetical delivery note for a manual run's summary; follows the refreshed record's
-    ``last_delivery_error`` so the summary never claims success over a failed delivery."""
+    ``last_delivery_error`` so the summary never claims success over a failed delivery.
+
+    Follows the refreshed job record (#83993): ``run_one_job`` writes ``last_delivery_error`` via
+    ``mark_job_run`` when the post-run delivery (telegram/discord/…) failed, and the summary must not claim
+    success over that record — the calling agent relays this line to the user. Local jobs never deliver; an
+    empty/missing error keeps the legacy wording byte-for-byte.
+    """
     # Falsy deliver ("", stored JSON null) is normalized to "local" at fire time -> saved
     # locally. Whitespace-only values fall through so the fire-time "no target" error surfaces.
     if not deliver or deliver == "local":
@@ -208,6 +219,16 @@ def _run_heartbeat(job_name: str):
     stop = threading.Event()
     thread = None
     try:
+        # run_one_job records last_run_at/last_status via mark_job_run (which also clears the fire claim)
+        # and returns True iff it processed the job. ``job`` here is the exact claimed snapshot
+        # (owner-bearing), so the shared body fences every terminal write by that owner. A manual `run`
+        # executes the job synchronously on the caller's thread, and a cron job is itself a full agent run
+        # that routinely takes minutes. The calling turn emits no tool activity for that entire window, so
+        # the gateway inactivity watchdog concludes the agent is hung and kills the parent turn (#76502).
+        # Fire a heartbeat into the caller's activity tracker (the same signal tool progress uses) while the
+        # job runs, so the watchdog sees a working tool instead of a silent one — mirrors the delegate_task
+        # heartbeat pattern. Best-effort: if no activity callback is registered (direct Python callers,
+        # tests), behavior is unchanged.
         from tools.environments.base import get_activity_callback
         # Capture on THIS thread: the callback is thread-local (installed by the tool
         # executor), so a freshly spawned thread cannot read it.
@@ -255,6 +276,9 @@ def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) ->
         # In-flight dedupe: the fire claim's TTL is routinely outlived by real jobs, so
         # register in the scheduler's shared running set (same guard the ticker uses;
         # also visible to the gateway shutdown drain).
+        # In-flight dedupe (idea from #53395 by @izumi0uu): the fire claim's TTL (300s) is routinely
+        # outlived by real jobs, so it alone cannot stop a manual run from double-firing a job the ticker
+        # (or another manual run) is still executing.
         if not try_register_running_job(job_id):
             return {"claimed": True, "success": False, "error": _ALREADY_RUNNING_ERROR}
         _registered = True
@@ -265,6 +289,10 @@ def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) ->
         # Inside the gateway process deliver on the loop that owns clients such as
         # Matrix/aiohttp (a standalone asyncio.run() loop breaks them).
         runner_ref = getattr(sys.modules.get("gateway.run"), "_gateway_runner_ref", None)
+        # Manual runs invoked from a gateway agent execute outside the scheduler ticker, but they still
+        # share the process with the live platform adapters. Calling those clients from run_one_job's
+        # standalone asyncio.run() loop raises errors like "Timeout context manager should be used inside a
+        # task" and can break encrypted Matrix delivery (#61495 — salvaged from #63586 by @Fly-onlyone).
         runner = runner_ref() if callable(runner_ref) else None
         adapters = getattr(runner, "adapters", None) if runner is not None else None
         gateway_loop = getattr(runner, "_gateway_loop", None) if runner is not None else None
@@ -289,6 +317,9 @@ def _run_claimed_job(job: Dict[str, Any], extra_prompt: Optional[str] = None) ->
         run_error = refreshed.get("last_error")
         if last_status == "delivery_failed" and not run_error:
             run_error = refreshed.get("last_delivery_error")
+        # That is NOT a success for the caller — the calling agent relays this result — so report it as
+        # failed and surface the delivery error, which lives in last_delivery_error (last_error is None for
+        # these runs, and a bare success=False with error=None reads as an unexplained failure). See #83993.
         ok = last_status == "ok"
         if execution is not None and execution.get("status") != "completed":
             ok = False
@@ -329,6 +360,11 @@ def _reap_stale_executions(job_name: str) -> None:
     invocations have no such moment, so a stale claim would block every later manual run.
     Best-effort self-heal: must not block dispatch."""
     try:
+        # Reap any execution row this job (or any job) left stranded 'claimed'/ 'running' by a dead owner
+        # process -- e.g. a PRIOR one-shot `hermes cron run` invocation whose dispatched runner died with
+        # the exiting process before writing a terminal status (issue #86721). Safe and cheap: only
+        # provably-dead owners (PID gone, or PID reused by a different process per its start time) are
+        # reaped; a genuinely live owner's row is left untouched.
         from cron.executions import recover_interrupted_executions
         _reclaimed = recover_interrupted_executions()
         if _reclaimed:
@@ -400,6 +436,9 @@ def _try_dispatch_background_run(
     # Routing capture BEFORE the claim: no routable session = no durable consumer for a detached
     # completion, so don't claim-and-dispatch (direct callers like `hermes cron run` exit right after).
     session_key = _background_session_key(session_id)
+    # CLI path: the approval contextvar is only bound during gateway/TUI turns. The CLI drain filters
+    # completions by the durable agent session id (#64240), so stamp it as the key — an empty key would fail
+    # closed and the completion could never be claimed.
     if not session_key:
         return None
 
@@ -557,6 +596,8 @@ def _action_list(a: Dict[str, Any]) -> str:
     _result = {"success": True, "count": len(jobs), "jobs": jobs}
     # Same inert-job class as create; an empty list has nothing inert.
     if jobs:
+        # Same silent-inert-job class as create (#87033): an agent inspecting existing jobs in a
+        # gateway-less environment must learn they are not firing, not just see a clean list.
         _result.update(_gateway_liveness_notice(plural=True))
     return _dumps(_result)
 
@@ -588,6 +629,7 @@ def _action_run(job: Dict[str, Any], a: Dict[str, Any]) -> str:
     # `prompt` on run is transient per-fire context appended to the stored prompt, never
     # persisted; same strict scan as stored prompts.
     extra_prompt = a["prompt"] or None
+    # See #57331, #57342, #57360.
     if extra_prompt:
         scan_error = _scan_cron_prompt(extra_prompt)
         if scan_error:

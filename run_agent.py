@@ -210,6 +210,8 @@ def _pool_may_recover_from_rate_limit(pool) -> bool:
     """Wait for credential-pool rotation (True) or fall back to ``fallback_model`` (False) after a 429.
 
     Rotation only helps when the pool has somewhere to go; a single-credential pool would retry the same quota.
+
+    See issues #11314 and #13636.
     """
     return pool is not None and pool.has_available() and len(pool.entries()) > 1
 
@@ -346,6 +348,11 @@ class AIAgent(
                 from hermes_cli.profiles import get_active_profile_name
                 profile_for_session = get_active_profile_name()
             except Exception:
+                # Persist the profile name EXPLICITLY, including "default". NULL used to stand in for the
+                # default profile, but the #94724 legacy-owner backfill already stamps literal "default"
+                # onto old rows, and profile-keyed consumers (sidebar scope matching,
+                # @session:<profile>/<id> deep links) treat NULL as unowned — rows minted NULL after the
+                # one-shot backfill vanished from the sidebar (#99222).
                 profile_for_session = None
             # Carry the gateway routing identity: when the gateway SessionStore degraded to JSONL (corrupt
             # state.db) this lazy create is the ONLY durable write, and an identity-less row is unrecoverable.
@@ -414,6 +421,7 @@ class AIAgent(
         self._usage_anchor = None
         self._turn_base_usage_anchor = None
 
+        # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
         # Copilot x-initiator: True for the first API call of a user turn, False for tool-loop follow-ups.
         self._is_user_initiated_turn = False
@@ -701,7 +709,16 @@ class AIAgent(
     def _is_ollama_glm_backend(self) -> bool:
         """Ollama-hosted GLM models misreport finish_reason='stop'. Matches only explicit Ollama signatures
         (port 11434, "ollama" in URL, provider ollama), never arbitrary local proxies; excludes Ollama Cloud
-        (``ollama.com`` / ``:cloud``), which reports faithfully — rewriting it would manufacture truncations."""
+        (``ollama.com`` / ``:cloud``), which reports faithfully — rewriting it would manufacture truncations.
+
+        Crucially it does NOT match arbitrary local/private endpoints (LiteLLM/sglang/vLLM/LM Studio
+        proxies, Tailscale boxes), which report finish_reason correctly and were the source of #13971's
+        false-positive truncation continuations.
+        Two signatures identify it: the ``ollama.com`` host (provider ``ollama-cloud``) and the ``:cloud``
+        model suffix (cloud generation proxied through a local 11434 endpoint, #98406). Applying the
+        stop→length rewrite to them manufactures false truncations and causes the continuation nudge to
+        consume the model's output budget on the next retry, making further false-positives more likely.
+        """
         model_lower = (self.model or "").lower()
         provider_lower = (self.provider or "").lower()
         if "glm" not in model_lower and provider_lower != "zai":
@@ -758,6 +775,8 @@ class AIAgent(
 
         # Structural clone at the single chokepoint: the fork sanitizes in place, and a shallow copy would
         # alias the live history's nested tool_calls/content.
+        # Structural clone at the single chokepoint every review path (automatic, /refine, idle-queue
+        # deferral) goes through. See #100795.
         from agent.turn_finalizer import _clone_background_review_messages
         kwargs = dict(messages_snapshot=_clone_background_review_messages(messages_snapshot),
                       review_memory=review_memory, review_skills=review_skills, focus=focus, task_cfg=task_cfg)
@@ -872,6 +891,12 @@ class AIAgent(
 
         Uses ``original_user_message`` (``user_message`` may carry injected skill content). Interrupted turns
         are skipped: partial output is not durable truth. Best-effort — an offline backend never blocks.
+
+        A partial assistant output, an aborted tool chain, or a mid-stream reset is not durable
+        conversational truth — mirroring it into an external memory backend pollutes future recall with
+        state the user never saw completed. The prefetch is gated on the same flag: the user's next message
+        is almost certainly a retry of the same intent, and a prefetch keyed on the interrupted turn would
+        fire against stale context. See #15218.
         """
         if interrupted or not (self._memory_manager and final_response and original_user_message):
             return
@@ -955,6 +980,11 @@ class AIAgent(
 
     def _drop_shared_client(self, close_fn: Callable[[Any], None]) -> None:
         """Hand the shared OpenAI/httpx client to ``close_fn`` and clear the attribute."""
+        # Retire the OpenAI/httpx client to release sockets immediately. #70773: eviction runs on the
+        # gateway's memory-manager thread — a cross-thread hard close of the shared client can release TLS
+        # FDs under a still-unwinding worker (FD-recycle → SQLite corruption). Retirement shuts the pooled
+        # sockets down (the memory/socket win we want here) and lets GC release the FDs once no thread holds
+        # them.
         client = getattr(self, "client", None)
         if client is not None:
             close_fn(client)
@@ -991,6 +1021,7 @@ class AIAgent(
         if getattr(self, "_owns_session_db", False) and session_db is not None:
             self._owns_session_db = False
             # Shared instances no-op on close(); release the refcount so the registry closes on the last caller.
+            # See #90837.
             from hermes_state import release_or_close
             release_or_close(session_db)
 
@@ -1098,6 +1129,10 @@ class AIAgent(
             return False
         # A native compaction checkpoint makes a carrier never thinking-only, regardless of api_mode or
         # reasoning field. Checked above every reasoning branch so no carrier shape is dropped.
+        # The checkpoint is the server-side stand-in for already-pruned history and exists in exactly one
+        # place; the codex_responses adapter also surfaces commentary text via msg["reasoning"], so the
+        # string branch below would otherwise drop a carrier before the sidecar is ever inspected. See
+        # #82108.
         from agent.native_compaction import has_compaction_checkpoint
 
         if has_compaction_checkpoint(msg.get("codex_reasoning_items")):
@@ -1194,7 +1229,10 @@ class AIAgent(
 
     def _has_pending_fallback(self) -> bool:
         """Whether a fallback provider remains (mirrors ``try_activate_fallback``'s guard) — gates the
-        "trying fallback..." status so we never announce one that won't be attempted."""
+        "trying fallback..." status so we never announce one that won't be attempted.
+
+        See #17446.
+        """
         return getattr(self, "_fallback_index", 0) < len(getattr(self, "_fallback_chain", None) or [])
 
     _restore_primary_runtime = _forward("agent.agent_runtime_helpers", "restore_primary_runtime")

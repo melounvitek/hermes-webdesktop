@@ -20,6 +20,7 @@ from rich.table import Table
 # parse-time from ``hermes_cli.main``, so the backend import stays lazy (nothing touches ``bw``
 # until a handler runs) and ``_BWS_VERSION`` is duplicated here for the ``install --help`` text.
 # ``agent.secret_sources.bitwarden._BWS_VERSION`` is the source of truth; bump both together.
+# See #86781.
 _BWS_VERSION = "2.0.0"
 
 from hermes_cli._secrets_common import (
@@ -53,7 +54,13 @@ def _load_bw():
 
 def __getattr__(name: str):
     """PEP 562 lazy ``bw`` attribute (tests monkeypatch ``secrets_cli.bw``); an eager binding
-    would re-import ``cryptography`` at import time."""
+    would re-import ``cryptography`` at import time.
+
+    Existing callers (and upstream tests) monkeypatch attributes on ``hermes_cli.secrets_cli.bw`` directly.
+    Resolving that attribute at module-import time would re-import ``cryptography`` eagerly — the very
+    self-lock we are preventing (#86781). Defer the backend import until the first actual attribute access,
+    so ``import hermes_cli.secrets_cli`` stays crypto-free while ``secrets_cli.bw.find_bws`` still resolves.
+    """
     if name == "bw":
         return _load_bw()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

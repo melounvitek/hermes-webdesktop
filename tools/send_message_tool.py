@@ -132,6 +132,9 @@ def _handle_send(args):
             return tool_error(err)
     if duplicate_skip := _maybe_skip_cron_duplicate_send(platform_name, chat_id, thread_id):
         return json.dumps(duplicate_skip)
+    # Slack: resolve user targets to DM channel IDs before sending. _parse_target_ref emits internal
+    # ``user:U...`` / ``user_name:@handle`` targets; a bare U... id can also arrive from session metadata or
+    # the home-channel config. All are opened via conversations.open (fixes #19236).
     if platform_name == "slack" and chat_id:
         chat_id, resolve_err = _slack_dm_chat_id(pconfig, chat_id)
         if resolve_err:
@@ -381,6 +384,10 @@ async def _send_via_adapter(platform, pconfig, chat_id, chunk, *, thread_id=None
 async def _send_chunks(chunks, send_one):
     """``send_one(chunk, is_last)`` in order; stop at the first error dict, else last result."""
     result = None
+    # --- Matrix: route ALL sends through the native adapter so text is encrypted in E2EE rooms too (issue:
+    # text-only sends arrived with a red padlock because they took the raw-HTTP standalone path). The
+    # adapter reuses the live gateway's E2EE session when available (#46310) and falls back to an
+    # encryption-aware ephemeral adapter for standalone/cron. ---
     for i, chunk in enumerate(chunks):
         result = await send_one(chunk, i == len(chunks) - 1)
         if isinstance(result, dict) and result.get("error"):

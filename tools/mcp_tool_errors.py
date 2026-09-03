@@ -36,14 +36,24 @@ def _handshake_rejected_as_modern(exc: BaseException) -> bool:
 def _is_method_not_found_error(exc: BaseException) -> bool:
     """True if *exc* is a JSON-RPC ``method not found`` (-32601; ``ping`` is optional in MCP). The
     substring fallback includes "Unknown method: <name>" — without it the ping→list_tools keepalive
-    fallback never latches and reconnect-loops."""
+    fallback never latches and reconnect-loops.
+
+    The substring fallback matters when a server reports method-not-found without a structural ``-32601``
+    code (e.g. surfaced as a plain exception string). Besides the canonical "method not found", many
+    JSON-RPC implementations phrase it as "Unknown method: <name>" — agentmemory's MCP server is one such
+    case (#50028).
+    """
     return _jsonrpc_matches(
         exc, (_core._JSONRPC_METHOD_NOT_FOUND,),
         (str(_core._JSONRPC_METHOD_NOT_FOUND), "method not found", "unknown method", "not found: ping"))
 
 
 class InvalidMcpUrlError(ValueError):
-    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup to fail fast."""
+    """A remote MCP server's ``url`` is not parseable http(s):// — validated once at startup to fail fast.
+
+    Validated once at startup so we fail fast with a clear message instead of burning through the
+    reconnect-backoff loop on every attempt. (Ported from anomalyco/opencode#25019.)
+    """
 
 
 class NonMcpEndpointError(ConnectionError):
@@ -274,6 +284,8 @@ def _is_auth_error(exc: BaseException) -> bool:
 
 
 # Lower-cased substrings meaning the transport session expired / was GC'd (OAuth token still valid).
+# Substrings (lower-cased match) that indicate the MCP server rejected the request because its server-side
+# transport session expired / was garbage-collected. See #13383.
 _SESSION_EXPIRED_MARKERS: tuple = (
     "invalid or expired session", "expired session", "session expired", "session not found",
     "unknown session", "session terminated", "closedresourceerror", "closed resource",

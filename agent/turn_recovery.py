@@ -145,6 +145,9 @@ def _recover_unicode_encode_error(
     # Non-ASCII in the API key makes httpx fail encoding the Authorization header — the
     # usual persistent cause after message/tool sanitization. Entra ID bearer providers
     # are callables minting ASCII JWTs; skip them (``_strip_non_ascii`` would crash).
+    # Sanitize the API key — non-ASCII characters in credentials (e.g. ʋ instead of v from a bad copy-paste)
+    # cause httpx to fail when encoding the Authorization header as ASCII. This is the most common cause of
+    # persistent UnicodeEncodeError that survives message/tool sanitization (#6843).
     _credential_sanitized = False
     _raw_key = getattr(agent, "api_key", None) or ""
     if _raw_key and isinstance(_raw_key, str):
@@ -543,6 +546,8 @@ def recover_after_classification(
     # Anthropic OAuth subscription rejected the 1M-context beta: disable it for this
     # session, rebuild the client, retry once. Reactive so capable subscriptions keep 1M.
     if (
+        # See PR #17680 for the original report (we chose reactive recovery over the proposed unconditional
+        # omit so capable subscriptions don't silently lose the capability).
         classified.reason == FailoverReason.oauth_long_context_beta_forbidden
         and agent.api_mode == "anthropic_messages"
         and agent._is_anthropic_oauth
@@ -698,6 +703,8 @@ def nonretryable_client_error_result(
     logger.error("%sNon-retryable client error: %s", agent.log_prefix, api_error)
     # Skip persistence on likely context-overflow (400 + large session): persisting the
     # failed message grows the session and repeats the failure.
+    # Persisting the failed user message would make the session even larger, causing the same failure on the
+    # next attempt. (#1630)
     if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
         _vlines(agent, "⚠️  Skipping session persistence for large failed session to prevent growth loop.")
     else:
@@ -981,6 +988,9 @@ def compute_error_backoff(
         _ra_raw = _resp_headers.get("retry-after") or _resp_headers.get("Retry-After")
         if _ra_raw:
             try:
+                # Cap at 10 minutes. Anthropic Tier 1 input-token buckets reset in ~171s, so a 120s cap
+                # caused us to retry before the actual reset window and re-trip the limit. 600s covers all
+                # realistic provider reset windows while still rejecting pathological values. (#26293)
                 _retry_after = min(float(_ra_raw), 600)
             except (TypeError, ValueError):
                 pass
@@ -1307,6 +1317,9 @@ def route_classified_error(
             # Overhead-aware request size so recovery arms on the true request
             # (msgs + tools + system), not the tool-blind message count.
             messages, active_system_prompt = agent._compress_context(
+                # Route the overhead-aware _real_tokens (computed above) into compression, not the bare
+                # last_prompt_tokens — which is 0 in the no-usage fallback, hiding the true request size
+                # from the engine's overflow guard (upstream PR #77169 review).
                 messages, system_message,
                 approx_tokens=estimate_request_tokens_rough(api_messages, tools=agent.tools or None),
                 task_id=effective_task_id,
@@ -1331,6 +1344,12 @@ def route_classified_error(
     is_rate_limited = classified.reason in _RATE_LIMIT_REASONS
     # Some relays wrap upstream output-cap 400s as 429 (rate_limit). Only the max_tokens
     # clamp fixes it. Parsed once; gates the eager-fallback exemption and overflow entry.
+    # Relay-wrapped output-cap errors: some gateways wrap an upstream "[400]: max_tokens (...) exceeds
+    # model's maximum output tokens (...)" as HTTP 429, which classifies as rate_limit. The failure is a
+    # deterministic request-shape problem — falling back to another provider (or burning generic retries)
+    # can't fix it, but the output-cap clamp below can, in one retry (#72281). Parse once here; the result
+    # gates both the eager-fallback exemption and the widened is_context_length_error entry, and is reused
+    # as available_out inside the handler.
     _wrapped_output_cap_budget = (
         parse_available_output_tokens_from_error(error_msg)
         if classified.reason == FailoverReason.rate_limit else None
@@ -1348,6 +1367,7 @@ def route_classified_error(
     if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
         # No eager fallback while credential pool rotation may recover. Exception: an
         # upstream-aggregator 429 — the pool can't help, always fall back.
+        # Fixes #11314.
         _is_upstream = classified.reason == FailoverReason.upstream_rate_limit
         pool_may_recover = (
             False if _is_upstream else _ra()._pool_may_recover_from_rate_limit(agent._credential_pool)

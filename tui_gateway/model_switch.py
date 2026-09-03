@@ -178,6 +178,10 @@ def _commit_agent_switch(sid: str, session: dict, agent, result, current_model: 
     except Exception as exc:
         # The in-place swap rolled the agent back and re-raised. Abort the whole commit (worker
         # restart, persist, marker, override, config write) or the session pins a broken model.
+        # Abort the commit: do NOT restart the slash worker, persist runtime, append the switch marker, set
+        # a session model_override, or persist to config — all of which would otherwise leave the session
+        # pinned to a broken model and kill the conversation on the next turn (#50163). A failed switch is a
+        # no-op; surface a clean error to the client.
         logger.warning("In-place model switch failed for TUI agent: %s", exc)
         raise ValueError(f"Model switch to {result.new_model} failed ({exc}); "
                          f"staying on {getattr(agent, 'model', current_model)}.") from exc

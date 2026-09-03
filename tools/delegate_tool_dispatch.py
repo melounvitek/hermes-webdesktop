@@ -187,6 +187,10 @@ def _resolve_async_wake_sid(origin_wake_sid: str) -> Optional[str]:
     id.
     """
     try:
+        # Finite sessions cannot route a detached subagent result back to the agent after their turn/process
+        # ends. This includes stateless HTTP requests (#10760) and one-shot Kanban workers (#63169). Fall
+        # back to SYNCHRONOUS execution so the result returns in this same turn instead of handing out a
+        # handle with no durable consumer. Mirrors the pool-at-capacity inline fallback below.
         from gateway.session_context import async_delivery_supported
         if async_delivery_supported():
             return ""
@@ -229,6 +233,11 @@ def _batch_progress_token(child_agents: List[Any]) -> tuple:
     so a child streaming a long response counts as alive; a fully frozen token past the threshold means the batch
     is wedged. ``in_tool`` is True while ANY child is inside a tool so slow tools get the higher ceiling (mirrors
     the sync heartbeat)."""
+    # Progress token for the async registry's stale monitor: the combined (api_call_count, current_tool,
+    # last_activity_ts) of every child. last_activity_ts is ticked by _touch_activity on every streamed
+    # chunk ("receiving stream response"), every tool transition, and every API-call start/completion — so a
+    # child streaming a long response is alive even though api_call_count only advances when the call
+    # completes (same liveness signal as the compaction inactivity budget, PR #71508).
     parts = []
     in_tool = False
     for c in child_agents:

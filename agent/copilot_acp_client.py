@@ -119,6 +119,7 @@ def _build_subprocess_env() -> dict[str, str]:
 
     # Copilot ACP drives a model and needs LLM provider credentials; the central helper still
     # strips Tier-1 secrets (bot tokens, GitHub auth, infra).
+    # See #29157.
     env = hermes_subprocess_env(inherit_credentials=True)
     env["HOME"] = _resolve_home_dir()
     apply_subprocess_home_env(env)
@@ -303,6 +304,8 @@ class CopilotACPClient:
         try:
             from hermes_cli._subprocess_compat import windows_hide_flags  # hide the Windows console flash (#56747); pipes intact for the ACP wire
 
+            # Hide the console the CLI child would otherwise flash on Windows (#56747). Hide-only — stdio
+            # pipes stay intact for the ACP wire.
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding='utf-8', errors='replace', bufsize=1, cwd=self._acp_cwd, env=_build_subprocess_env(),

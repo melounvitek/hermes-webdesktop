@@ -823,7 +823,15 @@ def _has_local_edits(installed: dict) -> bool:
 def do_update(name: Optional[str] = None, console: Optional[Console] = None,
               force: bool = False) -> None:
     """Update hub-installed skills. Locally edited ones are skipped unless ``force`` — the
-    update rmtree-replaces the user's work, so that must be an explicit choice."""
+    update rmtree-replaces the user's work, so that must be an explicit choice.
+
+    Skills whose on-disk content no longer matches the hash recorded at install time have been edited
+    locally; updating them would silently destroy the user's work (``do_install(force=True)``
+    rmtree-replaces the directory). Those are skipped by default and only overwritten when ``force=True``.
+    Mirrors the user-modified protection bundled skills already get from ``hermes update`` (ported from
+    paperclipai/paperclip#10978's explicit-merge-mode rule: destructive replacement must be an explicit
+    caller choice, never a rerun default).
+    """
     from tools.skills_hub import HubLockFile, check_for_skill_updates
     c = console or _console
     lock = HubLockFile()

@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 # `{file path}`, `<FEATURE-NAME>`), the shape LLM templates leave behind. Bare single-word brackets must never be
 # rejected: legitimate goals are full of generics (`Vec<T>`), HTML tags (`<div>`), dict snippets (`{"key": 1}`), glob
 # braces (`{a,b}`) and f-string style (`{i}`).
+# See #81141.
 _PLACEHOLDER_GOAL_RE = re.compile(r"^(todo|task\s*\d+)$", re.IGNORECASE)
 _TEMPLATE_MARKER_RE = re.compile(
     r"<[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+>|\{[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+\}"
@@ -37,7 +38,10 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
     array is the canonical single-task shape (legacy top-level `goal` is wrapped into one). Duplicate goals are
     deliberately NOT rejected — identical-goal fan-outs (best-of-N / ensemble sampling) are legitimate and blocking
     them broke real workflows. The too-short check applies only to multi-task fan-outs (terse goals there are
-    usually unexpanded templates); a SINGLE task legitimately uses short goals ("Fix the tests")."""
+    usually unexpanded templates); a SINGLE task legitimately uses short goals ("Fix the tests").
+
+    See #81141.
+    """
     for i, task in enumerate(task_list):
         goal = str(task.get("goal", "")).strip()
         if _PLACEHOLDER_GOAL_RE.match(" ".join(goal.lower().split())):

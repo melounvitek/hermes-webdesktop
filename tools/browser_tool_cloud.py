@@ -181,6 +181,8 @@ def _is_local_backend() -> bool:
     if _bt._get_cloud_provider() is not None:
         return False
     # Scope-aware: under gateway multiplexing the routed profile's terminal backend lives in the per-turn scope.
+    # When terminal runs in a container, browser on host can access internal networks the terminal can't →
+    # treat as non-local. See #68559.
     from tools.terminal_scope import terminal_env
     return terminal_env("TERMINAL_ENV", "local").strip().lower() in ("local", "")
 

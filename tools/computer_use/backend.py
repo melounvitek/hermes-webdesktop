@@ -55,6 +55,7 @@ class UIElement:
     attributes: Dict[str, Any] = field(default_factory=dict)
     # Opaque per-snapshot handle from cua-driver, passed alongside `index` for explicit stale-detection: a
     # stale token errors instead of silently re-resolving to a different element. None on older drivers.
+    # None for pre-#1961 drivers that didn't carry the field.
     element_token: Optional[str] = None
 
 
@@ -74,6 +75,7 @@ class CaptureResult:
     png_bytes_len: int = 0          # raw bytes sent to Anthropic, for token estimation
     # MIME type of `png_b64` when the backend supplied it (cua-driver-rs emits `mimeType` on every image
     # part). None → consumers fall back to base64-prefix sniffing (older drivers).
+    # See #1961, #47072.
     image_mime_type: Optional[str] = None
     # Guidance appended to the summary by capture lanes that intentionally return no elements (e.g.
     # full-screen composited grabs) to point the model at an interactive lane.
@@ -86,7 +88,11 @@ class ActionResult:
     tool/transport success only — NOT the semantic verdict; read ``effect`` / ``escalation``
     (cua-driver's structured verdict) to pick the next rung of the verify → escalate ladder.
     Structured fields are optional and additive: an older driver that omits
-    ``structuredContent`` leaves them ``None``, behavior unchanged."""
+    ``structuredContent`` leaves them ``None``, behavior unchanged.
+
+    Beyond the transport-level ``ok`` flag, this carries cua-driver's structured action verdict so the model
+    can follow the documented verify → escalate ladder (NousResearch/hermes-agent#67052).
+    """
 
     ok: bool
     action: str

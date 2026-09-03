@@ -302,6 +302,17 @@ def discord_skill_commands_by_category(
     ``(name, description, cmd_key)``, names clamped to 32 chars, descriptions to 100. No
     per-group cap (the caller flattens into one autocomplete callback); ``hidden_count`` only
     reports 32-char clamp collisions against reserved names or earlier skills.
+
+    Scan roots include the local ``SKILLS_DIR`` **and** any configured ``skills.external_dirs`` — matching
+    the widened filter applied to the flat ``discord_skill_commands()`` collector in #18741. Without this
+    parity, external-dir skills are visible via ``hermes skills list`` and the agent's ``/skill-name``
+    dispatch but silently absent from Discord's ``/skill`` autocomplete.
+    The legacy 25-group × 25-subcommand caps (from the old nested ``/skill <cat> <name>`` layout) are
+    **not** applied — the live caller (``_register_skill_group`` in ``gateway/platforms/discord.py``,
+    refactored in PR #11580) flattens these results and feeds them into a single autocomplete callback,
+    which scales to thousands of entries without any per-command payload concerns. ``hidden_count`` is
+    retained in the return tuple for backward compatibility and still reports skills dropped for other
+    reasons (32-char clamp collision vs a reserved name).
     """
     categories: dict[str, list[tuple[str, str, str]]] = {}
     uncategorized: list[tuple[str, str, str]] = []

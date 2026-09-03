@@ -18,7 +18,11 @@ logger = logging.getLogger("cron.scheduler")
 
 def _parse_wake_gate(script_output: str) -> bool:
     """Wake gate: False only if the last non-empty stdout line is JSON ``{"wakeAgent": false}``
-    (agent skipped entirely — no LLM run, no delivery); anything else wakes normally."""
+    (agent skipped entirely — no LLM run, no delivery); anything else wakes normally.
+
+    Any other output (non-JSON, missing flag, gate absent, or ``wakeAgent: true``) means wake the agent
+    normally. See #1232.
+    """
     stripped_lines = [line for line in (script_output or "").splitlines() if line.strip()]
     if not stripped_lines:
         return True
@@ -189,7 +193,12 @@ def _build_job_prompt(
     """Build the effective prompt for a cron job, optionally loading skills first.
     ``prerun_script``: cached ``(success, stdout)`` from a script the caller already ran (wake-gate
     check) — skips re-execution. ``extra_prompt``: per-run ``## Run Context`` for this fire only,
-    never persisted to the job."""
+    never persisted to the job.
+
+    When provided, the script is not re-executed and the cached result is used for prompt injection. When
+    omitted, the script (if any) runs inline as before. extra_prompt: Optional per-run context (from
+    ``cronjob(action='run')``, 57331 — salvaged from #57342 by @liuhao1024).
+    """
     user_prompt = str(job.get("prompt") or "")
     if extra_prompt:
         user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
@@ -238,6 +247,9 @@ def _build_job_prompt(
         parts.append("")
         # Skill blocks are stable per job config; the appended instruction is volatile per-run.
         # Declare that boundary for the Anthropic cache planner.
+        # The skill blocks (and any skipped-skill notice) above are stable per job config; the appended
+        # instruction carries the volatile per-run data (cron hint + prompt + script output + run context).
+        # See #81867.
         stable_prefix = append_user_instruction(parts, prompt)
     assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
     if (
@@ -261,6 +273,9 @@ def _scan_assembled_cron_prompt(
     STRICT ``_scan_cron_prompt``; skills or injected data → LOOSER ``_scan_cron_skill_assembled``
     (command-shape patterns dropped, invisible unicode sanitized not blocked, so a false positive
     cannot permanently kill a job); injected data without skills also scans ``user_prompt`` STRICT.
+
+    Since cron runs non-interactively (auto-approves tool calls), a malicious skill carrying an injection
+    payload bypassed every gate. See #3968.
     """
     from tools.cronjob_tools import _scan_cron_prompt, _scan_cron_skill_assembled
     if has_skills or has_injected_data:

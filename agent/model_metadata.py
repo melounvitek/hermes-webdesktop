@@ -112,6 +112,11 @@ _ENDPOINT_MODEL_CACHE_TTL = 300
 # server swap on the same port is re-detected; None gets the short TTL so a
 # transient failure recovers in minutes without re-running the waterfall each turn.
 _ENDPOINT_PROBE_TTL_SECONDS = 3600.0
+# A failed probe verdict (server_type is None — no known endpoint answered) is cached for a much shorter
+# window: the in-memory entry exists only to keep one image-bearing turn from re-running the 5-request
+# waterfall on every subsequent turn (#89863 — a keyed remote endpoint answered 401 to each leg and the None
+# verdict was never cached, so every turn re-probed). Short TTL keeps a transient failure (server starting
+# up, key being fixed) recoverable within minutes instead of pinning "undetected" for an hour.
 _ENDPOINT_PROBE_FAILURE_TTL_SECONDS = 300.0
 _endpoint_probe_path_cache: Dict[str, tuple] = {}
 # Routable-but-dead endpoints (corp LAN off-VPN) blackhole TCP: once ANY probe paid
@@ -674,6 +679,9 @@ def detect_local_server_type(base_url: str, api_key: str = "") -> Optional[str]:
     return result
 
 
+# Cache the negative verdict in memory only (never on disk — a failure is often transient: server starting,
+# key being fixed) so the very next turn does not re-run the whole waterfall against an endpoint that just
+# answered nothing (#89863).
 def _iter_nested_dicts(value: Any):
     if isinstance(value, dict):
         yield value
@@ -778,6 +786,7 @@ def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any
     try:
         _ensure_requests()
         # (connect, read) tuple: a flat timeout lets urllib3 block per retry stage through proxies that 403 CONNECT.
+        # See #46620.
         response = requests.get(OPENROUTER_MODELS_URL, timeout=(5, 10), verify=_resolve_requests_verify())
         response.raise_for_status()
         cache = {}
@@ -1186,6 +1195,8 @@ def _ollama_show(server_url: str, api_key: str, bare_model: str, timeout: float 
 
 def _is_ollama_server(base_url: str, api_key: str) -> bool:
     try:
+        # Forward the API key: a remote API-keyed endpoint answers the probe waterfall with 401s without it,
+        # and an unauthorized probe can never produce a positive verdict (#89863).
         return detect_local_server_type(base_url, api_key=api_key) == "ollama"
     except Exception:
         return False
@@ -1447,7 +1458,11 @@ _CODEX_900K_SNAPSHOT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _bare_codex_slug(model: Optional[str]) -> str:
-    """Lowercased slug without ``vendor/`` (display/auxiliary callers pass ``openai/gpt-5.6-sol-900k``)."""
+    """Lowercased slug without ``vendor/`` (display/auxiliary callers pass ``openai/gpt-5.6-sol-900k``).
+
+    Display/auxiliary callers pass ids like ``openai/gpt-5.6-sol-900k``; the main-agent path normalizes the
+    namespace away earlier, but this resolver must accept both shapes (#92797 review).
+    """
     return (model or "").strip().lower().rsplit("/", 1)[-1]
 
 
@@ -1567,6 +1582,10 @@ def _resolve_codex_oauth_context_length_with_source(model: str, access_token: st
             return bumped, source
         return ctx, source
     # The Codex catalog only knows the base slug (no -900k, no vendor/).
+    # ``-900k`` variants are Hermes picker aliases — the Codex catalog only knows the base slug, so resolve
+    # against the stripped id. Also drop any ``vendor/`` namespace (``openai/gpt-5.6-sol-900k``): the
+    # main-agent path normalizes it away before reaching here, but display/auxiliary callers pass it through
+    # (#92797 review).
     lookup_bare = _bare_codex_slug(strip_codex_context_variant_suffix(model_bare))
     if access_token:
         live, fresh_probe = _fetch_codex_oauth_context_lengths_with_source(access_token)
@@ -1650,6 +1669,10 @@ def _validate_cached_context_length(model: str, base_url: str, cached: int, is_b
             _invalidate_cached_context_length(model, base_url)
             return bedrock_ctx
         return cached
+    # For local endpoints, run the probe that respects configured Modelfile context values first.
+    # _query_local_context_length prefers num_ctx from Modelfile, while _query_ollama_api_show returns the
+    # GGUF training max first which can be larger and would create a false-safe window for compression
+    # (#63122). Non-local endpoints preserve the existing GGUF-first behavior.
     if is_local_endpoint(base_url):
         return _reconcile_local_cached_context_length(model, base_url, cached, api_key=api_key)
     return cached
@@ -1740,12 +1763,17 @@ def _config_override_context_length(model: str, base_url: str, provider: str, cu
     """Steps 0b-0c: config-only overrides (never touch the network). 0b: EXPLICIT model_overrides
     only — fill-gap _default entries apply inside lookup_models_dev_context once the catalog has
     missed, so a _default can never preempt custom_providers or live probes. 0c: custom_providers."""
+    # This is the supported self-unblock path for models with wrong context in models.dev (#84482) and for
+    # custom/local models (#8731).
     if provider and model:
         with contextlib.suppress(Exception):  # fall through to other resolution paths
             from agent.models_dev import _override_context_window
             mo_ctx = _override_context_window(provider, model)
             if mo_ctx is not None and mo_ctx > 0:
                 return mo_ctx
+    # 0c. custom_providers per-model override — check before any probe. This closes the gap where /model
+    # switch and display paths used to fall back to 128K despite the user having a per-model context_length
+    # set. See #15779.
     if custom_providers and base_url and model:
         with contextlib.suppress(Exception):  # fall through to probing
             from hermes_cli.config import get_custom_provider_context_length
@@ -1981,6 +2009,16 @@ def _strip_stale_thinking_for_estimate(messages: List[Dict[str, Any]]) -> List[D
 # pinned (strong ref in the entry, so the id can't be reused and immutability makes id-equality
 # value-equality); numbers/bools/None by value; dicts/lists structurally in key order (``str(shadow)``
 # depends on it); any other type aborts the memo. api_messages shallow-copies dicts but shares the strings.
+# ``estimate_messages_tokens_rough`` is called on the full history every loop iteration (conversation_loop
+# preflight), repeatedly during compaction telemetry, and inside an O(n^2) shrink loop in moa_loop. The
+# per-message helpers are pure functions of the message's value, so a memo keyed on a fingerprint that
+# uniquely determines the value is exactly equivalent. Fingerprint design (soundness argument): While the
+# entry lives, that id cannot be reused by another object, so id-equality implies object-equality — strings
+# are immutable, so value-equality too (no #50372-style aliasing). Equal fingerprints therefore imply
+# deep-equal messages built from identical immutable leaves ⇒ identical ``str(shadow)`` bytes ⇒ identical
+# estimate. Because the api_messages build shallow-copies history dicts each iteration, the copies share the
+# same content strings — so unchanged history messages hit the memo even though the outer dicts are fresh
+# objects every turn.
 _MSG_TOKENS_CACHE: Dict[Any, Tuple[list, int]] = {}
 _MSG_TOKENS_CACHE_MAX = 4096
 

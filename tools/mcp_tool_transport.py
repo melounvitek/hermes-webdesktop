@@ -48,7 +48,13 @@ class MCPServerTransportMixin:
 
     def _advertises_tools(self) -> bool:
         """False only when captured capabilities omit ``tools`` (prompt-/resource-only servers,
-        where ``tools/list`` raises -32601); True without capability info (legacy fallback)."""
+        where ``tools/list`` raises -32601); True without capability info (legacy fallback).
+
+        Per the MCP spec, ``InitializeResult.capabilities.tools`` is non-None iff the server implements the
+        ``tools/*`` request family. Prompt-only or resource-only servers omit it, and calling ``tools/list``
+        against them raises ``MCPError(-32601 Method not found)`` — which previously killed the connection
+        during discovery and made every keepalive fail. (Ported from anomalyco/opencode#31271.)
+        """
         caps = getattr(self.initialize_result, "capabilities", None)
         return caps is None or getattr(caps, "tools", None) is not None
 
@@ -109,6 +115,20 @@ class MCPServerTransportMixin:
         self._ready.set()
         self._ever_connected = True
         _core._reset_server_error(self.name)
+        # Session is live again: clear any breaker state from a prior outage so the first call after
+        # recovery isn't gated on a stale consecutive-failure count (#16788).
+        # A completed handshake alone is NOT proof of health: a flapping transport can handshake fine and
+        # drop moments later, forever (#62212). The session must prove itself (keepalive success or a
+        # successful tool call) before the reconnect budget is cleared — see _mark_session_proven.
+        # Session is live again: clear any breaker state from a prior outage so the first call after
+        # recovery isn't gated on a stale consecutive-failure count (#16788).
+        # Unproven until keepalive/tool-call success (#62212).
+        # Session is live again: clear any breaker state from a prior outage so the first call after
+        # recovery isn't gated on a stale failure count (#16788).
+        # Unproven until keepalive/tool-call success (#62212).
+        # Session is live again: clear any breaker state from a prior outage so the first call after
+        # recovery isn't gated on a stale consecutive-failure count (#16788).
+        # Unproven until keepalive/tool-call success (#62212).
         self._session_proven = False
         reason = await self._wait_for_lifecycle_event()
         if label and reason == "reconnect":
@@ -201,6 +221,13 @@ class MCPServerTransportMixin:
         # off-loop because the reaper blocks up to 2s.
         await asyncio.to_thread(_core._kill_orphaned_mcp_children)
         pids_before = _core._snapshot_child_pids()  # so the new child can be identified after spawn
+        # Reap any orphaned subprocesses from prior failed connection attempts before spawning a new one.
+        # Without this, each retry in the run() reconnect loop spawns a fresh process pair while the
+        # previous failed pair lingers — leading to rapid zombie accumulation (see #57355, #57228). The
+        # unscoped sweep also opportunistically reaps orphans left by *other* servers that never reconnect;
+        # per-server filtering via ``server_name`` remains available for scoped call sites. Run in a worker
+        # thread: the reaper blocks up to 2s (SIGTERM → wait → SIGKILL) when orphans exist, which would
+        # otherwise stall the shared MCP event loop.
         new_pids: set = set()
         # Subprocess stderr goes to ~/.hermes/logs/mcp-stderr.log so banners can't corrupt the TUI.
         _core._write_stderr_log_header(self.name)
@@ -271,7 +298,20 @@ class MCPServerTransportMixin:
         TaskGroup, so a transient drop escapes as a ``BaseExceptionGroup`` that would otherwise park the server for
         300s over a sub-second glitch. Re-raise when it is not one: shutdown in progress (``_shutdown_event`` is
         set before cancel), KeyboardInterrupt/SystemExit or a real CancelledError in the group, or no live session
-        this attempt (``_ready`` unset — connect failures must back off, not hot-loop)."""
+        this attempt (``_ready`` unset — connect failures must back off, not hot-loop).
+
+        Streamable-HTTP / SSE transports run their stream pump inside an anyio TaskGroup. A transient stream
+        drop (idle timeout, brief backend blip, server-side TCP close) surfaces as a ``BaseExceptionGroup``
+        escaping the transport context manager. Left unwrapped it reaches ``run()``'s error path, which
+        applies exponential backoff and eventually *parks* the server for 300s and deregisters its tools — a
+        multi-minute tool outage for what is usually a sub-second glitch while the POST path stays healthy
+        (issue #66092).
+        - the group carries a ``KeyboardInterrupt`` / ``SystemExit`` — fatal signals must propagate to the
+        interpreter, never be converted into a reconnect; - the group carries a real ``CancelledError``
+        (task cancellation must propagate to asyncio, mirroring the ``run()`` guard for #9930); - we never
+        reached a live session this attempt (``_ready`` unset) — a connect/handshake failure SHOULD fall
+        through to ``run()``'s backoff rather than hot-loop reconnects against a broken endpoint.
+        """
         if (self._shutdown_event.is_set()
                 or eg.split((KeyboardInterrupt, SystemExit))[0] is not None
                 or eg.split(asyncio.CancelledError)[0] is not None
@@ -375,9 +415,15 @@ class MCPServerTransportMixin:
 
     # -------------------------------------------------------------- discovery
 
+    # Legacy Streamable-HTTP transport TaskGroup dropped: reconnect immediately instead of backoff/park
+    # (#66092).
     async def _discover_tools(self):
         """Discover tools from the connected session. Capability-gated: prompt-/resource-only
-        servers raise ``MCPError(-32601)`` on ``tools/list``, which would abort the connection."""
+        servers raise ``MCPError(-32601)`` on ``tools/list``, which would abort the connection.
+
+        Skip the call when the server doesn't advertise the ``tools`` capability. (Ported from
+        anomalyco/opencode#31271.)
+        """
         self._ping_unsupported = False  # fresh transport: re-probe ``ping`` across the reconnect
         if self.session is None:
             return

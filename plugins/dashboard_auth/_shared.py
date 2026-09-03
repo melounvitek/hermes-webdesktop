@@ -204,6 +204,10 @@ def verify_jwt(
     try:
         signing_key = jwks_client.get_signing_key_from_jwt(token)
     except Exception as exc:
+        # Unreachable JWKS -> ProviderError (503); a bearer that is not one of our JWTs (opaque peer key,
+        # foreign kid) -> InvalidCodeError (None / next provider). Folding both into 503 produced #94558.
+        # Unreachable JWKS -> ProviderError (503); a bearer that is not one of our JWTs (opaque peer key,
+        # foreign kid) -> InvalidCodeError (None / next provider). Folding both into 503 produced #94558.
         raise classify_jwks_lookup_error(exc) from exc
     try:
         return jwt.decode(

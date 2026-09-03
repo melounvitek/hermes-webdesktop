@@ -80,6 +80,8 @@ def _resolve_install_target(root: Path) -> tuple[list[str], dict | None]:
 
 def _venv_scripts_dir(root: Path) -> Path | None:
     """Project venv Scripts/bin dir, when present (hermes_constants is stdlib-only)."""
+    # hermes_constants is stdlib-only, so the canonical layout helpers are safe to use from this
+    # corrupted-venv repair path (#76105: never open-code the Scripts/bin split).
     from hermes_constants import project_venv_dir, venv_bin_dir
 
     venv_dir = project_venv_dir(root)
@@ -163,6 +165,12 @@ def ensure_windows_bin_launchers(
     canonical managed binary dir (only when *root* is the managed clone, so source checkouts
     elsewhere never gain launchers) and the legacy ``<root>\bin`` (only while the user PATH still
     points at it). Never raises.
+
+    The canonical launcher home is the managed binary dir — the default Hermes root's ``bin``
+    (``%LOCALAPPDATA%\\hermes\\bin``, next to the managed uv) — which lives OUTSIDE the git checkout so no
+    git operation can ever touch it. It is a per-machine dir shared by every profile: ``get_hermes_home()``
+    would point inside ``profiles\\<name>`` under ``hermes -p``, so the anchor here is
+    :func:`hermes_constants.get_default_hermes_root`. See #83797.
     """
     if windows is None:
         windows = _is_windows()
@@ -265,6 +273,8 @@ def migrate_windows_bin_path(
     absolute launcher paths keep working and the dir is git-ignored. Registry writes preserve the
     stored value type and raw ``%VARS%``. Never raises; True when the canonical layout is in place.
     *read_user_path*/*write_user_path* are injectable for tests.
+
+    See #83797.
     """
     if windows is None:
         windows = _is_windows()
@@ -299,6 +309,7 @@ def migrate_windows_bin_path(
         _normalize_windows_path(root / "bin"),
         # The old installer put the venv's Scripts dir itself on PATH, always at the literal
         # `venv` layout (never `.venv`) — match what it wrote then, not where the venv lives now.
+        # See #83797.
         _normalize_windows_path(venv_bin_dir(root / "venv", windows=True)),
     }
     home_bin_key = _normalize_windows_path(home_bin)
@@ -336,6 +347,8 @@ class ShimQuarantineError(RuntimeError):
     Raised BEFORE the install command runs. Callers catch it like any install failure: the
     update-incomplete marker survives and a later launch retries once the holder exits — the
     contended venv is never mutated.
+
+    See #87331.
     """
 
     def __init__(self, failed_shims: list[str]):
@@ -351,6 +364,9 @@ def _quarantine_running_hermes_exe(
     Windows blocks REPLACE on a running .exe but allows RENAME. Best-effort: silently skips anything
     that cannot be renamed (names appended to *failed_out*). Returns (original, quarantined) pairs.
     The console-script set comes from pyproject ``[project.scripts]`` (fallback: well-known trio).
+
+    ``failed_out``: when provided, names of shims that could not be renamed are appended so the caller can
+    refuse instead of mutating a contended venv (#87331 fail-closed).
     """
     if not _is_windows():
         return []
@@ -373,7 +389,13 @@ def _quarantine_running_hermes_exe(
 
 
 def _restore_quarantined_exes(moved: list[tuple[Path, Path]]) -> None:
-    """Put quarantined shims back when the installer did not replace them (shared retry ladder)."""
+    """Put quarantined shims back when the installer did not replace them (shared retry ladder).
+
+    Delegates to the shared helper in the stdlib-only ``_early_recovery`` module: one retry ladder and one
+    recovery message for every restore site, instead of the near-identical copies that had already drifted
+    (#75584). Warnings land on stderr — this module runs in the early-recovery path and ``hermes acp``
+    speaks JSON-RPC on stdout.
+    """
     _er.restore_quarantined_shims(moved)
 
 
@@ -384,6 +406,8 @@ def _run_install_cmd(cmd: list[str], *, env: dict | None, root: Path) -> None:
     installer would die partway on the same locks — raise :class:`ShimQuarantineError` WITHOUT
     running it. Raises CalledProcessError on install failure (callers implement the per-extra
     fallback ladder).
+
+    The caller's marker-keeping failure handling turns that into "retry next launch". See #87331.
     """
     scripts_dir = _venv_scripts_dir(root) if _is_windows() else None
     failed: list[str] = []
@@ -398,6 +422,7 @@ def _run_install_cmd(cmd: list[str], *, env: dict | None, root: Path) -> None:
         # entirely (uv audits an already-satisfied editable install as a no-op), which would leave
         # the shims renamed aside and `hermes` gone from PATH. Restore only renames back when the
         # installer did NOT write a fresh shim, so this is safe in both cases.
+        # See #75584.
         if scripts_dir is not None:
             _restore_quarantined_exes(moved)
 

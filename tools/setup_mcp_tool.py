@@ -20,6 +20,12 @@ _ACTIONS = ("install", "enable", "authorize")
 def setup_mcp_tool(server: str = "", action: str = "install", reason: str = "", callback: Optional[Callable] = None) -> str:
     """Ask the desktop GUI to run an MCP setup flow; return its JSON outcome."""
     if callback is None:
+        # Still down — the server task is reconnecting, or it has exhausted its retry budget and parked
+        # (e.g. a dead stdio subprocess). Probing here would write into a dead/absent transport and re-arm
+        # the breaker forever (#16788). Instead, ask the (always-present) server task to rebuild the
+        # transport — which respawns a dead stdio subprocess — and return a clean "reconnecting" error so
+        # the model backs off without burning iterations. The breaker resets once the fresh session
+        # initializes (_run_stdio/_run_http call _reset_server_error).
         return tool_error(
             "setup_mcp is only available in the Hermes desktop app. Use the "
             "terminal instead: `hermes mcp install <name>` for catalog entries, "

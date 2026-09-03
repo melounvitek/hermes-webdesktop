@@ -31,6 +31,8 @@ class HermesProviderMixin:
 
     def __init__(self, *args: Any, token_user_agent: str | None = None, **kwargs: Any):
         super().__init__(*args, **kwargs)
+        # oauth.user_agent — stamped onto token-endpoint requests only; some authorization servers/WAFs
+        # reject httpx's default (#75576).
         self._hermes_token_user_agent = token_user_agent
 
     def _prepare_token_request(self, request):

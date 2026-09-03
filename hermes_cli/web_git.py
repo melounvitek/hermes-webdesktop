@@ -586,6 +586,11 @@ def _worktree_for_existing(root: str, raw_name: str) -> dict:
     requested = _sanitize_branch(raw_name)
     if not requested:
         raise RuntimeError("Branch name is required.")
+    # "origin/feature" is a remote-tracking ref, not a branch git can check out — `git worktree add <dir>
+    # origin/feature` detaches HEAD. Create a local branch with the same short name that tracks the remote
+    # ref, like `git switch feature` does for a branch on exactly one remote. (Parity with the Electron op;
+    # a remote gateway serves this mirror, so the desktop's convert-a-branch flow must behave identically.
+    # #81724)
     remote = _remote_of_ref(root, requested)
     existing = requested.split("/", 1)[1] if remote else requested
     if not remote and existing == _default_branch(root):
@@ -645,7 +650,10 @@ def _ref_names(cwd: str, *patterns: str, fmt: str = "%(refname:short)") -> list[
 
 def branch_list(cwd: str) -> list[dict]:
     """Branches for the convert-a-branch picker: local heads first, then remote-tracking
-    refs with no local head yet (a teammate's branch without a manual checkout)."""
+    refs with no local head yet (a teammate's branch without a manual checkout).
+
+    Parity with the Electron op — a remote gateway serves this mirror for the same desktop UI (#81724).
+    """
     locals_ = _ref_names(cwd, "refs/heads")
     if not locals_:
         return []

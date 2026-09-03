@@ -331,7 +331,17 @@ class SessionContextMixin:
         ``reasoning_level`` is honored only when dialecticDynamic is true. ``apply_injection_cap``
         clips to ``dialecticMaxChars`` (automatic injection only). ``raise_errors`` re-raises backend
         failures instead of returning "" so explicit tool calls can tell a timeout from an empty answer.
-        Raises HonchoAuthError when credentials are rejected after a forced refresh and one retry."""
+        Raises HonchoAuthError when credentials are rejected after a forced refresh and one retry.
+
+        Args: session_key: The session key to query against. query: Natural language question.
+        reasoning_level: Override the configured default (dialecticReasoningLevel). If None or
+        dialecticDynamic is false, uses the configured default. peer: Which peer to query — "user" (default)
+        or "ai". apply_injection_cap: Clip automatic injections to ``dialecticMaxChars``. Explicit
+        ``honcho_reasoning`` calls pass False because Honcho already bounds their output. raise_errors:
+        Re-raise backend failures instead of returning "". Explicit tool calls pass True so a timeout or
+        server error surfaces as an error, not as "no result" (#36098 issue 4: collapsing failures to ""
+        made auth errors, timeouts, and genuinely-empty answers indistinguishable).
+        """
         session = self._cache.get(session_key)
         target_peer_id = self._resolve_peer_id(session, peer) if session else None
         if target_peer_id is None:

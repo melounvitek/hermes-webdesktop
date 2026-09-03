@@ -119,6 +119,7 @@ def mount_spa(application: FastAPI):
             # path, a renderer whose spawn token no longer matched (e.g. after `hermes update`)
             # white-screened. Serve a token-only page at the exact root, but ONLY when the auth
             # gate is off: on a gated serve the token must never be readable without auth.
+            # See #94227, #95575.
             gated = bool(getattr(application.state, "auth_required", False))
             if full_path == "" and not gated:
                 return HTMLResponse(
@@ -131,6 +132,14 @@ def mount_spa(application: FastAPI):
             return JSONResponse({"error": _HEADLESS_MSG}, status_code=404)
         return
 
+    # A missing WEB_DIST is deliberately NOT a mount-time terminal state (#82614): a long-lived `hermes
+    # dashboard --skip-build` process that survives a `git pull` (or starts before the first build) used to
+    # install a permanent no_frontend catch-all here and could never recover — every route answered 404
+    # "Frontend not built" until the process was restarted, even after `npm run build` completed. The SPA
+    # routes below all cope with a missing dist per-request (`_serve_index` returns the same 404 JSON when
+    # index.html is unreadable; the asset mounts use check_dir=False and 404 on missing files), so mounting
+    # them unconditionally makes the dashboard recover the moment a build appears on disk — no restart
+    # needed.
     def _serve_index(prefix: str = ""):
         """index.html with the session token + base-path injected.
 
@@ -427,6 +436,10 @@ def _safe_plugin_api_relpath(api_field: Any, *, dashboard_dir: Path) -> Optional
     ``/tmp/evil.py``) and ``../`` could climb out of it (GHSA-5qr3-c538-wm9j). Returns the
     original string when the resolved path stays under ``dashboard_dir``, else ``None`` so
     the plugin still loads its static JS/CSS but its backend ``api`` is rejected.
+
+    The web server later imports this file as a Python module via ``importlib.util.spec_from_file_location``
+    (arbitrary code execution by design — that's how plugins extend the backend). Pre-#29156 the field was
+    used as-is, which meant:
     """
     if not isinstance(api_field, str) or not api_field.strip():
         return None
@@ -455,12 +468,29 @@ def _dashboard_plugin_search_dirs() -> List[tuple]:
     from hermes_constants import get_default_hermes_root
 
     bundled_root = get_bundled_plugins_dir()
+    # User dashboard plugins are a dashboard-owned asset (same category as theme YAML): resolve them from
+    # the process launch home so they don't vanish when a request is scoped to another profile via a
+    # context-local HERMES_HOME override (e.g. embedded /chat under --open-profile). #87197: when the
+    # process itself is profile-scoped (``--profile <name>`` sets ``HERMES_HOME=<root>/profiles/<name>``),
+    # the launch home is the profile directory, which has no ``plugins/`` — user plugins are installed in
+    # the hermes root (``~/.hermes/plugins``). Scan the default root as well (``get_default_hermes_root()``
+    # unwraps ``<root>/profiles/<name>`` → ``<root>`` and returns a custom ``HERMES_HOME`` unchanged when it
+    # *is* the root), mirroring how ``hermes_cli.plugins`` resolves plugin install locations. The
+    # ``seen_names`` dedupe below keeps profile-local plugins (if any) authoritative over same-named root
+    # plugins.
     user_plugin_roots = [get_process_hermes_home() / "plugins"]
     root_plugins = get_default_hermes_root() / "plugins"
     if root_plugins.resolve(strict=False) != user_plugin_roots[0].resolve(strict=False):
         user_plugin_roots.append(root_plugins)
     search_dirs = [(d, "user") for d in user_plugin_roots]
     search_dirs += [(bundled_root / "memory", "bundled"), (bundled_root, "bundled")]
+    # GHSA-5qr3-c538-wm9j (#29156): the previous ``os.environ.get(...)`` check treated *any* non-empty
+    # string as truthy, so ``=0``, ``=false``, and ``=no`` — all of which the agent loader and operators
+    # correctly read as "disabled" — silently *enabled* the untrusted project source in the web server.
+    # Combined with the absolute-path RCE primitive on the manifest's ``api`` field (now patched below),
+    # this turned the opt-in into a sticky always-on switch. Use the shared truthy semantics (``1`` /
+    # ``true`` / ``yes`` / ``on``) so the gate matches ``hermes_cli/plugins.py`` and the documented user
+    # contract.
     if env_var_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
         search_dirs.append((Path.cwd() / ".hermes" / "plugins", "project"))
     return search_dirs
@@ -738,6 +768,15 @@ def _mount_plugin_api_routes():
 
     Each plugin's ``api`` file must expose a ``router`` (FastAPI APIRouter), mounted under
     ``/api/plugins/<name>/``. See ``_plugin_api_mount_skip_reason`` for the trust gates.
+
+    Backend import is restricted to ``bundled`` and ``user`` sources. Project plugins
+    (``./.hermes/plugins/``) ship with the CWD and are therefore attacker-controlled in any threat model
+    where the user opens a malicious repo; they can extend the dashboard UI via static JS/CSS but their
+    Python ``api`` file is never auto-imported by the web server. See GHSA-5qr3-c538-wm9j (#29156).
+    Additionally, user plugins must be explicitly enabled via the ``plugins.enabled`` allow-list in
+    config.yaml before their backend code is imported. Without this gate, an installed-but-not-enabled
+    plugin's Python code would execute at dashboard startup — a code execution vector that bypasses the
+    user's intent. (#46435, GHSA-mcfc-hp25-cjv7)
     """
     from hermes_cli.web_server import _get_dashboard_plugins, app
     try:

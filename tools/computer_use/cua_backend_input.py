@@ -46,7 +46,11 @@ class _InputMixin:
         """Attach delivery_mode to an input-action args dict. Background is the default and needs no flag.
         Foreground is only sent when the live action schema accepts it; on an older driver we refuse with
         ``foreground_unsupported`` instead of silently downgrading to background (which would land input
-        where the model didn't expect)."""
+        where the model didn't expect).
+
+        Returns an ActionResult to short-circuit on refusal, or None to proceed. See
+        NousResearch/hermes-agent#67052 phase B.
+        """
         if not delivery_mode or delivery_mode == "background":
             return None
         if delivery_mode != "foreground":
@@ -90,6 +94,10 @@ class _InputMixin:
             return refusal
         # Tool is chosen by click_count only; `button` goes through click's enum (the driver rejects unknown
         # buttons). `right_click` / `middle_click` MCP tools are deprecated aliases and never invoked here.
+        # Choose tool by click_count only — single-vs-double — and pass the button through to `click`'s
+        # `button` enum (Surface 5 of NousResearch/hermes-agent#47072). cua-driver-rs gained an explicit
+        # `button: "left"|"right"|"middle"` arg on `click` in trycua/cua#1961 which rejects unknown buttons;
+        # before that, `middle` was silently mapped to a left-click via name-routing through `right_click`.
         button_norm = (button or "left").lower()
         if button_norm not in {"left", "right", "middle"}:
             return _refuse("click", f"unknown button {button!r} — expected left, right, middle.")

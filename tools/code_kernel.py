@@ -388,6 +388,7 @@ _KERNELS: Dict[Tuple, SessionKernel] = _REGISTRY.kernels
 # Bounded lifecycle defaults (config: code_execution.max_session_kernels / kernel_idle_timeout).
 # A long-lived gateway must never accumulate one live child per finished conversation:
 # stable owner id, owner-teardown disposal, idle reaping, max-live bound.
+# See #88637.
 DEFAULT_MAX_SESSION_KERNELS = 4
 DEFAULT_KERNEL_IDLE_TIMEOUT = 1800
 
@@ -437,7 +438,10 @@ def shutdown_all_kernels() -> None:
 
 def shutdown_kernels_for_owner(owner: str) -> None:
     """Dispose every kernel a session owns — wired into ``tools.approval.clear_session``
-    so kernels die at the same boundary that clears approval/yolo state (/new, session close)."""
+    so kernels die at the same boundary that clears approval/yolo state (/new, session close).
+
+    See #88637.
+    """
     if owner:
         _REGISTRY.shutdown(owner)
 

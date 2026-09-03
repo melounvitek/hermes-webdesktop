@@ -37,6 +37,7 @@ def _build_permission_options(
     # A gate that re-asks every time (allow_session=False, e.g. protected
     # agent-instruction writes) collapses to the same two options as a Smart
     # DENY override — offering a scope Hermes discards would re-prompt every write.
+    # See #81887.
     once_only = smart_denied or not allow_session
     options = [PermissionOption(option_id="allow_once", kind="allow_once", name="Allow once")]
     if not once_only:

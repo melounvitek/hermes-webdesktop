@@ -208,6 +208,12 @@ class GatewayTurnMixin:
             row = db.get_session(session_id)
             if not row:
                 return
+            # Legacy backfill: canonical Bot Chats created BEFORE the follow_profile_config contract existed
+            # carry no marker, yet they are still the plugin-owned forever-DM. The plugin's own identity
+            # rule is "the profile's session titled exactly 'Bot Chat'" (UNIQUE(title) makes that an exact
+            # registry, and pre-policy rows may be visible OR hidden), so mirror that rule here. Without
+            # this, every Bot Chat that already exists in the field stays pinned to its stale stored
+            # provider until the user deletes it — the exact live-report shape (#89497 / #94818).
             raw_config = row.get("model_config")
             config = {}
             with suppress(Exception):
@@ -319,6 +325,8 @@ class GatewayTurnMixin:
         bound_session_id = stored_session_id
         # A binding pointing at a pre-compression parent is walked forward to the tip so the next
         # message resumes the compressed child instead of reloading the oversized parent.
+        # Returns the input unchanged when the session isn't a compression parent, so this is cheap and
+        # safe. See #20470, #29712, #33414.
         if bound_session_id and self._session_db is not None:
             try:
                 canonical_session_id = await self._session_db.get_compression_tip(bound_session_id)
@@ -344,10 +352,16 @@ class GatewayTurnMixin:
         """Consume auto-reset / fresh-reset flags and emit ``session:start`` for new sessions.
         Returns ``(_was_auto_reset, _is_new_session)``."""
         # Consume was_auto_reset immediately so it cannot re-fire and wipe overrides set between turns.
+        # Capture and immediately consume was_auto_reset so it does not re-fire on subsequent messages —
+        # preventing the cleanup from wiping model/reasoning overrides set between turns (Closes #48031).
         _was_auto_reset = getattr(session_entry, "was_auto_reset", False)
         if _was_auto_reset:
             # Conversation boundary: the funnel clears every conversation-scoped dict; evict the cached
             # agent so context_compressor._previous_summary cannot leak into new summaries.
+            # Treat auto-reset as a full conversation boundary — clear every conversation-scoped per-session
+            # dict in one funnel call so the fresh session does not inherit the previous conversation's
+            # model/reasoning overrides, a queued "/model switched" note, or a stale resolved-model cache
+            # (#48031, #58403). See _CONVERSATION_SCOPED_STATE.
             self._clear_conversation_scope(session_key, reason="auto_reset")
             self._evict_cached_agent(session_key)
             session_entry.was_auto_reset = False
@@ -356,6 +370,7 @@ class GatewayTurnMixin:
         _is_new_session = session_entry.created_at == session_entry.updated_at or _was_auto_reset or _is_fresh_reset
         # Consume is_fresh_reset so it doesn't leak onto later messages in the same session.
         if _is_fresh_reset:
+            # See #6508.
             session_entry.is_fresh_reset = False
         if _is_new_session:
             await self.hooks.emit("session:start", {
@@ -373,6 +388,8 @@ class GatewayTurnMixin:
         context_note = _AUTO_RESET_CONTEXT_NOTES.get(reset_reason, _AUTO_RESET_CONTEXT_NOTES["idle"])
         # Long-lived channels: point the agent at the prior same-channel session for session_search.
         try:
+            # Returns None (appends nothing) for other platforms or when there's no prior activity to
+            # recall. Deterministic — no extra API/DB calls (#36220).
             continuity_note = build_channel_continuity_note(session_entry, source)
         except Exception:
             continuity_note = None
@@ -384,6 +401,16 @@ class GatewayTurnMixin:
             policy = self.session_store.config.get_reset_policy(
                 platform=source.platform, session_type=getattr(source, 'chat_type', 'dm'),
             )
+            # Check pairing store. A pairing entry is a first-class authorization grant, created only by a
+            # trusted operator approving a pairing code (hermes gateway pairing approve / the authenticated
+            # dashboard) — an inbound sender can never reach approve_code, so this is not an
+            # attacker-controlled path. Honored as a UNION with the allowlist: a paired user is authorized
+            # regardless of the allowlist, and when an allowlist IS configured, operator approval also
+            # writes the user into that allowlist (see PairingStore._approve_user), keeping a single
+            # operator-visible source of truth. (#23778: the original bypass was the inbound
+            # message/approval-button gate, not this gate; that gate is fixed separately.) In multiplex
+            # gateways, route to the per-profile PairingStore so each profile's whitelist is isolated; falls
+            # back to the global store when the source has no profile or the profile isn't registered.
             platform_name = source.platform.value if source.platform else ""
             # Suspended / restart-recovery-expired sessions always notify (the user must learn they
             # can /resume); idle/daily resets respect policy.notify + excluded platforms + activity.
@@ -601,6 +628,8 @@ class GatewayTurnMixin:
         if _needs_compress:
             # DB-backed cooldown (shared with context_compressor.py): survives gateway restarts, so a
             # failing compression is not re-triggered on every restart.
+            # The in-memory dict was reset on every restart, re-triggering the same failing compression and
+            # wedging session storage (#74136).
             _session_db = getattr(self, "_session_db", None)
             _getter = getattr(getattr(_session_db, "_db", _session_db), "get_compression_failure_cooldown", None)
             if _getter is not None:
@@ -928,6 +957,20 @@ class GatewayTurnMixin:
             )
             _hyg_rotated = False
             _compressed = history
+        # Only rewrite the transcript when rotation produced a NEW session id. In-place compaction does NOT
+        # need a rewrite: archive_and_compact() has already soft-archived the previous active rows and
+        # inserted the compacted messages as the new active set inside _compress_context(). Calling
+        # rewrite_transcript() after in-place compaction would invoke replace_messages(active_only=False)
+        # which DELETEs ALL rows — including the archived turns that archive_and_compact() deliberately
+        # preserved (silent data loss, #61145). The danger this guards against (mirrors the /compress fix
+        # #44794/#39704): if _compress_context returns a summary but neither rotates nor completes
+        # archive_and_compact(), the session_id is unchanged for a FAILURE reason, and an unconditional
+        # rewrite_transcript() would DELETE the original messages and replace them with only the compressed
+        # summary (permanent data loss, #21301). Write-before-repoint (mirrors manual /compress): if we
+        # repointed session_entry onto the child SID and rewrite_transcript then failed (lock/ENOSPC), the
+        # live entry would already reference a brand-new empty session while the turn continues — the
+        # conversation silently vanishes. Persist the child transcript first; only then rebind the live
+        # entry.
         if _hyg_rotated:
             if not await self.async_session_store.rewrite_transcript(_hyg_new_sid, _compressed):
                 logger.error(
@@ -1039,6 +1082,8 @@ class GatewayTurnMixin:
         would destroy the live thread (next turn starts blank), so use the cached agent's
         thread/compact/start and KEEP it cached."""
         from gateway.run import run_codex_hygiene_compaction
+        # codex app-server runtime: the model's real context is the app-server's server-side thread, not the
+        # transcript mirror. See #73503.
         _hyg_codex_auto = "native"
         _hyg_comp_cfg = hs.data.get("compression") if isinstance(hs.data, dict) else None
         if isinstance(_hyg_comp_cfg, dict):
@@ -1114,6 +1159,11 @@ class GatewayTurnMixin:
             attempt.commit_fence = _hyg_commit_fence
             attempt.future = loop.run_in_executor(
                 None,
+                # But it MUST run inside the caller's contextvars: under multiplex_profiles the profile
+                # secret scope / HERMES_HOME override live in ContextVars, and a bare run_in_executor worker
+                # starts with an empty Context — the summary model's get_secret(<PROVIDER>_API_KEY) then
+                # fails closed (UnscopedSecretError) and every hygiene compaction silently degrades to a
+                # lossy truncation (#100849 bundle).
                 copy_context().run,
                 lambda: _hyg_agent._compress_context(
                     _hyg_msgs, "", approx_tokens=plan.approx_tokens, commit_fence=_hyg_commit_fence,
@@ -1177,6 +1227,8 @@ class GatewayTurnMixin:
                     )
         except HygieneTurnHoldExceeded:
             # Availability boundary, not a failure — already logged at INFO by the turn-hold handler.
+            # Must not hit the generic "auto-compress failed" warning below: that log is how thinking-model
+            # deployments read as permanently broken (#97963; surfaced by @686f6c61 in PR #99657).
             pass
         except Exception as e:
             logger.warning("Session hygiene auto-compress failed: %s", e)
@@ -1327,6 +1379,7 @@ class GatewayTurnMixin:
                 logger.debug("clear_resume_pending failed for %s: %s", session_key, _e)
 
         # Normalize empty responses: surface errors, partial failures, and work-without-text.
+        # Fix for #18765.
         if not _intentional_silence:
             response = _normalize_empty_agent_response(agent_result, response, history_len=len(history))
             response = _sanitize_gateway_final_response(source.platform, response)
@@ -1459,6 +1512,15 @@ class GatewayTurnMixin:
         Context-overflow failures must NOT persist the user message (session would grow and
         reproduce the failure forever); transient failures (429/timeout/5xx) DO."""
         from gateway.run import _is_gateway_hidden_reasoning_incomplete_turn
+        # Save the full conversation to the transcript, including tool calls. This preserves the complete
+        # agent loop (tool_calls, tool results, intermediate reasoning) so sessions can be resumed with full
+        # context and transcripts are useful for debugging and training data. IMPORTANT: For
+        # context-overflow failures (compression exhausted, generic 400 on large sessions) we must NOT
+        # persist the user's message — doing so would grow the session further and cause the same failure on
+        # the next attempt, an infinite loop. (#1630, #9893) Transient failures (429, timeout, connection
+        # error, provider 5xx) are different: the session is not oversized, and silently dropping the user
+        # message causes severe context loss on retry — the agent forgets what was just asked. Persist the
+        # user turn so the conversation is preserved. (#7100)
         agent_failed_early = bool(agent_result.get("failed"))
         hidden_reasoning_incomplete = _is_gateway_hidden_reasoning_incomplete_turn(agent_result)
         _err = str(agent_result.get("error", "")).lower()
@@ -1492,6 +1554,9 @@ class GatewayTurnMixin:
         replaying the oversized context forever. Never on a lock-contended defer — that is the
         OPPOSITE case (a concurrent path holds the lock and is shrinking it). Returns
         ``(response, session_entry)``."""
+        # When compression is exhausted, the session is permanently too large to process. (#9893) Never wipe
+        # the session for that — retry-next-message semantics apply (#69870 lock-skip consumer; salvaged
+        # from #49874).
         if agent_result.get("compression_deferred"):
             logger.info(
                 "Compression deferred for session %s — the compression "
@@ -1509,6 +1574,13 @@ class GatewayTurnMixin:
                 # Re-point the Telegram topic binding at the fresh session, or the binding-heal walk
                 # switches the next message back onto the bloated child and re-triggers exhaustion
                 # forever. No-op on non-topic lanes.
+                # Compression rotated session_entry.session_id to the oversized compressed child earlier
+                # this turn (the agent-result sync above), and that _sync also rewrote the (chat_id,
+                # thread_id) -> bloated-child binding. reset_session swaps in a clean, parentless session,
+                # but without re-syncing the binding the next inbound message in this topic gets
+                # switch_session'd back onto the bloated child by the binding-heal walk, reloads the
+                # oversized transcript, and re-triggers compression exhaustion forever (#35809 — regression
+                # of the #9893/#10063 auto-reset).
                 session_entry = new_entry
                 await asyncio.to_thread(
                     self._sync_telegram_topic_binding, source, session_entry, reason="compression-exhausted-reset",
@@ -1522,6 +1594,11 @@ class GatewayTurnMixin:
     @staticmethod
     def _hmwa_user_transcript_entry(event, prepared, ts):
         """Transcript row for the inbound user turn (clean text + event time when captured)."""
+        # Transient failure (429/timeout/5xx): persist only the user message so the next message can load a
+        # transcript that reflects what was said. Skip the assistant error text since it's a
+        # gateway-generated hint, not model output. Hidden- reasoning-only incomplete turns follow the same
+        # persistence rule so peer-agent channels don't ingest them as completed assistant turns. (#7100,
+        # #51628)
         _user_entry = {
             "role": "user",
             "content": (
@@ -1550,6 +1627,13 @@ class GatewayTurnMixin:
         history = prepared.history
         # The agent already persisted this turn's rows (codex app-server reports agent_persisted=True
         # too); skip the DB write. Default = a session DB exists; non-persisting runtimes pass False.
+        # The agent already persisted these messages to SQLite via _flush_messages_to_session_db(), so skip
+        # the DB write here to prevent the duplicate-write bug (#860 / #42039). This holds for the codex
+        # app-server runtime too: although it early-returns and bypasses conversation_loop's per-step
+        # flushes, it flushes its own projected assistant/tool messages before returning and reports
+        # agent_persisted=True (see agent/codex_runtime.py). Reading the flag (default = self._session_db is
+        # not None) keeps the persistence contract explicit and lets any future non-persisting runtime opt
+        # into a gateway-side write by returning False.
         agent_persisted = agent_result.get("agent_persisted", self._session_db is not None)
         _user_row = self._hmwa_user_transcript_entry(event, prepared, ts)
 
@@ -2076,6 +2160,7 @@ class GatewayTurnMixin:
                     )},
                     session_db=getattr(self._session_db, "_db", self._session_db),
                     # Reload from disk — do not reuse the startup snapshot.
+                    # See #60955.
                     fallback_model=self._refresh_fallback_model(),
                 )
                 try:
@@ -2164,7 +2249,10 @@ class GatewayTurnMixin:
         """Disconnect, reconnect, and notify MCP tool changes (shared by button / text / no-confirm paths).
 
         Under multiplex the reload runs inside the requesting profile's runtime scope (entered here
-        when the caller did not) and only that profile's servers are torn down and rediscovered."""
+        when the caller did not) and only that profile's servers are torn down and rediscovered.
+
+        See #95518.
+        """
         from gateway.run import _profile_runtime_scope
         multiplex = bool(getattr(self.config, "multiplex_profiles", False))
         if multiplex and not get_hermes_home_override():
@@ -2265,6 +2353,9 @@ class GatewayTurnMixin:
         if _buffer_only:
             _effective_cursor = ""
         # Fresh-final applies to Telegram only (others edit in place cheaply).
+        # Fresh-final applies to Telegram only — other platforms either edit in place cheaply (Discord,
+        # Slack) or don't have the timestamp-on-edit / edit-timestamp-stays-stale problem. (Ported from
+        # openclaw/openclaw#72038.)
         _fresh_final_secs = (
             float(getattr(scfg, "fresh_final_after_seconds", 0.0) or 0.0)
             if source.platform == Platform.TELEGRAM else 0.0
@@ -2293,6 +2384,9 @@ class GatewayTurnMixin:
         """Platform stream consumer for the proxy path when streaming is enabled, else ``None``."""
         from gateway.run import _load_gateway_config, _platform_config_key
         _scfg = getattr(getattr(self, "config", None), "streaming", None)
+        # #60671 — streaming TTS consumer is created on the outer event-loop thread before run_sync
+        # launches.  run_sync only reads it via ``streaming_tts_consumer_holder[0]`` for delta callback
+        # wiring.
         if _scfg is None:
             from gateway.config import StreamingConfig
             _scfg = StreamingConfig()
@@ -2552,6 +2646,10 @@ class GatewayTurnMixin:
             "thinking_progress", default=False, require_platform_override_for={Platform.MATTERMOST},
         ) != "off"
         # Slack-native task cards need the progress queue even with text tool_progress off.
+        # Slack-native task cards (#29483): when the Slack adapter's opt-in is set, tool progress renders as
+        # native plan/task cards via chat.startStream — the progress queue is needed even though Slack keeps
+        # ordinary text tool_progress off by default (requiring both flags would silently leave the native
+        # feature inactive).
         _native_slack_task_cards = False
         if source.platform == Platform.SLACK and hasattr(adapter, "native_task_cards_enabled"):
             try:
@@ -2691,6 +2789,10 @@ class GatewayTurnMixin:
             self._thread_metadata_for_progress(
                 source, event_message_id, _progress_thread_id, _relay_prospective_thread_id,
             ),
+            # Freshness-gate stale resume_pending zombies (#46934) — but honor an explicit
+            # ``session_reset.mode: none``: the user opted out of ALL automatic resets, so an expired resume
+            # marker must fall through to a normal resume of the preserved transcript, never a silent fresh
+            # session (#61052).
             platform=source.platform,
         )
         if _native_slack_task_cards:
@@ -2766,6 +2868,10 @@ class GatewayTurnMixin:
 
         Created on the gateway loop thread (not run_sync's executor); an inactive consumer leaves
         the holder None so the whole-file fallback path runs."""
+        # Skip when streaming TTS already delivered audio for this turn (#60671).
+        # This avoids a cross-scope NameError: the outer interrupt / finalisation paths reference the
+        # consumer via ``streaming_tts_consumer_holder[0]``. Gates: voice input, auto-TTS enabled for this
+        # chat, adapter supports streaming, and a usable streaming TTS provider configured. See #60671.
         _stts_adapter = self._adapter_for_source(source)
         _is_voice_input = (
             message_type is not None
@@ -2849,6 +2955,14 @@ class GatewayTurnMixin:
         agent.interrupt(pending_text)
         _interrupt_detected.set()
         # Abort streaming TTS on barge-in.
+        # See #60671.
+        # See #60671.
+        # See #60671.
+        # Finalize the streaming-TTS consumer (#60671). finish() is called from the outer event-loop thread
+        # (not the executor worker) so early returns from run_sync are also finalised.  wait_complete()
+        # drains queued audio; on timeout the consumer is aborted unconditionally — if audio was audible,
+        # suppression is preserved so the gateway does not replay from the beginning; if no audio was
+        # audible, the whole-file fallback path is permitted.
         _stts = streaming_tts_consumer_holder[0]
         if _stts is not None:
             _stts.abort("barge-in")
@@ -2944,6 +3058,9 @@ class GatewayTurnMixin:
 
         # background=true processes survive a turn: reap only children created by THIS turn on timeout.
         _turn_task_id = turn_ctx.session_id or ""
+        # The daemon watchdog is independent of asyncio: cgroup memory reclaim may starve the event loop
+        # that runs the normal timeout poll, but it need not also postpone cleanup until the loop recovers
+        # (#76115).
         _turn_process_baseline = process_registry.snapshot_running_ids(_turn_task_id)
         turn_ctx.process_task_id = _turn_task_id
         turn_ctx.process_baseline = _turn_process_baseline
@@ -2968,6 +3085,10 @@ class GatewayTurnMixin:
                 # `.turn.agent` stays reachable until the *next* turn is claimed; clearing the
                 # ownership markers now means a /stop on the finished turn no longer reaps background
                 # work it left running.
+                # `.turn.agent` on the session state is only reset to _AGENT_PENDING_SENTINEL when the
+                # *next* turn is claimed (see _session_state(...).turn.agent = ... at claim time), so a
+                # stale reference to this exact agent instance stays reachable from
+                # _interrupt_and_clear_session() until then. See #76115.
                 _finished_agent = agent_holder[0] if agent_holder else None
                 if _finished_agent is not None:
                     _finished_agent._gateway_turn_process_task_id = ""
@@ -3277,6 +3398,7 @@ class GatewayTurnMixin:
             _active[session_key].clear()
 
         # Cap recursion depth (user keeps sending while the agent keeps failing).
+        # (#816)
         if _interrupt_depth >= self._MAX_INTERRUPT_DEPTH:
             logger.warning(
                 "Interrupt recursion depth %d reached for session %s — "
@@ -3297,6 +3419,7 @@ class GatewayTurnMixin:
         next_source, next_message, next_session_key = source, pending, session_key
         # message_type is carried into the recursive call so queued voice turns can stream TTS.
         next_message_id = next_channel_prompt = next_message_type = None
+        # See #60671.
         if pending_event is not None:
             next_source = getattr(pending_event, "source", None) or source
             if self._is_goal_continuation_event(pending_event) and not self._goal_still_active_for_session(session_id):
@@ -3324,6 +3447,7 @@ class GatewayTurnMixin:
             next_message_type = getattr(pending_event, "message_type", None)
 
         # Clear the prior turn's streaming-TTS completion marker so the recursive turn isn't suppressed.
+        # See #60671.
         _clear_adapter = self._adapter_for_source(source)
         _completed_turns = getattr(_clear_adapter, "_streaming_tts_completed_turns", None)
         _prior_key = getattr(_clear_adapter, "_streaming_tts_turn_key", None)
@@ -3339,6 +3463,15 @@ class GatewayTurnMixin:
 
         # Re-baseline the cached agent's message_count before recursing, else the coherence guard
         # rebuilds on OUR OWN flushed rows (the outer handler re-baselines only after the chain).
+        # Re-baseline the cached agent's message_count snapshot before recursing into the in-band queued
+        # (/queue) follow-up turn. The first turn has completed and flushed its own user + assistant rows to
+        # the SessionDB, so the cross-process coherence guard (#45966) — which this recursive _run_agent
+        # call re-enters — would otherwise see the grown on-disk count against the stale build-time snapshot
+        # and rebuild the agent on THIS process's OWN writes, destroying the prompt-cache prefix #46237 was
+        # merged to preserve. The existing re-baseline in _handle_message_with_agent only runs after the
+        # whole _run_agent chain unwinds — too late for the in-band follow-up. Use the same (session_key,
+        # session_id) the recursive call runs under so the snapshot matches exactly what the follow-up's
+        # guard will consult. Fail-safe in helper.
         await self._refresh_agent_cache_message_count(session_key, session_id)
 
         followup_result = await self._run_agent(
@@ -3371,6 +3504,7 @@ class GatewayTurnMixin:
 
         # Abort + bounded wait for streaming TTS: covers paths where normal finalisation was skipped.
         _stts_finally = turn_ctx.streaming_tts_consumer_holder[0]
+        # See #60671.
         if _stts_finally is not None and not _stts_finally.done:
             _stts_finally.abort("cleanup")
             with suppress(Exception):
@@ -3426,8 +3560,17 @@ class GatewayTurnMixin:
         _final = response.get("final_response") or ""
         _is_empty_sentinel = not _final or _final == "(empty)"
         # response_previewed: only suppress if that EXACT text was delivered, not unrelated commentary.
+        # Unrelated commentary/progress must not be mistaken for the final response (#14238).
         _previewed = bool(response.get("response_previewed"))
         _content_delivered = bool(_sc and getattr(_sc, "final_content_delivered", False))
+        # #71643: a *successful* finalize edit can still carry only the last preview snapshot — deltas
+        # generated between that edit and stream completion never reach any API call, and both suppression
+        # flags are set from the call's success rather than its content. Reconcile the consumer's recorded
+        # turn-final payload against the completed response: on a demonstrable mismatch (False) neither
+        # final_response_sent nor final_content_delivered may suppress the normal final send. False also
+        # covers payload-less multi-message split delivery (#78541). None (no record on a non-split legacy
+        # path) keeps legacy trust; the failed-finalize family (#51828 / #33793) is unaffected because those
+        # paths leave the flags False or record the complete fallback payload.
         _stale_finalized = False
         if _content_delivered and not _is_empty_sentinel:
             _matcher = getattr(_sc, "delivered_final_matches", None)

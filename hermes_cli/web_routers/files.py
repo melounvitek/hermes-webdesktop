@@ -64,6 +64,8 @@ _FS_READDIR_HIDDEN = {
 # points the managed root at HERMES_HOME. Mirrors the two canonical guards
 # (agent.file_safety.get_read_block_error, gateway.platforms.base
 # ._ROOT_CREDENTIAL_FILES) so the Files tab never lags behind them.
+# These typically contain credentials (API keys, tokens) and exposing them through the dashboard file
+# browser is a security leak — see issue #57505.
 _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
     "auth.json", "auth.lock", "credentials", "config.yaml", ".anthropic_oauth.json",
     "google_token.json", "google_oauth_pending.json", "google_oauth.json",
@@ -93,7 +95,12 @@ def _is_sensitive_filename(name: str) -> bool:
 def _is_sensitive_path(path: Path) -> bool:
     """True when the basename is sensitive OR any path component (case-
     insensitive) is a credential directory. Read-side guard (list/read/
-    download); the write endpoints are a separate threat class."""
+    download); the write endpoints are a separate threat class.
+
+    Read-side only: this guards list/read/download (the #57505 exfil surface). The write endpoints
+    (upload/mkdir/delete) are a separate threat class handled by the write-path checks; extending this guard
+    to them is out of scope for this fix.
+    """
     if _is_sensitive_filename(path.name):
         return True
     return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)

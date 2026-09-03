@@ -91,6 +91,7 @@ _HAS_FASTER_WHISPER, _HAS_OPENAI, _HAS_MISTRAL, _HAS_PILK = map(
 # Local model singleton; the lock guards check-then-load against concurrent voice messages.
 _local_model: Optional[object] = None
 _local_model_name: Optional[str] = None
+# See #24767.
 _local_model_lock = threading.Lock()
 
 # Idle unload: one daemon thread releases the model (hundreds of MB of RAM/VRAM) after a
@@ -137,6 +138,9 @@ def _resolve_stt_language(
 def _openai_audio_unavailable_reason() -> Optional[str]:
     """None when OpenAI audio has usable credentials (config, env, or managed gateway); else the reason."""
     try:
+        # Resolve directly instead of via the boolean probe: the probe flattens
+        # _resolve_openai_audio_client_config's selection-specific ValueError into False, so a managed
+        # openai-audio gateway outage would be logged as a generic "no API key" hint (#93045).
         _resolve_openai_audio_client_config()
         return None
     except ValueError as exc:
@@ -336,6 +340,10 @@ def _get_or_load_local_model(model_name: str, local_cfg: Dict[str, Any]):
     strong reference stays valid even if the idle watcher nulls the global mid-transcription."""
     global _local_model, _local_model_name
     model = _local_model
+    # Lazy-load the model (downloads on first use, ~150 MB for 'base'). Double-checked lock: concurrent
+    # voice messages must not both download/load the model (#24767). ``model`` is a strong local reference
+    # bound under the lock: the idle watcher may null the module global at any time, but this transcription
+    # keeps using the instance it grabbed.
     if model is None or _local_model_name != model_name:
         with _local_model_lock:
             if _local_model is None or _local_model_name != model_name:
@@ -491,6 +499,7 @@ def _dispatch_stt_provider(
         return handler(file_path, model_name, language=language, prompt=prompt)
     # Command providers: after built-ins (``stt.providers.openai.command`` can't override the
     # real handler) and BEFORE plugins, since config is more local than a plugin install.
+    # User-declared command-type provider (``stt.providers.<name>: type: command``). See #17843.
     command_provider_config = _resolve_command_stt_provider_config(provider, stt_config)
     if command_provider_config is not None:
         return _transcribe_command_stt(file_path, provider, command_provider_config, stt_config,
@@ -508,6 +517,7 @@ def _no_provider_error(provider: str, stt_config: Dict[str, Any]) -> Dict[str, A
     if "provider" in stt_config and provider_key and provider_key not in BUILTIN_STT_PROVIDERS and provider_key != "none":
         return _unregistered_stt_provider_error(provider_key)
     # An explicit openai selection flattened to "none" has a specific reason (e.g. managed gateway down).
+    # Surface it — with its `hermes tools` remediation — instead of the all-provider setup hint (#93045).
     if provider_key == "none" and str(stt_config.get("provider") or "") == "openai" and _HAS_OPENAI:
         reason = _openai_audio_unavailable_reason()
         if reason is not None:

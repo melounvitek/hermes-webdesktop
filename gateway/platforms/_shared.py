@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+# Profile-scoped secret reader for multiplexing support (PR #50094)
 from agent.secret_scope import UnscopedSecretError as _UnscopedSecretError
 from agent.secret_scope import get_secret as _scoped_get_secret
 
@@ -30,6 +31,9 @@ def get_scoped_secret(name: str, default: Any = None) -> Any:
 
 
 def profile_scoped() -> bool:
+    # --------------------------------------------------------------------------- YAML → env config bridge
+    # (apply_yaml_config_fn, #25443)
+    # ---------------------------------------------------------------------------
     """True when running inside a multiplexed secondary profile's scope.
 
     Secondary-profile adapters are constructed/connected inside

@@ -212,7 +212,11 @@ def _resolve_inference_base_url(cfg: Optional[Dict[str, Any]], provider: str) ->
 def _resolve_inference_api_key(cfg: Optional[Dict[str, Any]], provider: str) -> str:
     """Best-effort API key, resolved like :func:`_resolve_inference_base_url` so it
     matches the base URL actually probed; otherwise the local server-type probe hits
-    a keyed remote endpoint without Authorization and sprays 401s on every image turn."""
+    a keyed remote endpoint without Authorization and sprays 401s on every image turn.
+
+    Mirrors :func:`_resolve_inference_base_url`'s resolution order (runtime value, then ``model.api_key``,
+    then the providers blocks) so the key matches the base URL actually being probed. See #89863.
+    """
     return _resolve_inference_value(cfg, provider, "api_key", runtime_ok=lambda _: True)
 
 
@@ -270,6 +274,11 @@ def _probe_models_dev(provider: str, model: str, cfg: Optional[Dict[str, Any]]) 
     The fetch is cached (4h TTL) and backoff-limited."""
     from agent.models_dev import get_model_capabilities
 
+    # allow_network=True on purpose: vision-capability lookup runs when an image actually needs routing (not
+    # per turn), and the #31179 text-only-main guard depends on catalog data — a cold cache returning
+    # "unknown" would fall back to attempting the call and reintroduce the bug. This preserves the
+    # historical network-on-cold-cache behavior for this one path; the fetch is cached (4h TTL) and
+    # backoff-limited after failures.
     caps = get_model_capabilities(provider, model, allow_network=True)
     return None if caps is None else bool(caps.supports_vision)
 

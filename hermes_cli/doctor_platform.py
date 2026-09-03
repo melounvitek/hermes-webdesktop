@@ -258,6 +258,8 @@ def check_macos_tcc_grants() -> None:
     rebuild, so grants silently stop matching while the Settings toggle stays ON; identifier-pinned builds
     survive rebuilds, but grants made to older binaries stay stale until re-granted once. TCC.db needs Full
     Disk Access, so the DR string is the only readable signal (a proxy for the signing class, not DR wording).
+
+    See #86385.
     """
     from hermes_cli.doctor import _desktop_app_bundle, _macos_desktop_dr
     app = _desktop_app_bundle() if sys.platform == "darwin" else None
@@ -298,7 +300,10 @@ def _macos_desktop_dr(app: Path) -> str | None:
 
 def check_macos_tcc_anchor(should_fix: bool = False) -> None:
     """Report (and with --fix install) the dylib-complete TCC anchor; silent on non-macOS / non-uv interpreters.
-    Never raises. Install is gated by the module's pre-install boot probe, so ``--fix`` cannot brick the CLI."""
+    Never raises. Install is gated by the module's pre-install boot probe, so ``--fix`` cannot brick the CLI.
+
+    See #95596.
+    """
     with warn_on_error("macOS TCC anchor check failed"):
         from hermes_cli import macos_tcc_anchor as tcc
         status, detail = tcc.tcc_anchor_state()
@@ -317,6 +322,12 @@ def check_macos_full_disk_access() -> None:
 
     Probe: listdir of ``~/Library/Application Support/com.apple.TCC`` — FDA-gated, and probing it does NOT
     trigger a prompt (the TCC dir just returns EPERM). A missing dir / other error is indeterminate: stay silent.
+
+    macOS TCC prompts per-category (Desktop, then Downloads, then Documents, ...), so first-run agents
+    drip-feed permission dialogs as they touch each folder. ONE Full Disk Access grant covers all of them,
+    permanently — and with the stable signing identities now in place (#73681/#95091/#95131), it survives
+    updates too. This check probes whether the terminal context already has FDA and, when it doesn't, prints
+    the exact one-switch setup with the System Settings deep link.
     """
     if sys.platform != "darwin":
         return
@@ -377,9 +388,16 @@ def _check_python_environment(should_fix: bool, f: Finding) -> None:
             check_info(f"SQLite source id: {(src[:48] + '…') if len(src) > 48 else src}")
         _report_database_journal_modes()
     check_bool(sys.prefix != sys.base_prefix, "Virtual environment active", ("Not in virtual environment", "(recommended)"))
+    # macOS TCC interpreter anchor (#95596): dylib-complete re-land of the mechanism reverted in #95563.
+    # Silent on non-macOS.
     check_macos_tcc_anchor(should_fix=should_fix)
+    # macOS Full Disk Access (issue #52010 follow-up): one grant silences every per-folder prompt
+    # permanently. Silent on non-macOS.
     check_macos_full_disk_access()
     _check_version_consistency(f.issues)
+    # macOS TCC grant persistence (issue #86385): a locally-built desktop bundle whose DR is cdhash-pinned
+    # loses every permission grant on each rebuild; a post-#73681 identifier-pinned DR survives, but grants
+    # made to older binaries stay stale (toggle shows ON while macOS re-prompts).
     check_macos_tcc_grants()
 
 

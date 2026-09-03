@@ -206,6 +206,18 @@ def prune_pre_checkpoint_items(
       that is itself a canonical summary carrier is read from the SOURCE and retained as a
       synthesized ``role="assistant"`` message.
     - ``enable_summary_retention`` is a test override, not a config surface.
+
+    The server drops every input item that precedes a replayed ``compaction`` item (live-verified Aug 2026),
+    so sending pre-checkpoint history is dead weight AND silently erases the user's plaintext asks —
+    including any local-compression summary the agent already produced, which previously vanished here
+    because it carries ``role="assistant"``, not ``"user"`` (#90975).
+    A summary is never byte/character-sliced: Hermes summaries carry structural framing (handoff prefix, end
+    marker, merge-into-tail delimiters) that a blind slice can corrupt, so one that doesn't fit whole is
+    dropped instead. A summary already retained once (identical text) is never duplicated, so repeated
+    checkpoints stay idempotent. - ``enable_summary_retention`` is a function-level override (used by tests
+    and callers that need the pre-#90975 behavior back); it is not wired to a user-facing config surface.
+    Without ``item_sources`` (default), retention only sees what survived conversion, matching pre-#90976
+    behavior (#90976).
     """
     if not isinstance(items, list) or not items:
         return items
@@ -241,6 +253,9 @@ def prune_pre_checkpoint_items(
             continue
         # Source-based detection sees past a lossy conversion; it only fires
         # when the source itself is a provenance-tagged summary carrier.
+        # Canonical source-based summary detection: reads the ORIGINAL chat message's own content, so it
+        # sees past a lossy conversion (a typed `function_call_output` wrapper, or a stale exact-replay
+        # message) that erased the summary from `item` itself (#90976).
         if enable_summary_retention and isinstance(source, dict) and _is_summary_item(source):
             text = flatten_message_text(source.get("content"))
             _src_role = source.get("role")
@@ -291,6 +306,13 @@ def is_native_compaction_rejection(error: Any, status_code: Any = None) -> bool:
     Drives one-shot recovery (strip, disable for the session, retry), so matching is narrow:
     a transient 5xx that merely ECHOES the request must not downgrade native compaction.
     Requires ``status_code`` 400 (or unknown) AND the field name with rejection language.
+
+    See #82777.
+    * ``status_code`` is 400 (or unknown/None — some transports surface only a message string; field-name
+    matching alone is then the best available signal, preserving pre-#82777 behavior for them), and * the
+    error text names ``context_management`` / ``compact_threshold`` alongside rejection language ("unknown",
+    "unsupported", "invalid", "unexpected", "not permitted"...). A bare field-name echo without rejection
+    language does not match.
     """
     text = str(error or "").lower()
     if "context_management" not in text and "compact_threshold" not in text:

@@ -107,6 +107,11 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
     profile's store like a multiplex gateway; external providers keep the
     single-store behavior (registries are not profile-scoped). Cross-process
     safe: the built-in tick takes the per-store ``cron/.tick.lock``.
+
+    Every local profile's store is ticked, not just this backend's own (#69377's desktop sibling): the
+    desktop pools per-profile backends and reaps them after ~10 idle minutes, so a secondary profile's
+    ticker dies with its backend and that profile's jobs silently stop firing until the user next opens it
+    ("tasks on the sleeping profile could be idle" — community report, Aug 2026).
     """
     from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
 
@@ -610,6 +615,9 @@ async def _plugin_api_runtime_gate(request: Request, call_next):
         or _has_valid_query_token(request, path)
     ):
         try:
+            # Gate: only serve user plugins that are in plugins.enabled and not in plugins.disabled. This
+            # prevents the frontend from loading JS/CSS from plugins the user has not explicitly activated.
+            # (#46435)
             from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
             enabled_set = _get_enabled_set()
             disabled_set = _get_disabled_set()

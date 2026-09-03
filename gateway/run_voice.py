@@ -31,7 +31,12 @@ _VOICE_MODES = {"off", "voice_only", "all"}
 class GatewayVoiceMixin:
     def _voice_key(self, platform: Platform, chat_id: str, profile: Optional[str] = None) -> str:
         """``<profile>:<platform>:<chat_id>`` under multiplexing (else two bots in one channel
-        share a key and one ``/voice`` flips the other's); default keeps ``<platform>:<chat>``."""
+        share a key and one ``/voice`` flips the other's); default keeps ``<platform>:<chat>``.
+
+        Under multiplexing the key is additionally namespaced by the profile whose bot speaks in the chat
+        (``<profile>:<platform>:<chat_id>``); the default profile keeps the historical
+        ``<platform>:<chat_id>`` shape so persisted state stays valid. See #75198.
+        """
         base = f"{platform.value}:{chat_id}"
         profile = profile.strip() if isinstance(profile, str) else ""
         return base if not profile or profile == "default" else f"{profile}:{base}"
@@ -239,6 +244,10 @@ class GatewayVoiceMixin:
         if not text_ch_id:
             return
         source = self._voice_input_source(adapter, guild_id, user_id, text_ch_id)
+        # Validate the session owner against the current allowlist before auto-resuming. A session created
+        # before TELEGRAM_ALLOWED_USERS (or equivalent) was configured, or before the owner was removed from
+        # it, must not silently receive a full agent response on gateway restart just because it has a
+        # resume-pending marker (issue #23778).
         if not self._is_user_authorized(source):
             logger.debug("Unauthorized voice input from user %d, ignoring", user_id)
             return

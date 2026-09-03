@@ -37,6 +37,9 @@ def mirror_to_session(
     pairs that break strict-alternation providers, while a user-role mirror
     collapses safely via the consecutive-user merge.
     Returns True if mirrored, False if no matching session or error. Never raises.
+
+    ``role`` defaults to ``"assistant"`` — correct for the interactive ``send_message`` mirror, where the
+    mirrored text is the agent's own outgoing reply (a genuine assistant turn). See #2221.
     """
     try:
         if not session_id:
@@ -66,6 +69,9 @@ def _find_session_id(platform: str, chat_id: str, thread_id: Optional[str] = Non
     don't embed the chat_id ("agent:main:telegram:dm"), so match on the persisted
     origin.  With *user_id*, exact sender matches win; several same-chat candidates
     with no user match → None rather than contaminate another participant's session.
+
+    Queries state.db gateway session rows (primary source since #9006); falls back to scanning sessions.json
+    for pre-migration databases.
     """
     try:
         from hermes_state import get_shared_session_db, release_or_close

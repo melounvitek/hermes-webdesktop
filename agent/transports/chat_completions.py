@@ -20,6 +20,14 @@ from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
 # xAI reserves ``tool_search`` for its server-side tool (HTTP 400 on client
 # declarations); aliased on the wire, mapped back in normalize_response.
+# xAI's chat-completions API reserves the function name ``tool_search`` for its own server-side tool and
+# rejects any request declaring a client function with that name (HTTP 400 "The function name tool_search is
+# reserved for the tool_search tool", #95003). The Tool Search bridge (tools/tool_search.py) assembles its
+# client-side discovery tool under the same literal name for every provider, so Grok providers are unusable
+# whenever the bridge is active. Mirror the web_search treatment in transports/codex.py
+# (_rename_client_web_search_for_xai): alias the wire declaration and map the alias back in
+# normalize_response. The alias value matches _CODEX_TOOL_SEARCH_ALIAS from the Codex-side fix for the same
+# reserved-name class (#83122) so the two transports stay consistent.
 _XAI_TOOL_SEARCH_ALIAS = "hermes_tool_search"
 
 # Persistence-only / cross-transport message keys that strict OpenAI-compatible
@@ -70,7 +78,19 @@ def _add_prompt_cache_key(
     survives compression rotation. A caller-supplied key is authoritative but is
     bounded to OpenAI's 64-char cap in place. Shares the Responses transport's hash
     so equivalent prefixes hit one bucket across modes.
+
+    ``cache_scope_id``, when provided, is the rotation-stable logical scope (compression-lineage root —
+    agent/prompt_cache_scope.py) and takes precedence over the physical ``session_id`` so the key survives
+    context-compression session rotation (#79017).
     """
+    # Stable prompt-cache routing for the Codex/Responses aux path, mirroring the main transport
+    # (agent/transports/codex.py::build_kwargs, which sets prompt_cache_key =
+    # _content_cache_key(instructions, tools)). Without this, MoA acting-aggregator and other auxiliary
+    # Responses calls stay cache-cold while the main Responses transport is warm (issue #53735). The key is
+    # content-addressed from the static prefix (instructions + tool schemas) so it stays warm across
+    # turns/fires. Guard the top-level field the same way the main transport does: xAI Responses takes the
+    # key in extra_body (not top-level) and GitHub/Copilot Responses opts out of cache-key routing entirely
+    # — for those hosts, skip it here.
     from agent.transports.codex import (
         _bound_prompt_cache_key_field, _cache_scope_from_session_id, _content_cache_key
     )
@@ -90,7 +110,14 @@ def _add_prompt_cache_key(
 
 
 def _reasoning_config_for_model(model: str, reasoning_config: dict | None) -> dict | None:
-    """Clamp Hermes' extended effort set (``ultra``) to the OpenAI-compat wire vocabulary."""
+    """Clamp Hermes' extended effort set (``ultra``) to the OpenAI-compat wire vocabulary.
+
+    Hermes' internal effort set extends the wire vocabulary with ``ultra`` (the /reasoning command documents
+    none..xhigh|max|ultra). OpenAI- compatible wires — OpenRouter chief among them — accept exactly
+    max|xhigh|high|medium|low|minimal|none and reject the extension with HTTP 400 (#89503). Clamp against
+    the declared wire vocabulary via the shared policy in ``agent.reasoning_effort``; provider profiles with
+    narrower sets clamp again downstream.
+    """
     if not isinstance(reasoning_config, dict):
         return reasoning_config
     effort = str(reasoning_config.get("effort") or "").strip().lower()
@@ -104,6 +131,10 @@ def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> 
         return None
     normalized_model = (model or "").strip().lower().removeprefix("google/")
     # Gemini-only; Gemma/PaLM on the same provider 400 on the field even as ``{"includeThoughts": False}``.
+    # ``thinking_config`` is a Gemini-only request parameter. The same ``gemini`` provider also serves Gemma
+    # (and historically PaLM/Bard); those reject the field with HTTP 400 "Unknown name 'thinking_config':
+    # Cannot find field" — including the polite ``{"includeThoughts": False}`` form. Omit the field entirely
+    # on non-Gemini models. (#17426)
     if not normalized_model.startswith("gemini"):
         return None
     effort = str(reasoning_config.get("effort", "medium") or "medium").strip().lower()

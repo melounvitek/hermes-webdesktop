@@ -253,6 +253,9 @@ _VALUELESS_QUERY_FLAG_RE = re.compile(r"(?:[A-Za-z0-9_~-]|%[0-9A-Fa-f]{2})+\Z")
 # Same-directory links (``](./FILE.ext)`` / ``](FILE.ext)``): siblings of SKILL.md the document links
 # explicitly (e.g. ./CONTEXT-FORMAT.md). Dropping them made the install "succeed" with unresolved links.
 # The extension requirement keeps prose words out; support-dir links stay on _LOCAL_LINK_RE.
+# Skills legitimately ship supporting docs next to SKILL.md instead of under a support directory (e.g.
+# mattpocock/skills' domain-modeling links ./CONTEXT-FORMAT.md); dropping them made the install "succeed"
+# while the bundle came out with unresolved links (#96310).
 _SAMEDIR_LINK_RE = re.compile(r"\]\(([^)\s\"'<>]+)")
 _SAMEDIR_NAME_RE = re.compile(r"^(?:\./)?[A-Za-z0-9][A-Za-z0-9._-]*$")
 

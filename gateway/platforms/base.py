@@ -184,7 +184,13 @@ def build_auto_tts_output_path(platform) -> str:
     """Unique temp output path for gateway auto-TTS: ``.ogg`` for ``OPUS_VOICE_PLATFORMS``
     (the tool's ``_repair_ogg_container`` then guarantees real Opus bytes), else ``.mp3``.
     Platform-awareness lives HERE because ``_clear_session_env`` wipes the TTS tool's
-    ``HERMES_SESSION_PLATFORM`` contextvar before the post-handler auto-TTS block runs."""
+    ``HERMES_SESSION_PLATFORM`` contextvar before the post-handler auto-TTS block runs.
+
+    Platforms whose native voice bubbles require Ogg/Opus (``tools.tts_tool.OPUS_VOICE_PLATFORMS`` — the
+    single source of truth) get an explicit ``.ogg`` path; the tool's central container repair
+    (``_repair_ogg_container``) then guarantees real Ogg/Opus bytes for every provider, including MP3-only
+    backends like Edge TTS. Everything else keeps the MP3 default. See #36685, #57049.
+    """
     from tools.tts_tool import OPUS_VOICE_PLATFORMS
     ext = "ogg" if _platform_name(platform) in OPUS_VOICE_PLATFORMS else "mp3"
     audio_path = os.path.join(
@@ -195,7 +201,10 @@ def build_auto_tts_output_path(platform) -> str:
 
 def utf16_len(s: str) -> int:
     """UTF-16 code units in *s* — Telegram's 4 096 limit counts those, so astral chars
-    (emoji, CJK Ext B) cost **two** units although Python's ``len()`` counts one."""
+    (emoji, CJK Ext B) cost **two** units although Python's ``len()`` counts one.
+
+    Ported from nearai/ironclaw#2304 which discovered the same discrepancy in Rust's ``chars().count()``.
+    """
     return len(s.encode("utf-16-le")) // 2
 
 
@@ -430,6 +439,8 @@ if TYPE_CHECKING:
     from agent.display import ToolPreview
 
 @dataclass
+# --------------------------------------------------------------------------- Streaming TTS format
+# descriptor and handle (#60671) ---------------------------------------------------------------------------
 class AudioFormat:
     """Declared PCM format for a streaming-TTS session: every ``write_streaming_tts``
     chunk must be raw little-endian PCM at this rate / channels / sample width."""
@@ -510,6 +521,15 @@ IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
 
 # Inbound media cap (``gateway.max_inbound_media_bytes``): payloads are buffered fully in memory,
 # so an uncapped upload (Discord Nitro: 500 MB) could OOM-kill the gateway.
+# Inbound image / audio / video payloads are buffered fully into process memory before being written to the
+# cache directory. With no cap, a single large upload (Discord Nitro allows 500 MB) — or a remote URL in an
+# inbound message payload pointing at an arbitrarily large file — can spike RAM and OOM-kill the gateway.
+# The ``cache_*_from_bytes`` helpers (the shared funnel every platform reaches eventually) and the
+# ``cache_*_from_url`` downloaders enforce this cap, so the protection holds regardless of which platform
+# adapter or code path produced the bytes. Configurable via ``gateway.max_inbound_media_bytes`` in
+# config.yaml. ``0`` disables the cap. Default 128 MiB — generous enough for ordinary photos/voice
+# notes/short clips while still bounding a hostile upload.
+# --------------------------------------------------------------------------- See #13145.
 DEFAULT_INBOUND_MEDIA_MAX_BYTES = 128 * 1024 * 1024
 
 
@@ -759,7 +779,13 @@ _ROOT_CREDENTIAL_PATHS = (
 def _profile_cache_roots() -> List[Path]:
     """Per-profile cache roots ``<root>/profiles/<name>/cache/{images,...}`` (the static safe
     roots cover only the active HERMES_HOME). Enumerated at check time so profiles created after
-    startup count and are allowlisted BEFORE the ``/root`` denylist (HERMES_HOME symlinked)."""
+    startup count and are allowlisted BEFORE the ``/root`` denylist (HERMES_HOME symlinked).
+
+    ``HERMES_HOME=/opt/data``) while the model emits a profile-scoped path silently fails delivery.
+    Enumerated dynamically at check time so profiles created after startup are covered, and so the resolved
+    profile path is allowlisted *before* the ``/root`` system denylist is consulted (which otherwise wins
+    when HERMES_HOME is symlinked under a denied prefix and $HOME is not that prefix). See issue #31733.
+    """
     try:
         profile_dirs = [p for p in (_HERMES_ROOT / "profiles").iterdir() if p.is_dir()]
     except OSError:
@@ -897,7 +923,12 @@ def _docker_sandbox_dir_candidates(session_key: str = "") -> List[str]:
     """Candidate host sandbox dir names for the delivering session, best first. Mirrors
     ``_resolve_container_task_id`` (tools/terminal_tool.py): containers are PROFILE-scoped
     (``default``, else ``profile:<name>``); legacy ``session:<key>`` sandboxes stay as a fallback.
-    The key is passed explicitly because delivery runs after the turn's contextvars were cleared."""
+    The key is passed explicitly because delivery runs after the turn's contextvars were cleared.
+
+    Takes the key explicitly because the delivery pipeline runs after ``_handle_message_with_agent`` cleared
+    the turn's session contextvars (#93950) — an ambient lookup here would silently collapse onto
+    ``default`` and miss the session's real sandbox.
+    """
     try:
         from tools.environments.path_utils import sanitize_task_id_for_path
     except Exception:
@@ -974,7 +1005,10 @@ def _cache_dir_container_mounts() -> List[Tuple[Path, Path]]:
 
 def _warn_unresolved_docker_media(candidate: Path, session_key: str, reason: str) -> None:
     """Name WHY a container-absolute MEDIA path failed translation (otherwise the only signal is
-    the generic "Skipping unsafe MEDIA directive path" line). Docker-only; host rejections quiet."""
+    the generic "Skipping unsafe MEDIA directive path" line). Docker-only; host rejections quiet.
+
+    See #93950.
+    """
     if not _docker_env_active():
         return
     logger.warning("Docker MEDIA path %s did not resolve to a host sandbox file (%s%s); "
@@ -1112,6 +1146,19 @@ SUPPORTED_IMAGE_DOCUMENT_TYPES = {
 
 # Media-delivery ext allowlist — SINGLE SOURCE OF TRUTH for both extractors and the cleanup
 # regexes: a tag is stripped only when deliverable, unknown-ext paths survive in the body.
+# Both extractors that turn response text into native attachments derive their extension set from this
+# tuple: * ``extract_media()``       — explicit ``MEDIA:<path>`` tags * ``extract_local_files()`` — bare
+# absolute/home paths the agent mentions Historically these two carried independently-maintained extension
+# lists. ``extract_media`` had a narrow list (no .md/.json/.yaml/.xml/.html/...) while
+# ``extract_local_files`` had a broad one. Combined with the unconditional ``MEDIA:\\s*\\S+`` cleanup at the
+# dispatch sites, that mismatch created a silent black hole: a ``MEDIA:/report.md`` tag failed the narrow
+# extract_media match, got stripped from the body by the loose cleanup regex, and was then invisible to
+# extract_local_files — the file was never delivered (issue #34517). Keeping one list eliminates the drift;
+# building the cleanup regexes from the same set means a tag is only stripped when its extension is one we
+# can actually deliver, so an unknown-extension path survives in the body instead of vanishing. Covers
+# images (inline), video (inline where supported), audio (voice/audio), documents/spreadsheets/presentations
+# (send_document), archives, and rendered web output. The dispatch partition (image vs video vs document)
+# lives in ``gateway/run.py``. ---------------------------------------------------------------------------
 MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg",  # images (embed inline)
     ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp",  # video (embed inline where supported)
@@ -1133,6 +1180,22 @@ _MEDIA_EXT_ALTERNATION = "|".join(sorted((e.lstrip(".") for e in MEDIA_DELIVERY_
 # ``MEDIA:`` as a boundary so glued tags (``MEDIA:/a.pngMEDIA:/b.png``) never merge; sentence-final
 # ``.`` is a boundary only before whitespace/EOL (``data.csv.`` -> ``data.csv``, ``archive.tar.gz``
 # extends past ``.tar``); CJK full-width punctuation terminates paths (``早报.pdf（782.6 KB）``).
+# A ``MEDIA:`` tag with an unknown extension is left in the text so it can still be picked up by the
+# bare-path detector (extract_local_files) downstream rather than silently deleted. Path anchors: ``~/``
+# (Unix home-relative), ``/`` (Unix absolute), ``X:\\`` or ``X:/`` (Windows drive-letter absolute — #34632).
+# Emphasis tolerance: models routinely wrap the tag in Markdown emphasis (``**MEDIA:/x.pdf**``,
+# ``*MEDIA:/x.pdf*``, ``_MEDIA:/x.pdf_``) when they present a file to the user. The old single-quote anchor
+# (``[`"']?``) and the closing lookahead (which lacked ``*``/``_``) failed to match such tags, so the file
+# was silently never delivered and the literal ``MEDIA:`` text leaked into the chat. Allow a short run of
+# emphasis/quote markers on both sides so the tag is recognised regardless of cosmetic Markdown. Code-block
+# / inline-code / blockquote contexts are still neutralised earlier by ``_mask_protected_spans`` (#35695),
+# so example tags remain non-deliverable. The trailing lookahead also accepts ``MEDIA:`` as a boundary, so
+# the next tag stops the current match cleanly (#68773). The whitespace guard keeps multi-part extensions
+# intact — for ``archive.tar.gz`` the ``.`` after ``tar`` is followed by ``g``, so the match must extend to
+# ``.gz`` instead of stopping early at ``.tar``. CJK full-width punctuation accepted as MEDIA path
+# terminators, mirroring the ASCII set in the looka below. Chinese-language agent output naturally writes
+# ``MEDIA:D:\path\早报.pdf（782.6 KB）`` or ``MEDIA:...pdf：内容`` — without these, the lookahead fails and the
+# attachment is silently dropped (#88038).
 _MEDIA_CJK_TERMINATORS = "（）〈〉《》：，。；！？、\u201c\u201d\u2018\u2019【】"
 
 MEDIA_TAG_CLEANUP_RE = re.compile(
@@ -1146,6 +1209,23 @@ MEDIA_TAG_CLEANUP_RE = re.compile(
 # ``validate_media_delivery_path`` accepts them, so injected paths that don't validate stay visible.
 # The bare path class is whitespace-bounded (a tag glued to the next ``MEDIA:`` or prose must not
 # absorb it); spaced paths are recovered by ``_match_extensionless_path`` with on-disk validation.
+# Paths NOT covered by MEDIA_TAG_CLEANUP_RE's extension alternation — both extension-less files (Caddyfile,
+# Dockerfile, Makefile) and files with an unknown extension (.py, .log, .weirdext, ...) — are validated and
+# delivered via MEDIA_EXTENSIONLESS_TAG_RE. Every ``MEDIA:`` path is therefore deliverable regardless of
+# file type (#36060): known extensions extract unconditionally via the anchored pattern above, everything
+# else extracts only after ``validate_media_delivery_path`` accepts it (exists on disk, not under the
+# credential/system denylist, strict-mode rules honored), so prompt-injection paths that do not validate are
+# left visible instead of silently dropped. The path class uses a tempered-greedy token (``[^\s\n`"']+?``
+# followed by a ``(?=...)`` lookahead) instead of the prior ``[^\s\n`"']+`` so a tag glued to the next
+# ``MEDIA:`` keyword (``MEDIA:/a.pngMEDIA:/b.png``) or to arbitrary following text (``MEDIA:/a.pngSome
+# text``) cannot silently absorb the next path — that earlier behavior merged the two paths into one invalid
+# string and dropped the file (#68773). The bare form stays non-greedy and whitespace-bounded — spaced paths
+# are NOT absorbed at the regex level, because greedy space-tolerance would reintroduce the #68773 bug class
+# (gluing the next MEDIA: tag or trailing prose into one invalid path). Instead, unknown-extension paths
+# containing spaces (``MEDIA:/data/map data.kmz``, ``C:\...\My Documents\x.log``) are recovered by
+# ``_match_extensionless_path`` (#24032): when the bare match fails validation, the candidate is
+# progressively extended forward across single spaces — bounded, stopping at newline / the next ``MEDIA:``
+# keyword — and the first extension that validates on disk wins.
 MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
     r'''[`"'*_]{0,3}MEDIA:\s*'''
     r'''(?P<path>`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|'''
@@ -1158,7 +1238,14 @@ MEDIA_EXTENSIONLESS_TAG_RE = re.compile(
 def _match_extensionless_path(scan_text: str, match: "re.Match") -> Optional[Tuple[str, int]]:
     """Extensionless MEDIA tag match -> validated on-disk ``(safe_path, end_offset)`` or None: the
     captured path first, then extended across single spaces (max 8 tokens, never past a newline
-    or the next ``MEDIA:``)."""
+    or the next ``MEDIA:``).
+
+    When that fails validation, the candidate is progressively extended forward across single spaces
+    (validation-gated, bounded at 8 tokens, never past a newline or a subsequent ``MEDIA:`` keyword) so
+    unknown-extension paths containing spaces deliver (#24032). Returns ``(safe_path, end_offset)`` where
+    ``end_offset`` is the index in ``scan_text`` just past the matched path, or ``None`` when nothing
+    validates.
+    """
     path = _normalize_media_tag_path(match.group("path"))
     if not path:
         return None
@@ -1192,7 +1279,13 @@ def _normalize_media_tag_path(raw: str) -> str:
 
 def _path_lacks_deliverable_extension(path: str) -> bool:
     """True when ``path`` has no extension or one outside MEDIA_DELIVERY_EXTS — such paths
-    take the validated delivery pass so nonexistent / denylisted ones stay visible."""
+    take the validated delivery pass so nonexistent / denylisted ones stay visible.
+
+    ``path`` — either the basename has no extension at all (Caddyfile, Makefile, …) or the extension is not
+    in MEDIA_DELIVERY_EXTS (.py, .log, .weirdext, …). Such paths route through the validated delivery pass
+    (``validate_media_delivery_path``) instead of the unconditional one, so every file type is deliverable
+    (#36060) while nonexistent / denylisted paths stay visible in the text.
+    """
     return Path(path).suffix.lower() not in MEDIA_DELIVERY_EXTS
 
 
@@ -1264,7 +1357,10 @@ def _strip_media_tag_directives(text: str) -> str:
     """Remove MEDIA: tags and [[audio_as_voice]] / [[as_document]] markers so they never render
     as text (backstop after ``extract_media``). Protected spans are mask-located only — tags
     inside them are neither stripped nor mangled, matching ``extract_media`` so display and
-    delivery agree. Empty/None text is returned as-is."""
+    delivery agree. Empty/None text is returned as-is.
+
+    See #16434.
+    """
     if not text or not _has_media_directives(text):
         return text
     cleaned = text.replace("[[audio_as_voice]]", "").replace("[[as_document]]", "")
@@ -1748,6 +1844,12 @@ class BasePlatformAdapter(ABC):
     supports_inchannel_continuable: bool = False
     # A human can answer "session restored — what next?"; webhook-style platforms set False so
     # auto-resume finishes the work instead of asking nobody.
+    # The startup auto-resume turn (``_schedule_resume_pending_sessions`` → the ``_is_resume_pending``
+    # branch in ``_handle_message_with_agent``) reads this to pick its guidance: interactive platforms
+    # (Telegram, Slack, Discord DMs, …) get "report the restore and ask what the user wants next";
+    # non-interactive event platforms (webhook) get "finish the interrupted work" because nobody is there to
+    # answer, and an acknowledgement would silently abandon the task (#57056). Read generically via
+    # ``getattr(adapter, "interactive_resume", True)`` — no per-platform branching at the call site.
     interactive_resume: bool = True
     # Back-reference to the running ``GatewayRunner`` (set by gateway/run.py); ``build_source``
     # resolves the inbound profile via ``runner._profile_name_for_source``.
@@ -1769,6 +1871,7 @@ class BasePlatformAdapter(ABC):
         # Strong refs to shielded fatal-error handler tasks that outlive their carrier task
         # (asyncio keeps only weak refs); without them the loop can GC the detached handler
         # mid-flight — the "handler killed mid-flight" class (#81335).
+        # See #81335.
         self._detached_fatal_tasks: set = set()
         # Lock takeover armed only for the initial connect of ``gateway run --replace``.
         self._platform_lock_takeover_allowed = self._platform_lock_takeover_attempted = False
@@ -1799,6 +1902,9 @@ class BasePlatformAdapter(ABC):
         self._auto_tts_default: bool = False
         self._auto_tts_enabled_chats, self._auto_tts_disabled_chats = set(), set()
         # Turn keys where streaming TTS already delivered audio; whole-file auto-TTS skips them.
+        # When the gateway streaming-TTS consumer successfully delivers audio, it adds the turn key here so
+        # the base adapter's whole-file auto-TTS path skips the duplicate. Cleared after the turn completes.
+        # See #60671.
         self._streaming_tts_completed_turns: set[str] = set()
         # Chats whose typing indicator is paused (approval waits); _keep_typing skips them.
         self._typing_paused: set = set()
@@ -1919,7 +2025,11 @@ class BasePlatformAdapter(ABC):
 
     def _should_auto_tts_for_chat(self, chat_id: str) -> bool:
         """Whether auto-TTS fires for ``chat_id``: explicit ``/voice on|tts`` wins,
-        then explicit ``/voice off``, then the global ``voice.auto_tts`` default."""
+        then explicit ``/voice off``, then the global ``voice.auto_tts`` default.
+
+        Decision layers (Issue #16007): 1. Explicit ``/voice on`` or ``/voice tts`` → always fire (even if
+        ``voice.auto_tts`` is False). 2. 3.
+        """
         return chat_id in self._auto_tts_enabled_chats or (
             chat_id not in self._auto_tts_disabled_chats and bool(self._auto_tts_default))
 
@@ -1999,6 +2109,7 @@ class BasePlatformAdapter(ABC):
             # cancels; unshielded, the handler died mid-flight — adapter popped from the
             # gateway map but never queued for background reconnect, leaving a zombie
             # gateway with no platforms and no pending retries (#81335).
+            # See #81335.
             task = asyncio.ensure_future(result)
             # Strong ref: asyncio only keeps weak refs to tasks ("save a reference ... to
             # avoid a task disappearing mid-execution"); matches
@@ -2351,7 +2462,12 @@ class BasePlatformAdapter(ABC):
     async def delete_message(self, chat_id: str, message_id: str) -> bool:
         """Delete a sent message; True on success (platforms without a deletion API return False and
         callers leave it). Used by the stream consumer's fresh-final cleanup to remove stale
-        previews."""
+        previews.
+
+        Used by the stream consumer's fresh-final cleanup path (see openclaw/openclaw#72038) to remove
+        long-lived preview messages after sending the completed reply as a fresh message so the platform's
+        visible timestamp reflects completion time.
+        """
         return False
 
     def _get_ephemeral_system_ttl_default(self) -> int:
@@ -2603,6 +2719,11 @@ class BasePlatformAdapter(ABC):
     # ── Streaming TTS contract: voice adapters accept PCM chunks while the LLM generates.
     # Defaults report "unsupported" (whole-file fallback).
 
+    # ------------------------------------------------------------------ Streaming TTS adapter contract
+    # (#60671) ------------------------------------------------------------------ Voice-capable adapters
+    # (LiveKit, Discord voice, …) override these to accept PCM audio chunks while the LLM is still
+    # generating. The default implementations report "unsupported" so existing adapters are
+    # source-compatible and keep the whole-file auto-TTS fallback.
     def supports_streaming_tts(self, chat_id: str, audio_format: AudioFormat) -> bool:
         """Return True when this adapter can accept streaming PCM for *chat_id*."""
         return False
@@ -2654,7 +2775,12 @@ class BasePlatformAdapter(ABC):
         self, chat_id: str, media_path: str, *, is_voice: bool = False,
         metadata: Optional[Dict[str, Any]] = None) -> None:
         """User-visible notice when a MEDIA attachment upload failed: the tag was
-        already stripped from the text, so silence would be a silent drop."""
+        already stripped from the text, so silence would be a silent drop.
+
+        The non-streaming dispatch loop strips ``MEDIA:`` tags before sending attachments. When the
+        subsequent upload returns ``success=False`` (for example Discord accepted the message but attached
+        nothing), the user must see a failure notice instead of a silent drop (#66797).
+        """
         ext = Path(media_path).suffix.lower()
         if is_voice or should_send_media_as_audio(self.platform, ext, is_voice=is_voice):
             text = _media_failure_text("audio")
@@ -2707,6 +2833,7 @@ class BasePlatformAdapter(ABC):
                 continue  # This is a MEDIA path quote, not inline code
             # A whole tag in inline code (`MEDIA:/path.csv`) is a real directive (models format
             # paths as code): deliver IF it validates; non-existent examples stay masked.
+            # See #35695.
             inner = m.group(0)[1:-1].strip()
             if inner.upper().startswith("MEDIA:"):
                 candidate = _normalize_media_tag_path(inner[6:])
@@ -2722,7 +2849,12 @@ class BasePlatformAdapter(ABC):
         like ``{"result": "MEDIA:/x/stale.png"}``) so they are never re-delivered. Only
         value-context strings (``:,{[`` before the ``"``) and bare paths (``/``, ``~/``, ``X:\\``)
         count; ``MEDIA:"..."`` quoted tags and line-start/prose tags are untouched. Offsets
-        preserved."""
+        preserved.
+
+        Here the ``MEDIA:`` is part of stored text, not an outbound directive, but the bare-path branch of
+        ``MEDIA_TAG_CLEANUP_RE`` would still match it and re-deliver a stale file. (Regression report
+        #34375.)
+        """
         if '"' not in content or "MEDIA:" not in content:
             return content
         # Value-context string: quote preceded by : , { or [; escape-aware body to the closing
@@ -2744,6 +2876,11 @@ class BasePlatformAdapter(ABC):
         # Scan a masked copy so example/stored MEDIA paths (code, quotes, JSON values) are never
         # delivered; dedupe on the expanded path so a file referenced twice uploads once.
         scan_content = _mask_media_scan_text(content)
+        # - code blocks / inline code / blockquotes hold prose examples (#35695) - serialized JSON string
+        #   values hold stored tool-result text (#34375) Both maskers are offset-preserving (chars ->
+        #   spaces) so match offsets stay valid; chaining them masks the union of both protected regions.
+        # Dedupe on the expanded path (first occurrence wins) so the same file referenced twice in one
+        # response — e.g. a MEDIA tag inline AND in a summary footer — is uploaded once, not twice (#29131).
         seen_paths: set = set()
 
         def _add(path: str) -> None:
@@ -2785,6 +2922,9 @@ class BasePlatformAdapter(ABC):
         mutilated. Dispatch by type lives in ``gateway/run.py``."""
         ext_part = '|'.join(e.lstrip('.') for e in MEDIA_DELIVERY_EXTS)
         # Lookbehind rejects URL/relative matches (https://…/img.png, ./foo.png).
+        # (?<![/:\w.]) prevents matching inside URLs (e.g. https://…/img.png) and relative paths (./foo.png)
+        # (?:~/|/)    anchors to absolute or home-relative Unix paths (?:[A-Za-z]:[/\\]) anchors to Windows
+        # drive-letter paths (#34632)
         path_re = re.compile(
             r'(?<![/:\w.])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.(?:' + ext_part + r')\b',
             re.IGNORECASE)
@@ -3352,6 +3492,8 @@ class BasePlatformAdapter(ABC):
         # calling the message handler directly and sending the response.  Do NOT use
         # _process_message_background — it manages session lifecycle and its cleanup
         # races with the running task (split-brain, see PR #4926).
+        # Certain commands must bypass the active-session guard and be dispatched directly to the gateway
+        # runner. Without this, they are queued as pending messages and either: See #4926.
         cmd = event.get_command()
         from hermes_cli.commands import (is_interrupt_then_dispatch, should_bypass_active_session)
         if should_bypass_active_session(cmd):
@@ -3372,6 +3514,7 @@ class BasePlatformAdapter(ABC):
         # Otherwise it lands in _pending_messages as a follow-up turn and the answer is
         # discarded.  Same shape as the /approve deadlock fix (PR #4926): agent thread
         # blocked on Event.wait, message must reach the resolver before being a new turn.
+        # See #4926.
         if not cmd and event.allow_gateway_control:
             try:
                 from tools import clarify_gateway as _clarify_mod
@@ -3653,9 +3796,13 @@ class BasePlatformAdapter(ABC):
         # Captured before extract_media strips it: images then go via send_document (no recompression).
         force_document = "[[as_document]]" in response
         pre_extract = response
+        # Pre-extract snapshot for the #29346 recovery/invariant below.
         media_files, response = self.extract_media(response)
         media_files = self.filter_media_delivery_paths(media_files, session_key=session_key)
         images, text_content = self.extract_images(response)
+        # Strip any remaining internal directives from message body (fixes #1561). _strip_media_directives
+        # shares MEDIA_TAG_CLEANUP_RE, so a MEDIA: tag with an unknown extension is intentionally left in
+        # the body for extract_local_files below to pick up rather than silently dropped (#34517).
         text_content = _strip_media_directives(text_content).strip()
         if images:
             logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
@@ -3673,6 +3820,9 @@ class BasePlatformAdapter(ABC):
                     local_files = [p for p in local_files if p not in history]
             if local_files:
                 logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
+        # A2 (#29346): extraction can reduce a non-empty response to empty text with no attachment, and the
+        # `if text_content` guard below then drops it silently. Recover on every platform (#33842 was
+        # Discord-only); the guard avoids duplicating an attachment.
         if not (text_content or images or local_files or media_files):
             _recovered = _strip_media_directives(response).strip()
             if _recovered:
@@ -3707,6 +3857,11 @@ class BasePlatformAdapter(ABC):
         if late_pending is not None:
             existing_task = self._session_tasks.get(session_key)
             if existing_task is not None and existing_task is not current_task:
+                # The in-band drain (or an earlier late-arrival drain) already spawned a follow-up task that
+                # owns this session. Re-queue the late-arrival event so that task picks it up — avoids
+                # spawning two concurrent _process_message_background tasks for the same key (#17758
+                # follow-up: prevents the create_task path from racing with itself across the
+                # in-band/finally boundary).
                 self._pending_messages[session_key] = late_pending
             else:
                 logger.debug(
@@ -3835,7 +3990,16 @@ class BasePlatformAdapter(ABC):
         self, session_key: str, interrupt_event: Optional[asyncio.Event]) -> None:
         """Release a finished owner task's guard, dropping its ``_session_tasks`` entry ONLY if the
         guard was released: after a concurrent guard swap the done-task entry lets
-        ``_session_task_is_stale`` heal the orphan."""
+        ``_session_task_is_stale`` heal the orphan.
+
+        Release-then-conditional-delete is the #48300 fix: when a concurrent path (reset/new command, drain
+        handoff) swapped ``_active_sessions[key]`` to a different guard, ``_release_session_guard`` skips on
+        the guard mismatch and the lock stays installed. If we deleted ``_session_tasks`` unconditionally
+        (the old order), ``_session_task_is_stale`` would later see no owner task and report "not stale", so
+        the orphaned guard would never be healed — a permanent session deadlock. Keeping the done-task entry
+        when the guard survives lets the on-entry self-heal detect the stale lock and clear it on the next
+        inbound message.
+        """
         self._release_session_guard(session_key, guard=interrupt_event)
         if session_key not in self._active_sessions:
             self._session_tasks.pop(session_key, None)

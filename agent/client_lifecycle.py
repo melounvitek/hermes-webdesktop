@@ -117,6 +117,13 @@ class ClientLifecycleMixin:
 
         ``close()`` releases FDs from the calling thread while other threads may still hold the fd in an SSL BIO;
         a recycled fd then gets a TLS record written into an unrelated file (SQLite-header corruption).
+
+        The shared primary client has no single owning thread — worker threads from stale-killed attempts
+        may still be unwinding their SSL BIOs, and the codex-direct / MoA paths stream on the shared client
+        itself. If we release an FD while another thread's SSL layer still caches the raw integer fd, the
+        kernel can recycle it into an unrelated ``open()`` (e.g. ``kanban.db``) and the unwinding TLS flush
+        then writes an application-data record into that file — the SQLite-header corruption documented in
+        #29507/#70773.
         """
         if client is None:
             return
@@ -134,6 +141,12 @@ class ClientLifecycleMixin:
 
         The worker may be blocked in an OpenSSL read; hard-closing from the timeout thread releases FDs under a
         live BIO (native corruption / SIGSEGV). Only ``shutdown()`` so the read sees EOF and the worker closes itself.
+
+        See #94248.
+        A delegation deadline abandons this agent's daemon worker while it may still be blocked inside an
+        in-flight OpenSSL ``read`` (Codex Responses stream, httpx request). This helper only ``shutdown()``s
+        pooled sockets (safe from any thread), settling blocked reads with EOF/EPIPE so the worker can
+        unwind and run the real close from its own thread. See #70773, #94248.
         """
         drained = 0
         # Shared primary client (codex-direct / MoA stream on it directly).
@@ -194,6 +207,11 @@ class ClientLifecycleMixin:
                 return False
             self.client = new_client
         # Never hard-close the replaced shared client (another thread may still be unwinding on the old pool).
+        # #70773: never hard-close the replaced shared client from here — the caller may not be the thread
+        # whose request is still unwinding on the old pool (credential rotation and dead-connection cleanup
+        # run on the turn thread while stale-killed workers unwind; the codex-direct path streams on the
+        # shared client itself). Retire it instead: sockets are shut down (FD-safe), FD release deferred to
+        # GC.
         self._retire_shared_openai_client(old_client, reason=f"replace:{reason}")
         return True
 
@@ -310,6 +328,10 @@ class ClientLifecycleMixin:
         try:
             shutdown_count = self._force_close_tcp_sockets(client)
             # Zero sockets shut down means the worker stays blocked — WARN, not success.
+            # tcp_force_closed=0 means the stranger-thread abort found no sockets to shut down — the worker
+            # stays blocked in recv and the provider keeps the slot (#72975). Surface that as WARNING so it
+            # cannot be mistaken for a successful abort in the logs.
+            # See #72975.
             _log = logger.warning if shutdown_count == 0 else logger.info
             _log(
                 "%s client aborted (%s, shared=False, tcp_force_closed=%d, deferred_close=stranger_thread) %s%s",
@@ -572,7 +594,12 @@ class ClientLifecycleMixin:
 
     def _try_refresh_env_client_credentials(self) -> bool:
         """Adopt ``~/.hermes/.env`` credential/base-url edits at the turn boundary (a Settings save updates ``.env``
-        but a live worker keeps init-time values). Adoption rule: ``_should_adopt_env_credentials``."""
+        but a live worker keeps init-time values). Adoption rule: ``_should_adopt_env_credentials``.
+
+        Covers api-key registry providers and named custom providers with a ``key_env`` (#67935) — the
+        latter resolve to ``provider="custom"`` with no registry entry, so they are matched through the
+        runtime provider's config lookup instead.
+        """
         if self.api_mode != "chat_completions" or getattr(self, "_fallback_activated", False):
             return False
         resolved = self._resolve_env_credentials()

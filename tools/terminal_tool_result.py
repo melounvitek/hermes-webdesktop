@@ -84,6 +84,13 @@ def _interpret_exit_code(command: str, exit_code: int) -> str | None:
     if exit_code == 0:
         return None
     if (signal_note := _interpret_signal_exit(exit_code)) is not None:
+        # Signal terminations (ported from Kilo-Org/kilocode#12698, adapted to Python semantics). Two shapes
+        # reach the model: * negative codes — subprocess.Popen reports a signal-killed process as
+        # ``-signum`` (definite signal death), and * 128+signum — the conventional shell encoding when bash
+        # reports a signal-killed child (heuristic: a program *can* ``exit 139``, so these notes say
+        # "usually"). Without a note the model sees a bare ``exit_code=-9`` or ``137`` and burns turns
+        # re-running or mis-diagnosing (137 = OOM kill is the big one). 130/SIGINT is deliberately absent:
+        # the executor has bespoke interrupt-marker handling for rc=130.
         return signal_note
     # The last command of a pipeline/chain determines the exit code; base
     # command = its first word that isn't a VAR=val assignment, basename'd.
@@ -213,6 +220,11 @@ def finalize_foreground_result(
     from agent.redact import redact_terminal_output
     from tools.ansi_strip import strip_ansi
     output = strip_ansi(output)
+    # For source/config dumps (MAX_TOKENS=100, "apiKey": "x" fixtures, postgresql:// f-string templates) the
+    # ENV/JSON/template passes are skipped to avoid false positives (code_file=True). But for env-dump
+    # commands (env/printenv/set/export/declare) the output IS a KEY=value credential dump, so
+    # redact_terminal_output runs the ENV pass (code_file=False) to mask opaque tokens with no vendor
+    # prefix. Real prefixes, auth headers, JWTs, private keys are masked in both modes. See issue #43025.
     output = redact_terminal_output(output.strip(), command) if output else ""
 
     exit_note = _interpret_exit_code(command, returncode)

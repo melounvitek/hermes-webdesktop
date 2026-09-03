@@ -8,6 +8,10 @@ from .method_ctx import bind_module
 # Verbose tool text is capped to the Ink render budget (a hair more, so the "[omitted …]" label
 # stays informative): unbounded output fed a render-tree blowup that OOM-killed the TUI parent.
 # Full output stays in the agent context and the SQLite session, untouched.
+# Tool Args/Result text shipped to the TUI for the verbose trail line. The TUI renders only a small
+# persisted preview (ui-tui VERBOSE_TRAIL_MAX_CHARS), kept all session and expanded by default — so shipping
+# more than that is pure pipe waste AND feeds the Ink render-tree blowup that silently OOM-killed the TUI
+# parent (#34095).
 _TUI_VERBOSE_TEXT_MAX_CHARS = 1_000
 _TUI_VERBOSE_TEXT_MAX_LINES = 16
 
@@ -270,6 +274,9 @@ def _progress_moa_reference(sid, name, preview, kw):
 def _progress_moa_progress(sid, name, preview, kw):
     # Drives the status-bar `MOA: 2/3 refs done`; both counters required for deterministic rendering.
     refs_done, refs_total = kw.get("moa_refs_done"), kw.get("moa_refs_total")
+    # Per-reference completion — drives the status-bar progress indicator (`MOA: 2/3 refs done`) requested
+    # in issue #59546. Only emitted when both counters are present so the client can render
+    # deterministically.
     if refs_done is None or refs_total is None:
         return
     _emit("moa.progress", sid, {"label": str(name or ""), "refs_done": int(refs_done), "refs_total": int(refs_total)})

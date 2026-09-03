@@ -135,6 +135,10 @@ def _transaction() -> Iterator[sqlite3.Connection]:
 
     ``sqlite3.Connection`` as a context manager only commits/rolls back; without
     the close, each call leaks a connection (and WAL/SHM fds) until GC runs.
+
+    Using ``with _connect()`` alone therefore leaks a connection — and its WAL/SHM file descriptors — on
+    every call, deferring the close to the garbage collector, which over a long-running process can exhaust
+    ``RLIMIT_NOFILE`` (the cron-ledger sibling of this bug was #69567 / PR #69594).
     """
     conn = _connect()
     try:

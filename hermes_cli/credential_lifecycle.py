@@ -149,6 +149,8 @@ def purge_env_credential_references(
 
     Prunes env-seeded pool entries and (optionally) the affected ``provider_models_cache.json`` rows
     so the model picker stops advertising a provider whose key is gone.
+
+    See #59761.
     """
     pruned = _prune_env_pool_entries(env_var)
     providers = sorted(set(pruned) | set(_providers_for_env_var(env_var)))
@@ -168,6 +170,15 @@ def save_provider_env_credential(env_var: str, value: str) -> Dict[str, Any]:
     config.yaml mirrors of the PREVIOUS value are updated so a stale higher-precedence copy cannot
     shadow the rotation, and ``load_pool()`` runs now so the env-seeded ``credential_pool`` entry
     lands in ``auth.json`` (a ``.env``-only write left env-backed providers 401'ing).
+
+    Suppressed ``env:<VAR>`` pool sources are re-enabled so a deliberate re-add through the UI behaves like
+    ``hermes auth add``. See #62269.
+    The save also forces an immediate ``load_pool()`` for every provider registered against this env var so
+    the env-seeded ``credential_pool`` entry is materialized to ``auth.json`` right now — the live runtime
+    reads from the pool, and before #96058 the Desktop "Save" action only touched ``.env`` while
+    ``auth.json``'s mtime stayed unchanged, so an OpenCode Go (or any other env-backed provider) request
+    kept 401'ing until the user ran ``hermes auth add <provider> --type api-key`` separately. This makes the
+    Desktop save's effect on disk match what ``hermes auth add`` does.
     """
     from hermes_cli.config import load_env, save_env_value
 

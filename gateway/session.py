@@ -494,14 +494,25 @@ class SessionEntry:
     prev_session_id: Optional[str] = None  # replaced by auto-reset; feeds the continuity note
     # Explicit /new or /reset; consumed once to re-inject topic/channel skills. Distinct from
     # was_auto_reset, whose "expired due to inactivity" notice is wrong for a manual reset.
+    # Set by reset_session() when the user explicitly sends /new or /reset. Consumed once by
+    # _handle_message_with_agent to trigger topic/channel skill re-injection on the first message of the new
+    # session. We can't reuse was_auto_reset for this because that flag fires the "session expired due to
+    # inactivity" user-facing notice and a misleading context-note prepend — both wrong for an explicit
+    # manual reset. See issue #6508.
     is_fresh_reset: bool = False
     # Set by the expiry watcher after finalizing; persisted so restarts don't re-run finalization.
     expiry_finalized: bool = False
     # Next get_or_create_session() auto-resets; set by /stop to break stuck-resume loops.
+    # When True the next call to get_or_create_session() will auto-reset this session (create a new
+    # session_id) so the user starts fresh. See #7536.
     suspended: bool = False
     # Interrupted by a restart/drain timeout, recovery expected: unlike ``suspended`` the
     # session_id is kept so the agent auto-continues. Cleared after the next successful turn;
     # escalation to ``suspended`` is the runner's ``.restart_failure_counts`` job.
+    # Unlike ``suspended``, ``resume_pending`` preserves the existing session_id on next access — the user
+    # stays on the same transcript and the agent auto-continues from where it left off. Escalation to
+    # ``suspended`` is handled by the existing ``.restart_failure_counts`` stuck-loop counter (#7536), not
+    # by a parallel counter on this entry.
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
@@ -769,6 +780,16 @@ class SessionStore(
         # SQLite handles are cached per path and resolved through ``_db`` per call, never bound
         # once: a multiplexed gateway serves every profile from ONE process and a handle frozen to
         # the root home would land every profile's rows in the root state.db.
+        # Initialize SQLite session database. A multiplexed gateway serves every profile from a SINGLE
+        # process, so a handle bound during __init__ is frozen to the process's own root home; every
+        # profile's rows then land in the root state.db even though ``_profile_runtime_scope`` has already
+        # redirected ``get_hermes_home()`` for the turn (its docstring lists "sessions" among what it
+        # scopes). The row still carries the right ``profile_name``, so the damage is invisible in the data
+        # and shows up only as the desktop listing a profile's session under the default bot --
+        # ``_open_session_db_for_profile`` reads ``profiles/<name>/state.db``, which never received the
+        # write. See #88532. Priming the handle for the current scope here keeps the startup diagnostics
+        # exactly where they were: the live-DB isolation guard still raises during construction, and the
+        # JSONL-fallback warning is still printed once at startup rather than on first use.
         self._db_pinned = _DB_UNPINNED
         self._db_handles: Dict[Path, Any] = {}
         self._db_handles_lock = threading.Lock()
@@ -1028,7 +1049,12 @@ class SessionStore(
 
     def set_session_metadata(self, session_key: str, key: str, value: Any) -> bool:
         """Persist a small JSON-serializable metadata value. Deliberately does NOT advance
-        ``updated_at``: a background write must not make an idle session look fresh."""
+        ``updated_at``: a background write must not make an idle session look fresh.
+
+        Metadata writes are internal bookkeeping and deliberately do NOT advance ``updated_at``: it is the
+        user-activity clock that drives idle/daily reset policy and the restart-resume freshness gate
+        (#85709), and a background write must not make an idle session look fresh.
+        """
         return self._update_entry(session_key, lambda e: e.metadata.__setitem__(key, value))
 
     def set_model_override(self, session_key: str, override: Optional[Dict[str, Any]]) -> None:
@@ -1084,6 +1110,9 @@ class SessionStore(
         self._save()
         return new_entry
 
+    # Compression repoint is store bookkeeping, not user activity — leave ``updated_at`` alone so a
+    # background compression on an idle session cannot make it look fresh to reset policy or the
+    # restart-resume freshness gate (#85709).
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
         """Point a session key at an existing session ID (``/resume``): ends the current row and
         reopens the target so resume matches the CLI."""

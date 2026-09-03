@@ -58,7 +58,10 @@ Interaction style:
 
 
 def build_plan_prompt(task: str = "") -> str:
-    """Build the plan-mode prompt; empty *task* asks the agent to infer it from conversation context."""
+    """Build the plan-mode prompt; empty *task* asks the agent to infer it from conversation context.
+
+    See #36821.
+    """
     task = (task or "").strip()
     task_block = f"Task to plan:\n{task}\n" if task else (
         "No explicit task was given with /plan — infer the task from the "

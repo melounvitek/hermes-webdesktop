@@ -348,6 +348,10 @@ def _try_resolve_from_custom_pool(
                 # Legacy configs used short placeholder keys ('123', 'm') for local no-auth
                 # services; has_usable_secret's 4-char floor rejects them. Every other path
                 # substitutes "no-key-required" for a loopback endpoint — this was the one gap.
+                # Every OTHER resolution path in this file already substitutes "no-key-required" for a
+                # loopback endpoint with no usable secret (the config-based custom_providers fallback a few
+                # hundred lines below, and the "actual" provider's local-offline exemption further down) --
+                # this pool path was the one gap (issue #86864).
                 pool_api_key = "no-key-required"
             return rp._runtime(provider_label, api_mode_override or rp._detect_api_mode_for_url(base_url) or "chat_completions",
                                base_url, pool_api_key, source=f"pool:{pool_key}", credential_pool=pool)
@@ -435,6 +439,10 @@ def _resolve_direct_alias_runtime(requested_provider: str, explicit_api_key: Opt
 
 def _opencode_family_for_custom(requested_provider: str, base_url: str) -> Optional[str]:
     """OpenCode family by provider name, else by opencode.ai host (``/zen/go`` => opencode-go)."""
+    # Custom providers in the OpenCode family (name extends opencode-go/zen, or base_url hosted on
+    # opencode.ai) serve models behind different API surfaces per model — a static api_mode 503s for
+    # /v1/responses-only models like grok-4.5 (#85589). Re-derive api_mode from the effective model and
+    # normalize the /v1 suffix, exactly like the built-in opencode-zen/go paths do.
     from hermes_cli.models import opencode_provider_family
     family = opencode_provider_family(requested_provider)
     if family is not None:
@@ -455,6 +463,11 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     llamacpp alias with no explicit base_url resolves to the managed server first; an explicit
     base_url always wins."""
     rp = _rp()
+    # Bare `provider="custom"` with an explicit base_url (e.g. propagated from a `model_aliases:`
+    # direct-alias resolution) — build a runtime directly so the alias's base_url actually takes effect.
+    # GitHub #27132: provider aliases that resolve to "custom" at runtime (ollama, vllm, llamacpp, …) are
+    # treated identically here, so a YAML `provider: ollama` with a LAN/WireGuard `base_url` doesn't
+    # silently fall through to OpenRouter.
     requested_norm = (requested_provider or "").strip().lower()
     if requested_norm in _LLAMACPP_ALIASES and not explicit_base_url:
         return _resolve_llamacpp_runtime(requested_provider, explicit_api_key)

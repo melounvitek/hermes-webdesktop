@@ -22,7 +22,12 @@ def _tui_compression_config_signature(cfg: dict | None) -> tuple:
 
 def _compressor_ctor_default(name: str, fallback: Any) -> Any:
     """Default read off ContextCompressor.__init__'s REAL signature, so unset-key restoration uses the
-    construction path's derivation instead of a hardcoded copy that could drift."""
+    construction path's derivation instead of a hardcoded copy that could drift.
+
+    Unset restoration must go through the same derivation the construction path uses (#94724 review finding
+    on #95980) — pulling the default off ``ContextCompressor.__init__`` itself instead of hardcoding copies
+    keeps the two from drifting.
+    """
     try:
         import inspect
         from agent.context_compressor import ContextCompressor
@@ -67,7 +72,14 @@ _COMPRESSION_INT_KEYS = (
 def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
     """Update a live session's compressor in place from config.yaml. Every adopted key has UNSET semantics:
     a removed key restores the normalized default (or model-derived value) through the construction
-    path's own derivation — acting only on PRESENT keys would leave stale values active forever."""
+    path's own derivation — acting only on PRESENT keys would leave stale values active forever.
+
+    Every adopted key has UNSET semantics (#94724 review finding on the merged #95980): removing a key from
+    config.yaml restores the normalized default — or the model-derived value — on the next turn, through the
+    same derivation the construction path uses (ContextCompressor ctor defaults read off its real signature,
+    the Codex threshold autoraise via ``_resolve_compression_threshold``, context-length re-inference via
+    the deferred ``get_model_context_length`` resolution).
+    """
     cfg = cfg if isinstance(cfg, dict) else {}
     compression = cfg.get("compression") if isinstance(cfg.get("compression"), dict) else {}
     model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
@@ -138,7 +150,11 @@ def _apply_live_compression_config(agent: Any, cfg: dict | None) -> None:
 
 def _sync_agent_compression_with_config(sid: str, session: dict) -> None:
     """Adopt compression.* / model.context_length edits at turn start (messaging gateways rebuild the
-    agent on these keys; Desktop/TUI keeps the live compressor, so it must be updated in place)."""
+    agent on these keys; Desktop/TUI keeps the live compressor, so it must be updated in place).
+
+    Desktop/TUI only synced the model; the live compressor kept the threshold captured at agent creation
+    (#95151).
+    """
     agent = session.get("agent")
     if agent is None:
         return
@@ -185,7 +201,13 @@ def _compress_session_history(
 ) -> tuple[int, dict]:
     """Single choke point for all manual-compress routes. ``focus_topic`` is the RAW argument string after
     ``/compress``, parsed HERE (not per-route) so boundary forms (``here [N]``, ``up to here``, ``--keep N``)
-    trigger a partial compress on EVERY route instead of a FULL compress focused on the literal text."""
+    trigger a partial compress on EVERY route instead of a FULL compress focused on the literal text.
+
+    It is parsed here with :func:`parse_partial_compress_args` so boundary-aware forms (``here [N]``, ``up
+    to here``, ``--keep N``) trigger a partial compress — head summarized, most recent ``keep_last``
+    exchanges kept verbatim — on EVERY route, mirroring cli.py's ``_manual_compress`` and
+    gateway/slash_commands.py (PR #35252).
+    """
     from agent.conversation_compression import finalize_context_engine_compression_notification
     from agent.model_metadata import estimate_request_tokens_rough
     from hermes_cli.partial_compress import (
@@ -208,11 +230,18 @@ def _compress_session_history(
         head = history
     if approx_tokens is None:
         # Include system prompt + tool schemas so the figure reflects real request pressure.
+        # Include system prompt + tool schemas in the estimate — a transcript-only number understates real
+        # request pressure and can even appear to grow after compression because a dense handoff summary
+        # replaces many short turns (#6217).
         approx_tokens = estimate_request_tokens_rough(
             history, system_prompt=getattr(agent, "_cached_system_prompt", "") or "", tools=getattr(agent, "tools", None) or None
         )
     # system_message=None: passing the cached prompt (already holding the identity block) would append the
     # identity twice. force=True: manual /compress bypasses the summary-failure cooldown like CLI/gateway.
+    # Pass system_message=None so AIAgent._compress_context rebuilds the system prompt cleanly via
+    # _build_system_prompt(None). Mirrors the CLI's _manual_compress fix for issue #15281. force=True: every
+    # caller of this helper is a manual /compress path (session.compress RPC, slash compress/compact,
+    # slash-worker mirror) — auto-compaction runs inside the agent loop, not here.
     try:
         compressed, _ = agent._compress_context(
             head, None, approx_tokens=approx_tokens, focus_topic=focus_topic or None, force=True,

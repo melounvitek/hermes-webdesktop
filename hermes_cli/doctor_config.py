@@ -211,6 +211,7 @@ def _provider_has_credentials(runtime_provider: str) -> bool:
 
 def _validate_model_config(config_path, issues: list) -> None:
     """Validate model.provider / model.default against the provider registry (raw file)."""
+    # Detect stale root-level model keys (known bug source — PR #4329)
     from hermes_cli.config import read_user_config_raw
     cfg = read_user_config_raw(config_path)
     model_section = cfg.get("model") or {}
@@ -334,6 +335,12 @@ def _drift_max_iterations_ghost(f: Finding, should_fix: bool, config_path) -> No
     .env FILE (load_env), not get_env_value/os.environ, which the bridge may have overridden already.
     """
     from hermes_cli.doctor import _DHH
+    # Detect stale HERMES_MAX_ITERATIONS ghost in .env shadowing agent.max_turns in config.yaml (issue
+    # #17534). The setup wizard used to dual-write the iteration budget to both stores; users who later edit
+    # only config.yaml are left with a .env ghost. The gateway bridge normally derives HERMES_MAX_ITERATIONS
+    # from agent.max_turns at startup, but if that bridge bails (any earlier config-parse error), the stale
+    # .env value silently wins and the agent runs at the wrong budget — e.g. config says 400 but the
+    # activity line reads N/90.
     from hermes_cli.config import load_env, read_user_config_raw, remove_env_value
     raw_config = read_user_config_raw(config_path)
     agent_cfg = raw_config.get("agent")

@@ -87,7 +87,10 @@ class SessionUsageMixin:
     ) -> None:
         """Unconditionally set the billing route (``update_token_counts`` only COALESCE-fills
         NULLs) so the dashboard reflects the latest /model switch; also nulls
-        ``system_prompt`` so the cached snapshot header is rebuilt."""
+        ``system_prompt`` so the cached snapshot header is rebuilt.
+
+        See #48173, #48248.
+        """
         # Barrier against queued token deltas — see update_session_model.
         self.flush_token_counts()
 
@@ -298,6 +301,11 @@ class SessionUsageMixin:
         # mid-session /model switch would attribute every token to the initial model. Only
         # the incremental path records here — absolute cumulative updates cannot be split
         # back into routes; Insights reconciles the residual instead.
+        # ``update_token_counts`` is the single chokepoint every per-API-call delta flows through (CLI,
+        # gateway, cron, delegated runs — see conversation_loop / codex_runtime), and each call carries the
+        # model/provider *active at the time of that call*. Recording the per-call delta into
+        # session_model_usage keyed by the live model preserves an accurate per-model breakdown regardless
+        # of how many times the user switches. See #51607.
         record_model_usage = (not absolute) and has_usage
 
         def _do(conn):
@@ -334,7 +342,12 @@ class SessionUsageMixin:
         write txn after the ``sessions`` UPDATE. A missing model/provider falls back to
         the session row — except for aux rows (``task`` set), which must NOT inherit the
         main-loop route (vision on gemini while the main loop runs anthropic): missing
-        info stays 'unknown'/empty."""
+        info stays 'unknown'/empty.
+
+        ``task`` distinguishes what kind of work consumed the tokens: ``''`` (empty) is the main agent loop;
+        auxiliary calls record their task name (``vision``, ``compression``, ``title_generation``, ...) via
+        :meth:`record_auxiliary_usage` (issue #23270).
+        """
         row = conn.execute(
             "SELECT model, billing_provider, billing_base_url, billing_mode FROM sessions WHERE id = ?", (session_id,),
         ).fetchone()
@@ -357,7 +370,12 @@ class SessionUsageMixin:
         """Record an auxiliary LLM call's usage (vision, compression, title generation, ...)
         as a per-(model, provider, task) delta in ``session_model_usage`` WITHOUT touching
         the ``sessions`` summary row (the gateway overwrites those counters with absolute
-        main-loop totals). ``api_call_count`` may aggregate N calls. Best-effort."""
+        main-loop totals). ``api_call_count`` may aggregate N calls. Best-effort.
+
+        See #23270.
+        Background-review forks record an aggregate of N fork API calls in one write with
+        ``task='background_review'`` (issue #87250).
+        """
         usage = {k: v for k, v in locals().items() if k in _MODEL_USAGE_FIELDS}
         if not session_id or not task:
             return

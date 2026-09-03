@@ -265,7 +265,13 @@ class MemoryStore:
         """Force-close every shared connection whose database lives under ``directory``; returns the count.
         close() is refcount-driven, so a live holder (e.g. an agent's provider) keeps a profile's SQLite handle
         open, which on Windows makes rmtree of the profile fail. The directory is going away, so later use by a
-        stale holder is expected to fail."""
+        stale holder is expected to fail.
+
+        That is exactly what a profile delete must break on Windows: the desktop's main ``serve`` process
+        opens ``memory_store.db`` for every known profile, and ``rmtree`` of the profile directory fails
+        with ``WinError 32`` while any of those handles is open (#88347). In a process that holds none (e.g.
+        the CLI deleting from outside serve) this is a harmless no-op returning 0.
+        """
         root = os.path.normcase(str(Path(directory).expanduser().resolve())) + os.sep
         with cls._shared_guard:
             doomed = [cls._shared.pop(key) for key in list(cls._shared) if os.path.normcase(key).startswith(root)]
@@ -290,6 +296,7 @@ class MemoryStore:
                 finally:
                     # Pop only OUR entry: after release_all_under() a same-path store may have
                     # registered a FRESH entry under this key; a stale late close() must not evict it.
+                    # See #88347.
                     if MemoryStore._shared.get(self._key) is entry:
                         MemoryStore._shared.pop(self._key, None)
             self._entry = None

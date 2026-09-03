@@ -109,6 +109,9 @@ class _Recovery(OverflowVerdict):
             "failed": True,
         }
         if compression_exhausted:
+            # Reuse the gateway's existing context-recovery contract (#98722, salvaged from #98741). The
+            # bloated transcript remains intact while future input can move to a clean session instead of
+            # replaying the summarize-timeout loop.
             result["compression_exhausted"] = True
         result.update(extra)
         return self.done("return", result)
@@ -190,6 +193,14 @@ class _Recovery(OverflowVerdict):
         if deferred is not None:
             return deferred, False, original_tokens
         messages = self.messages
+        # Re-measure after compression. Same-message-count compression (tool-result pruning, in-place
+        # summarization) can materially reduce request size without reducing the message array (#39550), and
+        # — the image-dominated case — compaction's historical-media aging (#97160) can free megabytes of
+        # base64 that the token estimate never counted. Bytes are the yardstick for a 413; tokens are kept
+        # only for status display.
+        # Re-estimate tokens after compression. Same-message-count compression (tool-result pruning,
+        # in-place summarization) can materially reduce request size without reducing the message array.
+        # (#39550)
         new_tokens = estimate_messages_tokens_rough(messages)
         shrank_tokens = new_tokens > 0 and new_tokens < original_tokens * 0.95
         if len(messages) < original_len:
@@ -223,6 +234,13 @@ def _recover_payload_too_large(st: _Recovery, _retry: TurnRetryState) -> Overflo
 
     messages = st.messages
     original_len = len(messages)
+    # A 413 is a BYTE-size error, so this branch scores progress in BYTES of the serialized messages payload
+    # — exact and free — never the token estimate. The estimator prices every image at a flat per-image
+    # token cost (see estimate_messages_tokens_rough) so screenshots don't trigger premature compaction;
+    # that deliberate byte-blindness means compaction can free megabytes of base64 (real case: two vision
+    # results = 96.6% of the request body but ~3.7% of the estimate) while the token delta stays under any
+    # threshold. Token-scored progress here burned all attempts on "no progress" and wedged the session
+    # permanently. (#88960 / #47339)
     original_bytes = serialized_messages_bytes(messages)
     deferred = st.compress(st.request_tokens())
     if deferred is not None:
@@ -439,6 +457,9 @@ def recover_from_overflow(
     # failover or generic retries. The classifier also covers 400/disconnect +
     # large-session heuristics.
     st.is_context_length_error = (
+        # Check for context-length errors BEFORE generic 4xx handler. The classifier detects context
+        # overflow from: explicit error messages, generic 400 + large session heuristic (#1630), and server
+        # disconnect + large session pattern (#2153).
         classified.reason == FailoverReason.context_overflow
         or wrapped_output_cap_budget is not None
     )

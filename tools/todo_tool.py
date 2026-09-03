@@ -221,6 +221,7 @@ def check_todo_requirements() -> bool:
 TODO_SCHEMA = {
     "name": "todo_list",
     "description": (
+        # See #95681.
         "Track a task list for multi-step work (3+ steps). Use for complex tasks "
         "with 3+ steps or when the user provides multiple tasks. "
         "For 'all N items' tasks, enumerate every instance as its own checklist "

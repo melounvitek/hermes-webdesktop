@@ -259,9 +259,12 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
                 self._set_fatal_error(code, message, retryable=False)
                 return False
         # Tighter keepalive so idle CLOSE_WAIT drains promptly.
+        # Outbound HTTP client. See #18451.
         from gateway.platforms._http_client_limits import platform_httpx_limits
         self._http_client = httpx.AsyncClient(timeout=30.0, limits=platform_httpx_limits())
         # client_max_size backstops the bounded reader in _handle_webhook.
+        # Inbound webhook server. client_max_size backstops the bounded reader in _handle_webhook — aiohttp
+        # enforces the cap on request.read()/post() paths too (#58536/#58902/#59180 pattern).
         app = web.Application(client_max_size=WEBHOOK_MAX_BODY_BYTES)
         app.router.add_get(self._health_path, self._handle_health)
         app.router.add_get(self._webhook_path, self._handle_verify)

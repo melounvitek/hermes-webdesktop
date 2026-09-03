@@ -264,6 +264,9 @@ def _stop_mcp_loop(*, only_if_idle: bool = False) -> bool:
     # Drain before stopping: tasks still suspended when the loop closes get resumed by the GC
     # against a closed loop. shutdown_mcp_servers only reaps _servers; everything else ends here.
     future = None
+    # Drain before stopping: closing the loop with tasks still suspended leaves their coroutines for the GC,
+    # whose finalizer then resumes them to run cleanup against a loop that is already closed -> "Event loop
+    # is closed" (#60197).
     if loop.is_running():
         from agent.async_utils import safe_schedule_threadsafe
 

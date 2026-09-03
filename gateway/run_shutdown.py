@@ -140,11 +140,27 @@ class GatewayShutdownMixin:
 
     @staticmethod
     def _running_cron_job_count() -> int:
+        # The FULL work aggregate, not _running_agent_count(): cron jobs run on the scheduler's own thread
+        # pool and API-server runs live on the adapter — both outside _running_agents (the #60432 blind
+        # spot), so counting agents alone let a suspend land mid-cron-job. Fail-AWAKE accounting: the shared
+        # shutdown-drain counters (_active_cron_job_count/_active_api_run_count) swallow exceptions to 0,
+        # which is fine for a drain but unsafe for a suspend predicate — a transient read failure would make
+        # live work look idle and reopen the mid-job freeze. Here an unreadable source counts as work
+        # (sentinel 1) so the machine stays awake until the source is readable again.
         from cron.scheduler import get_running_job_ids
         return len(get_running_job_ids())
 
     def _active_cron_job_count(self) -> int:
-        """Cron jobs currently executing — they run outside ``_running_agents``; 0 if cron can't import."""
+        """Cron jobs currently executing — they run outside ``_running_agents``; 0 if cron can't import.
+
+        Cron jobs run through a standalone ``AIAgent`` on the scheduler's own thread pool
+        (``cron/scheduler.py::run_job``), entirely outside ``self._running_agents`` — the dict every OTHER
+        active-work check on this class (``_running_agent_count``, ``_drain_active_agents``) reads. Without
+        this, the shutdown drain is structurally blind to in-flight cron work: it can report
+        ``active_at_start=0`` and proceed straight to killing tool subprocesses while a cron job's terminal
+        command is still running (#60432). Best-effort: returns 0 if the cron module can't be imported (e.g.
+        a minimal test double for this class).
+        """
         try:
             return self._running_cron_job_count()
         except Exception:
@@ -191,6 +207,7 @@ class GatewayShutdownMixin:
             workers.pop(done_future, None)
             # Workers that outlive their starting coroutine have no later waiter: consume the
             # terminal exception so asyncio emits no unhandled-future warning.
+            # See #98973.
             if not done_future.cancelled():
                 with suppress(Exception):
                     done_future.exception()
@@ -583,6 +600,11 @@ class GatewayShutdownMixin:
         if not self._running_agents and not (_cron0 or _api0 or _deferred0):
             return snapshot, False
         # Cron has its own deadline: a chat turn is announced+resumable; a killed cron run is a permanent failure.
+        # ``timeout`` (``restart_drain_timeout``) defaults to 0 because interrupting a chat turn is
+        # announced and resumable; a cron run killed mid-flight is recorded in jobs.json as a permanent
+        # failure nobody is waiting on. Sharing one budget meant the default config could report
+        # ``timed_out=True`` after 0.00s with a cron job in flight and kill it — the drain never even
+        # entered this loop (#82161).
         started = loop.time()
         deadline = started + timeout
         cron_deadline = started + (timeout if cron_timeout is None else cron_timeout)
@@ -626,6 +648,9 @@ class GatewayShutdownMixin:
         from gateway.run import _AGENT_PENDING_SENTINEL
         reason = "restart_timeout" if self._restart_requested else "shutdown_timeout"
         marked: list[str] = []
+        # Pre-mark sessions as resume_pending BEFORE the drain wait. If the process is killed by the service
+        # manager during the drain, the durable marker is already written so the next gateway boot can
+        # recover in-flight sessions (#27856).
         for _sk, _agent in list(self._running_agents.items()):
             if _agent is _AGENT_PENDING_SENTINEL:
                 continue
@@ -653,6 +678,15 @@ class GatewayShutdownMixin:
 
         The cron worker can't (its thread reaches ``_deliver_result`` after teardown closed the
         transport), so this runs post-interrupt while adapters are still connected. Best-effort.
+
+        Its thread reaches ``_deliver_result`` asynchronously, and by then ``_bounded_adapter_teardown`` has
+        closed the transport — so the notice never leaves the process, and ``_consume_interrupted_flag``
+        discards the resulting ``delivery_error`` along with it. The run's only trace is a line in jobs.json
+        nobody reads (#82232).
+        Must therefore be called from the post-interrupt phase, while adapters are still connected — the
+        same window ``_notify_active_sessions_of_shutdown`` relies on for chat sessions, which is blind to
+        cron work because cron runs on the scheduler's own thread pool rather than ``self._running_agents``
+        (#60432).
         """
         if not job_ids:
             return 0
@@ -671,6 +705,7 @@ class GatewayShutdownMixin:
                     continue
                 # deliver=local / unresolvable-origin jobs resolve to zero targets and stay silent (no home-
                 # channel fallback). Interrupted notices are failure-category status: honor failure_deliver.
+                # See #43014.
                 targets = _resolve_delivery_targets(job, for_failure=True)
             except Exception as e:
                 logger.debug("Cron interrupt targets unresolved for %s: %s", job_id, e)
@@ -843,6 +878,16 @@ class GatewayShutdownMixin:
         tool rounds would vanish on resume. Idempotent; gracefully finished agents re-flush nothing.
         """
         with _log_suppressed(logging.DEBUG, "Shutdown transcript flush failed: %s"):
+            # Persist any in-flight transcript to the SQLite session store before teardown (#13121). An
+            # agent forcibly interrupted by the drain-timeout escalation may never reach
+            # ``turn_finalizer.finalize_turn`` (the only place that flushes the turn to state.db) — e.g. it
+            # was blocked in a tool call that did not abort within the post-interrupt grace window. Its
+            # in-flight tool rounds live only in the in-memory ``_session_messages`` (refreshed per tool
+            # round in ``conversation_loop`` but never written to SQLite mid-turn), so the immediate
+            # pre-restart turn is silently dropped from ``load_transcript()`` on resume. Flushing here
+            # closes that gap; the resume_pending / fresh-tool-tail branches in
+            # ``_handle_message_with_agent`` already expect a transcript whose tail may be a pending tool
+            # result.
             _flush = getattr(agent, "_flush_messages_to_session_db", None)
             _session_messages = getattr(agent, "_session_messages", None)
             if not (callable(_flush) and isinstance(_session_messages, list) and _session_messages):
@@ -880,7 +925,12 @@ class GatewayShutdownMixin:
     def _should_emit_long_running_notification(
         self, session_key: Optional[str], agent: Any, executor_task: Optional[Any],
     ) -> bool:
-        """Emit the heartbeat only while this task still owns the live run (not after ``/new`` rebinds)."""
+        """Emit the heartbeat only while this task still owns the live run (not after ``/new`` rebinds).
+
+        Guards against a stale ``running: delegate_task`` heartbeat outliving the run that started it: stop
+        once the executor finishes, the agent is gone, or the session key has been rebound to a different
+        live agent (e.g. the user sent ``/new`` and a fresh agent took the slot mid-run, #12029).
+        """
         if agent is None or (executor_task is not None and executor_task.done()):
             return False
         if session_key:
@@ -957,12 +1007,25 @@ class GatewayShutdownMixin:
             if hasattr(agent, "shutdown_memory_provider"):
                 # Drain queued memory writes BEFORE teardown (shutdown_all() gives the worker only ~5s, so a
                 # /reset or rotation could drop them). Bounded; a failure never blocks teardown.
+                # The memory manager persists per-turn sync and end-of-session extraction on a single
+                # serialized background worker. shutdown_memory_provider() -> shutdown_all() only gives that
+                # worker a ~5s bounded drain and abandons (cancels) anything still queued past it, so a
+                # /reset — or any gateway session rotation that reaches this cleanup path — could silently
+                # drop writes the session had already handed off. The next session then loads stale memory
+                # (#73297). Give pending work a bounded head start through the manager's own barrier first,
+                # mirroring the CLI exit path (cli.py). Best-effort: a flush failure must never block
+                # teardown.
                 _mm = getattr(agent, "_memory_manager", None)
                 if _mm is not None and hasattr(_mm, "flush_pending"):
                     with suppress(Exception):
                         _mm.flush_pending(timeout=10)
                 # Pass the real transcript so ``on_session_end`` hooks don't see the empty default.
                 # ``_session_messages`` may be absent on ``object.__new__`` test stubs, hence getattr.
+                # ``_session_messages`` is set on ``AIAgent`` (run_agent.py:1518) and refreshed at the end
+                # of every ``run_conversation`` turn via ``_persist_session``; on an agent built through
+                # ``object.__new__`` (test stubs) the attribute may be absent, so ``getattr`` with a
+                # ``None`` default keeps the call signature-compatible with the pre-fix behaviour
+                # (``shutdown_memory_provider(messages=None)``). See #15165.
                 session_messages = getattr(agent, "_session_messages", None)
                 if isinstance(session_messages, list):
                     agent.shutdown_memory_provider(session_messages)
@@ -1062,6 +1125,9 @@ class GatewayShutdownMixin:
         project_root = Path(__file__).resolve().parent.parent
         # Console python under CREATE_NO_WINDOW: nothing flashes. NOT pythonw.exe — a console-less
         # watcher makes every console-subsystem descendant allocate a visible conhost (#54220/#56747).
+        # The watcher runs sys.executable (console python) under the CREATE_NO_WINDOW detach kwargs below:
+        # it owns one hidden console, inherited by the `hermes gateway restart` child, so nothing flashes.
+        # See #54220, #56747.
         watcher_python = sys.executable
         venv_dir = Path(watcher_env.get("VIRTUAL_ENV") or project_root / "venv")
         site_packages = venv_dir / "Lib" / "site-packages"
@@ -1237,6 +1303,13 @@ class GatewayShutdownMixin:
             await self.stop(restart=True, detached_restart=detached, service_restart=via_service)
 
         # NOT in _background_tasks: _stop_impl cancels those, which would skip _shutdown_event.set() / exit 75.
+        # _run_restart is a short-lived self-terminating task (calls stop() then returns). Don't add it to
+        # _background_tasks — _stop_impl cancels all entries in that set, which would cancel _run_restart
+        # while it's awaiting _stop_task, propagating CancelledError into _stop_impl and preventing
+        # _shutdown_event.set() / _exit_code = 75. See #12875. We still hold a strong reference in
+        # self._restart_task: a bare asyncio.create_task() keeps only a weak reference, so the event loop
+        # may garbage-collect a still-pending task mid-flight. The cancel loop in _stop_impl explicitly
+        # skips _restart_task for the same reason it skips _stop_task.
         self._restart_task = asyncio.create_task(_run_restart())
         return True
 
@@ -1296,6 +1369,9 @@ class GatewayShutdownMixin:
         def _mark_cron_interrupted() -> list:
             # kill_all() is global: a cron job mid-dispatch lost its tool subprocess and its agent thread may
             # still emit a plausible response from truncated output — mark it interrupted, never success.
+            # Any cron job still dispatched at this instant just had its tool subprocess killed above
+            # (kill_all() has no per-job-ID targeting — it's a global sweep). No-op when no cron job is in
+            # flight. See #60432.
             from cron.scheduler import mark_running_jobs_interrupted
             _interrupted = mark_running_jobs_interrupted(
                 f"Gateway shutdown ({phase}) killed the job's tool subprocess before the run finished."
@@ -1437,6 +1513,8 @@ class GatewayShutdownMixin:
         logger.info("Shutdown phase: post-interrupt tool kill done at +%.2fs", ctx.elapsed())
         # Last window with the transport up (the cron worker's own notice arrives after teardown).
         with _log_suppressed(logging.DEBUG, "Cron interrupt notification failed: %s"):
+            # The cron worker whose run we just killed will try to deliver its own "interrupted" notice, but
+            # it gets there after the adapter teardown below and the message is lost (#82232).
             await self._notify_interrupted_cron_jobs(_interrupted_cron_jobs)
         logger.info("Shutdown phase: cron interrupt notices done at +%.2fs", ctx.elapsed())
 
@@ -1481,6 +1559,9 @@ class GatewayShutdownMixin:
             if _task is self._stop_task or _task is self._restart_task:
                 continue
             _task.cancel()
+        # The restart orchestration task is awaiting _stop_task right now; cancelling it would propagate
+        # CancelledError into this _stop_impl and skip _shutdown_event.set() / _exit_code = 75 (#12875). It
+        # self-terminates anyway.
         self._background_tasks.clear()
         self.adapters.clear()
         for _session_key in list(self._running_agents):
@@ -1510,6 +1591,11 @@ class GatewayShutdownMixin:
         logger.info("Shutdown phase: final-cleanup tool kill done at +%.2fs", ctx.elapsed())
         # Reap the auxiliary-client cache: clients bound to dead worker-thread loops leak httpx transports.
         def _reap_aux_clients() -> None:
+            # Reap the process-global auxiliary-client cache once at the very end of teardown. Per-turn
+            # cleanup runs in _cleanup_agent_resources for each active agent, but clients bound to
+            # worker-thread loops that died with their ThreadPoolExecutor (notably cron ticks) only get
+            # swept here. Without this, long-running gateways accumulate async httpx transports until they
+            # hit EMFILE on macOS's default RLIMIT_NOFILE=256. See #14210.
             from agent.auxiliary_client import shutdown_cached_clients
             shutdown_cached_clients()
 
@@ -1521,6 +1607,18 @@ class GatewayShutdownMixin:
         # Quiesce the thread pool BEFORE closing session DBs: a late executor write after
         # SessionDB.close() checkpointed the WAL reopens the handle and splits the WAL generation
         # (close-time corruption). Clamped to the remaining watchdog leash minus 1s for the close.
+        # This used to run *after* the close block below, which left two holes: (a) `_executor_closing` was
+        # still False during the close, so any coroutine reaching `_run_in_executor_with_context` minted a
+        # brand-new pool and ran more blocking DB work against handles that had just been closed; (b)
+        # cancelling `self._background_tasks` above does not stop a `run_in_executor` future that already
+        # started — the task dies, the worker thread keeps writing. Either way a write lands after
+        # `SessionDB.close()`, which has already checkpointed the WAL and let SQLite unlink the sidecar. The
+        # late write silently reopens the handle (#94736) and mints a fresh WAL generation behind that
+        # checkpoint, so teardown checkpoints the same file a second time from a connection the shutdown log
+        # never accounts for — the close-time page-write damage in #101093 and the split WAL generation in
+        # #101064. The wait is bounded and clamped to what is left of the shutdown watchdog leash (minus a
+        # second for the close itself), so a stuck worker can never cost us the post-close cleanup window
+        # (#82161).
         _exec_quiesce_budget = max(
             0.0, min(_EXECUTOR_QUIESCE_TIMEOUT, resolve_shutdown_watchdog_delay(timeout) - ctx.elapsed() - 1.0),
         )
@@ -1553,6 +1651,8 @@ class GatewayShutdownMixin:
 
         def _close_shared() -> None:
             # Shared SessionDB instances still held by the process-wide registry (tools, cron, mirror).
+            # This is the safety net that guarantees no WAL write lock survives past gateway shutdown
+            # (#90837).
             from hermes_state import close_shared_session_dbs
             closed = close_shared_session_dbs()
             if closed:
@@ -1632,6 +1732,9 @@ class GatewayShutdownMixin:
         from gateway.run import GatewayRunner
         # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
         # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
+        # Arm a plain OS thread at the start of stop(); if teardown never finishes within drain+grace it
+        # dumps faulthandler stacks and os._exit so KeepAlive/systemd can revive. Skip under pytest so
+        # stop()-driving unit tests don't get a delayed hard-exit in the worker. See #66892.
         _watchdog_done = threading.Event()
         self._shutdown_watchdog_done = _watchdog_done
         # Shutdown-path doubles may lack the deferred-worker counter.

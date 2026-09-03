@@ -58,6 +58,12 @@ from hermes_cli.models_reasoning_caps import (  # noqa: F401  (re-exported; test
     _seed_reasoning_caps,
     nous_catalog_url,
     nous_model_reasoning_capabilities,
+    # Live-catalog metadata first (ported from PrimeIntellect-ai/prime-agent#1258): OpenRouter's /v1/models
+    # entries advertise reasoning support via supported_parameters + a reasoning object, which covers every
+    # routed vendor without a hand-maintained prefix list. The static prefix allowlist below repeatedly went
+    # stale one vendor at a time (nvidia/ missing → #75386; same class as tencent/, xiaomi/ additions before
+    # it) — metadata makes new vendors work without a code change. One catalog fetch per process, cached;
+    # unknown (catalog unreachable / unlisted model) falls back to the static list.
     openrouter_model_reasoning_capabilities,
     parse_openrouter_reasoning_capabilities,
     refresh_reasoning_caps_async,
@@ -469,7 +475,10 @@ def _openrouter_model_is_free(pricing: Any) -> bool:
 def _openrouter_model_supports_tools(item: Any) -> bool:
     """True when ``supported_parameters`` advertises ``tools`` (hermes-agent is tool-calling-first).
     Permissive when the field is absent/malformed: some OpenRouter-compatible gateways (Nous Portal,
-    private mirrors) don't populate it, and the picker must not silently empty for them."""
+    private mirrors) don't populate it, and the picker must not silently empty for them.
+
+    Ported from Kilo-Org/kilocode#9068.
+    """
     params = item.get("supported_parameters") if isinstance(item, dict) else None
     return "tools" in params if isinstance(params, list) else True
 
@@ -550,6 +559,9 @@ def fetch_openrouter_models(
         # Hide models without tool-calling support — selecting one fails at the first tool call.
         if live_item is None or not _openrouter_model_supports_tools(live_item):
             continue
+        # Hide models that don't advertise tool-calling support — hermes-agent requires it and surfacing
+        # them leads to immediate runtime failures when the user selects them. Ported from
+        # Kilo-Org/kilocode#9068.
         if preferred_id == silent_default:
             desc = "default"  # keep the silent-default badge through the live refresh
         else:
@@ -902,7 +914,11 @@ def _configured_provider_ids() -> set[str]:
 
 def _resolve_provider_prefix(model_name: str) -> Optional[tuple[str, str]]:
     """Route an explicit ``vendor/model`` prefix (``nous/deepseek-v4-pro``, ``ollama/qwen3.5:4b``) to
-    a provider the user defined in ``providers:`` (by raw name or alias) instead of the default."""
+    a provider the user defined in ``providers:`` (by raw name or alias) instead of the default.
+
+    ``nous/deepseek-v4-pro`` or ``ollama/qwen3.5:4b`` should route to the named provider instead of falling
+    back to the configured default (which silently sends non-default models to the wrong endpoint, #87189).
+    """
     if "/" not in model_name:
         return None
     vendor, model = model_name.split("/", 1)
@@ -1226,6 +1242,12 @@ def _openai_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]
     # Custom OpenAI-compatible endpoints serve a small curated catalog — use it verbatim. Official
     # OpenAI hosts (canonical and data-residency regional) return 120+ embeddings/whisper/tts/…
     # entries, so intersect with the curated agentic catalog so ``/model`` matches ``hermes model``.
+    # Model not in live /v1/models — check the curated catalog before rejecting. Providers may omit models
+    # from their live listing that are still valid (stale cache, partial rollout, gated previews). Use the
+    # pure-catalog helper (no extra live fetch) so we only accept models Hermes actually ships. (#46850)
+    # Their /v1/models listing is access-scoped and authoritative — a model absent from it is one this key
+    # CANNOT serve, so the curated soft-accept would manufacture a selection that 400s at first use. Custom
+    # OpenAI-compatible proxies keep the fallback (incomplete listings are common there).
     from hermes_cli.providers import is_official_openai_host
 
     try:
@@ -1342,6 +1364,14 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     if models is not None:
         return models
 
+    # Merge static curated list with live API results so models that the live endpoint omits (stale cache,
+    # partial rollout) still appear in the picker. Single providers (kimi, zai) use curated-first (commit
+    # 658ac1d86) to surface newest models even when live API lags (#46309). OpenCode Zen / Go are different:
+    # their live API is the authoritative catalog, so they merge live-first — live entries lead and stale
+    # curated entries no longer pollute the top of the picker. (#49129) Plugin providers with no static
+    # _PROVIDER_MODELS entry fall back to the profile's curated fallback_models so their agentic picks lead
+    # the picker instead of whatever the live catalog happens to return first (e.g. Fireworks lists an image
+    # model, flux-*, ahead of its chat models).
     curated_static = list(_PROVIDER_MODELS.get(normalized, []))
     if normalized not in _MODELS_DEV_PREFERRED:
         return curated_static
@@ -1912,7 +1942,14 @@ _OPENCODE_FAMILIES = ("opencode-free", "opencode-go", "opencode-zen")
 
 
 def opencode_provider_family(provider_id: Optional[str]) -> Optional[str]:
-    """Resolve a provider id (canonical or prefixed) to its OpenCode family, or None."""
+    """Resolve a provider id (canonical or prefixed) to its OpenCode family, or None.
+
+    Returns ``"opencode-zen"`` or ``"opencode-go"`` for the built-in providers AND for custom providers
+    whose name extends a family slug (e.g. ``opencode-go-bridge`` pointing at
+    ``https://opencode.ai/zen/go/v1``, issue #85589). Matching is case-insensitive. Custom family providers
+    need the same per-model api_mode routing and /v1 base-url normalization as the built-ins — this
+    predicate is the single owner of that family-membership question; do not re-implement it inline.
+    """
     raw = str(provider_id or "").strip().lower()
     if not raw:
         return None

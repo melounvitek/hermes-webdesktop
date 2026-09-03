@@ -29,6 +29,10 @@ class CLIChatTurnMixin:
         ``_pending_input`` so process_loop and the interrupt monitor never compete); an
         interrupting message is re-queued as the next turn. ``voice_input`` gates the
         concise voice-response prefix.
+
+        Args: message: The user's message (str or multimodal content list) images: Optional list of Path
+        objects for attached images voice_input: True when the message came from voice transcription (gates
+        the concise voice-response prefix, #65827)
         """
         from cli import ChatConsole, _ChatTurn, _DIM, _RST, _accent_hex, _cprint, set_secret_capture_callback
         # Single-query and direct chat callers do not go through run().
@@ -361,6 +365,7 @@ class CLIChatTurnMixin:
             except queue.Empty:
                 # Flush the StdoutProxy buffer: it otherwise only flushes on input-triggered
                 # renderer passes, so on macOS the CLI looks frozen until the user types.
+                # Force prompt_toolkit to flush any pending stdout output from the agent thread. (#1624)
                 self._invalidate(min_interval=0.15)
                 continue
             if not interrupt_msg:

@@ -177,6 +177,12 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
     _apply_required_codex_headers(kwargs, access_token=api_key, base_url=base_url)
     # Hermes owns aux retry/fallback policy; the SDK default (max_retries=2) would triple
     # wall time on a hung endpoint before Hermes sees one failure.
+    # Hermes owns auxiliary retry + provider/model fallback policy (the same-provider transient retry in
+    # call_llm plus the except-chain fallback). The OpenAI SDK's own default (max_retries=2 → up to 3
+    # attempts) silently multiplies the effective wall time of every aux call by 3× on a slow/hung endpoint,
+    # so a 120s timeout can stall ~360s before Hermes sees a single failure (issue #54465). Disable
+    # SDK-internal retries by default and let Hermes control the budget; explicit callers can still override
+    # via kwargs.
     kwargs.setdefault("max_retries", 0)
     return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
 
@@ -184,6 +190,13 @@ def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
 # Interrupt protection for atomic aux tasks: a compression summary killed by an ordinary
 # gateway interrupt degrades to a static marker, so a thread-local flag marks such calls
 # protected. Explicit host cancel (Ctrl+C, /stop) still overrides it, timeouts still fire.
+# ── Interrupt protection for atomic auxiliary tasks ────────────────────── Some auxiliary tasks must NOT be
+# aborted mid-flight by a gateway interrupt (e.g. an incoming user message while the agent is busy). Context
+# compression is the prime case: if the summary LLM call is interrupted part-way, compression falls back to
+# a static "summary unavailable" marker and the real handoff is lost (#23975). A thread-local flag lets such
+# a task mark its in-flight LLM call as interrupt-protected; the Codex Responses stream's cancellation check
+# honors it. TIMEOUTS still fire (a hung call must die), and all OTHER aux tasks (vision, web_extract,
+# title_generation, …) remain freely interruptible.
 _aux_interrupt_protection = threading.local()
 
 
@@ -279,6 +292,12 @@ _aux_provider_response = threading.local()
 # Absolute monotonic deadline of the waiting HOST. The stream's own ceiling
 # (_aux_stream_total_ceiling, >= the host's and started later) would otherwise leave an
 # orphaned stream still billing after every host-ceiling timeout.
+# Absolute wall-clock deadline (time.monotonic) of the HOST waiting for this auxiliary call, when it has one
+# (#99692). Liveness alone is not enough: a host also stops waiting at its own total ceiling, and the
+# streamed consumer below bounds itself only by _aux_stream_total_ceiling() — a budget derived from the aux
+# request timeout, which is >= the host ceiling for every configured value AND starts counting later. So the
+# stream that outlives its abandoned host is not an edge case; it is the guaranteed outcome of every
+# total-ceiling timeout.
 _aux_stream_deadline = threading.local()
 
 
@@ -411,6 +430,12 @@ def aux_stream_deadline(deadline: Optional[float]):
     ``None`` is a passthrough; re-entrant-safe. Host->worker return leg of the progress hook:
     without it the isolated provider daemon streams to its own ceiling after the host stopped
     waiting, billing a summary the commit fence refuses.
+
+    ``8207862212`` releases the compression OWNER when the fence is cancelled, but the isolated provider
+    daemon (:func:`_run_protected_sync_provider_call`) that holds the socket keeps streaming to its own
+    ``_aux_stream_total_ceiling`` budget — >= the host's ceiling by construction — billing an abandoned
+    summary the commit fence is already guaranteed to refuse, and stacking one fresh orphan per turn on a
+    session that compression never managed to shrink. See #99692.
     """
     previous = getattr(_aux_stream_deadline, "value", None)
     _aux_stream_deadline.value = deadline if isinstance(deadline, (int, float)) else previous
@@ -446,6 +471,9 @@ def _run_protected_sync_provider_call(callback: Callable[[dict[str, Any]], Any],
     dispatch_hook = getattr(_aux_dispatch, "hook", None)
     provider_response_hook = getattr(_aux_provider_response, "hook", None)
     host_deadline = _current_aux_stream_deadline()
+    # #99692: the stream is consumed on the daemon below, and thread-locals do not cross that boundary — an
+    # owner-thread-only deadline would leave the fix inert on exactly the path large-session compression
+    # takes (protected call + hard-cancel source installed).
     provider_context = contextvars.copy_context()
     done = threading.Event()
     outcome: dict[str, Any] = {}
@@ -1104,6 +1132,18 @@ class _CodexStreamGuard:
         self.total_timeout = total_timeout
         self._start = time.monotonic()
         self.no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
+        # Progress-aware stream deadlines (supersedes the old single absolute kill at ``total_timeout``).
+        # Three regimes: 1. First token: the stream must produce its first substantive payload within
+        # ``no_progress_timeout`` (60s default) or we fail fast and let the caller's normal retry/fallback
+        # chain run — a dead (or keepalive-only zombie) Codex stream no longer holds the full 300s
+        # compression budget before falling back (masoria report, Aug 2026: 3 stacked 300s waits -> 20+ min
+        # stuck on "Summarizing"). 2. Streaming: every substantive event re-arms the deadline by
+        # ``no_progress_timeout`` — a live stream is never killed by an absolute total, so a long reasoning
+        # summary that is actually producing tokens completes instead of timing out at 300s and falling back
+        # (#54915's original complaint, fixed properly). Keepalive/lifecycle frames do NOT re-arm, mirroring
+        # the commit-fence progress gating (#96707). 3. Hard ceiling: an absolute backstop from
+        # ``_aux_stream_total_ceiling`` (max(600s, 4x configured timeout) — the same bound the streamed
+        # chat.completions path uses) so a pathological one-token-per-59s drip still terminates.
         if total_timeout is not None:
             self.no_progress_timeout = min(self.no_progress_timeout, float(total_timeout))
         self.hard_deadline = self._start + _aux_stream_total_ceiling(total_timeout)
@@ -1193,6 +1233,9 @@ class _CodexStreamGuard:
         # FD-safe — ``close()`` releases the raw TLS fd while the owner's OpenSSL BIO still
         # caches it, the kernel recycles it (e.g. into a SQLite handle), and the owner's TLS
         # flush corrupts that file. The owner does the real close in its ``finally``.
+        # This callback has two callers — ``_check_cancelled`` on the owning thread, and the daemon watchdog
+        # ``threading.Timer``, which is a stranger thread. The owning thread performs the real close in the
+        # ``finally`` below, which is where the FD release belongs. See #70773.
         self.timeout_release_pending.set()
         if threading.get_ident() == self._owner_tid:
             _close_quietly(self._client, "client close during timeout failed")
@@ -1212,6 +1255,9 @@ class _CodexStreamGuard:
         # The aux client cache wraps this same client; drop the entry so the next aux call
         # doesn't reuse the dead transport and fail fast.
         try:
+            # After we close the httpx transport above, the cache must drop that entry — otherwise the next
+            # auxiliary call (compression retry, memory flush, etc.) reuses the dead client and fails fast
+            # with a connection error. See issue #23432.
             _evict_cached_client_instance(self._client)
         except Exception:
             logger.debug("Codex auxiliary: cache eviction on timeout failed", exc_info=True)
@@ -1227,6 +1273,8 @@ class _CodexStreamGuard:
             # interrupt (degraded fallback marker); explicit host cancel has its own exception.
             if _aux_interrupt_cancel_requested():
                 raise AuxiliaryExplicitCancellation()
+            # Explicit host cancellation has its own frozen exception; timeouts above still fire and other
+            # aux tasks remain interruptible. See #23975.
             if is_interrupted() and not _aux_interrupt_protected():
                 raise InterruptedError("Codex auxiliary Responses stream interrupted")
         except InterruptedError:
@@ -1260,6 +1308,8 @@ class _CodexStreamGuard:
         # TTFP telemetry records every frame, but forward progress (compression commit fence,
         # no-progress window) counts only substantive payloads — keepalives must not re-arm,
         # so a zombie stream dies at the same window as a dead connection.
+        # #93650: keep bulk wire-format payload out of the SDK's GIL-holding request transform on auxiliary
+        # calls too.
         if _codex_event_has_content(_event):
             self.record_progress()
             self.saw_content.set()
@@ -1289,6 +1339,15 @@ class _CodexCompletionsAdapter:
     def _build_responses_kwargs(self, kwargs: Dict[str, Any]) -> Tuple[Dict[str, Any], str, Any]:
         """chat.completions kwargs → Responses API kwargs, ``(resp_kwargs, model, timeout)``; mirrors codex.py::build_kwargs."""
         from utils import base_url_host_matches
+        # Separate system/instructions from replayable conversation messages, then route the rest through
+        # the SINGLE shared chat->Responses converter used by the main agent transport
+        # (agent/transports/codex.py). Maintaining a private conversion loop here let chat-style messages
+        # with role="tool" leak straight into Responses input[] — which the Responses API rejects with
+        # "Invalid value: 'tool'. Supported values are: 'assistant', 'system', 'developer', and 'user'."
+        # (issue #5709, hit hard by flush_memories() / compression replaying real session history that
+        # includes assistant tool_calls + role="tool" results). The shared converter encodes assistant tool
+        # calls as `function_call` items and tool results as `function_call_output` items with a valid
+        # call_id, so every Responses path normalizes tool history identically and cannot drift.
         from agent.codex_responses_adapter import _chat_messages_to_responses_input
         model = kwargs.get("model", self._model)
         host = str(getattr(self._client, "base_url", "") or "")
@@ -1309,6 +1368,9 @@ class _CodexCompletionsAdapter:
         # Copilot binds replayed codex_message_items ids to a backend connection that doesn't
         # survive credential rotation (401 on replay) — same guard as build_kwargs. Aux calls
         # never send ``context_management`` (main-turn feature): no compaction checkpoint.
+        # Auxiliary calls (context compression, flush_memories, MoA aggregation) go through this adapter
+        # instead of agent/transports/codex.py's build_kwargs, so they need the same guard applied
+        # independently. See #32716.
         input_items = _chat_messages_to_responses_input(
             replay_messages, is_github_responses=is_copilot, native_compaction_eligible=False
         )
@@ -1374,6 +1436,9 @@ class _CodexCompletionsAdapter:
         # conversation (rotation-stable logical scope, else the physical session id). Skip the
         # key where the main transport does: xAI takes it in extra_body, GitHub opts out.
         try:
+            # Reuse the Responses transport's single authoritative hash algorithm and session-scope
+            # normalization so equivalent static prefixes route to the same cache bucket across modes,
+            # without concentrating unrelated sessions into one shared bucket (see #78941).
             from agent.transports.codex import _cache_scope_from_session_id, _content_cache_key
             from agent.transports.codex import _default_prompt_cache_retention_for_request
             if not (is_xai or is_github) and "prompt_cache_key" not in resp_kwargs:
@@ -1471,6 +1536,11 @@ class _AsyncAuxiliaryClientBase:
         self.api_key = sync_wrapper.api_key
         self.base_url = sync_wrapper.base_url
         if hasattr(sync_wrapper, "_real_client"):
+            # Mirror the sync wrapper's _real_client so cache eviction by leaf OpenAI client (e.g.
+            # _close_client_on_timeout in #23482) drops this async entry too. Without this, sync and async
+            # cache entries diverge on poisoning: the sync entry is evicted but the async entry keeps
+            # reusing the closed transport, failing every subsequent async aux call with 'Connection error'
+            # until the gateway restarts.
             self._real_client = sync_wrapper._real_client
 
 
@@ -1587,6 +1657,9 @@ class _AnthropicCompletionsAdapter:
         # response_format: top-level gets the same translation as the extra_body form; when both
         # are present the extra_body form wins. Passthrough excludes ``reasoning``/``response_format``
         # (already TRANSLATED to native fields — raw would 400 on strict gateways) and ``_`` Hermes plumbing.
+        # The adapter builds the Messages body from a fixed allow-list of kwargs, so before this an
+        # unrecognized top-level kwarg was dropped on the floor: the request succeeded but the schema
+        # contract silently became prompt compliance (#85626 review, point 2).
         top_level_response_format = kwargs.get("response_format")
         if top_level_response_format is not None:
             _translate_anthropic_response_format(anthropic_kwargs, top_level_response_format)
@@ -2471,6 +2544,10 @@ def set_runtime_main(
     Context-local so concurrent gateway sessions don't clobber each other; legacy mirrors are
     updated for old readers. ``cache_scope`` is the rotation-stable logical cache scope,
     preferred over ``session_id`` for prompt_cache_key derivation.
+
+    ``cache_scope`` is the rotation-stable logical cache scope (compression- lineage root —
+    agent/prompt_cache_scope.py) resolved once per turn by turn_context; auxiliary Responses calls prefer it
+    over ``session_id`` for prompt_cache_key derivation (#79017).
     """
     runtime = {
         "provider": (provider or "").strip().lower(),
@@ -2538,6 +2615,8 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
     if base_url_host_matches(custom_base, "openrouter.ai"):
         return None, None, None  # requested='custom' falls back to OpenRouter when unconfigured.
     # Local servers (Ollama, vLLM, ...) ignore auth but the SDK needs a non-empty key.
+    # Use a placeholder key — the OpenAI SDK requires a non-empty string but local servers ignore the
+    # Authorization header. Same fix as cli.py _ensure_runtime_credentials() (PR #2556).
     if not isinstance(custom_key, str) or not custom_key.strip():
         custom_key = "no-key-required"
     if not isinstance(custom_mode, str) or not custom_mode.strip():
@@ -2931,6 +3010,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     OpenAI's RateLimitError may omit .status_code — matched by class name. A generic 429 without
     billing keywords counts as a rate limit.
     """
+    # (PR #8023 pattern)
     if type(exc).__name__ == "RateLimitError":
         return True
     if getattr(exc, "status_code", None) != 429:
@@ -3116,6 +3196,8 @@ def _is_invalid_aux_response_error(exc: Exception) -> bool:
 # Tasks on a user-visible critical path (compression blocks resuming an oversized session; vision
 # stalls the serialised turn queue). A same-provider retry after a full-budget timeout costs another
 # whole ``timeout`` window, so they skip straight to fallback; fast blips still retry.
+# Fast blips (a streaming-close or a 5xx) still retry, since those are cheap. See issue #54465 for the
+# compression case.
 _TIMEOUT_NO_RETRY_TASKS = frozenset({"compression", "vision"})
 
 
@@ -3294,6 +3376,10 @@ def _prepare_same_provider_retry(
     )
     # Preserve per-request attribution headers (e.g. Copilot ``x-initiator``) so the retry keeps capability gating.
     if extra_headers:
+        # Copilot's ``x-initiator: user``) across the rebuilt-client retry — dropping them here would let a
+        # recovery retry silently lose capability gating (#60293).
+        # Preserve per-request attribution headers across the rebuilt-client retry — see the sync variant
+        # above (#60293).
         retry_kwargs["extra_headers"] = dict(extra_headers)
     if _is_anthropic_compat_endpoint(resolved_provider, retry_base):
         retry_kwargs["messages"] = _convert_openai_images_to_anthropic(retry_kwargs["messages"])
@@ -3432,7 +3518,13 @@ def _coerce_positive_timeout(raw: Any) -> Optional[float]:
 
 def _fallback_entry_timeout(task: Optional[str], fb_label: str) -> Optional[float]:
     """Per-entry ``timeout`` for a configured fallback candidate, or None (keep the task-level
-    timeout). Inheriting the primary's deadline used to kill healthy-but-slower fallbacks."""
+    timeout). Inheriting the primary's deadline used to kill healthy-but-slower fallbacks.
+
+    A fallback candidate previously inherited the exact timeout the primary provider was called with. When
+    that deadline was tuned for the primary (or the primary simply consumed its whole budget before failing
+    over), the fallback aborted on the same clock even when independently healthy — a 163k-token compression
+    that needs ~90s on the fallback died at the primary's 30s deadline every turn (#62452).
+    """
     entry = _fallback_chain_entry(task, fb_label)
     return _coerce_positive_timeout(entry.get("timeout") if entry else None)
 
@@ -3598,7 +3690,12 @@ def _call_fallback_candidate_sync(
 ) -> Optional[Any]:
     """Call one fallback candidate with stale-credential recovery: on an auth error refresh its
     credentials and retry once with a rebuilt client; if that also auth-fails, quarantine the
-    provider and return None so the caller moves on. Non-auth errors raise."""
+    provider and return None so the caller moves on. Non-auth errors raise.
+
+    ``effective_timeout`` is the task-level deadline; a configured-chain candidate with its own ``timeout``
+    entry gets that instead, so a fallback tuned differently from the primary is allowed its own budget
+    (#62452).
+    """
     destination, fb_kwargs, rebuild = _plan_fallback_candidate(
         fb_client, fb_model, fb_label, task=task, effective_timeout=effective_timeout,
         apply_fast_lane=True, messages=messages, tools=tools, temperature=temperature,
@@ -3751,6 +3848,17 @@ def _try_main_agent_model_fallback(
 # too-small aux models; runtime chains must too, or compression stops at a reachable-but-too-small
 # candidate. ``None`` (unknown) passes through.
 
+# ── Context-window screening for runtime fallback chains (issue #52392) ── When the runtime auxiliary
+# fallback chain selects a candidate that is reachable but has a context window smaller than the compression
+# task requires, the call errors out instead of continuing to the next, viable candidate. The startup
+# feasibility check in ``agent.conversation_compression.check_compression_model_feasibility`` already
+# filters too-small auxiliary models at startup, but the runtime fallback chain
+# (``_try_configured_fallback_chain`` and ``_try_main_fallback_chain``) does not apply the same filter, so
+# compression can stop at the first alive door even if the room behind it is too small. The helpers below
+# screen each candidate by its effective context window before it is returned. ``None`` results from
+# ``get_model_context_length`` are passed through (we cannot prove a model is too small, so we do not block
+# it). This preserves the existing fallback surface for unrecognised/custom models while closing the gap on
+# the well-known ones.
 def _task_minimum_context_length(task: Optional[str]) -> Optional[int]:
     """Minimum context length for an auxiliary task; None = no floor (only ``compression`` has one)."""
     return MINIMUM_CONTEXT_LENGTH if task == "compression" else None
@@ -3991,6 +4099,7 @@ def _try_main_provider_route(
             explicit_base_url = None
         elif runtime_base_url:
             # Config-less named custom provider (live runtime only): anonymous custom arm + runtime key.
+            # See #34777.
             resolved_provider = "custom"
             explicit_api_key = runtime_api_key or None
         elif runtime_api_key:
@@ -4121,6 +4230,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     _apply_required_codex_headers(async_kwargs, access_token=sync_client.api_key, base_url=sync_base_url)
     async_kwargs = {**_openai_http_client_kwargs(sync_base_url, async_mode=True), **async_kwargs}
     # Hermes owns the auxiliary retry/timeout budget; disable SDK-internal retries.
+    # See #54465.
     async_kwargs.setdefault("max_retries", 0)
     return AsyncOpenAI(**async_kwargs), model
 
@@ -4187,6 +4297,7 @@ def _build_bedrock_client(provider: str, model: Optional[str], *, raw_codex: boo
         return None, None
     # Region must match the main runtime's resolution (bedrock.region in config first, then
     # env/profile) so aux calls never leave the primary runtime's configured region.
+    # See #53880, #65076.
     region = resolve_bedrock_runtime_region()
     default_model = "anthropic.claude-haiku-4-5-20251001-v1:0"
     final_model = _normalize_resolved_model(model or default_model, provider) or default_model
@@ -4406,6 +4517,8 @@ def _resolve_custom_branch(req: _ResolveRequest) -> _ResolveResult:
     elif main_runtime:
         # Reuse main_runtime's concrete base_url + api_key for a named custom provider;
         # re-resolving from bare "custom" loses the name and lands on the wrong provider.
+        # Re-resolution loses the provider name and falls back to OpenRouter or a wrong API-key provider —
+        # the main agent already solved this, we just need to reuse its answer. (#45472)
         _main_base = str(main_runtime.get("base_url") or "").strip().rstrip("/")
         _main_key = str(main_runtime.get("api_key") or "").strip()
         if _main_base and _main_key:
@@ -4487,6 +4600,7 @@ def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResul
                  provider, final_model, entry_api_mode or "chat_completions")
     # anthropic_messages: route via AnthropicAuxiliaryClient (mirrors _try_custom_endpoint);
     # the Anthropic SDK sees the original (un-rewritten) URL.
+    # Mirrors the anonymous-custom branch in _try_custom_endpoint(). See #15033.
     if entry_api_mode == "anthropic_messages":
         try:
             from agent.anthropic_adapter import build_anthropic_client
@@ -4710,6 +4824,29 @@ def resolve_provider_client(
     # Excluded: ``auto`` (a stale main slug could pair with any picked provider) and Nous + vision (the
     # Portal's tier-aware vision recommendation must win over a text-only model).
     if not model and provider != "auto" and not (provider == "nous" and is_vision):
+        # ``auto`` is intentionally excluded: `_resolve_auto(main_runtime=...)` returns the model paired
+        # with the provider it actually selected. Pre-filling an auto call from `_read_main_model()` can
+        # leak a stale process-global runtime into a different provider (for example Claude model slug on
+        # Codex OAuth) and override that correctly resolved model. 1. ``model`` argument (caller knew what
+        # they wanted) 2. Provider's catalog default — cheap/fast model the provider registered via
+        # ``ProviderProfile.default_aux_model`` or the legacy ``_API_KEY_PROVIDER_AUX_MODELS_FALLBACK``
+        # dict. 3. User's main model from ``model.model`` in config.yaml. This is the load-bearing step for
+        # OAuth providers: an xai-oauth user with grok-4.3 configured gets grok-4.3 for title generation
+        # instead of silently dropping to whatever Step-2 fallback (#31845). When the main provider is MoA,
+        # ``_read_main_model_for_aux()`` substitutes the preset's aggregator model — the preset NAME is
+        # never a valid wire model id, so unset aux models default to the preset's acting model instead.
+        # Each provider branch below sees a non-empty ``model`` whenever the user has *anything* configured
+        # — no provider-specific empty-model guards needed. When the user has NOTHING configured (fresh
+        # install, main_model also empty), the branches still hit their own missing-credentials returns and
+        # ``_resolve_auto`` falls through to the Step-2 chain as before. Do NOT pre-fill a blank ``auto``
+        # request from the config/main default here. Claude model sent to Codex after the main lane fell
+        # back to gpt-5.5). Let _resolve_auto() return the actual current runtime model when the caller did
+        # not explicitly request one. (# compression-current-model) Nous + vision is the one carve-out: the
+        # branch below resolves its model from the Portal's tier-aware vision recommendation
+        # (``_try_nous(vision= True)``), and ``final_model = model or default`` means anything pre-filled
+        # here wins over that. The main chat model is routinely text-only (e.g. a ``:free`` chat SKU), so
+        # pre-filling it sends the image to a model that cannot accept one and the Portal 404s. Leave
+        # ``model`` unset and let the Portal slot through; only an explicit caller model may override it.
         model = _get_aux_model_for_provider(provider) or _read_main_model_for_aux() or model
     req = _ResolveRequest(
         provider, original_provider, model, async_mode, raw_codex,
@@ -4974,6 +5111,8 @@ def auxiliary_max_tokens_param(value: int, *, model: Optional[str] = None) -> di
 # Client cache: (provider, async_mode, base_url, api_key, api_mode, runtime_key) -> (client, default_model, loop)
 # Loop identity is NOT part of the key: stale-loop entries are replaced in place on async hits,
 # bounding growth to one entry per provider config (avoids fd accumulation in gateways).
+# This bounds cache growth to one entry per unique provider config rather than one per (config ×
+# event-loop), which previously caused unbounded fd accumulation in long-running gateway processes (#10200).
 _client_cache: Dict[tuple, tuple] = {}
 _client_cache_lock = threading.Lock()
 _CLIENT_CACHE_MAX_SIZE = 64  # safety belt — evict oldest when exceeded
@@ -5056,6 +5195,12 @@ def _refresh_nous_auxiliary_client(
     to ``_get_cached_client`` when the stale client was acquired — so the fresh client overwrites
     the exact entry the stale one is served from. Keying on the resolved model or an empty task
     would leave the expired client immortal and every auxiliary call 401ing forever.
+
+    See #56889.
+    For ``provider == "auto"`` the task participates in the cache key (task-specific fallback policy), so it
+    MUST be carried into the key here for the same reason as ``lookup_model``; otherwise an auto-provider
+    client refreshed on a 401 lands under the ``task=""`` key while the stale entry survives under the
+    task-scoped key (#58894).
     """
     runtime = _resolve_nous_runtime_api(force_refresh=True, stale_access_token=api_key)
     if runtime is None:
@@ -5212,6 +5357,10 @@ def _get_cached_client(
 
     Async clients bind to the loop they were created on, so every async hit validates the cached
     loop is the current, open loop; stale entries are replaced in place (bounded, no cross-loop reuse).
+
+    This keeps cache size bounded to one entry per unique provider config, preventing the fd-exhaustion that
+    previously occurred in long-running gateways where recycled worker threads created unbounded entries
+    (#10200).
     """
     current_loop = _current_event_loop() if async_mode else None
     runtime = _normalize_main_runtime(main_runtime)
@@ -5265,6 +5414,14 @@ def _get_cached_client(
 _AUX_DIRECT_API_BASE_URLS: Dict[str, str] = {"openai": "https://api.openai.com/v1"}
 
 
+# MoA virtual provider: an *explicit* `provider: moa` override (either the caller-passed `provider` arg or
+# `auxiliary.<task>.provider` in config.yaml) reaches this function directly — it never goes through
+# _resolve_auto(), which only unwraps the *implicit* "main provider is moa" case (#53827). Left as-is, "moa"
+# is returned verbatim and resolve_provider_client() looks it up in PROVIDER_REGISTRY (which has no "moa"
+# entry — it's not a real HTTP provider), falls to the unknown-provider dead end, and call_llm surfaces a
+# nonsensical "MOA_API_KEY environment variable" error for a provider that was never meant to be reached
+# over the wire. Auxiliary tasks don't need the reference fan-out — resolve to the preset's aggregator slot
+# instead, exactly like the implicit path does (shared helper: _resolve_moa_aggregator).
 def _unwrap_moa_provider(prov: str, mdl: Optional[str]) -> Tuple[str, Optional[str]]:
     """Resolve an *explicit* ``provider: moa`` to its preset's aggregator slot (_resolve_auto()
     only unwraps the implicit case; "moa" isn't in PROVIDER_REGISTRY and would dead-end)."""
@@ -5350,6 +5507,7 @@ def _resolve_task_provider_model(
     # An explicit provider without base_url adopts the task's configured endpoint (same or
     # unnamed provider) so the early return below carries it. Explicit "auto" is excluded — it
     # must keep flowing through auto-resolution.
+    # See #58515.
     if provider and provider != "auto" and not base_url and cfg_base_url and cfg_provider in (None, provider):
         base_url = cfg_base_url
         if not api_key:
@@ -5375,6 +5533,11 @@ _DEFAULT_AUX_TIMEOUT = 30.0
 # Reasoning compression models can exceed the default 120 s config timeout, falling back to the
 # deterministic marker. Bounded *floor* for config-derived compression timeouts only; never
 # overrides an explicit per-call timeout.
+# Compression summarises large conversation histories; a reasoning auxiliary model (e.g. Codex / GPT-5.5)
+# can legitimately take longer than the default ``auxiliary.compression.timeout`` (120 s), causing the
+# stream to time out and the compressor to fall back to the deterministic context marker (#54915). A floor
+# is harmless for fast compression models (they finish before the deadline) and is a minimum, so a higher
+# config value is kept unchanged.
 _COMPRESSION_TIMEOUT_FLOOR_SECONDS = 300.0
 
 
@@ -5531,6 +5694,9 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
 
 # Per-task concurrency limiting: many sessions can spawn unbounded background aux calls, each
 # retrying across the fallback chain during incidents.
+# During provider incidents each call also retries / fans out across the fallback chain, multiplying request
+# volume on already-degraded endpoints. A per-task semaphore caps in-flight calls so retry amplification
+# stays bounded. See #23324.
 _aux_sync_semaphores: Dict[str, Tuple[int, threading.BoundedSemaphore]] = {}
 _aux_async_semaphores: Dict[Tuple[str, int], Tuple[int, Any]] = {}
 _aux_sem_lock = threading.Lock()
@@ -5833,6 +5999,11 @@ def _validate_llm_response(
 
     Also the single aux-usage accounting chokepoint: every successful non-streaming response
     passes here exactly once; *provider*/*base_url* are optional hints.
+
+    See #7264.
+    Recording is best-effort and never affects validation. *provider*/*base_url* are optional accounting
+    hints — fallback-path calls omit them and the row keeps the model (read from the response itself) with
+    an empty route. See #23270.
     """
     if response is None:
         raise RuntimeError(f"Auxiliary {task or 'call'}: LLM returned None response")
@@ -6007,6 +6178,7 @@ _AFFORDABLE_TOKENS_RE = re.compile(r"can only afford\s+([0-9][0-9,]*)", re.IGNOR
 # Below the floor the affordable budget can't fit a useful aux output — treat as exhaustion;
 # the margin keeps provider-side token-count rounding from 402-ing the retry.
 _AFFORDABLE_RETRY_FLOOR_TOKENS = 512
+# See #49785.
 _AFFORDABLE_RETRY_MARGIN_TOKENS = 64
 
 
@@ -6067,7 +6239,18 @@ def _create_with_progress_once(
     """create() that streams (and re-aggregates, ticking the hook per substantive chunk) when a
     progress hook is active or the provider is stream-only; plain ``create(**kwargs)`` otherwise
     or when the adapter streams internally. Streaming rejections fall back to a plain call —
-    except under ``force_stream``."""
+    except under ``force_stream``.
+
+    Behavior is byte-for-byte identical to a plain ``create(**kwargs)`` when neither trigger applies (every
+    existing caller/task) or when the client's wire adapter streams internally. With a hook + a
+    chunk-capable client, the request is sent with ``stream=True`` and aggregated, ticking the hook only for
+    substantive chunks. The configured ``timeout`` acts per stream read (idle) rather than as a total
+    budget, and outer liveness watchdogs see tokens moving. ``force_stream=True`` (stream-only providers
+    such as Tencent Copilot — credit @kudi88, PR #60686) takes the same streamed path even without a hook.
+    Providers that reject the streamed request fall back to the plain non-streaming call — except under
+    ``force_stream``, where a stream-only provider rejects the plain call by definition, so the original
+    error is surfaced to the normal recovery chains instead.
+    """
     _notify_aux_dispatch()
     _notify_aux_progress()  # Preserve the watchdog's historical dispatch tick.
     if (not _aux_progress_active() and not force_stream) or _client_streams_internally(client):
@@ -6141,6 +6324,9 @@ class _ChatStreamAccumulator:
         self._total_ceiling = total_ceiling
         # Absolute instant the waiting host gives up; checked alongside (not instead of) the
         # ceiling, and unaffected by pre-construction dispatch/TTFT.
+        # Checked as well as (not instead of) the ceiling above: the ceiling still bounds callers with no
+        # host deadline, and the host deadline is absolute, so it is unaffected by however long dispatch and
+        # TTFT took before this accumulator was constructed. See #99692.
         self._host_deadline = host_deadline
         self.content_parts: List[str] = []
         self.reasoning_parts: List[str] = []
@@ -6626,6 +6812,12 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     response) bypass the explicit-provider gate — the provider cannot serve this request
     regardless of user intent. Auth errors only fall back in auto mode."""
     task, tag, resolved_provider = route.task, route.tag, route.resolved_provider
+    # Respect explicit provider choice for transient errors (auth, request validation, etc.) but allow
+    # fallback when the provider clearly cannot serve the request due to capacity: payment/quota exhaustion
+    # and connection failures are capacity problems, not request constraints. See #26803: daily token quota
+    # (429 + "too many tokens per day") must fall back just like a 402 credit error.
+    # Rate limits are included: after retries are exhausted, a 429 means the provider is at capacity. See
+    # #52228. See #26803: daily token quota must fall back like a 402 credit error.
     is_auto = resolved_provider in {"auto", "", None}
     reason = next((label for predicate, label in _FALLBACK_REASONS if predicate(first_err)), None)
     is_capacity_error = any(
@@ -6669,6 +6861,9 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
                     break
     # All fallback layers exhausted — one user-visible warning, then re-raise.
     logger.warning("Auxiliary %s%s: %s on %s and all fallbacks exhausted "
+                   # All fallback layers exhausted — emit a single user-visible warning so the operator
+                   # knows aux task is about to fail. (#26882) The error itself is re-raised below.
+                   # (#26882)
                    "(fallback_chain + main agent model). Raising original error.",
                    task or "call", tag, reason, resolved_provider)
     return None
@@ -6705,6 +6900,10 @@ def _aux_recovery_ladder(
         return resp
     # Connection/timeout errors poison the cached client (closed transport, half-read
     # stream); evict so the next aux call rebuilds a fresh one.
+    # Drop it from the cache regardless of whether we found a fallback above so the next auxiliary call
+    # rebuilds a fresh client instead of reusing the dead one. See issue #23432.
+    # Mirror the sync path: drop poisoned clients on connection/timeout so the next aux call rebuilds. See
+    # issue #23432.
     if _is_connection_error(first_err):
         try:
             _evict_cached_client_instance(client)
@@ -6924,6 +7123,17 @@ def _call_llm_impl(
         return _relay_sync_stream(client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode)
 
     def _primary(**validate_kw: Any) -> Any:
+        # Retry on the same provider for a transient transport blip (connection reset / streaming-close /
+        # incomplete chunked read / 5xx / 408) before the except-chain below escalates to provider/model
+        # fallback. A dropped connection shouldn't abandon an otherwise-healthy provider — this especially
+        # matters for pinned auxiliary calls like MoA reference advisors, where "fallback to another
+        # provider" is not a meaningful recovery (the advisor is a specific model), so a transient blip that
+        # isn't retried simply loses that advisor for the turn (root of the run2 double-advisor "Connection
+        # error" collapse — a genuine upstream blip hitting both parallel advisors at once). Attempts are
+        # bounded and use exponential backoff. Count is configurable via auxiliary.transient_retries
+        # (default 2 retries → 3 total attempts); a second/third failure or any non-transient error falls
+        # through to ``first_err`` and the existing fallback handling unchanged. Unified home for the
+        # transient retry every auxiliary task shares. (PR #16587)
         return _validate_llm_response(
             _relay_sync_completion(
                 client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode,
@@ -7087,6 +7297,7 @@ async def _async_call_llm_impl(
     client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
     try:
         # Retry ONCE on the same provider for a transient blip before fallback (see call_llm()).
+        # (PR #16587)
         _force_stream_async = (
             _provider_requires_stream(request_provider, req.base_info or req.resolved_base_url)
             and not isinstance(client, (

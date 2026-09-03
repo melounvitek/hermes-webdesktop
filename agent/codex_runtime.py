@@ -307,6 +307,9 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
 
     def _fire_delta(params: dict, attr: str) -> None:
         text = params.get("delta") or params.get("text") or ""
+        # Single-writer guard (#65991): a superseded stream must not pollute the turn's accumulated text
+        # (which also feeds the interim-visible-text de-dup comparison), even when a caller reaches this
+        # directly (the tool-suppressed content path) rather than through _fire_stream_delta.
         if isinstance(text, str) and text:
             agent_cb(attr, f"{attr} raised", args=(text,))
 
@@ -380,6 +383,11 @@ def _ensure_codex_session(agent) -> None:
         auto_approve_requests = is_approval_bypass_active()
     except Exception:
         logger.debug("codex app-server: approval-bypass lookup failed; keeping fail-closed default", exc_info=True)
+    # Bridge codex JSON-RPC notifications (item/started, item/completed, item/agentMessage/delta, ...) into
+    # Hermes' gateway UI callbacks (tool_progress_callback, _fire_stream_delta,
+    # _emit_interim_assistant_message). Without this, Discord/Telegram users see no live tool-progress or
+    # interim commentary while codex_app_server is running — only the final answer (#33200). Supersedes the
+    # narrower item/started-only bridge from #38835.
     agent._codex_session = CodexAppServerSession(
         cwd=getattr(agent, "session_cwd", None) or str(resolve_agent_cwd()), approval_callback=approval_callback,
         request_routing=_ServerRequestRouting(auto_approve_exec=auto_approve_requests, auto_approve_apply_patch=auto_approve_requests),

@@ -10,6 +10,7 @@ from hermes_cli.config import DEFAULT_CONFIG
 GATEWAY_SERVICE_RESTART_EXIT_CODE = 75
 # EX_CONFIG (sysexits.h): fatal configuration error (token collision, no platforms);
 # the s6 finish script maps it to exit 125 so the supervisor stops restarting.
+# See #51228.
 GATEWAY_FATAL_CONFIG_EXIT_CODE = 78
 
 # Set by ``hermes gateway run --external-supervisor``. Unlike systemd's INVOCATION_ID
@@ -35,6 +36,7 @@ DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT = float(DEFAULT_CONFIG["agent"]["cron_drain_t
 CRON_DRAIN_CLEANUP_RESERVE_S = 10.0
 # systemd TimeoutStopSec headroom after the stop-path drain budget, and the floor when that
 # budget is still the default immediate (0s) chat drain. Keep in lockstep with generate_systemd_unit().
+# See #94759.
 SYSTEMD_STOP_HEADROOM_S = 30.0
 SYSTEMD_TIMEOUT_STOP_SEC_FLOOR = 60.0
 
@@ -47,6 +49,11 @@ def is_global_startup_conflict(error_code: str | None) -> bool:
     Adapters emit ``{scope}_lock`` with ``retryable=True`` so a *mid-run* reconnect can
     recover; at startup a live foreign holder is a configuration conflict (two gateways
     cannot poll one token), not a transient blip.  Matches by error CODE only, never text.
+
+    ``BasePlatformAdapter._acquire_platform_lock`` emits ``{scope}_lock`` with ``retryable=True`` on
+    purpose: a *mid-run* reconnect must be able to recover once the live holder exits or a stale record is
+    cleared (#54167). This matches by error CODE only (the ``{scope}_lock`` / ``lock_conflict`` families
+    every adapter emits for scoped-lock and identity conflicts), never by message text.
     """
     code = (error_code or "").strip().lower()
     return bool(code) and (code == "lock_conflict" or code.endswith("_lock"))
@@ -97,7 +104,11 @@ def parse_restart_after_turn_timeout(raw: object) -> float:
 
 
 def parse_cron_drain_timeout(raw: object) -> float:
-    """Parse the cron-only drain floor (``0`` = opt out; cron interrupted on the chat budget)."""
+    """Parse the cron-only drain floor (``0`` = opt out; cron interrupted on the chat budget).
+
+    ``0`` is a deliberate opt-out — cron work is then interrupted on the same budget as chat work, the
+    pre-#82161 behaviour — and must not fall through to the default, unlike empty/missing input.
+    """
     return _parse_timeout_keeping_zero(raw, DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT)
 
 
@@ -131,7 +142,10 @@ def resolve_systemd_timeout_stop_sec(
 ) -> int:
     """Seconds systemd ``TimeoutStopSec`` must cover: the stop path may first wait
     ``cron_drain_timeout`` + ``cleanup_reserve_s`` for cron work, so sizing from the chat drain
-    alone lets systemd SIGKILL an in-budget drain.  A zero cron timeout is an opt-out."""
+    alone lets systemd SIGKILL an in-budget drain.  A zero cron timeout is an opt-out.
+
+    ``restart_drain_timeout`` is only the chat-turn interrupt budget (default 0). See #94759.
+    """
     drain = _seconds(drain_timeout)
     cron = _seconds(cron_drain_timeout)
     cron_budget = (cron + _seconds(cleanup_reserve_s)) if cron > 0.0 else 0.0

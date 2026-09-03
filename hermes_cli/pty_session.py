@@ -110,6 +110,7 @@ class PtySession:
                 pass
         try:
             # bridge.close() joins the child — blocking; keep it off the event loop.
+            # See #53227.
             await asyncio.to_thread(self.bridge.close)
         except Exception:
             pass
@@ -148,6 +149,7 @@ class PtySessionRegistry:
         if len(self._sessions) >= self._max:
             self._reap_one_idle_or_raise()
         # PTY spawn does blocking fork/exec work — keep it off the event loop.
+        # See #53227.
         bridge = await asyncio.to_thread(spawn)
         session = PtySession(key, bridge, buffer_cap=self._buffer_cap, read_timeout=self._read_timeout)
         await session.start()

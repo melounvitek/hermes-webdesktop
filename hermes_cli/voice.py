@@ -20,6 +20,8 @@ from typing import Any, Callable, Optional
 _VOICE_MOD_ALIASES = {"ctrl": "c-", "control": "c-", "alt": "a-", "option": "a-", "opt": "a-"}
 
 # Named keys prompt_toolkit accepts as ``c-<name>`` / ``a-<name>``; aliases collapse to canonical.
+# Aliases collapse to prompt_toolkit's canonical spelling so the same config value binds identically in both
+# runtimes (Copilot round-10 on #19835).
 _VOICE_NAMED_KEYS = {
     "space": "space", "spc": "space", "enter": "enter", "return": "enter", "ret": "enter", "tab": "tab",
     "escape": "escape", "esc": "escape", "backspace": "backspace", "bs": "backspace", "delete": "delete", "del": "delete",
@@ -31,12 +33,23 @@ _VOICE_NAMED_KEYS = {
 # ``key.meta``), mirroring the TUI's darwin-only reservation — alt is reserved on darwin only.
 _VOICE_RESERVED_CHARS = frozenset({"c", "d", "l"})
 
+# On macOS the classic CLI's prompt_toolkit bindings for copy / exit / clear also claim ``a-c`` / ``a-d`` /
+# ``a-l`` via the action-modifier lookup, and hermes-ink reports Alt as ``key.meta`` on many terminals.
+# Mirror the TUI parser's darwin-only reservation so ``option+c`` etc. don't bind Alt+C in the CLI while the
+# TUI silently falls back to Ctrl+B (Copilot round-14 on #19835).
 _DEFAULT_PT_KEY = "c-b"
 
 
 def voice_record_key_from_config(cfg: Any) -> Any:
     """Shape-safe ``cfg.voice.record_key``: a hand-edited ``voice: true`` / ``voice: cmd+b`` leaves
-    ``cfg["voice"]`` as a bool/str and the naive ``.get`` chain would raise before voice starts."""
+    ``cfg["voice"]`` as a bool/str and the naive ``.get`` chain would raise before voice starts.
+
+    ``load_config()`` deep-merges raw YAML and preserves scalar overrides, so a hand-edited ``voice: true``
+    / ``voice: cmd+b`` leaves ``cfg["voice"]`` as a bool/str instead of a dict, and the naive
+    ``.get("voice", {}).get("record_key")`` chain raises AttributeError before voice can even start (Copilot
+    round-11 on 19835). Return ``None`` for malformed shapes so call sites can feed the result straight into
+    the normalizer/formatter and get the documented default. See #19835.
+    """
     voice = cfg.get("voice") if isinstance(cfg, dict) else None
     return voice.get("record_key") if isinstance(voice, dict) else None
 
@@ -49,6 +62,10 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
     ``c-b``; named keys collapse to canonical spelling (``ctrl+return`` → ``c-enter``). Exactly one
     modifier: multi-modifier chords bind different shortcuts in prompt_toolkit (a-c-r) and
     hermes-ink rejects them; a bare key is refused by the TUI parser.
+
+    * ``super`` / ``win`` / ``windows`` → ``c-b`` (TUI-only modifiers — prompt_toolkit has no super mod; the
+    CLI binding site is expected to warn when this fallback fires so users see the cross-runtime split,
+    Copilot round-11 on #19835)
     """
     if not isinstance(raw, str):
         return _DEFAULT_PT_KEY
@@ -56,6 +73,10 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
     if len(parts) != 2:
         return _DEFAULT_PT_KEY
     modifier_token, key_token = parts
+    # ``super`` / ``win`` / ``windows`` are TUI-only (prompt_toolkit has no super modifier, so
+    # ``@kb.add(super+b)`` crashes the CLI at startup). Fall back to the documented default here; the CLI
+    # binding site is expected to log a warning when the configured value is one of these spellings so users
+    # know the TUI+CLI runtimes diverge on that shortcut (Copilot round-11 on #19835).
     normalized_mod = _VOICE_MOD_ALIASES.get(modifier_token)
     if not normalized_mod:
         return _DEFAULT_PT_KEY
@@ -77,7 +98,11 @@ def pt_key_to_sequence(pt_key: str) -> tuple[str, ...]:
 
 def format_voice_record_key_for_status(raw: Any) -> str:
     """Render ``voice.record_key`` for ``/voice status`` as ``Ctrl+B`` / ``Alt+Space``; malformed
-    configs surface as the default so status never advertises a shortcut that won't bind."""
+    configs surface as the default so status never advertises a shortcut that won't bind.
+
+    Mirrors the TUI's ``formatVoiceRecordKey``: returns ``Ctrl+B`` / ``Alt+Space`` / ``Ctrl+Enter``. See
+    #19835.
+    """
     normalized = normalize_voice_record_key_for_prompt_toolkit(raw)
     prefix = "Alt+" if normalized.startswith("a-") else "Ctrl+"
     key = normalized[2:]
@@ -113,6 +138,8 @@ def _beeps_enabled() -> bool:
         voice_cfg = load_config().get("voice", {})
         if isinstance(voice_cfg, dict):
             # is_truthy_value handles quoted YAML strings like "false" that bool() misreads.
+            # See #49883.
+            # See #49883.
             return is_truthy_value(voice_cfg.get("beep_enabled", True), default=True)
     except Exception:
         pass
@@ -545,6 +572,10 @@ def _speak_streaming(text: str, stop_event: Optional[threading.Event]) -> bool:
     """
     import queue
 
+    # One dispatcher, zero parallel streaming implementations (#58930): when the configured provider has a
+    # chunked streamer registered in tools.tts_streaming, route the whole reply through the same
+    # stream_tts_to_speaker pipeline the CLI voice mode uses — audio starts on sentence one instead of after
+    # full synthesis. Falls through to the legacy whole-file path when no streamer resolves.
     from tools.tts_streaming import resolve_streaming_provider
     from tools.tts_tool import _load_tts_config, stream_tts_to_speaker
 

@@ -132,16 +132,38 @@ class PluginLoaderMixin:
         """Register a deferred platform's *client* tools without its adapter. Deferring the plugin would
         otherwise defer its outbound tools too, so CLI/TUI processes (which never materialize platforms)
         would miss them in ``hermes tools`` / ``platform_toolsets``. Opt-in is explicit via ``provides_tools``;
-        tools live in a ``tools`` submodule so ``__init__`` stays import-light."""
+        tools live in a ``tools`` submodule so ``__init__`` stays import-light.
+
+        A platform plugin can ship two independent things: an inbound adapter (heavy — it imports the
+        platform SDK) and outbound client tools the agent calls like any other tool. Deferring the plugin
+        defers both, so in a CLI/TUI process the client tools never register at all: ``resolve_toolset()``
+        returns ``[]``, the toolset is missing from the ``hermes tools`` checklist, and even an explicit
+        ``platform_toolsets`` entry is dropped because the key is unknown. The same tools work in
+        gateway/web processes only because those materialize every platform at startup (issue #78050).
+        Opting in is explicit: the manifest must declare ``provides_tools`` (the field the plugin list and
+        web server already read to name a plugin's tools, per #78538). Keying off the mere presence of a
+        ``tools.py`` would opt a plugin in by accident — a platform is free to put internal helpers there —
+        and would leave the contract invisible to anyone reading the manifest. ``tools.py`` remains where
+        the code is imported from; ``provides_tools`` is what asks for it. A platform that does not declare
+        the field is untouched and stays fully deferred.
+        """
         from hermes_cli.plugins import PluginContext, _PLUGINS_DEBUG
         if not manifest.provides_tools:
             return
         lookup_key = manifest_key(manifest)
+        # Never let a client-tool import break discovery — the platform stays deferred and behaves exactly
+        # as it did before. But a broken tools.py produces the #78050 symptom itself (declared tools missing
+        # from the session), so this has to be visible without turning on debug logging to find it. Where it
+        # failed is the first thing an operator needs: nothing registered points at the import or the module
+        # body, a partial run points at one tool's definition, and a full run that still raised points past
+        # the registrations entirely.
         declared = list(manifest.provides_tools)
         plugin_dir = Path(manifest.path) if manifest.path else None
         if plugin_dir is None or not (plugin_dir / "tools.py").is_file():
             # Declared but undeliverable — staying quiet reproduces the very symptom this fixes.
             logger.warning(
+                # Staying quiet here reproduces the exact symptom this path exists to fix — tools the
+                # manifest promises, silently absent from the session (#78050) — so say so.
                 "Plugin '%s' declares provides_tools %s but has no tools.py; "
                 "those tools will not be available in CLI/TUI sessions.", lookup_key, declared,
             )
@@ -195,7 +217,14 @@ class PluginLoaderMixin:
             )
 
     def _warn_python_dependencies(self, manifest: PluginManifest) -> None:
-        """Warn about missing declared pip dependencies with an install hint — NEVER auto-install."""
+        """Warn about missing declared pip dependencies with an install hint — NEVER auto-install.
+
+        See #64165.
+        python_dependencies is a declaration seam ONLY: Hermes validates and prints the requirements with an
+        install hint but NEVER auto-installs them. The isolation design (constraints installs vs. vendored
+        dirs vs. conflict-detection-and-refusal) is an explicitly deferred follow-up — see the round-2
+        review on #64165 and #15220.
+        """
         deps = manifest.python_dependencies
         if not deps:
             return
@@ -212,7 +241,10 @@ class PluginLoaderMixin:
             logger.debug("Plugin %s python_dependencies satisfied: %s", key, ", ".join(deps))
 
     def _validate_plugin_config_schema(self, manifest: PluginManifest) -> None:
-        """Warn (never block) on plugins.entries.<id> settings that violate config_schema."""
+        """Warn (never block) on plugins.entries.<id> settings that violate config_schema.
+
+        See #64165.
+        """
         if not manifest.config_schema:
             return
         plugin_id = manifest_key(manifest)
@@ -251,6 +283,7 @@ class PluginLoaderMixin:
         self._track_tool_override_policy(manifest, module_name)
         try:
             # Reuse a deferred platform's already-imported package so its body doesn't run twice.
+            # See #78050.
             module = self._predeclared_modules.pop(plugin_key, None)
             if module is None and manifest.source in {"user", "project", "bundled"}:
                 module = self._load_directory_module(manifest, module_name=module_name)
@@ -276,6 +309,9 @@ class PluginLoaderMixin:
             logger.warning("Failed to load plugin '%s': %s", manifest.name, exc, exc_info=_PLUGINS_DEBUG)
         # The failure path swept this plugin's whole ledger (not just the registration_start slice), so
         # discovery-time pre-registrations are gone too.
+        # There is no live tool left to credit — attribution and the registry agree at zero. Only the
+        # success path pops _predeclared_tools, so drop the entry here rather than let the bookkeeping
+        # outlive the load attempt (#78050).
         if not loaded.enabled:
             self._predeclared_tools.pop(plugin_key, None)
         self._plugins[plugin_key] = loaded

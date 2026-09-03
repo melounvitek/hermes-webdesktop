@@ -58,6 +58,13 @@ class BrowserProvider(ProviderBase):
 
     # Legacy ``CloudBrowserProvider`` names still used by ``tools.browser_tool`` and out-of-tree subclasses.
 
+    # ------------------------------------------------------------------ Backward-compat shims for the
+    # legacy CloudBrowserProvider API ------------------------------------------------------------------ The
+    # pre-PR-#25214 ABC exposed ``is_configured()`` and ``provider_name()``; ``tools.browser_tool`` has ~6
+    # callers that still use those names. Rather than churn every callsite (and break out-of-tree downstream
+    # code that subclassed CloudBrowserProvider), we expose the old names as thin delegations to the new
+    # API. Subclasses MUST implement :meth:`is_available` and :attr:`name`; they may override
+    # ``is_configured`` / ``provider_name`` for compatibility with the legacy ABC but it is not required.
     def is_configured(self) -> bool:
         """Backward-compat alias for :meth:`is_available`."""
         return self.is_available()

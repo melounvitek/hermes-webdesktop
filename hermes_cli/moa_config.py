@@ -58,7 +58,12 @@ def _coerce_reference_timeout(value: Any) -> float | None:
 def _coerce_fanout(value: Any) -> str:
     """Normalize the fan-out cadence to ``per_iteration`` | ``user_turn`` | ``every_n:<N>`` (N >= 2);
     the mapping form ``{mode: every_n, n: N}`` becomes the string, ``every_n:1`` collapses to
-    ``per_iteration``, anything unparseable falls back to ``user_turn`` (the cheapest cadence)."""
+    ``per_iteration``, anything unparseable falls back to ``user_turn`` (the cheapest cadence).
+
+    The ``every_n`` cadence also accepts the mapping form ``{mode: every_n, n: N}`` from hand-edited YAML
+    and normalizes it to the canonical string, so the rest of the pipeline (presets, flattened view,
+    runtime) only ever sees one shape. See #67199.
+    """
     def _every_n(n: int) -> str:
         return f"every_n:{n}" if n >= 2 else ("per_iteration" if n == 1 else "user_turn")
 
@@ -82,7 +87,13 @@ def coerce_privacy_filter(value: Any) -> str:
 
     ``false``/``None``/unknown values land on '' so a hand-edited config degrades to prior
     behavior. 'display' redacts user-visible surfaces only (reference blocks in the UI and saved
-    MoA trace records)."""
+    MoA trace records).
+
+    - ``''`` (empty string): filter off — the default. The aggregator still sees raw advisor text, so answer
+    quality is unaffected. - ``'full'``: additionally redact the advisor text injected into the aggregator
+    prompt (issue #59959's literal ask). A hand-edited boolean ``true`` maps here because the issue framed
+    the toggle as "redact before passing to the aggregator".
+    """
     if value is True:
         return "full"
     if value is None or value is False:
@@ -168,7 +179,12 @@ def validate_moa_payload(raw: Any) -> list[str]:
     """Return the problems ``normalize_moa_config`` would silently paper over (empty = safe to save).
 
     Read-time tolerance (a hand-edited config degrades to defaults instead of crashing) is a
-    corruption engine at write time: a half-filled slot would silently replace the whole preset."""
+    corruption engine at write time: a half-filled slot would silently replace the whole preset.
+
+    ``normalize_moa_config`` is deliberately tolerant: at *read* time a hand-edited config must degrade to
+    defaults rather than crash the agent. API write paths call this first and reject invalid payloads loudly
+    instead of saving something the user never chose. See #64156.
+    """
     if not isinstance(raw, dict):
         return ["MoA config must be an object"]
 
@@ -229,6 +245,14 @@ _FLAT_PRESET_KEYS = (
     "fanout", "enabled")
 
 
+# When the reference fan-out runs. "user_turn" (default) runs the advisors ONCE per user turn (the original
+# MoA shape, and the cheapest cadence — #67199): the aggregator gets their upfront plan-level advice, then
+# acts alone for the rest of the tool loop. "per_iteration" re-runs the advisors whenever the advisory view
+# changes — i.e. every tool iteration, so advice tracks live task state at the cost of multiplying advisor
+# spend by tool-loop depth. "every_n:<N>" (N >= 2) is the middle ground: advisors run on the first iteration
+# of each user turn and every Nth tool iteration after it; in-between iterations reuse the cached guidance
+# from the last advisor run. Also accepts the mapping form {mode: every_n, n: N}, normalized to the
+# canonical string.
 def normalize_moa_config(raw: Any) -> dict[str, Any]:
     """Return validated MoA config with named presets."""
     if not isinstance(raw, dict):
@@ -280,7 +304,10 @@ def exact_moa_preset_name(config: Any, text: str) -> str | None:
     Used by the no-explicit-provider switch path for a bare ``/model <preset>``. Because the match
     is implicit it honors the per-preset ``enabled`` opt-out: a plain model switch that collides
     with a disabled preset's name must not silently pivot onto the MoA provider. Explicit
-    ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable."""
+    ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable.
+
+    See #55187.
+    """
     wanted = str(text or "").strip()
     if not wanted:
         return None

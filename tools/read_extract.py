@@ -127,7 +127,12 @@ def extract_document_bytes(data: bytes, path: str) -> str:
 
 
 def _anydoc_missing_error(path: str) -> str:
-    """Teaching text for anydoc-gated formats (not in the schema: only sessions hitting one pay)."""
+    """Teaching text for anydoc-gated formats (not in the schema: only sessions hitting one pay).
+
+    Response-time hint (#95681 pattern): the schema no longer lists the anydoc-gated formats or the
+    availability caveat — a session that never touches a .doc/.odt/.epub never pays for the explanation, and
+    one that does gets the full story here, with the fix.
+    """
     return (
         f"Cannot convert {path!r}: this format needs the optional anydoc "
         "converter, which is not installed (install blocked or first "

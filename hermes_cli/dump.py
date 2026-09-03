@@ -15,7 +15,13 @@ from agent.skill_utils import is_excluded_skill_path
 
 def _dotenv_key_names() -> set[str]:
     """Env-var names assigned a non-empty value in ~/.hermes/.env — what the managed backends (launchd /
-    systemd / desktop ``serve``) load, as opposed to the shell exports ``os.getenv`` reflects here."""
+    systemd / desktop ``serve``) load, as opposed to the shell exports ``os.getenv`` reflects here.
+
+    ``hermes debug share`` runs in a terminal, so ``os.getenv`` reflects the shell's environment, which can
+    include exported keys the managed backend never sees. Comparing against this set lets the dump flag that
+    mismatch (the exact trap behind #48504-style "no web_search" reports: key exported in the shell, absent
+    from .env, invisible to the launchd backend).
+    """
     try:
         text = get_env_path().read_text(encoding="utf-8", errors="ignore")
     except (OSError, UnicodeError):
@@ -200,6 +206,9 @@ def _api_key_lines(show_keys: bool) -> list[str]:
         if val and env_var not in dotenv_keys:
             display += " (shell only — not in .env; managed/desktop backend may not see it)"
         # `hermes auth add openrouter` credentials live in the pool, not env — don't read "not set".
+        # A credential added via `hermes auth add openrouter` lives in the credential pool, not as an env
+        # var — surface it so the dump doesn't misleadingly read "not set" while `hermes auth list` shows it
+        # (#42130).
         if not val and label == "openrouter":
             try:
                 from agent.credential_pool import load_pool as _load_pool

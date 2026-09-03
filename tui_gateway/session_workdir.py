@@ -253,7 +253,10 @@ def _ensure_session_db_row(session: dict) -> bool:
 
     A cwd the user *chose* is always persisted. Otherwise the launch directory stands in only for terminal sessions
     (the user deliberately ``cd``'d there; dropping it left the sidebar with no cwd AND no git_repo_root); desktop
-    launch dirs (``/``, home) stay null -> "No workspace"."""
+    launch dirs (``/``, home) stay null -> "No workspace".
+
+    See #98924.
+    """
     if not (key := session.get("session_key")):
         return
     # Persist into the session's own profile db (global remote mode), not the launch profile's — otherwise the unified
@@ -265,6 +268,8 @@ def _ensure_session_db_row(session: dict) -> bool:
         if db is None:
             # Fail loud ONLY when the store failed to open (_db_error records the SessionDB open exception); None with
             # no recorded error means "no store in this context" -> True.
+            # A None db with no recorded error means "no store in this context" (degraded harness, store
+            # deliberately absent) — that keeps the pinned best-effort contract and stays True. See #98924.
             return _db_error is None
         row_model, model_config = _workdir_row_model_config(session)
         try:
@@ -273,6 +278,10 @@ def _ensure_session_db_row(session: dict) -> bool:
                 parent_session_id=session.get("parent_session_id") or None, cwd=_persisted_session_cwd(session),
                 # Self-describing rows: aggregators merging several profile DBs can't rely on which file a row came
                 # from; a NULL is only repaired by the one-shot backfill.
+                # Stamp the launch profile explicitly instead of leaving NULL — NULL is exactly what the
+                # #94724 legacy-owner backfill exists to repair, and rows minted AFTER that one-shot
+                # backfill ran stayed NULL forever: profile-keyed matching then drops them from the sidebar
+                # and deep links can't resolve them (#99222).
                 profile_name=Path(profile_home).name if profile_home else _current_profile_name())
             # Born hidden (session.create hidden=true, or set_hidden before the row existed): apply the deferred intent.
             if session.get("pending_hidden"):
@@ -319,6 +328,8 @@ def _persist_branch_seed(session: dict) -> None:
         try:
             # Chunked so each BEGIN IMMEDIATE stays short (a seed can be hundreds of rows); a mid-copy failure leaves a
             # partial seed with _branch_seed_persisted unset.
+            # Bounded-chunk transactions (see #23254): a branch seed can be hundreds of rows; chunking keeps
+            # each BEGIN IMMEDIATE short so concurrent writers aren't starved.
             db.append_messages_batch(
                 key, [{"role": msg.get("role", "user"), **{f: msg.get(f) for f in _WORKDIR_SEED_FIELDS}} for msg in seed],
                 chunk_rows=500)

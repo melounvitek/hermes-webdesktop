@@ -586,6 +586,8 @@ class RelayAdapter(BasePlatformAdapter):
         adapter's keyword contract, not a card_id. ``fallback_text``/``title``
         are accepted for parity but not forwarded (the connector's plan-mode
         stream renders task chunks; field limits are enforced connector-side).
+
+        See #85476.
         """
         merged_meta = dict(metadata or {})
         if reply_to and "thread_ts" not in merged_meta:
@@ -636,6 +638,16 @@ class RelayAdapter(BasePlatformAdapter):
         # durable buffer and replay on re-handshake; routine WS drops are handled by
         # the transport's own reconnect supervisor.
         if self._transport is None:
+            # ``is_reconnect`` is part of the BasePlatformAdapter.connect contract: the gateway's reconnect
+            # watcher (gateway/run.py) re-establishes a platform after a fatal adapter error by building a
+            # fresh adapter and calling ``connect(is_reconnect=True)``. Relay MUST accept the kwarg or that
+            # recovery path raises TypeError and the relay platform can never come back through the watcher.
+            # The flag exists so adapters with a server-side update queue (e.g. Telegram's Bot API) preserve
+            # that queue across an outage instead of dropping it (#46621). Routine WS drops are handled
+            # entirely by the transport's own reconnect supervisor (WebSocketRelayTransport,
+            # reconnect=True); a watcher-driven reconnect builds a fresh transport from scratch (the
+            # fatal-error handler disconnect()s the old adapter first, cancelling its supervisor), so there
+            # is nothing at the adapter layer to preserve.
             raise RuntimeError("RelayAdapter has no transport configured")
         self._transport.set_inbound_handler(self._on_inbound)
         # Interrupts and passthrough-plane forwards (Discord interactions, Twilio, …)
@@ -1016,6 +1028,10 @@ class RelayAdapter(BasePlatformAdapter):
             # read off the wire (engages /sethome's via_relay guard).
             delivered_via_upstream_relay=True,
             # Profile routing (multiplex mode), mirroring _event_from_wire.
+            # The HERMES profile this interaction is routed to (multiplex mode) — mirrors _event_from_wire's
+            # profile stamping for plain relayed messages (#60586). Without this, a Team-Gateway's Discord
+            # slash-command/button/modal always fell back to the legacy agent:main namespace even when the
+            # connector resolved a specific profile for it.
             profile=getattr(forward, "profile", None),
         )
         event = MessageEvent(text=text, message_type=message_type, source=source)
@@ -1327,6 +1343,11 @@ class RelayAdapter(BasePlatformAdapter):
         triggering ts IS the thread anchor and the final reply's ONLY threading signal
         (dropping it unconditionally exiled finals to the DM root while progress
         stayed threaded). Removes an anchor, never adds one.
+
+        It does NOT: * regress real-thread streaming — a real thread carries a distinct ``thread_id`` in
+        metadata, so the guard leaves ``reply_to`` alone; * regress channel autoThread — a channel/group
+        top-level reply carries ``thread_id`` (the message's own ts) in metadata when threading is on, so it
+        is left alone; and a non-DM chat is never matched here. See #18859.
         """
         if reply_to is None:
             return None
@@ -1472,6 +1493,15 @@ class RelayAdapter(BasePlatformAdapter):
         self, chat_id: str, metadata: Optional[Dict[str, Any]], content: Optional[str], lane: str
     ) -> None:
         """One ``typing`` frame (``content`` None = omit; "" = Slack clear). Cosmetic: never raises."""
+        # Thread anchor for the status surface. Slack's status line ("is thinking…" in the thread's replies
+        # footer — works with plain chat:write, confirmed on native no-assistant bots) is THREAD-only: the
+        # connector's typing case no-ops without a thread_ts. But the typing lane's metadata (base.py
+        # _thread_metadata_for_source) has no anchor for a top-level DM — source.thread_id is None — so
+        # every heartbeat was silently dropped. In thread-per-message mode the turn's thread root IS the
+        # triggering message ts (run.py's synthetic root); synthesize it here from the per-chat inbound
+        # cache, exactly like native send_typing resolves thread_ts from metadata.message_id. Flat mode
+        # (reply_in_thread=false) keeps the no-anchor no-op: there is no thread and must not be one
+        # (#18859).
         md = self._with_status_thread_anchor(chat_id, metadata)
         frame: Dict[str, Any] = {"op": "typing", "chat_id": chat_id, "metadata": self._with_scope(chat_id, md)}
         if content is not None:

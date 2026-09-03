@@ -69,7 +69,11 @@ def _env_keys_defined_in_dotenv(path: Path) -> set[str]:
 
 def _clear_known_keys_missing_from_dotenv(path: Path) -> None:
     """After ``.env`` loaded with override, delete inherited ``_PROFILE_MANAGED_ENV_KEYS`` it does not
-    define. Deliberately NARROW: only keys that change *which provider path* is used."""
+    define. Deliberately NARROW: only keys that change *which provider path* is used.
+
+    Does **not** run when the ``.env`` file does not exist (bare-profile case, which follows ``#66930`` /
+    ``#67027`` semantics).
+    """
     if not path.exists():
         return
     defined = _env_keys_defined_in_dotenv(path)
@@ -119,6 +123,8 @@ def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
         local_env.update(load_env_file(home / ".env"))
         # Mirror load_hermes_dotenv()'s .op.env bootstrap (1Password token lives in gitignored .op.env)
         # or cold profiles fail 1Password hydration. .env wins.
+        # Without seeding it here a cold profile configured for the supported .op.env flow fails 1Password
+        # hydration (sweeper review on #74549). .env values win — never override an existing key.
         op_env = home / ".op.env"
         if op_env.exists():
             for _name, _value in load_env_file(op_env).items():
@@ -186,7 +192,12 @@ def _format_offending_chars(value: str, limit: int = 3) -> str:
 
 
 def _sanitize_loaded_credentials() -> None:
-    """Strip non-ASCII from credential env vars (``_CREDENTIAL_SUFFIXES``) so the codebase never sees them."""
+    """Strip non-ASCII from credential env vars (``_CREDENTIAL_SUFFIXES``) so the codebase never sees them.
+
+    Emits a one-line warning to stderr when characters are stripped. Silent stripping would mask copy-paste
+    corruption (Unicode lookalike glyphs from PDFs / rich-text editors, ZWSP from web pages) as opaque
+    provider-side "invalid API key" errors (see #6843).
+    """
     for key, value in list(os.environ.items()):
         if not any(key.endswith(suffix) for suffix in _CREDENTIAL_SUFFIXES):
             continue
@@ -245,6 +256,8 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     # ORDER MATTERS: BOM_UTF32_LE (FF FE 00 00) startswith BOM_UTF16_LE (FF FE); UTF-16 first would mangle it.
     force_utf8_rewrite = False
     if raw.startswith(codecs.BOM_UTF32_LE) or raw.startswith(codecs.BOM_UTF32_BE):
+        # Lazy import keeps the module import block identical to #65124's codecs/io additions so the two PRs
+        # auto-merge either order.
         path_key = str(path.resolve())
         if path_key not in _WARNED_UTF32_PATHS:
             _WARNED_UTF32_PATHS.add(path_key)
@@ -355,6 +368,13 @@ def load_hermes_dotenv(
     # self-lock preflight exit 2 again.
     from hermes_cli import _early_recovery
 
+    # External secret sources are skipped in two updater situations: 1. ``load_external_secrets=False`` —
+    # the caller is an ``update`` invocation that must not import optional secret-manager libraries
+    # (Bitwarden → cryptography → ``_rust.pyd``) into the process that replaces that same environment on
+    # Windows (#73381, #86735). 2. A fresh ``hermes update`` retry just completed a deferred dependency
+    # install before importing this module. Do not remap native secret-source dependencies in that same
+    # updater process or the self-lock preflight will recreate the marker and exit 2 again. Dotenv and
+    # managed env still load in both cases; only external source resolution is unnecessary for the updater.
     if load_external_secrets and not _early_recovery._should_skip_external_secret_sources():
         _apply_external_secret_sources(home_path)
     _apply_managed_env()
@@ -362,6 +382,12 @@ def load_hermes_dotenv(
     # config.yaml owns terminal.*, but the override=True loads above let a stale TERMINAL_ENV=docker in
     # ~/.hermes/.env win on every reload and flip the backend mid-session in long-lived processes.
     # Re-apply the explicit terminal keys LAST, after the managed overlay, so the merged config lands.
+    # config.yaml is the documented source of truth for terminal.* settings, but the dotenv loads above run
+    # with override=True — so a stale TERMINAL_ENV=docker left in ~/.hermes/.env (e.g. written by an older
+    # `hermes setup` before the user switched terminal.backend in config.yaml) silently wins again on every
+    # reload. Startup launchers bridge config→env once, but long-lived processes (gateway per-turn reload,
+    # cron standalone runs) call load_hermes_dotenv() repeatedly and used to flip the effective backend back
+    # to the stale .env value mid-session (#29186, #67323).
     _reapply_terminal_config_bridge(home_path)
 
     return loaded
@@ -414,6 +440,7 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     try:
         cfg = _load_secrets_config(home_path)
     except Exception:  # noqa: BLE001 — config errors must not block startup
+        # See #40597.
         return
     if not cfg:
         return
@@ -443,8 +470,14 @@ def _apply_external_secret_sources(home_path: Path) -> None:
     # Marking AFTER the attempt keeps the earlier failure paths retryable.
     _APPLIED_HOMES.add(home_key)
 
+    # A real fetch attempt happened (success OR error). Mark the home now so the 3-5 import-time
+    # load_hermes_dotenv() calls per startup don't re-fetch / re-print — error retries within one process
+    # are opt-in via reset_secret_source_cache(). Marking AFTER the attempt (not before, see #40597) is what
+    # lets the earlier failure paths stay retryable.
     if report.applied_any:
         _sanitize_loaded_credentials()  # vault values carry the same copy-paste corruption risk as .env
+        # Re-run the ASCII sanitization pass: vault values are user-supplied and might have the same
+        # copy-paste corruption as a manually edited .env (see #6843).
         values: dict[str, str] = {}
         for name, applied in report.provenance.items():
             _SECRET_SOURCES[name] = applied.source

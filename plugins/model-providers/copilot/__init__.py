@@ -32,6 +32,7 @@ class CopilotProfile(ProviderProfile):
             # Honor a level the live catalog lists; otherwise clamp to the nearest WEAKER
             # supported level (never drop straight to medium, which inverted the ladder:
             # ultra < high). Bespoke levels the ladder can't place fall to medium (or [0]).
+            # See #74295.
             if effort not in supported:
                 effort = clamp_reasoning_effort_to_supported(effort, list(supported))
                 if effort not in supported:

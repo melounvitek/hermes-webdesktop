@@ -104,6 +104,8 @@ def _is_managed_scratch_path(p: Path) -> bool:
     ``rmtree`` outside managed storage — a board ``default_workdir`` on a real
     source tree paired with ``workspace_kind='scratch'`` would otherwise make
     task completion delete user data.
+
+    See #28818.
     """
     return _managed_scratch_path_info(p)[0]
 
@@ -123,6 +125,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         if kind not in _REMOVABLE_KINDS or not path:
             # Not removable itself, but completing may still unblock a deferred
             # parent scratch cleanup (e.g. a 'dir' child of a scratch parent).
+            # See #33774.
             _try_cleanup_parent_workspaces(conn, task_id)
             return
         # Defer while any child is not yet terminal so it can still read
@@ -146,6 +149,7 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # Containment guard: a board's ``default_workdir`` can pair
             # ``workspace_kind='scratch'`` with a user path pointing at a real
             # source tree; without this, completion would rmtree the user's data.
+            # See #28818.
             if _is_managed_scratch_path(wp):
                 shutil.rmtree(wp, ignore_errors=True)
                 _kb._log.debug("Removed scratch workspace: %s", wp)
@@ -159,6 +163,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         # Kill the owning worker's tmux session if it is now dead, then let any
         # parent whose children are all done run its deferred cleanup.
         _cleanup_worker_tmux(conn, task_id)
+        # After cleaning up this task's workspace, check if any parent tasks now have all children done —
+        # their deferred cleanup can proceed (#33774).
         _try_cleanup_parent_workspaces(conn, task_id)
     except Exception:
         pass  # best-effort — never block completion
@@ -213,7 +219,10 @@ def _cleanup_worktree_workspace(
 def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
     """Run the deferred cleanup of any parent scratch/worktree workspace whose
     children are now all done/archived/failed/cancelled (called after each
-    child completes)."""
+    child completes).
+
+    See #33774.
+    """
     try:
         parents = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",

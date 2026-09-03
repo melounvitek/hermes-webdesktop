@@ -492,7 +492,13 @@ class SessionSchemaMixin:
         fails closed at open, leaving search on LIKE; live write/search paths must never
         start a full rebuild, and a gateway opens state.db once for days, so "next open"
         never comes. Bounded doubling backoff, non-blocking admission, no new thread. True
-        only when the index was rebuilt and sync triggers restored. Never raises."""
+        only when the index was rebuilt and sync triggers restored. Never raises.
+
+        This is the in-process retry: bounded backoff from ``_FTS_STALE_RETRY_SECONDS`` doubling to
+        ``_FTS_STALE_RETRY_MAX_SECONDS``, non-blocking admission (``timeout=0``) so a live holder is skipped
+        and tried again later, no new thread — the caller is an existing periodic tick (gateway
+        housekeeping). See #100108, #97940.
+        """
         if not self._fts_stale:
             return False
         if getattr(self, "_db_corrupt", False):
@@ -691,7 +697,13 @@ class SessionSchemaMixin:
         """Rebuild ``gateway_routing`` when its PRIMARY KEY predates scoping (``session_key TEXT
         PRIMARY KEY``): the reconciler ADDs ``scope`` but SQLite cannot ALTER a PK, so every
         routing write fails (ON CONFLICT mismatch / cross-scope UNIQUE violation). Newest
-        row wins a cross-scope session_key collision (INSERT OR REPLACE in updated_at order)."""
+        row wins a cross-scope session_key collision (INSERT OR REPLACE in updated_at order).
+
+        Early builds of the routing-index migration (#59203) created the table with ``session_key TEXT
+        PRIMARY KEY`` and no ``scope`` column. ``_reconcile_columns()`` ADDs the missing ``scope`` column on
+        those databases, but SQLite cannot ALTER a primary key, so the shipped composite ``PRIMARY KEY
+        (scope, session_key)`` never lands. On such tables every write path is broken:
+        """
         pk_cols = self._live_pk_columns(cursor, "gateway_routing")
         if pk_cols is None or pk_cols == ["scope", "session_key"]:
             return
@@ -720,7 +732,12 @@ class SessionSchemaMixin:
         window: INSERT OR IGNORE does NOT suppress FK violations, so an orphaned usage row
         would abort the rebuild (PRAGMA foreign_keys is a no-op inside a transaction; none
         is open here). OR IGNORE: COALESCE(task, '') on legacy NULL rows can collide with a
-        genuine ''-task row — keep the first."""
+        genuine ''-task row — keep the first.
+
+        Installs whose ``state.db`` reached ``schema_version >= 22`` before the ``task`` dimension was added
+        carry a 5-column PRIMARY KEY ``(session_id, model, billing_provider, billing_base_url,
+        billing_mode)``. See #73823.
+        """
         pk_cols = self._live_pk_columns(cursor, "session_model_usage")
         if pk_cols is None or "task" in pk_cols:
             return
@@ -732,6 +749,13 @@ class SessionSchemaMixin:
         try:
             self._rebuild_table(
                 cursor, "session_model_usage", "session_model_usage_legacy_pk", _SESSION_MODEL_USAGE_HEAL_DDL,
+                # v20: per-model usage attribution (issue #51607). Going forward update_token_counts()
+                # records each API call into session_model_usage keyed by the live model, but existing
+                # sessions only have their aggregate totals on the sessions row. Seed one usage row per
+                # historical session from those aggregates so insights reads uniformly from the new table.
+                # INSERT OR IGNORE keeps it idempotent: if newer code already wrote a (session_id, model,
+                # provider) row for a session, the PK conflict skips the stale aggregate rather than
+                # doubling it.
                 """INSERT OR IGNORE INTO session_model_usage (
                        session_id, model, billing_provider, billing_base_url,
                        billing_mode, task, api_call_count, input_tokens,
@@ -764,6 +788,14 @@ class SessionSchemaMixin:
         never skip a column; schema_version remains for data migrations only."""
         # Startup-watchdog lease: on multi-GB files this is I/O-bound (near-zero CPU), which
         # the watchdog's CPU fallback would misread as a parked deadlock.
+        # Declare a startup-watchdog progress lease before potentially long synchronous work: on multi-GB
+        # state.db files the reconciliation + version-gated data migrations below are legitimately slow and
+        # can be I/O-bound (near-zero CPU), which the watchdog's CPU fallback would misread as a parked
+        # deadlock (OOF-298 / PR #89750). Single lease is deliberate: this is the one pre-loop phase that
+        # can legitimately exceed the 300s default deadline (multi-GB DBs), and the lease is clamped to
+        # _MAX_LEASE_S=900. Honest worst case: a genuinely wedged DB init delays supervisor respawn by up to
+        # the lease duration. Per-chunk renewal would shrink that, but adds complexity to the migration
+        # loops for a rare failure mode.
         report_startup_progress(600.0, phase="state_db_init_schema")
         cursor = self._conn.cursor()
         cursor.executescript(SCHEMA_SQL)
@@ -771,10 +803,20 @@ class SessionSchemaMixin:
         # Column reconciliation, then the two table-shape repairs ADD COLUMN cannot express.
         self._reconcile_columns(cursor)
         self._heal_gateway_routing_pk(cursor)
+        # Rebuild session_model_usage if its PRIMARY KEY lacks the ``task`` column (5-column PK on installs
+        # already at v22+ when the column landed — the version-gated rebuild is unreachable there, #73823).
+        # Same PK-rebuild constraint as gateway_routing above.
         self._heal_session_model_usage_pk(cursor)
 
         # Indexes referencing reconciler-added columns must be created AFTER _reconcile_columns
         # (in SCHEMA_SQL the executescript would fail on legacy DBs).
+        # Heal NULL ``active`` rows unconditionally on every startup. On real-world DBs the reconciler-added
+        # ``active`` column can lack its NOT NULL DEFAULT 1 (older reconciler builds reconstructed the type
+        # without the default — see #51646: PRAGMA shows (17,'active','INTEGER',0,None,0) in the wild), so
+        # INSERTs that omitted the column wrote NULL and the ``WHERE active = 1`` transcript loaders hid the
+        # whole history. The INSERTs now set active=1 explicitly; this idempotent repair un-hides rows
+        # written before the fix. It was previously gated at ``current_version < 12`` which never re-ran for
+        # already-v12+ databases.
         try:
             cursor.execute(
                 "CREATE INDEX IF NOT EXISTS idx_messages_platform_msg_id "
@@ -805,6 +847,7 @@ class SessionSchemaMixin:
         if row is None:
             cursor.execute("INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
             # Store provenance so fresh vs wiped stores are distinguishable.
+            # See #97568.
             now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
             cursor.executemany(
                 "INSERT OR IGNORE INTO state_meta (key, value) VALUES (?, ?)",
@@ -824,6 +867,11 @@ class SessionSchemaMixin:
         # Renew the lease: the chain can rewrite whole tables on large DBs.
         report_startup_progress(600.0, phase="state_db_data_migrations")
         # (v10 trigram backfill and v11 inline FTS re-index were superseded by v23 and removed.)
+        # v11 (SUPERSEDED by v23): re-index FTS5 tables to cover tool_name + tool_calls in inline mode
+        # (#16751). v23 drops and rebuilds both FTS tables in external-content form, so running the v11
+        # inline backfill first would only burn startup time and WAL space before v23 throws the work away —
+        # and its inline INSERT shape no longer matches the current external-content FTS_SQL anyway. Kept
+        # only for source archaeology; unreachable while SCHEMA_VERSION >= 23.
         if current_version < 16:
             # v16: tag delegate subagent rows so pickers stay clean after parent deletes orphan them.
             with contextlib.suppress(sqlite3.OperationalError):
@@ -847,6 +895,8 @@ class SessionSchemaMixin:
         if current_version < 18:
             # v18: best-effort gateway metadata backfill from sessions.json.
             try:
+                # Backfill display_name / origin_json / expiry_finalized from sessions.json so pre-migration
+                # gateway sessions are discoverable from state.db without the JSON index. See #9006.
                 self._backfill_gateway_metadata_from_sessions_json(cursor)
             except Exception as exc:
                 logger.debug("v18 gateway metadata backfill skipped: %s", exc)
@@ -877,6 +927,22 @@ class SessionSchemaMixin:
         # marker until optimize-storage runs. An INTERRUPTED optimize (markers, trash, or an
         # empty external index against non-empty messages) is NOT stamped: the marker is the
         # source of truth for "fully optimized" and keeps the resume offer alive.
+        # v23: FTS storage redesign (issues #22478, #43690, #55233). The v11 inline-mode FTS tables each
+        # store a full private copy of every message (content || tool_name || tool_calls), and the trigram
+        # index additionally covers role='tool' rows (~90% of message bytes: base64 payloads, file dumps) at
+        # ~2.6x amplification — together ~75% of state.db on heavy installs (observed: 18.9 GB of a 25 GB
+        # DB). OPT-IN, NOT AUTOMATIC. The transition (demote old vtables → new external-content schema →
+        # backfill → teardown → VACUUM) is disk-heavy (transient ~2x file size to fully reclaim via VACUUM)
+        # and long (~1-2h background on a 25 GB DB). Doing it silently on every big user's next open — with
+        # a completeness guarantee that depends on the process staying alive long enough — is the wrong
+        # default. So on an EXISTING install we touch nothing here: the v22 inline FTS keeps working exactly
+        # as before, and we only record a flag advertising that the optimization is available. `hermes
+        # sessions optimize-storage` performs the whole transition as one deliberate, disk-checked,
+        # progress-reported foreground operation. DECOUPLED VERSIONING. Crucially, this does NOT hold back
+        # the main schema_version. The FTS storage LAYOUT is tracked by an independent `fts_storage_version`
+        # marker (see _fts_storage_version / SETTLE below), so schema_version advances to SCHEMA_VERSION
+        # here like every other migration — future v24+ migrations land automatically for legacy-FTS users
+        # too. Only the FTS *layout* waits for opt-in.
         if (
             fts5_available
             and not self._db_needs_fts_storage_upgrade(cursor)
@@ -898,6 +964,10 @@ class SessionSchemaMixin:
         """v22: ``task`` joins the session_model_usage PRIMARY KEY ('' = main loop; aux calls
         named). SQLite cannot ALTER a PK, so rebuild; existing rows → task=''."""
         try:
+            # v22: task-dimension usage attribution (issue #23270). session_model_usage gains a ``task``
+            # column ('' = main agent loop; 'vision'/'compression'/'title_generation'/... = auxiliary calls)
+            # so aux model spend is visible in analytics. The reconciler will have already ADDed the plain
+            # column on legacy DBs (harmless); the rebuild bakes it into the PK properly.
             legacy_pk = cursor.execute(
                 "SELECT COUNT(*) FROM pragma_table_info('session_model_usage') WHERE name = 'task' AND pk > 0"
             ).fetchone()[0]
@@ -992,7 +1062,10 @@ class SessionSchemaMixin:
         simultaneously (the interleaving that corrupted state.db in production), so this
         FAILS CLOSED: on deferral the just-repaired triggers are dropped again and the
         stale breadcrumb persisted — triggers must never be live over an unrebuilt gap
-        (``_enter_fts_fail_open``'s ordering contract); a later recovery path restores both."""
+        (``_enter_fts_fail_open``'s ordering contract); a later recovery path restores both.
+
+        See #93200.
+        """
         with fts_rebuild_admission(self.db_path) as admitted:
             if admitted:
                 rebuild_fn()

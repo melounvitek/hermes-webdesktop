@@ -338,7 +338,10 @@ def _validate_entry_paths(entry: Dict[str, Any]) -> Optional[str]:
 def rollback_entry(entry_id: str) -> Tuple[bool, str]:
     """Restore the before-state of mutation *entry_id*. Fail-closed (mirrors
     agent/curator_backup.rollback): every before-blob must exist BEFORE any change, and a
-    pre-rollback safety entry of every touched path's CURRENT state is appended first."""
+    pre-rollback safety entry of every touched path's CURRENT state is appended first.
+
+    1. 2. See #63366.
+    """
     entry = get_entry(entry_id)
     if entry is None:
         return False, f"no ledger entry with id '{entry_id}'"

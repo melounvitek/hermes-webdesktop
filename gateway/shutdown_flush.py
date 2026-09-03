@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Reason tag for transcript messages dropped by the in-memory pending cap during live
 # operation. Payloads carry the full transcript message dict for verbatim replay.
+# See #78182.
 TRANSCRIPT_CAP_DROP_REASON = "transcript_cap_drop"
 # Monotonic tiebreaker so same-second spool files replay in drop order.
 _TRANSCRIPT_SPOOL_SEQ = itertools.count()
@@ -112,7 +113,12 @@ def flush_overflow_to_file(overflow_by_session: Dict[str, Any], *, reason: str =
 
 
 def spool_dropped_transcript_message(session_id: str, message: Dict[str, Any]) -> Optional[Path]:
-    """Spool a cap-evicted transcript message; ``None`` on failure (callers degrade to drop+log)."""
+    """Spool a cap-evicted transcript message; ``None`` on failure (callers degrade to drop+log).
+
+    Uses the same on-disk pending spool as :func:`flush_pending_to_file` (one atomic JSON payload per
+    message under ``<hermes_home>/pending_messages/``), so a runtime cap rotation no longer silently
+    discards user data while the process stays up (#78182).
+    """
     try:
         return _write_payload(_get_flush_dir(), {
             "session_key": session_id, "reason": TRANSCRIPT_CAP_DROP_REASON, "ts": int(time.time()),
@@ -227,6 +233,8 @@ def recover_pending_to_db(session_db=None) -> int:
 
 def _recover_one_payload(session_db, path: Path, payload: Dict[str, Any]) -> bool:
     """Append one flush payload to ``session_db``; False (file kept) when structurally invalid."""
+    # Cap-dropped transcript payloads carry the full message dict keyed by session_id — replay directly
+    # (#78182). This handles spool files that were never drained before a restart.
     if payload.get("reason") == TRANSCRIPT_CAP_DROP_REASON:
         # Cap-dropped payloads carry the full message dict keyed by session_id — replay directly.
         data = payload.get("data", {}) or {}

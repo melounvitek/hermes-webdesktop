@@ -379,6 +379,7 @@ class _HealPass:
         from hermes_cli.auth import _is_same_auth_store
         if self.root_singleton is not None and _is_same_auth_store(profile_singleton, self.root_singleton):
             return  # an aliased singleton pair is one shared grant, not a fork: never self-compare/unlink
+        # See #101356.
         p_single = _singleton_as_row(profile_singleton)
         root_has_grant = bool(self.r_oauth) or self.root_singleton_row is not None
         # Otherwise root has NO grant for this provider (or the file is not a grant): the
@@ -479,6 +480,7 @@ def _heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str,
         # itself, and the strip would write through the alias and delete the shared credential.
         # Nothing to consolidate; the mtime mark keeps this off the per-call hot path.
         _oauth_heal_clean_marks[provider_id] = fingerprint
+        # See #101356.
         logger.debug("%s: forked-OAuth heal skipped, %s is the root store", provider_id, profile_path)
         return None
 

@@ -69,6 +69,7 @@ def _cmd_approve(store, platform: str, code: str):
         print("  They'll be recognized automatically on their next message.\n")
     elif store._is_locked_out(platform):
         # approve_code returns None for both invalid codes and lockout — say which.
+        # Tell the operator it's lockout so they don't chase a "wrong code" rabbit hole (#10195).
         import time as _time
         lockout_until = store._load_json(store._rate_limit_path()).get(f"_lockout:{platform}", 0)
         mins = max(0, int(lockout_until - _time.time())) // 60

@@ -10,6 +10,10 @@ Requires the ``teams`` extra (auto-installed by the gateway on first start, or
 from __future__ import annotations
 
 import asyncio
+# microsoft-teams-apps calls ``load_dotenv(find_dotenv(usecwd=True))`` at ``microsoft_teams.apps.app``
+# import time. Importing it during plugin discovery / ``TeamsSummaryWriter`` imports would pollute process
+# ``os.environ`` from a cwd-discovered ``.env`` (#62935). Detect presence via find_spec only; bind symbols
+# in ``check_teams_requirements()`` behind a dotenv no-op.
 import importlib.util
 import json
 import logging
@@ -247,10 +251,18 @@ _SDK_IMPORTS = {
     "microsoft_teams.cards": ("AdaptiveCard", "ExecuteAction", "TextBlock")}
 
 
+# Keep the old name as an alias so existing test imports don't break. NOTE: ``check_requirements`` is the
+# PASSIVE probe (registry ``check_fn``, status / unit tests) — it must never trigger a pip install.
+# ``check_teams_requirements`` is the ACTIVE lazy-installer, registered as ``ensure_deps_fn``: the
+# registry's ``create_adapter()`` runs it when the passive probe fails, right before the gateway connects
+# Teams (#79812). ``connect()`` re-checks defensively.
 @contextmanager
 def _suppress_third_party_dotenv() -> Iterator[None]:
     """No-op ``dotenv.load_dotenv`` while importing the Teams SDK: ``microsoft_teams.apps.app`` loads a
-    cwd-discovered ``.env`` at import, mutating process-global ``os.environ``. Hermes owns dotenv loading."""
+    cwd-discovered ``.env`` at import, mutating process-global ``os.environ``. Hermes owns dotenv loading.
+
+    See #62935.
+    """
     try:
         import dotenv as _dotenv
     except ImportError:
@@ -358,6 +370,10 @@ class TeamsAdapter(BasePlatformAdapter):
                 return False
         try:
             # aiohttp app first — the bridge adapter wires SDK routes into it.
+            # Set up aiohttp app first — the bridge adapter wires SDK routes into it. client_max_size: Bot
+            # Framework activities are JSON (caps out well under 1 MiB); an explicit cap keeps
+            # oversized/chunked bodies from being buffered unbounded on a 0.0.0.0 bind (same pattern as
+            # webhook.py / raft, #58536/#58902).
             aiohttp_app = web.Application(client_max_size=_MAX_BODY_BYTES)
             aiohttp_app.router.add_get("/health", lambda _: web.Response(text="ok"))
             self._app = App(

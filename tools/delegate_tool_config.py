@@ -166,7 +166,10 @@ def _normalized_runtime_url(value: Any) -> str:
 def _inherit_parent_capabilities(parent_agent, override_provider, override_base_url) -> Optional[dict]:
     """Parent's endpoint-trust capability map for a child, or None. ``agent.capabilities`` is a trust decision scoped
     to one provider+endpoint: inherited ONLY when the child runs the parent's exact route; any provider or base_url
-    override stays DEFAULT-DENY (matches the /model switch posture)."""
+    override stays DEFAULT-DENY (matches the /model switch posture).
+
+    See #94036, #97292.
+    """
     if override_provider or override_base_url:
         return None
     parent_caps = getattr(parent_agent, "capabilities", None)
@@ -204,7 +207,14 @@ def _resolve_child_credential_pool(
     its fixed credential). Custom endpoints all collapse to ``provider="custom"``, so they are matched by endpoint
     identity (the ``custom:<name>`` pool key) — sharing the parent's pool across different custom endpoints would
     overwrite the child's delegated base_url on lease; an unregistered custom endpoint (no custom_providers entry)
-    keeps the child's fixed credential rather than inherit the parent's."""
+    keeps the child's fixed credential rather than inherit the parent's.
+
+    Custom endpoints are a special case: every direct ``delegation.base_url`` runtime collapses to
+    ``provider="custom"``, so bare provider equality would treat two *different* custom endpoints as
+    interchangeable and let the child inherit the parent's pool. We therefore resolve custom runtimes by
+    endpoint identity (the ``custom:<name>`` pool key derived from the base_url) and only share the parent's
+    pool when both resolve to the *same* custom endpoint. See #7833.
+    """
     parent_pool = getattr(parent_agent, "_credential_pool", None)
     if not effective_provider:
         return parent_pool
@@ -274,6 +284,8 @@ def _direct_endpoint_credentials(v: dict, explicit_request_overrides) -> dict:
     """``delegation.base_url`` branch: provider/api_mode from URL heuristics."""
     # Shared URL-based api_mode detector so Anthropic-compatible direct endpoints (/anthropic suffix: Azure AI
     # Foundry, MiniMax, Zhipu, LiteLLM) get the Messages transport instead of 404ing on chat_completions.
+    # Without this, subagents would default to chat_completions and hit 404s on endpoints that only speak
+    # the Anthropic Messages protocol. Fixes #10213.
     from hermes_cli.runtime_provider import _detect_api_mode_for_url
     base_lower = v["base_url"].lower()
     host = base_url_hostname(v["base_url"])
@@ -329,6 +341,8 @@ def _runtime_provider_credentials(v: dict, explicit_request_overrides) -> dict:
             f"Delegation provider '{configured_provider}' resolved but has no API key. "
             f"Set the appropriate environment variable or run 'hermes auth'."
         )
+    # A pinned ACP transport command must exist — refuse the spawn loudly rather than letting the child
+    # silently fall back to another transport (#80450).
     pinned_command = runtime.get("command")
     _require_pinned_command(
         pinned_command, f"Delegation provider '{configured_provider}' is pinned to the "
@@ -410,6 +424,12 @@ def _resolve_child_runtime(
     # api_mode: each provider has its own wire, so a different provider re-derives (None) instead of inheriting (404s
     # otherwise). Nous Portal is dual-wire within one provider (anthropic/* → Messages, else chat_completions), so
     # same-provider inheritance would pin the child on the wrong wire — re-derive.
+    # Bug #20558 / PR #20563: api_mode must NOT be inherited when the child uses a different provider than
+    # the parent — each provider has its own API surface (e.g. MiniMax uses anthropic_messages, DeepSeek
+    # uses chat_completions). Inheriting the parent's mode causes 404 errors when the child routes to the
+    # wrong endpoint. Derive the mode from the target provider when it differs. Same-provider inheritance
+    # would pin a child Hermes/Qwen subagent onto the parent's Claude Messages wire (or the reverse).
+    # agent_init honors an explicit api_mode above its nous branch, so re-derive here before construction.
     _parent_provider = getattr(parent_agent, "provider", None) or ""
     if override_api_mode is not None:
         effective_api_mode = override_api_mode
@@ -432,8 +452,14 @@ def _resolve_child_runtime(
     )
     # A pinned provider must use direct API calls; inheriting the parent's ACP
     # transport would bypass the override credentials entirely.
+    # Inheriting acp_command unconditionally causes run_agent.py to initialize CopilotACPClient, bypassing
+    # override credentials entirely (issue #16816).
     if override_provider and not override_acp_command:
         effective_acp_command, effective_acp_args = None, []
+    # Defensive: validate trusted delegation.command exists on PATH before honoring it. An explicitly pinned
+    # transport that cannot run must fail the spawn loudly (#80450) — silently falling back to the default
+    # transport would run the child somewhere the user explicitly routed it away from. Normally unreachable
+    # via delegate_task, which pre-validates the command in _resolve_delegation_credentials.
     if override_acp_command:
         # Forced ACP transport requires provider copilot-acp for run_agent to init the client.
         effective_provider, effective_api_mode = "copilot-acp", "chat_completions"

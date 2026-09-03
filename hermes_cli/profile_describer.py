@@ -149,6 +149,7 @@ def describe_profile(profile_name: str, *, overwrite: bool = False, timeout: Opt
     try:
         # call_llm applies auxiliary.profile_describer.* config (provider/model/base_url,
         # extra_body, reasoning_effort, retries); the direct-create path dropped extra_body.
+        # See #35566.
         resp = call_llm(
             task="profile_describer",
             messages=[{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],

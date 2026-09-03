@@ -73,6 +73,8 @@ def _conversation_generation(session_key: str, source: str, session_db: Any) -> 
     The declared key survives ``/new``, so hashing it alone would reuse one scope across
     conversations. The counter advances with each reset boundary, independent of prunable
     rows and wall-clock; compression does not advance it.
+
+    The declared key names a chat and deliberately survives `/new` and policy resets. See #79017, #86733.
     """
     reader = getattr(session_db, "latest_conversation_boundary", None)
     if not callable(reader):
@@ -99,6 +101,11 @@ def declared_conversation_scope(agent: Any) -> Optional[str]:
     if sid and db is not None:
         try:
             # One read for both halves of the row identity (fork verdict + source).
+            # One read for both halves of the row's identity: the fork verdict and the source the peer
+            # queries match on live on the same ``sessions`` row, and asking for them separately read it
+            # twice per resolution (@teknium1 on #98811). A SessionDB without the combined view keeps the
+            # original call, so nothing that predates it — including the doubles that certify the
+            # fail-closed contract below — changes behaviour.
             identity = getattr(db, "declared_scope_identity", None)
             if callable(identity):
                 is_fork, row_source = identity(sid)
@@ -158,7 +165,14 @@ def declared_conversation_scope_safe(agent: Any) -> Optional[str]:
 
 def resolve_prompt_cache_scope_safe(agent: Any) -> Optional[str]:
     """Never-raising variant of :func:`resolve_prompt_cache_scope` (None = use the physical id).
-    At turn_context an exception inside ``set_runtime_main(...)`` would skip the whole binding."""
+    At turn_context an exception inside ``set_runtime_main(...)`` would skip the whole binding.
+
+    Returns None on any failure (or when there is no scope). Consumers treat None/empty as "fall back to the
+    physical session_id", so a resolution failure degrades to pre-#79017 behavior instead of blocking the
+    caller — important at turn_context's call site, where an exception raised inside the
+    ``set_runtime_main(...)`` argument list would otherwise skip the whole runtime binding, not just the
+    cache scope.
+    """
     try:
         return resolve_prompt_cache_scope(agent) or None
     except Exception:

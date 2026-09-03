@@ -57,6 +57,15 @@ class ApiErrorSummaryMixin:
         the pool. xAI returns the same permission-denied text for BOTH cases; a ``[WKE=unauthenticated:...]``
         suffix (or "access token could not be validated") means stale token → return False so the refresh path
         runs.
+
+        Disambiguator for xAI (#29344): the same ``code`` text ("The caller does not have permission to
+        execute the specified operation") is returned for BOTH an unsubscribed account AND a stale OAuth
+        access token.  xAI ships an explicit signal in the ``error`` field that tells the two apart: a
+        ``[WKE=unauthenticated:...]`` suffix (and/or the ``OAuth2 access token could not be validated``
+        phrasing) means the credentials failed validation — that's recoverable by refreshing the token, NOT
+        by surfacing an entitlement message. When either signal is present we return False eagerly so the
+        credential-pool refresh path runs, letting long-running TUI sessions recover from stale tokens
+        without an exit/reopen cycle.
         """
         if status_code not in {401, 403, None}:
             return False
@@ -162,6 +171,9 @@ class ApiErrorSummaryMixin:
 
         # SDK may leave body empty while httpx has the payload. Redact: the body is attacker-influenced
         # and may echo Authorization / x-api-key / request JSON.
+        # Redact before returning: the raw provider/proxy error body is attacker-influenced and may echo
+        # Authorization / x-api-key / request JSON, which would otherwise leak into final_response + logs
+        # (this path widens exposure vs the old empty-body "HTTP 400" string). See #36109.
         response = getattr(error, "response", None)
         if response is not None:
             try:

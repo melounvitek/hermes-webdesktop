@@ -11,7 +11,10 @@ PLATFORMS = {k: info.label for k, info in _PLATFORMS.items() if k != "api_server
 
 def _normalize_skill_names(values) -> Set[str]:
     """Config value -> set of skill names (mirrors ``agent.skill_utils._normalize_string_set``):
-    ``None`` (YAML null) is empty and a bare scalar is a single-item list, NOT its characters."""
+    ``None`` (YAML null) is empty and a bare scalar is a single-item list, NOT its characters.
+
+    See #13026.
+    """
     if values is None:
         return set()
     if isinstance(values, str):

@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 # Per-profile by design (anchored on get_hermes_home(), see cron/jobs.py). Optional test override;
 # production resolves the path at CALL time so multiplexed profile ticks (set_hermes_home_override)
 # cannot leak one profile's suggestions into the import-time home.
+# Per-profile by design (issue #4707): suggestions live alongside the active profile's cron store. Anchor on
+# get_hermes_home() (profile home), not the shared default root. Same pattern as cron/executions.py.
 SUGGESTIONS_FILE: Optional[Path] = None
 
 # Protects load->modify->save cycles (the background review fork and the main agent can both write).

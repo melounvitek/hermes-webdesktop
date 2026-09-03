@@ -139,6 +139,7 @@ def _model_flow_custom(config):
 
     # The key goes to .env and config.yaml only references it. Keyed on host:port
     # so two servers on one machine keep separate credentials.
+    # See #69449.
     custom_key_env = ""
     if effective_key:
         _parsed = urllib.parse.urlparse(effective_url)
@@ -306,6 +307,8 @@ def _model_flow_named_custom(config, provider_info):
     # ``discover_models: false`` (default True) uses the configured ``models:`` list
     # verbatim and skips the live probe, so operators can restrict the picker to the
     # subset their plan serves. Same semantics as the slash-command picker.
+    # This lets operators restrict the picker to the subset their plan actually serves instead of the
+    # endpoint's full catalog (#18726: Baidu Qianfan returns 100+ models for a 2-3 model plan).
     discover = provider_info.get("discover_models", True)
     if isinstance(discover, str):
         discover = discover.lower() not in {"false", "no", "0"}

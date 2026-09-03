@@ -278,6 +278,8 @@ def _run_check_fn_uncached(fn: Callable, *, unresolved_scope: bool = False) -> b
             # any profile secret scope exists, so get_secret raises by design. No traceback,
             # so it isn't mistaken for a crashed check_fn.
             logger.debug(
+                # The tool re-probes on the first scoped turn — log without a traceback so this cannot be
+                # mistaken for a crashed check_fn (#100697).
                 "check_fn %s hit the multiplex fail-closed path with no "
                 "profile secret scope active; dependent tools re-probe on the first scoped turn",
                 _fn_label(fn))
@@ -689,6 +691,10 @@ class ToolRegistry:
                 owner = self._plugin_owner_of(entry.handler)
                 # Ownership binds to the plugin package root (``hermes_plugins.{name}``), not
                 # the exact module: a submodule's handler is still the package's to remove.
+                # A handler defined in ``hermes_plugins.pkg.handlers`` is still owned by the
+                # ``hermes_plugins.pkg`` package — exact string equality would wrongly block root-module
+                # cleanup code from removing tools registered by a submodule of the same plugin (egilewski
+                # review on #55840).
                 same_plugin = bool(owner and caller_owner == owner)
                 if (
                     caller_owner is not None

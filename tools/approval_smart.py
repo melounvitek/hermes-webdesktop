@@ -72,13 +72,18 @@ def _get_smart_policy() -> str:
 
 
 def _smart_approve(command: str, description: str) -> str:
-    """Ask the auxiliary LLM; return 'approve', 'deny', or 'escalate' (uncertain/failed)."""
+    """Ask the auxiliary LLM; return 'approve', 'deny', or 'escalate' (uncertain/failed).
+
+    Inspired by OpenAI Codex's Smart Approvals guardian subagent (openai/codex#13860).
+    """
     _smart_t0 = time.monotonic()
     try:
         from agent.auxiliary_client import _get_task_timeout, call_llm
 
         # Pass the timeout explicitly AND log call + duration: this synchronous call gates EVERY flagged command, and
         # a stalled provider once froze turns for tens of minutes with zero log output.
+        # Pass the same configured value explicitly (belt) and log the call + duration (suspenders) so a
+        # hang is visible in the logs instead of silent. See #72500, #82846.
         smart_timeout = _get_task_timeout("approval")
         logger.debug("Smart approvals: assessing risk for command (timeout=%ss)", smart_timeout)
         system_prompt = _SYSTEM_PROMPT

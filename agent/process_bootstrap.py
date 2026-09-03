@@ -209,6 +209,11 @@ def enable_happy_eyeballs_on_client(client) -> None:
     For callers that build clients inline (Codex OAuth/device-login). Proxy-backed
     pools are skipped (TCP connect goes to the proxy host); async clients need
     nothing (anyio already races per RFC 8305). Best-effort.
+
+    Proxy-backed transports (``httpcore.HTTPProxy`` / SOCKS pools) are left untouched: with a proxy in play
+    the TCP connect goes to the proxy host, which is out of scope for the direct-transport racing added in
+    #94388. Async clients are also left untouched — httpcore's async backend already performs RFC 8305
+    racing natively via ``anyio.connect_tcp(happy_eyeballs_delay=0.25)``.
     """
     try:
         import httpcore
@@ -312,6 +317,8 @@ def _shared_transport_cls():
         mounted object absorbs that close while the shared pool keeps serving other clients.
         ``handle_request`` stamps the owning view into ``request.extensions`` so socket-abort
         sweeps target only this client's in-flight connections on the shared pool.
+
+        See #10933.
         """
 
         __slots__ = ("_inner", "_closed")
@@ -391,6 +398,9 @@ def build_keepalive_http_client(base_url: str = "", *, async_mode: bool = False,
     ``HTTPTransport`` through a ``_SharedTransport`` view, so N delegated children share one
     connection pool + SSL context. Async clients are never shared: an httpcore async pool is
     bound to the event loop that first used it. Proxy-backed clients keep httpx's own transport.
+
+    See #12952, #54049.
+    See #10933.
     """
     try:
         import httpx

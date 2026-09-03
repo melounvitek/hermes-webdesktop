@@ -150,6 +150,8 @@ def _provision_libpython(venv_dir: Path, source_file: Path, *, refresh: bool = F
 
     Provision-if-present: a surplus hardlink on a statically-linked build is free; a missed
     detection is the only way the dylib-not-found crash returns.
+
+    See #95425.
     """
     src_lib = _store_root(source_file) / "lib"
     if not src_lib.is_dir():
@@ -319,6 +321,8 @@ def ensure_tcc_anchor(project_root: Path | None = None) -> Path | None:
     No-op (None) on non-macOS, without a venv interpreter, or when the interpreter is not
     uv-managed. Idempotent. Best-effort — None (and logs) if the copy or boot-gate fails; callers
     must never depend on success.
+
+    See #95596.
     """
     found = _managed_venv(project_root)
     if isinstance(found, str):

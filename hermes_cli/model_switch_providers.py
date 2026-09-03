@@ -448,6 +448,10 @@ def _extend_unique(target: list, items) -> None:
 
 
 def _norm_url(url: Any) -> str:
+    # Effective base URLs of every built-in row we emit (normalized lower+rstrip). Section 4 uses this to
+    # hide ``custom_providers`` entries that point at the same endpoint as a built-in (e.g. a user-defined
+    # "my-dashscope" on https://coding-intl.dashscope.aliyuncs.com/v1 collides with the built-in
+    # alibaba-coding-plan row when DASHSCOPE_API_KEY is present). Fixes #16970.
     return str(url or "").strip().rstrip("/").lower()
 
 
@@ -710,6 +714,9 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
         has_creds = _overlay_has_env_creds(pid, hermes_slug, overlay, os.environ.get)
     # External-process providers (copilot-acp) hold no key/token/pool entry by design — the
     # spawned ACP subprocess brings its own auth. "Configured" means the executable resolves.
+    # "Configured" means the executable resolves, which is exactly what get_auth_status() reports for them;
+    # without this branch the has_creds filter below unconditionally hides the provider from every picker
+    # (#63662).
     if not has_creds and overlay.auth_type == "external_process":
         try:
             from hermes_cli.auth import get_auth_status
@@ -1039,6 +1046,7 @@ def list_authenticated_providers(
             pass
 
     # PyYAML parses unquoted numeric names (`provider: 2070`) as int.
+    # seen_slugs: set = set()  # lowercase-normalized to catch case variants (#9545)
     current_provider = coerce_provider_id(current_provider)
     current_base_url = str(current_base_url or "").strip()
     current_model = str(current_model or "").strip()

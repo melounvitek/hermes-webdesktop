@@ -180,6 +180,11 @@ class MicroCompactionMixin:
             # in-place pop on a live dict would be identity-skipped by the bounded flush scan;
             # flag the finalizer.
             entry.pop(_cc()._DB_PERSISTED_MARKER, None)
+            # Sibling of the finalize_turn pop site (#75170): this pop also strips the marker from a LIVE
+            # dict in place, so the bounded flush-scan cursor would identity-skip the rewritten marker and
+            # the defragged summary would never reach state.db. The compressor holds no agent reference, so
+            # raise a flag the finalizer consumes to invalidate agent._db_flush_scan_prefix. (The pop sites
+            # at module scope — fresh copies in strip-marker helpers — break identity and need no flag.)
             self._flush_scan_cursor_invalidated = True
         logger.info(
             "Micro-compaction defrag: rolling summary re-summarized (%d -> %d chars)",
@@ -313,6 +318,9 @@ class MicroCompactionMixin:
             self._micro_compact_tokens_saved_total -= delta or 0
             self._micro_compact_passes += 1
             # Cached reads only: the lazy properties can fire a synchronous /models probe.
+            # The ``threshold_tokens`` / ``context_length`` properties resolve lazily and can fire a
+            # synchronous /models probe on first access (#32221) — telemetry must never be the thing that
+            # blocks a turn. Unresolved simply reports null.
             threshold = self._threshold_tokens
             has_occupancy = threshold and tokens_after is not None and threshold > 0
             occupancy = round(tokens_after / threshold * 100, 1) if has_occupancy else None
@@ -343,6 +351,7 @@ class MicroCompactionMixin:
             # Every row except the marker is a carried-forward original: archive rewind-style.
             session_db.archive_and_compact(session_id, compacted_messages, tail_count=max(0, len(compacted_messages) - 1))
             # Shared post-commit stamp site with batch commit and proactive prune.
+            # See #98450.
             _cc().stamp_db_persisted_markers(compacted_messages)
         except Exception:
             logger.info(

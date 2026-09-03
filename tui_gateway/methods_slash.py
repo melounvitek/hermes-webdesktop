@@ -251,6 +251,9 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
         if snapshot_kwargs:
             _compress_session_history(session, arg.strip() or None, **snapshot)
         else:
+            # The raw argument goes through unparsed: _compress_session_history (the choke point shared by
+            # all three manual-compress routes) parses the boundary-aware forms (here [N], up to here,
+            # --keep N) and does the partial head/tail split there (#35533).
             _compress_session_history(session, arg)
     except CompressionLockHeld as e:
         return describe_compression_lock_skip(e.holder)

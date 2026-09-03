@@ -205,7 +205,10 @@ class SessionGatewayMixin:
         row. Self-healing: a missing target row (deferred ``create_session`` write, or crash between routing
         publication and row creation) is INSERTed with full identity rather than no-opped, so a gateway row
         is never first-created by the identity-less lazy writer (``update_token_counts``) and left
-        unroutable forever."""
+        unroutable forever.
+
+        See #9006.
+        """
         if not session_id or not session_key:
             return
         identity = (session_key, source, user_id, chat_id, chat_type, thread_id, display_name, origin_json)
@@ -283,7 +286,11 @@ class SessionGatewayMixin:
         """Keyed, still-open rows with no evidence of a single turn (no messages, tokens, tool/API calls,
         activity, or title): leaked fixtures or chats routed but never answered. Safe to drop — the gateway
         mints a fresh session on the next message. Needs its own selector because ``bulk prune``/``archive``
-        are pinned to ``ended_at IS NOT NULL``. ``pinned``/``archived`` = explicit keep intent."""
+        are pinned to ``ended_at IS NOT NULL``. ``pinned``/``archived`` = explicit keep intent.
+
+        That is exactly the shape of a leaked test fixture (#82770) — and also of a chat that was routed but
+        never answered.
+        """
         cutoff = time.time() - (float(older_than_days) * 86400.0)
         rows = self._read_all(
             """
@@ -383,7 +390,15 @@ class SessionGatewayMixin:
         exact-key fallback requires the complete peer tuple (never cross chats/threads/users) plus a profile
         fence: a Telegram DM's tuple is identical for every bot, so a sibling profile's legacy row would
         otherwise be adopted. Ours = profile_name is the owner or NULL; stores outside the profile tree
-        derive no owner and stay unfenced."""
+        derive no owner and stay unfenced.
+
+        See #60609.
+        Reset boundaries fence recovery (#68539): an intentional boundary such as ``session_reset`` (or any
+        explicit non-recoverable end_reason) must block fallback to an *older* row for the same peer. Each
+        candidate is therefore rejected when a boundary row for the peer ended *after* the candidate's last
+        activity — if the conversation's most recent event is an intentional reset, recovery returns nothing
+        rather than reaching behind it.
+        """
         if not session_key:
             return None
         with self._read_ctx() as conn:
@@ -392,6 +407,11 @@ class SessionGatewayMixin:
                 return self._session_row_dict(row)
             if chat_id is None or chat_type is None:
                 return None
+            # Profile fence (#74285): a Telegram DM's peer tuple is identical for every bot (chat_id ==
+            # user_id, no thread), so a sibling profile's row written into this store before the per-profile
+            # partition (legacy data) would otherwise be adopted here. Every profile-tree store has one
+            # owner; a row is ours when its profile_name is the owner or NULL (legacy rows this store
+            # minted). Stores outside the tree derive no owner and keep the historical unfenced behavior.
             owner = self._own_profile_name()
             row = conn.execute(
                 _PEER_BY_TUPLE_SQL, (source, user_id, chat_id, chat_type, thread_id, owner, owner, owner)
@@ -466,6 +486,13 @@ class SessionGatewayMixin:
             if (donor is None or orphan is None or not donor["session_key"] or orphan["session_key"]
                     or (donor["source"] or "") != (orphan["source"] or "")):
                 return False
+            # Belt-and-suspenders for gateway routing metadata (#59527): the gateway re-records the peer on
+            # the child after rotation (d5b4879d4), but a hard crash between child creation and that write
+            # leaves the child row without origin columns, so ``find_latest_gateway_session_for_peer`` can't
+            # recover the mapping on restart. Inherit them from the parent at creation time — but ONLY for
+            # compression forks (parent already ended with end_reason='compression'). Delegate/subagent
+            # children are spawned while the parent is still live and must NOT inherit routing keys, or peer
+            # recovery could repoint gateway traffic into a subagent's session.
             conn.execute(
                 """UPDATE sessions
                       SET session_key = ?,

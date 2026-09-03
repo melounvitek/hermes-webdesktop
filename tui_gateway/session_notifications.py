@@ -293,7 +293,10 @@ def _kb_poll_board(_kb, slug: str, session_key: str) -> list:
 def _collect_kanban_notifications(session: dict) -> list:
     """Claim unseen terminal kanban events for this session's ``platform="tui"`` subscriptions (``kanban_create``
     auto-subscribes with ``chat_id=HERMES_SESSION_KEY``; no "tui" messaging adapter exists, so this poller is the
-    delivery path). Same atomic cursor-claim as the gateway notifier: exactly-once even if a gateway polls the same DB."""
+    delivery path). Same atomic cursor-claim as the gateway notifier: exactly-once even if a gateway polls the same DB.
+
+    See #59890.
+    """
     session_key = str(session.get("session_key") or "")
     if not session_key or session.get("_finalized"):
         return []
@@ -399,7 +402,12 @@ def _notif_handle_event(sid, session, evt, emitted, registry, fmt, deferred) -> 
 def _notification_poller_loop(stop_event: threading.Event, sid: str, session: dict) -> None:
     """Daemon thread (started by _init_session()) that drains the process-global completion_queue for this session
     (ownership routing: _notif_handle_event) and polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` — the
-    delivery path for platform="tui" rows."""
+    delivery path for platform="tui" rows.
+
+    Also polls ``kanban_notify_subs`` every ``_KANBAN_POLL_SECONDS`` for this session's TUI kanban
+    subscriptions and delivers terminal task events the same way (status.update + agent turn) — the delivery
+    path tools/kanban_tools.py documents for platform="tui" rows (issue #59890).
+    """
     from tools.process_registry import process_registry, format_process_notification
     queue = process_registry.completion_queue
     emitted: set = set()  # dedup re-queued events so one completion isn't emitted 50 times while busy

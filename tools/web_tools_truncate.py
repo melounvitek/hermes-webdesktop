@@ -14,6 +14,13 @@ logger = logging.getLogger("tools.web_tools")
 
 # Per-page char budget sent to the model (override: web.extract_char_limit); larger pages are head+tail
 # truncated, full text stored on disk.
+# ─── Parallel / Tavily / Firecrawl helpers — moved into plugins ────────────── After PR #25182, the
+# per-vendor client construction, request helpers, and response normalizers all live in
+# plugins.web.<vendor>.provider: - parallel: plugins/web/parallel/provider.py - tavily:
+# plugins/web/tavily/provider.py - firecrawl: plugins/web/firecrawl/provider.py The names from the firecrawl
+# plugin (Firecrawl proxy, _get_firecrawl_client, _to_plain_object, _normalize_result_list,
+# _extract_web_search_results, _extract_scrape_payload, _is_tool_gateway_ready, etc.) are re-exported at the
+# top of this module for backward-compat with integration tests and unit-test patches.
 DEFAULT_EXTRACT_CHAR_LIMIT = 15000
 # Ceiling on the full-text file written to cache/web so a multi-MB page can't write unbounded bytes on
 # every extract; the model only ever sees char_limit.

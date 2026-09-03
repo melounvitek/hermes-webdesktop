@@ -295,6 +295,7 @@ class FALVideoGenProvider(VideoGenProvider):
     def capabilities(self) -> Dict[str, Any]:
         # RESOLVED family's surface so the dynamic tool schema gates params on what the selected model honors; union fallback (never raises).
         try:
+            # Falls back to the cross-family union if resolution fails (never raises). See #97057.
             _family_id, family = _resolve_family(None)
         except Exception:  # noqa: BLE001
             family = None

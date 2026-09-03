@@ -358,6 +358,8 @@ def install_pack_plugins(
         _save_enabled_set(enabled)
         _save_disabled_set(disabled)
 
+        # Per-plugin capability consent — the SAME flow as a single install (#64228). A pack never
+        # bulk-grants capabilities.
         declared = _declared_capabilities_from_manifest(manifest, installed_name)
         if declared:
             _run_capability_consent(console, installed_name, declared, context="install")

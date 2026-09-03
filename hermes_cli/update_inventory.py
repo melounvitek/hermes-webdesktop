@@ -24,6 +24,7 @@ class RuntimeRecord:
     pid: Optional[int] = None
     supervisor: str = "manual"    # systemd | launchd | desktop | windows-service | service | manual | manual-serve
     code_sha: Optional[str] = None       # stamped running-code sha
+    # See #91283.
     code_version: Optional[str] = None
     restart_via: str = ""         # mechanism id, see _RESTART_MECHANISMS
     detail: dict = field(default_factory=dict)
@@ -50,6 +51,7 @@ def _detect_supervisor_for_pid(pid: int, service_pids: set, windows_service_pids
     if windows_service_pids and pid in windows_service_pids:
         # SCM-supervised Windows gateway: the update pause machinery stops the SERVICE via sc.exe
         # instead of killing the child, so reconciliation must plan it under its own mechanism id.
+        # See #91277.
         return "windows-service"
     if pid not in service_pids:
         return "manual"
@@ -83,7 +85,13 @@ _SERVE_KINDS = ("serve", "dashboard")
 
 
 def _restart_mechanism(supervisor: str, profile: str) -> str:
-    """Machine-readable restart mechanism id for a runtime."""
+    """Machine-readable restart mechanism id for a runtime.
+
+    THE policy table (#91277 Phase 2): restart execution consumes these ids via
+    :func:`match_runtime_outcomes` / the update's restart phase, and the receipt records per-runtime
+    outcomes against them. Display strings are derived by :func:`describe_restart_mechanism` — never the
+    other way around.
+    """
     return _RESTART_MECHANISMS.get(supervisor, "manual")
 
 
@@ -127,6 +135,7 @@ def _collect_install_shape(plan: UpdatePlan) -> None:
         # container can look like `git` while the running filesystem is an immutable image.
         # Fail-closed: an invalid marker still flips the plan to not-updatable.
         with _probe("Image provenance probe"):
+            # See #91277.
             from hermes_cli.image_provenance import read_image_provenance
 
             provenance = read_image_provenance()
@@ -146,6 +155,9 @@ def _supervisor_classifier() -> Callable[[int], str]:
         service_pids = _get_service_pids(all_profiles=True) or set()
     # Windows SCM services (no-op off Windows): the update's pause phase stops these via `sc.exe
     # stop` / restarts via `sc.exe start`, so the plan must carry the matching mechanism id.
+    # --- SCM-supervised gateway PIDs (Windows) ------------------------------
+    # find_windows_gateway_services() maps validated gateway PIDs through process ancestry to running SCM
+    # service PIDs (no-op off Windows). See #91277.
     windows_service_pids: set = set()
     with _probe("Windows SCM service-ownership probe"):
         from hermes_cli.gateway import find_windows_gateway_services
@@ -265,7 +277,12 @@ def print_update_plan(plan: UpdatePlan) -> None:
 
 def _serve_unit_matches_profile(profile: str, unit: object) -> bool:
     """Does *unit* name a ``hermes-serve*``/``hermes-dashboard*`` unit for *profile*? (OWN vocabulary;
-    the gateway's ``hermes-gateway*`` names never cover serve/dashboard runtimes.)"""
+    the gateway's ``hermes-gateway*`` names never cover serve/dashboard runtimes.)
+
+    Exact names only — ``work`` must not claim ``hermes-serve-workbench`` — and a scope prefix
+    (``user/hermes-serve``) is tolerated because the restart phase records scope-qualified identities in
+    some lists. See #100479.
+    """
     name = str(unit).removesuffix(".service").rsplit("/", 1)[-1]
     suffix = "" if profile == "default" else f"-{profile}"
     return name in {f"hermes-serve{suffix}", f"hermes-dashboard{suffix}"}
@@ -294,6 +311,10 @@ def match_runtime_outcomes(
     reconciled in their OWN vocabulary and never borrow the gateway's outcome: with
     ``stale_serve_pids`` a pre-update serve whose incarnation is gone counts as ``restarted``, one
     still alive is ``unaccounted``; without the probe an untouched serve stays ``unaccounted``.
+
+    See #91277.
+    They never borrow the gateway's outcome: ``relaunched_profiles`` and ``hermes-gateway*`` name a
+    different process that shares the profile, nothing more. See #100479.
     """
     outcomes: list[dict[str, Any]] = []
     try:
@@ -353,6 +374,7 @@ def report_unaccounted_runtimes(outcomes: list[dict[str, Any]]) -> bool:
         print("      hermes -p <profile> gateway restart   # named profile")
     if any(o.get("kind") in _SERVE_KINDS for o in missed):
         # A serve/dashboard is not reachable by any `gateway restart` command: name the process, not the wrong verb.
+        # See #100479.
         print("      systemctl --user restart hermes-serve.service   # unit-managed serve")
         print("      relaunch `hermes serve` / `hermes dashboard` / the Desktop app")
     return True

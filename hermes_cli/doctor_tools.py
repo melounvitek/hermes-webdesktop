@@ -63,6 +63,8 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
 
     Uses the same active-provider resolvers as the tools but reports ``is_available()``
     readiness, so an explicitly selected but unconfigured backend does not look healthy.
+
+    See #78412.
     """
     rows: list[tuple[str, str, str]] = []
     try:
@@ -250,6 +252,8 @@ def _check_agent_browser(should_fix: bool) -> bool:
     install) so doctor can't diverge from the tools; validate=False keeps it a cheap, side-effect-free check.
     """
     try:
+        # agent-browser is no longer a root package.json dependency (#43564) — it resolves lazily via npx
+        # (or a global/Hermes-managed install) at first use.
         from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel
         resolved = _find_agent_browser(validate=False)
     except Exception:
@@ -390,6 +394,12 @@ def _check_npm_audit(should_fix: bool, f: Finding) -> None:
     npm_bin = _safe_which("npm")
     if npm_bin:
         try:
+            # Each entry: (cwd, label, extra_audit_args) PROJECT_ROOT is audited with --workspaces=false so
+            # that the apps/* glob (which pulls in Electron, node-pty, etc.) is never resolved for a routine
+            # security check. The web and ui-tui workspaces are audited separately via --workspace flags.
+            # See #38772. The WhatsApp bridge may live under a writable HERMES_HOME mirror instead of the
+            # (possibly read-only) install tree in Docker — resolve it through the shared helper so we audit
+            # the dir that actually holds node_modules. See #49561.
             from gateway.platforms.whatsapp_common import resolve_whatsapp_bridge_dir
             whatsapp_bridge_dir = resolve_whatsapp_bridge_dir()
         except Exception:
@@ -418,6 +428,7 @@ def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     # Web is split into search/extract readiness rows so an explicitly
     # selected but unconfigured backend cannot look healthy.
     web_rows = []
+    # See #78412.
     if "web" in available or any(item.get("name") == "web" for item in unavailable):
         web_rows = _doctor_web_capability_rows()
         if web_rows:

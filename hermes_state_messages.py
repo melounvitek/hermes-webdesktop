@@ -182,8 +182,22 @@ class SessionMessagesMixin:
         NOT check compression_locks: the lock only stops two COMPRESSIONS colliding and archive_and_compact()
         commits against a watermark, so concurrent appends are safe (blocking them killed turns during slow
         summaries). Destructive user mutations opt in via ``reject_active_*`` so a compressor that captured
-        its watermark cannot resurrect the removed turn."""
+        its watermark cannot resurrect the removed turn.
+
+        Shared by :meth:`append_message` and :meth:`append_messages_batch` so the two writers can never
+        diverge on these correctness invariants (this guard has already needed targeted fixes — see the
+        #74478 patience note below). User-initiated transcript mutations may opt in to rejecting an active
+        unowned turn lease in that same transaction.
+        """
         from hermes_state import CompressionSessionClosedError, SessionCompressionInProgressError, SessionTurnLeaseLostError
+        # NOTE (#75316 redesign): appends do NOT check compression_locks. The lock's job is to stop two
+        # COMPRESSIONS colliding, not to fence ordinary transcript writes. Concurrent appends during a
+        # compression are safe by construction: archive_and_compact() commits against a watermark captured
+        # at compression start and clones every row that arrived after it back into the live transcript, in
+        # the same write transaction. Blocking appends here was the root cause of a whole symptom family —
+        # turns dying as session_persistence_failed while a slow provider summary held the lease (#74568,
+        # #77386), including stale locks from dead PIDs blocking writes for the full TTL. Keep that narrow
+        # fence opt-in so ordinary appends retain the watermark behavior.
         if reject_active_compression_lock:
             active_lock = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
             if active_lock is not None:
@@ -435,7 +449,18 @@ class SessionMessagesMixin:
         """Atomically replace a session's messages (/retry, /undo, /compress). DESTRUCTIVE by default (rows
         DELETEd, leave FTS). ``active_only`` spares soft-archived rows (needed with in-place compaction).
         ``archive_dropped`` SOFT-archives live rows rewind-style: what rewind/edit/regenerate must use, since
-        DELETE leaves nothing to recover. ``reject_active_turn_lease``: in-txn lease check for user rewrites."""
+        DELETE leaves nothing to recover. ``reject_active_turn_lease``: in-txn lease check for user rewrites.
+
+        Pass ``archive_dropped=True`` to SOFT-archive the live rows instead of DELETEing them: the replaced
+        turns stay on disk with ``active = 0``, ``compacted = 0`` — the same "the user took it back" marking
+        :meth:`rewind_to_message` applies — and stay readable via :meth:`get_messages` with
+        ``include_inactive=True``. This is the mode a rewind/edit/regenerate must use: those flows overwrite
+        a transcript the user may not have meant to drop, and a plain DELETE also evicts the rows from the
+        FTS index, leaving nothing to recover from (#82756). It implies active-only handling —
+        already-archived rows are never touched — so ``active_only`` is redundant with it. The rewritten set
+        is inserted as fresh active rows exactly as in the destructive path, so the live view is identical
+        either way; only the durability of the dropped turns differs.
+        """
         from hermes_state import CompressionSessionClosedError
         def _do(conn):
             if reject_active_turn_lease:
@@ -454,7 +479,12 @@ class SessionMessagesMixin:
         self._execute_write(_do)
 
     def has_archived_messages(self, session_id: str) -> bool:
-        """True if the session has any soft-archived (``active = 0``) rows (tests/diagnostics)."""
+        """True if the session has any soft-archived (``active = 0``) rows (tests/diagnostics).
+
+        Cheap existence probe — does not load rows. NOTE: production rewrite paths no longer branch on this
+        (they pass ``active_only=True`` unconditionally — a probe can fail open or race a concurrent
+        ``archive_and_compact``, #80216); kept for tests and diagnostics.
+        """
         return self._read_one(
             "SELECT 1 FROM messages WHERE session_id = ? AND active = 0 LIMIT 1", (session_id,)) is not None
 
@@ -494,7 +524,16 @@ class SessionMessagesMixin:
         in-txn so a reclaimed lease fails instead of clobbering the winner. *tail_count*: the LAST N compacted
         rows are the verbatim carried tail; their originals and the clones' originals are superseded
         duplicates and get rewind flags (``active=0, compacted=0``) so search doesn't return each carried
-        message once per compaction. ``model_config_patch`` merges in the same txn (``None`` removes a key)."""
+        message once per compaction. ``model_config_patch`` merges in the same txn (``None`` removes a key).
+
+        Concurrent-append safety (#75316): when *watermark* is provided (the value of
+        :meth:`get_active_message_watermark` captured at compression START), rows that arrived during the
+        slow provider summary call (``id > watermark``) are NOT summarized away. They are re-sequenced after
+        the compacted set by a pure-SQL column clone (every column except ``id`` — content, api_content,
+        platform_message_id, token counts, reasoning sidecars all survive byte-exact, and the FTS triggers
+        index the clones naturally), and the originals are archived. NOTE: re-sequencing assigns the tail
+        rows fresh ids; consumers that reference durable row ids re-resolve by content (see 3e8ab0610).
+        """
         from hermes_state import SessionCompressionInProgressError
         def _do(conn):
             if lock_holder is not None:
@@ -657,7 +696,13 @@ class SessionMessagesMixin:
         """Redirect a resume target to the descendant holding the messages: follow the compression chain to
         the live tip (lineage-aware, so delegate/branch children never hijack it), then walk
         ``parent_session_id`` forward to the DEEPEST node with messages (a continuation may hold newer
-        turns), skipping branch/delegate/reset/tool children. Unchanged when nothing has messages; depth cap 32."""
+        turns), skipping branch/delegate/reset/tool children. Unchanged when nothing has messages; depth cap 32.
+
+        Context compression ends the current session and forks a new child session (linked via
+        ``parent_session_id``). The flush cursor is reset, so the child is where new messages actually land
+        — the parent ends up with ``message_count = 0`` rows unless messages had already been flushed to it
+        before compression. See #15000.
+        """
         if not session_id:
             return session_id
         try:
@@ -751,6 +796,11 @@ class SessionMessagesMixin:
             # Underscore-prefixed like ``_row_id``: transports strip it before the wire; compression's
             # assembly copies strip it so rotated child handoffs still flush (_fresh_compaction_message_copy).
             msg = {"role": row["role"], "content": content, _DB_PERSISTED_MARKER_KEY: True}
+            # Born durable (#92231): this dict is materialized FROM a durable row, so stamp the persistence
+            # marker at the source instead of relying on every restore caller to thread the loaded list back
+            # through a flush as ``conversation_history=`` — any identity-losing handoff (compression's
+            # durable-snapshot adoption, incremental persists with no history arg) would otherwise re-append
+            # the ENTIRE transcript on flush.
             if include_row_ids and row["id"] is not None:
                 msg["_row_id"] = row["id"]
             msg.update((col, row[col]) for col in ("api_content", "display_kind") if row[col])
@@ -796,7 +846,14 @@ class SessionMessagesMixin:
     def get_resume_conversations(self, session_id: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """``(model_history, display_history)`` for a resume from ONE SELECT; byte-identical to the separate
         reads. model: the tip's active rows, alternation-repaired, summary marker kept for pre-compress
-        checkpointing. display: the full lineage (``/branch`` stands alone), compaction-archived rows deduped."""
+        checkpointing. display: the full lineage (``/branch`` stands alone), compaction-archived rows deduped.
+
+        The display projection also includes rows preserved by IN-PLACE compaction (``active=0,
+        compacted=1``), deduped by :meth:`_dedupe_display_generations`. Without them a compacted
+        conversation resumes showing only its summary plus the carried-forward tail — the user's own turns
+        read as deleted even though every row is still on disk, and the REST transcript read (which has
+        always included them) disagreed with this one about the same session (#92080).
+        """
         rows = self._fetch_conversation_rows(
             self._resume_lineage_ids(session_id), _DISPLAY_ACTIVE_CLAUSE, with_session_id=True)
         # The model projection stays active-only: it is the compressed working context.
@@ -910,6 +967,9 @@ class SessionMessagesMixin:
                 return None
         return None
 
+    # ========================================================================= Rewind (soft-delete) — see
+    # /rewind slash command + issue #21910
+    # =========================================================================
     def get_active_message_ids(self, session_id: str) -> List[int]:
         """Ordered physical active ids for rewind CAS checks (includes legacy harness rows projections omit)."""
         return [int(row[0]) for row in self._read_all(_ACTIVE_IDS_SQL, (session_id,))]
@@ -993,7 +1053,12 @@ class SessionMessagesMixin:
         return self._read_one(sql, (session_id,) if session_id else ())[0]
 
     def has_platform_message_id(self, session_id: str, platform_message_id: str) -> bool:
-        """True when *platform_message_id* exists (partial-index probe; the gateway's transient-failure dedupe)."""
+        """True when *platform_message_id* exists (partial-index probe; the gateway's transient-failure dedupe).
+
+        Uses the idx_messages_platform_msg_id partial index for efficient lookup. Used by the gateway's
+        transient-failure dedupe guard (#47237) to skip re-persisting a user message that was already saved
+        on a prior retry of the same inbound platform message.
+        """
         return self._read_one(
             "SELECT 1 FROM messages WHERE session_id = ? AND platform_message_id = ? LIMIT 1",
             (session_id, platform_message_id)) is not None

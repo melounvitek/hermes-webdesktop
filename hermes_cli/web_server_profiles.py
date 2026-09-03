@@ -211,6 +211,10 @@ def _profile_scope(profile: Optional[str]):
     ``get_hermes_home()`` so writes land in the live home even when the import-time binding
     is stale (test isolation, late HERMES_HOME override). Yields the profile dir for a named
     profile, None for the current one.
+
+    ``tools.skills_sync`` (reset/diff/list-modified/opt-in/opt-out/ repair-official) needs NO retargeting:
+    since #65828 its directory lookups resolve at call time through the same contextvar override set in step
+    1.
     """
     from hermes_constants import get_hermes_home
     from tools import skills_tool as _skills_tool
@@ -247,6 +251,12 @@ def _config_profile_scope(profile: Optional[str]):
 # Terminal backend picker rows — GUI counterpart of terminal.backend. Keep in sync with
 # tools/terminal_tool.py::_create_environment and the terminal.backend enum.
 
+# --------------------------------------------------------------------------- Terminal execution backend
+# picker — the GUI counterpart of terminal.backend in config.yaml. Each row carries a fast, defensive health
+# probe (Docker daemon reachable, SSH host configured, Modal/Daytona credentials present) so the
+# Capabilities panel can render Ready / Needs setup guidance instead of a bare enum (issues #57738 /
+# #63783). Probes must never raise — a probe failure renders as a status, not a 500.
+# ---------------------------------------------------------------------------
 _TERMINAL_BACKENDS: List[Dict[str, str]] = [
     dict(zip(("name", "label", "description"), row)) for row in (
         ("local", "Local", "Run commands directly on this machine. No isolation."),
@@ -291,7 +301,10 @@ def _token_volume(row: Dict[str, Any]) -> Any:
 def _aux_usage_rows(db, cutoff: float) -> List[Dict[str, Any]]:
     """Per-(model, task) auxiliary usage within the window: the task-dimension rows
     (task != '') record_auxiliary_usage writes into session_model_usage. [] when the
-    table predates the task column (older DB opened read-only by newer code)."""
+    table predates the task column (older DB opened read-only by newer code).
+
+    See #23270.
+    """
     try:
         cur = db._conn.execute("""
             SELECT u.model,

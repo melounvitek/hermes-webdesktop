@@ -193,6 +193,9 @@ def finalize_pending_update_receipt(exit_code: Optional[int] = None, stop_reason
     fetch failure) predating the inner finalize calls; finalizing here means refused/failed runs —
     where a receipt matters most — leave a record. Exit 0/None → ``success``, exit 2 → ``refused``
     (preflight convention), else → ``failed``.
+
+    No-op when no receipt is open (the inner paths already finalized — exactly-once via the popped
+    singleton) or when recording was never started. See #91283.
     """
     if _current is None:
         return None
@@ -247,6 +250,10 @@ def _socket_identity(home: Path) -> Optional[tuple[int, dict]]:
     didn't bind.
     """
     try:
+        # Prefer the gateway-owned control socket (#92091): identity declared by the process itself,
+        # including its own supervisor provenance — no argv/PID inference. Scan fallback below.
+        # Prefer the gateway-owned control socket (#92091): a live `identify` answer is authoritative — no
+        # PID-reuse or stale-file heuristics.
         from gateway.control_socket import identify_gateway
 
         identity = identify_gateway(home)
@@ -276,6 +283,14 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
     Rollout safety: ``down`` requires membership in ``pre_restart_pids`` — a stale state file from a
     long-dead gateway (machine reboot, manual kill weeks ago) must NOT fail every future update.
     Without a pre-restart snapshot (``None``/empty) dead PIDs are skipped (historical behavior).
+
+    ``stale``   — gateway stamped a code_sha that differs from the updated checkout's HEAD (it is still
+    serving pre-update modules). ``unknown`` — gateway predates the code-identity stamp (started before this
+    feature landed) or identity could not be resolved. ``down``    — the gateway was ALIVE when this update
+    started (``pre_restart_pids``), its runtime status still says running, but the PID is dead and no
+    successor rewrote the record: the restart phase stopped it and nothing came back. Without this row a
+    killed-and-never-replaced gateway produced NO entry at all and the matrix passed silently (Phase-1
+    verification gap, #88848/#74973 class).
     """
     _pre_restart = {int(p) for p in (pre_restart_pids or []) if isinstance(p, int)}
     results: list[dict[str, Any]] = []
@@ -309,6 +324,7 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
             # behavior so the rollout can't false-positive. ``_pre_restart`` is a bare PID set, not
             # (pid, start_time) pairs, so a recycled PID from gateway A landing in B's stale record
             # could still mislabel B as down — inherent to the snapshot's data model.
+            # See #93258.
             gw_state = record.get("gateway_state")
             if pid in _pre_restart and isinstance(gw_state, str) and gw_state and gw_state not in _NOT_EXPECTED_STATES:
                 results.append(_fleet_row(profile, pid, None, record.get("code_version"), None, state="down"))

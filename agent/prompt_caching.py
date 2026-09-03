@@ -280,6 +280,12 @@ def apply_anthropic_cache_control(
     marker and the remaining two go to the latest cacheable non-system messages; otherwise
     the legacy system-and-3 layout applies. Idempotent: pre-existing markers are stripped from
     a per-message copy first. Returns a shallow list copy with deep copies of modified messages.
+
+    Idempotent: pre-existing ``cache_control`` markers are stripped from a per-message copy before new ones
+    are placed, so calling this twice (or handing it messages a prior call already marked) can never
+    accumulate past 4 markers. Only messages that already carry a marker pay the copy cost — a shallow
+    top-level copy suffices because :func:`strip_anthropic_cache_control` is copy-on-write on content parts
+    — and the rest of the copy-on-write contract is unchanged (#90971).
     """
     if not api_messages:
         return api_messages

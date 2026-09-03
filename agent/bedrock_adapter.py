@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 
 # boto3 is not in the [all] extras; lazy_deps installs it on demand.
 try:
+    # --------------------------------------------------------------------------- Ensure boto3/botocore are
+    # installed before any code in this module runs. Upstream removed boto3 from [all] extras (PRs #24220,
+    # #24515); lazy_deps handles on-demand installation so the Bedrock provider still works in the EKS
+    # deployment without baking boto3 into the base image.
+    # ---------------------------------------------------------------------------
     from tools.lazy_deps import ensure
     ensure("provider.bedrock", prompt=False)
 except Exception:
@@ -260,7 +265,12 @@ def resolve_aws_auth_env_var(env: Optional[Dict[str, str]] = None) -> Optional[s
 
 
 def has_aws_credentials(env: Optional[Dict[str, str]] = None) -> bool:
-    """True if any AWS credential source (env vars or boto3 chain) is detected."""
+    """True if any AWS credential source (env vars or boto3 chain) is detected.
+
+    This two-tier approach mirrors the pattern from OpenClaw PR #62673: cloud environments (EC2, ECS,
+    Lambda) provide credentials via instance metadata, not environment variables. The env-var check is a
+    fast path for local development; the boto3 fallback covers all cloud deployments.
+    """
     return resolve_aws_auth_env_var(env) is not None or _boto3_chain_has_credentials()
 
 
@@ -431,6 +441,8 @@ def convert_tools_to_converse(tools: List[Dict]) -> List[Dict]:
 
 
 # Converse rejects empty OR whitespace-only text blocks, so the placeholder must be non-whitespace.
+# A lone space is whitespace and is rejected too — the placeholder MUST itself be non-whitespace. Ref: issue
+# #9486.
 _EMPTY_TEXT_PLACEHOLDER = "(empty)"
 _PLACEHOLDER_BLOCK = {"text": _EMPTY_TEXT_PLACEHOLDER}
 
@@ -447,6 +459,7 @@ def _image_block_from_data_url(url: str) -> Dict:
     header, _, data = url.partition(",")
     media_type = (header[5:].split(";")[0] if header.startswith("data:") else "") or "image/jpeg"
     try:
+        # Ref: #33317.
         raw_bytes = base64.b64decode(data)
     except Exception:
         raw_bytes = data.encode("utf-8")

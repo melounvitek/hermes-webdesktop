@@ -67,6 +67,8 @@ def _result_flags(result: Any) -> tuple:
 
 def _finish_reason(completed, is_partial, is_failed, err_msg, agent_error=None) -> str:
     """OpenAI ``finish_reason``: "length" for truncation, "error" for failure, else "stop"."""
+    # OpenAI uses "length" for truncation, "stop" for normal completion, and downstream SDKs accept "error"
+    # / custom codes. See issue #22496.
     if is_partial and err_msg and "truncat" in err_msg.lower():
         return "length"
     if agent_error is not None or is_failed or (not completed and err_msg):
@@ -411,6 +413,7 @@ class OpenAICompatRoutesMixin:
             _content_has_visible_payload, _derive_chat_session_id, _error_response, _invalid_request,
             _multimodal_validation_error, _normalize_chat_content, _normalize_multimodal_content,
             _openai_error, _redact_api_error_text, _resolve_media_to_data_urls)
+        # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
         if limited is not None:
             return limited
@@ -731,6 +734,7 @@ class OpenAICompatRoutesMixin:
             _content_has_visible_payload, _error_response, _invalid_request,
             _multimodal_validation_error, _normalize_multimodal_content, _redact_api_error_text,
             _resolve_media_to_data_urls, _responses_usage_payload)
+        # Bound total in-flight agent runs (configurable; #7483).
         limited = self._concurrency_limited_response()
         if limited is not None:
             return limited
@@ -958,7 +962,12 @@ class OpenAICompatRoutesMixin:
     ) -> List[Dict[str, Any]]:
         """This turn's assistant/tool messages in client-safe shape: clients accumulating
         ``assistant.delta`` into one buffer cannot reconstruct assistant segments that preceded
-        tool calls, so ``run.completed`` carries the authoritative per-turn transcript."""
+        tool calls, so ``run.completed`` carries the authoritative per-turn transcript.
+
+        Emitting the authoritative per-turn transcript on ``run.completed`` lets any SSE consumer reconcile
+        its live view against ground truth without a separate ``GET /messages`` round-trip. Purely additive:
+        clients that ignore the field are unaffected. Refs #34703.
+        """
         agent_messages = result.get("messages") if isinstance(result, dict) else None
         if not isinstance(agent_messages, list) or not agent_messages:
             return []

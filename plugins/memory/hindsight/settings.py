@@ -24,6 +24,8 @@ _DEFAULT_RETAIN_SOURCE = ""
 _HINDSIGHT_GLYPH = "👁️"
 # Hindsight 0.5.0 added ``update_mode='append'``; older APIs would silently
 # overwrite prior turns under a stable document_id, so they keep the per-process id.
+# Mirrors hindsight-integrations/openclaw — Hindsight 0.5.0 added `update_mode='append'` semantics on retain
+# (vectorize-io/hindsight#932).
 _MIN_VERSION_FOR_UPDATE_MODE_APPEND = "0.5.0"
 _VALID_BUDGETS = {"low", "mid", "high"}
 _PROVIDER_DEFAULT_MODELS = {

@@ -68,6 +68,12 @@ _install_failure_reason: str = ""  # reason tag when _resolved_path is _INSTALL_
 # retry loop. Reset on success. Lock-free on purpose: a racing double-increment only opens the
 # breaker one call early; no corruption or security bypass is possible.
 _CRASH_LIMIT = 3
+# Reset on successful execution (see _record_tirith_crash / check_command_security). Thread safety:
+# _crash_count and _circuit_open are module-level globals mutated without a lock. check_command_security can
+# be called from concurrent agent threads (gateway multi-session). The race is benign — at worst two threads
+# both increment past _CRASH_LIMIT and both set _circuit_open = True, opening the breaker one call early.
+# This intentionally matches the lock-free style of error counters in mcp_tool.py rather than the locked
+# _warn_once pattern, because the worst case is harmless. See #41400.
 _crash_count: int = 0
 _circuit_open: bool = False
 
@@ -480,6 +486,9 @@ def check_command_security(command: str) -> dict:
     cfg = _load_security_config()
     if not cfg["tirith_enabled"]:
         return _verdict("allow")
+    # Circuit breaker: if tirith has crashed _CRASH_LIMIT times in a row, stop trying for the rest of the
+    # process. Without this, a corrupted or missing binary causes every tool call to hit the same spawn
+    # failure → fail-open → agent retry loop, hanging the user for 20+ minutes (issue #41400).
     if _circuit_open:
         return _verdict("allow", "tirith disabled (circuit breaker)")
     # No binary for this platform, ever: skip the resolver so we never spawn.

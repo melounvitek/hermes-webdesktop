@@ -338,7 +338,11 @@ def _missing_env_specs(manifest: dict) -> list[dict]:
 
 def _print_python_dependencies(manifest: dict, console) -> None:
     """Print declared ``python_dependencies`` with an install hint — Hermes never auto-installs
-    plugin pip dependencies."""
+    plugin pip dependencies.
+
+    See #64165.
+    See #15220, #64165.
+    """
     deps = manifest.get("python_dependencies") or []
     if not isinstance(deps, list):
         return
@@ -809,6 +813,7 @@ def cmd_update(name: str) -> None:
 
     # Re-consent when the new version declares capabilities the granted set lacks or the
     # declared set changed; additions stay ungranted until the user says yes (fail closed).
+    # See #64228.
     updated_manifest = _read_manifest(target)
     plugin_id = updated_manifest.get("name") or target.name
     declared_caps = _declared_capabilities_from_manifest(updated_manifest, plugin_id)
@@ -849,6 +854,8 @@ def _rescan_after_update(target: Path, name: str, console) -> None:
 
 def _post_pull_housekeeping(target: Path, console) -> None:
     """After ``git pull``: drop stale ``__pycache__`` and copy any new ``.example`` files."""
+    # Same stale-bytecode class as the main checkout (#6207/#60242): the pull just changed .py files under
+    # this plugin dir, so drop any __pycache__ compiled from the previous revision.
     _clear_plugin_bytecode(target)
     _copy_example_files(target, console)
 
@@ -1021,6 +1028,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
         return
     # When the manifest declares capabilities the consent screen is the canonical grant path
     # (it covers tools.override too); the legacy prompt then only runs on an explicit flag.
+    # See #64228.
     declared_caps = _declared_capabilities_for_key(key)
     if declared_caps:
         _run_capability_consent(console, key, declared_caps, context="enable")
@@ -1033,6 +1041,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
 # ── Capability consent flow ──────────────────────────────────────────────────
 
 
+# ── Capability consent flow (#64228) ─────────────────────────────────────────
 def _declared_capabilities_from_manifest(manifest: dict, plugin_name: str = "?") -> list:
     """Extract + normalize the ``capabilities:`` declaration from a manifest."""
     from hermes_cli.plugin_capabilities import parse_declared_capabilities
@@ -1462,6 +1471,7 @@ def cmd_toggle() -> None:
     # key (``web/firecrawl``) while the name may differ (``web-firecrawl``); persisting the bare
     # name let plugins.disabled drift so "explicit disable wins" kept a plugin off forever.
     plugin_keys = [entry[5] for entry in entries]
+    # Keys keep every surface aligned. See #40190.
     plugin_labels = [
         (f"{name} \u2014 {description}" if description else name) + (" [bundled]" if source == "bundled" else "")
         for name, _version, description, source, _d, _key in entries
@@ -1490,6 +1500,9 @@ def _persist_plugin_selection(plugin_keys, chosen, disabled) -> tuple[bool, set]
     them) under the canonical key ONLY, so the list can't drift from what ``cmd_enable`` clears.
     Re-checking also drops any stale legacy bare-leaf disable.
     """
+    # See #40190.
+    # Persist by canonical key only — never the bare manifest name — so the disabled-list stays aligned with
+    # cmd_enable / PluginManager (#40190).
     new_enabled: set = set()
     new_disabled: set = set(disabled)  # preserve existing disabled state for unseen plugins
     for i, key in enumerate(plugin_keys):
@@ -1807,7 +1820,10 @@ def dashboard_update_user_plugin(name: str) -> dict[str, Any]:
 def _clear_plugin_bytecode(target: Path) -> int:
     """Remove ``__pycache__`` dirs under a just-updated plugin checkout. Plugin dirs sit outside
     the repo, so the launch-time bytecode sweep never covers them and stale bytecode after a pull
-    can ImportError in the next process. Never raises."""
+    can ImportError in the next process. Never raises.
+
+    See #60242, #6207.
+    """
     removed = 0
     try:
         for cache_dir in target.rglob("__pycache__"):
@@ -1868,7 +1884,14 @@ def _autostash_dirty_tree(git_exe: str, target: Path) -> tuple[bool, str]:
 
 def _git_pull_plugin_dir(target: Path) -> tuple[bool, str]:
     """``git pull --ff-only`` a plugin checkout, autostashing local edits (users patch installed
-    plugins in place, and a plain ff-only pull would then refuse forever)."""
+    plugins in place, and a plain ff-only pull would then refuse forever).
+
+    Users tweak installed plugins in place (config constants, small patches), and a plain ``pull --ff-only``
+    then aborts with "Your local changes ... would be overwritten by merge" — making the plugin permanently
+    un-updatable until they hand-run git. Same UX class Factory Droid fixed in v0.188 ("Updating a plugin
+    marketplace now succeeds when its checkout has local changes"), and the same autostash approach ``hermes
+    update`` already uses for the main checkout (PR #70161).
+    """
     git_exe = _resolve_git_executable()
     if not git_exe:
         return False, "git is not installed or not in PATH."

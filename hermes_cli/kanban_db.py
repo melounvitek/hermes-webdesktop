@@ -228,7 +228,13 @@ def _fire_dispatch_tick_hook(
     result: "DispatchResult", *, board: Optional[str] = None, dry_run: bool = False,
 ) -> None:
     """``on_kanban_dispatch_tick`` — strictly AFTER ``_dispatch_tick_lock`` is
-    released so a slow subscriber cannot stall a sibling dispatcher."""
+    released so a slow subscriber cannot stall a sibling dispatcher.
+
+    Re-port of PR #56066 per the #64231 batch disposition: renamed to the taxonomy form and called by
+    ``dispatch_once`` strictly AFTER ``_dispatch_tick_lock`` has been released — the original fired inside
+    the lock, so a slow subscriber could extend the single-writer critical section and stall a sibling
+    dispatcher's tick. Observer-only and fully best-effort: any subscriber failure is swallowed.
+    """
     if not _kanban_observer_consumed("on_kanban_dispatch_tick"):
         return
     try:
@@ -259,6 +265,11 @@ DEFAULT_CLAIM_TTL_SECONDS = 15 * 60
 
 # A live PID with a heartbeat older than this is wedged and reclaimed anyway
 # (``_touch_activity`` keeps genuinely active workers fresh).
+# If a worker's PID is still alive but its ``last_heartbeat_at`` is older than this when
+# ``release_stale_claims`` runs, treat the worker as wedged and reclaim regardless of PID liveness (#29747
+# gap 3). This catches the logic-loop case where the process is technically running but not making
+# observable progress. ``_touch_activity`` bridges chunk-level liveness into ``last_heartbeat_at`` via
+# #31752, so any genuinely active worker keeps its heartbeat fresh as a side effect of normal API traffic.
 DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS = 60 * 60
 
 # Grace when a host-local worker survived termination (e.g. parked in D state
@@ -1413,6 +1424,9 @@ def _inherit_notify_subs(
     Single owner of inheritance (create_task, link_tasks, decompose). It must
     copy EVERY routing/delivery column: dropping ``chat_type`` made DM-originated
     completions wake a fresh group session instead of the originating DM.
+
+    Omitting columns here silently degrades routing: a DM-originated child completion falls back to
+    chat_type='group' and wakes a fresh group-scoped session instead of the originating DM (issue #73030).
     """
     parent_ids = tuple(dict.fromkeys(p for p in parents if p))
     if not parent_ids:
@@ -1626,6 +1640,9 @@ def _linked_ids(conn: sqlite3.Connection, want: str, where: str, task_id: str) -
     return [r[want] for r in rows]
 
 
+# Dependency edge removed — re-evaluate promotion eligibility for the child immediately. Matches the
+# contract of complete_task and unblock_task; without this the child stays stuck in todo until the next
+# dispatcher tick or a manual `hermes kanban recompute` (issue #22459).
 def parent_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return _linked_ids(conn, "parent_id", "child_id", task_id)
 
@@ -1949,7 +1966,13 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """True when the newest ``blocked``/``unblocked`` event is ``blocked`` — an
     explicit ``kanban_block`` that must wait for an operator. A breaker trip
     emits ``gave_up`` (not ``blocked``) and so auto-recovers, as does a task
-    with no such event at all (direct DB edit)."""
+    with no such event at all (direct DB edit).
+
+    See #28712.
+    Returns ``False`` when there is no such event at all (e.g. the task was set to ``status='blocked'`` by
+    the circuit breaker or by direct DB manipulation) — preserves the pre-#28712 auto-recover semantics for
+    that path.
+    """
     row = conn.execute(
         "SELECT kind FROM task_events "
         "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
@@ -1996,6 +2019,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
     ``consecutive_failures`` reached the limit (else the breaker could never
     trip). Limit order matches ``_record_task_failure``: ``max_retries`` >
     ``failure_limit`` > ``DEFAULT_FAILURE_LIMIT``.
+
+    1. The most recent block event was a worker-initiated ``kanban_block`` — those stay blocked until an
+    explicit ``kanban_unblock`` (#28712).
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
@@ -2052,6 +2078,8 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
     """Return whether every direct parent is terminal for dependency gating."""
     return conn.execute(
+        # Check if this task has children that still need the workspace. If any child is not yet
+        # done/archived, defer cleanup so the child can read handoff artifacts from the workspace (#33774).
         "SELECT 1 FROM task_links l "
         "JOIN tasks p ON p.id = l.parent_id "
         "WHERE l.child_id = ? "
@@ -2260,6 +2288,18 @@ def release_stale_claims(conn: sqlite3.Connection, *, signal_fn=None) -> int:
     heartbeat) — unless ``last_heartbeat_at`` is older than
     ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (wedged; ``_touch_activity``
     keeps any genuinely active worker fresh). Safe to call often.
+
+    Reclaiming a live worker mid-flight produces the spawn- then-immediately-reclaim loop seen on slow
+    models that spend longer than ``DEFAULT_CLAIM_TTL_SECONDS`` inside a single tool-free LLM call (#23025):
+    no tool calls means no ``kanban_heartbeat``, even though the subprocess is healthy.
+    Backstop (#29747 gap 3): if the worker's PID is still alive but its ``last_heartbeat_at`` is stale by
+    more than ``DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS`` (1h), the worker has been making no observable
+    progress and we reclaim anyway — even if ``_pid_alive`` is still true. This catches the
+    wedged-in-a-logic-loop case where the process is technically running but accomplishing nothing.
+    ``_touch_activity`` (run_agent.py) bridges chunk-level liveness into ``last_heartbeat_at`` via #31752,
+    so any genuinely active worker keeps its heartbeat fresh as a side effect of normal API traffic.
+    ``enforce_max_runtime`` and ``detect_crashed_workers`` remain the upper bounds for genuinely wedged or
+    dead workers.
     """
     now = int(time.time())
     reclaimed = 0
@@ -2621,6 +2661,11 @@ def _completed_event_payload(
     notifiers / dashboard WS render without a second round-trip; verified
     cards; and ``metadata["artifacts"]`` promoted so the notifier can upload
     them as native attachments without fetching the run row."""
+    # Mirror CLI's _show_voice_status: include STT/TTS provider availability so the user can tell at a
+    # glance *why* voice mode isn't working ("STT provider: MISSING ..." is the common case). ``record_key``
+    # mirrors the configured ``voice.record_key`` so the TUI can both bind it (frontend
+    # ``isVoiceToggleKey``) and display it in /voice status — previously the TUI hardcoded Ctrl+B and
+    # ignored the config (#18994).
     payload: dict = {
         "result_len": len(result) if result else 0,
         "summary": _first_line(event_summary, 400) or None,
@@ -3872,6 +3917,10 @@ def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
     if omitted_note:
         lines.append(omitted_note)
     for c in shown:
+        # Render author with explicit "comment from worker" framing so operator-controlled HERMES_PROFILE
+        # values like "hermes-system" or "operator" can't be misread by the next worker as a system
+        # directive above the (attacker-influenceable) comment body. Defense-in-depth — the LLM-controlled
+        # author-forgery surface was already closed in #22435. See #22452.
         safe_author = (c.author or "").replace("`", "")
         lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
         lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))

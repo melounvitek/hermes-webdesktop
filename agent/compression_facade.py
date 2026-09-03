@@ -114,6 +114,14 @@ def _run_under_progress_timeout(
     from agent.conversation_compression import CompressionCommitFence, run_compress_context_with_progress_timeout
 
     def _snapshot_worker(fence=None):
+        # #76354 review F3: the pooled worker must NEVER share the caller's live transcript. Plugin/legacy
+        # context engines are allowed to mutate their input list in place; after a host timeout the worker
+        # stays alive, so a shared list would let a late engine rewrite the live conversation (roles,
+        # ordering, persisted content) behind the caller's back. Deep-snapshot here, on the worker thread,
+        # so the caller's list object is never touched by pooled code. Results are published to
+        # caller-visible state only via the returned value of an ADMITTED commit (the host discards results
+        # on timeout/cancel); durable SessionDB mutation is already gated behind the commit fence inside
+        # compress_context.
         snapshot = copy.deepcopy(messages)
         result_msgs, result_prompt = run(fence, target_messages=snapshot)
         return (messages if result_msgs is snapshot else result_msgs), result_prompt
@@ -185,9 +193,18 @@ class CompressionFacadeMixin:
     ) -> tuple:
         """Forwarder — see ``agent.conversation_compression.compress_context``.
         ``force=True`` (manual /compress) bypasses the summary-failure cooldown; ``bypass_cooldown=True``
-        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed."""
+        (provider-proven overflow recovery) runs one real attempt while the cooldown stays armed.
+
+        ``force=True`` is passed by the manual ``/compress`` slash command so users can bypass the
+        summary-failure cooldown after an auto-compress abort. Auto-compress callers use the default
+        ``force=False``. See #100661.
+        """
         # Per-attempt timeout signal for turn-start preflight and in-loop consumers: a stalled
         # compression must not be mistaken for a structural no-op. Thread-local + per-agent lock.
+        # A stalled compression must not be mistaken for a structural no-op and followed by the oversized
+        # provider request it was meant to prevent. The typed helper upgrades the simple attribute to
+        # thread-local state guarded by a per-agent lock so overlapping automatic/manual entrypoints cannot
+        # clobber each other's outcome (#98741).
         from agent.conversation_compression import (
             CompressionCommitFence, compress_context, reset_context_compression_timeout_outcome,
             resolve_context_compression_timeouts,
@@ -206,6 +223,9 @@ class CompressionFacadeMixin:
             root = self._conversation_root_id()
             if root:
                 token = set_conversation_context(root)
+        # Initialized alongside `token`: the turn-lease timeout/interrupt early returns leave the try block
+        # before set_affinity_scope() runs, and the finally reads this name unconditionally
+        # (UnboundLocalError otherwise — the 4 red cross-process lease tests on PR #97158).
         affinity_token = None
         if get_affinity_scope() is None:
             declared = declared_conversation_scope_safe(self)

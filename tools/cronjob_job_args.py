@@ -45,7 +45,15 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
 def _local_delivery_notice(job: Dict[str, Any], user_deliver: Optional[str]) -> Optional[str]:
     """Notice when a created job won't deliver anywhere: CLI/TUI sessions have no capturable
     origin, so deliver='origin' (or omitted) saves output but never delivers it. None when the
-    user explicitly asked for ``local`` or the job resolves to a real target."""
+    user explicitly asked for ``local`` or the job resolves to a real target.
+
+    TUI/CLI sessions cannot be captured as a cron ``origin`` (no ``HERMES_SESSION_PLATFORM``/``CHAT_ID`` is
+    set for them), so a ``deliver="origin"`` request — or an omitted ``deliver`` that defaults to
+    origin-or-local — produces a job that runs and saves output to ``last_output`` but is never delivered
+    back into the session. This is by design (there is no live-delivery channel for local sessions), but
+    silently dropping the user's "tell me when it runs" intent is the trap reported in 51568. Surface it at
+    create time so the agent can relay it instead of promising a delivery that never happens. See #51568.
+    """
     if (user_deliver or "").strip().lower() == "local":
         return None
     try:
@@ -383,7 +391,12 @@ def _format_job(job: Dict[str, Any]) -> Dict[str, Any]:
 
 def _gateway_liveness_notice(plural: bool = False) -> dict:
     """``gateway_running``/``warning`` payload via the shared CLI helper so CLI and tool agree
-    on "scheduler active". False -> warning (no gateway process), None -> probe failed."""
+    on "scheduler active". False -> warning (no gateway process), None -> probe failed.
+
+    Thin adapter over the shared CLI helper ``hermes_cli.cron._builtin_gateway_liveness`` (#87033) so the
+    CLI and this tool can never disagree about what "scheduler active" means. ``plural`` rewords the warning
+    for multi-job results (the ``list`` action).
+    """
     try:
         from hermes_cli.cron import _builtin_gateway_liveness
         _gw = _builtin_gateway_liveness()

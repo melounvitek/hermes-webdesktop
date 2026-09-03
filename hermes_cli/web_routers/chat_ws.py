@@ -450,6 +450,7 @@ async def pty_ws(ws: WebSocket) -> None:
                 # The client only pins the viewport to the bottom when it asked
                 # for `?resume=`; announce the implicit active-session replay so
                 # it gets the same follow-scroll treatment.
+                # See #93518.
                 await ws.send_json({"type": "resume", "id": resume})
 
     resolve_kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}

@@ -98,6 +98,8 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
         # Re-install the caller's context-local HERMES_HOME override (multi-profile dashboard/desktop
         # backends) inside the thread: ContextVars don't propagate into bare threads, so a session
         # switched to profile X would otherwise discover the LAUNCH profile's mcp_servers.
+        # The config gate above already runs on the caller's thread, so it sees the same override. See
+        # #67605.
         home_override = get_hermes_home_override()
 
         def _discover() -> None:
@@ -218,6 +220,10 @@ def mcp_discovery_in_flight() -> bool:
 
     Mirrors ``tui_gateway.entry.mcp_discovery_in_flight``; surfaces that start discovery here
     (desktop, dashboard sidecar) populate this thread, so the late-refresh scheduler consults both.
+
+    Those processes populate THIS module's ``_mcp_discovery_thread``, not ``tui_gateway.entry``'s, so the
+    late-refresh scheduler must consult both to decide whether a slow server's tools are still pending (see
+    #51587).
     """
     thread = _mcp_discovery_thread
     return thread is not None and thread.is_alive()

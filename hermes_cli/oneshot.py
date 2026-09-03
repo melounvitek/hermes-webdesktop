@@ -242,6 +242,7 @@ def run_oneshot(
     if response:
         # Lone UTF-16 surrogates would raise UnicodeEncodeError on a real stdout and abort with
         # exit 1 after the turn already completed — scrub to U+FFFD first.
+        # Model text can contain lone UTF-16 surrogates (invalid in UTF-8). See #80366.
         from agent.message_sanitization import _sanitize_surrogates
 
         response = _sanitize_surrogates(response)
@@ -371,6 +372,9 @@ def _run_agent(
     # Oneshot builds AIAgent directly, bypassing cli.py's MCP background discovery and
     # _init_agent's wait, so the construction-time tool snapshot would miss late MCP servers.
     # Idempotent start + bounded wait with the single-query bound (there is no later turn).
+    # Ensure MCP tools are discovered before building the agent. This helper starts discovery if needed
+    # (idempotent) and bounded-waits with the larger single-query bound (default 15s) because there is only
+    # ONE turn and no between-turns late-binding refresh (#38448).
     from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
 
     ensure_mcp_discovery_before_agent_build(logger=logging.getLogger(__name__), single_query=True)
@@ -421,6 +425,10 @@ def _quietly(what: str, fn) -> None:
 
 
 def _linger_for_background_completions() -> None:
+    # Linger (bounded) for background processes this turn spawned with notify_on_complete=true BEFORE
+    # agent.close(): close() calls process_registry.kill_all(task_id) and the dying parent owns the
+    # children's stdout pipes, so exiting now destroys in-flight deliveries — including Bot Mode handoff
+    # replies dispatched from a short-lived recipient (#90879).
     from tools.process_registry import process_registry
 
     process_registry.wait_for_pending_completions(None)

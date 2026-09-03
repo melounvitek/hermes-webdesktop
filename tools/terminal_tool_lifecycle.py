@@ -187,6 +187,12 @@ def ensure_task_env(task_id: Optional[str] = None):
     paths) bring the sandbox up on demand with the same machinery as the
     terminal tool. No-op on local. Returns the env, or ``None`` when local or
     when creation fails (best-effort; the caller's fail-closed path stays intact).
+
+    :func:`terminal_tool` creates the environment on the first terminal command, but nothing else did — so
+    under a non-local backend (ssh, docker, …) a session whose first action is ``vision_analyze`` on a
+    container-only path hit "no active sandbox session" because the SSH/Docker handshake never ran (issue
+    #62825). vision reads such paths inside the sandbox (see ``tools.image_source``), so it calls this to
+    bring the env up on demand, reusing the same creation machinery as the terminal tool.
     """
     from tools.terminal_tool import (
         _active_environments, _creation_locks, _creation_locks_lock, _env_lock,

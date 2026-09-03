@@ -16,7 +16,11 @@ _SKILL_TOOLS = {"skill_view", "skill_manage"}
 
 
 def _fmt_est_cost(est_cost: float) -> str:
-    """Shared label helper so sub-cent totals render at 4dp, not "~$0.00"."""
+    """Shared label helper so sub-cent totals render at 4dp, not "~$0.00".
+
+    Routes through ``format_cost_label`` so sub-cent aggregates render at 4dp instead of collapsing to
+    "~$0.00" (#79220 bug class — the same dishonesty this module's cost buckets exist to fix, #77223).
+    """
     return format_cost_label(Decimal(str(est_cost)))
 
 
@@ -450,6 +454,8 @@ class InsightsEngine:
     @staticmethod
     def _cost_lines(o: Dict, templates: tuple) -> List[str]:
         """One formatted line per non-zero cost bucket (estimated, included, unknown)."""
+        # Cost breakdown — surface the three buckets so subscription-included and unknown-cost sessions are
+        # visible instead of silently collapsing to $0. See #77223.
         est_cost = o.get("estimated_cost", 0.0)
         values = (_fmt_est_cost(est_cost) if est_cost > 0 else "", o.get("included_cost_sessions", 0), o.get("unknown_cost_sessions", 0))
         return [tpl.format(v) for tpl, v in zip(templates, values) if v]

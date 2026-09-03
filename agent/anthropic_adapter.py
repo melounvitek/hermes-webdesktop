@@ -568,6 +568,17 @@ def build_anthropic_kwargs(
             kwargs["tool_choice"] = _TOOL_CHOICE_MAP.get(tool_choice) or {
                 "type": "tool", "name": to_wire(tool_choice) if to_wire else tool_choice
             }
+    # Map reasoning_config to Anthropic's thinking parameter. Claude 4.6+ models use adaptive thinking +
+    # output_config.effort. Older models use manual thinking with budget_tokens. MiniMax Anthropic-compat
+    # endpoints support thinking (manual mode only, not adaptive). Haiku does NOT support extended thinking
+    # — skip entirely. Kimi / Moonshot models also use adaptive thinking: their Anthropic-compatible
+    # endpoints (api.moonshot.cn/anthropic, api.kimi.com/coding) accept ``thinking.type="adaptive"`` +
+    # ``output_config.effort``, and the replay-validation 400s that originally motivated dropping the
+    # parameter (#13848) no longer occur. (Kimi on chat_completions enables thinking via extra_body in the
+    # ChatCompletionsTransport — see #13503.) On 4.7+ the `thinking.display` field defaults to "omitted",
+    # which silently hides reasoning text that Hermes surfaces in its CLI. We request "summarized" so the
+    # reasoning blocks stay populated — matching 4.6 behavior and preserving the activity-feed UX during
+    # long tool runs.
     if reasoning_config and isinstance(reasoning_config, dict):
         kwargs.update(_thinking_kwargs(reasoning_config, model, effective_max_tokens))
     # Safety net so upstream 4.6 -> 4.7 migrations don't need coordinated edits everywhere callers
@@ -638,6 +649,9 @@ def _stream_final_message(stream_fn, api_kwargs, log_prefix, on_stream_event, on
             try:
                 on_stream_event(event)
             except TimeoutError:
+                # The callback is the caller's deadline seam (#99692: the host waiting on this summary has
+                # already given up). Abandon the stream — the ``with`` closes it — instead of streaming an
+                # answer nobody will read.
                 raise
             except Exception:
                 logger.debug("%son_stream_event callback failed", log_prefix, exc_info=True)

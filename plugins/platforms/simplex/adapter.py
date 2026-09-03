@@ -107,6 +107,9 @@ class SimplexAdapter(BasePlatformAdapter):
             self.auto_accept = bool(extra.get("auto_accept", True))
         # Without SIMPLEX_GROUP_ALLOWED group messages are ignored (safer default); ``*`` = any group.
         group_allowed_str = _get_scoped_secret("SIMPLEX_GROUP_ALLOWED", "") or extra.get("group_allowed", "")
+        # Parse allowlists — group policy is derived from presence of group allowlist Scoped reads (#93522):
+        # allowlists are per-profile authorization config; raw os.getenv misses secondary profiles' .env
+        # values and leaks the default profile's list into them.
         self.group_allow_from = set(_parse_comma_list(group_allowed_str))
         self._ws = None  # websockets connection
         self._ws_task: Optional[asyncio.Task] = None

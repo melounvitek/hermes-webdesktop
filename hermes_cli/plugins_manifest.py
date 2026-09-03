@@ -27,6 +27,7 @@ _VALID_PLUGIN_KINDS: Set[str] = {"standalone", "backend", "exclusive", "platform
 
 # Unknown plugin.yaml fields are forward-compat surface: warn (debug for v1 files, warning for v2+)
 # and continue loading. ``capabilities``/``emits``/``listens``/``hermes``/``depends`` are reserved.
+# ── Manifest v2 (#64165) parsing helpers ──────────────────────────────────
 _KNOWN_MANIFEST_FIELDS: Set[str] = {
     "name", "version", "description", "author", "requires_env", "provides_tools", "provides_hooks",
     "kind", "hooks", "label", "optional_env", "platforms", "external_dependencies",
@@ -106,7 +107,10 @@ def _manifest_int(raw: object, key: str, warn: str, fallback: Optional[int]) -> 
 
 
 def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
-    """Validate/normalize manifest v2 fields into PluginManifest kwargs (warnings, never failures)."""
+    """Validate/normalize manifest v2 fields into PluginManifest kwargs (warnings, never failures).
+
+    See #64165.
+    """
     # manifest_version — absent means v1 (supported forever); api_version is the independent API generation.
     mv = _manifest_int(data.get("manifest_version", 1), key,
                        "Plugin %s: manifest_version %r is not an integer; treating as 1", 1)
@@ -161,7 +165,10 @@ def _parse_manifest_v2_fields(data: Mapping, key: str) -> Dict[str, Any]:
 
 
 def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -> List[str]:
-    """Return actionable warning strings for settings vs config_schema mismatches (never raises)."""
+    """Return actionable warning strings for settings vs config_schema mismatches (never raises).
+
+    Never raises; schema mismatches must not block plugin load (#64165).
+    """
     warnings: List[str] = []
     if not isinstance(schema, Mapping) or not isinstance(settings, Mapping):
         return warnings
@@ -192,7 +199,10 @@ def validate_config_schema(plugin_id: str, schema: Mapping, settings: Mapping) -
 def resolve_plugin_load_order(manifests: Mapping[str, "PluginManifest"]) -> List[str]:
     """Return plugin keys in dependency order: B before A when A requires B; alphabetical ties. A cycle warns
     and falls back to alphabetical order for all; a missing dependency warns once but never removes the
-    dependent plugin (loads never hard-fail on advisory deps)."""
+    dependent plugin (loads never hard-fail on advisory deps).
+
+    See #64165.
+    """
     import graphlib
     keys = sorted(manifests.keys())
     by_name: Dict[str, str] = {}
@@ -330,14 +340,18 @@ class PluginManifest:
     skill_namespace: str = ""
     # Declared capability ids, normalized to KNOWN ids. Declaration is consent metadata, NOT a grant: live
     # only via plugins.entries.<id>.granted_capabilities or the legacy allow_* key.
+    # See #64228.
     capabilities: List[str] = field(default_factory=list)
     # Manifest v2 fields — all optional and additive. manifest_version versions the FILE FORMAT (v1 supported
     # forever); api_version is the runtime plugin API generation (None = current).
+    # Absent (v1) manifests are fully supported forever. See #64165.
     manifest_version: int = 1
     api_version: Optional[int] = None
     # Advisory deps [{"id", "version_range"}]: missing ones warn but load; they order the load.
     requires_plugins: List[Dict[str, Any]] = field(default_factory=list)
     # Declared pip deps — VALIDATED AND SURFACED ONLY, never auto-installed.
+    # VALIDATED AND SURFACED ONLY — Hermes never auto-installs these (isolation design for the install seam
+    # is a deferred follow-up; see #64165 round-2 review and #15220).
     python_dependencies: List[str] = field(default_factory=list)
     # Schema for plugins.entries.<id>.settings; mismatches warn, never fail.
     config_schema: Dict[str, Any] = field(default_factory=dict)

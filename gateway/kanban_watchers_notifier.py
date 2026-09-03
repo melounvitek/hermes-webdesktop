@@ -25,6 +25,18 @@ _WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "revie
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
 # API outage must not permanently unsubscribe a live review-gate channel.
+# Subscriptions are removed only when the task reaches the irreversible archived status. ``done`` is
+# reversible in review/controller flows, so removing its subscription would silence a later reopen. We used
+# to also unsub on any terminal event kind (gave_up / crashed / timed_out / blocked), but that silently
+# dropped the user out of the loop whenever the dispatcher respawned the task: a worker that crashes, gets
+# reclaimed, runs again, and crashes a second time would only notify on the first crash because the
+# subscription was deleted after the first event. Same shape as the reblock-after-unblock cycle that PR
+# #22941 fixed for `blocked`. Keeping the subscription alive until the task is archived lets the cursor
+# (advanced atomically by claim_unseen_events_for_sub) handle dedup, and any retry-loop event reaches the
+# user. Per-subscription send-failure counter. Adapter.send raising means the chat is dead (deleted, bot
+# kicked, etc.) — after N consecutive send failures the sub is dropped so we don't spin against a dead chat
+# every 5 seconds forever. A genuinely dead chat still drops, just ~60s later — a fine trade for an
+# unattended gate where a false drop means silent work pileup.
 MAX_SEND_FAILURES = 12
 
 _LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
@@ -434,6 +446,10 @@ class _KanbanNotification:
         # hardcoded "group" mis-routed DM/thread creators into a fresh session.
         # Legacy rows may carry chat_type in delivery_metadata; last resort is
         # "group". A mismatch only degrades to a fresh session.
+        # Legacy rows written before the column existed may still carry chat_type in delivery_metadata
+        # (#60600 rows) — fall back to that, then to "group" (the historical default that suits the
+        # dashboard/group flows). handle_message() get_or_create_session's the target, so a mismatch only
+        # ever degrades to a fresh session, never an exception.
         _chat_type = str(sub.get("chat_type") or "").strip()
         if not _chat_type:
             _delivery_meta = sub.get("delivery_metadata")

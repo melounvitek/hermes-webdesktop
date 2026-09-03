@@ -648,7 +648,12 @@ def delete_task(task_id: str, board: Optional[str] = Query(None)):
 
 
 def _parents_blocking_ready(conn: sqlite3.Connection, task_id: str) -> list:
-    """Parent rows (id, title, status) not ``done`` that block promotion to ``ready``."""
+    """Parent rows (id, title, status) not ``done`` that block promotion to ``ready``.
+
+    Used to enrich the 409 response from :func:`update_task` so the dashboard can show an actionable toast
+    (#26744) instead of a silent no-op. Returns ``[]`` when nothing blocks the transition (e.g. no parents,
+    or all parents already done).
+    """
     rows = conn.execute(
         "SELECT t.id, t.title, t.status FROM tasks t "
         "JOIN task_links l ON l.parent_id = t.id "
@@ -902,7 +907,11 @@ class TerminateRunBody(BaseModel):
 @router.post("/runs/{run_id}/terminate")
 def terminate_run_endpoint(run_id: int, payload: TerminateRunBody, board: Optional[str] = _BOARD_Q):
     """Terminate an in-flight run via ``reclaim_task`` (same SIGTERM->SIGKILL flow, bookkeeping
-    and events as ``POST /tasks/{id}/reclaim``); 409 if already ended / not reclaimable."""
+    and events as ``POST /tasks/{id}/reclaim``); 409 if already ended / not reclaimable.
+
+    Closes the gap left by PR #28432, which shipped the read-only sibling endpoints (``/workers/active``,
+    ``/runs/{run_id}``, ``/runs/{run_id}/inspect``) but no termination control surface.
+    """
     with _board_conn(board) as (board, conn):
         r = _require_run(conn, run_id)
         if r.ended_at is not None:

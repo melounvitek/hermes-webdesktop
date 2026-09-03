@@ -109,6 +109,7 @@ def normalize_model_name(model: str, preserve_dots: bool = False) -> str:
     if model.lower().startswith("anthropic/"):
         model = model[len("anthropic/"):]
     if not preserve_dots and not _is_bedrock_model_id(model) and model.lower().startswith(("claude-", "anthropic/")):
+        # Only convert dots to hyphens for Anthropic/Claude models. See issue #17171.
         model = model.replace(".", "-")
     return model
 
@@ -150,6 +151,8 @@ def convert_tools_to_anthropic(tools: List[Dict]) -> List[Dict]:
     for t in tools or []:
         fn = t.get("function", {})
         name = fn.get("name", "")
+        # Defensive dedup: Anthropic rejects requests with duplicate tool names. Upstream injection paths
+        # already dedup, but this guard converts a hard API failure into a warning. See: #18478
         if name and name in seen_names:
             logger.warning("convert_tools_to_anthropic: duplicate tool name '%s' — dropping second occurrence", name)
             continue
@@ -370,6 +373,12 @@ def _replay_ordered_blocks(m: Dict[str, Any], ordered_blocks: List[Any]) -> Opti
 def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     """Assistant message -> Anthropic content blocks (thinking, text, tool_use, Kimi/DeepSeek
     reasoning_content injection)."""
+    # apply_anthropic_cache_control marks an assistant turn with non-empty text by writing cache_control
+    # INTO ``content`` (see _apply_cache_marker's list branch), not at the top level. This branch rebuilds
+    # the message from ordered_blocks and never reads ``content``, so that marker would be dropped -- and
+    # because _can_carry_marker already counted this message as a carrier, the breakpoint is burned rather
+    # than relocated. #56195 covered the complementary shape (blank content -> top-level marker); this is
+    # the interleaved thinking + preamble-text + tool_use shape.
     content = m.get("content", "")
     ordered_blocks = m.get("anthropic_content_blocks")
     if isinstance(ordered_blocks, list) and ordered_blocks:
@@ -395,6 +404,8 @@ def _convert_assistant_message(m: Dict[str, Any]) -> Dict[str, Any]:
     # (injected as a fallback upstream). Prepend, since thinking must precede text/tool_use. Skip
     # when reasoning_details already supplied (signed) thinking blocks: a duplicate unsigned one
     # would be downgraded to a spurious text block on the last assistant message.
+    # See hermes-agent#13848. Accept empty string "" — _copy_reasoning_content_for_api() injects "" as a
+    # tier-3 fallback for Kimi tool-call messages that had no reasoning.
     reasoning_content = m.get("reasoning_content")
     if isinstance(reasoning_content, str) and not _has_block_type(blocks, _THINKING_TYPES):
         blocks.insert(0, {"type": "thinking", "thinking": reasoning_content})
@@ -598,7 +609,13 @@ def _ensure_leading_user_turn(result: List[Dict[str, Any]]) -> None:
     """Anthropic requires messages[0].role == user; prepend a placeholder turn otherwise. A second
     auto-compaction can leave a role=assistant summary first, which the API rejects (often masked
     as a misleading tool_use/tool_result 400). The filler must be non-whitespace text or it trades
-    that 400 for the blank-block one."""
+    that 400 for the blank-block one.
+
+    The inserted text block must be non-whitespace: Anthropic separately rejects any text content block
+    whose text is empty or whitespace-only ("text content blocks must contain non-whitespace text"), so a
+    single space here traded the "leading assistant turn" 400 for that one (#69512 class). Uses the same
+    placeholder as every other synthesized filler block in this module for consistency.
+    """
     if result and result[0].get("role") != "user":
         result.insert(0, {"role": "user", "content": [_text_block(_EMPTY_TEXT_PLACEHOLDER)]})
 

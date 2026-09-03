@@ -37,6 +37,8 @@ def _env_file_has_key(env_path: Path, key: str) -> bool:
     if not env_path.is_file():
         return False
     try:
+        # .env is written as UTF-8 everywhere in the codebase, but a Notepad-edited file can carry a BOM —
+        # read as utf-8-sig so the first key isn't hidden behind U+FEFF (#62617).
         for raw in env_path.read_text(encoding="utf-8-sig").splitlines():
             line = raw.strip()
             if line and not line.startswith("#") and line.split("=", 1)[0].strip() == key:

@@ -512,6 +512,12 @@ class CLISessionMixin:
             # the current turn to the OLD session before rotating or it is silently lost.
             if self.agent:
                 with contextlib.suppress(Exception):
+                    # Flush any un-persisted messages from the current turn to the old session *before*
+                    # rotating.  /new can be called mid-turn when _flush_messages_to_session_db() has not
+                    # yet run — without this, messages generated during the current turn are silently lost
+                    # on session rotation (#47202).
+                    # See #47202.
+                    # See #47202.
                     self.agent._flush_messages_to_session_db(
                         self.conversation_history, conversation_history=self.conversation_history)
             with contextlib.suppress(Exception):
@@ -530,6 +536,8 @@ class CLISessionMixin:
         self.reasoning_config = _parse_reasoning_config(
             CLI_CONFIG["agent"].get("reasoning_effort", ""))
         # Session-scoped overrides (/model --session, /fast, one-turn restores) don't carry over.
+        # Re-derive model/provider and service tier from config.yaml so a session-only switch never leaks
+        # into the next session (#48055, #23131).
         self._pending_one_turn_model_restore = None
         self.service_tier = _parse_service_tier_config(CLI_CONFIG["agent"].get("service_tier", ""))
         _reset_model_to_config_default(self, silent)
@@ -591,6 +599,8 @@ class CLISessionMixin:
         chance to be a bare session number. The pending state is one-shot — cleared on the
         first input regardless of outcome, so a stray later number is never hijacked.
         Returns True if the input was consumed (caller must not treat it as chat).
+
+        See #34584.
         """
         from cli import _cprint
         pending = self._pending_resume_sessions
@@ -678,6 +688,11 @@ class CLISessionMixin:
                 f.write(content)
             label = {"json": "JSON", "md": "Markdown", "html": "HTML"}[fmt]
             print(f"(^_^)v Conversation saved to: {path} ({label})")
+            # #76354 review F5: the worker thread also rebound the session ContextVar inside its own
+            # (copied) context, which the caller never sees — and get_session_env() prefers an already-bound
+            # ContextVar over os.environ. Rebind in the CALLER's context so post-compression
+            # tools/subprocesses on this thread resolve HERMES_SESSION_ID to the child id after an
+            # out-of-place rotation (idempotent when no rotation happened).
             if self.session_id:
                 print(f"       Resume the live session with: hermes --resume {self.session_id}")
         except Exception as e:
@@ -881,6 +896,7 @@ class CLISessionMixin:
         self._publish_truncated_history(truncated, invalidate_prompt=True)
         # Same hook /branch fires; rewound=True invalidates per-turn document caches.
         _mm = getattr(self.agent, "_memory_manager", None)
+        # See #21910, #6672.
         if _mm is not None and self.session_id:
             with contextlib.suppress(Exception):
                 _mm.on_session_switch(self.session_id, parent_session_id="", reset=False, rewound=True)
@@ -1080,6 +1096,9 @@ class CLISessionMixin:
 
                 # system_message=None so _compress_context rebuilds the prompt from scratch;
                 # passing _cached_system_prompt duplicated the identity block.
+                # Passing _cached_system_prompt caused duplication because _build_system_prompt appends
+                # system_message to prompt_parts which already contain the agent identity — resulting in the
+                # identity block appearing twice (issue #15281).
                 compressed, _ = self.agent._compress_context(
                     head, None, approx_tokens=approx_tokens, focus_topic=focus_topic or None,
                     force=True, defer_context_engine_notification=True)
@@ -1222,6 +1241,15 @@ class CLISessionMixin:
                 self._write_terminal_breadcrumb()
 
         try:
+            # Create the DB session row now that _cached_system_prompt is populated, so the persisted
+            # snapshot is written non-NULL on the first turn (Issue #45499). Idempotent:
+            # _ensure_db_session() no-ops once the row exists. Must run BEFORE preflight compression:
+            # in-place compaction inserts message rows referencing this session (archive_and_compact), and
+            # rotation creates a child with parent_session_id pointing at it — with PRAGMA foreign_keys=ON,
+            # a missing parent row fails both INSERTs on a fresh oversized first turn. The user-turn crash
+            # persist itself runs LATER (after memory prefetch / pre_llm_call), so the row is written once
+            # with its final api_content — both steps take the same per-agent persist lock as CLI close
+            # persistence.
             if persist_lock is None:
                 _snapshot_and_persist()
             else:
@@ -1232,9 +1260,20 @@ class CLISessionMixin:
 
     def _print_exit_summary(self, clear_screen: bool = True):
         """Print session resume info on exit. ``clear_screen`` (interactive TUI teardown)
-        wipes screen + scrollback first; single-query mode passes False to keep the answer."""
+        wipes screen + scrollback first; single-query mode passes False to keep the answer.
+
+        Args: clear_screen: When True (default), clear the terminal screen and scrollback before printing
+        the summary. See #38252, #53009.
+        """
         from cli import datetime
         if clear_screen:
+            # Clear the screen + scrollback before printing the summary so the live bottom chrome (status
+            # bar, input box, separator rules) and the rest of the session transcript don't get stranded
+            # above the exit summary (#38252). By this point app.run() has returned and prompt_toolkit has
+            # restored terminal modes, so writing raw escapes to stdout is safe. ESC[3J clears scrollback,
+            # ESC[2J clears the visible screen, ESC[H homes the cursor — so the summary prints at a clean
+            # top-left. Falls back to the platform clear command if stdout isn't a TTY-capable stream.
+            # Honors NO_COLOR/dumb terminals by skipping silently when there's no real console.
             self._clear_terminal_on_exit()
         print()
         msg_count = len(self.conversation_history)

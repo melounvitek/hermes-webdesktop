@@ -113,6 +113,8 @@ def _denial_breaker_addendum(session_key: str) -> str:
     threshold = _get_denial_breaker_threshold()
     if threshold <= 0 or count < threshold:
         return ""
+    # WARNING (was DEBUG): a failed/blocked guardian call is a real event the operator needs to see — the
+    # whole point of #82846 is that the hang was invisible. Log the elapsed time and error class too.
     logger.warning(
         "Smart-approval circuit breaker tripped for session %s: %d consecutive denials (threshold %d)",
         session_key, count, threshold,
@@ -126,6 +128,8 @@ def _denial_breaker_addendum(session_key: str) -> str:
 # --- Gateway approval queue (the blocking wait loop lives in approval_gateway_wait) ---------------------------------
 
 
+# Optional free-text reason supplied with an explicit deny (``/deny <reason>``) so the agent can adapt
+# instead of only hearing "denied". Ported from qwibitai/nanoclaw#2832.
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
 
@@ -644,6 +648,8 @@ def _smart_gate(spec: _GateSpec, command: str, description: str, pattern_key: st
     if human_present:
         return None, True
     return {
+        # Unattended programmatic platforms (webhook/msgraph_webhook/ api_server): respect unattended_mode
+        # config. Resolves instantly — never a pending approval nobody can answer (#37284, #87509).
         "approved": False,
         "message": (f"BLOCKED by smart approval: {description}. The command was assessed as genuinely "
                     f"dangerous. Do NOT retry.{_denial_breaker_addendum(session_key)}"),
@@ -1057,6 +1063,11 @@ def check_execute_code_guard(code: str, env_type: str, has_host_access: bool = F
     Documented limitation: a purely local non-interactive non-gateway session returns approved
     (the terminal auto-approve contract); the hardline floor still blocks catastrophic
     ``terminal()`` commands the script issues.
+
+    See #30882.
+    The hardline floor still blocks catastrophic ``terminal()`` commands the script issues; running
+    arbitrary code headlessly without any approval surface is trusted-by-config (set a gateway/ask surface
+    or ``approvals.cron_mode`` to require approval). See #30882.
     """
     pattern_key = "execute_code"
     description = _EXECUTE_CODE_DESCRIPTION

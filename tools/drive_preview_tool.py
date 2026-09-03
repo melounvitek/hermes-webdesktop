@@ -62,6 +62,7 @@ ACT_PREVIEW_SCHEMA = {
     # Response-shape teaching kept only where skipping it wastes calls (delta
     # semantics, rebound refs, strobe's burst): a model that doesn't know them
     # re-reads pages or loops strobe.
+    # See #95681.
     "description": (
         "Use the web page open in the desktop preview pane (the one "
         "`desktop_preview` opens): log in, fill forms, click through flows. ALWAYS "

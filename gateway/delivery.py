@@ -256,6 +256,7 @@ class DeliveryRouter:
         # risk). Cron output is an ARTIFACT, not model chatter: a legitimately terse job ("...", a single 🔇)
         # has no mirror loop, and dropping it while returning success is how a cron gets logged as delivered
         # with nothing on the wire. Cron sends carry job_id in metadata; everything else is filtered.
+        # See #77763.
         is_cron_artifact = "job_id" in (metadata or {})
         if self._filter_silence_narration_enabled() and not is_cron_artifact and _is_silence_narration(content):
             logger.warning("Dropped silence-narration outbound to %s (chat=%s): %r",

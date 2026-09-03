@@ -29,6 +29,8 @@ def _probe_fail_json(diagnostic: str = "probe failed") -> str:
     ``ok: false`` plus ``probe_failed: true`` means the detector itself could not run — this is
     *not* a clear scan. Callers must treat ``ok is not True`` / non-zero exit as probe failure,
     never as ``blocked: false`` "clear".
+
+    See #83149.
     """
     return json.dumps({"ok": False, "probe_failed": True, "blocked": False, "processes": [],
                        "error": diagnostic})
@@ -161,7 +163,17 @@ def _is_pausable_gateway(cmdline: str) -> bool:
 
 
 def _is_updater_owned_backend(pid: int, cmdline: str) -> bool:
-    """True when *pid* is a Hermes backend the CLI updater can stop (positive ledger identity)."""
+    """True when *pid* is a Hermes backend the CLI updater can stop (positive ledger identity).
+
+    The gateway exemption above keeps ``gateway run`` holders out of the blocker list because the updater's
+    own pause machinery stops and resumes them. ``hermes serve`` / ``hermes dashboard`` backends had no such
+    deferral, so a leaked serve child (or a Desktop-owned backend the teardown lost track of) dead-ended the
+    hand-off with ``venv-blocked`` — or, worse, survived the hand-off and made the shim quarantine fail with
+    ``os error 32`` (#98336) — even though the updater downstream owns exactly this case with its ledger
+    rungs (`_ledger_reapable_backend_pids` reaps dead-spawner orphans; `_ledger_manual_serve_holders` stops
+    manual serves and relaunches them on their recorded host/port).
+    Positive identity only — never name/substring matching (#90778, and the 99558 identity-guard contract):
+    """
     return _updater_owned_backend_entry(pid, cmdline) is not None
 
 
@@ -170,6 +182,8 @@ def _updater_owned_backend_entry(pid: int, cmdline: str) -> dict | None:
 
     Returning the entry lets ``main()`` emit sanitized decision evidence — structured identity
     fields only, never argv, which can carry tokens or private endpoints.
+
+    See #98350.
     """
     try:
         from hermes_cli.update_cmd import _hermes_holder_subcommand  # noqa: PLC0415
@@ -199,7 +213,12 @@ def _updater_owned_backend_entry(pid: int, cmdline: str) -> dict | None:
 
 
 def _deferred_backend_evidence(entries: list[dict]) -> list[dict]:
-    """Sanitized evidence (pid, purpose, recorded port — never argv) for deferred backends."""
+    """Sanitized evidence (pid, purpose, recorded port — never argv) for deferred backends.
+
+    Structured ledger fields only — pid, purpose, recorded port — never the command line, which can carry
+    tokens or private endpoints. Lets the scan result explain *why* a holder disappeared from ``processes``
+    without echoing argv (#98350).
+    """
     return [{"pid": entry.get("pid"), "purpose": entry.get("purpose"), "port": entry.get("port")}
             for entry in entries if isinstance(entry.get("pid"), int)]
 
@@ -253,6 +272,7 @@ def main() -> None:
         if deferred_entry is not None:
             # Ledger-verified backend the updater's own rungs stop (and relaunch) downstream —
             # reporting it here would dead-end the hand-off before that machinery can run.
+            # See #98336.
             deferred_entries.append(deferred_entry)
             continue
         # Truncate for display AFTER the gateway exemption has seen the full cmdline (long
@@ -267,7 +287,11 @@ def main() -> None:
         "blocked": bool(processes),
         "processes": processes,
         "pausable_gateways": exempted_gateways,
+        # Diagnostic only: ledger-verified serve/dashboard backends deferred to the updater's stop/relaunch
+        # rungs (#98336).
         "deferred_backends": len(deferred_entries),
+        # Diagnostic only: sanitized evidence (structured ledger identity, never argv) explaining which
+        # holders the deferral consumed (#98350).
         "deferred_backend_evidence": _deferred_backend_evidence(deferred_entries),
     }
     print(json.dumps(data))

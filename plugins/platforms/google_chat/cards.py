@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict
 # Invisible Unicode codepoints that render as tofu (□) in Google Chat's
 # restricted font stack: ZWS/ZWNJ/ZWJ, bidi marks, word joiner, BOM and
 # Variation Selectors (Chat ignores them and often shows a blank box).
+# Pattern lifted from PR #14965.
 _INVISIBLE_RE = re.compile(
     "["
     "\u200b"          # Zero-Width Space

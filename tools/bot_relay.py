@@ -51,7 +51,11 @@ ROSTER_FRESH_SECONDS = 600
 
 
 class EnvelopeRefusedError(RuntimeError):
-    """``enqueue_envelope`` refused to queue (nothing written); ``reason`` is a stable machine code."""
+    """``enqueue_envelope`` refused to queue (nothing written); ``reason`` is a stable machine code.
+
+    ``reason`` is a stable machine code; ``str(exc)`` is the human text. 'runtime_offline' matches the
+    #93091 item-1 failure-reason enum (plain literal here so the branches merge cleanly).
+    """
 
     def __init__(self, reason: str, message: str):
         super().__init__(message)
@@ -241,7 +245,12 @@ def _expire_if_stale(root: Path | str, path: Path, ttl: float, now: float) -> bo
 
 def claim_pending_envelopes(root: Path | str) -> list[dict]:
     """Drain the outbox (rename → claimed/ so a second drain can't double-deliver).
-    TTL-expired envelopes get a 'queued_expired' reply and are removed instead."""
+    TTL-expired envelopes get a 'queued_expired' reply and are removed instead.
+
+    Envelopes older than ``bot_mode.envelope_ttl_seconds`` are NOT delivered: each gets an error reply
+    (reason ``'queued_expired'``) so the sender's waiter resolves, and its outbox file is removed (#93091
+    item 2).
+    """
     base = _ensure_dirs(root)
     _sweep_stale(base)
     ttl = _envelope_ttl_seconds()
@@ -318,6 +327,8 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
     # raw literal parses the folded backslash literally. No-op on POSIX, and \'
     # still cannot terminate a raw literal, so the injection defense holds.
     code = (
+        # Encode label with !r so roster fields cannot break out of the generated python -c source (quotes,
+        # parens, or extra statements in connection_id). See #93590.
         "import json,os,sys,time\n"
         f"p = r{reply_path!r}\n"
         f"label = r{label!r}\n"
@@ -328,6 +339,7 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
         "        if d.get('error'):\n"
         # Typed reason code rides ahead of the free text so the sender can
         # branch on it without parsing provider prose.
+        # See #93091.
         "            code = str(d.get('reason') or '').strip()\n"
         "            tag = ' [reason: ' + code + ']' if code else ''\n"
         "            print('Delivery to ' + label + ' failed' + tag + ': ' + d['error'])\n"
@@ -346,7 +358,15 @@ def waiter_command(root: Path | str, envelope: dict) -> str:
 
 def _hermes_cli() -> str:
     """hermes CLI beside this interpreter, then ``shutil.which``, then the bare name
-    (service contexts lack PATH, so a bare "hermes" died with ENOENT)."""
+    (service contexts lack PATH, so a bare "hermes" died with ENOENT).
+
+    The deliver RPC runs on the target gateway, whose process is the venv python — its bin/Scripts directory
+    holds the matching ``hermes`` entrypoint. A bare ``"hermes"`` relies on PATH, which is exactly what
+    service contexts (systemd units, desktop launchers, non-login SSH shells) do not provide, so delivery
+    died with ENOENT there (#93590). When no sibling exists (e.g. running from a source tree without an
+    installed script), a ``shutil.which`` lookup runs next — it honors whatever PATH the process does have —
+    before falling back to the bare name, preserving today's behavior for interactive shells.
+    """
     sibling = Path(sys.executable or "").parent / ("hermes.exe" if sys.platform == "win32" else "hermes")
     return str(sibling) if sibling.is_file() else shutil.which("hermes") or "hermes"
 
@@ -363,8 +383,19 @@ def local_delivery_command(profile: str, query_file: str) -> list[str]:
 # crashed turn can never wedge the profile.
 
 
+# ── per-profile turn lock (#93091) ─────────────────────────────────────────── Two deliveries into the SAME
+# target profile must never run their Bot Chat turns concurrently: deliveries spawn separate ``hermes``
+# subprocesses, so an in-memory mutex is useless — the lock is a per-profile lockfile under
+# ``<root>/bot_relay/locks/`` held with ``fcntl.flock`` for exactly the turn execution window. flock is
+# released by the kernel when the holder's fd closes (including process death), so a crashed turn can never
+# wedge the profile. A queued delivery waits up to ``bot_mode.turn_wait_seconds`` and then fails with a
+# structured 'target_busy' refusal instead of blocking forever.
 class TurnBusyError(RuntimeError):
-    """A delivery turn is already running for the target profile (``waited_seconds`` ≈ time queued)."""
+    """A delivery turn is already running for the target profile (``waited_seconds`` ≈ time queued).
+
+    ``reason`` is 'target_busy' — extends the #93091 item-1 structured refusal enum. ``waited_seconds`` is
+    roughly how long the caller queued behind the current turn before giving up.
+    """
 
     reason = "target_busy"
 

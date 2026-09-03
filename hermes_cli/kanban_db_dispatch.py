@@ -76,7 +76,18 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 
 @dataclass
 class DispatchResult:
-    """Outcome of a single ``dispatch`` pass."""
+    """Outcome of a single ``dispatch`` pass.
+
+    ``kanban.default_assignee`` applied this tick before spawning (#27145). Surfaces the auto-assignment to
+    telemetry / CLI / dashboard so the operator can see when the dispatcher is acting on the fallback rule
+    ``kanban.max_in_progress_per_profile`` (#21582). Each entry is ``(task_id, assignee,
+    current_running_count)``. NOT an operator-actionable failure — the task will be picked up on a
+    subsequent tick when the assignee has capacity. Separate bucket so telemetry / dashboards can show "this
+    profile is busy" vs
+    the board's dispatch lock (issue #35240). A losing dispatcher does no DB writes this tick — the lock
+    holder is making progress on the same board. This is the steady-state signal that a single-writer guard
+    is
+    """
 
     reclaimed: int = 0
     promoted: int = 0
@@ -709,6 +720,10 @@ def _protocol_violation_streak(conn: sqlite3.Connection, task_id: str) -> int:
 
 
 _PROTOCOL_VIOLATION_ERROR = (
+    # Worker subprocess returned 0 but its task is still ``running`` in the DB — it exited without calling
+    # ``kanban_complete`` / ``kanban_block``. Overwhelmingly the work itself succeeded and only the
+    # paperwork was skipped, so a retry usually completes; the corrective sentence below is surfaced to the
+    # retry worker via the prior-attempt error in ``build_worker_context`` (guidance approach from #61817).
     "worker exited cleanly (rc=0) without calling "
     "kanban_complete or kanban_block — protocol violation. "
     "If the prior run already did the work, verify it and "
@@ -946,6 +961,22 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
         for hook_fields in sweep.exited_hook_payloads:
             hook_fields = dict(hook_fields)
             _kb._fire_kanban_lifecycle_hook(
+                # Kanban worker-lifecycle, task-mutation, and dispatcher-tick observers (RFC #58548,
+                # accepted as the design basis in the #64231 batch disposition; on_kanban_dispatch_tick is
+                # the re-port of PR #56066). All five are observers only: return values are ignored, and
+                # every fire site is fully best-effort, so a broken callback can never break dispatch or a
+                # task mutation. Cost rule: every call site short-circuits on has_hook(), so when nothing
+                # subscribes no payload is built and the hot paths (each dispatcher tick, each task write)
+                # pay one dict probe. WHICH PROCESS: worker spawn/exit/stale-claim and the dispatch tick
+                # fire in the DISPATCHER process (gateway-embedded dispatcher or ``hermes kanban
+                # dispatch``); on_kanban_task_updated fires in whichever process committed the mutation
+                # (CLI, worker, or the gateway-embedded dashboard API). Common kwargs (task-scoped hooks):
+                # task_id: str, profile_name: str, board: str | None, assignee: str | None, run_id: int |
+                # None. on_kanban_worker_spawned fires after ``spawn_fn`` returns AND the worker PID (when
+                # one was reported) is durably persisted, per the RFC timing contract; like
+                # kanban_task_claimed it runs inside the board's dispatch lock, so callbacks must stay fast.
+                # Adds: worker_pid: int | None, workspace_path: str. Privacy: workspace_path is a filesystem
+                # path and may reveal project layout or usernames.
                 "on_kanban_worker_exited",
                 hook_fields.pop("task_id"),
                 board=_board,
@@ -1514,6 +1545,12 @@ def _dispatch_lane_task(
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
+        # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
+        # operator-configured fallback exists, persist the assignment and proceed. This removes the
+        # dashboard footgun where a task created without an assignee parks in 'ready' forever even though
+        # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
+        # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
+        # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         if not dry_run:
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
@@ -1720,6 +1757,9 @@ def _resolve_default_assignee(default_assignee: Optional[str]) -> Optional[str]:
     return name
 
 
+# The dispatch lock has been released here. Fire the tick observer strictly OUTSIDE the single-writer
+# critical section (#56066 sweeper finding / #64231 disposition): a slow subscriber must never extend the
+# lock hold and stall a sibling dispatcher's tick.
 def _dispatch_once_locked(
     conn: sqlite3.Connection,
     *,
@@ -1765,6 +1805,10 @@ def _dispatch_once_locked(
     # Per-profile cap. Deferred tasks go to skipped_per_profile_capped, not
     # skipped_unassigned — "busy, retry later" differs from "needs routing".
     per_profile_cap = max_in_progress_per_profile if (
+        # Per-profile concurrency cap (#21582): when set, track how many workers each assignee already has
+        # in flight, and refuse to spawn when this would push that assignee past the cap. Prevents fan-out
+        # workloads from melting a single profile's local model / API quota / browser pool while leaving
+        # other profiles idle.
         isinstance(max_in_progress_per_profile, int)
         and max_in_progress_per_profile > 0
     ) else None
@@ -2179,6 +2223,13 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
     # build_context_files_prompt; without it relative writes land in the gateway
     # user's home and workers load the gateway's AGENTS.md. file_tools rejects
     # relative / sentinel values, so only set a real absolute directory.
+    # Pin TERMINAL_CWD to the task's workspace so the worker's file tools and context-file loader anchor on
+    # the workspace, not whatever cwd the dispatching gateway happened to export. The worker subprocess is
+    # already launched with cwd=workspace, but TERMINAL_CWD takes precedence over the process cwd in both
+    # file_tools._resolve_base_dir (#41312 — relative write_file paths were landing in the gateway user's
+    # home) and build_context_files_prompt (#34619 — workers loaded the dispatching gateway's AGENTS.md
+    # instead of the task's). Setting it to the workspace fixes both: the workspace is where the task's work
+    # actually happens.
     if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
         env["TERMINAL_CWD"] = workspace
     if task.branch_name:

@@ -337,6 +337,13 @@ async def add_credential_pool_entry(body: CredentialPoolAdd):
             label = (body.label or "").strip() or f"key #{len(pool.entries()) + 1}"
             pool.add_entry(PooledCredential(
                 provider=provider,
+                # Add a distinct, self-contained pool entry per account (matching the qwen-oauth /
+                # minimax-oauth multi-account patterns, and the xai-oauth path below) instead of routing
+                # through the singleton ``_save_codex_tokens`` save path. The singleton round-trip collapsed
+                # every added account into the latest login: a second ``hermes auth add openai-codex``
+                # overwrote the first account's singleton-mirrored ``device_code`` entry rather than
+                # creating an independent one (#39236). ``manual:device_code`` entries refresh from their
+                # own token pair, so they need no singleton shadow.
                 id=uuid.uuid4().hex[:6],
                 label=label,
                 auth_type=AUTH_TYPE_API_KEY,
@@ -376,6 +383,8 @@ async def remove_credential_pool_entry(provider: str, index: int):
     the same RemovalStep registry as ``hermes auth remove``: each source cleans
     its external state and suppresses ``(provider, source)`` so seeders skip it.
     Manual entries have no step — nothing external, and they aren't re-seeded.
+
+    See #55217.
     """
     from agent.credential_pool import load_pool
     from agent.credential_sources import find_removal_step

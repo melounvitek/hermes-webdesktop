@@ -181,7 +181,18 @@ def iter_configured_hooks(cfg: Optional[Dict[str, Any]]) -> List[ShellHookSpec]:
 
 def re_register_config_hooks() -> None:
     """Re-register after a plugin force-reload cleared the manager's hooks; only this home's keys
-    are cleared (profile A's reload never drops B), never re-prompts."""
+    are cleared (profile A's reload never drops B), never re-prompts.
+
+    ``PluginManager.discover_and_load(force=True)`` unloads via the ownership ledger and clears the
+    manager's ``_hooks`` dict, which silently drops shell hooks that were registered from ``config.yaml`` at
+    startup (they are config-owned, not plugin-owned, so the ledger cannot restore them). Clear the
+    idempotence set and re-run ``register_from_config()`` so hooks are wired again (#60036 / PR #60267;
+    tracking #64178 — salvaged from PR #64188).
+    Only the idempotence keys for the *current* Hermes home are cleared — ``discover_and_load(force=True)``
+    only unloads the manager scoped to that one home, so clearing every home's keys would make a
+    force-reload in profile A drop profile B's still-live registration from the ledger and duplicate it on
+    B's next registration call (#92682 review).
+    """
     _forget_home_registrations(_registered, _registered_lock)
     from hermes_cli.config import load_config
     register_from_config(load_config())

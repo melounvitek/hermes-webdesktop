@@ -33,6 +33,8 @@ class ActivityTrackingMixin:
 
         ``_touch_activity`` stamps under it and the liveness watchdog samples/commits under it, so a stall
         observation can never abort a turn that resumed in between.
+
+        Created lazily so ``AIAgent.__new__``-based test doubles keep working. See #95663.
         """
         return _activity_lock(self)
 
@@ -48,6 +50,9 @@ class ActivityTrackingMixin:
         projection. ``provenance`` names special writers (compression); ``force_persist`` bypasses the
         SessionDB rate limit. Module-level lock helper, not ``self._liveness_activity_lock()``: doubles bind
         only ``_touch_activity`` (tests/run_agent/test_session_activity_persist.py).
+
+        Bridge is rate-limited (60s) and best-effort — it never raises into the agent loop. See #31752.
+        See #72016, #72039.
         """
         from agent.session_activity import (
             bound_activity_description, normalize_activity_provenance,
@@ -117,6 +122,8 @@ class ActivityTrackingMixin:
 
         Keeps ``_last_activity_ts`` so idle/watchdog clocks stay continuous across turns; clears description +
         provenance so idle agents / SessionDB listings stop advertising the last mid-turn stamp.
+
+        See #15654, #72039.
         """
         self._last_activity_desc = ""
         self._last_activity_provenance = ActivityProvenance.UNKNOWN

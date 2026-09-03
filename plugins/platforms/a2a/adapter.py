@@ -168,7 +168,10 @@ class A2ARequestHandler(BaseHTTPRequestHandler):
         return self.client_address[0] if self.client_address else ""
 
     def _request_public_url(self) -> str:
-        """A2A_PUBLIC_URL > X-Forwarded-Host / Host (scheme from X-Forwarded-Proto) > "" (bind host)."""
+        """A2A_PUBLIC_URL > X-Forwarded-Host / Host (scheme from X-Forwarded-Proto) > "" (bind host).
+
+        Empty means "caller has no info, fall back to bind host". See #41711.
+        """
         explicit = os.getenv("A2A_PUBLIC_URL", "").strip()
         if explicit:
             return explicit
@@ -249,6 +252,9 @@ class A2AAdapter(BasePlatformAdapter):
         extra = getattr(config, "extra", {}) or {}
         # Scope-aware: a secondary multiplex profile must not borrow the default profile's bridged
         # A2A_PORT (falls closed to the module default). advertised_toolsets is deliberately unscoped.
+        # (advertised_toolsets has the same env-leak shape but is left unscoped here — see the "Scope note"
+        # in this fix's PR description: open PR #98937 is actively rewriting this field's None-vs-empty-list
+        # semantics.)
         self._security_context = security.A2ASecurityContext.capture()
         _port_env = None if _profile_scoped() else os.getenv("A2A_PORT")
         self.port = int(_port_env or extra.get("port", _DEFAULT_PORT))
@@ -281,7 +287,11 @@ class A2AAdapter(BasePlatformAdapter):
     @property
     def authorization_is_upstream(self) -> bool:
         """Requests are authenticated in ``do_POST``; the gateway's A2A_ALLOWED_USERS list would
-        otherwise reject peers (identity is a token-derived name or IP). Wrong credentials still 401."""
+        otherwise reject peers (identity is a token-derived name or IP). Wrong credentials still 401.
+
+        This is authorization delegated to the A2A bearer-token transport, not a fail-open: every request is
+        401'd if the credential is wrong. Reported by kuangmi-bit (PR #41711 comment, Jun 27).
+        """
         return True
 
     async def connect(self, **_kwargs) -> bool:
