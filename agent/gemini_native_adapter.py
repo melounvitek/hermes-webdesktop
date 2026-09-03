@@ -495,8 +495,7 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
     return _envelope(model, "chat.completion", SimpleNamespace(index=0, message=message, finish_reason=finish_reason), usage)
 
 
-class _GeminiStreamChunk(SimpleNamespace):
-    pass
+class _GeminiStreamChunk(SimpleNamespace): ...
 
 
 def _make_stream_chunk(
@@ -568,14 +567,30 @@ def translate_stream_event(event: Dict[str, Any], model: str, tool_call_indices:
             }))
 
     if finish_reason_raw := str(cand.get("finishReason") or ""):
-        finish_chunk = _make_stream_chunk(
-            model=model, finish_reason="tool_calls" if tool_call_indices else _map_gemini_finish_reason(finish_reason_raw)
-        )
-        # usageMetadata rides on the finish chunk so the streaming loop records token counts.
-        if usage_meta := event.get("usageMetadata") or {}:
+        finish_reason = "tool_calls" if tool_call_indices else _map_gemini_finish_reason(finish_reason_raw)
+        finish_chunk = _make_stream_chunk(model=model, finish_reason=finish_reason)
+        if usage_meta := event.get("usageMetadata") or {}:  # rides on the finish chunk so the stream loop records tokens
             finish_chunk.usage = _usage_from_metadata(usage_meta)
         chunks.append(finish_chunk)
     return chunks
+
+
+def _error_info(err_obj: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
+    """``(reason, metadata)`` from the first google.rpc.ErrorInfo detail (later ones fill gaps until reason is set)."""
+    reason, metadata = "", {}
+    details = err_obj.get("details")
+    for detail in details if isinstance(details, list) else []:
+        if isinstance(detail, dict) and not reason and str(detail.get("@type") or "").endswith("/google.rpc.ErrorInfo"):
+            reason = detail["reason"] if isinstance(detail.get("reason"), str) else reason
+            metadata = detail["metadata"] if isinstance(detail.get("metadata"), dict) else metadata
+    return reason, metadata
+
+
+def _parse_float(value: Any) -> Optional[float]:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = None) -> GeminiAPIError:
@@ -590,18 +605,8 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     err_obj = err_obj if isinstance(err_obj, dict) else {}
     err_status = str(err_obj.get("status") or "").strip()
     err_message = str(err_obj.get("message") or "").strip()
-    details_list = err_obj.get("details")
-    # First google.rpc.ErrorInfo detail supplies reason/metadata (later ones only fill gaps until reason is set).
-    reason, metadata = "", {}
-    for detail in details_list if isinstance(details_list, list) else []:
-        if isinstance(detail, dict) and not reason and str(detail.get("@type") or "").endswith("/google.rpc.ErrorInfo"):
-            reason = detail["reason"] if isinstance(detail.get("reason"), str) else reason
-            metadata = detail["metadata"] if isinstance(detail.get("metadata"), dict) else metadata
-    retry_after: Optional[float] = None
-    try:
-        retry_after = float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
-    except (TypeError, ValueError):
-        pass
+    reason, metadata = _error_info(err_obj)
+    retry_after = _parse_float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
     message = (
         f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
         else f"Gemini returned HTTP {status}: {body_text[:500]}"
