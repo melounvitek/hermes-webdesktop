@@ -15,8 +15,7 @@ import snowballstemmer
 
 from tools.tool_search_names import TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME
 
-# Chars-per-token rule of thumb for budget estimates; 4.0 slightly
-# underestimates, which is the safer direction (fewer false activations).
+# Chars-per-token rule of thumb; 4.0 slightly underestimates (fewer false activations).
 CHARS_PER_TOKEN = 4.0
 
 
@@ -26,16 +25,15 @@ class CatalogEntry:
 
     name: str
     description: str
-    schema: Dict[str, Any]  # The full {"type":"function", "function": {...}} entry.
+    schema: Dict[str, Any]  # the full {"type":"function", "function": {...}} entry
     source: str  # "mcp" | "plugin" | "other"
-    source_name: str  # Toolset name, e.g. "mcp-github" or "kanban"
+    source_name: str  # toolset name, e.g. "mcp-github" or "kanban"
     _tokens: List[str] = field(default_factory=list)  # pre-tokenized for BM25
 
 
 _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
-
-# Snowball stemmers carry mutable parsing state and bridge dispatch runs on
-# parallel tool-call threads, so: one stemmer per thread, created lazily.
+# Snowball stemmers carry mutable parsing state and bridge dispatch runs on parallel
+# tool-call threads: one stemmer per thread, created lazily.
 _thread_local = threading.local()
 
 
@@ -53,11 +51,9 @@ def _stem(token: str) -> str:
 
 
 def _tokenize(text: str) -> List[str]:
-    """Lowercase alphanumeric tokens, Snowball-stemmed (English). Shared by the
-    index and query paths so "issues" matches ``create_issue``."""
-    if not text:
-        return []
-    return [_stem(token.lower()) for token in _TOKEN_RE.findall(text)]
+    """Lowercase alphanumeric tokens, Snowball-stemmed (English); shared by the index and
+    query paths so "issues" matches ``create_issue``."""
+    return [_stem(token.lower()) for token in _TOKEN_RE.findall(text)] if text else []
 
 
 def _fn(td: Dict[str, Any]) -> Dict[str, Any]:
@@ -66,9 +62,8 @@ def _fn(td: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _registry_entry(name: str) -> Any:
-    """Registry entry for ``name``; None when unregistered OR when the registry
-    is unavailable/raises (lookup failures must never fail a bridge call).
-    The import stays lazy: tests patch ``tools.registry.registry``."""
+    """Registry entry for ``name``; None when unregistered OR the registry raises (lookup
+    failures must never fail a bridge call). Lazy import: tests patch the registry."""
     try:
         from tools.registry import registry
         return registry.get_entry(name)
@@ -77,31 +72,26 @@ def _registry_entry(name: str) -> Any:
 
 
 def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
-    """Search-text blob: split name words + source label + description +
-    top-level parameter names. Schema bodies are excluded (noise, no recall
-    gain). The ``mcp__`` prefix is dropped — it is in every MCP document, so
-    its IDF is ~0. The source label lets a service-name query ("linear") reach
-    a tool whose own name omits the vendor."""
+    """Search-text blob: split name words + source label + description + top-level parameter
+    names (schema bodies are noise with no recall gain). The ``mcp__`` prefix is dropped — it
+    is in every MCP document, so its IDF is ~0. The source label lets a service-name query
+    ("linear") reach a tool whose own name omits the vendor."""
     fn = _fn(td)
     name = fn.get("name", "")
     if name.startswith("mcp__"):
         name = name[len("mcp__"):]
-    desc = fn.get("description", "") or ""
-    params = ((fn.get("parameters") or {}).get("properties") or {})
-    param_names = " ".join(params.keys())
     name_words = re.sub(r"[_.:-]", " ", name)
     extra = source_label if source_label and source_label not in name_words.split() else ""
-    return f"{name_words} {extra} {desc} {param_names}"
+    param_names = " ".join(((fn.get("parameters") or {}).get("properties") or {}).keys())
+    return f"{name_words} {extra} {fn.get('description', '') or ''} {param_names}"
 
 
 def _classify_source(name: str) -> Tuple[str, str]:
     """Return (source_kind, source_name) for a registered tool name."""
     entry = _registry_entry(name)
-    if entry is None:
-        return ("other", "")
     try:
         return ("mcp" if entry.toolset.startswith("mcp-") else "plugin", entry.toolset)
-    except Exception:  # malformed entry (no str toolset)
+    except Exception:  # unregistered, or malformed entry (no str toolset)
         return ("other", "")
 
 
@@ -117,12 +107,8 @@ def build_catalog(tool_defs: List[Dict[str, Any]]) -> List[CatalogEntry]:
         # Index the human-facing label ("linear", not "mcp-linear").
         source_label = _listing_group_label(source_name) if source_name else ""
         catalog.append(CatalogEntry(
-            name=name,
-            description=fn.get("description", "") or "",
-            schema=td,
-            source=source,
-            source_name=source_name,
-            _tokens=_tokenize(_entry_search_text(td, source_label))))
+            name=name, description=fn.get("description", "") or "", schema=td, source=source,
+            source_name=source_name, _tokens=_tokenize(_entry_search_text(td, source_label))))
     return catalog
 
 
@@ -130,8 +116,8 @@ def _bm25_score(query_tokens: List[str], doc_tokens: List[str],
                 doc_lengths: List[int], avg_dl: float,
                 doc_freq: Dict[str, int], n_docs: int,
                 k1: float = 1.5, b: float = 0.75) -> float:
-    """Standard BM25 for one query against one document (inlined; the catalog
-    is bounded — typically < 500 tools — so a dependency is not worth it)."""
+    """Standard BM25 for one query against one document (inlined; the catalog is bounded —
+    typically < 500 tools — so a dependency is not worth it)."""
     if not doc_tokens:
         return 0.0
     score = 0.0
@@ -143,8 +129,7 @@ def _bm25_score(query_tokens: List[str], doc_tokens: List[str],
         if df == 0 or tf == 0:
             continue
         idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
-        norm = tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
-        score += idf * norm
+        score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
     return score
 
 
@@ -167,18 +152,15 @@ def search_catalog(
     limit: int = 5,
     *,
     corpus_stats: Optional[_CorpusStats] = None) -> List[CatalogEntry]:
-    """Top-``limit`` catalog entries for ``query`` by BM25 (exact name match
-    ranks first). Falls back to a name-substring match only when NO query
-    token appears in any document (e.g. "hub" vs ``github_*``); the IDF
-    variant is strictly positive, so a hit anywhere suppresses the fallback."""
-    if not catalog or limit <= 0:
-        return []
-    query_tokens = _tokenize(query)
+    """Top-``limit`` catalog entries for ``query`` by BM25 (exact name match ranks first).
+    Falls back to a name-substring match only when NO query token appears in any document
+    (e.g. "hub" vs ``github_*``); the IDF variant is strictly positive, so a hit anywhere
+    suppresses the fallback."""
+    query_tokens = _tokenize(query) if catalog and limit > 0 else []
     if not query_tokens:
         return []
     if corpus_stats is None:
         corpus_stats = _corpus_stats(catalog)
-
     scored: List[Tuple[float, CatalogEntry]] = []
     exact_name = query.strip().lower()
     for entry in catalog:
@@ -189,8 +171,7 @@ def search_catalog(
         if s > 0:
             scored.append((s, entry))
     if not scored:
-        ql = query.lower()
-        scored = [(0.1, entry) for entry in catalog if ql in entry.name.lower()]
+        scored = [(0.1, entry) for entry in catalog if query.lower() in entry.name.lower()]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [e for _, e in scored[:limit]]
 
@@ -200,12 +181,10 @@ _SENTENCE_END_RE = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\betc)[.!?](?=\s|$)")
 
 
 def _short_desc(description: str, max_chars: int = 60) -> str:
-    """First sentence of a tool description, clipped to ``max_chars`` on a
-    word boundary. ``e.g.``/``i.e.``/``etc.`` do not end a sentence; whitespace
-    normalization and the regex search stay linear-time on hostile input."""
+    """First sentence of a tool description, clipped to ``max_chars`` on a word boundary.
+    ``e.g.``/``i.e.``/``etc.`` do not end a sentence; whitespace normalization and the regex
+    search stay linear-time on hostile input."""
     text = " ".join((description or "").split())
-    if not text:
-        return ""
     m = _SENTENCE_END_RE.search(text)
     if m:
         text = text[:m.end()]
@@ -225,29 +204,22 @@ def _listing_group_label(source_name: str) -> str:
 
 def build_catalog_listing_with_form(
     deferrable: List[Dict[str, Any]], *, max_tokens: int = 4000) -> Tuple[Optional[str], str]:
-    """Render the skills-style deferred-catalog manifest: ``- name: short desc``
-    lines grouped under a heading per source (MCP server / plugin toolset).
-
-    Returns ``(text, form)``; ``form`` is ``"full"``, ``"names"`` (names-only),
-    ``"mixed"`` (oversized servers collapsed to a name + count summary line,
-    small ones keep per-tool lines), ``"groups"`` (every server summarized),
-    or ``"none"`` (over budget even summarized -> text is None).
-
-    Ordering is deterministic (sorted groups and tools) so the block is
-    byte-stable across assemblies — the request prefix stays cacheable.
-    Degradation is PER SERVER (largest first): one huge server must not cost
-    a small co-attached server its listing.
-    """
+    """Render the skills-style deferred-catalog manifest: ``- name: short desc`` lines grouped
+    under a heading per source (MCP server / plugin toolset). Returns ``(text, form)``; form is
+    ``"full"``, ``"names"``, ``"mixed"`` (oversized servers collapsed to a name + count line,
+    small ones keep per-tool lines), ``"groups"`` (every server summarized) or ``"none"``
+    (over budget even summarized -> text is None). Ordering is deterministic (sorted groups
+    and tools) so the block is byte-stable across assemblies — the request prefix stays
+    cacheable. Degradation is PER SERVER, largest first: one huge server must not cost a
+    small co-attached server its listing."""
     groups: Dict[str, List[Tuple[str, str]]] = {}
     for td in deferrable:
         fn = _fn(td)
         name = fn.get("name", "")
-        if not name:
-            continue
-        # ``_classify_source`` returns ("other", "") for unregistered names and
-        # ``_listing_group_label("")`` is "other", so one call covers both.
-        label = _listing_group_label(_classify_source(name)[1])
-        groups.setdefault(label, []).append((name, _short_desc(fn.get("description", ""))))
+        if name:
+            # _classify_source gives ("other", "") when unregistered; the label of "" is "other".
+            label = _listing_group_label(_classify_source(name)[1])
+            groups.setdefault(label, []).append((name, _short_desc(fn.get("description", ""))))
     if not groups:
         return None, "none"
 
@@ -271,19 +243,15 @@ def build_catalog_listing_with_form(
         text = "\n".join([header] + [render_group(lbl, modes[lbl]) for lbl in sorted(groups)])
         return text if math.ceil(len(text) / CHARS_PER_TOKEN) <= max_tokens else None
 
-    # 1. Everything full.  2. Everything names-only.
-    for mode in ("full", "names"):
+    for mode in ("full", "names"):  # 1. everything full; 2. everything names-only
         modes = {lbl: mode for lbl in groups}
         text = assemble_if_fits(modes)
         if text is not None:
             return text, mode
-    # 3. Per-server degradation: collapse the LARGEST rendered groups first
-    #    (deterministic: size then label).
-    by_size = sorted(groups, key=lambda lbl: (-len(render_group(lbl, "names")), lbl))
-    for lbl in by_size:
+    # 3. Collapse the LARGEST rendered groups first (deterministic: size then label).
+    for lbl in sorted(groups, key=lambda lbl: (-len(render_group(lbl, "names")), lbl)):
         modes[lbl] = "summary"
         text = assemble_if_fits(modes)
         if text is not None:
-            form = "groups" if all(m == "summary" for m in modes.values()) else "mixed"
-            return text, form
+            return text, "groups" if all(m == "summary" for m in modes.values()) else "mixed"
     return None, "none"
