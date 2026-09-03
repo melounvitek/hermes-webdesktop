@@ -189,25 +189,32 @@ def _rollback_interrupted_preflight_display(agent, interrupted) -> None:
             _rollback_fn(_preflight_snapshot)
 
 
-def _close_transcript_tail(agent, messages, final_response, interrupted, failed):
-    """Shape the transcript tail before the durable snapshot; returns the (possibly
-    stream-recovered) ``final_response``."""
-    # Strip private retry scaffolding first, or a later "continue" replays
-    # assistant("(empty)") / recovery nudges into the same empty-response loop. Only
-    # the synthetic verification nudges go; the assistant candidate persists (#65919).
+def _drop_transcript_scaffolding(agent, messages) -> None:
+    """Strip private retry scaffolding first, or a later "continue" replays
+    assistant("(empty)") / recovery nudges into the same empty-response loop. Only
+    the synthetic verification nudges go; the assistant candidate persists (#65919)."""
     agent._drop_trailing_empty_response_scaffolding(messages)
     _drop_verification_continuation_scaffolding(messages)
 
-    # An empty terminal completion is not authoritative when the stream already
-    # delivered text; recover before persist so a blank tail isn't frozen (#95514).
-    _recovered_from_stream = False
-    if not interrupted and not failed:
-        _streamed = getattr(agent, "_current_streamed_assistant_text", "") or ""
-        _streamed = _streamed.strip() if isinstance(_streamed, str) else ""
-        if not (flatten_message_text(final_response).strip() if final_response else "") and _streamed:
-            final_response = _streamed
-            _recovered_from_stream = True
 
+def _recover_final_from_stream(agent, final_response, interrupted, failed) -> Tuple[Any, bool]:
+    """An empty terminal completion is not authoritative when the stream already
+    delivered text; recover before persist so a blank tail isn't frozen (#95514).
+    Returns ``(final_response, recovered_from_stream)``. Called by the finalizer BEFORE
+    the fallible tail-shaping/persist steps so the recovered text is already bound when
+    one of them raises — a persist failure must not lose text the user already saw."""
+    if interrupted or failed:
+        return final_response, False
+    _streamed = getattr(agent, "_current_streamed_assistant_text", "") or ""
+    _streamed = _streamed.strip() if isinstance(_streamed, str) else ""
+    if not (flatten_message_text(final_response).strip() if final_response else "") and _streamed:
+        return _streamed, True
+    return final_response, False
+
+
+def _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream) -> None:
+    """Shape the transcript tail before the durable snapshot (scaffolding already dropped
+    and ``final_response`` already stream-recovered by the caller)."""
     # An interrupt can leave a tool result as the tail; close the sequence so strict
     # providers don't see ``tool → user`` (placeholder: final_response is usually empty).
     if interrupted:
@@ -250,7 +257,6 @@ def _close_transcript_tail(agent, messages, final_response, interrupted, failed)
     _apply_override = getattr(agent, "_apply_persist_user_message_override", None)
     if callable(_apply_override):
         _apply_override(messages)
-    return final_response
 
 
 def _micro_compact_after_turn(agent, messages, final_response, logger) -> None:
@@ -459,10 +465,18 @@ def finalize_turn(
         "cleanup_task_resources", lambda: agent._cleanup_task_resources(effective_task_id),
         _cleanup_errors, logger,
     )
-    # Persist only after the transcript tail is shaped and scaffolding removed.
+    # Persist only after the transcript tail is shaped and scaffolding removed. Each
+    # sub-step runs in the same order as the original inline block, and the
+    # stream-recovered ``final_response`` is rebound the moment it is computed — BEFORE
+    # the fallible tail-shaping / override / micro-compaction / persist calls — so a
+    # raise in any of them can't drop text the user already saw (#95514, #8049).
     def _persist_step():
         nonlocal final_response
-        final_response = _close_transcript_tail(agent, messages, final_response, interrupted, failed)
+        _drop_transcript_scaffolding(agent, messages)
+        final_response, _recovered_from_stream = _recover_final_from_stream(
+            agent, final_response, interrupted, failed
+        )
+        _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
         if not interrupted and not failed:
             _micro_compact_after_turn(agent, messages, final_response, logger)
         agent._persist_session(messages, conversation_history)
