@@ -224,6 +224,17 @@ def _toolset_label(ts_key: str) -> str:
 # toolset key -> provider options shown when the toolset is newly enabled. Toolsets not in this map either
 # need no config or use the TOOLSET_ENV_REQUIREMENTS fallback.
 
+def _key(key: str, prompt: str, url: str = "", **extra) -> dict:
+    """One ``env_vars`` entry for a TOOL_CATEGORIES provider row."""
+    return {"key": key, "prompt": prompt, **({"url": url} if url else {}), **extra}
+
+
+_OPENAI_VOICE_KEY = _key("VOICE_TOOLS_OPENAI_KEY", "OpenAI API key", "https://platform.openai.com/api-keys")
+_ELEVENLABS_KEY = _key("ELEVENLABS_API_KEY", "ElevenLabs API key", "https://elevenlabs.io/app/settings/api-keys")
+_DEEPINFRA_KEY = _key("DEEPINFRA_API_KEY", "DeepInfra API key", "https://deepinfra.com/dash/api_keys")
+_LANGFUSE_PUBLIC = ("HERMES_LANGFUSE_PUBLIC_KEY", "Langfuse public key (pk-lf-...)")
+_LANGFUSE_SECRET = ("HERMES_LANGFUSE_SECRET_KEY", "Langfuse secret key (sk-lf-...)")
+
 TOOL_CATEGORIES = {
     "tts": {
         "name": "Text-to-Speech", "icon": "🔊",
@@ -233,25 +244,24 @@ TOOL_CATEGORIES = {
             {"name": "Nous Subscription", "badge": "subscription", "tag": "Managed OpenAI TTS billed to your subscription",
              "env_vars": [], "tts_provider": "openai", "requires_nous_auth": True, "managed_nous_feature": "tts",
              "override_env_vars": ["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]},
-            {"name": "OpenAI TTS", "badge": "paid", "tag": "High quality voices", "env_vars": [{"key": "VOICE_TOOLS_OPENAI_KEY", "prompt": "OpenAI API key", "url": "https://platform.openai.com/api-keys"}],
+            {"name": "OpenAI TTS", "badge": "paid", "tag": "High quality voices", "env_vars": [_OPENAI_VOICE_KEY],
              "tts_provider": "openai"},
             {"name": "xAI TTS", "tag": "Grok voices — uses xAI Grok OAuth or XAI_API_KEY", "env_vars": [],
              "tts_provider": "xai", "post_setup": "xai_grok"},
-            {"name": "ElevenLabs", "badge": "paid", "tag": "Most natural voices", "env_vars": [{"key": "ELEVENLABS_API_KEY", "prompt": "ElevenLabs API key", "url": "https://elevenlabs.io/app/settings/api-keys"}],
+            {"name": "ElevenLabs", "badge": "paid", "tag": "Most natural voices", "env_vars": [_ELEVENLABS_KEY],
              "tts_provider": "elevenlabs"},
             # Mistral Voxtral TTS — `mistralai` SDK lazy-installs on first use.
             {"name": "Mistral (Voxtral TTS)", "badge": "paid", "tag": "Multilingual, native Opus",
-             "env_vars": [{"key": "MISTRAL_API_KEY", "prompt": "Mistral API key", "url": "https://console.mistral.ai/"}],
-             "tts_provider": "mistral"},
+             "env_vars": [_key("MISTRAL_API_KEY", "Mistral API key", "https://console.mistral.ai/")], "tts_provider": "mistral"},
             {"name": "Google Gemini TTS", "badge": "preview", "tag": "30 prebuilt voices, controllable via prompts",
-             "env_vars": [{"key": "GEMINI_API_KEY", "prompt": "Gemini API key", "url": "https://aistudio.google.com/app/apikey"}],
+             "env_vars": [_key("GEMINI_API_KEY", "Gemini API key", "https://aistudio.google.com/app/apikey")],
              "tts_provider": "gemini"},
             {"name": "KittenTTS", "badge": "local · free", "tag": "Lightweight local ONNX TTS (~25MB), no API key",
              "env_vars": [], "tts_provider": "kittentts", "post_setup": "kittentts"},
             {"name": "Piper", "badge": "local · free", "tag": "Local neural TTS, 44 languages (voices ~20-90MB)",
              "env_vars": [], "tts_provider": "piper", "post_setup": "piper"},
             {"name": "DeepInfra TTS", "badge": "paid", "tag": "Chatterbox, Qwen3-TTS, … — live catalog from api.deepinfra.com",
-             "env_vars": [{"key": "DEEPINFRA_API_KEY", "prompt": "DeepInfra API key", "url": "https://deepinfra.com/dash/api_keys"}], "tts_provider": "deepinfra"},
+             "env_vars": [_DEEPINFRA_KEY], "tts_provider": "deepinfra"},
         ],
     },
     "stt": {
@@ -264,18 +274,17 @@ TOOL_CATEGORIES = {
              "requires_nous_auth": True, "managed_nous_feature": "stt",
              "override_env_vars": ["VOICE_TOOLS_OPENAI_KEY", "OPENAI_API_KEY"]},
             {"name": "OpenAI", "badge": "paid", "tag": "whisper-1, gpt-4o-transcribe, gpt-transcribe",
-             "env_vars": [{"key": "VOICE_TOOLS_OPENAI_KEY", "prompt": "OpenAI API key", "url": "https://platform.openai.com/api-keys"}], "stt_provider": "openai"},
+             "env_vars": [_OPENAI_VOICE_KEY], "stt_provider": "openai"},
             {"name": "Groq", "badge": "free tier", "tag": "Whisper large-v3 family — very fast",
-             "env_vars": [{"key": "GROQ_API_KEY", "prompt": "Groq API key", "url": "https://console.groq.com/keys"}],
-             "stt_provider": "groq"},
+             "env_vars": [_key("GROQ_API_KEY", "Groq API key", "https://console.groq.com/keys")], "stt_provider": "groq"},
             {"name": "xAI", "tag": "grok-stt — uses xAI Grok OAuth or XAI_API_KEY", "env_vars": [],
              "stt_provider": "xai", "post_setup": "xai_grok"},
             {"name": "ElevenLabs Scribe", "badge": "paid", "tag": "scribe_v2 — diarization + audio-event tagging",
-             "env_vars": [{"key": "ELEVENLABS_API_KEY", "prompt": "ElevenLabs API key", "url": "https://elevenlabs.io/app/settings/api-keys"}], "stt_provider": "elevenlabs"},
+             "env_vars": [_ELEVENLABS_KEY], "stt_provider": "elevenlabs"},
             # Mistral Voxtral STT intentionally omitted — mistralai PyPI package quarantined (malicious 2.4.6
             # release, 2026-05-12). Restore alongside the dashboard stt.provider option.
             {"name": "DeepInfra", "badge": "paid", "tag": "Live STT catalog from api.deepinfra.com",
-             "env_vars": [{"key": "DEEPINFRA_API_KEY", "prompt": "DeepInfra API key", "url": "https://deepinfra.com/dash/api_keys"}], "stt_provider": "deepinfra"},
+             "env_vars": [_DEEPINFRA_KEY], "stt_provider": "deepinfra"},
         ],
     },
     "web": {
@@ -290,7 +299,7 @@ TOOL_CATEGORIES = {
              "override_env_vars": ["FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"]},
             {"name": "Firecrawl Self-Hosted", "badge": "free · self-hosted", "tag": "Run your own Firecrawl instance (Docker)",
              "web_backend": "firecrawl",
-             "env_vars": [{"key": "FIRECRAWL_API_URL", "prompt": "Your Firecrawl instance URL (e.g., http://localhost:3002)"}]},
+             "env_vars": [_key("FIRECRAWL_API_URL", "Your Firecrawl instance URL (e.g., http://localhost:3002)")]},
         ],
     },
     "image_gen": {
@@ -330,7 +339,7 @@ TOOL_CATEGORIES = {
             {"name": "xAI Grok OAuth (SuperGrok / Premium+)", "badge": "subscription",
              "tag": "Browser login at accounts.x.ai — no API key required", "env_vars": [], "post_setup": "xai_grok"},
             {"name": "xAI API key", "badge": "paid", "tag": "Direct xAI API billing via XAI_API_KEY",
-             "env_vars": [{"key": "XAI_API_KEY", "prompt": "xAI API key", "url": "https://console.x.ai/"}]},
+             "env_vars": [_key("XAI_API_KEY", "xAI API key", "https://console.x.ai/")]},
         ],
     },
     "browser": {
@@ -355,7 +364,7 @@ TOOL_CATEGORIES = {
              # "needs setup" forever on machines without a local Chromium build).
              "post_setup": "browserbase"},
             {"name": "Camofox", "badge": "free · local", "tag": "Anti-detection browser (Firefox/Camoufox)",
-             "env_vars": [{"key": "CAMOFOX_URL", "prompt": "Camofox server URL", "default": "http://localhost:9377", "url": "https://github.com/jo-inc/camofox-browser"}],
+             "env_vars": [_key("CAMOFOX_URL", "Camofox server URL", "https://github.com/jo-inc/camofox-browser", default="http://localhost:9377")],
              "browser_provider": "camofox", "post_setup": "camofox"},
             {"name": "Browser Use", "badge": "free · local · cloud", "tag": "New SOTA web harness (CLI 3.0)", "env_vars": [],
              "browser_backend": "browser-use", "post_setup": "browser_use_cli"},
@@ -365,8 +374,8 @@ TOOL_CATEGORIES = {
         "name": "Smart Home", "icon": "🏠",
         "providers": [
             {"name": "Home Assistant", "tag": "REST API integration",
-             "env_vars": [{"key": "HASS_TOKEN", "prompt": "Home Assistant Long-Lived Access Token"},
-                          {"key": "HASS_URL", "prompt": "Home Assistant URL", "default": "http://homeassistant.local:8123"}]},
+             "env_vars": [_key("HASS_TOKEN", "Home Assistant Long-Lived Access Token"),
+                          _key("HASS_URL", "Home Assistant URL", default="http://homeassistant.local:8123")]},
         ],
     },
     "spotify": {
@@ -391,13 +400,11 @@ TOOL_CATEGORIES = {
         "name": "Langfuse Observability", "icon": "📊",
         "providers": [
             {"name": "Langfuse Cloud", "tag": "Hosted Langfuse (cloud.langfuse.com)",
-             "env_vars": [{"key": "HERMES_LANGFUSE_PUBLIC_KEY", "prompt": "Langfuse public key (pk-lf-...)", "url": "https://cloud.langfuse.com"},
-                          {"key": "HERMES_LANGFUSE_SECRET_KEY", "prompt": "Langfuse secret key (sk-lf-...)", "url": "https://cloud.langfuse.com"}],
+             "env_vars": [_key(*_LANGFUSE_PUBLIC, "https://cloud.langfuse.com"), _key(*_LANGFUSE_SECRET, "https://cloud.langfuse.com")],
              "post_setup": "langfuse"},
             {"name": "Langfuse Self-Hosted", "tag": "Self-hosted Langfuse instance",
-             "env_vars": [{"key": "HERMES_LANGFUSE_PUBLIC_KEY", "prompt": "Langfuse public key (pk-lf-...)"},
-                          {"key": "HERMES_LANGFUSE_SECRET_KEY", "prompt": "Langfuse secret key (sk-lf-...)"},
-                          {"key": "HERMES_LANGFUSE_BASE_URL", "prompt": "Langfuse server URL (e.g. http://localhost:3000)", "default": "http://localhost:3000"}],
+             "env_vars": [_key(*_LANGFUSE_PUBLIC), _key(*_LANGFUSE_SECRET),
+                          _key("HERMES_LANGFUSE_BASE_URL", "Langfuse server URL (e.g. http://localhost:3000)", default="http://localhost:3000")],
              "post_setup": "langfuse"},
         ],
     },
@@ -914,7 +921,7 @@ def _toolset_enabled_for_reconfigure(ts_key: str, config: dict) -> bool:
         if not _toolset_allowed_for_platform(ts_key, platform):
             continue
         try:
-            if ts_key in _get_platform_tools(config, platform, include_default_mcp_servers=False):
+            if ts_key in _current_platform_tools(config, platform):
                 return True
         except Exception:
             continue
@@ -974,7 +981,7 @@ def _configure_newly_added(added: Set[str], already: Set[str], config: dict) -> 
 
 
 def _platform_menu_label(config: dict, pkey: str) -> str:
-    count = len(_get_platform_tools(config, pkey, include_default_mcp_servers=False))
+    count = len(_current_platform_tools(config, pkey))
     total = len(_get_effective_configurable_toolsets())
     return f"Configure {PLATFORMS[pkey]['label']}  ({count}/{total} enabled)"
 
@@ -1023,7 +1030,7 @@ def _first_install_flow(config: dict, enabled_platforms: List[str]) -> None:
     """Fresh install: one checklist per platform, no menu, keys prompted for every enabled tool."""
     for pkey in enabled_platforms:
         pinfo = PLATFORMS[pkey]
-        current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
+        current_enabled = _current_platform_tools(config, pkey)
         new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled - _DEFAULT_OFF_TOOLSETS, pkey)
         _print_toolset_diff(*_checklist_diff(new_enabled, current_enabled, pkey))
         auto_configured = apply_nous_managed_defaults(config, enabled_toolsets=new_enabled, force_fresh=True)
@@ -1042,11 +1049,28 @@ def _first_install_flow(config: dict, enabled_platforms: List[str]) -> None:
         print()
 
 
+def _current_platform_tools(config: dict, pkey: str) -> Set[str]:
+    return _get_platform_tools(config, pkey, include_default_mcp_servers=False)
+
+
+def _apply_platform_checklist(config: dict, pkey: str, new_enabled: Set[str], prev: Set[str], already: Set[str],
+                              *, indent: str = "  ", header: bool = False) -> None:
+    """Print the diff, configure newly added toolsets not in ``already``, and write the platform list.
+    Keys for newly enabled tools not already handled by the selected-tool pass, so a tool enabled globally
+    but lacking provider config doesn't drop the user back to the main menu."""
+    added, removed = _checklist_diff(new_enabled, prev, pkey)
+    if header and (added or removed):
+        print(color(f"  {PLATFORMS[pkey]['label']}:", Colors.DIM))
+    _print_toolset_diff(added, removed, indent=indent)
+    _configure_newly_added(added, already, config)
+    _save_platform_tools(config, pkey, new_enabled)
+
+
 def _configure_all_platforms(config: dict, platform_keys: List[str]) -> bool:
     """'Configure all platforms (global)' menu entry. Returns True when config was saved."""
     all_current: Set[str] = set()
     for pk in platform_keys:
-        all_current |= _get_platform_tools(config, pk, include_default_mcp_servers=False)
+        all_current |= _current_platform_tools(config, pk)
     new_enabled = _prompt_toolset_checklist("All platforms", all_current, force_fresh=True)
     selected_to_configure = _toolsets_needing_setup(new_enabled, config)
     _configure_list(selected_to_configure, config)
@@ -1054,15 +1078,8 @@ def _configure_all_platforms(config: dict, platform_keys: List[str]) -> bool:
         print(color("  No changes", Colors.DIM))
         return False
     for pk in platform_keys:
-        prev = _get_platform_tools(config, pk, include_default_mcp_servers=False)
-        added, removed = _checklist_diff(new_enabled, prev, pk)
-        if added or removed:
-            print(color(f"  {PLATFORMS[pk]['label']}:", Colors.DIM))
-            _print_toolset_diff(added, removed, indent="    ")
-        # Keys for newly enabled tools not already handled by the global selected-tool pass, so a tool enabled
-        # globally but lacking provider config doesn't drop the user back to the main menu.
-        _configure_newly_added(added, set(selected_to_configure), config)
-        _save_platform_tools(config, pk, new_enabled)
+        _apply_platform_checklist(config, pk, new_enabled, _current_platform_tools(config, pk),
+                                  set(selected_to_configure), indent="    ", header=True)
     save_config(config)
     print(color("  ✓ Saved configuration for all platforms", Colors.GREEN))
     return True
@@ -1071,19 +1088,16 @@ def _configure_all_platforms(config: dict, platform_keys: List[str]) -> bool:
 def _configure_one_platform(config: dict, pkey: str) -> None:
     """Per-platform checklist + key setup + save."""
     pinfo = PLATFORMS[pkey]
-    current_enabled = _get_platform_tools(config, pkey, include_default_mcp_servers=False)
+    current_enabled = _current_platform_tools(config, pkey)
     new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled, force_fresh=True)
     selected_to_configure = _toolsets_needing_setup(new_enabled, config)
     _configure_list(selected_to_configure, config)
-    if new_enabled != current_enabled or selected_to_configure:
-        added, removed = _checklist_diff(new_enabled, current_enabled, pkey)
-        _print_toolset_diff(added, removed)
-        _configure_newly_added(added, set(selected_to_configure), config)
-        _save_platform_tools(config, pkey, new_enabled)
-        save_config(config)
-        print(color(f"  ✓ Saved {pinfo['label']} configuration", Colors.GREEN))
-    else:
+    if new_enabled == current_enabled and not selected_to_configure:
         print(color(f"  No changes to {pinfo['label']}", Colors.DIM))
+        return
+    _apply_platform_checklist(config, pkey, new_enabled, current_enabled, set(selected_to_configure))
+    save_config(config)
+    print(color(f"  ✓ Saved {pinfo['label']} configuration", Colors.GREEN))
 
 
 def tools_command(args=None, first_install: bool = False, config: dict = None):
