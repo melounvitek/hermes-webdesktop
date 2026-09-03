@@ -59,14 +59,7 @@ _SUMMARY_ROUTE_PIN: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
 )
 
 # ``timeout`` is included so a fallback entry keeps its own deadline.
-_PINNED_ROUTE_FIELDS: tuple[str, ...] = (
-    "provider",
-    "model",
-    "base_url",
-    "api_key",
-    "api_mode",
-    "timeout",
-)
+_PINNED_ROUTE_FIELDS: tuple[str, ...] = ("provider", "model", "base_url", "api_key", "api_mode", "timeout")
 
 
 @contextlib.contextmanager
@@ -99,11 +92,7 @@ def _pinned_summary_call_kwargs() -> Dict[str, Any]:
     route = take_pinned_summary_route()
     if not route:
         return {}
-    return {
-        field: route[field]
-        for field in _PINNED_ROUTE_FIELDS
-        if route.get(field) not in (None, "")
-    }
+    return {field: route[field] for field in _PINNED_ROUTE_FIELDS if route.get(field) not in (None, "")}
 
 
 _SUMMARY_PERMANENT_QUOTA_MARKERS: tuple[str, ...] = (
@@ -116,10 +105,7 @@ _SUMMARY_PERMANENT_QUOTA_MARKERS: tuple[str, ...] = (
     "out of extra usage",
 )
 
-_SUMMARY_MISSING_CREDENTIAL_MARKERS: tuple[str, ...] = (
-    "no api key was found",
-    "no api key found",
-)
+_SUMMARY_MISSING_CREDENTIAL_MARKERS: tuple[str, ...] = ("no api key was found", "no api key found")
 
 _HYGIENE_PREAGENT_ONLY_COOLDOWN_MARKERS: tuple[str, ...] = (
     "session hygiene compression timed out",
@@ -134,9 +120,7 @@ def _is_hygiene_preagent_only_cooldown(error: object) -> bool:
     failure and must never block the in-agent compressor.
     """
     text = str(error or "").strip().casefold()
-    return any(
-        marker in text for marker in _HYGIENE_PREAGENT_ONLY_COOLDOWN_MARKERS
-    )
+    return any(marker in text for marker in _HYGIENE_PREAGENT_ONLY_COOLDOWN_MARKERS)
 
 
 def _response_finish_reason(response: Any) -> str:
@@ -351,11 +335,7 @@ def _prune_stale_reasoning_replay(messages: List[Dict[str, Any]]) -> int:
             items = msg.get(key)
             if not isinstance(items, list) or not items:
                 continue
-            kept = [
-                item
-                for item in items
-                if isinstance(item, dict) and item.get("type") == "compaction"
-            ]
+            kept = [item for item in items if isinstance(item, dict) and item.get("type") == "compaction"]
             if len(kept) == len(items):
                 continue  # nothing stale in this sidecar
             if kept:
@@ -392,10 +372,7 @@ def _looks_like_compaction_summary(msg: Dict[str, Any], content: str) -> bool:
     # compressor marker. Tool messages are handled only by the stub/keep-recent pass.
     if msg.get("role") == "tool":
         return False
-    if (
-        msg.get("role") in ("user", "assistant")
-        and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY)
-    ):
+    if msg.get("role") in ("user", "assistant") and not msg.get(COMPRESSED_SUMMARY_METADATA_KEY):
         return False
     head = content[:280]
     return (
@@ -490,10 +467,7 @@ def salvage_grown_transcript(
     if estimate_messages_tokens_rough(out) >= budget:
         _salvage_reduce_todo_snapshot(out)
 
-    if not any(
-        isinstance(message, dict) and message.get("role") == "user"
-        for message in out
-    ):
+    if not any(isinstance(message, dict) and message.get("role") == "user" for message in out):
         return None
     if estimate_messages_tokens_rough(out) < budget:
         return out
@@ -753,9 +727,7 @@ def _next_timeout_cooldown(compressor: Any) -> int:
     Module-level (not a method) so callers that bind a single real method onto a stub still
     exercise the ladder.
     """
-    compressor._consecutive_timeout_failures = (
-        getattr(compressor, "_consecutive_timeout_failures", 0) + 1
-    )
+    compressor._consecutive_timeout_failures = getattr(compressor, "_consecutive_timeout_failures", 0) + 1
     return _TIMEOUT_COOLDOWN_LADDER[
         min(compressor._consecutive_timeout_failures, len(_TIMEOUT_COOLDOWN_LADDER)) - 1
     ]
@@ -888,10 +860,7 @@ def _reinject_pruned_skill_markers(summary: str, skill_names: list[str]) -> str:
     """
     if not skill_names:
         return summary
-    missing = [
-        name for name in skill_names
-        if _skill_pruned_marker(name) not in summary
-    ]
+    missing = [name for name in skill_names if _skill_pruned_marker(name) not in summary]
     if not missing:
         return summary
     lines = [_skill_pruned_marker(name) for name in missing]
@@ -925,10 +894,7 @@ _LEAN_TAIL_DEMOTE_MIN_CHARS = 1_500
 
 def _lean_recovery_stub(tool_name: str, content_len: int, session_id: str) -> str:
     """One-line replacement for a demoted tail tool result."""
-    hint = (
-        f" Recover with session_search(query=..., session_id='{session_id}')"
-        if session_id else ""
-    )
+    hint = f" Recover with session_search(query=..., session_id='{session_id}')" if session_id else ""
     return (
         f"[{tool_name or 'tool'} output demoted at compaction — {content_len:,} "
         f"chars preserved in session history.{hint}]"
@@ -1055,9 +1021,7 @@ def _build_anchor_index(turns: List[Dict[str, Any]]) -> str:
         if not counts:
             continue
         ranked = sorted(counts, key=lambda v: (-counts[v], -last_seen[v]))[:cap]
-        line = f"{label}: " + ", ".join(
-            f"{v}(x{counts[v]})" if counts[v] > 1 else v for v in ranked
-        )
+        line = f"{label}: " + ", ".join(f"{v}(x{counts[v]})" if counts[v] > 1 else v for v in ranked)
         if used + len(line) > _LEAN_ANCHOR_BUDGET_CHARS:
             break
         sections.append(line)
@@ -1077,9 +1041,7 @@ def _build_anchor_index(turns: List[Dict[str, Any]]) -> str:
 _SKILL_PRUNE_RECENT_WINDOW = 10
 
 
-def _skill_view_call_sites(
-    messages: List[Dict[str, Any]],
-) -> list[tuple[int, str]]:
+def _skill_view_call_sites(messages: List[Dict[str, Any]]) -> list[tuple[int, str]]:
     """Yield ``(message_index, skill_name)`` for every skill_view tool call."""
     sites: list[tuple[int, str]] = []
     for i, msg in enumerate(messages):
@@ -1107,9 +1069,7 @@ def _skill_view_call_sites(
     return sites
 
 
-def _collect_protected_skill_names(
-    messages: List[Dict[str, Any]], prune_boundary: int,
-) -> set[str]:
+def _collect_protected_skill_names(messages: List[Dict[str, Any]], prune_boundary: int) -> set[str]:
     """Skill names (lower-cased) whose skill_view bodies must survive Phase-1 demotion.
 
     Recently loaded, loaded inside the protected tail, or named by a tail user message.
@@ -1130,9 +1090,7 @@ def _collect_protected_skill_names(
     protected: set[str] = set()
     for idx, skill in _skill_view_call_sites(messages):
         key = skill.lower()
-        if idx >= recent_start or idx >= tail_start or any(
-            key in text for text in tail_user_texts
-        ):
+        if idx >= recent_start or idx >= tail_start or any(key in text for text in tail_user_texts):
             protected.add(key)
     return protected
 
@@ -1175,9 +1133,7 @@ _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
 
 # MEDIA directives must not reach the summarizer or they get re-emitted as active.
 _MEDIA_DIRECTIVE_RE = re.compile(r"MEDIA:\S+")
-_HISTORICAL_TASK_SECTION_RE = re.compile(
-    rf"(?ms)^{re.escape(HISTORICAL_TASK_HEADING)}\s*\n.*?(?=^## |\Z)"
-)
+_HISTORICAL_TASK_SECTION_RE = re.compile(rf"(?ms)^{re.escape(HISTORICAL_TASK_HEADING)}\s*\n.*?(?=^## |\Z)")
 
 
 def _redact_compaction_text(text: Any) -> str:
@@ -1186,11 +1142,7 @@ def _redact_compaction_text(text: Any) -> str:
     ``force=True`` overrides ``security.redact_secrets: false``; URL credentials are
     redacted too, since summaries persist and re-enter every later prompt.
     """
-    return redact_sensitive_text(
-        text or "",
-        force=True,
-        redact_url_credentials=True,
-    )
+    return redact_sensitive_text(text or "", force=True, redact_url_credentials=True)
 
 
 def _dedupe_append(items: list[str], value: str, *, limit: int) -> None:
@@ -1318,31 +1270,18 @@ def _serialized_length_for_budget(value: Any) -> int:
 
 # Replay/metadata fields invisible to content/tool_calls accounting but shipped
 # on the wire. ``reasoning_details`` is handled by _reasoning_details_text_chars.
-_REPLAY_BUDGET_KEYS = (
-    "reasoning",
-    "reasoning_content",
-    "codex_reasoning_items",
-    "codex_message_items",
-)
+_REPLAY_BUDGET_KEYS = "reasoning", "reasoning_content", "codex_reasoning_items", "codex_message_items"
 
 # Keys replayed on EVERY retained assistant turn: Codex items ride every request and message
 # items are required for prefix-cache continuity. Generic thinking keys ship for the newest turn
 # only elsewhere (Anthropic strips older, Bedrock never replays, strict chat-completions reject
 # or pad the field); charging them everywhere overcut the tail.
-_ALWAYS_REPLAYED_BUDGET_KEYS = (
-    "codex_reasoning_items",
-    "codex_message_items",
-)
-_NEWEST_TURN_ONLY_BUDGET_KEYS = (
-    "reasoning",
-    "reasoning_content",
-)
+_ALWAYS_REPLAYED_BUDGET_KEYS = "codex_reasoning_items", "codex_message_items"
+_NEWEST_TURN_ONLY_BUDGET_KEYS = "reasoning", "reasoning_content"
 
 # Safe to strip from stale assistant turns: only the current turn's replay needs
 # them, and the compaction boundary already invalidated the prompt-cache prefix.
-_STALE_REPLAY_PRUNE_KEYS = (
-    "codex_reasoning_items",
-)
+_STALE_REPLAY_PRUNE_KEYS = "codex_reasoning_items",
 
 
 def _reasoning_details_text_chars(value: Any) -> int:
@@ -1402,10 +1341,7 @@ def _estimate_msg_budget_tokens(msg: dict, charge_stale_thinking: bool = True) -
     # Charge only thinking TEXT, never the signed/base64 envelope; skip when the
     # same text already rides in reasoning/reasoning_content.
     if not (msg.get("reasoning") or msg.get("reasoning_content")):
-        tokens += (
-            _reasoning_details_text_chars(msg.get("reasoning_details"))
-            // _CHARS_PER_TOKEN
-        )
+        tokens += _reasoning_details_text_chars(msg.get("reasoning_details")) // _CHARS_PER_TOKEN
     return tokens
 
 
@@ -1845,11 +1781,7 @@ def _summarize_tool_result_unguarded(tool_name: str, tool_args: str, tool_conten
     return f"[{tool_name}]{first_arg} ({content_len:,} chars result)"
 
 
-def resolve_model_threshold(
-    model: str,
-    model_thresholds: dict[str, float] | None,
-    default: float,
-) -> float:
+def resolve_model_threshold(model: str, model_thresholds: dict[str, float] | None, default: float) -> float:
     """Resolve the effective compression threshold for a given model.
 
     Longest matching ``model_thresholds`` substring key wins; otherwise ``default``.
@@ -1974,10 +1906,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             telemetry["aux_model"] = aux_model
         if effective_aux_context is not None:
             telemetry["effective_aux_context"] = _safe_int(effective_aux_context)
-        if (
-            telemetry["effective_aux_context"] is not None
-            and telemetry["aux_prompt_tokens"] is not None
-        ):
+        if telemetry["effective_aux_context"] is not None and telemetry["aux_prompt_tokens"] is not None:
             telemetry["fit_margin"] = (
                 telemetry["effective_aux_context"]
                 - telemetry["aux_prompt_tokens"]
@@ -2044,9 +1973,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # Re-apply the raise-only floor so percent and tokens derive from the same window.
         _base = getattr(self, "_base_threshold_percent", None)
         if _base is not None:
-            self.threshold_percent = self._effective_threshold_percent(
-                value, _base,
-            )
+            self.threshold_percent = self._effective_threshold_percent(value, _base)
         self._threshold_tokens = None
         self._tail_token_budget = None
         self._max_summary_tokens = None
@@ -2087,9 +2014,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
     @property
     def max_summary_tokens(self) -> int:
         if self._max_summary_tokens is None:
-            self._max_summary_tokens = min(
-                int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING,
-            )
+            self._max_summary_tokens = min(int(self.context_length * 0.05), _SUMMARY_TOKENS_CEILING)
         return self._max_summary_tokens
 
     @max_summary_tokens.setter
@@ -2301,9 +2226,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if deadline == self._anti_thrash_recovery_deadline:
             return
         self._anti_thrash_recovery_deadline = deadline
-        self._durable_write(
-            "set_compression_recovery_deadline", "compression recovery deadline", deadline,
-        )
+        self._durable_write("set_compression_recovery_deadline", "compression recovery deadline", deadline)
 
     def _record_ineffective_compression_verdict(self, count: int) -> None:
         """Set the anti-thrash strike counter; persists only on change."""
@@ -2318,9 +2241,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         Nothing eligible existed, so nothing was "ineffective"; striking would permanently
         disarm auto-compaction on short sessions. The backoff still stops per-turn re-scans.
         """
-        self._structural_no_op_backoff_until = (
-            time.monotonic() + self._STRUCTURAL_NO_OP_BACKOFF_SECONDS
-        )
+        self._structural_no_op_backoff_until = time.monotonic() + self._STRUCTURAL_NO_OP_BACKOFF_SECONDS
         if not self.quiet_mode:
             logger.warning(
                 "Compression skipped (%s): retrying in %.0fs "
@@ -2334,9 +2255,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
 
         Does not arm real-usage verification or touch the fallback streak (nothing was committed).
         """
-        self._record_ineffective_compression_verdict(
-            self._ineffective_compression_count + 1
-        )
+        self._record_ineffective_compression_verdict(self._ineffective_compression_count + 1)
         if not self.quiet_mode:
             logger.warning(
                 "Compaction rejected before commit (would grow the "
@@ -2375,11 +2294,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             self._fallback_compression_streak = 0
         self._persist_fallback_compression_streak()
 
-    def get_active_compression_failure_cooldown(
-        self,
-        *,
-        refresh: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    def get_active_compression_failure_cooldown(self, *, refresh: bool = False) -> Optional[Dict[str, Any]]:
         """Return the live compression-failure cooldown for the bound session."""
         if refresh:
             # Rollback must distinguish an authoritative empty row from a failed read; the return value can't.
@@ -2441,11 +2356,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             "error": self._last_summary_error,
         }
 
-    def _record_compression_failure_cooldown(
-        self,
-        cooldown_seconds: float,
-        error: Optional[str],
-    ) -> None:
+    def _record_compression_failure_cooldown(self, cooldown_seconds: float, error: Optional[str]) -> None:
         now_mono = time.monotonic()
         new_mono = now_mono + float(cooldown_seconds)
         # Never shorten a longer live deadline; record the latest error text only.
@@ -2525,16 +2436,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         self.api_mode = api_mode
         self.context_length = context_length
         # Re-resolve from the raw config value so a switch away from an overridden model falls back correctly.
-        _config_pct = getattr(
-            self, "_config_threshold_percent", self.threshold_percent,
-        )
-        _new_base = resolve_model_threshold(
-            model, self.model_thresholds, _config_pct,
-        )
+        _config_pct = getattr(self, "_config_threshold_percent", self.threshold_percent)
+        _new_base = resolve_model_threshold(model, self.model_thresholds, _config_pct)
         self._base_threshold_percent = _new_base
-        self.threshold_percent = self._effective_threshold_percent(
-            context_length, _new_base,
-        )
+        self.threshold_percent = self._effective_threshold_percent(context_length, _new_base)
         # max_tokens=None means "unspecified": keep the existing output reservation.
         if max_tokens is not None:
             self.max_tokens = self._coerce_max_tokens(max_tokens)
@@ -2545,9 +2450,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # Reset to None so the property recomputes via the mode-aware path (not the legacy formula).
         self._tail_token_budget = None
         _ = self.tail_token_budget  # eager recompute, same timing as before
-        self.max_summary_tokens = min(
-            int(context_length * 0.05), _SUMMARY_TOKENS_CEILING,
-        )
+        self.max_summary_tokens = min(int(context_length * 0.05), _SUMMARY_TOKENS_CEILING)
 
         # Calibration state is only valid for the model that produced it: carried across a switch to a
         # smaller window it would let should_defer_preflight_to_real_usage() suppress a compaction the
@@ -2606,9 +2509,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 self.threshold_tokens = _effective_cap
 
     @staticmethod
-    def _effective_threshold_percent(
-        context_length: int, threshold_percent: float,
-    ) -> float:
+    def _effective_threshold_percent(context_length: int, threshold_percent: float) -> float:
         """Raise-only small-context threshold floor: models under 512K trigger at >= 75%."""
         if context_length and context_length < _SMALL_CTX_WINDOW_LIMIT:
             return max(threshold_percent, _SMALL_CTX_THRESHOLD_PERCENT)
@@ -2679,9 +2580,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         )
         self.threshold_percent = self._base_threshold_percent
         # Effective trigger = min(ratio threshold, cap); re-applied in update_model().
-        self.threshold_tokens_cap = self._coerce_threshold_tokens_cap(
-            threshold_tokens_cap,
-        )
+        self.threshold_tokens_cap = self._coerce_threshold_tokens_cap(threshold_tokens_cap)
         self.protect_first_n = protect_first_n
         self.protect_last_n = protect_last_n
         # Proactive prune runs independently of the full-compression trigger. 0 = disabled.
@@ -2692,9 +2591,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             _PRUNE_MIN_CHARS, int(proactive_prune_min_result_chars or 8000)
         )
         # Every commit breaks the prompt-cache prefix; require a meaningful reclaim batch so fires are episodic.
-        self.proactive_prune_min_reclaim_tokens = max(
-            0, int(proactive_prune_min_reclaim_tokens or 0)
-        )
+        self.proactive_prune_min_reclaim_tokens = max(0, int(proactive_prune_min_reclaim_tokens or 0))
         # A committed prune is a cache boundary: rearm only after the prompt regrows the reclaimed tokens.
         self._proactive_prune_rearm_tokens: int = 0
         self.min_tail_user_messages = min_tail_user_messages
@@ -2783,9 +2680,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
             # not "messages shrank"; should_compress() runs twice per turn with mixed measures and would reset it.
             if self._verify_compaction_cleared_threshold:
                 if self.last_prompt_tokens >= self.threshold_tokens:
-                    self._record_ineffective_compression_verdict(
-                        self._ineffective_compression_count + 1,
-                    )
+                    self._record_ineffective_compression_verdict(self._ineffective_compression_count + 1)
                     if not self.quiet_mode:
                         logger.warning(
                             "Compaction did not clear the threshold: %d real "
@@ -2865,9 +2760,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         decision, _reason = self.should_compress_info(prompt_tokens)
         return decision
 
-    def should_compress_info(
-        self, prompt_tokens: int = None
-    ) -> "tuple[bool, str | None]":
+    def should_compress_info(self, prompt_tokens: int = None) -> "tuple[bool, str | None]":
         """Return ``(should_compress, reason)``.
 
         ``reason`` is None unless compression is needed but blocked: ``"cooldown:<seconds>"`` or
@@ -2888,15 +2781,10 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         _cooldown_remaining = self._summary_failure_cooldown_until - time.monotonic()
         if _cooldown_remaining > 0:
             return f"cooldown:{_cooldown_remaining:.0f}"
-        _structural_remaining = (
-            self._structural_no_op_backoff_until - time.monotonic()
-        )
+        _structural_remaining = self._structural_no_op_backoff_until - time.monotonic()
         if _structural_remaining > 0:
             return f"structural_backoff:{_structural_remaining:.0f}"
-        if (
-            self._ineffective_compression_count >= 2
-            or self._fallback_compression_streak >= 2
-        ):
+        if self._ineffective_compression_count >= 2 or self._fallback_compression_streak >= 2:
             return "ineffective"
         return None
 
@@ -2936,9 +2824,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 )
             return True
         # Structural no-op backoff is transient (in-memory, no strikes); auto-compaction resumes when it lapses.
-        _structural_remaining = (
-            self._structural_no_op_backoff_until - time.monotonic()
-        )
+        _structural_remaining = self._structural_no_op_backoff_until - time.monotonic()
         if _structural_remaining > 0:
             if not self.quiet_mode:
                 logger.debug(
@@ -2960,9 +2846,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
                 self._anti_thrash_recovery_deadline - _now
                 > self._ANTI_THRASH_RECOVERY_SECONDS
             ):
-                self._set_anti_thrash_recovery_deadline(
-                    _now + self._ANTI_THRASH_RECOVERY_SECONDS
-                )
+                self._set_anti_thrash_recovery_deadline(_now + self._ANTI_THRASH_RECOVERY_SECONDS)
             elif _now >= self._anti_thrash_recovery_deadline:
                 self._set_anti_thrash_recovery_deadline(0.0)
                 if self._ineffective_compression_count >= 2:
@@ -3215,11 +3099,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         # Capability gate first: a store without archive_and_compact makes every prune a no-op.
         session_db = getattr(self, "_session_db", None)
         session_id = getattr(self, "_session_id", "")
-        if (
-            session_db
-            and session_id
-            and not callable(getattr(session_db, "archive_and_compact", None))
-        ):
+        if session_db and session_id and not callable(getattr(session_db, "archive_and_compact", None)):
             return messages, 0
         pruned_msgs, pruned_count = self._prune_old_tool_results(
             messages,
@@ -3236,11 +3116,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         if reclaimed < self.proactive_prune_min_reclaim_tokens:
             return messages, 0
         # Require a full trigger-sized regrowth before the next cache-breaking rewrite.
-        runway = max(
-            reclaimed,
-            self.proactive_prune_tokens,
-            self.proactive_prune_min_reclaim_tokens,
-        )
+        runway = max(reclaimed, self.proactive_prune_tokens, self.proactive_prune_min_reclaim_tokens)
         next_rearm_tokens = after + runway
         if session_db and session_id:
             try:
@@ -3420,11 +3296,7 @@ class ContextCompressor(MicroCompactionMixin, ContextEngine):
         anchors = self._fallback_anchors(turns_to_summarize)
         user_asks = anchors["user_asks"]
         completed = anchors["completed"]
-        active_task = (
-            f"User asked: {user_asks[-1]!r}"
-            if user_asks
-            else _NO_USER_TASK_SENTINEL
-        )
+        active_task = f"User asked: {user_asks[-1]!r}" if user_asks else _NO_USER_TASK_SENTINEL
         previous_summary_note = ""
         if self._previous_summary:
             previous_summary = redact_sensitive_text(self._previous_summary.strip())
@@ -3524,9 +3396,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 continue
             if content.startswith("[") and " chars)" in content and len(content) < 400:
                 continue  # already a summary stub
-            stub = _lean_recovery_stub(
-                msg.get("tool_name") or "", len(content), session_id,
-            )
+            stub = _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id)
             replaced = {**msg, "content": stub}
             drop_stale_api_content(replaced)
             result[i] = replaced
@@ -3535,20 +3405,14 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
         return result
 
-    def _augment_summary_lean(
-        self, summary: str, turns_to_summarize: List[Dict[str, Any]],
-    ) -> str:
+    def _augment_summary_lean(self, summary: str, turns_to_summarize: List[Dict[str, Any]]) -> str:
         """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
         if getattr(self, "tail_mode", "lean") != "lean":
             return summary
         if _LEAN_ANCHOR_HEADING not in summary:
-            summary += _redact_compaction_text(
-                _build_anchor_index(turns_to_summarize)
-            )
+            summary += _redact_compaction_text(_build_anchor_index(turns_to_summarize))
         if _LEAN_USER_MESSAGES_HEADING not in summary:
-            summary += _redact_compaction_text(
-                _build_verbatim_user_section(turns_to_summarize)
-            )
+            summary += _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))
         if _LEAN_RECOVERY_HEADING not in summary:
             summary += _build_recovery_footer(
                 getattr(self, "_session_id", "") or "",
@@ -3786,10 +3650,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         Focus guidance is appended last so it takes precedence.
         """
         _sanitized_memory_context = sanitize_memory_context(memory_context)
-        _serialized_memory_context = json.dumps(
-            _sanitized_memory_context,
-            ensure_ascii=False,
-        )
+        _serialized_memory_context = json.dumps(_sanitized_memory_context, ensure_ascii=False)
         _serialized_memory_context = (
             _serialized_memory_context.replace("&", "\\u0026")
             .replace("<", "\\u003c")
@@ -3882,12 +3743,8 @@ Describe agent/tool work only as completed actions, state, or historical work.]"
                 "[Runtime, configuration, and technical constraints only. Do not "
                 "invent user preferences.]"
             )
-            _resolved_questions_instructions = (
-                "[Write exactly: None. No user-authored questions exist.]"
-            )
-            _pending_asks_instructions = (
-                "[Write exactly: None. No user-authored requests exist.]"
-            )
+            _resolved_questions_instructions = "[Write exactly: None. No user-authored questions exist.]"
+            _pending_asks_instructions = "[Write exactly: None. No user-authored requests exist.]"
 
         _summarizer_preamble = (
             "You are a summarization agent creating a context checkpoint. "
@@ -3992,9 +3849,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
         if self._previous_summary:
             # Iterative update. Bound the previous summary too: a rehydrated handoff can be huge.
-            _bounded_previous_summary = self._bound_summary_input(
-                self._previous_summary
-            )
+            _bounded_previous_summary = self._bound_summary_input(self._previous_summary)
             prompt = f"""{_summarizer_preamble}
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
@@ -4226,10 +4081,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         """Reject user attribution when the source transcript has no user."""
         if has_user_turn:
             return
-        match = re.search(
-            rf"(?ms)^{re.escape(HISTORICAL_TASK_HEADING)}\s*\n(.*?)(?=\n##\s|\Z)",
-            summary,
-        )
+        match = re.search(rf"(?ms)^{re.escape(HISTORICAL_TASK_HEADING)}\s*\n(.*?)(?=\n##\s|\Z)", summary)
         task_snapshot = match.group(1).strip() if match else ""
         # The "User asked:" scan can false-positive on quoted tool output; acceptable, since
         # the RuntimeError only costs one retry on the existing fallback path.
@@ -4289,9 +4141,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return not cls._is_blank_user_turn(message)
 
     @classmethod
-    def _blank_echo_indices_after(
-        cls, messages: List[Dict[str, Any]], user_idx: int
-    ) -> set[int]:
+    def _blank_echo_indices_after(cls, messages: List[Dict[str, Any]], user_idx: int) -> set[int]:
         """Return contiguous blank echoes after a user event; removable only if an assistant follows."""
         indices: set[int] = set()
         if user_idx < 0:
@@ -4305,10 +4155,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return indices if messages[idx].get("role") == "assistant" else set()
 
     @classmethod
-    def _derive_auto_focus_topic(
-        cls,
-        messages: List[Dict[str, Any]],
-    ) -> Optional[str]:
+    def _derive_auto_focus_topic(cls, messages: List[Dict[str, Any]]) -> Optional[str]:
         """Infer a compact focus hint from the most recent real user turns."""
         candidates: list[str] = []
         for idx in range(len(messages) - 1, -1, -1):
@@ -4341,10 +4188,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return focus
 
     @classmethod
-    def _latest_user_task_snapshot(
-        cls,
-        messages: List[Dict[str, Any]],
-    ) -> Optional[str]:
+    def _latest_user_task_snapshot(cls, messages: List[Dict[str, Any]]) -> Optional[str]:
         """Return a deterministic task-snapshot line from the newest real user turn.
 
         The summarizer must not invent the active-task anchor from a prompt example or a
@@ -4372,11 +4216,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return None
 
     @classmethod
-    def _ground_historical_task_snapshot(
-        cls,
-        summary: str,
-        messages: List[Dict[str, Any]],
-    ) -> str:
+    def _ground_historical_task_snapshot(cls, summary: str, messages: List[Dict[str, Any]]) -> str:
         """Force the task snapshot section to match a real user turn when possible."""
         snapshot = cls._latest_user_task_snapshot(messages)
         if not snapshot:
@@ -4387,9 +4227,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         # this regex on the next compaction (deleting every following section).
         replacement = f"{HISTORICAL_TASK_HEADING}\n{snapshot}\n\n"
         if _HISTORICAL_TASK_SECTION_RE.search(body):
-            grounded = _HISTORICAL_TASK_SECTION_RE.sub(
-                lambda _m: replacement, body, count=1
-            )
+            grounded = _HISTORICAL_TASK_SECTION_RE.sub(lambda _m: replacement, body, count=1)
             return grounded.strip()
         return f"{replacement}{body}".strip()
 
@@ -4409,10 +4247,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         for idx in range(start, end):
             content = messages[idx].get("content")
             if cls._is_context_summary_message(messages[idx]):
-                summaries.append((
-                    idx,
-                    cls._strip_summary_prefix(_content_text_for_contains(content)),
-                ))
+                summaries.append((idx, cls._strip_summary_prefix(_content_text_for_contains(content))))
         return summaries
 
     @classmethod
@@ -4429,10 +4264,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         return None, ""
 
     @classmethod
-    def _strip_context_summary_handoff_message(
-        cls,
-        message: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
+    def _strip_context_summary_handoff_message(cls, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Drop stale handoff data while preserving merged prior-tail content.
 
         Returns a copy for non-handoff rows, the unwrapped prior-tail content for merged
@@ -4615,10 +4447,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             idx += 1
         return idx
 
-    def _restart_handoff_probe_bounds(
-        self,
-        messages: List[Dict[str, Any]],
-    ) -> tuple[int, int]:
+    def _restart_handoff_probe_bounds(self, messages: List[Dict[str, Any]]) -> tuple[int, int]:
         """Return the bounded transcript region that can indicate restart decay."""
         if not messages or self.protect_first_n <= 0:
             return 0, 0
@@ -4630,10 +4459,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             + _RESTART_HANDOFF_PROBE_EXTRA_MESSAGES,
         )
 
-    def _effective_protect_first_n(
-        self,
-        messages: Optional[List[Dict[str, Any]]] = None,
-    ) -> int:
+    def _effective_protect_first_n(self, messages: Optional[List[Dict[str, Any]]] = None) -> int:
         """``protect_first_n`` decayed to 0 once the session has been compressed.
 
         Otherwise early turns fossilize across compactions. After a restart the decayed
@@ -4643,9 +4469,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             return 0
         if messages and self.protect_first_n > 0:
             # Probe only the early resumed-handoff shape; summary-like tail content must not decay protection.
-            first_non_system, restart_probe_end = self._restart_handoff_probe_bounds(
-                messages
-            )
+            first_non_system, restart_probe_end = self._restart_handoff_probe_bounds(messages)
             if any(
                 self._is_context_summary_message(msg)
                 for msg in messages[first_non_system:restart_probe_end]
@@ -4681,25 +4505,18 @@ This compaction should PRIORITISE preserving all information related to the focu
         return idx
 
 
-    def _find_last_user_message_idx(
-        self, messages: List[Dict[str, Any]], head_end: int
-    ) -> int:
+    def _find_last_user_message_idx(self, messages: List[Dict[str, Any]], head_end: int) -> int:
         """Return the latest actionable user turn at or after *head_end*, or -1.
 
         Compaction handoffs and blank platform echoes never displace the real request.
         """
         for i in range(len(messages) - 1, head_end - 1, -1):
             msg = messages[i]
-            if (
-                self._is_actionable_user_turn(msg)
-                and not self._is_synthetic_compression_user_turn(msg)
-            ):
+            if self._is_actionable_user_turn(msg) and not self._is_synthetic_compression_user_turn(msg):
                 return i
         return -1
 
-    def _find_last_assistant_message_idx(
-        self, messages: List[Dict[str, Any]], head_end: int
-    ) -> int:
+    def _find_last_assistant_message_idx(self, messages: List[Dict[str, Any]], head_end: int) -> int:
         """Return the last text-bearing, non-summary assistant reply at or after *head_end*, or -1.
 
         Falls back to the last non-summary assistant of any kind when none has text.
@@ -4813,10 +4630,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         user_indices = []
         for i in range(len(messages) - 1, head_end - 1, -1):
             msg = messages[i]
-            if (
-                self._is_actionable_user_turn(msg)
-                and not self._is_synthetic_compression_user_turn(msg)
-            ):
+            if self._is_actionable_user_turn(msg) and not self._is_synthetic_compression_user_turn(msg):
                 user_indices.append(i)
 
         if len(user_indices) == 0:
@@ -4830,11 +4644,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         cut_idx = target_idx
         return max(cut_idx, head_end + 1)
 
-    def _find_turn_pair_end(
-        self,
-        messages: List[Dict[str, Any]],
-        user_idx: int,
-    ) -> int:
+    def _find_turn_pair_end(self, messages: List[Dict[str, Any]], user_idx: int) -> int:
         """Return the index after the turn-pair (user -> assistant -> tools) at *user_idx*.
 
         Returns ``user_idx + 1`` when there is no reply yet.
@@ -4886,10 +4696,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         min_tail_floor = max(3, min(self.protect_last_n, _MAX_TAIL_MESSAGE_FLOOR))
         # Keep >= 2 non-head messages summarizable so a tiny middle still saves messages.
         compressible_tail_cap = max(3, available_tail - 2)
-        min_tail = (
-            min(min_tail_floor, compressible_tail_cap, available_tail)
-            if available_tail > 1 else 0
-        )
+        min_tail = min(min_tail_floor, compressible_tail_cap, available_tail) if available_tail > 1 else 0
         soft_ceiling = int(token_budget * 1.5)
 
         # Only the newest assistant turn's thinking ships (#73624), except echo-back providers
@@ -4988,11 +4795,7 @@ This compaction should PRIORITISE preserving all information related to the focu
         summary_idx = None
         summary_body = None
         tail_start = compress_end
-        summary_hits = self._find_context_summaries(
-            messages,
-            summary_search_start,
-            summary_search_end,
-        )
+        summary_hits = self._find_context_summaries(messages, summary_search_start, summary_search_end)
         real_user_present = self._transcript_has_real_user_turn(messages)
         if summary_hits:
             summary_idx = summary_hits[-1][0]
@@ -5002,9 +4805,7 @@ This compaction should PRIORITISE preserving all information related to the focu
                 if summary_bodies:
                     self._previous_summary = "\n\n".join(summary_bodies)
             # Zero-user provenance (#64650) rides on the newest handoff hit.
-            provenance = messages[summary_idx].get(
-                COMPRESSED_SUMMARY_HAS_USER_TURN_KEY
-            )
+            provenance = messages[summary_idx].get(COMPRESSED_SUMMARY_HAS_USER_TURN_KEY)
             if real_user_present:
                 self._summary_has_user_turn = True
             elif isinstance(provenance, bool):
@@ -5012,18 +4813,14 @@ This compaction should PRIORITISE preserving all information related to the focu
             elif self._summary_has_user_turn is None:
                 # Legacy handoffs lack provenance: assume a user turn unless the exact no-user
                 # sentinel is present.
-                self._summary_has_user_turn = not (
-                    summary_body and _NO_USER_TASK_SENTINEL in summary_body
-                )
+                self._summary_has_user_turn = not (summary_body and _NO_USER_TASK_SENTINEL in summary_body)
             summary_indices = {idx for idx, _ in summary_hits}
             # Summary rows are excluded from summarizer input, but a merged handoff carries genuine
             # prior-tail user content — unwrap it into the window (#47274).
             def _window_row(idx: int, msg: Dict[str, Any]):
                 if idx not in summary_indices:
                     return msg
-                stripped = self._strip_context_summary_handoff_message(
-                    _fresh_compaction_message_copy(msg)
-                )
+                stripped = self._strip_context_summary_handoff_message(_fresh_compaction_message_copy(msg))
                 return stripped  # None for standalone handoffs → dropped
             pre_summary_turns = [
                 row for idx, msg in enumerate(
@@ -5032,9 +4829,7 @@ This compaction should PRIORITISE preserving all information related to the focu
                 )
                 if (row := _window_row(idx, msg)) is not None
             ]
-            turns_to_summarize = (
-                pre_summary_turns + messages[summary_idx + 1:compress_end]
-            )
+            turns_to_summarize = pre_summary_turns + messages[summary_idx + 1:compress_end]
             # The newest hit may itself be a merged handoff — recover its prior-tail content too.
             _newest_stripped = self._strip_context_summary_handoff_message(
                 _fresh_compaction_message_copy(messages[summary_idx])
@@ -5083,9 +4878,7 @@ This compaction should PRIORITISE preserving all information related to the focu
             self._structural_no_op_backoff_until = 0.0
         return telemetry
 
-    def _structural_no_op_result(
-        self, telemetry: Dict[str, Any], failure_class: str, reason: str,
-    ) -> None:
+    def _structural_no_op_result(self, telemetry: Dict[str, Any], failure_class: str, reason: str) -> None:
         """Nothing eligible to compress: transient backoff (#93022), never an ineffectiveness strike."""
         telemetry["failure_class"] = failure_class
         self._last_compression_savings_pct = 0.0
@@ -5568,13 +5361,7 @@ def _handoff_only_content(content: Any) -> Any:
     # Ordinary merge: summary suffix starts in the delimiter part; later parts may carry live media
     # — never retain.
     for item in content:
-        text = (
-            item
-            if isinstance(item, str)
-            else item.get("text")
-            if isinstance(item, dict)
-            else None
-        )
+        text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
         if not isinstance(text, str) or _MERGED_SUMMARY_DELIMITER not in text:
             continue
         suffix = text.split(_MERGED_SUMMARY_DELIMITER, 1)[1].lstrip()
@@ -5592,13 +5379,7 @@ def _handoff_only_content(content: Any) -> Any:
     # Force-user-leading: keep parts through the end marker, truncated before the live ask.
     projected: list[Any] = []
     for item in content:
-        text = (
-            item
-            if isinstance(item, str)
-            else item.get("text")
-            if isinstance(item, dict)
-            else None
-        )
+        text = item if isinstance(item, str) else item.get("text") if isinstance(item, dict) else None
         if isinstance(text, str) and _SUMMARY_END_MARKER in text:
             prefix = text.split(_SUMMARY_END_MARKER, 1)[0] + _SUMMARY_END_MARKER
             if isinstance(item, dict):
@@ -5613,9 +5394,7 @@ def _handoff_only_content(content: Any) -> Any:
     return projected
 
 
-def split_user_originated_turn(
-    message: Any,
-) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+def split_user_originated_turn(message: Any) -> tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Split a user row into ``(handoff_only, live_view)``; either may be None; fresh dicts."""
     if not isinstance(message, dict) or message.get("role") != "user":
         return None, None
@@ -5740,15 +5519,10 @@ def _handoff_carries_live_user_content(message: Any) -> bool:
     """
     if not isinstance(message, dict):
         return False
-    return (
-        ContextCompressor._strip_context_summary_handoff_message(message)
-        is not None
-    )
+    return ContextCompressor._strip_context_summary_handoff_message(message) is not None
 
 
-def reference_handoff_would_drive_next_model_call(
-    messages: Optional[List[Dict[str, Any]]],
-) -> bool:
+def reference_handoff_would_drive_next_model_call(messages: Optional[List[Dict[str, Any]]]) -> bool:
     """Return True when the next model call would be driven only by a handoff (#80622).
 
     Mid tool-loop compression is allowed: trailing tool rows mean an in-flight exchange.
@@ -5794,9 +5568,7 @@ def reference_handoff_would_drive_next_model_call(
             and not ContextCompressor._is_synthetic_compression_user_turn(message)
         ):
             return False
-        if is_compaction_summary_message(message) and _handoff_carries_live_user_content(
-            message
-        ):
+        if is_compaction_summary_message(message) and _handoff_carries_live_user_content(message):
             return False
     return True
 
