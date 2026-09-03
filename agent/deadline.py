@@ -60,13 +60,10 @@ class DeadlineExpired(TimeoutError):
 
 
 class SuspectableBackend(Protocol):
-    """A stateful backend (MCP connection, browser session, LSP client) the deadline layer can flag.
-
-    ``run_bounded_*`` calls ``mark_suspect`` on timeout so the owner can health-check or
-    recycle the backend (``ensure_healthy``) before reuse. ``mark_suspect`` MUST be cheap,
-    non-blocking, and must not acquire locks the guarded operation may hold — it runs inline
-    on the event loop / caller's thread while the wedged worker is still alive.
-    """
+    """A stateful backend (MCP connection, browser session, LSP client) ``run_bounded_*`` flags via
+    ``mark_suspect`` on timeout so the owner can health-check/recycle it before reuse. ``mark_suspect``
+    MUST be cheap, non-blocking, and must not acquire locks the guarded operation may hold — it runs
+    inline on the event loop / caller's thread while the wedged worker is still alive."""
 
     def mark_suspect(self, reason: str) -> None: ...
 
@@ -148,11 +145,8 @@ def resolve_timeout(
     default: Optional[float],
     env_var: Optional[str] = None,
 ) -> Optional[float]:
-    """Resolve a timeout (seconds) for dotted ``timeouts.<key>`` > ``env_var`` > ``default``.
-
-    The winner goes through :func:`clamp_timeout`; invalid config/env values fall
-    through to the next source with a warning.
-    """
+    """Resolve a timeout (seconds): dotted ``timeouts.<key>`` > ``env_var`` > ``default``; the winner
+    goes through :func:`clamp_timeout`, invalid config/env values fall through with a warning."""
     raw = _lookup_dotted(_timeouts_section(), key)
     if raw is not None:
         # Explicit float() so invalid config values FALL THROUGH to env/default instead of
@@ -234,11 +228,9 @@ async def run_bounded_async(
 ) -> BoundedResult:
     """Await ``awaitable`` under a wall-clock deadline independent of loop timers.
 
-    Operation exceptions (incl. ``CancelledError`` from a caller cancelling *us*)
-    propagate unchanged. On timeout the task is cancelled and **abandoned** (never
-    awaited — cancellation-shielded scopes are exactly the paths that wedge), and
-    ``on_abandon`` is scheduled as detached best-effort cleanup.
-    """
+    Operation exceptions (incl. ``CancelledError`` from a caller cancelling *us*) propagate
+    unchanged. On timeout the task is cancelled and **abandoned** (never awaited —
+    cancellation-shielded scopes are exactly the paths that wedge); ``on_abandon`` runs detached."""
     timeout_s = clamp_timeout(timeout)
     start = time.monotonic()
     if timeout_s is None:
@@ -302,13 +294,10 @@ def run_bounded_sync(
     on_timeout: Optional[Callable[[], None]] = None,
     backend: object | None = None,
 ) -> BoundedResult:
-    """Run ``fn`` in a daemon worker thread under a wall-clock deadline.
-
-    Exceptions re-raise in the caller. On expiry the worker is **abandoned** and
-    ``on_timeout`` runs best-effort in the caller's thread. Every timeout leaks one
-    daemon thread, so do NOT use per-item in hot loops. The worker runs under
-    ``contextvars.copy_context()`` so secret scope / session id survive the hop.
-    """
+    """Run ``fn`` in a daemon worker thread under a wall-clock deadline; exceptions re-raise in
+    the caller. On expiry the worker is **abandoned** (every timeout leaks one daemon thread, so
+    do NOT use per-item in hot loops) and ``on_timeout`` runs best-effort in the caller's thread.
+    The worker runs under ``contextvars.copy_context()`` so secret scope / session id survive."""
     timeout_s = clamp_timeout(timeout)
     start = time.monotonic()
     if timeout_s is None:
@@ -355,16 +344,12 @@ def run_bounded_sync(
 
 
 def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
-    """Terminate ``pid`` and all its descendants, portably.
+    """Terminate ``pid`` and all its descendants, portably; True when anything was signalled.
 
-    Windows: ``taskkill /F /T`` (``sig`` ignored). POSIX: descendants are snapshotted
-    via psutil BEFORE signalling (once the parent dies they reparent and a parent walk
-    finds nothing), then the process group is signalled when ``pid`` leads one, and
-    every snapshotted descendant individually — which also reaches children that
-    ``setsid`` into their own session. ``sig`` defaults to ``SIGKILL``.
-
-    Returns True when the target (or any of its tree) was signalled.
-    """
+    Windows: ``taskkill /F /T`` (``sig`` ignored). POSIX: descendants are snapshotted via psutil
+    BEFORE signalling (once the parent dies they reparent and a parent walk finds nothing), then
+    the process group is signalled when ``pid`` leads one, and every snapshotted descendant
+    individually — which also reaches ``setsid`` children. ``sig`` defaults to ``SIGKILL``."""
     if sys.platform == "win32":
         try:
             from hermes_cli._subprocess_compat import windows_hide_flags
@@ -375,10 +360,7 @@ def kill_process_tree(pid: int, *, sig: Optional[int] = None) -> bool:
         try:
             proc = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
-                capture_output=True,
-                timeout=15,
-                check=False,
-                creationflags=creationflags,
+                capture_output=True, timeout=15, check=False, creationflags=creationflags,
             )
             # taskkill exits non-zero for not-found / access-denied (False = nothing terminated).
             return proc.returncode == 0

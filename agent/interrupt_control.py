@@ -90,17 +90,14 @@ class InterruptControlMixin:
     ) -> bool:
         """Request the agent to interrupt its current tool-calling loop (call from another thread).
 
-        ``message``: new message to include in the response context. ``hard_cancel``: explicit stop;
-        compression may honor it even while ordinary interrupts are masked. ``tool_reason``: trusted fixed
-        category safe for tool output. ``require_generation``: activity-generation claim — the interrupt is
-        published only if the turn's generation still matches at the final mutation edge (claim reserved under
-        the activity lock, consumed together with the first observable publication); returns False if the turn
-        resumed meanwhile.
+        ``hard_cancel``: explicit stop; compression may honor it even while ordinary interrupts are masked.
+        ``tool_reason``: trusted fixed category safe for tool output. ``require_generation``: activity-
+        generation claim — published only if the turn's generation still matches at the final mutation edge;
+        returns False if the turn resumed meanwhile.
         """
         if require_generation is not None:
-            # RESERVE the abort's generation claim under the SAME lock `_touch_activity` stamps with. Real
-            # progress invalidates it; it is CONSUMED at the final mutation edge, so a resumed turn abandons
-            # the abort.
+            # RESERVE the claim under the SAME lock `_touch_activity` stamps with; real progress invalidates
+            # it and it is CONSUMED at the final mutation edge, so a resumed turn abandons the abort.
             with self._liveness_activity_lock():
                 if getattr(self, "_turn_liveness_activity_generation", 0) != require_generation:
                     return False
@@ -123,22 +120,6 @@ class InterruptControlMixin:
                 if _hard_event is not None:
                     _hard_event.set()
 
-        def _consume_claim_and_publish_first_state() -> bool:
-            # Final mutation edge: claim consumption and the FIRST observable interrupt publication are ONE
-            # activity-lock critical section, so either the claim survives and commits before any later
-            # activity stamp, or the stamp landed first and the abort declines without publishing.
-            if require_generation is None:
-                # No claim to race: publish WITHOUT the liveness lock. Bare AIAgent stand-ins in other suites
-                # lack the liveness seam and would AttributeError.
-                _publish_interrupt_state()
-                return True
-            with self._liveness_activity_lock():
-                if getattr(self, "_turn_liveness_abort_claim", None) != require_generation:
-                    return False
-                self._turn_liveness_abort_claim = None
-                _publish_interrupt_state()
-            return True
-
         # A hard stop and redirect share one lock so /stop cannot race with an accepted correction and
         # accidentally turn itself into a retry. The blocking in-flight-commit wait runs BEFORE the atomic
         # claim edge (redirect lock still held); the destructive pending-commit cancel runs AFTER the claim
@@ -150,8 +131,19 @@ class InterruptControlMixin:
                     when_in_flight=True,
                     failure_log="Compression hard-cancel fence wait failed",
                 )
-            if not _consume_claim_and_publish_first_state():
-                return False
+            if require_generation is None:
+                # No claim to race: publish WITHOUT the liveness lock (bare AIAgent stand-ins in other
+                # suites lack the liveness seam and would AttributeError).
+                _publish_interrupt_state()
+            else:
+                # Final mutation edge: claim consumption and the FIRST observable publication are ONE
+                # activity-lock critical section, so either the claim survives and commits before any later
+                # activity stamp, or the stamp landed first and the abort declines without publishing.
+                with self._liveness_activity_lock():
+                    if getattr(self, "_turn_liveness_abort_claim", None) != require_generation:
+                        return False
+                    self._turn_liveness_abort_claim = None
+                    _publish_interrupt_state()
             if hard_cancel:
                 _fence_cancel_before_commit(
                     vars(self).get("_active_compression_commit_fence"),
@@ -201,19 +193,14 @@ class InterruptControlMixin:
         *,
         tool_reason: Optional[str] = None,
     ) -> None:
-        """Request an explicit stop while preserving the ``interrupt()`` ABI.
-
-        Frontends feature-detect this and fall back to legacy ``interrupt()`` for third-party agents.
-        """
-        # Bypass dynamic dispatch: legacy subclasses may override interrupt(message=None) without hard_cancel.
+        """Explicit stop preserving the ``interrupt()`` ABI (frontends feature-detect this and fall back to
+        legacy ``interrupt()`` for third-party agents). Bypasses dynamic dispatch: legacy subclasses may
+        override interrupt(message=None) without hard_cancel."""
         InterruptControlMixin.interrupt(self, message, hard_cancel=True, tool_reason=tool_reason)
 
     def clear_interrupt(self, *, preserve_redirect: bool = False) -> bool:
-        """Clear the interrupt request and per-thread tool signal.
-
-        ``preserve_redirect`` is only for the conversation loop rebuilding the same logical turn after
-        cancelling a model request; public hard-stop paths clear everything.
-        """
+        """Clear the interrupt request and per-thread tool signal. ``preserve_redirect`` is only for the
+        conversation loop rebuilding the same logical turn after cancelling a model request."""
         with _ic_lock(self, "_pending_redirect_lock"):
             if preserve_redirect and not getattr(self, "_pending_redirect", None):
                 return False
@@ -233,11 +220,8 @@ class InterruptControlMixin:
         return True
 
     def steer(self, text: str) -> bool:
-        """Inject user text into the next tool result without interrupting the current tool.
-
-        The text is appended to the LAST tool result once the batch finishes, so the model sees it on its next
-        iteration. Thread-safe; multiple calls concatenate with newlines. Returns False for empty text.
-        """
+        """Append user text to the LAST tool result once the batch finishes (no interrupt); multiple calls
+        concatenate with newlines. Returns False for empty text."""
         if not text or not text.strip():
             return False
         cleaned = text.strip()
@@ -247,19 +231,14 @@ class InterruptControlMixin:
         return True
 
     def redirect(self, text: str) -> bool:
-        """Redirect the active turn without converting it into a new task.
-
-        During a model request this cancels only that request: completed messages/tool results are kept, the
-        displayed partial reasoning becomes assistant context, the correction is appended as a real user
-        message, and the loop retries. During tool execution it degrades to ``steer()``; Codex app-server uses
-        native ``turn/steer``. Returns False when there is no live turn or the text is empty.
-        """
+        """Redirect the active turn without converting it into a new task: during a model request only that
+        request is cancelled (completed messages kept, partial reasoning becomes assistant context, the
+        correction is appended as a real user message, the loop retries); during tool execution it degrades
+        to ``steer()``; Codex app-server uses native ``turn/steer``. False when no live turn / empty text."""
         if not text or not text.strip():
             return False
         cleaned = text.strip()
 
-        # Codex owns its internal reasoning/tool loop, so use its first-class
-        # active-turn steering protocol rather than interrupting the subprocess.
         _native_steer = _ic_codex_method(self, "request_steer")
         if _native_steer is not None:
             with _ic_lock(self, "_pending_redirect_lock"):
@@ -278,9 +257,7 @@ class InterruptControlMixin:
         _model_active = getattr(self, "_model_request_active", None)
         with _ic_lock(self, "_pending_redirect_lock"):
             if _model_active is None or not _model_active.is_set():
-                # The response completed before we acquired the state lock.
-                # Reject so the surface queues a new turn.
-                return False
+                return False  # response completed before we got the lock: surface queues a new turn
             existing = getattr(self, "_pending_redirect", None)
             if self._interrupt_requested and not existing:
                 return False
@@ -290,8 +267,7 @@ class InterruptControlMixin:
             self._interrupt_requested = True
             self._interrupt_message = None
 
-        # Interrupt only the model request. Do not fan out to tool workers or
-        # child agents as interrupt() does.
+        # Interrupt only the model request — no fan-out to tool workers / child agents as interrupt() does.
         _execution_thread_id = getattr(self, "_execution_thread_id", None)
         if _execution_thread_id is not None:
             _set_interrupt(True, _execution_thread_id)
