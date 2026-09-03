@@ -101,11 +101,7 @@ class SharedMetricsStore:
                     # A wall-clock correction must not suppress activity until the
                     # stale future timestamp plus another full interval.
                     connection.execute(
-                        """
-                            UPDATE telemetry_state
-                            SET value = ?
-                            WHERE key = ?
-                            """,
+                        "UPDATE telemetry_state SET value = ? WHERE key = ?",
                         (_isoformat(now), _ACTIVE_INSTALL_STATE_KEY),
                     )
                     return False
@@ -118,11 +114,8 @@ class SharedMetricsStore:
                 period_start=now.date().isoformat(),
             )
             connection.execute(
-                """
-                    INSERT INTO telemetry_state(key, value)
-                    VALUES (?, ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                    """,
+                "INSERT INTO telemetry_state(key, value) VALUES (?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (_ACTIVE_INSTALL_STATE_KEY, _isoformat(now)),
             )
         return True
@@ -161,24 +154,12 @@ class SharedMetricsStore:
         connection.execute(
             """
             INSERT INTO counter_aggregates(
-                period_start,
-                metric_name,
-                hermes_version,
-                os_family,
-                architecture,
-                install_method,
-                dimensions_json,
-                value,
-                packaged_value
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json, value, packaged_value
             ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0)
             ON CONFLICT(
-                period_start,
-                metric_name,
-                hermes_version,
-                os_family,
-                architecture,
-                install_method,
-                dimensions_json
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json
             )
             DO UPDATE SET value = value + 1
             """,
@@ -216,24 +197,12 @@ class SharedMetricsStore:
             rows = connection.execute(
                 """
                 SELECT
-                    period_start,
-                    metric_name,
-                    hermes_version,
-                    os_family,
-                    architecture,
-                    install_method,
-                    dimensions_json,
-                    value,
-                    packaged_value
+                    period_start, metric_name, hermes_version, os_family, architecture,
+                    install_method, dimensions_json, value, packaged_value
                 FROM counter_aggregates
                 ORDER BY
-                    period_start,
-                    hermes_version,
-                    os_family,
-                    architecture,
-                    install_method,
-                    metric_name,
-                    dimensions_json
+                    period_start, hermes_version, os_family, architecture, install_method,
+                    metric_name, dimensions_json
                 """
             ).fetchall()
         return [
@@ -310,11 +279,8 @@ class SharedMetricsStore:
         SharedMetricsStore._add_send_columns(connection)
         SharedMetricsStore._add_consent_tables(connection)
         connection.execute(
-            """
-            INSERT INTO telemetry_state(key, value)
-            VALUES ('schema_version', ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
+            "INSERT INTO telemetry_state(key, value) VALUES ('schema_version', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             (_STORE_SCHEMA_VERSION,),
         )
 
@@ -394,13 +360,8 @@ class SharedMetricsStore:
                 value INTEGER NOT NULL,
                 packaged_value INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (
-                    period_start,
-                    metric_name,
-                    hermes_version,
-                    os_family,
-                    architecture,
-                    install_method,
-                    dimensions_json
+                    period_start, metric_name, hermes_version, os_family, architecture,
+                    install_method, dimensions_json
                 )
             )
             """
@@ -415,26 +376,12 @@ class SharedMetricsStore:
         connection.execute(
             """
             INSERT INTO counter_aggregates(
-                period_start,
-                metric_name,
-                hermes_version,
-                os_family,
-                architecture,
-                install_method,
-                dimensions_json,
-                value,
-                packaged_value
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json, value, packaged_value
             )
             SELECT
-                period_start,
-                metric_name,
-                hermes_version,
-                'unknown',
-                'unknown',
-                'unknown',
-                dimensions_json,
-                value,
-                packaged_value
+                period_start, metric_name, hermes_version, 'unknown', 'unknown', 'unknown',
+                dimensions_json, value, packaged_value
             FROM counter_aggregates_v1
             """
         )
@@ -467,20 +414,10 @@ class SharedMetricsStore:
                 """
                 SELECT COUNT(*) AS period_count
                 FROM (
-                    SELECT
-                        period_start,
-                        hermes_version,
-                        os_family,
-                        architecture,
-                        install_method
+                    SELECT period_start, hermes_version, os_family, architecture, install_method
                     FROM counter_aggregates
                     WHERE value > packaged_value
-                    GROUP BY
-                        period_start,
-                        hermes_version,
-                        os_family,
-                        architecture,
-                        install_method
+                    GROUP BY period_start, hermes_version, os_family, architecture, install_method
                 )
                 """
             ).fetchone()
@@ -492,12 +429,7 @@ class SharedMetricsStore:
             # Gate on the committed package, not its file write, so a failed
             # outbox export can be retried without packaging deltas twice.
             package_created_today = connection.execute(
-                """
-                    SELECT 1
-                    FROM package_outbox
-                    WHERE substr(created_at, 1, 10) >= ?
-                    LIMIT 1
-                    """,
+                "SELECT 1 FROM package_outbox WHERE substr(created_at, 1, 10) >= ? LIMIT 1",
                 (now.date().isoformat(),),
             ).fetchone()
             if package_created_today is not None:
@@ -514,20 +446,10 @@ class SharedMetricsStore:
     ) -> dict[str, Any] | None:
         period_row = connection.execute(
             """
-                SELECT
-                    period_start,
-                    hermes_version,
-                    os_family,
-                    architecture,
-                    install_method
+                SELECT period_start, hermes_version, os_family, architecture, install_method
                 FROM counter_aggregates
                 WHERE value > packaged_value
-                ORDER BY
-                    period_start,
-                    hermes_version,
-                    os_family,
-                    architecture,
-                    install_method
+                ORDER BY period_start, hermes_version, os_family, architecture, install_method
                 LIMIT 1
                 """
         ).fetchone()
@@ -541,12 +463,8 @@ class SharedMetricsStore:
             """
                 SELECT metric_name, dimensions_json, value, packaged_value
                 FROM counter_aggregates
-                WHERE period_start = ?
-                  AND hermes_version = ?
-                  AND os_family = ?
-                  AND architecture = ?
-                  AND install_method = ?
-                  AND value > packaged_value
+                WHERE period_start = ? AND hermes_version = ? AND os_family = ?
+                  AND architecture = ? AND install_method = ? AND value > packaged_value
                 ORDER BY metric_name, dimensions_json
                 """,
             (period_value, *resource_values),
@@ -567,11 +485,7 @@ class SharedMetricsStore:
         connection.execute(
             """
                 INSERT INTO package_outbox(
-                    package_id,
-                    period_start,
-                    period_end,
-                    payload_json,
-                    created_at
+                    package_id, period_start, period_end, payload_json, created_at
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
             (
@@ -597,12 +511,8 @@ class SharedMetricsStore:
                 """
                     UPDATE counter_aggregates
                     SET packaged_value = value
-                    WHERE period_start = ?
-                      AND metric_name = ?
-                      AND hermes_version = ?
-                      AND os_family = ?
-                      AND architecture = ?
-                      AND install_method = ?
+                    WHERE period_start = ? AND metric_name = ? AND hermes_version = ?
+                      AND os_family = ? AND architecture = ? AND install_method = ?
                       AND dimensions_json = ?
                     """,
                 (period_value, row["metric_name"], *resource_values, row["dimensions_json"]),
@@ -627,12 +537,8 @@ class SharedMetricsStore:
     def _export_pending_packages(self) -> list[Path]:
         with self._connection() as connection:
             rows = connection.execute(
-                """
-                SELECT package_id, payload_json
-                FROM package_outbox
-                WHERE exported_at IS NULL
-                ORDER BY created_at, package_id
-                """
+                "SELECT package_id, payload_json FROM package_outbox"
+                " WHERE exported_at IS NULL ORDER BY created_at, package_id"
             ).fetchall()
 
         exported: list[Path] = []
@@ -644,11 +550,8 @@ class SharedMetricsStore:
             )
             with self._connection() as connection:
                 connection.execute(
-                    """
-                    UPDATE package_outbox
-                    SET exported_at = ?
-                    WHERE package_id = ? AND exported_at IS NULL
-                    """,
+                    "UPDATE package_outbox SET exported_at = ?"
+                    " WHERE package_id = ? AND exported_at IS NULL",
                     (_isoformat(_utc_now()), package_id),
                 )
             exported.append(path)
@@ -660,13 +563,9 @@ class SharedMetricsStore:
         cutoff_timestamp = _isoformat(cutoff)
         with self._connection() as connection:
             rows = connection.execute(
-                """
-                SELECT package_id
-                FROM package_outbox
-                WHERE exported_at IS NOT NULL
-                  AND exported_at < ?
-                ORDER BY exported_at, package_id
-                """,
+                "SELECT package_id FROM package_outbox"
+                " WHERE exported_at IS NOT NULL AND exported_at < ?"
+                " ORDER BY exported_at, package_id",
                 (cutoff_timestamp,),
             ).fetchall()
 
@@ -685,12 +584,8 @@ class SharedMetricsStore:
         with self._write() as connection:
             for package_id in removable_package_ids:
                 connection.execute(
-                    """
-                        DELETE FROM package_outbox
-                        WHERE package_id = ?
-                          AND exported_at IS NOT NULL
-                          AND exported_at < ?
-                        """,
+                    "DELETE FROM package_outbox"
+                    " WHERE package_id = ? AND exported_at IS NOT NULL AND exported_at < ?",
                     (package_id, cutoff_timestamp),
                 )
             connection.execute(
