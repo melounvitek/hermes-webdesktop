@@ -172,9 +172,9 @@ class GatewayBusySessionMixin:
         """Claim a cross-process active-session slot for a new gateway turn."""
         if self._is_session_running(session_key):
             return None, None
-        local_limit_message = self._active_session_limit_message(session_key)
-        if local_limit_message is not None:
-            return None, local_limit_message
+        limit_message = self._active_session_limit_message(session_key)
+        if limit_message is not None:
+            return None, limit_message
         try:
             from hermes_cli.active_sessions import try_acquire_active_session
 
@@ -609,7 +609,6 @@ class GatewayBusySessionMixin:
         if await self._route_plaintext_approval_while_busy(event, session_key):
             return True
 
-        # Normal busy case (agent actively running a task)
         adapter = self._adapter_for_source(event.source)
         if not adapter:
             return False  # let default path handle it
@@ -626,10 +625,9 @@ class GatewayBusySessionMixin:
         _busy_state = self._peek_session_state(session_key)
         running_agent = _busy_state.turn.agent if _busy_state else None
 
-        busy_text_mode = self._effective_busy_text_mode(event.source)
         if (
             event.message_type == MessageType.TEXT
-            and busy_text_mode == "queue"
+            and self._effective_busy_text_mode(event.source) == "queue"
             and effective_mode != "steer"
         ):
             return False
@@ -1005,12 +1003,13 @@ class GatewayBusySessionMixin:
     async def _handle_suggestions_command(self, event: MessageEvent) -> str:
         """/suggestions via the shared handler (origin = event source so jobs deliver back here)."""
         from gateway.run import _command_origin_for_source
-        args = (event.get_command_args() or "").strip()
-        origin = _command_origin_for_source(event.source)
         try:
             from hermes_cli.suggestions_cmd import handle_suggestions_command
 
-            return handle_suggestions_command(args, origin=origin, surface="gateway")
+            return handle_suggestions_command(
+                (event.get_command_args() or "").strip(),
+                origin=_command_origin_for_source(event.source), surface="gateway",
+            )
         except Exception as e:
             logger.debug("suggestions command failed: %s", e)
             return f"Suggestions command failed: {e}"
@@ -1018,12 +1017,13 @@ class GatewayBusySessionMixin:
     async def _handle_blueprint_command(self, event: MessageEvent):
         """/blueprint via the shared handler (origin = event source so jobs deliver back here)."""
         from gateway.run import _command_origin_for_source
-        args = (event.get_command_args() or "").strip()
-        origin = _command_origin_for_source(event.source)
         try:
             from hermes_cli.blueprint_cmd import handle_blueprint_command
 
-            return handle_blueprint_command(args, origin=origin, surface="gateway")
+            return handle_blueprint_command(
+                (event.get_command_args() or "").strip(),
+                origin=_command_origin_for_source(event.source), surface="gateway",
+            )
         except Exception as e:
             logger.debug("blueprint command failed: %s", e)
             from hermes_cli.blueprint_cmd import BlueprintCommandResult
@@ -1041,13 +1041,11 @@ class GatewayBusySessionMixin:
         """
         confirm_required = True
         try:
-            cfg = self._read_user_config()
-            approvals = cfg.get("approvals") if isinstance(cfg, dict) else None
+            approvals = self._read_user_config().get("approvals")
             if isinstance(approvals, dict):
                 confirm_required = bool(approvals.get("destructive_slash_confirm", True))
         except Exception:
             pass
-
         if not confirm_required:
             return await execute()
 
@@ -1103,9 +1101,7 @@ class GatewayBusySessionMixin:
                 # value, so the try block alone says nothing about whether the write landed.
                 persisted = bool(save_config_value("approvals.destructive_slash_confirm", False))
                 if persisted:
-                    logger.info(
-                        "User opted out of destructive slash confirm (session=%s)", session_key,
-                    )
+                    logger.info("User opted out of destructive slash confirm (session=%s)", session_key)
                 else:
                     logger.warning(
                         "Could not persist destructive_slash_confirm=false "
@@ -1133,8 +1129,7 @@ class GatewayBusySessionMixin:
         counter = getattr(self, "_slash_confirm_counter", None)
         if counter is None:
             import itertools as _itertools
-            counter = _itertools.count(1)
-            self._slash_confirm_counter = counter
+            counter = self._slash_confirm_counter = _itertools.count(1)
         confirm_id = f"{next(counter)}"
 
         # Register FIRST so a fast button click cannot race the send_slash_confirm return.
@@ -1163,6 +1158,6 @@ class GatewayBusySessionMixin:
         try:
             from hermes_cli.config import load_config
             cfg = load_config()
-            return cfg if isinstance(cfg, dict) else {}
         except Exception:
             return {}
+        return cfg if isinstance(cfg, dict) else {}
