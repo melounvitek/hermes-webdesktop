@@ -80,25 +80,22 @@ def _sanitize_messages(messages: list, fix: Callable[[str], str], *, deep: bool)
         if not isinstance(msg, dict):
             continue
         content = msg.get("content")
-        if isinstance(content, str):
-            found |= _fix_str_field(msg, "content", fix)
-        elif isinstance(content, list):
+        if isinstance(content, list):
             for part in content:
                 if isinstance(part, dict):
                     found |= _fix_str_field(part, "text", fix)
+        else:
+            found |= _fix_str_field(msg, "content", fix)
         found |= _fix_str_field(msg, "name", fix)
         tool_calls = msg.get("tool_calls")
-        if isinstance(tool_calls, list):
-            for tc in tool_calls:
-                if not isinstance(tc, dict):
-                    continue
-                if deep:
-                    found |= _fix_str_field(tc, "id", fix)
-                fn = tc.get("function")
-                if isinstance(fn, dict):
-                    if deep:
-                        found |= _fix_str_field(fn, "name", fix)
-                    found |= _fix_str_field(fn, "arguments", fix)
+        for tc in tool_calls if isinstance(tool_calls, list) else ():
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            fn_fields = [(fn, "name"), (fn, "arguments")] if isinstance(fn, dict) else []
+            for container, key in [(tc, "id")] + fn_fields:
+                if deep or key == "arguments":
+                    found |= _fix_str_field(container, key, fix)
         for key, value in list(msg.items()):
             if key in _MESSAGE_CORE_KEYS:
                 continue
@@ -140,20 +137,15 @@ def _escape_invalid_chars_in_json_strings(raw: str) -> str:
     out: list[str] = []
     in_string = False
     i = 0
-    n = len(raw)
-    while i < n:
+    while i < len(raw):
         ch = raw[i]
-        if in_string and ch == "\\" and i + 1 < n:
+        if in_string and ch == "\\" and i + 1 < len(raw):
             out.append(raw[i:i + 2])
             i += 2
             continue
         if ch == '"':
             in_string = not in_string
-            out.append(ch)
-        elif in_string and ord(ch) < 0x20:
-            out.append(f"\\u{ord(ch):04x}")
-        else:
-            out.append(ch)
+        out.append(f"\\u{ord(ch):04x}" if in_string and ord(ch) < 0x20 else ch)
         i += 1
     return "".join(out)
 

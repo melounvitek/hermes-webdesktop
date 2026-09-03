@@ -202,36 +202,26 @@ def strip_anthropic_cache_control(api_messages: List[Dict[str, Any]]) -> List[Di
         content = msg.get("content")
         if not isinstance(content, list):
             continue
+        role = msg.get("role")
         # The skill split is the only decoration marking the FIRST part of a user message,
         # so the shape alone identifies it even after the prefix registry evicted the entry.
         skill_split_shape = (
-            msg.get("role") == "user"
-            and len(content) == 2
-            and isinstance(content[0], dict)
-            and isinstance(content[1], dict)
-            and "cache_control" in content[0]
-            and "cache_control" not in content[1]
+            role == "user" and len(content) == 2
+            and all(isinstance(p, dict) for p in content)
+            and "cache_control" in content[0] and "cache_control" not in content[1]
         )
         if _has_part_marker(content):
-            content = [
+            content = msg["content"] = [
                 {k: v for k, v in part.items() if k != "cache_control"}
-                if isinstance(part, dict) and "cache_control" in part
-                else part
+                if isinstance(part, dict) and "cache_control" in part else part
                 for part in content
             ]
-            msg["content"] = content
-        decoration_shape = content and all(
-            isinstance(part, dict)
-            and part.get("type", "text") == "text"
-            and isinstance(part.get("text"), str)
-            and set(part.keys()) <= {"type", "text"}
+        plain_text_parts = content and all(
+            isinstance(part, dict) and part.get("type", "text") == "text"
+            and isinstance(part.get("text"), str) and set(part.keys()) <= {"type", "text"}
             for part in content
-        ) and (
-            len(content) == 1
-            or (msg.get("role") == "system" and len(content) == 2)
-            or skill_split_shape
         )
-        if decoration_shape:
+        if plain_text_parts and (len(content) == 1 or (role == "system" and len(content) == 2) or skill_split_shape):
             msg["content"] = "".join(part["text"] for part in content)
     return api_messages
 
@@ -247,16 +237,11 @@ def strip_anthropic_tool_cache_control(tools: List[Dict[str, Any]] | None) -> Li
 
 def _count_cache_markers(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> int:
     """Count the wire-visible cache markers in a request-local plan."""
-    count = 0
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        count += "cache_control" in message
-        if isinstance(message.get("content"), list):
-            count += sum(
-                1 for part in message["content"] if isinstance(part, dict) and "cache_control" in part
-            )
-    return count + sum(1 for tool in tools if isinstance(tool, dict) and "cache_control" in tool)
+    def _marked(items: Any) -> int:
+        return sum(1 for item in items if isinstance(item, dict) and "cache_control" in item)
+
+    parts = [p for m in messages if isinstance(m, dict) and isinstance(m.get("content"), list) for p in m["content"]]
+    return _marked(messages) + _marked(parts) + _marked(tools)
 
 
 def _completed_transaction_endpoint_indexes(messages: List[Dict[str, Any]], *, native_anthropic: bool) -> List[int]:
@@ -264,10 +249,7 @@ def _completed_transaction_endpoint_indexes(messages: List[Dict[str, Any]], *, n
 
     def _tool_run_end(start: int) -> int:
         end = start
-        while end < len(messages):
-            result = messages[end]
-            if not isinstance(result, dict) or result.get("role") != "tool":
-                break
+        while end < len(messages) and isinstance(messages[end], dict) and messages[end].get("role") == "tool":
             end += 1
         return end
 
