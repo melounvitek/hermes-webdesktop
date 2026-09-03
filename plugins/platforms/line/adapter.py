@@ -208,8 +208,7 @@ def _resolve_chat(source: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _allowed_for_source(
-    source: Dict[str, Any], *, allow_all: bool, user_ids: Set[str], group_ids: Set[str], room_ids: Set[str],
-) -> bool:
+    source: Dict[str, Any], *, allow_all: bool, user_ids: Set[str], group_ids: Set[str], room_ids: Set[str]) -> bool:
     """Three-list gate: users, groups, rooms."""
     if allow_all:
         return True
@@ -588,8 +587,7 @@ class LineAdapter(BasePlatformAdapter):
             self._pending_buttons.pop(chat_id, None)
 
     async def _download_media(
-        self, message_id: str, msg_type: str, *, filename: Optional[str] = None
-    ) -> Tuple[Optional[str], str]:
+        self, message_id: str, msg_type: str, *, filename: Optional[str] = None) -> Tuple[Optional[str], str]:
         if not self._client or not message_id:
             return None, ""
         try:
