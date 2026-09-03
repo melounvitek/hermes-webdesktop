@@ -1,9 +1,7 @@
-"""Stale git lock-file recovery for update/check paths.
+"""Stale git lock-file and aborted-fetch pack-debris recovery for update/check paths.
 
-A crashed or killed ``git fetch`` on a shallow clone can leave ``.git/shallow.lock`` behind. Every
-later fetch then fails with::
-
-fatal: Unable to create '/path/.git/shallow.lock': File exists.
+A killed ``git fetch`` can leave ``.git/shallow.lock`` behind (every later fetch fails with "Unable to
+create '.../shallow.lock': File exists") and ``tmp_pack_*`` files git itself never cleans up.
 """
 
 from __future__ import annotations
@@ -17,36 +15,23 @@ from typing import Callable, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Lock files younger than this are presumed live (a fetch is in flight) and
-# are never removed. git lock files are created and removed within a single
-# fetch (seconds); anything older than 10 minutes is abandoned by any
-# reasonable standard.
+# Files younger than this are presumed live (a fetch may be in flight) and are never removed. Lock
+# files live for seconds and a healthy fetch completes in minutes; 10 minutes is abandoned.
 STALE_LOCK_MIN_AGE_SECONDS = 10 * 60
-
-# Lock files we know how to self-heal. ``shallow.lock`` is the one observed in
-# the wild (interrupted fetch on a shallow clone); the others are the same
-# class of failure (interrupted git operation) and harmless to clear when
-# stale. Index/HEAD locks from a live git process are protected by the
-# process guard in :func:`clear_stale_git_locks`.
-LOCK_NAMES = ("shallow.lock", "index.lock", "HEAD.lock", "MERGE_HEAD.lock")
-
-# Aborted-fetch pack debris younger than this is presumed live (a fetch may
-# be writing it right now) and is never removed. A healthy fetch completes in
-# minutes; the same 10-minute bar the lock sweep uses is comfortably safe.
 STALE_TMP_PACK_MIN_AGE_SECONDS = STALE_LOCK_MIN_AGE_SECONDS
-
-# Temp-file prefixes git writes into .git/objects/pack during a transfer and
-# renames away on success. Anything left with these names after a fetch died
-# is garbage by definition — git itself never reuses or cleans them.
+# ``shallow.lock`` is the one observed in the wild; the others are the same class of failure
+# (interrupted git operation). Locks held by a live git process are protected by the process guard.
+LOCK_NAMES = ("shallow.lock", "index.lock", "HEAD.lock", "MERGE_HEAD.lock")
+# Temp-file prefixes git writes into .git/objects/pack during a transfer and renames away on
+# success; anything left with these names after a fetch died is garbage by definition.
 _TMP_PACK_PREFIXES = ("tmp_pack_", "tmp_idx_", "tmp_rev_", "tmp_mtimes_")
 
 
 def _git_proc_running() -> bool:
     """True when a ``git`` process is currently running.
 
-    The conservative answer on any platform we can't probe: if we can't tell, treat a lock as
-    possibly-live and don't remove it. This is the safety check that stops us from yanking a lock a
-    real fetch is holding.
+    This is the safety check that stops us from yanking a lock a real fetch is holding. A failed
+    probe logs and returns False; the age floor in the sweep still applies.
     """
     try:
         if os.name == "nt":
@@ -55,23 +40,15 @@ def _git_proc_running() -> bool:
                 capture_output=True, text=True, timeout=10,
             ).stdout.lower()
             return "git.exe" in out
-        out = subprocess.run(
-            ["pgrep", "-x", "git"], capture_output=True, text=True, timeout=10,
-        )
-        return out.returncode == 0
+        return subprocess.run(["pgrep", "-x", "git"], capture_output=True, text=True, timeout=10).returncode == 0
     except Exception:
         logger.debug("git process probe failed; assuming no git running", exc_info=True)
         return False
 
 
 def _sweep_stale(
-    directory: Path,
-    candidates: Callable[[], Iterable[Path]],
-    *,
-    min_age_seconds: Optional[int],
-    default_age: int,
-    skip_msg: str,
-    log_removed: Callable[[Path, int], None],
+    directory: Path, candidates: Callable[[], Iterable[Path]], *, min_age_seconds: Optional[int], default_age: int,
+    skip_msg: str, log_removed: Callable[[Path, int], None],
 ) -> List[str]:
     """Shared guard + age-floor sweep. Never raises; skips anything it cannot stat/unlink."""
     if not directory.is_dir():
@@ -95,52 +72,37 @@ def _sweep_stale(
 
 
 def clear_stale_git_locks(repo_root: Path, *, min_age_seconds: Optional[int] = None) -> List[str]:
-    """Remove abandoned ``.git`` lock files under ``repo_root``.
+    """Remove abandoned ``.git`` lock files under ``repo_root``; returns the removed paths.
 
-    A lock is removed only when BOTH conditions hold:
-
-    Returns the list of removed lock file paths. Never raises: a lock we cannot stat or unlink is
-    skipped (a concurrently-held lock may have just been created between our age check and the
-    unlink — the process guard makes that window vanishingly small, and skipping is always safe).
+    A lock is removed only when it is older than the age floor AND no git process is running. Never
+    raises: a lock we cannot stat or unlink is skipped (a concurrently-held lock may have been
+    created between the age check and the unlink; skipping is always safe).
     """
     git_dir = Path(repo_root) / ".git"
     return _sweep_stale(
-        git_dir,
-        lambda: [git_dir / name for name in LOCK_NAMES],
-        min_age_seconds=min_age_seconds,
-        default_age=STALE_LOCK_MIN_AGE_SECONDS,
+        git_dir, lambda: [git_dir / name for name in LOCK_NAMES],
+        min_age_seconds=min_age_seconds, default_age=STALE_LOCK_MIN_AGE_SECONDS,
         skip_msg="git process running; skipping stale-lock sweep",
         log_removed=lambda p, _size: logger.info("Removed stale git lock %s", p),
     )
 
 
-def clear_stale_tmp_packs(
-    repo_root: Path, *, min_age_seconds: Optional[int] = None
-) -> List[str]:
+def clear_stale_tmp_packs(repo_root: Path, *, min_age_seconds: Optional[int] = None) -> List[str]:
     """Remove aborted-fetch temp pack files under ``.git/objects/pack``.
 
-    Every ``git fetch`` that dies mid-transfer (timeout, HTTP 429, dropped connection) leaves a
-    ``tmp_pack_*`` (and sometimes ``tmp_idx_*``) file behind, and git never cleans them up.
-
-    Same safety contract as :func:`clear_stale_git_locks`: only files older than the age floor,
-    never while a git process is running, never raises. Returns the removed paths.
+    Same safety contract as :func:`clear_stale_git_locks`. Returns the removed paths.
     """
     pack_dir = Path(repo_root) / ".git" / "objects" / "pack"
 
     def _candidates():
         try:
-            entries = list(pack_dir.iterdir())
+            return [e for e in pack_dir.iterdir() if e.name.startswith(_TMP_PACK_PREFIXES)]
         except OSError:
-            return []
-        return [e for e in entries if e.name.startswith(_TMP_PACK_PREFIXES)]
 
+            return []
     return _sweep_stale(
-        pack_dir,
-        _candidates,
-        min_age_seconds=min_age_seconds,
-        default_age=STALE_TMP_PACK_MIN_AGE_SECONDS,
+        pack_dir, _candidates,
+        min_age_seconds=min_age_seconds, default_age=STALE_TMP_PACK_MIN_AGE_SECONDS,
         skip_msg="git process running; skipping tmp-pack sweep",
-        log_removed=lambda p, size: logger.info(
-            "Removed aborted-fetch pack debris %s (%d bytes)", p, size
-        ),
+        log_removed=lambda p, size: logger.info("Removed aborted-fetch pack debris %s (%d bytes)", p, size),
     )

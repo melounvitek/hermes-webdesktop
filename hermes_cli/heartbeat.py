@@ -1,12 +1,9 @@
 """Session heartbeats — recurring re-entry prompts for the current session.
 
-This is deliberately session-scoped and in-process (CLI process or gateway process must be running)
-— the durable cross-process scheduling surface remains ``hermes cron`` / the ``cronjob`` tool, which
-runs in isolated sessions.
-
-Invariants (mirrors goals.py): - Injection is a plain user message. No system-prompt mutation, no
-toolset swap — prompt caching stays intact. - A real user message always wins: heartbeats only fire
-into an idle session with an empty input queue.
+Deliberately session-scoped and in-process (CLI or gateway must be running); durable cross-process
+scheduling remains ``hermes cron``. Invariants (mirrors goals.py): injection is a plain user message —
+no system-prompt mutation or toolset swap, so prompt caching stays intact — and a real user message
+always wins: heartbeats only fire into an idle session with an empty input queue.
 """
 
 from __future__ import annotations
@@ -20,12 +17,8 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-
-# Floor: a heartbeat that re-enters the session more often than once a
-# minute is a busy-loop, not a heartbeat. (Prime-Agent uses a similar floor.)
-MIN_INTERVAL_SECONDS = 60
-# How often drivers poll for due heartbeats. Not user-facing.
-POLL_SECONDS = 5.0
+MIN_INTERVAL_SECONDS = 60  # floor: re-entering more often than once a minute is a busy-loop, not a heartbeat
+POLL_SECONDS = 5.0  # how often drivers poll for due heartbeats; not user-facing
 
 HEARTBEAT_PROMPT_TEMPLATE = (
     "[Heartbeat — recurring instruction, fires every {interval}]\n"
@@ -36,23 +29,28 @@ HEARTBEAT_PROMPT_TEMPLATE = (
 )
 
 _INTERVAL_RE = re.compile(
-    r"^\s*(?:every\s+)?(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\s*$",
-    re.IGNORECASE,
+    r"^\s*(?:every\s+)?(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds?|m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)\s*$", re.IGNORECASE
 )
 
 _UNIT_SECONDS = {
-    "s": 1, "sec": 1, "secs": 1, "second": 1, "seconds": 1,
-    "m": 60, "min": 60, "mins": 60, "minute": 60, "minutes": 60,
-    "h": 3600, "hr": 3600, "hrs": 3600, "hour": 3600, "hours": 3600,
-    "d": 86400, "day": 86400, "days": 86400,
+    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1),
+    **dict.fromkeys(("m", "min", "mins", "minute", "minutes"), 60),
+    **dict.fromkeys(("h", "hr", "hrs", "hour", "hours"), 3600),
+    **dict.fromkeys(("d", "day", "days"), 86400),
+}
+
+# field -> (coercer, default used when the stored value is missing/falsy)
+_STATE_FIELDS = {
+    "prompt": (str, ""), "interval_seconds": (int, 0), "status": (str, "active"),
+    "created_at": (float, 0.0), "last_fired_at": (float, 0.0), "fire_count": (int, 0),
 }
 
 
 def parse_interval(text: str) -> Optional[int]:
     """Parse ``10m`` / ``every 2h`` / ``every 90 minutes`` into seconds.
 
-    Returns None when the text is not an interval; values below ``MIN_INTERVAL_SECONDS`` return
-    -1 so callers can distinguish "not an interval" from "too small".
+    None when the text is not an interval; values below ``MIN_INTERVAL_SECONDS`` return -1 so
+    callers can distinguish "not an interval" from "too small".
     """
     m = _INTERVAL_RE.match(text) if text else None
     if not m:
@@ -64,10 +62,8 @@ def parse_interval(text: str) -> Optional[int]:
 def format_interval(seconds: int) -> str:
     """Human-readable interval (``600`` → ``10m``)."""
     seconds = int(seconds)
-    for unit, suffix in ((86400, "d"), (3600, "h"), (60, "m")):
-        if seconds % unit == 0:
-            return f"{seconds // unit}{suffix}"
-    return f"{seconds}s"
+    units = ((86400, "d"), (3600, "h"), (60, "m"))
+    return next((f"{seconds // unit}{suffix}" for unit, suffix in units if seconds % unit == 0), f"{seconds}s")
 
 
 @dataclass
@@ -87,50 +83,21 @@ class HeartbeatState:
     @classmethod
     def from_json(cls, raw: str) -> "HeartbeatState":
         data = json.loads(raw)
-        # Falsy/missing values fall back to the default before type coercion.
-        return cls(**{
-            name: coerce(data.get(name) or default)
-            for name, (coerce, default) in _STATE_FIELDS.items()
-        })
+        return cls(**{name: coerce(data.get(name) or default) for name, (coerce, default) in _STATE_FIELDS.items()})
 
     def is_due(self, now: Optional[float] = None) -> bool:
         if self.status != "active" or not self.prompt or self.interval_seconds <= 0:
             return False
-        now = now if now is not None else time.time()
-        anchor = self.last_fired_at or self.created_at
-        return (now - anchor) >= self.interval_seconds
+        return ((time.time() if now is None else now) - (self.last_fired_at or self.created_at)) >= self.interval_seconds
 
     def render_prompt(self) -> str:
-        return HEARTBEAT_PROMPT_TEMPLATE.format(
-            interval=format_interval(self.interval_seconds),
-            prompt=self.prompt,
-        )
-
-
-# field -> (coercer, default used when the stored value is missing/falsy)
-_STATE_FIELDS = {
-    "prompt": (str, ""),
-    "interval_seconds": (int, 0),
-    "status": (str, "active"),
-    "created_at": (float, 0.0),
-    "last_fired_at": (float, 0.0),
-    "fire_count": (int, 0),
-}
-
-
-# Persistence (SessionDB state_meta) — same pattern as goals.py
-
-
-def _meta_key(session_id: str) -> str:
-    return f"heartbeat:{session_id}"
+        return HEARTBEAT_PROMPT_TEMPLATE.format(interval=format_interval(self.interval_seconds), prompt=self.prompt)
 
 
 def _get_session_db() -> Optional[Any]:
-    # Reuse the goals module's per-HERMES_HOME cached SessionDB so both
-    # features share one connection instead of thrashing the file.
+    """Persistence goes through the goals module's per-HERMES_HOME cached SessionDB (one shared connection)."""
     try:
         from hermes_cli.goals import _get_session_db as _goals_db
-
         return _goals_db()
     except Exception as exc:  # pragma: no cover
         logger.debug("HeartbeatManager: SessionDB bootstrap failed (%s)", exc)
@@ -142,7 +109,7 @@ def load_heartbeat(session_id: str) -> Optional[HeartbeatState]:
     if db is None:
         return None
     try:
-        raw = db.get_meta(_meta_key(session_id))
+        raw = db.get_meta(f"heartbeat:{session_id}")
     except Exception as exc:
         logger.debug("HeartbeatManager: get_meta failed: %s", exc)
         return None
@@ -162,20 +129,16 @@ def save_heartbeat(session_id: str, state: HeartbeatState) -> None:
     db = _get_session_db()
     if db is None:
         from hermes_cli.goals import _warn_dropped_write
-
         _warn_dropped_write("HeartbeatManager", "heartbeat", session_id)
         return
     try:
-        db.set_meta(_meta_key(session_id), state.to_json())
+        db.set_meta(f"heartbeat:{session_id}", state.to_json())
     except Exception as exc:
         logger.debug("HeartbeatManager: set_meta failed: %s", exc)
 
 
-# Manager — the surface CLI + gateway talk to
-
-
 class HeartbeatManager:
-    """Per-session heartbeat state + due-tick decisions.
+    """Per-session heartbeat state + due-tick decisions; the surface CLI + gateway talk to.
 
     Drivers (CLI thread / gateway task) call :meth:`due_prompt` on a poll cadence while the session
     is idle; a non-None return is the user-role message to inject. Firing is recorded immediately so
@@ -203,13 +166,10 @@ class HeartbeatManager:
         every = format_interval(s.interval_seconds)
         fired = f", fired {s.fire_count}×" if s.fire_count else ""
         if s.status == "active":
-            anchor = s.last_fired_at or s.created_at
-            next_in = max(0, int(anchor + s.interval_seconds - time.time()))
+            next_in = max(0, int((s.last_fired_at or s.created_at) + s.interval_seconds - time.time()))
             return f"♥ Heartbeat (every {every}, next in ~{next_in}s{fired}): {s.prompt}"
         icon = "⏸ " if s.status == "paused" else ""
         return f"{icon}Heartbeat ({s.status}, every {every}{fired}): {s.prompt}"
-
-    # --- mutation -----------------------------------------------------
 
     def set(self, prompt: str, interval_seconds: int) -> HeartbeatState:
         prompt = (prompt or "").strip()
@@ -218,9 +178,7 @@ class HeartbeatManager:
         interval_seconds = int(interval_seconds)
         if interval_seconds < MIN_INTERVAL_SECONDS:
             raise ValueError(f"interval must be at least {MIN_INTERVAL_SECONDS}s")
-        state = HeartbeatState(
-            prompt=prompt, interval_seconds=interval_seconds, status="active", created_at=time.time()
-        )
+        state = HeartbeatState(prompt=prompt, interval_seconds=interval_seconds, status="active", created_at=time.time())
         self._state = state
         save_heartbeat(self.session_id, state)
         return state
@@ -246,8 +204,6 @@ class HeartbeatManager:
             return False
         self._state = None
         return True
-
-    # --- driver entry point --------------------------------------------
 
     def due_prompt(self, now: Optional[float] = None) -> Optional[str]:
         """Return the injection prompt if the heartbeat is due, else None.
@@ -287,7 +243,6 @@ def migrate_heartbeat_to_session(old_session_id: str, new_session_id: str) -> bo
 
 
 __all__ = [
-    "HeartbeatState", "HeartbeatManager", "parse_interval", "format_interval",
-    "load_heartbeat", "save_heartbeat", "migrate_heartbeat_to_session",
-    "HEARTBEAT_PROMPT_TEMPLATE", "MIN_INTERVAL_SECONDS", "POLL_SECONDS",
+    "HeartbeatState", "HeartbeatManager", "parse_interval", "format_interval", "load_heartbeat", "save_heartbeat",
+    "migrate_heartbeat_to_session", "HEARTBEAT_PROMPT_TEMPLATE", "MIN_INTERVAL_SECONDS", "POLL_SECONDS",
 ]
