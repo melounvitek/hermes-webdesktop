@@ -120,6 +120,20 @@ _STALE_KEY_UPSERT_SQL = (
 _CLEAR_REBUILD_MARKERS_SQL = "DELETE FROM state_meta WHERE key IN ('fts_rebuild_high_water', 'fts_rebuild_progress')"
 
 
+def _legacy_inline_reinsert_sql(table: str, indent: int, *, delete_first: bool = False) -> str:
+    """Legacy inline (pre-v23) FTS re-population script fragment (whitespace pinned)."""
+    pad = " " * indent
+    body = f"{pad}DELETE FROM {table};\n" if delete_first else ""
+    return (
+        f"\n{body}{pad}INSERT INTO {table}(rowid, content)\n"
+        f"{pad}SELECT id,\n"
+        f"{pad}       COALESCE(content, '') || ' ' ||\n"
+        f"{pad}       COALESCE(tool_name, '') || ' ' ||\n"
+        f"{pad}       COALESCE(tool_calls, '')\n"
+        f"{pad}FROM messages;\n{pad[:-4]}"
+    )
+
+
 def _q(ident: str) -> str:
     """Double-quote an SQL identifier."""
     return '"' + ident.replace('"', '""') + '"'
@@ -192,20 +206,16 @@ class SessionSchemaMixin:
                 pass
 
     @staticmethod
-    def _fts_trigger_count(cursor: sqlite3.Cursor, names: Sequence[str] = _FTS_TRIGGERS) -> int:
-        """Count how many of *names* exist as triggers (_FTS_BASE_TRIGGERS / _FTS_TRIGRAM_TRIGGERS for one half)."""
+    def _fts_triggers_missing(cursor: sqlite3.Cursor, names: Sequence[str]) -> bool:
+        """True unless every trigger in *names* (one DDL half) exists."""
         if not names:
-            return 0  # "name IN ()" is a SQLite syntax error
+            return False  # "name IN ()" is a SQLite syntax error
         placeholders = ",".join("?" for _ in names)
         row = cursor.execute(
             f"SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name IN ({placeholders})",
             tuple(names),
         ).fetchone()
-        return int(row[0])
-
-    @staticmethod
-    def _fts_triggers_missing(cursor: sqlite3.Cursor, names: Sequence[str]) -> bool:
-        return SessionSchemaMixin._fts_trigger_count(cursor, names) < len(names)
+        return int(row[0]) < len(names)
 
     @staticmethod
     def _fts_update_trigger_needs_narrowing(sql: Optional[str]) -> bool:
@@ -477,24 +487,9 @@ class SessionSchemaMixin:
             schema_sql = LEGACY_FTS_SQL
             if include_trigram:
                 schema_sql += LEGACY_FTS_TRIGRAM_SQL
-            rebuild_sql = schema_sql + """
-                INSERT INTO messages_fts(rowid, content)
-                SELECT id,
-                       COALESCE(content, '') || ' ' ||
-                       COALESCE(tool_name, '') || ' ' ||
-                       COALESCE(tool_calls, '')
-                FROM messages;
-            """
+            rebuild_sql = schema_sql + _legacy_inline_reinsert_sql("messages_fts", 16)
             if include_trigram:
-                rebuild_sql += """
-                    DELETE FROM messages_fts_trigram;
-                    INSERT INTO messages_fts_trigram(rowid, content)
-                    SELECT id,
-                           COALESCE(content, '') || ' ' ||
-                           COALESCE(tool_name, '') || ' ' ||
-                           COALESCE(tool_calls, '')
-                    FROM messages;
-                """
+                rebuild_sql += _legacy_inline_reinsert_sql("messages_fts_trigram", 20, delete_first=True)
         else:
             schema_sql = FTS_SQL
             if include_trigram:
