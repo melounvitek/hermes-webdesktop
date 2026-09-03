@@ -28,8 +28,8 @@ def managed_nous_tools_enabled(*, force_fresh: bool = False) -> bool:
         return False
 
 
-def nous_tool_gateway_unavailable_message(
-    capability: str = "the Nous Tool Gateway", *, force_fresh: bool = False) -> str:
+def nous_tool_gateway_unavailable_message(capability: str = "the Nous Tool Gateway", *,
+                                          force_fresh: bool = False) -> str:
     """Return account-aware guidance for an unavailable Nous Tool Gateway path."""
     try:
         from hermes_cli.nous_account import (
@@ -69,12 +69,9 @@ def has_direct_modal_credentials() -> bool:
         return False
 
 
-def resolve_modal_backend_state(
-    modal_mode: object | None,
-    *,
-    has_direct: bool,
-    managed_ready: bool,
-    managed_enabled: bool | None = None) -> Dict[str, Any]:
+def resolve_modal_backend_state(modal_mode: object | None, *, has_direct: bool,
+                                managed_ready: bool,
+                                managed_enabled: bool | None = None) -> Dict[str, Any]:
     """Resolve direct vs managed Modal backend: ``direct``/``managed`` are exclusive; ``auto``
     prefers managed when available, else direct."""
     requested_mode = coerce_modal_mode(modal_mode)
@@ -110,8 +107,8 @@ def _dotenv_value(env_var: str) -> str:
         return ""
 
 
-def resolve_provider_secret(
-    env_var: str, provider_id: str, config_value: str = "", env_getter=None) -> str:
+def resolve_provider_secret(env_var: str, provider_id: str, config_value: str = "",
+                            env_getter=None) -> str:
     """Resolve a voice-provider API key (single owner for STT/TTS lookup). Order: explicit
     ``config_value`` -> profile secret scope / env -> ``.env`` via ``env_getter`` (or
     ``hermes_cli.config.get_env_value``) -> credential pool for ``provider_id``. Under an

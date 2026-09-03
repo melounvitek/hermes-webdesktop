@@ -166,8 +166,8 @@ def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
     return env.execute(cmd, timeout=30, stdin_data=content).get("returncode", 1) == 0
 
 
-def _build_persisted_message(
-    preview: str, has_more: bool, original_size: int, file_path: str) -> str:
+def _build_persisted_message(preview: str, has_more: bool, original_size: int,
+                             file_path: str) -> str:
     """Build the <persisted-output> replacement block."""
     size_kb = original_size / 1024
     size_str = f"{size_kb / 1024:.1f} MB" if size_kb >= 1024 else f"{size_kb:.1f} KB"
@@ -196,13 +196,9 @@ def extract_persisted_path(content: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def maybe_persist_tool_result(
-    content: str,
-    tool_name: str,
-    tool_use_id: str,
-    env=None,
-    config: BudgetConfig = DEFAULT_BUDGET,
-    threshold: int | float | None = None) -> str:
+def maybe_persist_tool_result(content: str, tool_name: str, tool_use_id: str, env=None,
+                              config: BudgetConfig = DEFAULT_BUDGET,
+                              threshold: int | float | None = None) -> str:
     """Layer 2: persist an oversized result, return preview + path. ``threshold`` overrides
     ``config.resolve_threshold(tool_name)``; falls back to inline truncation when no write
     location succeeds."""
@@ -243,8 +239,8 @@ def maybe_persist_tool_result(
             "Full output could not be saved to sandbox.]")
 
 
-def enforce_turn_budget(
-    tool_messages: list[dict], env=None, config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
+def enforce_turn_budget(tool_messages: list[dict], env=None,
+                        config: BudgetConfig = DEFAULT_BUDGET) -> list[dict]:
     """Layer 3: persist the largest non-persisted results first until the turn's aggregate is
     under budget. Mutates the list in-place and returns it."""
     candidates = []

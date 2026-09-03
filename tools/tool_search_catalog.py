@@ -116,10 +116,9 @@ def build_catalog(tool_defs: List[Dict[str, Any]]) -> List[CatalogEntry]:
     return catalog
 
 
-def _bm25_score(query_tokens: List[str], doc_tokens: List[str],
-                doc_lengths: List[int], avg_dl: float,
-                doc_freq: Dict[str, int], n_docs: int,
-                k1: float = 1.5, b: float = 0.75) -> float:
+def _bm25_score(query_tokens: List[str], doc_tokens: List[str], doc_lengths: List[int],
+                avg_dl: float, doc_freq: Dict[str, int], n_docs: int, k1: float = 1.5,
+                b: float = 0.75) -> float:
     """Standard BM25 for one query against one document (inlined; the catalog is bounded —
     typically < 500 tools — so a dependency is not worth it)."""
     if not doc_tokens:
@@ -150,12 +149,8 @@ def _corpus_stats(catalog: List[CatalogEntry]) -> _CorpusStats:
     return doc_lengths, avg_dl, dict(doc_freq), len(catalog)
 
 
-def search_catalog(
-    catalog: List[CatalogEntry],
-    query: str,
-    limit: int = 5,
-    *,
-    corpus_stats: Optional[_CorpusStats] = None) -> List[CatalogEntry]:
+def search_catalog(catalog: List[CatalogEntry], query: str, limit: int = 5, *,
+                   corpus_stats: Optional[_CorpusStats] = None) -> List[CatalogEntry]:
     """Top-``limit`` catalog entries for ``query`` by BM25 (exact name match ranks first).
     Falls back to a name-substring match only when NO query token appears in any document
     (e.g. "hub" vs ``github_*``); the IDF variant is strictly positive, so a hit anywhere
@@ -168,10 +163,8 @@ def search_catalog(
     scored: List[Tuple[float, CatalogEntry]] = []
     exact_name = query.strip().lower()
     for entry in catalog:
-        if entry.name.lower() == exact_name:
-            scored.append((float("inf"), entry))
-            continue
-        s = _bm25_score(query_tokens, entry._tokens, *corpus_stats)
+        s = (float("inf") if entry.name.lower() == exact_name
+             else _bm25_score(query_tokens, entry._tokens, *corpus_stats))
         if s > 0:
             scored.append((s, entry))
     if not scored:

@@ -161,9 +161,8 @@ def _tool_def_names(tool_defs: Iterable[Dict[str, Any]]) -> Iterable[str]:
     return (_fn(td).get("name", "") for td in tool_defs)
 
 
-def classify_tools(
-    tool_defs: List[Dict[str, Any]],
-    defer_tools: Optional[frozenset] = None) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def classify_tools(tool_defs: List[Dict[str, Any]], defer_tools: Optional[frozenset] = None,
+                   ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable); bridge tools are dropped (re-added
     after classification)."""
     visible: List[Dict[str, Any]] = []
@@ -190,10 +189,8 @@ def estimate_tokens_from_schemas(tool_defs: Iterable[Dict[str, Any]]) -> int:
     return int(math.ceil(total_chars / CHARS_PER_TOKEN))
 
 
-def should_activate(
-    config: ToolSearchConfig,
-    deferrable_tokens: int,
-    context_length: Optional[int]) -> bool:
+def should_activate(config: ToolSearchConfig, deferrable_tokens: int,
+                    context_length: Optional[int]) -> bool:
     """``"off"`` never activates; ``"on"``/``"auto"`` activate whenever any deferrable tool
     exists ("auto" is reserved for a future budget-gated mode — do not distinguish them
     without that design). ``context_length`` is kept for caller compatibility."""
@@ -249,10 +246,8 @@ def _search_description(deferred_count: int, listing: Optional[str], listing_for
     return desc + "\n\n" + listing
 
 
-def bridge_tool_schemas(
-    deferred_count: int,
-    listing: Optional[str] = None,
-    listing_form: str = "") -> List[Dict[str, Any]]:
+def bridge_tool_schemas(deferred_count: int, listing: Optional[str] = None,
+                        listing_form: str = "") -> List[Dict[str, Any]]:
     """Bridge tool schemas injected in place of deferred tools. Kept short — every byte is
     paid on every turn. ``listing`` is embedded in the tool_search description; per-tool
     ``listing_form``s say "skip search when you see the exact name", "groups" says which
@@ -318,15 +313,11 @@ class AssemblyResult:
     listing_form: str = "none"  # "full" | "names" | "mixed" | "groups" | "none"
 
 
-def assemble_tool_defs(
-    tool_defs: List[Dict[str, Any]],
-    *,
-    context_length: Optional[int] = None,
-    config: Optional[ToolSearchConfig] = None) -> AssemblyResult:
+def assemble_tool_defs(tool_defs: List[Dict[str, Any]], *, context_length: Optional[int] = None,
+                       config: Optional[ToolSearchConfig] = None) -> AssemblyResult:
     """Tool-defs the model should see: passthrough when inactive, else deferrable tools
     replaced by the three bridge tools. Idempotent — existing bridge tools are stripped first."""
-    if config is None:
-        config = load_config()
+    config = config or load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
     visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
@@ -379,9 +370,8 @@ def _available_source_summary(catalog: List[CatalogEntry]) -> List[Dict[str, Any
     return [{"name": name, "tool_count": counts[name]} for name in sorted(counts)]
 
 
-def _string_list_arg(
-    args: Dict[str, Any], key: str, *, dedupe: bool, max_items: int, retry_hint: str,
-) -> Tuple[Optional[List[str]], Optional[str]]:
+def _string_list_arg(args: Dict[str, Any], key: str, *, dedupe: bool, max_items: int,
+                     retry_hint: str) -> Tuple[Optional[List[str]], Optional[str]]:
     """Read a list-of-strings bridge argument -> ``(items, error_json)``. A bare string (a
     common model slip) is a one-item list; rejects non-lists, all-blank lists, > ``max_items``."""
     raw = args.get(key)
@@ -407,8 +397,7 @@ def dispatch_tool_search(args: Dict[str, Any], *, current_tool_defs: List[Dict[s
     results: [{query, matches: [names]}], tools: {name: {source, source_name, description,
     required}}}``. ``limit`` applies PER QUERY; empty groups get ``available_sources`` +
     ``hint`` so a lexical miss is not mistaken for a missing capability."""
-    if config is None:
-        config = load_config()
+    config = config or load_config()
     queries, err = _string_list_arg(
         args, "queries", dedupe=False, max_items=_MAX_QUERIES_PER_CALL,
         retry_hint="Retry with fewer, more targeted queries.")
@@ -444,8 +433,7 @@ def dispatch_tool_describe(args: Dict[str, Any], *, current_tool_defs: List[Dict
     """Execute the ``tool_describe`` bridge tool -> JSON ``{tools: {name: {description,
     parameters}}, not_found: [...]  (unknown / not in this assembly; never fails the call),
     errors: {name: msg}  (registered but non-deferrable)}``. Duplicates dedupe silently."""
-    if config is None:
-        config = load_config_readonly()
+    config = config or load_config_readonly()
     names, err = _string_list_arg(
         args, "names", dedupe=True, max_items=_MAX_DESCRIBE_NAMES_PER_CALL,
         retry_hint="Retry with fewer names per call.")
