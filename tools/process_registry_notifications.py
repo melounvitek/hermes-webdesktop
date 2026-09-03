@@ -25,13 +25,9 @@ def _format_age(seconds: float) -> str:
 
 
 def _model_not_found_patterns() -> "list[str]":
-    """Model-not-found phrases shared with the failover classifier.
-
-    Imported from ``agent.error_classifier`` so the batch renderer applies the
-    same classification the failover path uses (no hand-copied list to drift).
-    Fails open to a minimal built-in set so an import problem never hides the
-    per-task blocks.
-    """
+    """Model-not-found phrases from ``agent.error_classifier`` (same classification
+    the failover path uses, no hand-copied list to drift); a minimal built-in set
+    if the import fails so per-task blocks are never hidden."""
     try:
         from agent.error_classifier import _MODEL_NOT_FOUND_PATTERNS
 
@@ -42,11 +38,8 @@ def _model_not_found_patterns() -> "list[str]":
 
 def _delegation_config() -> dict:
     """Active delegation config (model/provider/fallbacks); ``{}`` on any error.
-
-    Mirrors ``tools.delegate_tool._load_config`` lazily so the renderer sees the
-    same model/provider the dispatcher used without importing the heavy
-    delegation module at import time.
-    """
+    Lazy ``tools.delegate_tool._load_config`` so the renderer sees the dispatcher's
+    model/provider without importing the heavy delegation module at import time."""
     try:
         from tools.delegate_tool import _load_config as _cfg
 
@@ -67,12 +60,8 @@ def _delegation_model_not_found(results, config) -> bool:
         return False
     model = str(model).lower()
     for r in results or []:
-        text = " ".join(
-            str(part) for part in (r.get("error"), r.get("summary")) if part
-        ).lower()
-        if not text or model not in text:
-            continue
-        if any(p in text for p in _model_not_found_patterns()):
+        text = " ".join(str(part) for part in (r.get("error"), r.get("summary")) if part).lower()
+        if text and model in text and any(p in text for p in _model_not_found_patterns()):
             return True
     return False
 
@@ -96,9 +85,7 @@ def _delegation_model_not_found_notice(results) -> "list[str] | None":
         from hermes_cli.fallback_config import get_fallback_chain
 
         if not get_fallback_chain(config):
-            lines.append(
-                "No fallback chain is configured, so no failover was attempted."
-            )
+            lines.append("No fallback chain is configured, so no failover was attempted.")
     except Exception:
         pass
     return lines
@@ -115,11 +102,14 @@ def _is_truncated(entry: dict) -> bool:
     return bool(entry.get("truncated") or entry.get("exit_reason") == "max_iterations")
 
 
-def _dispatched_line(dispatched_at, completed_at) -> "str | None":
-    if not isinstance(dispatched_at, (int, float)):
-        return None
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(dispatched_at))
-    return f"Dispatched: {ts} ({_format_age(completed_at - dispatched_at)} ago)"
+def _header_lines(evt: dict, title: str, intro: str, completed_at: float) -> "list[str]":
+    """Shared preamble: title, intro, blank, dispatch time and task-source lines."""
+    lines = [title, intro, ""]
+    dispatched_at = evt.get("dispatched_at")
+    if isinstance(dispatched_at, (int, float)):
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(dispatched_at))
+        lines.append(f"Dispatched: {ts} ({_format_age(completed_at - dispatched_at)} ago)")
+    return lines
 
 
 def _task_source_lines(evt: dict) -> "list[str]":
@@ -131,6 +121,10 @@ def _task_source_lines(evt: dict) -> "list[str]":
     return lines
 
 
+def _role_model(evt: dict) -> str:
+    return f"Role: {evt.get('role') or 'leaf'}   Model: {evt.get('model') or '?'}"
+
+
 def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> str:
     """Consolidated block for a delegate_task fan-out that finished as one unit."""
     results = evt.get("results") or []
@@ -138,22 +132,17 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
     n = len(results) if results else len(goals)
     total_dur = evt.get("total_duration_seconds", evt.get("duration_seconds", "?"))
     error = evt.get("error")
-    lines = [
+    lines = _header_lines(
+        evt,
         f"[ASYNC DELEGATION BATCH COMPLETE — {deleg_id}]",
         f"A background fan-out of {n} subagent(s) you dispatched earlier "
         "has finished. All ran in parallel and waited on each other; their "
         "consolidated results are below. You may have moved on since "
         "dispatching — act on these or re-dispatch if things have changed.",
-        "",
-    ]
-    dispatched = _dispatched_line(evt.get("dispatched_at"), completed_at)
-    if dispatched:
-        lines.append(dispatched)
-    lines.extend(_task_source_lines(evt))
-    lines.append(
-        f"Role: {evt.get('role') or 'leaf'}   Model: {evt.get('model') or '?'}"
-        f"   Total duration: {total_dur}s"
+        completed_at,
     )
+    lines.extend(_task_source_lines(evt))
+    lines.append(f"{_role_model(evt)}   Total duration: {total_dur}s")
     if error and not results:
         lines.append("--- ERROR ---")
         lines.append(f"The batch did not complete successfully: {error}")
@@ -195,16 +184,10 @@ def _format_batch_delegation(evt: dict, deleg_id: str, completed_at: float) -> s
             lines.append("Partial output:")
             lines.append(r_summary)
         else:
-            lines.append(
-                f"(no summary — status={r_status}"
-                + (f": {r_error}" if r_error else "")
-                + ")"
-            )
+            lines.append(f"(no summary — status={r_status}" + (f": {r_error}" if r_error else "") + ")")
         r_live = r.get("live_transcript")
         if r_live:
-            lines.append(
-                f"Full live transcript (complete tool/assistant trace): {r_live}"
-            )
+            lines.append(f"Full live transcript (complete tool/assistant trace): {r_live}")
     return "\n".join(lines)
 
 
@@ -226,19 +209,17 @@ def _format_async_delegation(evt: dict) -> str:
     summary = evt.get("summary")
     error = evt.get("error")
     truncated = _is_truncated(evt)
-    lines = [
+    lines = _header_lines(
+        evt,
         f"[ASYNC DELEGATION COMPLETE — {deleg_id}]",
         "A background subagent you dispatched earlier has finished. You may "
         "have moved on since dispatching it; the full task source is below so "
         "you can act on the result or re-dispatch if things have changed.",
-        "",
-    ]
-    dispatched = _dispatched_line(evt.get("dispatched_at"), completed_at)
-    if dispatched:
-        lines.append(dispatched)
+        completed_at,
+    )
     lines.append(f"Original goal: {evt.get('goal', '') or ''}")
     lines.extend(_task_source_lines(evt))
-    lines.append(f"Role: {evt.get('role') or 'leaf'}   Model: {evt.get('model') or '?'}")
+    lines.append(_role_model(evt))
     _notice = _delegation_model_not_found_notice([evt])
     if _notice:
         lines.append("")
@@ -255,14 +236,10 @@ def _format_async_delegation(evt: dict) -> str:
         lines.append(summary)
     else:
         if status == "interrupted":
-            lines.append(
-                "The subagent was interrupted before completing"
-                + (f": {error}" if error else ".")
-            )
+            lines.append("The subagent was interrupted before completing" + (f": {error}" if error else "."))
         else:  # error / timeout / failed
             lines.append(
-                f"The subagent did not complete successfully (status={status})."
-                + (f"\n{error}" if error else "")
+                f"The subagent did not complete successfully (status={status})." + (f"\n{error}" if error else "")
             )
         if summary:
             lines.append("Partial output:")
@@ -273,9 +250,8 @@ def _format_async_delegation(evt: dict) -> str:
 def _delegation_attribution_line(evt: dict) -> "str | None":
     """One-line provenance for a subagent-owned process event, else None.
 
-    Subagents run terminal sessions under ``task_id == subagent_id``; a
-    background process they started outlives the child and is routed to the
-    PARENT conversation, which otherwise sees an anonymous raw output wall.
+    A background process a subagent started outlives the child and is routed to
+    the PARENT conversation, which otherwise sees an anonymous raw output wall.
     Judged on ``owner_task_id`` (the raw spawning id) — ``task_id`` is the
     container key and may be collapsed to the session key.
     """
@@ -304,18 +280,19 @@ def _delegation_attribution_line(evt: dict) -> "str | None":
     return line
 
 
+_REASON_STATUS = {
+    "lost": "marked lost because the process backend disappeared",
+    "failed_start": "failed to start",
+}
+
+
 def _completion_status(evt: dict) -> str:
-    _exit = evt.get("exit_code", "?")
-    _reason = evt.get("completion_reason") or "exited"
-    if _reason == "killed":
+    reason = evt.get("completion_reason") or "exited"
+    if reason == "killed":
         return f"terminated by {evt.get('termination_source') or 'Hermes'}"
-    if _reason == "lost":
-        return "marked lost because the process backend disappeared"
-    if _reason == "failed_start":
-        return "failed to start"
-    if _exit == 0:
-        return "completed normally"
-    return "exited"
+    if reason in _REASON_STATUS:
+        return _REASON_STATUS[reason]
+    return "completed normally" if evt.get("exit_code", "?") == 0 else "exited"
 
 
 def format_process_notification(evt: dict) -> "str | None":
@@ -325,40 +302,32 @@ def format_process_notification(evt: dict) -> "str | None":
     _cmd = evt.get("command", "unknown")
     _attribution = _delegation_attribution_line(evt)
 
-    # watch_disabled and overflow events carry their own human-readable
-    # `message`; without this branch overflow events would fall through to the
-    # completion formatter as a phantom "process exited (exit code ?)".
+    # watch_disabled and overflow events carry their own human-readable `message`;
+    # otherwise overflow events would fall through to the completion formatter as a
+    # phantom "process exited (exit code ?)".
     if evt_type in ("watch_disabled", "watch_overflow_tripped", "watch_overflow_released"):
         return f"[IMPORTANT: {evt.get('message', '')}]"
-
     if evt_type == "watch_match":
         _sup = evt.get("suppressed", 0)
-        text = (
-            f"[IMPORTANT: Background process {_sid} matched "
-            f"watch pattern \"{evt.get('pattern', '?')}\".\n"
-        )
+        text = f"[IMPORTANT: Background process {_sid} matched watch pattern \"{evt.get('pattern', '?')}\".\n"
         if _attribution:
             text += f"{_attribution}\n"
         text += f"Command: {_cmd}\nMatched output:\n{evt.get('output', '')}"
         if _sup:
             text += f"\n({_sup} earlier matches were suppressed by rate limit)"
         return text + "]"
-
     if evt_type == "async_delegation":
         return _format_async_delegation(evt)
 
     _exit = evt.get("exit_code", "?")
     _out = evt.get("output", "")
     _signal = ", SIGTERM" if _exit in {-15, 143, "-15", "143"} else ""
-    text = (
-        f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} "
-        f"(exit code {_exit}{_signal}).\n"
-    )
+    text = f"[IMPORTANT: Background process {_sid} {_completion_status(evt)} (exit code {_exit}{_signal}).\n"
     if _attribution:
         text += f"{_attribution}\n"
-        # A subagent-owned process's full output belongs in the child's
-        # transcript, not as a raw wall in the parent — trim hard but keep
-        # enough tail to recognise failures.
+        # A subagent-owned process's full output belongs in the child's transcript,
+        # not as a raw wall in the parent — trim hard but keep enough tail to
+        # recognise failures.
         if isinstance(_out, str) and len(_out) > 600:
             _out = (
                 "...(output trimmed — subagent-owned process; see the "
