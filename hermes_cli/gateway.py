@@ -906,9 +906,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         import sys
         import time
         from hermes_cli._subprocess_compat import (
-            _WINDOWS_GATEWAY_BREAKAWAY_ENV,
-            windows_detach_flags,
-            windows_detach_flags_without_breakaway,
+            _WINDOWS_GATEWAY_BREAKAWAY_ENV, windows_detach_flags, windows_detach_flags_without_breakaway,
         )
 
         pid = int(sys.argv[1])
@@ -942,10 +940,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         # Windows needs explicit creationflags. CREATE_BREAKAWAY_FROM_JOB is critical: the watcher may
         # itself sit inside a job object (Electron/Tauri parent) and without breakaway the respawned
         # gateway dies when that job tears down. See _subprocess_compat.windows_detach_flags().
-        _popen_kwargs = {{
-            "stdout": _stdio_target,
-            "stderr": _stdio_target,
-        }}
+        _popen_kwargs = {{"stdout": _stdio_target, "stderr": _stdio_target}}
         # Anchor at the stable working dir and overlay the env (VIRTUAL_ENV / PYTHONPATH /
         # HERMES_HOME) the windowless base interpreter needs to import hermes_cli. Empty on POSIX.
         if _respawn_cwd:
@@ -958,19 +953,13 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
                     # Stamp the breakaway state exactly like gateway_windows._spawn_detached so the
                     # respawned gateway's exit-diag / lifecycle records show whether it escaped the
                     # parent Job Object (a job-teardown kill is otherwise indistinguishable).
-                    _popen_kwargs["env"] = {{
-                        **_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1",
-                    }}
+                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "1"}}
                     subprocess.Popen(cmd, **_popen_kwargs)
                 except OSError:
                     # CREATE_BREAKAWAY_FROM_JOB is rejected with ERROR_ACCESS_DENIED when the parent's
                     # job object refuses breakaway; retry without it (mirrors _spawn_detached).
-                    _popen_kwargs["creationflags"] = (
-                        windows_detach_flags_without_breakaway()
-                    )
-                    _popen_kwargs["env"] = {{
-                        **_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0",
-                    }}
+                    _popen_kwargs["creationflags"] = windows_detach_flags_without_breakaway()
+                    _popen_kwargs["env"] = {{**_base_env, _WINDOWS_GATEWAY_BREAKAWAY_ENV: "0"}}
                     subprocess.Popen(cmd, **_popen_kwargs)
             else:
                 if _respawn_env_overlay:
@@ -995,8 +984,7 @@ def _spawn_gateway_restart_watcher(old_pid: int, run_argv: list[str]) -> bool:
         # Parent job object rejected CREATE_BREAKAWAY_FROM_JOB; retry without it (Windows only —
         # ``start_new_session=True`` cannot raise OSError on POSIX).
         fallback_kwargs: dict = (
-            {"creationflags": windows_detach_flags_without_breakaway()}
-            if sys.platform == "win32"
+            {"creationflags": windows_detach_flags_without_breakaway()} if sys.platform == "win32"
             else {"start_new_session": True}
         )
         try:
